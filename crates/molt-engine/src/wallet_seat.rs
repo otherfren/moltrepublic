@@ -5,13 +5,10 @@
 //! `wallet` in its charter, the key part status frames, and the view key's
 //! ask and answer for a seat that holds no key part.
 
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet};
 
 use molt_core::wallet::ShareStatus;
 use molt_core::{MemberId, MoltError, Reply, SessionScope, Surface};
-use molt_net::supervisor::StateStore as _;
 use molt_net::wallet_frames::{WalletFrame, WalletStatusFrame, WalletViewAskFrame, WalletViewRespFrame, WALLET_V};
 use molt_treasury::keys;
 use zeroize::Zeroizing;
@@ -19,11 +16,11 @@ use zeroize::Zeroizing;
 use crate::State;
 
 /// Own status goes out again this often.
-const STATUS_RESEND_SECS: u64 = 30;
+pub(crate) const STATUS_RESEND_SECS: u64 = 30;
 /// A seat without the view key asks again this often.
-const ASK_SECS: u64 = 15;
+pub(crate) const ASK_SECS: u64 = 15;
 /// One answer per asker in this window.
-const ANSWER_SECS: u64 = 10;
+pub(crate) const ANSWER_SECS: u64 = 10;
 
 /// In memory; `statuses` and `view` mirror `TransportState`.
 #[derive(Default)]
@@ -33,16 +30,16 @@ pub(crate) struct SeatRt {
     pub(crate) founding: bool,
     /// The auto-init is armed since then, until an init is visible.
     armed_at: Option<u64>,
+    /// The inits visible when arming ended: the founding consented to these only.
+    founding_inits: BTreeSet<u64>,
     tried_at: u64,
     /// The others' key part status, last frame wins.
     pub(crate) statuses: BTreeMap<MemberId, ShareStatus>,
     /// The view key, held without a key part.
     view: Option<Zeroizing<[u8; 32]>>,
-    status_sent: Option<(ShareStatus, u64)>,
+    pub(crate) status_sent: Option<(ShareStatus, u64)>,
     asked_at: u64,
     answered: BTreeMap<MemberId, u64>,
-    persist_seq: u64,
-    persisted: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for SeatRt {
@@ -65,7 +62,32 @@ impl State {
             self.purse.seat.founding = true;
             self.purse.seat.armed_at = Some(self.presence_now());
             tracing::info!("wallet_stage=armed");
+            self.wallet_founding_claim();
         }
+    }
+
+    /// The first inits seen after arming are the founding's; arming ends.
+    pub(crate) fn wallet_founding_claim(&mut self) {
+        if self.purse.seat.armed_at.is_none() {
+            return;
+        }
+        let applied = self.wallet_init_applied();
+        let mut ids: BTreeSet<u64> = self.wallet_init_card_ids().into_iter().collect();
+        ids.extend(applied.as_ref().and_then(|i| i.id));
+        if applied.is_some() || !ids.is_empty() {
+            self.purse.seat.armed_at = None;
+            self.purse.seat.founding_inits = ids;
+        }
+    }
+
+    /// The ratification consents to the founding's init, unless this seat declined its card.
+    pub(crate) fn wallet_founding_consents(&self, init: u64) -> bool {
+        let me = self.member();
+        self.purse.seat.founding_inits.contains(&init) && !self.wallet_declined(init, &me)
+    }
+
+    pub(crate) fn wallet_declined(&self, init: u64, me: &MemberId) -> bool {
+        self.proposals.get(&init).is_some_and(|p| p.decliners.contains(me))
     }
 
     /// Load what a reopen keeps.
@@ -74,29 +96,11 @@ impl State {
         self.purse.seat.view = ts.wallet_view.as_ref().and_then(|v| <[u8; 32]>::try_from(v.0.as_slice()).ok()).map(Zeroizing::new);
     }
 
-    fn wallet_persist_seat(&mut self) {
-        let Some(store) = self.file_store() else {
-            return;
-        };
-        let seat = &mut self.purse.seat;
-        seat.persist_seq += 1;
-        let seq = seat.persist_seq;
-        let persisted = seat.persisted.clone();
-        let statuses = seat.statuses.clone();
-        let view = seat.view.as_ref().map(|v| molt_core::vault::SecretBytes(v.to_vec()));
-        tokio::spawn(async move {
-            store
-                .update(move |s| {
-                    if persisted.load(Ordering::SeqCst) > seq {
-                        return false;
-                    }
-                    persisted.store(seq, Ordering::SeqCst);
-                    s.wallet_status = statuses;
-                    s.wallet_view = view;
-                    true
-                })
-                .await;
-        });
+    fn wallet_persist_seat(&self) {
+        if let Some(active) = self.active.as_ref() {
+            let view = self.purse.seat.view.as_ref().map(|v| molt_core::vault::SecretBytes(v.to_vec()));
+            active.handle.save_wallet_seat(self.purse.seat.statuses.clone(), view);
+        }
     }
 
     /// The view key this seat holds for the purse: its record's, or one
@@ -154,13 +158,10 @@ impl State {
     /// The lowest position with a daemon proposes the init; the next one
     /// after a step if none is visible (§3.2).
     fn wallet_founding_tick(&mut self, now: u64) {
+        self.wallet_founding_claim();
         let Some(at) = self.purse.seat.armed_at else {
             return;
         };
-        if self.wallet_init_applied().is_some() || self.wallet_init_pending() {
-            self.purse.seat.armed_at = None;
-            return;
-        }
         if self.purse.init_gen.is_some() || self.session.settings.wallet_daemon_url.is_empty() {
             return;
         }
@@ -186,9 +187,10 @@ impl State {
     }
 
     /// [`molt_core::Command::NetWalletStatus`]: a seat's own word on its key part.
-    pub(crate) fn cmd_net_wallet_status(&mut self, from: &MemberId, status: ShareStatus) -> Result<Reply, MoltError> {
+    pub(crate) fn cmd_net_wallet_status(&mut self, from: &MemberId, status: ShareStatus, init: u64) -> Result<Reply, MoltError> {
         let peer = *from != self.member() && self.wallet_pos(from).is_some();
-        if !peer || status == ShareStatus::Unknown || self.wallet_purse().is_none() {
+        let ours = self.wallet_purse().is_some_and(|p| p.created.init == init);
+        if !peer || status == ShareStatus::Unknown || !ours {
             return Ok(Reply::Ack);
         }
         if self.purse.seat.statuses.insert(from.clone(), status) != Some(status) {

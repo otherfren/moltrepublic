@@ -100,7 +100,7 @@ async fn the_unbuilt_doors_refuse_compactly() {
     }
     for unusable in [
         Command::NetWalletFrame { from: peer(), body: secret(), generation: None },
-        Command::NetWalletStatus { from: peer(), status: ShareStatus::Held, generation: None },
+        Command::NetWalletStatus { from: peer(), status: ShareStatus::Held, init: 1, generation: None },
         Command::NetWalletViewAnswer { from: peer(), view: secret(), generation: None },
     ] {
         assert!(matches!(w.execute(unusable).await, Ok(Reply::Ack)), "no purse: dropped");

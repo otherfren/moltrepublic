@@ -217,7 +217,7 @@ impl EngineSink for CmdSink {
         let cmd = match frame {
             WalletFrame::Status(s) => {
                 let status = if s.held { molt_core::wallet::ShareStatus::Held } else { molt_core::wallet::ShareStatus::WatchOnly };
-                Command::NetWalletStatus { from, status, generation }
+                Command::NetWalletStatus { from, status, init: s.init, generation }
             }
             WalletFrame::ViewResp(r) => {
                 let Ok(view) = hex::decode(&r.view.0) else {

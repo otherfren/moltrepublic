@@ -706,15 +706,18 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
      (memory only; never a recovery or reopen): position k proposes
      `k-1` steps after arming once it has a daemon, until an init card
      or applied init is visible; the ratification is this seat's consent
-     for the init card (signed after the birthday check) and the run.
+     for that init's card (signed after the birthday check) and its run,
+     never for a later init, and void once this seat declined the card.
      `WalletView` gains `founding` (the wizard's purse stage follows)
      and `can_watch` (the view key is here). Three more tags:
-     `wstat` (`held` true/false, own status every 30 s and on change;
+     `wstat` (`held` true/false and its init, another init's is dropped;
+     own status every 30 s and on change;
      the own row is `Held` with the purse's record, else `WatchOnly`),
      `wvask` (every 15 s while no view key opens the address) and
      `wvresp` (any holder, at most once per asker in 10 s). Statuses
      and a handed-over view key are kept in `transport.state`
-     (`wallet_status`, `wallet_view`, sealed like `vault_seed`), not in
+     (`wallet_status`, `wallet_view`, sealed like `vault_seed`; their own
+     writer message, so a cursor save never resets them), not in
      the scan file: a damaged scan file costs a rescan, never the
      view key. A purse adopted without its block hook (a recovery's
      chain) settles on the next beat. §10.29–31, 38b, 40–41 run end to

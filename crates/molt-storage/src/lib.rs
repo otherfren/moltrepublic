@@ -3291,6 +3291,11 @@ pub fn purge_trash(root: &Path, max_age_secs: u64) {
 // The writer task: one per open workspace
 // ---------------------------------------------------------------------------
 
+struct WalletSeat {
+    status: std::collections::BTreeMap<molt_core::MemberId, molt_core::wallet::ShareStatus>,
+    view: Option<molt_core::vault::SecretBytes>,
+}
+
 enum WriterMsg {
     Append(EventEnvelope),
     Prefs(WorkspacePrefs),
@@ -3318,6 +3323,9 @@ enum WriterMsg {
     /// windows while the SUPERVISOR owns the cursors — each overlays only
     /// its own fields, so neither clobbers the other.
     SaveAccepted(std::collections::BTreeMap<molt_core::MemberId, molt_core::AcceptedWindow>),
+    /// The engine's purse statuses and handed-over view key (wallet plan
+    /// §7.8), its own message for the reason of `SaveAccepted`.
+    SaveWalletSeat(WalletSeat),
     /// Rewrite `kanban_wakes.json` with these fired keys.
     SaveKanbanWakes(Vec<String>),
     /// Rewrite the sealed `kanban_draft.json` ("" removes it).
@@ -3574,6 +3582,22 @@ impl StorageHandle {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 tracing::warn!(dropped = "accept-window save", "writer queue full");
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Persist the purse statuses and view key into `transport.state`,
+    /// touching nothing else.
+    pub fn save_wallet_seat(
+        &self,
+        status: std::collections::BTreeMap<molt_core::MemberId, molt_core::wallet::ShareStatus>,
+        view: Option<molt_core::vault::SecretBytes>,
+    ) {
+        match self.tx.try_send(WriterMsg::SaveWalletSeat(WalletSeat { status, view })) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(dropped = "wallet seat save", "writer queue full");
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {}
         }
@@ -4123,11 +4147,6 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             if state.vault_seed.is_some() {
                                 ts.vault_seed = state.vault_seed;
                             }
-                            // …and the purse's key part statuses (wallet plan §7.8)
-                            ts.wallet_status = state.wallet_status;
-                            if state.wallet_view.is_some() {
-                                ts.wallet_view = state.wallet_view;
-                            }
                             // append-only union: a stale clone never erases an audit line
                             for d in state.vault_displaced {
                                 if !ts.vault_displaced.iter().any(|x| x.grant_id == d.grant_id) {
@@ -4151,6 +4170,18 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             ts.accepted = accepted;
                             if let Err(e) = ws.write_transport_state(&ts) {
                                 fail(&failed_flag, "accept-window write", &e);
+                            }
+                        }
+                    }
+                    Ok(WriterMsg::SaveWalletSeat(seat)) => {
+                        if crypto_sealed {
+                            tracing::debug!("ignoring a post-merge wallet seat save");
+                        } else {
+                            let mut ts = ws.read_transport_state();
+                            ts.wallet_status = seat.status;
+                            ts.wallet_view = seat.view;
+                            if let Err(e) = ws.write_transport_state(&ts) {
+                                fail(&failed_flag, "wallet seat write", &e);
                             }
                         }
                     }
@@ -6101,10 +6132,10 @@ mod tests {
         assert_eq!(ws.read_transport_state().vault_status, status);
     }
 
-    /// Wallet 7b: the key part statuses and a handed-over view key ride the
-    /// transport save; a later save without a view key keeps it.
+    /// Wallet 7b: the key part statuses and a handed-over view key are the
+    /// engine's; a supervisor's stale clone never overwrites them.
     #[test]
-    fn a_transport_save_carries_the_purse_status_and_view() {
+    fn a_stale_transport_save_keeps_the_purse_status_and_view() {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("workspaces");
         let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
@@ -6113,12 +6144,8 @@ mod tests {
         let handle = start_writer(created);
         let status = BTreeMap::from([("b".to_string(), molt_core::wallet::ShareStatus::WatchOnly)]);
         let view = Some(molt_core::vault::SecretBytes(vec![5; 32]));
-        handle.save_transport_state(TransportState {
-            wallet_status: status.clone(),
-            wallet_view: view.clone(),
-            ..TransportState::default()
-        });
-        handle.save_transport_state(TransportState { wallet_status: status.clone(), ..TransportState::default() });
+        handle.save_wallet_seat(status.clone(), view.clone());
+        handle.save_transport_state(TransportState::default());
         handle.close(None);
         let (ws, _loaded) = open_workspace(&dir).expect("reopen");
         let ts = ws.read_transport_state();

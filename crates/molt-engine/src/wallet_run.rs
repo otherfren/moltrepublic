@@ -399,7 +399,7 @@ impl State {
         match frame {
             WalletFrame::Status(s) => {
                 let status = if s.held { ShareStatus::Held } else { ShareStatus::WatchOnly };
-                return self.cmd_net_wallet_status(from, status);
+                return self.cmd_net_wallet_status(from, status, s.init);
             }
             WalletFrame::ViewAsk(a) => {
                 self.wallet_on_view_ask(from, a.init);
@@ -727,9 +727,11 @@ impl State {
     }
 
     /// Consent: given in a run, or the init approval while the log carries it,
-    /// or `wallet` ratified at this founding (§3.2) - unless a decline withdrew it (W6).
+    /// or `wallet` ratified at this founding (§3.2) - unless a decline of the
+    /// card or in a run withdrew it (W6).
     fn wallet_consents(&self, init: u64) -> bool {
-        let standing = self.chain.own_approvals.contains(&init) || self.purse.seat.founding;
+        let standing = (self.chain.own_approvals.contains(&init) && !self.wallet_declined(init, &self.member()))
+            || self.wallet_founding_consents(init);
         self.purse.run.consented.contains(&init) || (standing && !self.purse.run.withdrawn.contains(&init))
     }
 

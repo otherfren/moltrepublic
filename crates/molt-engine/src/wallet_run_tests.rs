@@ -7,6 +7,7 @@
 use super::*;
 use crate::chain::test_support::{chain_signer, genesis_seat, Builder};
 use crate::wallet::WALLET_INIT;
+use crate::wallet_seat::{ANSWER_SECS, ASK_SECS, STATUS_RESEND_SECS};
 use molt_core::wallet::{ShareStatus, WalletPhase};
 use molt_core::ChainChange;
 use molt_treasury::dkg::Frames;
@@ -832,7 +833,7 @@ fn a_view_answer_must_open_the_address() {
 }
 
 /// Plan §7.8: each seat's status frame fills its row; this seat speaks
-/// for itself, a stranger and an unknown status change nothing.
+/// for itself, a stranger, an unknown status and another init change nothing.
 #[test]
 fn status_frames_fill_the_shareholders() {
     let b = with_init();
@@ -847,11 +848,13 @@ fn status_frames_fill_the_shareholders() {
             ("c".to_string(), ShareStatus::Unknown)
         ]
     );
-    a.cmd_net_wallet_status(&"b".to_string(), ShareStatus::Held).expect("ack");
-    a.cmd_net_wallet_status(&"c".to_string(), ShareStatus::WatchOnly).expect("ack");
-    a.cmd_net_wallet_status(&"z".to_string(), ShareStatus::Held).expect("ack");
-    a.cmd_net_wallet_status(&"a".to_string(), ShareStatus::WatchOnly).expect("ack");
-    a.cmd_net_wallet_status(&"b".to_string(), ShareStatus::Unknown).expect("ack");
+    a.cmd_net_wallet_status(&"b".to_string(), ShareStatus::Held, INIT).expect("ack");
+    a.cmd_net_wallet_status(&"c".to_string(), ShareStatus::WatchOnly, INIT).expect("ack");
+    a.cmd_net_wallet_status(&"z".to_string(), ShareStatus::Held, INIT).expect("ack");
+    a.cmd_net_wallet_status(&"a".to_string(), ShareStatus::WatchOnly, INIT).expect("ack");
+    a.cmd_net_wallet_status(&"b".to_string(), ShareStatus::Unknown, INIT)
+        .expect("ack");
+    a.cmd_net_wallet_status(&"c".to_string(), ShareStatus::Held, INIT + 1).expect("ack");
     assert_eq!(
         rows(&a),
         vec![
@@ -884,4 +887,100 @@ fn the_founding_stage_needs_wallet_within_bounds() {
     let mut st = genesis_seat("b", &all, all.blocks.clone());
     st.wallet_arm_founding(Some(&["wallet".to_string()]));
     assert!(!st.wallet_view().founding, "3-of-3 has no purse");
+}
+
+/// An armed founding seat with a daemon at 4000 (no init yet).
+fn armed_seat(name: &str) -> crate::State {
+    let b = Builder::new(&ABC, 2);
+    let mut st = run_seat(&b, name, false);
+    st.wallet_arm_founding(Some(&["wallet".to_string()]));
+    st
+}
+
+fn land_card(st: &mut crate::State, seq: u64, id: u64, birthday: u64) {
+    crate::chain::test_support::wire(
+        st,
+        "a",
+        seq,
+        molt_core::WorkspaceEvent::Proposed {
+            id: molt_core::ProposalId(id),
+            surface: Surface::Wallet,
+            payload: init_payload(birthday, "mainnet"),
+        },
+    );
+}
+
+/// W6 (design §3.1): a seat that declined the founding's init card, by
+/// its birthday check here, is asked in the run like any other.
+#[test]
+fn a_declined_founding_card_is_no_consent() {
+    let mut c = armed_seat("c");
+    land_card(&mut c, 1, INIT, 100);
+    assert!(c.proposals.get(&INIT).is_some_and(|p| p.decliners.contains(&"c".to_string())), "out of the window");
+    assert!(!c.wallet_consents(INIT), "declined: asked in the run");
+}
+
+/// Design §3.2/W10: the ratification consents to the founding's init
+/// only; a later card is asked for.
+#[test]
+fn founding_consent_covers_only_the_founding_init() {
+    let mut c = armed_seat("c");
+    land_card(&mut c, 1, INIT, 3000);
+    assert!(c.chain.own_approvals.contains(&INIT), "the founding's card is approved");
+    land_card(&mut c, 2, 9, 3000);
+    assert!(!c.chain.own_approvals.contains(&9), "a later card is not");
+    assert!(c.wallet_consents(INIT));
+    assert!(!c.wallet_consents(9));
+}
+
+/// Plan §7.8: own status every 30 s and on change, never on every beat.
+#[test]
+fn status_goes_out_every_30_s_and_on_change() {
+    let statuses = |st: &crate::State| sent(st).into_iter().filter(|f| matches!(f, WalletFrame::Status(_))).count();
+    let (mut a, _) = seat_with_purse("a", &[]);
+    a.wallet_seat_tick(1000);
+    assert_eq!(statuses(&a), 1);
+    a.wallet_seat_tick(1000 + STATUS_RESEND_SECS - 1);
+    assert_eq!(statuses(&a), 0, "not before 30 s");
+    a.wallet_seat_tick(1000 + STATUS_RESEND_SECS);
+    assert_eq!(statuses(&a), 1);
+    a.purse.seat.status_sent = Some((ShareStatus::Held, 1000 + STATUS_RESEND_SECS));
+    a.wallet_seat_tick(1000 + STATUS_RESEND_SECS + 1);
+    assert_eq!(statuses(&a), 1, "on change");
+}
+
+/// Plan §7.8: a seat without the view key asks every 15 s.
+#[test]
+fn the_view_ask_goes_out_every_15_s() {
+    let asks = |st: &crate::State| sent(st).into_iter().filter(|f| matches!(f, WalletFrame::ViewAsk(_))).count();
+    let (mut c, _) = seat_with_purse("c", &[]);
+    c.wallet_seat_tick(1000);
+    assert_eq!(asks(&c), 1);
+    c.wallet_seat_tick(1000 + ASK_SECS - 1);
+    assert_eq!(asks(&c), 0, "not before 15 s");
+    c.wallet_seat_tick(1000 + ASK_SECS);
+    assert_eq!(asks(&c), 1);
+}
+
+/// Plan §7.8: at most one answer per asker in 10 s; another asker is
+/// answered at once.
+#[test]
+fn a_holder_answers_each_asker_once_per_10_s() {
+    let b = with_init();
+    let (_, records) = purse_run(&b, 11, 3000, Network::Mainnet);
+    let (mut a, _) = seat_with_purse("a", &records[..1]);
+    let answers = |st: &crate::State| sent(st).into_iter().filter(|f| matches!(f, WalletFrame::ViewResp(_))).count();
+    a.presence.clock_override = Some(T0);
+    a.wallet_on_view_ask(&"c".to_string(), INIT);
+    assert_eq!(answers(&a), 1);
+    a.presence.clock_override = Some(T0 + ANSWER_SECS - 1);
+    a.wallet_on_view_ask(&"c".to_string(), INIT);
+    assert_eq!(answers(&a), 0, "not twice in 10 s");
+    a.wallet_on_view_ask(&"b".to_string(), INIT);
+    assert_eq!(answers(&a), 1, "another asker");
+    a.presence.clock_override = Some(T0 + ANSWER_SECS);
+    a.wallet_on_view_ask(&"c".to_string(), INIT);
+    assert_eq!(answers(&a), 1);
+    a.wallet_on_view_ask(&"c".to_string(), INIT + 1);
+    assert_eq!(answers(&a), 0, "another init");
 }

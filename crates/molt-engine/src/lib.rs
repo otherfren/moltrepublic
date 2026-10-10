@@ -2257,11 +2257,11 @@ impl State {
                 }
                 self.cmd_net_wallet_frame(&from, &body.0)
             }
-            Command::NetWalletStatus { from, status, generation } => {
+            Command::NetWalletStatus { from, status, init, generation } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
-                self.cmd_net_wallet_status(&from, status)
+                self.cmd_net_wallet_status(&from, status, init)
             }
             Command::NetWalletViewAnswer { from, view, generation } => {
                 if !self.net_generation_current(generation) {

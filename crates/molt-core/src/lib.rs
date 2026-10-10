@@ -5075,6 +5075,9 @@ pub enum Command {
         from: MemberId,
         /// What it says of itself.
         status: wallet::ShareStatus,
+        /// The init it speaks of; another purse's status is dropped.
+        #[serde(default)]
+        init: u64,
         /// Transport incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,

@@ -116,6 +116,10 @@ impl State {
         })
     }
 
+    pub(crate) fn wallet_init_card_ids(&self) -> Vec<u64> {
+        self.wallet_init_cards().into_iter().map(|(id, _)| id).collect()
+    }
+
     /// Open init cards, oldest id first.
     fn wallet_init_cards(&self) -> Vec<(u64, Value)> {
         self.proposals
@@ -381,13 +385,13 @@ impl State {
     /// out of the window or on another network declines (the card dies,
     /// §3.1), a consent that waited on the daemon signs, no daemon abstains.
     pub(crate) fn wallet_review(&mut self) {
+        self.wallet_founding_claim();
         let me = self.member();
         for (id, payload) in self.wallet_init_cards() {
             let approved = self.chain.own_approvals.contains(&id);
             let declined = self.proposals.get(&id).is_some_and(|p| p.decliners.contains(&me));
             let decided = approved || declined;
-            // a seat that ratified wallet at this founding consented then (§3.2)
-            let consent = self.purse.consent.contains(&id) || self.purse.seat.founding;
+            let consent = self.purse.consent.contains(&id) || self.wallet_founding_consents(id);
             match self.wallet_approve_check(&payload) {
                 Ok(()) if !decided && consent => {
                     tracing::info!(id, "wallet_init=approved");
