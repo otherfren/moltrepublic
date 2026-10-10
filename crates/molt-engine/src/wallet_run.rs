@@ -1203,7 +1203,7 @@ impl State {
     }
 
     /// This seat holds no key part of the purse: loud, once.
-    fn wallet_view_only(&mut self) {
+    pub(crate) fn wallet_view_only(&mut self) {
         if !self.purse.run.watch_only {
             self.purse.run.watch_only = true;
             tracing::warn!(seat = "watch_only", "wallet_keys=not_held");

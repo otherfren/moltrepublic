@@ -495,7 +495,19 @@ impl State {
         };
         match refusal {
             None => {
-                tracing::warn!(id, "wallet_keys=set_aside seat=watch_only");
+                // a file damaged after open: the parts still in memory go back to disk
+                let held: Vec<_> = self.purse.run.records.iter().map(molt_treasury::keys::KeysRecord::encode).collect();
+                let kept = !held.is_empty()
+                    && held.into_iter().all(|r| active.handle.persist_wallet_keys_blocking(r));
+                if kept {
+                    tracing::warn!(id, "wallet_keys=set_aside seat=rewritten");
+                } else {
+                    tracing::warn!(id, "wallet_keys=set_aside seat=watch_only");
+                    self.purse.run.records.clear();
+                    if self.wallet_purse().is_some() {
+                        self.wallet_view_only();
+                    }
+                }
                 self.lift_keys_hold(&id);
             }
             // the damage is gone already: only a keys failure holds the ticker

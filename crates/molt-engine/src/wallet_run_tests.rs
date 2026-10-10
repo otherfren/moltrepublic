@@ -999,3 +999,26 @@ fn a_holder_answers_each_asker_once_per_10_s() {
     a.wallet_on_view_ask(&"c".to_string(), INIT + 1);
     assert_eq!(answers(&a), 0, "another init");
 }
+
+/// W5: a keys file damaged after open is set aside, and the part still
+/// held in memory is written back - the seat keeps it.
+#[test]
+fn an_acknowledged_loss_writes_back_the_part_held_in_memory() {
+    let mut b = with_init();
+    let (purse, records) = purse_run(&b, 12, 3000, Network::Mainnet);
+    commit(&mut b, 6, created_value(&purse));
+    let (mut st, _tmp, dir) = crate::tests::support::stored_chain_signer(&b, "b", &ABC);
+    let mine = records[1].encode();
+    assert!(st.active.as_ref().expect("open").handle.persist_wallet_keys_blocking(mine.clone()));
+    st.wallet_on_open(Ok(vec![mine.clone()]));
+    let keys = dir.join(molt_storage::WALLET_KEYS_FILE);
+    let mut rotten = std::fs::read(&keys).expect("keys");
+    let last = rotten.len() - 1;
+    rotten[last] ^= 1;
+    std::fs::write(&keys, &rotten).expect("rot");
+
+    st.cmd_wallet_acknowledge_loss().expect("acknowledged");
+    assert!(dir.join(".wallet_keys.state.lost0").exists(), "the damaged file is kept aside");
+    assert_eq!(st.wallet_own_status(), ShareStatus::Held);
+    assert_eq!(records_on_disk(&mut st, &dir), vec![mine.to_vec()], "the part is on disk again");
+}
