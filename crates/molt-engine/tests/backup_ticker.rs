@@ -988,3 +988,56 @@ async fn an_acknowledgement_refused_because_the_damage_is_gone_still_lifts_the_h
         assert_eq!(puts(), 1, "remove={remove}");
     }
 }
+
+/// A replace-restore puts a healthy copy under a held id: the hold of the
+/// damaged one it replaced goes with it.
+#[tokio::test]
+async fn a_replace_restore_lifts_the_hold_of_the_copy_it_replaces() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (endpoint, log) = stub_server(Arc::new(|method, _path| match method {
+        "PUT" => (200, String::new(), 0),
+        _ => (200, empty_listing(), 0),
+    }))
+    .await;
+    let (w, id, root) = founded_engine(tmp.path(), &endpoint, 5).await;
+    w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+        .await
+        .expect("enable");
+    w.execute(Command::CloseWorkspace).await.expect("close");
+    let dir = molt_storage::find_workspace_dir(&root, &id).expect("dir");
+    let (ws, _) = molt_storage::open_workspace(&dir).expect("open");
+    ws.append_wallet_keys(b"the share").expect("keys");
+    drop(ws);
+    let blob = tmp.path().join("good.molt.enc");
+    w.execute(Command::ExportWorkspace {
+        id: id.clone(),
+        dest: blob.display().to_string(),
+        passphrase: "correct horse battery".to_string(),
+    })
+    .await
+    .expect("export");
+    poll_session(&w, "export", |sv| !sv.export.running && sv.export.result == "ok").await;
+    let keys = dir.join(molt_storage::WALLET_KEYS_FILE);
+    let mut rotten = std::fs::read(&keys).expect("read");
+    let last = rotten.len() - 1;
+    rotten[last] ^= 1;
+    std::fs::write(&keys, &rotten).expect("rot");
+    let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+    w.execute(Command::BackupTick).await.expect("tick");
+    poll_session(&w, "held", |sv| entry(sv, &id).backup_error == damaged).await;
+
+    w.execute(Command::RestoreStart {
+        way: "file".to_string(),
+        target: blob.display().to_string(),
+        secret: "correct horse battery".to_string(),
+        replace: true,
+    })
+    .await
+    .expect("restore");
+    let sv = poll_session(&w, "restored", |sv| sv.restore.run.outcome != 0).await;
+    assert_eq!(sv.restore.run.outcome, 1, "{:?}", sv.restore.run.log);
+    let puts = || log.lock().expect("log").iter().filter(|r| r.method == "PUT").count();
+    w.execute(Command::BackupTick).await.expect("tick");
+    poll_session(&w, "uploaded", |sv| entry(sv, &id).last_backup_min != WorkspaceInfo::NEVER).await;
+    assert_eq!(puts(), 1);
+}

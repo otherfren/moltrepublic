@@ -630,6 +630,8 @@ impl State {
         // a replace committed NEW content under an existing id — the old
         // session row (name/size/encrypted/…) no longer describes it
         self.session.workspaces.retain(|w| w.id != ws_id);
+        // the replaced copy's hold is not this one's
+        self.backup_hold.remove(&ws_id);
         {
             self.session.workspaces.push(WorkspaceInfo {
                 id: ws_id.clone(),
