@@ -1128,3 +1128,34 @@ fn invented_runs_earn_one_restart_per_sender_per_window() {
     let aborts = sent(&reopened).into_iter().filter(|f| matches!(f, WalletFrame::Abort(_))).count();
     assert_eq!(aborts, 1, "the next window answers again");
 }
+
+/// Plan §11: only the current run's starter suggests a daemon; another
+/// seat's hint, or one with no run, is dropped.
+#[test]
+fn only_the_starter_suggests_a_daemon() {
+    let (_, mut s) = three(true);
+    let forged = WalletFrame::Hint(WalletHintFrame { v: WALLET_V, init: INIT, url: "http://evil.onion".to_string() });
+    deliver(&mut s[1], "c", std::slice::from_ref(&forged));
+    assert_eq!(s[1].purse.run.hint, "", "no run, no suggestion");
+    s[0].wallet_start(Some([7; 32])).expect("start");
+    let out = sent(&s[0]);
+    deliver(&mut s[1], "a", &out);
+    deliver(&mut s[1], "c", &[forged]);
+    assert_eq!(s[1].wallet_run_view().map(|v| v.daemon_hint), Some("http://a.onion".to_string()));
+}
+
+/// A stream of ever-lower starts from one position keeps a bounded set of
+/// runs left in readiness.
+#[test]
+fn forged_starts_leave_a_bounded_set_of_runs() {
+    let (_, mut s) = three(true);
+    for i in (0..=u8::MAX).rev() {
+        let mut nonce = [0xff; 32];
+        nonce[0] = i;
+        let start = WalletFrame::Start(WalletStartFrame { v: WALLET_V, init: INIT, run: hex::encode(nonce), starter: 1 });
+        deliver(&mut s[1], "a", &[start]);
+    }
+    assert_eq!(s[1].purse.run.run.as_ref().map(|r| r.nonce[0]), Some(0), "the lowest start is current");
+    assert!(s[1].purse.run.left.len() <= LEFT_MAX, "left={}", s[1].purse.run.left.len());
+    assert!(s[1].purse.run.seen.len() <= LEFT_MAX + 1, "seen={}", s[1].purse.run.seen.len());
+}

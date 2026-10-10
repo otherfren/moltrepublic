@@ -38,6 +38,8 @@ const FOREIGN_RUNS_MAX: usize = 8;
 /// Runs this seat answers as lost; past it a round frame of an unknown run
 /// is dropped (its starter's beat still restarts the set-up).
 const LOST_RUNS_MAX: usize = 256;
+/// Runs left in readiness, kept for a rejoin on their round frame.
+const LEFT_MAX: usize = 16;
 /// The abort reasons a peer may name; anything else reads `aborted`.
 const REASONS: [&str; 9] =
     ["declined", "not ready", "timeout", "restart", "invalid", "equivocation", "transcript", "storage", "aborted"];
@@ -450,7 +452,10 @@ impl State {
             return;
         }
         if let WalletFrame::Hint(h) = &frame {
-            self.purse.run.hint.clone_from(&h.url);
+            // plan §11: the suggestion is the current starter's alone
+            if self.purse.run.run.as_ref().is_some_and(|r| r.starter == pos) {
+                self.purse.run.hint.clone_from(&h.url);
+            }
             return;
         }
         let Some(nonce) = frame.run().and_then(hex32) else {
@@ -554,10 +559,14 @@ impl State {
         };
         self.purse.run.seen.insert(nonce);
         self.purse.run.left.remove(&nonce);
+        self.purse.run.hint.clear();
         if let Some(old) = self.purse.run.run.take() {
             // left in readiness for another start: it may come back
             if !old.persisted && old.stage == RunStage::Ready {
                 self.purse.run.seen.remove(&old.nonce);
+                if self.purse.run.left.len() >= LEFT_MAX {
+                    self.purse.run.left.pop_last();
+                }
                 self.purse.run.left.insert(old.nonce, old.starter);
             }
             if !old.persisted && old.stage != RunStage::Aborted {
