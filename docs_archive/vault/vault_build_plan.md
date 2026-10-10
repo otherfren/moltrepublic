@@ -1162,14 +1162,14 @@ worktree and reruns its verification before merging.
      `vault_rows` count.
   3. `scripts/vault_lab.py` (stdlib only, patterns from `gui_walk.py`):
      - `up --relay <url> [--seats 3] [--complainer s3] [--founder-headless]`
-       writes `/tmp/vault-lab/{gui,s1,s2,s3}/config.toml` (one shared
+       writes `target/vault-lab/{gui,s1,s2,s3}/config.toml` (one shared
        token, ports from `free_port`, relay confirmed, clearnet on),
        starts the headless seats with `--mcp-tcp` from
        `target/dev-ui/debug/moltd` (the seat with `--complainer` launched
        with `MOLT_VAULT_LAB_COMPLAIN=1`), refuses to start when that
        binary is older than the newest `crates/**/*.rs`, and prints the
        GUI command:
-       `SLINT_LIVE_PREVIEW=1 target/dev-ui/debug/moltd --config /tmp/vault-lab/gui/config.toml`
+       `SLINT_LIVE_PREVIEW=1 target/dev-ui/debug/moltd --config target/vault-lab/gui/config.toml`
        (the same binary, never `dev-ui.sh run`, which would rebuild
        without `vault-lab`). With `--founder-headless` the founder is a
        fourth headless seat: it issues `create_start` 4 / 2, mints the
@@ -1254,7 +1254,7 @@ and the headless seats):
 2. Seats: `python3 scripts/vault_lab.py up --relay ws://127.0.0.1:<port> --seats 3 --complainer s3`
    - three headless seats `s1`..`s3` start; the script prints the GUI command.
 3. GUI: run the printed command
-   (`SLINT_LIVE_PREVIEW=1 target/dev-ui/debug/moltd --config /tmp/vault-lab/gui/config.toml`).
+   (`SLINT_LIVE_PREVIEW=1 target/dev-ui/debug/moltd --config target/vault-lab/gui/config.toml`).
 4. Found: Create republic, 4 members, threshold 2 -> mint the invites ->
    `python3 scripts/vault_lab.py join` (joins all three, waits for the
    charter). At the charter step the Vault box is enabled and unticked: tick it,

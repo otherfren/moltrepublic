@@ -23,6 +23,7 @@ Stdlib-only; scratch state lives in a temp dir and two ephemeral ports.
 import json
 import os
 import re
+import secrets
 import socket
 import subprocess
 import sys
@@ -32,7 +33,7 @@ import time
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MOLTD = os.path.join(REPO, "target", "debug", "moltd")
 DEV_RELAY = os.path.join(REPO, "target", "debug", "examples", "dev_relay")
-TOKEN = "walk"
+TOKEN = secrets.token_hex(16)
 
 
 def fail(step, detail):

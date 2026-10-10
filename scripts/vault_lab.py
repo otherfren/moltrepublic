@@ -19,12 +19,13 @@ Headless seats s1..sN run the live-preview `moltd` built with the
     python3 scripts/vault_lab.py read s2 a
     python3 scripts/vault_lab.py stop <seat> | start <seat> [--honest] | status | down
 
-Stdlib only. State lives in /tmp/vault-lab (lab.json, one dir per seat).
+Stdlib only. State lives in target/vault-lab (lab.json, one dir per seat).
 """
 
 import argparse
 import json
 import os
+import secrets
 import shutil
 import signal
 import socket
@@ -34,9 +35,9 @@ import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MOLTD = os.path.join(REPO, "target", "dev-ui", "debug", "moltd")
-LAB = "/tmp/vault-lab"
+# inside the checkout, not /tmp: another local user must not pre-create it
+LAB = os.path.join(REPO, "target", "vault-lab")
 STATE = os.path.join(LAB, "lab.json")
-TOKEN = "vault-lab"
 FOUNDER = "f"
 REPUBLIC = "VaultLab"
 
@@ -66,8 +67,7 @@ def load():
 
 def save(state):
     tmp = STATE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+    write_private(tmp, json.dumps(state, indent=2))
     os.replace(tmp, STATE)
 
 
@@ -89,7 +89,7 @@ def alive(pid):
 class Node:
     """Newline-delimited JSON-RPC over a seat's MCP TCP port."""
 
-    def __init__(self, name, port, timeout=60):
+    def __init__(self, name, port, token, timeout=60):
         self.name = name
         self.next_id = 1
         deadline = time.time() + timeout
@@ -102,7 +102,7 @@ class Node:
                     raise LabError(f"{name}: mcp port {port} never opened")
                 time.sleep(0.3)
         self.buf = b""
-        self.call("initialize", {"token": TOKEN})
+        self.call("initialize", {"token": token})
 
     def call(self, method, params):
         rid = self.next_id
@@ -169,7 +169,7 @@ def node(state, seat, timeout=60):
     s = state["seats"].get(seat)
     if s is None:
         die(f"unknown seat {seat} (seats: {', '.join(sorted(state['seats']))})")
-    return Node(seat, s["port"], timeout)
+    return Node(seat, s["port"], state["token"], timeout)
 
 
 def headless(state):
@@ -177,27 +177,38 @@ def headless(state):
     return sorted(state["seats"], key=lambda n: (n != FOUNDER, n))
 
 
-def config_text(ws_dir, port, relay, headless_seat, open_on_start=""):
+def config_text(ws_dir, port, relay, token, headless_seat, open_on_start=""):
     node_lines = f"headless = {'true' if headless_seat else 'false'}\n"
     if open_on_start:
         node_lines += f'open_on_start = "{open_on_start}"\n'
     return (
         f"[node]\n{node_lines}"
         f'[storage]\nworkspace_dir = "{ws_dir}"\n'
-        f'[mcp]\nport = {port}\nallow = "127.0.0.1"\ntoken = "{TOKEN}"\n'
+        f'[mcp]\nport = {port}\nallow = "127.0.0.1"\ntoken = "{token}"\n'
         f"[transport.nostr]\nclearnet_enabled = true\n"
         f'[[transport.nostr.relay]]\nurl = "{relay}"\nconfirmed = true\n'
     )
 
 
+def write_private(path, text):
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 def write_config(state, seat):
     s = state["seats"][seat]
-    with open(os.path.join(s["dir"], "config.toml"), "w", encoding="utf-8") as f:
-        f.write(
-            config_text(
-                os.path.join(s["dir"], "ws"), s["port"], state["relay"], True, s.get("workspace", "")
-            )
-        )
+    write_private(
+        os.path.join(s["dir"], "config.toml"),
+        config_text(
+            os.path.join(s["dir"], "ws"),
+            s["port"],
+            state["relay"],
+            state["token"],
+            True,
+            s.get("workspace", ""),
+        ),
+    )
 
 
 def spawn(state, seat, honest=False):
@@ -253,14 +264,15 @@ def cmd_up(a):
         old = load()
         if any(alive(s.get("pid")) for s in old["seats"].values()):
             die("a lab is up - run: vault_lab.py down")
-        shutil.rmtree(LAB, ignore_errors=True)
+    shutil.rmtree(LAB, ignore_errors=True)
     names = [f"s{i}" for i in range(1, a.seats + 1)]
     if a.complainer and a.complainer not in names:
         die(f"--complainer {a.complainer} is not a seat")
     if a.founder_headless:
         names.insert(0, FOUNDER)
-    os.makedirs(LAB, exist_ok=True)
+    os.makedirs(LAB, mode=0o700)
     state = {
+        "token": secrets.token_hex(16),
         "relay": a.relay,
         "complainer": a.complainer or "",
         "founder_headless": a.founder_headless,
@@ -270,17 +282,19 @@ def cmd_up(a):
     }
     for name in names:
         d = os.path.join(LAB, name)
-        os.makedirs(d, exist_ok=True)
+        os.mkdir(d, 0o700)
         state["seats"][name] = {"dir": d, "port": free_port(), "tcp": free_port(), "pid": 0, "workspace": ""}
         write_config(state, name)
         spawn(state, name)
     if not a.founder_headless:
         gui = os.path.join(LAB, "gui")
-        os.makedirs(gui, exist_ok=True)
+        os.mkdir(gui, 0o700)
         port = free_port()
         state["gui_port"] = port
-        with open(os.path.join(gui, "config.toml"), "w", encoding="utf-8") as f:
-            f.write(config_text(os.path.join(gui, "ws"), port, a.relay, False))
+        write_private(
+            os.path.join(gui, "config.toml"),
+            config_text(os.path.join(gui, "ws"), port, a.relay, state["token"], False),
+        )
     save(state)
     for name in names:
         wait_relay(node(state, name))
@@ -300,7 +314,7 @@ def cmd_up(a):
             time.sleep(2)
         print(f"founder {FOUNDER}: create_start {a.threshold}-of-{a.seats + 1}")
     else:
-        print("gui: SLINT_LIVE_PREVIEW=1 target/dev-ui/debug/moltd --config /tmp/vault-lab/gui/config.toml")
+        print(f"gui: SLINT_LIVE_PREVIEW=1 target/dev-ui/debug/moltd --config {os.path.join(LAB, 'gui', 'config.toml')}")
 
 
 def founder_node(state):
@@ -308,7 +322,7 @@ def founder_node(state):
         return node(state, FOUNDER)
     port = state.get("gui_port")
     try:
-        return Node("gui", port, timeout=5)
+        return Node("gui", port, state["token"], timeout=5)
     except LabError:
         die("the GUI seat is not running - start it with the printed command")
 
