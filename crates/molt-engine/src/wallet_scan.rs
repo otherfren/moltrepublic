@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The purse's scanner (`docs/chain/wallet_treasury_design.md` §7, §9,
+//! The purse's scanner (`docs_archive/chain/wallet_treasury_design.md` §7, §9,
 //! plan §7.9): one off-actor task per open workspace with a purse and its
 //! view key, scanning from `max(birthday, cursor)` through the daemon
 //! transport. It reports through [`molt_core::Command::NetWalletScan`];

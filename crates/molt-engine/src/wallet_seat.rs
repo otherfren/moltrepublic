@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! This seat's standing in the purse (`docs/chain/wallet_treasury_design.md`
+//! This seat's standing in the purse (`docs_archive/chain/wallet_treasury_design.md`
 //! §3.2, §5, plan §7.3, §7.8): the purse stage after a founding with
 //! `wallet` in its charter, the key part status frames, and the view key's
 //! ask and answer for a seat that holds no key part.

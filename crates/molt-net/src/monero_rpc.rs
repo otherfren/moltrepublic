@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The purse's daemon (`docs/chain/wallet_treasury_design.md` §7):
+//! The purse's daemon (`docs_archive/chain/wallet_treasury_design.md` §7):
 //! monero-daemon-rpc's [`HttpTransport`] over the crate's own HTTP client
 //! ([`crate::s3::http`]) and the fail-closed [`Dialer`]. An onion daemon
 //! rides Tor; a local or clearnet one is dialed only when it was confirmed

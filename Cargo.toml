@@ -101,7 +101,7 @@ hpke               = { version = "=0.13.0", default-features = false, features =
 rand_chacha        = "0.3"
 ed25519-dalek      = { version = "2", default-features = false, features = ["std", "rand_core"] }  # member identity keys (derived, never random)
 crc32c             = "0.6"    # molt-storage: torn-write/bitrot detection over the ciphertext
-# the purse, Stage 1 (molt-treasury, docs/chain/multi-sig-wallet-plan.md §6). Minors held;
+# the purse, Stage 1 (molt-treasury, docs_archive/chain/multi-sig-wallet-plan.md §6). Minors held;
 # monero-oxide's bug bounty is paused, so upgrade deliberately. No modular-frost and no
 # monero-wallet `multisig` until Stage 2.
 dkg                = { version = "0.6", default-features = false, features = ["std"] }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The purse run's control frames (`docs/chain/wallet_treasury_design.md`
+//! The purse run's control frames (`docs_archive/chain/wallet_treasury_design.md`
 //! §3.3-§3.5, §5, plan §7.4, §7.8): start, daemon hint, readiness, round 1,
 //! round 2, attestation, abort; key part status and the view key's ask and
 //! answer. Ephemeral and MLS-authenticated: the seat is the

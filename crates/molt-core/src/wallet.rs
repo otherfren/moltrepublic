@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The purse's read model and refusals (`docs/chain/wallet_treasury_design.md`,
+//! The purse's read model and refusals (`docs_archive/chain/wallet_treasury_design.md`,
 //! plan §5.2). Additive: every field defaults, so an older snapshot decodes.
 
 use serde::{Deserialize, Serialize};

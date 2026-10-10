@@ -1,8 +1,12 @@
 # Multisig-Wallet-Surface: Implementierungsplan Etappe 1
 
+Status: **EXECUTED (Stage 1 built 2026-10-10).** The spec of the shipping
+behaviour is `docs_archive/chain/wallet_treasury_design.md`; open items are
+in `docs/reviews/known_debt.md`.
+
 Stand: **Revision 3, 2026-10-06**, Anker gegen master `0f0cb30d` geprüft.
 Ersetzt Revision 2 (gleicher Tag); §17 listet die Änderungen.
-Design-Autorität: `docs/chain/wallet_treasury_design.md` (rev 3). Dieses
+Design-Autorität: `docs_archive/chain/wallet_treasury_design.md` (rev 3). Dieses
 Dokument ist der Bauplan: Dateien, Symbole, Tests, Reihenfolge.
 
 **Scope: nur Etappe 1** — Kasse einrichten, empfangen, beobachten.
@@ -770,8 +774,9 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    export; a closed republic's hold is a toast naming it. English refusal
    toasts stay the MCP text but for the daemon and op words (U1).
    Tests: `tests/wallet.rs`, `tests/gui/wallet.rs` (live-preview).
-10. [ ] clippy pro Crate = 0; Suiten grün; Review über den Gesamt-Diff;
-    master.
+10. [x] clippy pro Crate = 0; Suiten grün; Review über den Gesamt-Diff;
+    master (2026-10-10). The three-instance manual walk (§16) is open,
+    in `docs/reviews/known_debt.md`.
 
 ## 15. Bekannte Fallen
 

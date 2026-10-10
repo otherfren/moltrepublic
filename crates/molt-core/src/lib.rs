@@ -5018,7 +5018,7 @@ pub enum Command {
         generation: Option<u64>,
     },
 
-    // --- the purse (docs/chain/wallet_treasury_design.md) ---
+    // --- the purse (docs_archive/chain/wallet_treasury_design.md) ---
     /// Propose the purse's init vote (W4: the only door).
     WalletInit,
     /// This seat's consent to the current run (W6: a decline ends it).

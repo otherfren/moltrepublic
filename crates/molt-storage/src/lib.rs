@@ -170,7 +170,7 @@ const WALLET_SCAN_SEGMENT: u64 = u64::MAX - 10;
 /// The lowest reserved marker — a log file numbered at or above it is
 /// ignored (see [`list_sorted`]).
 const RESERVED_SEGMENT_FLOOR: u64 = WALLET_SCAN_SEGMENT;
-/// The purse's keys records (`docs/chain/wallet_treasury_design.md` §6).
+/// The purse's keys records (`docs_archive/chain/wallet_treasury_design.md` §6).
 pub const WALLET_KEYS_FILE: &str = "wallet_keys.state";
 /// The purse scanner's progress; damage costs a rescan.
 pub const WALLET_SCAN_FILE: &str = "wallet_scan.state";

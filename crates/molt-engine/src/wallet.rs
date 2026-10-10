@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The purse (`docs/chain/wallet_treasury_design.md`): its read model, the
+//! The purse (`docs_archive/chain/wallet_treasury_design.md`): its read model, the
 //! init vote (§3.1, the only door) and the command handlers. The run lives
 //! in `wallet_run.rs`, this seat's standing (founding stage, status, view
 //! key) in `wallet_seat.rs`, the scanner in `wallet_scan.rs`.

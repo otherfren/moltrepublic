@@ -4,24 +4,14 @@ How a republic gets — and governs — a shared Monero purse. Like
 `founding_ritual.md`, this document describes the design **abstractly**: the
 actors, the keys, the messages, and the guarantees that hold when each phase
 is over. The concrete crates and the build order live in
-`docs/chain/multi-sig-wallet-plan.md`.
+`docs_archive/chain/multi-sig-wallet-plan.md`.
 
-Status: **REV 3, 2026-10-06** — decisions W1–W11 (§0) by the user. Rev 3
-answers the review of rev 2: the purse record proves its own all-n consent
-(§3.5), the init vote is the only door (§3.1), every republic gets a purse
-by default (§3.2), and the purse runs on mainnet behind a loud warning
-(§7). Rev 1 (2026-08-16) and rev 2 (2026-10-06) are superseded; §13 lists
-what changed. Built so far: the dependency lock, `molt-treasury`'s pure
-core (DKG wrapper, view key, address, attestations, keys record, scan
-core), `daemon_kind`, the keys and scan files with export and
-import, and the contract, MCP tools and `[wallet]` config (plan §14
-steps 2-5, 2026-10-09); the init vote with its daemon transport (step 6,
-2026-10-10); the run, the attestations, the purse record and the
-restart (step 7a, 2026-10-10); the founding's purse stage, the status
-frames and the view key for a seat without a key part (step 7b,
-2026-10-10); the scanner (step 8, 2026-10-10); the purse UI (step 9,
-2026-10-10). **Scope is Stage 1 only:** found the
-purse, receive, watch. Spending (Stage 2) is gated on upstream (§8).
+Status: **SPEC of shipping Stage 1 behaviour (built 2026-10-10)** - found
+the purse, receive, watch; executed plan
+`docs_archive/chain/multi-sig-wallet-plan.md`. Stage 2 (spending, §8) stays
+gated on upstream and is unplanned; open items in
+`docs/reviews/known_debt.md`. Rev 3 (2026-10-06), decisions W1-W11 (§0) by
+the user; rev 1 and rev 2 are superseded, §13 lists what changed.
 
 ---
 

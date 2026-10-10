@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The purse's crypto (`docs/chain/wallet_treasury_design.md`, plan
-//! `docs/chain/multi-sig-wallet-plan.md` §5.1): the PedPoP DKG among the n
+//! The purse's crypto (`docs_archive/chain/wallet_treasury_design.md`, plan
+//! `docs_archive/chain/multi-sig-wallet-plan.md` §5.1): the PedPoP DKG among the n
 //! founding seats, the shared view key, the standard main address, the
 //! seats' attestations, the keys record and the scan core.
 //!

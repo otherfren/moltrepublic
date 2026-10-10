@@ -4,16 +4,41 @@ Status: **OPEN WORK.** The surviving deferred items whose home documents
 were executed and archived. One entry per item, with its fix direction;
 an item leaves in the change that closes it.
 
-## Story 14 remainder — a real backend for the Wallet
+## Story 14 remainder - the Wallet's Stage 2
 
-From `docs_archive/ui/mock_todo.md` §14. Memory is REAL
-(`docs_archive/memory/shared_memory_real.md`), the Vault is REAL
-(`docs_archive/vault/vault_threshold_disclosure.md`, prepared at every
-founding, enabled at founding or by vote), Kanban is REAL
-(`docs_archive/kanban/kanban_workflows.md`, built 2026-10-09; its vote
-load is to be measured on a real republic, §11 Q1); the
-Wallet's rev 3 awaits ratification (`docs/chain/wallet_treasury_design.md`,
-Stage 1 only; first step the dependency lock, spending gated on SA+L).
+From `docs_archive/ui/mock_todo.md` §14. Memory, Vault, Kanban and the
+Wallet's Stage 1 (`docs_archive/chain/wallet_treasury_design.md`, built
+2026-10-10) are REAL. Spending (Stage 2, design §8) is unplanned and waits
+for all three: `SalLegacyAlgorithm` over `ThresholdKeys<Ed25519>` in a
+released monero-wallet, a proof or audit of threshold SA+L, fixed FCMP++
+fork heights. Kanban's vote load is still to be measured on a real
+republic (`kanban_workflows.md` §11 Q1).
+
+## Wallet Stage 1 - open items (2026-10-10)
+
+- **Emergency exit** (design §5): m holders can rebuild the spend key and
+  sweep. Recorded, not built; needs a user decision whether it gets a
+  governed path.
+- **Manual three-instance walk** (plan §16) not run: founding with the
+  purse stage, same address, warning, mining, close/reopen, export/import,
+  phrase recovery watch-only, a later enable via the panel.
+- **Retention pin**: while a `.lost` keys file exists, copies older than
+  it are kept for good; only a restore or removing the file releases
+  them. The dialog offers no restore. Decide on a restore-from-S3 action.
+- **Output cap**: `molt_treasury::scan::MAX_OUTPUTS` (50k) never shrinks
+  (no spend detection in Stage 1), so a purse past it (dust spam) stops
+  scanning for good as `daemon fault: too many outputs`.
+- **Release note, backup version skew** (design §6): an older build
+  exports without the keys file and refuses to import a blob carrying it.
+  Say so in the first release notes that ship the purse.
+
+## `SaveTransport` overwrites `vault_status` wholesale
+
+`molt-storage` writer, `WriterMsg::SaveTransport`: the supervisor's clone
+replaces `vault_status`, unlike `vault_seed` (kept unless set) and
+`vault_displaced` (union). A clone older than a receipt update writes the
+old receipts back. Fix direction: give the receipts their own writer
+message, as `SaveWalletSeat` does for `wallet_status`.
 
 ## Vault share refresh (V6)
 

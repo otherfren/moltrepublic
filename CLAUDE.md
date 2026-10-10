@@ -104,7 +104,9 @@ and the user-owned relay pool), `transport/delivery_guarantee.md`,
 `ui/gui_over_mcp.md` (driving and reading the GUI headless),
 `vault/vault_threshold_disclosure.md` (the vault: threshold escrow with an
 elected reader), `kanban/kanban_workflows.md` (the gated board: tasks,
-calendar, derived deadlines, agent wakes), `build/reproducible-builds.md`,
+calendar, derived deadlines, agent wakes),
+`chain/wallet_treasury_design.md` (the treasury: Stage 1 Monero purse,
+founded by an m-of-n DKG, receive and watch only), `build/reproducible-builds.md`,
 and the ADRs under `adr/`.
 
 After moving or renaming any document run **`python3

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The purse run (`docs/chain/wallet_treasury_design.md` §3.3-§3.5, plan
+//! The purse run (`docs_archive/chain/wallet_treasury_design.md` §3.3-§3.5, plan
 //! §7.4-§7.6): start, readiness and consent, the two PedPoP rounds over
 //! control frames, persist-then-attest, the terminal `wallet_created`
 //! card, its projection and the restart. Ephemeral except the keys
