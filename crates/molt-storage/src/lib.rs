@@ -1831,6 +1831,8 @@ impl OpenedWorkspace {
             .find(|p| !p.exists())
             .ok_or_else(|| StorageError::BadFile("no name to set wallet_keys.state aside".to_string()))?;
         fs::rename(&path, &aside)?;
+        // its time pins the older backups that may still carry the share
+        OpenOptions::new().write(true).open(&aside)?.set_modified(std::time::SystemTime::now())?;
         File::open(&self.dir)?.sync_all()?;
         Ok(true)
     }
@@ -3295,6 +3297,20 @@ fn dir_size_to(dir: &Path, depth: u32) -> u64 {
         }
     }
     total
+}
+
+/// When the newest damaged keys file was set aside in `ws_dir` (unix
+/// seconds); `None` without one. A backup older than this may hold the share.
+pub fn wallet_keys_set_aside_at(ws_dir: &Path) -> Option<u64> {
+    let prefix = format!(".{WALLET_KEYS_FILE}.lost");
+    fs::read_dir(ws_dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.file_name().to_str().is_some_and(|n| n.starts_with(&prefix)))
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .max()
 }
 
 /// Move a workspace directory to `root/.trash/<name>-<ts>` (recoverable
@@ -5620,7 +5636,12 @@ mod tests {
         let last = rotted.len() - 1;
         rotted[last] ^= 1;
         fs::write(&path, &rotted).expect("rot");
+        assert_eq!(wallet_keys_set_aside_at(ws.dir()), None);
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1000);
+        OpenOptions::new().write(true).open(&path).expect("keys").set_modified(old).expect("age");
+        let before = now_secs();
         assert!(ws.set_aside_wallet_keys().expect("damaged"));
+        assert!(wallet_keys_set_aside_at(ws.dir()).is_some_and(|t| t >= before), "stamped now");
         assert!(!path.exists());
         assert!(ws.read_wallet_keys().expect("gone").is_empty());
         assert_eq!(fs::read(ws.dir().join(".wallet_keys.state.lost0")).expect("kept aside"), rotted);

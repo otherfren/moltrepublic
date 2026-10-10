@@ -5028,8 +5028,8 @@ pub enum Command {
     },
     /// Start a new run after an abort.
     WalletRetry,
-    /// Set a damaged keys file aside: this seat becomes watch-only and
-    /// backups resume (W5).
+    /// Set a damaged keys file aside; a part held in memory is written
+    /// back, else this seat is watch-only; backups resume (W5).
     WalletAcknowledgeLoss,
     /// The off-actor daemon probe reporting (engine-internal).
     NetWalletProbe {

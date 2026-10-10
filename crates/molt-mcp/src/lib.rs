@@ -1535,7 +1535,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "wallet_acknowledge_loss",
             command: "wallet_acknowledge_loss",
             scope: Scope::Seat,
-            description: "Accept that the open workspace's damaged purse key file is lost: it is set aside, this seat keeps watching the purse without a key part, and backups resume. Refused while the file is intact.",
+            description: "Accept that the open workspace's damaged purse key file is lost: it is set aside, a key part still in memory is written back (else this seat only watches), older backups are kept, and backups resume. Refused while the file is intact.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::WalletAcknowledgeLoss),
         },

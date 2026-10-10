@@ -1739,6 +1739,6 @@ lexicon! {
     wl_cn_ack: "I understand this and want to use the node.", "Ich habe das verstanden und will den Node benutzen.";
     wl_cn_confirm: "Confirm node", "Node bestätigen";
     wl_loss_title: "Key part damaged", "Schlüsselteil beschädigt";
-    wl_loss_body: "The key part file is unreadable. Set it aside to continue view only; backups resume.", "Die Schlüsselteil-Datei ist unlesbar. Beiseitelegen, um nur ansehend weiterzumachen; Backups laufen wieder.";
+    wl_loss_body: "The key part file is unreadable. Set it aside to continue; older backups keep their copy.", "Die Schlüsselteil-Datei ist unlesbar. Beiseitelegen, um weiterzumachen; ältere Backups behalten ihre Kopie.";
     wl_loss_confirm: "Set aside", "Beiseitelegen";
 }

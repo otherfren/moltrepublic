@@ -396,7 +396,10 @@ Two files, because one secret must never be lost and the rest is cheap:
   failure instead of retrying every minute; retention prunes only after a
   successful upload, so good copies are kept.
 - **Way out of a damaged file:** the seat acknowledges the loss once; the
-  file is set aside, the seat is watch-only, and exports resume.
+  file is set aside, and exports resume. A share still held in memory (the
+  file was damaged after open) is written back; otherwise the seat is
+  watch-only. Retention never prunes a copy older than the set-aside, since
+  it may still hold the share.
 - The import authenticates the keys file. If it does not authenticate, the
   restore proceeds without it and the seat is **watch-only**, loudly.
 - The scan file follows the base pattern: shipped if it authenticates,

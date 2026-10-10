@@ -408,7 +408,16 @@ impl State {
         tokio::spawn(async move {
             let ts = now_secs();
             let build_dir = dir.clone();
+            let pin_ids = own_ids.clone();
             let build = tokio::task::spawn_blocking(move || {
+                let pins: Pins = pin_ids
+                    .into_iter()
+                    .filter_map(|id| {
+                        let at = molt_storage::find_workspace_dir(&root, &id)
+                            .and_then(|d| molt_storage::wallet_keys_set_aside_at(&d))?;
+                        Some((id, at))
+                    })
+                    .collect();
                 if let Some(handle) = flush {
                     if !handle.flush_blocking() {
                         // the backup would capture a log the disk does not
@@ -423,11 +432,11 @@ impl State {
                     &molt_storage::export::ExportKey::Workspace,
                     &mut blob,
                 )
-                .map(|outcome| (blob, outcome))
+                .map(|_outcome| (blob, pins))
             })
             .await;
             let cmd = match build {
-                Ok(Ok((blob, _outcome))) => {
+                Ok(Ok((blob, pins))) => {
                     let bytes = u64::try_from(blob.len()).unwrap_or(u64::MAX);
                     if bytes > crate::lifecycles::RESTORE_MAX_BYTES {
                         // enforce the restore path's own size cap here: a blob
@@ -454,9 +463,9 @@ impl State {
                                 // retention and reports separately - the two
                                 // tell different stories.
                                 let prune_error =
-                                    prune_old_copies(&client, &id, keep, &object).await;
+                                    prune_old_copies(&client, &id, keep, &object, pins.get(&id).copied()).await;
                                 let quota_error =
-                                    enforce_quota(&client, max_bytes, &object, &own_ids).await;
+                                    enforce_quota(&client, max_bytes, &object, &own_ids, &pins).await;
                                 Command::NetBackupDone {
                                     id,
                                     ts,
@@ -624,6 +633,7 @@ async fn prune_old_copies(
     id: &WorkspaceId,
     keep: usize,
     just_uploaded: &str,
+    pinned_before: Option<u64>,
 ) -> String {
     let prefix = format!("{}{id}/", molt_core::BACKUP_OBJECT_PREFIX);
     let listed = match client.list_objects(&prefix).await {
@@ -638,7 +648,7 @@ async fn prune_old_copies(
         .map(|o| o.key)
         .collect();
     let mut first_error = String::new();
-    for key in prune_candidates(keys, keep, just_uploaded) {
+    for key in prune_candidates(keys, keep, just_uploaded, pinned_before) {
         if let Err(e) = client.delete_object(&key).await {
             if first_error.is_empty() {
                 first_error = format!("deleting {key} failed: {e}");
@@ -656,7 +666,15 @@ async fn prune_old_copies(
 /// exact in the normal case and only ever over-retains by one under a clock
 /// regression — the rare case where our new object's timestamp sorts
 /// "oldest" and would otherwise be deleted while `NetBackupDone` confirms it.
-fn prune_candidates(mut keys: Vec<String>, keep: usize, just_uploaded: &str) -> Vec<String> {
+fn prune_candidates(
+    mut keys: Vec<String>,
+    keep: usize,
+    just_uploaded: &str,
+    pinned_before: Option<u64>,
+) -> Vec<String> {
+    if let Some(pin) = pinned_before {
+        keys.retain(|k| molt_core::parse_backup_key(k).map_or(true, |(_, ts)| ts >= pin));
+    }
     keys.sort_unstable();
     let excess = keys.len().saturating_sub(keep);
     keys.into_iter()
@@ -664,6 +682,10 @@ fn prune_candidates(mut keys: Vec<String>, keep: usize, just_uploaded: &str) -> 
         .filter(|k| k != just_uploaded)
         .collect()
 }
+
+/// Per workspace, the set-aside time of a damaged keys file: older copies
+/// may hold the share and are never pruned (wallet design W5).
+type Pins = std::collections::HashMap<WorkspaceId, u64>;
 
 /// One listed backup object, reduced to what the quota decision needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -693,6 +715,7 @@ async fn enforce_quota(
     max_bytes: u64,
     just_uploaded: &str,
     own: &std::collections::HashSet<WorkspaceId>,
+    pins: &Pins,
 ) -> String {
     if max_bytes == 0 {
         return String::new();
@@ -713,7 +736,7 @@ async fn enforce_quota(
         })
         .collect();
     let objects = own_backups(objects, own);
-    let (delete, remaining) = quota_candidates(objects, max_bytes, just_uploaded);
+    let (delete, remaining) = quota_candidates(objects, max_bytes, just_uploaded, pins);
     let mut first_error = String::new();
     for key in delete {
         if let Err(e) = client.delete_object(&key).await {
@@ -759,6 +782,7 @@ fn quota_candidates(
     objects: Vec<QuotaObject>,
     max_bytes: u64,
     just_uploaded: &str,
+    pins: &Pins,
 ) -> (Vec<String>, u64) {
     let used: u64 = objects.iter().fold(0u64, |acc, o| acc.saturating_add(o.size));
     if max_bytes == 0 || used <= max_bytes {
@@ -780,6 +804,7 @@ fn quota_candidates(
     let mut candidates: Vec<&QuotaObject> = objects
         .iter()
         .filter(|o| o.key != just_uploaded)
+        .filter(|o| pins.get(&o.id).map_or(true, |pin| o.ts >= *pin))
         .filter(|o| newest.get(o.id.as_str()).map_or(true, |n| n.key != o.key))
         .collect();
     // oldest first; the key breaks a timestamp tie so the pick is stable
@@ -873,7 +898,7 @@ mod tests {
         assert_eq!(kept.len(), 2);
         assert!(kept.iter().all(|o| o.id == "mine"));
     }
-    use super::{prune_candidates, quota_candidates, QuotaObject};
+    use super::{prune_candidates, quota_candidates, Pins, QuotaObject};
 
     fn key(ts: u64) -> String {
         let id = "ab".repeat(32);
@@ -895,7 +920,7 @@ mod tests {
     fn prune_keeps_the_newest_and_deletes_the_oldest() {
         let keys = vec![key(1), key(2), key(3), key(4), key(5)];
         let just = key(5);
-        let del = prune_candidates(keys, 3, &just);
+        let del = prune_candidates(keys, 3, &just, None);
         // 5 keys, keep 3 (excluding the just-uploaded newest) → delete oldest 2
         assert_eq!(del, vec![key(1), key(2)]);
     }
@@ -908,7 +933,7 @@ mod tests {
         // never be deleted.
         let just = key(5);
         let keys = vec![key(10), key(11), key(12), just.clone()];
-        let del = prune_candidates(keys, 2, &just);
+        let del = prune_candidates(keys, 2, &just, None);
         assert!(
             !del.contains(&just),
             "the just-confirmed upload is never a prune candidate: {del:?}"
@@ -917,10 +942,26 @@ mod tests {
         assert_eq!(del, vec![key(10)]);
     }
 
+    /// W5: a set-aside keys file pins every older copy - it may still hold
+    /// the share - and retention counts the rest.
+    #[test]
+    fn copies_older_than_a_set_aside_are_never_pruned() {
+        let keys = vec![key(1), key(2), key(3), key(4)];
+        let del = prune_candidates(keys, 2, &key(4), Some(3));
+        assert!(del.is_empty(), "{del:?}");
+        let keys = vec![key(1), key(2), key(3), key(4), key(5), key(6)];
+        assert_eq!(prune_candidates(keys, 2, &key(6), Some(3)), vec![key(3), key(4)]);
+
+        let objects = vec![obj(1, 1, 100), obj(1, 2, 100), obj(1, 3, 100), obj(2, 1, 100), obj(2, 2, 100)];
+        let pins = Pins::from([("01".repeat(32), 3)]);
+        let (del, _) = quota_candidates(objects, 1, "", &pins);
+        assert_eq!(del, vec![molt_core::backup_key(&"02".repeat(32), 1)]);
+    }
+
     #[test]
     fn a_quota_of_zero_means_no_limit() {
         let objects = vec![obj(1, 1, 1_000), obj(1, 2, 1_000), obj(2, 1, 1_000)];
-        let (del, used) = quota_candidates(objects, 0, "");
+        let (del, used) = quota_candidates(objects, 0, "", &Pins::new());
         assert!(del.is_empty(), "0 = no limit, nothing is pruned: {del:?}");
         assert_eq!(used, 3_000);
     }
@@ -928,7 +969,7 @@ mod tests {
     #[test]
     fn under_the_quota_nothing_is_pruned() {
         let objects = vec![obj(1, 1, 100), obj(1, 2, 100)];
-        let (del, used) = quota_candidates(objects, 1_000, "");
+        let (del, used) = quota_candidates(objects, 1_000, "", &Pins::new());
         assert!(del.is_empty(), "{del:?}");
         assert_eq!(used, 200);
     }
@@ -944,7 +985,7 @@ mod tests {
             obj(2, 9, 100),
         ];
         let just = molt_core::backup_key(&"01".repeat(32), 3);
-        let (del, used) = quota_candidates(objects, 350, &just);
+        let (del, used) = quota_candidates(objects, 350, &just, &Pins::new());
         assert_eq!(del, vec![molt_core::backup_key(&"01".repeat(32), 1)]);
         assert_eq!(used, 300, "one 100-byte object deleted from 400");
     }
@@ -957,7 +998,7 @@ mod tests {
         let objects = vec![obj(1, 500, 100), obj(1, 501, 100), obj(2, 1, 100)];
         // 02 has only one copy → it is that workspace's newest and protected,
         // so the oldest DELETABLE object is 01@500.
-        let (del, _) = quota_candidates(objects, 100, "");
+        let (del, _) = quota_candidates(objects, 100, "", &Pins::new());
         assert_eq!(del, vec![molt_core::backup_key(&"01".repeat(32), 500)]);
     }
 
@@ -966,7 +1007,7 @@ mod tests {
         // far over quota, but each workspace's newest copy is untouchable —
         // a byte limit must never leave a republic with zero backups.
         let objects = vec![obj(1, 1, 100), obj(1, 2, 100), obj(2, 1, 100), obj(2, 2, 100)];
-        let (del, used) = quota_candidates(objects, 1, "");
+        let (del, used) = quota_candidates(objects, 1, "", &Pins::new());
         assert_eq!(
             del,
             vec![
@@ -983,14 +1024,14 @@ mod tests {
         // and would be the first byte-quota victim.
         let just = molt_core::backup_key(&"01".repeat(32), 5);
         let objects = vec![obj(1, 5, 100), obj(1, 10, 100), obj(1, 11, 100)];
-        let (del, _) = quota_candidates(objects, 1, &just);
+        let (del, _) = quota_candidates(objects, 1, &just, &Pins::new());
         assert!(!del.contains(&just), "{del:?}");
     }
 
     #[test]
     fn an_unfittable_quota_deletes_what_it_can_and_reports_the_remainder() {
         let objects = vec![obj(1, 1, 100), obj(1, 2, 100), obj(2, 1, 100)];
-        let (del, used) = quota_candidates(objects, 50, "");
+        let (del, used) = quota_candidates(objects, 50, "", &Pins::new());
         assert_eq!(del, vec![molt_core::backup_key(&"01".repeat(32), 1)]);
         assert_eq!(used, 200, "still over 50 - only the newest copies remain");
     }
