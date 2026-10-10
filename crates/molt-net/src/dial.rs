@@ -338,7 +338,9 @@ impl Dialer {
             Dialer::Direct => {
                 // a resolver-less direct dial can never reach an .onion — fail
                 // closed with a clear reason instead of a DNS error / hang.
-                if host.to_ascii_lowercase().ends_with(".onion") {
+                // `x.onion.` is the same name, and getaddrinfo would look it up
+                let name = host.trim_end_matches('.').to_ascii_lowercase();
+                if name.ends_with(".onion") || name == "onion" {
                     return Err(NetError::TorMisconfigured(format!(
                         "server {host} is onion-only but Tor is off - enable Tor to reach it"
                     )));
@@ -513,6 +515,14 @@ mod tests {
             matches!(res, Err(NetError::TorMisconfigured(_))),
             "got {res:?}"
         );
+        // the FQDN spelling is the same name: it must not reach getaddrinfo
+        for host in ["abcd.onion.", "abcd.ONION.."] {
+            let res = rt.block_on(Dialer::Direct.dial_host(host, 5223));
+            assert!(
+                matches!(res, Err(NetError::TorMisconfigured(_))),
+                "{host}: got {res:?}"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]

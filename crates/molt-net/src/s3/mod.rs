@@ -96,57 +96,58 @@ pub struct S3Endpoint {
 impl S3Endpoint {
     /// Parse `[scheme://]host[:port][/prefix]`. A missing scheme defaults to
     /// `https` (never a silent plaintext downgrade); explicit `http://` is
-    /// allowed for `.onion`/LAN endpoints.
+    /// meant for `.onion`/LAN endpoints but not enforced (a LAN name reads
+    /// like a public one).
     pub fn parse(raw: &str) -> Result<S3Endpoint, S3Error> {
         let raw = raw.trim();
         if raw.is_empty() {
             return Err(S3Error::Endpoint("no endpoint configured".to_string()));
         }
-        let (scheme, rest) = match raw.split_once("://") {
-            Some(("https", rest)) => (S3Scheme::Https, rest),
-            Some(("http", rest)) => (S3Scheme::Http, rest),
+        // the WHATWG parser reads the authority, never string slicing
+        if raw
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
+        {
+            return Err(S3Error::Endpoint("junk characters in endpoint".to_string()));
+        }
+        // the dialer's onion check and the SOCKS username assume an ASCII,
+        // lowercase host (review 2026-08-25 T7); IDNA would rewrite it
+        if !raw.is_ascii() {
+            return Err(S3Error::Endpoint("host must be ASCII".to_string()));
+        }
+        let (scheme, full) = match raw.split_once("://") {
+            Some((s, _)) if s.eq_ignore_ascii_case("https") => (S3Scheme::Https, raw.to_string()),
+            Some((s, _)) if s.eq_ignore_ascii_case("http") => (S3Scheme::Http, raw.to_string()),
             Some((other, _)) => {
                 return Err(S3Error::Endpoint(format!(
                     "unsupported scheme `{other}` (use https:// or http://)"
                 )))
             }
-            None => (S3Scheme::Https, raw),
+            None => (S3Scheme::Https, format!("https://{raw}")),
         };
-        let (authority, path) = match rest.find('/') {
-            Some(i) => (&rest[..i], &rest[i..]),
-            None => (rest, ""),
-        };
-        // host[:port], with [v6-literal]:port support
-        let (host, port_str) = if let Some(rest) = authority.strip_prefix('[') {
-            let end = rest.find(']').ok_or_else(|| {
-                S3Error::Endpoint("unterminated [IPv6] literal".to_string())
-            })?;
-            (&rest[..end], rest[end + 1..].strip_prefix(':'))
-        } else {
-            match authority.rsplit_once(':') {
-                Some((h, p)) => (h, Some(p)),
-                None => (authority, None),
+        let parsed =
+            url::Url::parse(&full).map_err(|e| S3Error::Endpoint(format!("bad endpoint: {e}")))?;
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(S3Error::Endpoint("no credentials in the endpoint".to_string()));
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(S3Error::Endpoint("no ?query or #fragment in the endpoint".to_string()));
+        }
+        let host = match parsed.host() {
+            // one spelling per host: `x.onion.` would dodge the onion check
+            Some(url::Host::Domain(d)) if d.ends_with('.') => {
+                return Err(S3Error::Endpoint("no trailing dot in the host".to_string()))
             }
+            Some(url::Host::Domain(d)) if !d.is_empty() => d.to_string(),
+            Some(url::Host::Ipv4(a)) => a.to_string(),
+            Some(url::Host::Ipv6(a)) => a.to_string(),
+            _ => return Err(S3Error::Endpoint("no host in endpoint".to_string())),
         };
-        if host.is_empty() {
-            return Err(S3Error::Endpoint("no host in endpoint".to_string()));
-        }
-        // the dialer's onion check and the SOCKS username assume an ASCII,
-        // lowercase host — the relay policy guarantees that for relays,
-        // nothing did for S3 (review 2026-08-25 T7)
-        if !host.is_ascii() {
-            return Err(S3Error::Endpoint("host must be ASCII".to_string()));
-        }
-        let host = host.to_ascii_lowercase();
-        let port = match port_str {
-            Some(p) => p
-                .parse::<u16>()
-                .map_err(|_| S3Error::Endpoint(format!("bad port `{p}`")))?,
-            None => match scheme {
-                S3Scheme::Https => 443,
-                S3Scheme::Http => 80,
-            },
+        let port = match parsed.port_or_known_default() {
+            Some(p) if p != 0 => p,
+            _ => return Err(S3Error::Endpoint("bad port".to_string())),
         };
+        let path = parsed.path();
         let base_path = path.trim_end_matches('/').to_string();
         Ok(S3Endpoint {
             scheme,
@@ -618,6 +619,23 @@ mod tests {
         let e = super::S3Endpoint::parse("http://ABC.ONION:8080").expect("parses");
         assert_eq!(e.host, "abc.onion", "the onion check sees the canonical form");
         assert!(super::S3Endpoint::parse("https://bücket.example").is_err());
+    }
+
+    #[test]
+    fn an_endpoint_has_one_spelling_per_host() {
+        let v3 = "a".repeat(56);
+        for raw in [
+            format!("http://{v3}.onion.:9000"),
+            format!("http://{v3}.onion."),
+            "https://s3.example.org./b".to_string(),
+            format!("http://user@{v3}.onion"),
+            format!("http://evil.example\\@{v3}.onion"),
+            "https://s3.example.org/#frag".to_string(),
+            "https://s3.example.org/?q".to_string(),
+            "https://s3.example.org:0".to_string(),
+        ] {
+            assert!(super::S3Endpoint::parse(&raw).is_err(), "{raw} accepted");
+        }
     }
 
     #[test]
