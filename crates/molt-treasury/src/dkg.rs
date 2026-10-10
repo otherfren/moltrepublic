@@ -141,9 +141,12 @@ pub fn transcript_preimage(
     run: &[u8; 32],
     round1: &Frames,
     n: u16,
-) -> Result<Vec<u8>, TreasuryError> {
+) -> Result<Zeroizing<Vec<u8>>, TreasuryError> {
     expect_all(round1, n)?;
-    let mut out = Vec::new();
+    let len = 4 + TRANSCRIPT_TAG.len() + run.len() + 4;
+    let len = round1.values().fold(len, |at, m| at + 2 + 4 + m.len());
+    // every view contribution rides in here: sized once, wiped on drop
+    let mut out = Zeroizing::new(Vec::with_capacity(len));
     put_bytes(&mut out, TRANSCRIPT_TAG);
     out.extend_from_slice(run);
     put_count(&mut out, round1.len());
@@ -156,7 +159,7 @@ pub fn transcript_preimage(
 
 /// The transcript hash `T` every seat sends in round 2 and attests.
 pub fn transcript(run: &[u8; 32], round1: &Frames, n: u16) -> Result<[u8; 32], TreasuryError> {
-    Ok(Sha256::digest(transcript_preimage(run, round1, n)?).into())
+    Ok(Sha256::digest(&*transcript_preimage(run, round1, n)?).into())
 }
 
 /// Participant `from`'s transcript hash against ours.

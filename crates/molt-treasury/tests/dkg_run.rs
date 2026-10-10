@@ -153,6 +153,8 @@ fn secret_buffers_are_sized_once() {
     let r = run(&id, 2, 3, 15);
     let pre = keys::view_preimage(&id, &r.round1, 3).expect("preimage");
     assert_eq!(pre.capacity(), pre.len());
+    let pre = dkg::transcript_preimage(&id.run, &r.round1, 3).expect("transcript");
+    assert_eq!(pre.capacity(), pre.len());
     let mut rng = ChaCha20Rng::seed_from_u64(1);
     let p = dkg::params(2, 3, 1).expect("params");
     let (_, msg) = dkg::round1(p, dkg::context(&id, 2, 3), &mut rng);
@@ -318,7 +320,7 @@ fn the_context_transcript_and_view_layouts_are_pinned() {
     want.extend_from_slice(&[2, 0]);
     put_bytes(&mut want, &[0x22; 2]);
     assert_eq!(
-        dkg::transcript_preimage(&id.run, &frames, 2).expect("pre"),
+        *dkg::transcript_preimage(&id.run, &frames, 2).expect("pre"),
         want
     );
 
