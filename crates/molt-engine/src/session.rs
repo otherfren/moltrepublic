@@ -453,13 +453,7 @@ impl State {
             merged.wallet_daemon_login = self.session.settings.wallet_daemon_login.clone();
         }
         validate_settings(&merged)?;
-        let daemon_moved = {
-            let s = &self.session.settings;
-            merged.wallet_daemon_url != s.wallet_daemon_url
-                || merged.wallet_daemon_confirmed != s.wallet_daemon_confirmed
-                || merged.wallet_daemon_login != s.wallet_daemon_login
-                || merged.wallet_network != s.wallet_network
-        };
+        let daemon_moved = daemon_moved(&self.session.settings, &merged);
         // the wholesale save below keeps the STORED daemon: this is its door
         let stored = &mut self.session.settings;
         stored.wallet_daemon_url = merged.wallet_daemon_url.clone();
@@ -605,10 +599,14 @@ impl State {
         }
         self.invalidate_backup_listing_on_target_change(&settings);
         self.invalidate_tor_test_on_anonymity_change(&settings);
+        let moved = daemon_moved(&self.session.settings, &settings);
         self.session.settings = settings;
         self.session.language = language;
         self.session.theme = theme;
         self.mark_restart_required();
+        if moved {
+            self.wallet_daemon_changed();
+        }
         self.session.notice = "config-reloaded".to_string();
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
@@ -2659,6 +2657,15 @@ fn validate_wake_command(command: &str) -> Result<(), MoltError> {
         ));
     }
     Ok(())
+}
+
+
+/// The purse's daemon or network differs between `old` and `new`.
+fn daemon_moved(old: &SessionSettings, new: &SessionSettings) -> bool {
+    new.wallet_daemon_url != old.wallet_daemon_url
+        || new.wallet_daemon_confirmed != old.wallet_daemon_confirmed
+        || new.wallet_daemon_login != old.wallet_daemon_login
+        || new.wallet_network != old.wallet_network
 }
 
 #[cfg(test)]

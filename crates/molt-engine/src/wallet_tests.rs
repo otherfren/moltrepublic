@@ -303,6 +303,21 @@ fn an_init_card_outside_the_bounds_is_declined() {
     assert!(!st.wallet_init_pending());
 }
 
+/// An outside edit of the daemon is the same move as a patch: the old
+/// daemon's height and probe are forgotten.
+#[test]
+fn a_reloaded_daemon_forgets_the_old_height() {
+    let b = Builder::new(&ABC, 2);
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    with_daemon(&mut st, 3000);
+    let probe = st.purse.probe_gen;
+    let mut edited = st.session.settings.clone();
+    edited.wallet_network = "stagenet".to_string();
+    st.cmd_reload_settings(edited, st.session.language.clone(), st.session.theme.clone()).expect("reload");
+    assert_eq!(st.purse.height, None);
+    assert!(st.purse.probe_gen > probe, "a probe in flight lands stale");
+}
+
 /// An approve kept as consent says so.
 #[test]
 fn a_held_approve_says_it_is_held() {
