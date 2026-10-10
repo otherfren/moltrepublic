@@ -187,9 +187,14 @@ impl WikiSearch {
         cursor: usize,
     ) -> tantivy::Result<(Vec<Hit>, bool)> {
         let searcher = self.reader.searcher();
+        // tantivy's collector reserves offset+limit slots up front
+        if u64::try_from(cursor).unwrap_or(u64::MAX) >= searcher.num_docs() {
+            return Ok((Vec::new(), false));
+        }
         let mut clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
         let text = text.trim();
         if !text.is_empty() {
+            check_query_shape(text)?;
             let parser = QueryParser::for_index(
                 &self.index,
                 vec![
@@ -255,6 +260,33 @@ impl WikiSearch {
         }
         Ok((hits, more))
     }
+}
+
+const MAX_QUERY_BYTES: usize = 1024;
+/// tantivy's grammar recurses per `(` unbounded and re-parses each group
+/// twice, so the cost doubles per level.
+const MAX_QUERY_DEPTH: usize = 8;
+
+fn check_query_shape(text: &str) -> tantivy::Result<()> {
+    let invalid = |m: &str| Err(tantivy::TantivyError::InvalidArgument(m.to_string()));
+    if text.len() > MAX_QUERY_BYTES {
+        return invalid("too long");
+    }
+    let (mut depth, mut max) = (0usize, 0usize);
+    for b in text.bytes() {
+        match b {
+            b'(' => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            b')' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    if max > MAX_QUERY_DEPTH {
+        return invalid("nested too deep");
+    }
+    Ok(())
 }
 
 /// The page's `upload:` destinations as search tokens: each reference as
@@ -416,6 +448,32 @@ mod tests {
             .expect("update");
         assert!(s.search("nachher", &Filters::default(), 10, 0).expect("q").0.is_empty());
         assert_eq!(s.search("nachbar", &Filters::default(), 10, 0).expect("q").0.len(), 1);
+    }
+
+    /// A hostile query is refused before tantivy's parser, which recurses
+    /// per `(` with no bound (stack) and backtracks twice per level (time).
+    #[test]
+    fn a_deeply_nested_query_is_refused_not_parsed() {
+        let s = WikiSearch::build(&tree(&[("a.md", "# A\nwort\n")])).expect("index");
+        let deep = format!("{}a", "(".repeat(200_000));
+        assert!(s.search(&deep, &Filters::default(), 10, 0).is_err(), "too deep");
+        let nested = format!("{}a{}", "(".repeat(40), ")".repeat(40));
+        assert!(s.search(&nested, &Filters::default(), 10, 0).is_err(), "too deep");
+        let nots = format!("{}wort", "NOT ".repeat(255));
+        let _ = s.search(&nots, &Filters::default(), 10, 0);
+        let ok = format!("{}wort{}", "(".repeat(4), ")".repeat(4));
+        assert_eq!(s.search(&ok, &Filters::default(), 10, 0).expect("q").0.len(), 1);
+    }
+
+    /// A cursor past the hits answers empty instead of sizing tantivy's
+    /// collector by it.
+    #[test]
+    fn a_cursor_past_the_index_answers_empty() {
+        let s = WikiSearch::build(&tree(&[("a.md", "# A\nwort\n")])).expect("index");
+        let (hits, more) = s
+            .search("wort", &Filters::default(), 10, usize::try_from(u32::MAX).expect("fits"))
+            .expect("q");
+        assert!(hits.is_empty() && !more);
     }
 
     /// Paging: the caller learns there is more without a second search.
