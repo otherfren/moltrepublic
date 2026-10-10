@@ -47,6 +47,9 @@ pub enum DaemonError {
     /// The daemon has not caught up with the network.
     #[error("daemon: syncing")]
     Syncing,
+    /// The daemon runs another network than the purse's.
+    #[error("daemon: wrong network")]
+    WrongNetwork,
     /// Dial, HTTP or RPC failure.
     #[error("daemon: {0}")]
     Rpc(String),
@@ -244,12 +247,19 @@ impl HttpTransport for DaemonTransport {
     }
 }
 
-/// The daemon's latest block number.
+/// The daemon's latest block number, from a daemon on `network`
+/// (`mainnet`, `stagenet`, `testnet`).
 ///
 /// # Errors
-/// Dial, login or RPC failure, one line.
-pub async fn daemon_height(transport: DaemonTransport) -> Result<u64, DaemonError> {
-    if !synchronized(&transport).await? {
+/// Another network, dial, login or RPC failure, one line.
+pub async fn daemon_height(transport: DaemonTransport, network: &str) -> Result<u64, DaemonError> {
+    let (synchronized, nettype) = info(&transport).await?;
+    // regtest runs as `fakechain` on mainnet addresses
+    let on = |n: &str| n == network || (n == "fakechain" && network == "mainnet");
+    if nettype.as_deref().is_some_and(|n| !on(n)) {
+        return Err(DaemonError::WrongNetwork);
+    }
+    if !synchronized {
         return Err(DaemonError::Syncing);
     }
     let daemon = MoneroDaemon::new(transport).await.map_err(|e| unwrap_error(&e))?;
@@ -272,13 +282,16 @@ pub async fn scannable_blocks(transport: DaemonTransport, from: u64, to: u64) ->
         .map_err(|e| unwrap_error(&e))
 }
 
-/// `get_info`'s `synchronized`; a daemon that omits it counts as caught up.
-async fn synchronized(transport: &DaemonTransport) -> Result<bool, DaemonError> {
+/// `get_info`'s `synchronized` and `nettype`; a daemon that omits the
+/// first counts as caught up.
+async fn info(transport: &DaemonTransport) -> Result<(bool, Option<String>), DaemonError> {
     const REQ: &str = r#"{"jsonrpc":"2.0","id":0,"method":"get_info"}"#;
     let body = transport.post_inner("json_rpc", REQ.as_bytes(), Some(GET_INFO_MAX)).await?;
     let v: serde_json::Value =
         serde_json::from_slice(&body).map_err(|_| DaemonError::Rpc("get_info".to_string()))?;
-    Ok(v.pointer("/result/synchronized").and_then(serde_json::Value::as_bool).unwrap_or(true))
+    let synchronized = v.pointer("/result/synchronized").and_then(serde_json::Value::as_bool).unwrap_or(true);
+    let nettype = v.pointer("/result/nettype").and_then(serde_json::Value::as_str).map(str::to_string);
+    Ok((synchronized, nettype))
 }
 
 /// The transport's own error comes back wrapped by the library.
@@ -343,6 +356,8 @@ pub mod stub {
         pub pad: usize,
         /// `get_info` says the daemon is still syncing.
         pub syncing: bool,
+        /// `get_info`'s `nettype`; absent when `None`.
+        pub nettype: Option<String>,
     }
 
     impl Drop for StubDaemon {
@@ -546,8 +561,9 @@ pub mod stub {
         let height = &chain.height;
         let body = match path.as_str() {
             "/json_rpc" if String::from_utf8_lossy(&buf[body_at..]).contains("get_info") => format!(
-                "{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"synchronized\":{},\"status\":\"OK\"}}}}",
-                !config.syncing
+                "{{\"jsonrpc\":\"2.0\",\"id\":0,\"result\":{{\"synchronized\":{},{}\"status\":\"OK\"}}}}",
+                !config.syncing,
+                config.nettype.as_ref().map(|n| format!("\"nettype\":\"{n}\",")).unwrap_or_default()
             ),
             "/json_rpc" => "[]".to_string(),
             "/get_height" => format!(
@@ -577,32 +593,47 @@ mod tests {
     #[tokio::test]
     async fn the_height_probe_reads_a_stub_daemon() {
         let d = StubDaemon::start(3000, StubConfig::default()).await;
-        assert_eq!(daemon_height(local(&d.url, "")).await, Ok(3000));
+        assert_eq!(daemon_height(local(&d.url, ""), "mainnet").await, Ok(3000));
         d.set_height(3005);
-        assert_eq!(daemon_height(local(&d.url, "")).await, Ok(3005));
+        assert_eq!(daemon_height(local(&d.url, ""), "mainnet").await, Ok(3005));
     }
 
     /// A syncing daemon's height is not the network's: it answers nothing.
     #[tokio::test]
     async fn a_syncing_daemon_gives_no_height() {
         let d = StubDaemon::start(3000, StubConfig { syncing: true, ..StubConfig::default() }).await;
-        assert_eq!(daemon_height(local(&d.url, "")).await, Err(DaemonError::Syncing));
+        assert_eq!(daemon_height(local(&d.url, ""), "mainnet").await, Err(DaemonError::Syncing));
+    }
+
+    /// A daemon on another network is refused; regtest (`fakechain`) takes
+    /// mainnet addresses, and a daemon that names none is taken at its word.
+    #[tokio::test]
+    async fn a_daemon_on_another_network_gives_no_height() {
+        let on = |n: &str| StubConfig { nettype: Some(n.to_string()), ..StubConfig::default() };
+        let d = StubDaemon::start(3000, on("mainnet")).await;
+        assert_eq!(daemon_height(local(&d.url, ""), "stagenet").await, Err(DaemonError::WrongNetwork));
+        assert_eq!(daemon_height(local(&d.url, ""), "mainnet").await, Ok(3000));
+        let d = StubDaemon::start(3000, on("fakechain")).await;
+        assert_eq!(daemon_height(local(&d.url, ""), "mainnet").await, Ok(3000));
+        assert_eq!(daemon_height(local(&d.url, ""), "testnet").await, Err(DaemonError::WrongNetwork));
+        let d = StubDaemon::start(3000, StubConfig::default()).await;
+        assert_eq!(daemon_height(local(&d.url, ""), "stagenet").await, Ok(3000));
     }
 
     #[tokio::test]
     async fn a_digest_login_answers_the_challenge() {
         let cfg = StubConfig { login: Some(("u".into(), "pw".into())), ..StubConfig::default() };
         let d = StubDaemon::start(42, cfg).await;
-        assert_eq!(daemon_height(local(&d.url, "u:pw")).await, Ok(42));
-        assert_eq!(daemon_height(local(&d.url, "u:nope")).await, Err(DaemonError::Login));
-        assert_eq!(daemon_height(local(&d.url, "")).await, Err(DaemonError::Login));
+        assert_eq!(daemon_height(local(&d.url, "u:pw"), "mainnet").await, Ok(42));
+        assert_eq!(daemon_height(local(&d.url, "u:nope"), "mainnet").await, Err(DaemonError::Login));
+        assert_eq!(daemon_height(local(&d.url, ""), "mainnet").await, Err(DaemonError::Login));
     }
 
     /// The per-call limit holds: a padded height answer is refused.
     #[tokio::test]
     async fn an_oversized_answer_is_refused() {
         let d = StubDaemon::start(7, StubConfig { pad: 2 * 1024 * 1024, ..StubConfig::default() }).await;
-        let got = daemon_height(local(&d.url, "")).await;
+        let got = daemon_height(local(&d.url, ""), "mainnet").await;
         assert!(matches!(&got, Err(DaemonError::Rpc(e)) if e.contains("exceeds")), "{got:?}");
     }
 
@@ -627,7 +658,7 @@ mod tests {
         assert_eq!(DaemonTransport::new("", "", true, true, &Dialer::Direct).map(|_| ()), Err(DaemonError::None));
         let onion = format!("http://{}.onion:18081", "a".repeat(56));
         let t = DaemonTransport::new(&onion, "", false, false, &Dialer::Direct).expect("an onion needs no consent");
-        let got = daemon_height(t).await;
+        let got = daemon_height(t, "mainnet").await;
         assert!(matches!(&got, Err(DaemonError::Rpc(e)) if e.contains("Tor is off")), "{got:?}");
     }
 
@@ -641,7 +672,7 @@ mod tests {
         d.set_garbage(true);
         let got = scannable_blocks(local(&d.url, ""), 100, 100).await;
         assert!(matches!(&got, Err(DaemonError::Fault(_))), "{got:?}");
-        assert_eq!(daemon_height(local(&d.url, "")).await, Ok(100), "the tip follows the chain");
+        assert_eq!(daemon_height(local(&d.url, ""), "mainnet").await, Ok(100), "the tip follows the chain");
         drop(d);
     }
 

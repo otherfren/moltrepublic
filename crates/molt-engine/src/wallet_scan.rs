@@ -197,8 +197,9 @@ impl State {
         };
         tracing::info!(from = state.next_height(), "wallet_scan=started");
         self.purse.scan.key = key;
+        let network = crate::wallet_run::network_word(w.network);
         self.purse.scan.task =
-            Some(tokio::spawn(scan_loop(transport, scanner, state, Feed { cmd_tx, generation }, base)));
+            Some(tokio::spawn(scan_loop(transport, network, scanner, state, Feed { cmd_tx, generation }, base)));
     }
 
     fn wallet_daemon_for_scan(&self) -> Result<DaemonTransport, String> {
@@ -437,6 +438,7 @@ enum Outcome {
 
 async fn scan_loop(
     transport: DaemonTransport,
+    network: &'static str,
     mut scanner: StandardScanner,
     mut state: ScanState,
     feed: Feed,
@@ -446,7 +448,7 @@ async fn scan_loop(
     let mut last = Zeroizing::new(Vec::new());
     loop {
         let mut tip = None;
-        let outcome = round(&transport, &mut scanner, &mut state, &mut tip).await;
+        let outcome = round(&transport, network, &mut scanner, &mut state, &mut tip).await;
         if !feed.report(&state, &mut last, tip, &outcome).await {
             return;
         }
@@ -497,6 +499,7 @@ impl Pace {
 /// One batch: the tip, the blocks above the cursor, each scanned and applied.
 async fn round(
     transport: &DaemonTransport,
+    network: &str,
     scanner: &mut StandardScanner,
     state: &mut ScanState,
     tip_out: &mut Option<u64>,
@@ -506,7 +509,7 @@ async fn round(
         DaemonError::Syncing => Outcome::Syncing(e.to_string()),
         other => Outcome::Down(other.to_string()),
     };
-    let tip = match monero_rpc::daemon_height(transport.clone()).await {
+    let tip = match monero_rpc::daemon_height(transport.clone(), network).await {
         Ok(h) => h,
         Err(e) => return failed(e),
     };

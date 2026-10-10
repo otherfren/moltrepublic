@@ -231,9 +231,10 @@ impl State {
         let generation = self.purse.probe_gen;
         self.purse.probing = true;
         let reply = reply.unwrap_or_else(|| tokio::sync::oneshot::channel().0);
+        let network = self.session.settings.wallet_network.clone();
         tokio::spawn(async move {
             let (height, error) = match transport {
-                Ok(t) => match molt_net::monero_rpc::daemon_height(t).await {
+                Ok(t) => match molt_net::monero_rpc::daemon_height(t, &network).await {
                     Ok(h) => (Some(h), String::new()),
                     Err(e) => (None, e.to_string()),
                 },
