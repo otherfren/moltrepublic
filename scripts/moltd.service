@@ -5,7 +5,8 @@
 # always on; the second one only keeps the process in the foreground - with
 # stdio the node would exit on systemd's /dev/null stdin). SIGTERM runs the
 # durable close. tor.mode = "local" needs tor.service; drop the After= line
-# for "embedded" (feature build) or "whonix".
+# for "embedded" (feature build) or "whonix". A workspace or download dir
+# under /home needs ProtectHome= dropped.
 [Unit]
 Description=MoltRepublic node
 After=network-online.target tor.service
@@ -14,6 +15,11 @@ Wants=network-online.target
 [Service]
 User=molt
 Environment=HOME=/var/lib/molt
+StateDirectory=molt
+StateDirectoryMode=0700
+UMask=0077
+PrivateTmp=yes
+ProtectHome=yes
 ExecStart=/usr/local/bin/moltd --config /var/lib/molt/config.toml --mcp-tcp 127.0.0.1:4041
 Restart=on-failure
 KillSignal=SIGTERM

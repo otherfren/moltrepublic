@@ -353,6 +353,7 @@ pub fn import_stage(
         fs::remove_dir_all(&staging)?;
     }
     let write = || -> Result<(), StorageError> {
+        crate::create_private_dir(&staging)?;
         for sub in ["keys", "log", "snapshots", "tmp"] {
             fs::create_dir_all(staging.join(sub))?;
         }

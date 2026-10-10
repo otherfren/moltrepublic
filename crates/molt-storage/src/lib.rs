@@ -960,6 +960,24 @@ pub fn workspace_dirname(name: &str, id: &str) -> String {
 }
 
 /// Write a file atomically through the workspace's same-fs `tmp/` dir.
+/// Create `dir` (and its parents) and make it owner-only: the plaintext
+/// files inside follow the umask.
+pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(dir)?;
+    restrict_dir(dir)
+}
+
+fn restrict_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(not(unix))]
+    let _ = dir;
+    Ok(())
+}
+
 fn write_atomic(ws_dir: &Path, rel: &str, bytes: &[u8], mode_600: bool) -> Result<(), StorageError> {
     let tmp_dir = ws_dir.join("tmp");
     fs::create_dir_all(&tmp_dir)?;
@@ -1063,7 +1081,7 @@ pub fn write_restored_stub(
     }
     let short: String = id.chars().take(12).collect();
     let dir = root.join(format!("restored-{short}"));
-    fs::create_dir_all(&dir)?;
+    create_private_dir(&dir)?;
     let manifest = WorkspaceManifest {
         format: MANIFEST_FORMAT.to_string(),
         version: STORAGE_VERSION,
@@ -2682,6 +2700,7 @@ pub fn create_workspace(
     if staging.exists() {
         fs::remove_dir_all(&staging)?;
     }
+    create_private_dir(&staging)?;
     for sub in ["keys", "log", "snapshots", "tmp"] {
         fs::create_dir_all(staging.join(sub))?;
     }
@@ -2780,6 +2799,9 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
     // in a directory that is not an openable workspace
     openable_gate(&read_manifest(ws_dir)?)?;
     let lock = acquire_lock(ws_dir)?;
+    if let Err(e) = restrict_dir(ws_dir) {
+        tracing::warn!(dir = %ws_dir.display(), error = %e, "workspace dir not made owner-only");
+    }
     // re-read under the flock: a seal_at_rest may have raced the pre-check
     // (its marker + key deletion land under the flock we now hold) — the
     // stale copy would misreport a healthy sealed dir as corruption
@@ -4971,6 +4993,30 @@ mod tests {
             state,
         };
         ws.write_snapshot(&snap).expect("snapshot");
+    }
+
+    /// A workspace dir is owner-only whatever the umask: its plaintext
+    /// manifest, prefs, logo and avatars follow the umask inside it.
+    #[cfg(unix)]
+    #[test]
+    fn workspace_dirs_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        let dir = ws.dir().to_path_buf();
+        assert_eq!(mode(&dir), 0o700, "a created workspace");
+        drop(ws);
+
+        // a dir an older build left world-traversable heals at open
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).expect("chmod");
+        let (ws, _) = open_workspace(&dir).expect("open");
+        assert_eq!(mode(&dir), 0o700, "an opened workspace");
+        drop(ws);
+
+        let stub = write_restored_stub(tmp.path(), &"ab".repeat(32), 1, b"blob").expect("stub");
+        assert_eq!(mode(&stub), 0o700, "a restored stub");
     }
 
     /// **WP4a F6 migration.** Putting every segment under its own data key is
