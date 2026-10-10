@@ -137,15 +137,15 @@ async fn a_payment_confirms_after_20_blocks_and_a_reorg_rewinds_it() {
         assert_eq!(v.history.len(), 1);
         let tx = &v.history[0];
         assert!(tx.incoming);
-        assert_eq!((tx.amount, tx.height, tx.confirmations), (AMOUNT, paid, 0));
+        assert_eq!((tx.amount, tx.height, tx.confirmations), (AMOUNT, paid, 1), "the top block counts");
         assert_eq!(tx.txid.len(), 64);
         assert!(tx.at.is_some_and(|t| t > 1_600_000_000), "the block's time");
         assert!(!v.can_spend);
     }
-    c.grow(19, None);
+    c.grow(18, None);
     c.serve(&ds);
     for w in &all {
-        let v = wait_wallet(w, "19 blocks on", |v| v.scan_height == paid + 19).await;
+        let v = wait_wallet(w, "18 blocks on", |v| v.scan_height == paid + 18).await;
         assert_eq!((v.balance, v.pending), (0, AMOUNT), "19 confirmations are not enough");
     }
     c.grow(1, None);
@@ -177,7 +177,6 @@ async fn the_fork_pauses_and_a_bad_daemon_is_a_fault() {
     let url = relay.url().await.to_string();
     let (all, ds, mut c, address) = purse(&url, tmp.path()).await;
     let a = &all[0];
-    let mut events = a.subscribe();
     c.grow(1, Some(pay(&address)));
     c.serve(&ds);
     wait_wallet(a, "the payment", |v| v.pending == AMOUNT).await;
@@ -192,6 +191,7 @@ async fn the_fork_pauses_and_a_bad_daemon_is_a_fault() {
     let v = wait_wallet(a, "resumed", |v| v.scan_paused.is_none() && v.scan_height == TIP + 2).await;
     assert_eq!(v.pending, AMOUNT);
 
+    let mut events = a.subscribe();
     let tip = c.tip().clone();
     c.blocks.push(block(tip.number + 1, tip.hash, 17, 0, None));
     c.serve(&ds);
@@ -199,8 +199,12 @@ async fn the_fork_pauses_and_a_bad_daemon_is_a_fault() {
     assert_eq!(v.pending, AMOUNT, "funds kept");
     assert_eq!(v.scan_height, TIP + 2, "nothing past the fork");
     let mut paused = false;
-    while let Ok(e) = events.try_recv() {
-        paused |= matches!(&e, Event::WalletScanPaused { reason } if reason == "update needed");
+    loop {
+        match events.try_recv() {
+            Ok(e) => paused |= matches!(&e, Event::WalletScanPaused { reason } if reason == "update needed"),
+            Err(tokio::sync::broadcast::error::TryRecvError::Lagged(_)) => {}
+            Err(_) => break,
+        }
     }
     assert!(paused, "the pause reaches the frontends");
 

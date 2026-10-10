@@ -3839,10 +3839,16 @@ impl StorageHandle {
             .map_err(|_| StorageError::BadFile("storage writer stopped".to_string()))?
     }
 
-    /// Persist the scanner's progress (fire-and-forget: a lost save costs a rescan).
-    pub fn save_wallet_scan(&self, bytes: Zeroizing<Vec<u8>>) {
-        if let Err(mpsc::TrySendError::Full(_)) = self.tx.try_send(WriterMsg::SaveWalletScan(bytes)) {
-            tracing::warn!(dropped = "wallet scan save", "writer queue full");
+    /// Persist the scanner's progress; `false` when nothing was queued.
+    #[must_use]
+    pub fn save_wallet_scan(&self, bytes: Zeroizing<Vec<u8>>) -> bool {
+        match self.tx.try_send(WriterMsg::SaveWalletScan(bytes)) {
+            Ok(()) => true,
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(dropped = "wallet scan save", "writer queue full");
+                false
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => false,
         }
     }
 
@@ -5516,13 +5522,21 @@ mod tests {
         assert!(handle.prune_wallet_keys_blocking(Zeroizing::new(b"run two".to_vec())));
         assert!(handle.persist_wallet_keys_blocking(Zeroizing::new(b"run four".to_vec())));
         assert!(handle.drop_wallet_keys_blocking(vec![Zeroizing::new(b"run four".to_vec()), Zeroizing::new(b"run five".to_vec())]));
-        handle.save_wallet_scan(Zeroizing::new(b"cursor 2".to_vec()));
+        assert!(handle.save_wallet_scan(Zeroizing::new(b"cursor 2".to_vec())));
         handle.close(None);
         let (ws, _) = open_workspace(&dir).expect("reopen");
         let held: Vec<Vec<u8>> =
             ws.read_wallet_keys().expect("read").iter().map(|r| r.to_vec()).collect();
         assert_eq!(held, [b"run two".to_vec()], "only the purse's record is left");
         assert_eq!(ws.read_wallet_scan().expect("read").as_deref().map(|b| b.as_slice()), Some(&b"cursor 2"[..]));
+    }
+
+    /// A scan save the full queue dropped is reported, so it is sent again.
+    #[test]
+    fn a_dropped_scan_save_is_reported() {
+        let (tx, _rx) = mpsc::sync_channel::<WriterMsg>(0);
+        let handle = StorageHandle { tx, failed: Arc::new(AtomicBool::new(false)), transport_gate: Arc::default() };
+        assert!(!handle.save_wallet_scan(Zeroizing::new(b"cursor".to_vec())));
     }
 
     /// The keys file's plaintext layout: tag, record count, length-prefixed records.

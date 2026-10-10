@@ -26,6 +26,8 @@ fn out(key: u8, amount: u64, height: u64) -> Received {
     }
 }
 
+const ADDR: &str = "the purse";
+
 fn hash(h: u64, fork: u8) -> [u8; 32] {
     let mut b = [fork; 32];
     b[..8].copy_from_slice(&h.to_le_bytes());
@@ -34,10 +36,10 @@ fn hash(h: u64, fork: u8) -> [u8; 32] {
 
 #[test]
 fn a_repeated_output_key_is_ignored() {
-    let mut s = ScanState::new(100);
+    let mut s = ScanState::new(ADDR, 100);
     assert_eq!(s.next_height(), 100);
     assert_eq!(
-        s.apply(100, hash(100, 0), hash(99, 0), vec![out(1, 5, 100)]),
+        s.apply(100, hash(100, 0), hash(99, 0), 0, vec![out(1, 5, 100)]),
         Step::Applied(vec![out(1, 5, 100)])
     );
     assert_eq!(
@@ -45,6 +47,7 @@ fn a_repeated_output_key_is_ignored() {
             101,
             hash(101, 0),
             hash(100, 0),
+            0,
             vec![out(1, 7, 101), out(2, 3, 101)]
         ),
         Step::Applied(vec![out(2, 3, 101)])
@@ -55,9 +58,9 @@ fn a_repeated_output_key_is_ignored() {
 
 #[test]
 fn twenty_confirmations_split_balance_and_pending() {
-    let mut s = ScanState::new(10);
-    s.apply(10, hash(10, 0), hash(9, 0), vec![out(1, 5, 10)]);
-    s.apply(11, hash(11, 0), hash(10, 0), vec![out(2, 3, 11)]);
+    let mut s = ScanState::new(ADDR, 10);
+    s.apply(10, hash(10, 0), hash(9, 0), 0, vec![out(1, 5, 10)]);
+    s.apply(11, hash(11, 0), hash(10, 0), 0, vec![out(2, 3, 11)]);
     assert_eq!(CONFIRMATIONS, 20);
     assert_eq!(s.balance(30), (5, 3));
     assert_eq!(s.balance(31), (8, 0));
@@ -66,7 +69,7 @@ fn twenty_confirmations_split_balance_and_pending() {
 
 #[test]
 fn a_locked_output_stays_pending_until_it_unlocks() {
-    let mut s = ScanState::new(10);
+    let mut s = ScanState::new(ADDR, 10);
     let mined = Received {
         lock: Lock::Block(70),
         ..out(1, 5, 10)
@@ -75,24 +78,33 @@ fn a_locked_output_stays_pending_until_it_unlocks() {
         lock: Lock::Time(1_700_000_000),
         ..out(2, 3, 10)
     };
-    s.apply(10, hash(10, 0), hash(9, 0), vec![mined, timed]);
+    s.apply(10, hash(10, 0), hash(9, 0), 1_699_999_000, vec![mined, timed]);
     assert_eq!(s.balance(30), (0, 8));
     assert_eq!(s.balance(69), (0, 8));
+    assert_eq!(s.balance(70), (5, 3));
+    // a time lock opens on the scanned chain's clock
+    for h in 11..30 {
+        s.apply(h, hash(h, 0), hash(h - 1, 0), 1_699_999_000 + h, vec![]);
+    }
+    s.apply(30, hash(30, 0), hash(29, 0), 1_700_000_000, vec![]);
+    assert_eq!(s.balance(70), (8, 0));
+    // a reorg back below that block closes it again
+    s.apply(31, hash(31, 1), hash(30, 1), 1_700_000_100, vec![]);
     assert_eq!(s.balance(70), (5, 3));
 }
 
 #[test]
 fn the_window_bounds_how_far_a_reorg_steps_back() {
     let top = u64::try_from(RECENT_BLOCKS).expect("window") + 50;
-    let mut s = ScanState::new(0);
+    let mut s = ScanState::new(ADDR, 0);
     for h in 0..top {
-        s.apply(h, hash(h, 0), hash(h.wrapping_sub(1), 0), vec![]);
+        s.apply(h, hash(h, 0), hash(h.wrapping_sub(1), 0), 0, vec![]);
     }
     // each foreign parent drops one remembered block; the window's last one restarts
     for k in 1..=RECENT_BLOCKS {
         let at = s.next_height();
         assert_eq!(
-            s.apply(at, hash(at, 1), hash(at - 1, 1), vec![]),
+            s.apply(at, hash(at, 1), hash(at - 1, 1), 0, vec![]),
             Step::Reorg
         );
         let want = if k == RECENT_BLOCKS {
@@ -106,40 +118,41 @@ fn the_window_bounds_how_far_a_reorg_steps_back() {
 
 #[test]
 fn a_reorg_rewinds_and_a_deep_one_rescans_from_the_birthday() {
-    let mut s = ScanState::new(10);
+    let mut s = ScanState::new(ADDR, 10);
     for h in 10..15 {
         s.apply(
             h,
             hash(h, 0),
             hash(h - 1, 0),
+            0,
             vec![out(u8::try_from(h).expect("h"), 1, h)],
         );
     }
     // block 15 builds on a different 14: rewind one, refetch 14
-    assert_eq!(s.apply(15, hash(15, 1), hash(14, 1), vec![]), Step::Reorg);
+    assert_eq!(s.apply(15, hash(15, 1), hash(14, 1), 0, vec![]), Step::Reorg);
     assert_eq!(s.next_height(), 14);
     assert_eq!(s.outputs().len(), 4);
     // the key seen in the orphaned block counts again on the new chain
     assert_eq!(
-        s.apply(14, hash(14, 1), hash(13, 0), vec![out(14, 2, 14)]),
+        s.apply(14, hash(14, 1), hash(13, 0), 0, vec![out(14, 2, 14)]),
         Step::Applied(vec![out(14, 2, 14)])
     );
     assert_eq!(s.next_height(), 15);
 
     // a fork below every remembered block: start over at the birthday
-    let mut s = ScanState::new(10);
-    s.apply(10, hash(10, 0), hash(9, 0), vec![out(1, 1, 10)]);
-    assert_eq!(s.apply(11, hash(11, 1), hash(10, 1), vec![]), Step::Reorg);
+    let mut s = ScanState::new(ADDR, 10);
+    s.apply(10, hash(10, 0), hash(9, 0), 0, vec![out(1, 1, 10)]);
+    assert_eq!(s.apply(11, hash(11, 1), hash(10, 1), 0, vec![]), Step::Reorg);
     assert_eq!(s.next_height(), 10);
     assert!(s.outputs().is_empty());
     assert_eq!(
-        s.apply(10, hash(10, 1), hash(9, 1), vec![out(1, 1, 10)]),
+        s.apply(10, hash(10, 1), hash(9, 1), 0, vec![out(1, 1, 10)]),
         Step::Applied(vec![out(1, 1, 10)])
     );
 
     // a block for another height is refused, nothing changes
     assert_eq!(
-        s.apply(42, hash(42, 0), hash(41, 0), vec![]),
+        s.apply(42, hash(42, 0), hash(41, 0), 0, vec![]),
         Step::OutOfOrder
     );
     assert_eq!(s.next_height(), 11);
@@ -226,8 +239,8 @@ fn a_mined_output_carries_its_lock() {
     assert_eq!(found[0].lock, Lock::Block(560));
     assert_eq!(found[0].at, 1_600_000_500, "the block's time");
 
-    let mut s = ScanState::new(500);
-    s.apply(500, hash(500, 0), hash(499, 0), found);
+    let mut s = ScanState::new(ADDR, 500);
+    s.apply(500, hash(500, 0), hash(499, 0), 0, found);
     assert_eq!(s.balance(520), (0, 9));
     assert_eq!(s.balance(560), (9, 0));
 }

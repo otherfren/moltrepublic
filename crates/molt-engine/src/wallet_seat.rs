@@ -32,7 +32,7 @@ pub(crate) struct SeatRt {
     armed_at: Option<u64>,
     /// The inits visible when arming ended: the founding consented to these only.
     founding_inits: BTreeSet<u64>,
-    tried_at: u64,
+    pub(crate) tried_at: u64,
     /// The others' key part status, last frame wins.
     pub(crate) statuses: BTreeMap<MemberId, ShareStatus>,
     /// The view key, held without a key part.

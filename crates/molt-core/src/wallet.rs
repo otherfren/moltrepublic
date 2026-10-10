@@ -129,7 +129,7 @@ pub struct WalletView {
     pub daemon_height: u64,
     /// The daemon answers.
     pub connected: bool,
-    /// Why scanning stopped (`update needed`).
+    /// Why scanning stopped: `update needed` (the fork) or `daemon fault`.
     pub scan_paused: Option<String>,
     /// `rule_m`.
     pub threshold: u32,

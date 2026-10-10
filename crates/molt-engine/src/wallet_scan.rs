@@ -37,10 +37,8 @@ pub(crate) struct ScanRt {
     key: Option<[u8; 32]>,
     /// The incarnation; never reset, so a closed workspace's report is stale.
     generation: u64,
-    /// The progress, from the file or the task.
+    /// The progress, from the file or the task; bound to its purse.
     state: Option<ScanState>,
-    /// The address `state` belongs to (a reorg may swap the purse).
-    state_for: Option<String>,
     /// The bytes last handed to the writer.
     saved: Option<Zeroizing<Vec<u8>>>,
     daemon_height: Option<u64>,
@@ -83,13 +81,16 @@ pub(crate) struct ScanShown {
 }
 
 impl ScanRt {
-    /// The task stops; its queued reports go stale.
+    /// The task stops; its queued reports go stale, its daemon's word too.
     pub(crate) fn stop(&mut self) {
         if let Some(t) = self.task.take() {
             t.abort();
         }
         self.key = None;
         self.generation += 1;
+        self.daemon_height = None;
+        self.connected = false;
+        self.paused = None;
     }
 
     /// A workspace closed: nothing of its scan stays.
@@ -109,14 +110,12 @@ impl State {
         let Some(purse) = self.wallet_purse() else {
             return;
         };
-        let birthday = purse.created.birthday;
-        self.purse.scan.state_for = Some(purse.created.address);
         let state = match file {
             Ok(None) => None,
             Ok(Some(bytes)) => match ScanState::decode(&bytes) {
-                Ok(s) if s.birthday() == birthday => Some(s),
+                Ok(s) if for_purse(&s, &purse.created) => Some(s),
                 Ok(_) => {
-                    tracing::warn!("wallet_scan=foreign_birthday action=rescan");
+                    tracing::warn!("wallet_scan=foreign_purse action=rescan");
                     None
                 }
                 Err(e) => {
@@ -135,6 +134,21 @@ impl State {
     /// The beat: a scanner runs exactly while there is a purse, its view
     /// key and a daemon this node may dial.
     pub(crate) fn wallet_scan_tick(&mut self) {
+        let before = self.wallet_scan_shown();
+        self.wallet_scan_step();
+        if self.wallet_scan_shown() != before {
+            self.emit_session(SessionScope::Full);
+        }
+    }
+
+    fn wallet_scan_step(&mut self) {
+        let purse = self.wallet_purse();
+        let foreign = self.purse.scan.state.as_ref().is_some_and(|s| !purse.as_ref().is_some_and(|p| for_purse(s, &p.created)));
+        if foreign {
+            tracing::info!("wallet_scan=purse_changed action=rescan");
+            self.purse.scan.state = None;
+            self.purse.scan.saved = None;
+        }
         let want = self.wallet_scan_want();
         let key = want.as_ref().map(|w| w.key);
         if key == self.purse.scan.key {
@@ -150,8 +164,6 @@ impl State {
                 if self.purse.scan.error != e {
                     tracing::info!(error = %e, "wallet_scan=no_daemon");
                     self.purse.scan.error = e;
-                    self.purse.scan.connected = false;
-                    self.emit_session(SessionScope::Full);
                 }
                 // no key: the dial settings are asked again on the next beat
                 return;
@@ -168,12 +180,7 @@ impl State {
                 return;
             }
         };
-        let ours = self.purse.scan.state_for.as_deref() == Some(w.address.as_str());
-        let state = match self.purse.scan.state.take() {
-            Some(s) if ours && s.birthday() == w.birthday => s,
-            _ => ScanState::new(w.birthday),
-        };
-        self.purse.scan.state_for = Some(w.address.clone());
+        let state = self.purse.scan.state.take().unwrap_or_else(|| ScanState::new(&w.address, w.birthday));
         self.purse.scan.state = Some(state.clone());
         let generation = self.purse.scan.generation;
         let base = match self.wallet_seams.scan_poll_ms.load(std::sync::atomic::Ordering::SeqCst) {
@@ -243,10 +250,9 @@ impl State {
             }
             if scan.saved.as_deref() != Some(&r.state) {
                 let bytes = Zeroizing::new(r.state);
-                if let Some(active) = self.active.as_ref() {
-                    active.handle.save_wallet_scan(bytes.clone());
+                if self.active.as_ref().is_some_and(|a| a.handle.save_wallet_scan(bytes.clone())) {
+                    self.purse.scan.saved = Some(bytes);
                 }
-                self.purse.scan.saved = Some(bytes);
             }
         }
         let scan = &mut self.purse.scan;
@@ -277,7 +283,7 @@ impl State {
     }
 
     /// The scan as the purse view shows it; balance against the daemon's
-    /// height, or the scan's own while none answered.
+    /// chain height, or the scan's own while none answered.
     pub(crate) fn wallet_scan_shown(&self) -> ScanShown {
         let scan = &self.purse.scan;
         let Some(state) = scan.state.as_ref() else {
@@ -292,8 +298,9 @@ impl State {
             };
         };
         let scan_height = state.next_height().saturating_sub(1);
-        let tip = scan.daemon_height.unwrap_or(scan_height);
-        let (balance, pending) = state.balance(tip);
+        // the daemon's top block number; a chain holds one block more
+        let chain = scan.daemon_height.map_or(state.next_height(), |h| h.saturating_add(1));
+        let (balance, pending) = state.balance(chain);
         let mut txs: std::collections::BTreeMap<(u64, [u8; 32]), WalletTxView> = std::collections::BTreeMap::new();
         for o in state.outputs() {
             txs.entry((o.height, o.tx))
@@ -304,7 +311,7 @@ impl State {
                     amount: o.amount,
                     height: o.height,
                     at: Some(o.at),
-                    confirmations: tip.saturating_sub(o.height),
+                    confirmations: chain.saturating_sub(o.height),
                 });
         }
         let history: Vec<WalletTxView> = txs.into_values().rev().collect();
@@ -327,6 +334,11 @@ impl PartialEq for ScanShown {
     }
 }
 
+/// `state` was scanned for this purse.
+fn for_purse(state: &ScanState, purse: &crate::wallet_run::Created) -> bool {
+    state.address() == purse.address && state.birthday() == purse.birthday
+}
+
 struct Want {
     key: [u8; 32],
     address: String,
@@ -343,13 +355,7 @@ struct Feed {
 impl Feed {
     /// `false` once the engine is gone.
     async fn report(&self, state: &ScanState, tip: u64, outcome: &Outcome) -> bool {
-        let (paused, error, connected) = match outcome {
-            Outcome::CaughtUp | Outcome::More => (None, String::new(), true),
-            Outcome::Paused(f) => (f.paused().map(str::to_string), f.to_string(), true),
-            Outcome::Fault(e) => (Some(DAEMON_FAULT.to_string()), e.clone(), true),
-            Outcome::Down(e) => (None, e.clone(), false),
-            Outcome::Syncing(e) => (None, e.clone(), true),
-        };
+        let (paused, error, connected) = outcome.verdict();
         let cmd = Command::NetWalletScan {
             scan_height: state.next_height().saturating_sub(1),
             daemon_height: tip,
@@ -361,6 +367,19 @@ impl Feed {
         };
         let reply = tokio::sync::oneshot::channel().0;
         self.cmd_tx.send(crate::Envelope { cmd, reply }).await.is_ok()
+    }
+}
+
+impl Outcome {
+    /// `(paused, error, connected)` as reported.
+    fn verdict(&self) -> (Option<String>, String, bool) {
+        match self {
+            Self::CaughtUp | Self::More => (None, String::new(), true),
+            Self::Paused(f) => (f.paused().map(str::to_string), f.to_string(), true),
+            Self::Fault(e) => (Some(DAEMON_FAULT.to_string()), e.clone(), true),
+            Self::Down(e) => (None, e.clone(), false),
+            Self::Syncing(e) => (None, e.clone(), true),
+        }
     }
 }
 
@@ -387,29 +406,54 @@ async fn scan_loop(
     feed: Feed,
     base: Option<Duration>,
 ) {
-    let poll = base.unwrap_or(Duration::from_secs(POLL_SECS));
-    let retry = base.unwrap_or(Duration::from_secs(RETRY_SECS));
-    let mut backoff = retry;
+    let mut pace = Pace::new(base);
     let mut tip = 0;
     loop {
         let outcome = round(&transport, &mut scanner, &mut state, &mut tip).await;
         if !feed.report(&state, tip, &outcome).await {
             return;
         }
-        let wait = match outcome {
-            Outcome::More => continue,
+        if let Some(wait) = pace.after(&outcome) {
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
+/// The waits between rounds.
+struct Pace {
+    poll: Duration,
+    retry: Duration,
+    paused: Duration,
+    backoff: Duration,
+}
+
+impl Pace {
+    /// `base` (the test seam) replaces every wait.
+    fn new(base: Option<Duration>) -> Self {
+        let retry = base.unwrap_or(Duration::from_secs(RETRY_SECS));
+        Self {
+            poll: base.unwrap_or(Duration::from_secs(POLL_SECS)),
+            retry,
+            paused: base.unwrap_or(Duration::from_secs(PAUSED_SECS)),
+            backoff: retry,
+        }
+    }
+
+    /// The wait after `outcome`; none to go on at once.
+    fn after(&mut self, outcome: &Outcome) -> Option<Duration> {
+        match outcome {
+            Outcome::More => None,
             Outcome::CaughtUp => {
-                backoff = retry;
-                poll
+                self.backoff = self.retry;
+                Some(self.poll)
             }
-            Outcome::Paused(_) => base.unwrap_or(Duration::from_secs(PAUSED_SECS)),
+            Outcome::Paused(_) => Some(self.paused),
             Outcome::Fault(_) | Outcome::Down(_) | Outcome::Syncing(_) => {
-                let w = backoff;
-                backoff = (backoff * 2).min(Duration::from_secs(RETRY_MAX_SECS));
-                w
+                let w = self.backoff;
+                self.backoff = (w * 2).min(Duration::from_secs(RETRY_MAX_SECS));
+                Some(w)
             }
-        };
-        tokio::time::sleep(wait).await;
+        }
     }
 }
 
@@ -437,13 +481,13 @@ async fn round(transport: &DaemonTransport, scanner: &mut StandardScanner, state
         let Ok(height) = u64::try_from(b.block.number()) else {
             return Outcome::Fault("daemon fault: block number".to_string());
         };
-        let (hash, previous) = (b.block.hash(), b.block.header.previous);
+        let (hash, previous, at) = (b.block.hash(), b.block.header.previous, b.block.header.timestamp);
         let found = match scanner.scan_block(b) {
             Ok(found) => found,
             Err(f @ ScanFault::UpdateNeeded(_)) => return Outcome::Paused(f),
             Err(f @ ScanFault::Daemon(_)) => return Outcome::Fault(f.to_string()),
         };
-        match state.apply(height, hash, previous, found) {
+        match state.apply(height, hash, previous, at, found) {
             Step::Applied(new) => {
                 for o in new {
                     tracing::info!(height, amount = o.amount, "wallet_scan=received");
@@ -467,27 +511,122 @@ async fn round(transport: &DaemonTransport, scanner: &mut StandardScanner, state
 mod tests {
     use super::*;
     use crate::chain::test_support::{genesis_seat, Builder};
+    use crate::wallet_run::tests::{purse_run, seat_with_purse, with_init};
     use molt_treasury::scan::{Lock, Received};
+    use molt_treasury::Network;
 
     fn out(key: u8, tx: u8, height: u64, amount: u64) -> Received {
         Received { key: [key; 32], amount, height, at: 1_700_000_000 + height, tx: [tx; 32], index_in_tx: u64::from(key), lock: Lock::None }
     }
 
-    /// One row per transaction, its outputs summed, newest first; balance at the daemon's tip.
+    /// A state for `address` from `birthday` with one paid block.
+    fn paid(address: &str, birthday: u64) -> ScanState {
+        let mut s = ScanState::new(address, birthday);
+        s.apply(birthday, [1; 32], [0; 32], 1_700_000_000, vec![out(1, 7, birthday, 5)]);
+        s
+    }
+
+    /// One row per transaction, its outputs summed, newest first; the
+    /// daemon's top block counts as a confirmation (Monero's convention).
     #[test]
     fn history_sums_a_transaction_and_lists_the_newest_first() {
         let b = Builder::new(&["a", "b", "c"], 2);
         let mut st = genesis_seat("a", &b, b.blocks.clone());
-        let mut s = ScanState::new(100);
-        s.apply(100, [1; 32], [0; 32], vec![out(1, 7, 100, 5), out(2, 7, 100, 6)]);
-        s.apply(101, [2; 32], [1; 32], vec![out(3, 8, 101, 4)]);
+        let mut s = ScanState::new("p", 100);
+        s.apply(100, [1; 32], [0; 32], 0, vec![out(1, 7, 100, 5), out(2, 7, 100, 6)]);
+        s.apply(101, [2; 32], [1; 32], 0, vec![out(3, 8, 101, 4)]);
         st.purse.scan.state = Some(s);
-        st.purse.scan.daemon_height = Some(120);
+        st.purse.scan.daemon_height = Some(119);
         let shown = st.wallet_scan_shown();
         let rows: Vec<(u64, u64, u64)> = shown.history.iter().map(|t| (t.height, t.amount, t.confirmations)).collect();
         assert_eq!(rows, vec![(101, 4, 19), (100, 11, 20)]);
         assert_eq!((shown.balance, shown.pending, shown.scan_height), (11, 4, 101));
         assert!(shown.history.iter().all(|t| t.incoming));
         assert_eq!(shown.connected, None, "no scanner: the probe speaks");
+    }
+
+    /// A scan file is the progress of one purse: another address or
+    /// birthday costs a rescan.
+    #[test]
+    fn a_scan_file_of_another_purse_is_not_adopted() {
+        let (mut st, c) = seat_with_purse("a", &[]);
+        let file = |s: ScanState| Ok(Some(Zeroizing::new(s.encode())));
+        st.wallet_scan_on_open(file(paid("another purse", c.birthday)));
+        assert!(st.purse.scan.state.is_none(), "another address");
+        st.wallet_scan_on_open(file(paid(&c.address, c.birthday + 1)));
+        assert!(st.purse.scan.state.is_none(), "another birthday");
+        st.wallet_scan_on_open(file(paid(&c.address, c.birthday)));
+        assert!(st.purse.scan.state.is_some(), "its own");
+    }
+
+    /// A purse swapped in session drops the old progress at once, with no
+    /// daemon to start a scanner for the new one.
+    #[test]
+    fn a_swapped_purse_drops_the_old_progress_without_a_daemon() {
+        let b = with_init();
+        let (_, records) = purse_run(&b, 11, 3000, Network::Mainnet);
+        let (mut st, c) = seat_with_purse("a", &records[..1]);
+        st.session.settings.wallet_daemon_url = String::new();
+        st.purse.scan.state = Some(paid("another purse", c.birthday));
+        st.purse.scan.daemon_height = Some(c.birthday + 100);
+        assert_eq!(st.wallet_view().balance, 5, "shown before the beat");
+        st.wallet_scan_tick();
+        assert!(st.purse.scan.state.is_none());
+        assert_eq!((st.wallet_view().balance, st.wallet_view().history.len()), (0, 0));
+    }
+
+    /// A restarted scanner starts without the old daemon's word.
+    #[test]
+    fn a_stop_forgets_the_old_daemons_word() {
+        let (mut st, c) = seat_with_purse("a", &[]);
+        st.purse.scan.state = Some(paid(&c.address, c.birthday));
+        st.purse.scan.key = Some([1; 32]);
+        st.purse.scan.paused = Some("update needed".to_string());
+        st.purse.scan.daemon_height = Some(c.birthday + 100);
+        st.purse.scan.connected = true;
+        st.wallet_scan_tick();
+        let v = st.wallet_view();
+        assert_eq!(v.scan_paused, None);
+        assert_ne!(v.daemon_height, c.birthday + 100);
+        assert_eq!((v.balance, v.pending), (0, 0), "no view key");
+    }
+
+    /// The balance shows only where the view key is: a key part's, or one
+    /// handed over.
+    #[test]
+    fn only_a_seat_with_the_view_key_shows_the_balance() {
+        let b = with_init();
+        let (_, records) = purse_run(&b, 11, 3000, Network::Mainnet);
+        let (mut c, created) = seat_with_purse("c", &[]);
+        c.purse.scan.state = Some(paid(&created.address, created.birthday));
+        c.purse.scan.daemon_height = Some(created.birthday + 100);
+        let v = c.wallet_view();
+        assert_eq!((v.balance, v.pending, v.history.len(), v.can_watch), (0, 0, 0, false), "a stale file shows nothing");
+        c.cmd_net_wallet_view_answer(&"a".to_string(), &records[0].view[..]).expect("ack");
+        let v = c.wallet_view();
+        assert_eq!((v.balance, v.history.len(), v.can_watch), (5, 1, true));
+    }
+
+    /// A syncing daemon answers: connected, not paused; a fault is not the fork.
+    #[test]
+    fn a_syncing_daemon_is_connected_and_a_fault_is_not_the_fork() {
+        assert_eq!(Outcome::Syncing("syncing".into()).verdict(), (None, "syncing".to_string(), true));
+        assert_eq!(Outcome::Down("down".into()).verdict(), (None, "down".to_string(), false));
+        let (paused, _, connected) = Outcome::Fault("bad".into()).verdict();
+        assert_eq!((paused.as_deref(), connected), (Some(DAEMON_FAULT), true));
+        let (paused, _, _) = Outcome::Paused(molt_treasury::scan::ScanFault::UpdateNeeded(17)).verdict();
+        assert_eq!(paused.as_deref(), Some("update needed"));
+    }
+
+    /// Failures back off doubling to the cap; a good round resets it.
+    #[test]
+    fn a_failing_daemon_backs_off_to_the_cap() {
+        let mut p = Pace::new(None);
+        let down = Outcome::Down(String::new());
+        let waits: Vec<u64> = (0..8).filter_map(|_| p.after(&down)).map(|d| d.as_secs()).collect();
+        assert_eq!(waits, [10, 20, 40, 80, 160, 320, 600, 600]);
+        assert_eq!(p.after(&Outcome::CaughtUp), Some(Duration::from_secs(POLL_SECS)));
+        assert_eq!(p.after(&Outcome::Syncing(String::new())), Some(Duration::from_secs(RETRY_SECS)));
+        assert_eq!(p.after(&Outcome::More), None);
     }
 }

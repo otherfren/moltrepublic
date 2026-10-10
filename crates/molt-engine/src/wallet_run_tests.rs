@@ -25,7 +25,7 @@ fn commit(b: &mut Builder, id: u64, payload: Value) {
 
 /// A real 2-of-3 run of `b`'s republic: every seat's keys record (its
 /// own attestation inside) and the `wallet_created` with all three.
-fn purse_run(b: &Builder, tag: u8, birthday: u64, network: Network) -> (Created, Vec<KeysRecord>) {
+pub(crate) fn purse_run(b: &Builder, tag: u8, birthday: u64, network: Network) -> (Created, Vec<KeysRecord>) {
     let mut rng = rand_chacha::ChaCha20Rng::from_seed([tag; 32]);
     let republic_id = hex32(&b.republic_id).expect("raw id");
     let run = RunId { republic_id, init_id: INIT, run: [tag; 32] };
@@ -75,7 +75,7 @@ fn purse_run(b: &Builder, tag: u8, birthday: u64, network: Network) -> (Created,
     (record_created(&records[0], sigs), records)
 }
 
-fn with_init() -> Builder {
+pub(crate) fn with_init() -> Builder {
     let mut b = Builder::new(&ABC, 2);
     commit(&mut b, INIT, init_payload(3000, "mainnet"));
     b
@@ -788,7 +788,7 @@ fn a_reopened_seat_rejoins_a_run_in_readiness() {
 }
 
 /// The purse committed on a seat that holds `records` (none: view only).
-fn seat_with_purse(member: &str, records: &[KeysRecord]) -> (crate::State, Created) {
+pub(crate) fn seat_with_purse(member: &str, records: &[KeysRecord]) -> (crate::State, Created) {
     let mut b = with_init();
     let (c, _) = purse_run(&b, 11, 3000, Network::Mainnet);
     commit(&mut b, 6, created_value(&c));
@@ -895,6 +895,21 @@ fn armed_seat(name: &str) -> crate::State {
     let mut st = run_seat(&b, name, false);
     st.wallet_arm_founding(Some(&["wallet".to_string()]));
     st
+}
+
+/// Plan §7.3: position k tries the founding's init `k-1` steps after arming.
+#[test]
+fn a_founding_position_proposes_only_after_its_wait() {
+    let tried = |name: &str, at: u64| {
+        let mut st = armed_seat(name);
+        st.wallet_seat_tick(at);
+        st.purse.seat.tried_at == at
+    };
+    assert!(tried("a", T0), "position 1 at once");
+    assert!(!tried("b", T0 + STEP_SECS - 1));
+    assert!(tried("b", T0 + STEP_SECS), "position 2 after one step");
+    assert!(!tried("c", T0 + 2 * STEP_SECS - 1));
+    assert!(tried("c", T0 + 2 * STEP_SECS), "position 3 after two");
 }
 
 fn land_card(st: &mut crate::State, seq: u64, id: u64, birthday: u64) {

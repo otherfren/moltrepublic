@@ -198,7 +198,7 @@ pub struct WalletView {
     pub scan_height: u64,
     pub daemon_height: u64,
     pub connected: bool,
-    pub scan_paused: Option<String>, // "update needed" (Fork) o. ä.
+    pub scan_paused: Option<String>, // "update needed" (Fork) | "daemon fault"
     pub threshold: u32,
     pub participants: u32,
     pub phase: WalletPhase,          // Off | Bounds | NoPurse | Init | Ready
@@ -405,13 +405,13 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
 
 ### 7.9 Scanner
 
-- Off-actor-Task pro offenem Workspace mit `net_scope`, Abbruch in
-  `reset_workspace_state`.
+- Off-actor-Task pro offenem Workspace mit eigener Generation (veraltete
+  Rückmeldungen fallen weg), Abbruch in `reset_workspace_state`.
 - Ab `max(birthday, cursor)`; Rückmeldung per `Net*`-Command.
 - Gesehene Output-Keys; letzte Block-Hashes je Höhe für Reorg-Erkennung.
 - 20 Bestätigungen; Reorg → zurückspulen oder Rescan ab Birthday.
 - `UnsupportedProtocol` → `scan_paused = "update needed"`; Dekodierfehler →
-  Daemon-Fehler.
+  `scan_paused = "daemon fault"`, nie die Pause.
 
 ## 8. Kontrakt-Erweiterungen
 
@@ -435,7 +435,7 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
 | Datei | Segment | Inhalt | Export | Import |
 |---|---|---|---|---|
 | `wallet_keys.state` | `u64::MAX − 9` | Keys-Records (je attestiertem Lauf, ab finaler Kasse nur der der Kasse) | prüfen; defekt → **Abbruch** | prüfen; defekt → verwerfen, watch-only; Record ≠ Kasse → watch-only |
-| `wallet_scan.state` | `u64::MAX − 10` | Cursor, Block-Hashes, gesehene Keys, Outputs | prüfen; defekt → skip + benennen | prüfen; defekt → verwerfen, Rescan |
+| `wallet_scan.state` | `u64::MAX − 10` | Adresse, Cursor, Block-Hashes + -Zeiten, gesehene Keys, Outputs | prüfen; defekt → skip + benennen | prüfen; defekt → verwerfen, Rescan |
 
 - Sub-Keys `hkdf32(ws_key, "molt-wallet-keys", id)` /
   `"molt-wallet-scan"`; `encode_frame` + `write_atomic`; Cap
@@ -735,9 +735,14 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    error (`DaemonError::Fault`) shows as `scan_paused = "daemon fault"`
    with `connected` true; only `update needed` emits `WalletScanPaused`.
    History is one row per transaction, newest first; confirmations are
-   `daemon_height - height`, as the balance rule counts them. The scan
-   layout is `molt-wallet-scan-v2`: each output carries its block's time
-   (a v1 file reads as damage: one rescan). `molt-treasury`'s
+   `daemon_height + 1 - height` (the daemon's top block counts, as in
+   Monero's wallet), as the balance rule counts them. A time lock opens
+   on the newest scanned block's time. The scan layout is
+   `molt-wallet-scan-v3`: the purse's address (another purse's file, or
+   a purse swapped in session, rescans), each remembered block's time,
+   each output's block time (older files read as damage: one rescan).
+   Deviation: the task does not run under `net_scope`; its own
+   generation drops a stopped task's reports. `molt-treasury`'s
    `test-blocks` feature builds the real blocks the stub daemon serves
    (a payment is a miner output without its lock).
    Regtest: monerod (fakechain) takes mainnet addresses.

@@ -490,7 +490,8 @@ Fixed now, whatever the algorithm:
   above hard-fork version 16 (`UnsupportedProtocol`), and its decoder fails
   on unknown output types. The scanner treats `UnsupportedProtocol` as
   **"scanning paused: update needed"** and a decode error as a daemon fault
-  (otherwise a lying daemon could fake the pause). Funds are safe meanwhile;
+  (`scan_paused = "daemon fault"`, never the pause: otherwise a lying
+  daemon could fake it). Funds are safe meanwhile;
   only the display stops. The scanner sits behind the treasury's own
   interface, so the Carrot upgrade swaps an implementation.
 - **Spending after v18** needs SA+L (§8). CLSAG transactions become

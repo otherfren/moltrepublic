@@ -18,6 +18,8 @@ fn out(key: u8, amount: u64, height: u64, lock: Lock) -> Received {
     }
 }
 
+const ADDR: &str = "the purse";
+
 fn hash(h: u64) -> [u8; 32] {
     let mut b = [7; 32];
     b[..8].copy_from_slice(&h.to_le_bytes());
@@ -25,13 +27,14 @@ fn hash(h: u64) -> [u8; 32] {
 }
 
 fn scanned() -> ScanState {
-    let mut s = ScanState::new(10);
-    s.apply(10, hash(10), hash(9), vec![out(1, 5, 10, Lock::Block(70))]);
-    s.apply(11, hash(11), hash(10), vec![]);
+    let mut s = ScanState::new(ADDR, 10);
+    s.apply(10, hash(10), hash(9), 0, vec![out(1, 5, 10, Lock::Block(70))]);
+    s.apply(11, hash(11), hash(10), 0, vec![]);
     s.apply(
         12,
         hash(12),
         hash(11),
+        0,
         vec![out(2, 3, 12, Lock::Time(9)), out(3, 4, 12, Lock::None)],
     );
     s
@@ -44,25 +47,28 @@ fn the_scan_state_round_trips() {
     assert_eq!(back, s);
     // the seen keys come back too: a repeat stays ignored after a restart
     let mut back = back;
-    let step = back.apply(13, hash(13), hash(12), vec![out(2, 9, 13, Lock::None)]);
+    let step = back.apply(13, hash(13), hash(12), 0, vec![out(2, 9, 13, Lock::None)]);
     assert_eq!(step, molt_treasury::scan::Step::Applied(vec![]));
     assert_eq!(
-        ScanState::decode(&ScanState::new(5).encode()).expect("empty"),
-        ScanState::new(5)
+        ScanState::decode(&ScanState::new(ADDR, 5).encode()).expect("empty"),
+        ScanState::new(ADDR, 5)
     );
+    assert_eq!(back.address(), ADDR, "the purse it was scanned for");
 }
 
 #[test]
 fn the_scan_state_layout_is_pinned() {
-    let mut s = ScanState::new(10);
-    s.apply(10, hash(10), hash(9), vec![out(1, 5, 10, Lock::Block(70))]);
+    let mut s = ScanState::new(ADDR, 10);
+    s.apply(10, hash(10), hash(9), 1_700_000_010, vec![out(1, 5, 10, Lock::Block(70))]);
     let mut want = Vec::new();
-    put_bytes(&mut want, b"molt-wallet-scan-v2");
+    put_bytes(&mut want, b"molt-wallet-scan-v3");
+    put_bytes(&mut want, ADDR.as_bytes());
     want.extend_from_slice(&10u64.to_le_bytes());
     want.extend_from_slice(&11u64.to_le_bytes());
     want.extend_from_slice(&1u32.to_le_bytes());
     want.extend_from_slice(&10u64.to_le_bytes());
     want.extend_from_slice(&hash(10));
+    want.extend_from_slice(&1_700_000_010u64.to_le_bytes());
     want.extend_from_slice(&1u32.to_le_bytes());
     want.extend_from_slice(&[1; 32]);
     want.extend_from_slice(&5u64.to_le_bytes());
@@ -87,8 +93,8 @@ fn a_damaged_scan_state_is_refused() {
 
     // an output outside [birthday, next), a repeated key, an unknown lock,
     // a lock-free output with a value, `next` not past what it holds
-    let mut s = ScanState::new(10);
-    s.apply(10, hash(10), hash(9), vec![out(1, 5, 10, Lock::None)]);
+    let mut s = ScanState::new(ADDR, 10);
+    s.apply(10, hash(10), hash(9), 0, vec![out(1, 5, 10, Lock::None)]);
     let base = s.encode();
     let at = |field_from_end: usize| base.len() - field_from_end;
     let mut low = base.clone();
@@ -103,9 +109,9 @@ fn a_damaged_scan_state_is_refused() {
     none_value[at(8)] = 1;
     assert!(refused(&none_value), "a lock-free output carries no value");
 
-    let mut twice = ScanState::new(10);
-    twice.apply(10, hash(10), hash(9), vec![out(1, 5, 10, Lock::None)]);
-    twice.apply(11, hash(11), hash(10), vec![out(2, 5, 11, Lock::None)]);
+    let mut twice = ScanState::new(ADDR, 10);
+    twice.apply(10, hash(10), hash(9), 0, vec![out(1, 5, 10, Lock::None)]);
+    twice.apply(11, hash(11), hash(10), 0, vec![out(2, 5, 11, Lock::None)]);
     let mut dup = twice.encode();
     let second = dup.len() - (32 + 8 + 8 + 8 + 32 + 8 + 1 + 8);
     dup[second..second + 32].copy_from_slice(&[1; 32]);
@@ -113,7 +119,7 @@ fn a_damaged_scan_state_is_refused() {
 
     let mut ahead = base;
     // `next` sits after the tag and the birthday
-    let n = 4 + b"molt-wallet-scan-v2".len() + 8;
+    let n = 4 + b"molt-wallet-scan-v3".len() + 4 + ADDR.len() + 8;
     ahead[n..n + 8].copy_from_slice(&10u64.to_le_bytes());
     assert!(refused(&ahead), "next at a held block and output");
 }
@@ -121,13 +127,15 @@ fn a_damaged_scan_state_is_refused() {
 /// An output-free image: `birthday`, `next`, and the remembered heights.
 fn window(birthday: u64, next: u64, heights: &[u64]) -> Vec<u8> {
     let mut b = Vec::new();
-    put_bytes(&mut b, b"molt-wallet-scan-v2");
+    put_bytes(&mut b, b"molt-wallet-scan-v3");
+    put_bytes(&mut b, ADDR.as_bytes());
     b.extend_from_slice(&birthday.to_le_bytes());
     b.extend_from_slice(&next.to_le_bytes());
     b.extend_from_slice(&u32::try_from(heights.len()).expect("count").to_le_bytes());
     for h in heights {
         b.extend_from_slice(&h.to_le_bytes());
         b.extend_from_slice(&hash(*h));
+        b.extend_from_slice(&0u64.to_le_bytes());
     }
     b.extend_from_slice(&0u32.to_le_bytes());
     b

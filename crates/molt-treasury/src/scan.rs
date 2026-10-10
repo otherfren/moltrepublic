@@ -18,7 +18,7 @@ use molt_core::{put_bytes, put_count};
 use crate::keys::view_pair;
 use crate::{Reader, TreasuryError};
 
-const SCAN_TAG: &[u8] = b"molt-wallet-scan-v2";
+const SCAN_TAG: &[u8] = b"molt-wallet-scan-v3";
 
 /// Confirmations before an output counts as balance.
 pub const CONFIRMATIONS: u64 = 20;
@@ -56,12 +56,13 @@ pub enum Lock {
 }
 
 impl Lock {
-    /// Spendable at chain height `daemon_height`; a time lock counts as locked.
-    pub fn open_at(self, daemon_height: u64) -> bool {
+    /// Spendable with `chain_height` blocks in the chain whose newest
+    /// known block is from `chain_time`.
+    pub fn open_at(self, chain_height: u64, chain_time: u64) -> bool {
         match self {
             Self::None => true,
-            Self::Block(h) => h <= daemon_height,
-            Self::Time(_) => false,
+            Self::Block(h) => h <= chain_height,
+            Self::Time(t) => t <= chain_time,
         }
     }
 }
@@ -175,17 +176,21 @@ pub enum Step {
 /// The scanner's progress from the birthday on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanState {
+    /// The purse's address: progress never carries over to another purse.
+    address: String,
     birthday: u64,
     next: u64,
-    recent: BTreeMap<u64, [u8; 32]>,
+    /// Height to (hash, block time).
+    recent: BTreeMap<u64, ([u8; 32], u64)>,
     seen: BTreeSet<[u8; 32]>,
     outputs: Vec<Received>,
 }
 
 impl ScanState {
-    /// Nothing scanned yet.
-    pub fn new(birthday: u64) -> Self {
+    /// Nothing scanned yet for the purse at `address`.
+    pub fn new(address: &str, birthday: u64) -> Self {
         Self {
+            address: address.to_string(),
             birthday,
             next: birthday,
             recent: BTreeMap::new(),
@@ -199,6 +204,11 @@ impl ScanState {
         self.next
     }
 
+    /// The purse this progress belongs to.
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
     /// The purse's birthday height.
     pub fn birthday(&self) -> u64 {
         self.birthday
@@ -209,26 +219,28 @@ impl ScanState {
         &self.outputs
     }
 
-    /// Block `height` with its hash, its parent's hash and what the scanner found.
-    /// A repeated output key is dropped (burning bug: only the first counts).
+    /// Block `height` with its hash, its parent's hash, its time and what
+    /// the scanner found. A repeated output key is dropped (burning bug:
+    /// only the first counts).
     pub fn apply(
         &mut self,
         height: u64,
         hash: [u8; 32],
         previous: [u8; 32],
+        at: u64,
         found: Vec<Received>,
     ) -> Step {
         if height != self.next {
             return Step::OutOfOrder;
         }
         let parent = height.checked_sub(1);
-        if let Some(held) = parent.and_then(|p| self.recent.get(&p)) {
+        if let Some((held, _)) = parent.and_then(|p| self.recent.get(&p)) {
             if *held != previous {
                 self.rewind();
                 return Step::Reorg;
             }
         }
-        self.recent.insert(height, hash);
+        self.recent.insert(height, (hash, at));
         while self.recent.len() > RECENT_BLOCKS {
             self.recent.pop_first();
         }
@@ -241,12 +253,14 @@ impl ScanState {
         Step::Applied(new)
     }
 
-    /// `(balance, pending)` in piconero at the daemon's chain height;
-    /// pending until confirmed and unlocked.
-    pub fn balance(&self, daemon_height: u64) -> (u64, u64) {
+    /// `(balance, pending)` in piconero with `chain_height` blocks in the
+    /// chain (the daemon's `get_height`); pending until confirmed and
+    /// unlocked, a time lock against the newest scanned block's time.
+    pub fn balance(&self, chain_height: u64) -> (u64, u64) {
+        let chain_time = self.recent.last_key_value().map_or(0, |(_, (_, at))| *at);
         self.outputs.iter().fold((0, 0), |(ok, wait), r| {
-            if daemon_height.saturating_sub(r.height) >= CONFIRMATIONS
-                && r.lock.open_at(daemon_height)
+            if chain_height.saturating_sub(r.height) >= CONFIRMATIONS
+                && r.lock.open_at(chain_height, chain_time)
             {
                 (ok.saturating_add(r.amount), wait)
             } else {
@@ -255,18 +269,20 @@ impl ScanState {
         })
     }
 
-    /// The scan file's bytes: `tag ‖ birthday ‖ next ‖ count ‖ (height ‖
-    /// hash)* ‖ count ‖ (key ‖ amount ‖ height ‖ at ‖ tx ‖ index ‖ lock kind ‖
+    /// The scan file's bytes: `tag ‖ address ‖ birthday ‖ next ‖ count ‖
+    /// (height ‖ hash ‖ time)* ‖ count ‖ (key ‖ amount ‖ height ‖ at ‖ tx ‖ index ‖ lock kind ‖
     /// lock value)*`; the seen keys are the outputs' keys.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         put_bytes(&mut out, SCAN_TAG);
+        put_bytes(&mut out, self.address.as_bytes());
         out.extend_from_slice(&self.birthday.to_le_bytes());
         out.extend_from_slice(&self.next.to_le_bytes());
         put_count(&mut out, self.recent.len());
-        for (h, hash) in &self.recent {
+        for (h, (hash, at)) in &self.recent {
             out.extend_from_slice(&h.to_le_bytes());
             out.extend_from_slice(hash);
+            out.extend_from_slice(&at.to_le_bytes());
         }
         put_count(&mut out, self.outputs.len());
         for r in &self.outputs {
@@ -298,12 +314,13 @@ impl ScanState {
         if r.bytes()? != SCAN_TAG {
             return None;
         }
+        let address = core::str::from_utf8(r.bytes()?).ok()?;
         let birthday = r.u64()?;
         let next = r.u64()?;
         if next < birthday {
             return None;
         }
-        let mut s = Self::new(birthday);
+        let mut s = Self::new(address, birthday);
         s.next = next;
         let blocks = usize::try_from(u32::from_le_bytes(r.array()?)).ok()?;
         if blocks > RECENT_BLOCKS {
@@ -312,11 +329,12 @@ impl ScanState {
         for _ in 0..blocks {
             let h = r.u64()?;
             let hash = r.array()?;
+            let at = r.u64()?;
             let ascending = !matches!(s.recent.last_key_value(), Some((top, _)) if *top >= h);
             if !ascending || h < birthday || h >= next {
                 return None;
             }
-            s.recent.insert(h, hash);
+            s.recent.insert(h, (hash, at));
         }
         let outputs = u32::from_le_bytes(r.array()?);
         for _ in 0..outputs {
@@ -351,11 +369,11 @@ impl ScanState {
     /// Drop the newest block; past the remembered window, start over.
     fn rewind(&mut self) {
         let Some((top, _)) = self.recent.pop_last() else {
-            *self = Self::new(self.birthday);
+            *self = Self::new(&self.address, self.birthday);
             return;
         };
         if self.recent.is_empty() {
-            *self = Self::new(self.birthday);
+            *self = Self::new(&self.address, self.birthday);
             return;
         }
         let seen = &mut self.seen;
