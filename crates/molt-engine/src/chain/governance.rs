@@ -12,6 +12,9 @@
 
 use super::*;
 
+/// One voter is told its vote was dropped at most this often.
+const VOTE_REFUSAL_DEBOUNCE_SECS: u64 = 30;
+
 /// L3: open cards one proposer may hold at once — a flooding member can
 /// only crowd itself (the shed card is re-earned by the WP2 re-serve).
 pub(super) const OPEN_CARDS_PER_PROPOSER_MAX: usize = 64;
@@ -1140,9 +1143,17 @@ impl State {
     }
 
     /// Inbound: a peer's signed approval (gossip). Collect + try to seal.
-    pub(crate) fn receive_approval(&mut self, id: u64, by: &str, height: u64, sig: &str) {
+    /// `true` when it was dropped for a height beyond the next block.
+    pub(crate) fn receive_approval(&mut self, id: u64, by: &str, height: u64, sig: &str) -> bool {
         if sig.is_empty() {
-            return;
+            return false;
+        }
+        // L3: an approval may OUTRUN its card (collected, displayed once it
+        // lands) - but only inside the same id window everything else uses,
+        // or unknown-id entries grow without bound
+        if !self.plausible_wire_id(id) {
+            tracing::warn!(%id, "dropping an approval for an implausible proposal id");
+            return false;
         }
         // SECURITY: `height` is peer-supplied. A legitimate approval can
         // only be for the current target (head + 1) or a value we already
@@ -1153,17 +1164,7 @@ impl State {
         let target = self.chain.head.as_ref().map(|h| h.height + 1);
         if target.is_some_and(|t| height > t) {
             tracing::warn!(%id, height, "dropping an approval for an implausible future height");
-            // A6: tell the sender. A seat whose votes are silently dropped
-            // reads its own local count as progress and waits forever.
-            self.tell_the_voter_it_was_dropped(id, by, height);
-            return;
-        }
-        // L3: an approval may OUTRUN its card (collected, displayed once it
-        // lands) — but only inside the same id window everything else uses,
-        // or unknown-id entries grow without bound
-        if !self.plausible_wire_id(id) {
-            tracing::warn!(%id, "dropping an approval for an implausible proposal id");
-            return;
+            return true;
         }
         let verified = self.approval_verifies(id, height, by, sig);
         self.collect_sig(id, height, by, sig, verified);
@@ -1174,16 +1175,28 @@ impl State {
             self.note_signer(by, height);
         }
         self.try_commit(id);
+        false
     }
 
     /// A6: answer a dropped vote with the one fact its sender is missing -
-    /// this node's head. Only for a member of the roster, and never for our
-    /// own signature.
-    fn tell_the_voter_it_was_dropped(&mut self, id: u64, voter: &str, height: u64) {
+    /// this node's head. Only for a member of the roster, never for our own
+    /// signature, and once per voter per [`VOTE_REFUSAL_DEBOUNCE_SECS`]: every
+    /// peer records and publishes the answer.
+    pub(crate) fn tell_the_voter_it_was_dropped(&mut self, id: u64, voter: &str, height: u64) {
         let me = self.member();
         if voter == me || !self.roster().iter().any(|m| m == voter) {
             return;
         }
+        let now = self.presence_now();
+        if self
+            .chain
+            .refused_at
+            .get(voter)
+            .is_some_and(|t| now.saturating_sub(*t) < VOTE_REFUSAL_DEBOUNCE_SECS)
+        {
+            return;
+        }
+        self.chain.refused_at.insert(voter.to_string(), now);
         let head = self.chain.head.as_ref().map_or(0, |h| h.height);
         let env = self.make_env(
             me,

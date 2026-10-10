@@ -331,3 +331,39 @@ fn park_eviction_is_fifo_and_a_drain_frees_the_slot() {
         vec![react("ada"), PendingRef::Delete { by: "ben".to_string() }]
     );
 }
+
+/// A6: a dropped vote is answered only to the seat that cast it, and at
+/// most once per debounce - a forged `Approved` naming another seat, or a
+/// stream of them, must not make every peer record and publish refusals.
+#[test]
+fn a_vote_refusal_answers_only_the_voter_and_only_once_per_debounce() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let b = crate::chain::test_support::Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = crate::chain::test_support::chain_peer("walter", &b, b.blocks.clone());
+    assert!(walter.is_chain_governed());
+    let forged = |seq: u64, by: &str| EventEnvelope {
+        prev_seq: seq.saturating_sub(1),
+        seq,
+        ts: 100,
+        by: "dora".to_string(),
+        body: WorkspaceEvent::Approved {
+            id: molt_core::ProposalId(7),
+            by: by.to_string(),
+            height: u64::MAX,
+            sig: "x".to_string(),
+        },
+    };
+    let refusals = |st: &crate::State| st.next_seq;
+    let before = refusals(&walter);
+    walter.deliver_gated("dora".to_string(), forged(1, "petra")).expect("ack");
+    assert_eq!(refusals(&walter), before, "a vote of petra relayed by dora earns petra no refusal");
+    walter.deliver_gated("dora".to_string(), forged(2, "dora")).expect("ack");
+    let once = refusals(&walter);
+    assert_eq!(once, before + 1, "dora's own dropped vote is answered");
+    walter.deliver_gated("dora".to_string(), forged(3, "dora")).expect("ack");
+    assert_eq!(refusals(&walter), once, "a second one within the debounce is not");
+}

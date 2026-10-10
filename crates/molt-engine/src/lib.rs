@@ -902,6 +902,8 @@ pub(crate) struct ChainProjection {
     /// per frame, into the durable log), so one requester is served at
     /// most once per `CHAIN_SERVE_DEBOUNCE_SECS` (net/ingest.rs) (review C3).
     pub(crate) served_at: HashMap<MemberId, u64>,
+    /// A6: when each voter was last told its vote was dropped.
+    pub(crate) refused_at: HashMap<MemberId, u64>,
     /// Declines waiting for their proposal (keyed by proposal id, one entry
     /// per member with the decline's ts): a decline travels on a different
     /// sender's G7 chain than its proposal, and an own-log decline replays
@@ -1565,6 +1567,7 @@ impl State {
                 adoption_pending: false,
                 own_approvals: std::collections::BTreeSet::new(),
                 served_at: HashMap::new(),
+                refused_at: HashMap::new(),
                 pending_declines: HashMap::new(),
                 id_collisions: BTreeMap::new(),
                 diverged: BTreeMap::new(),

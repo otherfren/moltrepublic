@@ -821,6 +821,7 @@ impl State {
         self.chain.pending_sigs.clear();
         self.chain.own_approvals.clear();
         self.chain.served_at.clear();
+        self.chain.refused_at.clear();
         // the chain PROJECTIONS too (review E5): a chainless workspace opened
         // next has nothing to refold them from, so they bled across
         self.chain.applied_sigs.clear();
