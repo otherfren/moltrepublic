@@ -789,3 +789,81 @@ fn the_mirror_sweep_drops_a_deleted_job() {
     st.applied.entry(Surface::Files).or_default().push((None, block("delete")));
     assert!(st.mirror_job_gone(&st.files_state(), &id.to_string()), "the delete drops it");
 }
+
+fn persisted_share(st: &mut State, id: molt_core::MessageId) {
+    st.applied.entry(Surface::Files).or_default().push((None, json!({
+        "op": "persist", "id": id.to_string(), "name": "contract.pdf", "kind": "PDF",
+        "size": 9, "checksum": "ab".repeat(32), "by": "peer-2", "shared_ts": 100
+    })));
+}
+
+fn file_msg(id: molt_core::MessageId, from: &str, checksum: &str, size: u64) -> molt_core::ChatMessage {
+    let mut msg = molt_core::ChatMessage::text(id, from, "contract", now_secs());
+    msg.file = Some(molt_core::FileMeta {
+        name: "contract.pdf".to_string(),
+        size,
+        kind: "PDF".to_string(),
+        modified: 100,
+        available: true,
+        checksum: checksum.to_string(),
+        key_b64: String::new(),
+        pieces: 0,
+        root: String::new(),
+    });
+    msg
+}
+
+/// A chat message reusing a persisted share's id after its original
+/// aged out never replaces the ratified identity: the block decides.
+#[test]
+fn a_colliding_chat_message_never_overrides_a_persisted_share() {
+    let mut st = plain_state();
+    let id = molt_core::MessageId([0x77u8; 16]);
+    persisted_share(&mut st, id);
+    let env = st.make_env(
+        "mallory".to_string(),
+        molt_core::WorkspaceEvent::Chat(file_msg(id, "mallory", &"ee".repeat(32), 4096)),
+    );
+    st.apply(&env);
+    let (ident, available) = st.share_identity(&id).expect("identity");
+    assert_eq!(ident.by, "peer-2");
+    assert_eq!(ident.checksum, "ab".repeat(32));
+    assert_eq!(ident.size, 9);
+    assert!(available, "the block's word for a foreign share");
+}
+
+/// The wire drops a chat message whose id names a persisted share it
+/// does not match; the original arriving late still lands.
+#[test]
+fn the_wire_drops_a_chat_squatting_a_persisted_share_id() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let mut st = plain_state();
+    let id = molt_core::MessageId([0x78u8; 16]);
+    persisted_share(&mut st, id);
+    let deliver = |st: &mut State, from: &str, msg: molt_core::ChatMessage, seq: u64| {
+        st.cmd_net_delivered(
+            from.to_string(),
+            molt_core::EventEnvelope {
+                prev_seq: 0,
+                seq,
+                ts: now_secs(),
+                by: from.to_string(),
+                body: molt_core::WorkspaceEvent::Chat(msg),
+            },
+            None,
+        )
+        .expect("a wire delivery never errors");
+    };
+    deliver(&mut st, "peer-1", file_msg(id, "peer-1", &"ee".repeat(32), 4096), 1);
+    assert!(st.chat_by_id(&id).is_err(), "the squat is dropped");
+    let mut text = molt_core::ChatMessage::text(id, "peer-1", "no file", now_secs());
+    text.file = None;
+    deliver(&mut st, "peer-1", text, 2);
+    assert!(st.chat_by_id(&id).is_err(), "a file-less squat too");
+    deliver(&mut st, "peer-2", file_msg(id, "peer-2", &"ab".repeat(32), 9), 1);
+    assert!(st.chat_by_id(&id).is_ok(), "the original lands");
+}

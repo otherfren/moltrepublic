@@ -106,7 +106,7 @@ Both carry the identity: a checkpoint keeps only the LATEST op per share
 | source | temporary row | persistent row |
 |---|---|---|
 | chat-visible share, no Files state | yes, expiry `ts + retention` | - |
-| Files state `Persistent` | - | yes, metadata from the block; `available`/`online`/`availability` from the live message when present, else `sharer-only`/offline-derived |
+| Files state `Persistent` | - | yes, metadata from the block; `available`/`online`/`availability` from the live message when it matches the block, else `sharer-only`/offline-derived |
 | Files state `Unpersisted { at }` | yes while `at + retention > now`, expiry `at + retention`, metadata from the block (the message may be gone) | - |
 
 `UploadView` grows `persistent: bool` (`#[serde(default)]`). One

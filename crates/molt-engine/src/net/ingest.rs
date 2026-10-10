@@ -143,6 +143,10 @@ impl State {
                     }
                     return Ok(Reply::Ack);
                 }
+                if self.chat_squats_voted_share(&msg) {
+                    tracing::warn!(%from, id = %msg.id, "dropping a wire chat message that squats a voted share id");
+                    return Ok(Reply::Ack);
+                }
                 let id = msg.id;
                 let channel = msg.channel.clone();
                 let body = msg.body.clone();

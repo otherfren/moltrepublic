@@ -4380,7 +4380,9 @@ impl State {
             let available = self
                 .chat_by_id(id)
                 .ok()
-                .and_then(|(_, m)| m.file.as_ref().map(|f| f.available))
+                .and_then(|(_, m)| crate::files_state::live_share(m))
+                .filter(|(m, _)| st.identity().admits_live(m))
+                .map(|(_, available)| available)
                 .unwrap_or_else(|| {
                     st.identity().by != me || self.files.share_paths.contains_key(id)
                 });

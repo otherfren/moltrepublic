@@ -256,7 +256,9 @@ Accepted in the 2026-07-10 review — documented, not fixed:
   identities (`from` and the stored author), which is the audit trail.
   Accepted because members are rostered, MLS-authenticated humans in small
   republics and chat is ephemeral; the real fix — sender-bound (signed) ids —
-  is a protocol decision deferred deliberately.
+  is a protocol decision deferred deliberately. A VOTED share's id is not
+  squattable: the wire drops a `Chat` under a Files-state id unless it is
+  that share, and every share door reads the block's identity.
 - **Mixed-version reactions degrade to the legacy toggle.**
   `WorkspaceEvent::ChatReacted` now carries an additive idempotent `op`
   (`Add`/`Remove`, `#[serde(default)]`); a peer that does not send it falls

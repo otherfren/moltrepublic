@@ -62,6 +62,19 @@ impl ShareIdentity {
         )
     }
 
+    /// Whether a live message is the share this block pinned: every field
+    /// but the stamp (the wire clamps it), the series material unless the
+    /// block predates it.
+    pub(crate) fn admits_live(&self, live: &ShareIdentity) -> bool {
+        self.by == live.by
+            && self.name == live.name
+            && self.kind == live.kind
+            && self.size == live.size
+            && self.checksum == live.checksum
+            && (self.key_b64.is_empty()
+                || (self.key_b64 == live.key_b64 && self.pieces == live.pieces && self.root == live.root))
+    }
+
     fn from_payload(v: &Value) -> Option<ShareIdentity> {
         let s = |k: &str| v.get(k).and_then(Value::as_str).map(str::to_string);
         let me = ShareIdentity {
@@ -104,6 +117,26 @@ impl ShareIdentity {
         v["pieces"] = Value::from(self.pieces);
         v["root"] = Value::from(self.root.as_str());
     }
+}
+
+/// A chat message's share identity and its availability flag.
+pub(crate) fn live_share(msg: &molt_core::ChatMessage) -> Option<(ShareIdentity, bool)> {
+    msg.file.as_ref().map(|f| {
+        (
+            ShareIdentity {
+                by: msg.from.clone(),
+                name: f.name.clone(),
+                kind: f.kind.clone(),
+                size: f.size,
+                checksum: f.checksum.clone(),
+                shared_ts: msg.ts,
+                key_b64: f.key_b64.clone(),
+                pieces: f.pieces,
+                root: f.root.clone(),
+            },
+            f.available,
+        )
+    })
 }
 
 /// What the votes say about one share: last op per id wins.
@@ -270,33 +303,21 @@ impl State {
     /// is what the vote said it is, an own share is available while this
     /// node still knows its path.
     pub(crate) fn share_identity(&self, id: &MessageId) -> Result<(ShareIdentity, bool), MoltError> {
-        let live = self.chat_by_id(id).ok().and_then(|(_, msg)| {
-            msg.file.as_ref().map(|f| {
-                (
-                    ShareIdentity {
-                        by: msg.from.clone(),
-                        name: f.name.clone(),
-                        kind: f.kind.clone(),
-                        size: f.size,
-                        checksum: f.checksum.clone(),
-                        shared_ts: msg.ts,
-                        key_b64: f.key_b64.clone(),
-                        pieces: f.pieces,
-                        root: f.root.clone(),
-                    },
-                    f.available,
-                )
-            })
-        });
-        if let Some((meta, available)) = live {
+        let live = self.chat_by_id(id).ok().and_then(|(_, msg)| live_share(msg));
+        let states = self.files_state();
+        let block = states.get(id).map(FileState::identity);
+        // a vote pinned the identity: a live message under that id counts
+        // only while it IS that share - an id squatted after the original
+        // aged out must not swap the ratified file
+        if let Some((meta, available)) = live.filter(|(m, _)| block.map_or(true, |b| b.admits_live(m))) {
             // R21: a share is immutable - my own file replaced on disk is
             // not the share any more, at EVERY door (serve, vote, download)
             let changed = self.share_file_changed(id, meta.size);
             return Ok((meta, available && !changed));
         }
-        match self.files_state().get(id) {
-            Some(st) => {
-                let meta = st.identity().clone();
+        match block {
+            Some(meta) => {
+                let meta = meta.clone();
                 let available = meta.by != self.member()
                     || (self.files.share_paths.contains_key(id)
                         && !self.share_file_changed(id, meta.size));
@@ -307,6 +328,14 @@ impl State {
                 Err(e) => Err(e),
             },
         }
+    }
+
+    /// Whether a wire chat message may land under its id: a voted share's
+    /// id takes only the share itself.
+    pub(crate) fn chat_squats_voted_share(&self, msg: &molt_core::ChatMessage) -> bool {
+        self.files_state()
+            .get(&msg.id)
+            .is_some_and(|st| !live_share(msg).is_some_and(|(m, _)| st.identity().admits_live(&m)))
     }
 
     fn retention_secs(&self) -> u64 {
