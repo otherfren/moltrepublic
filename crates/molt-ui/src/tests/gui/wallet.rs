@@ -235,6 +235,17 @@ fn a_late_enable_shows_the_panel() {
     settle();
     assert!(shown(&ui, "b declined"));
     assert!(shown(&ui, &s.get_wl_try_again()));
+
+    // the purse committed: the panel stays with the address until closed
+    crate::wallet::apply_wallet(&ui, 0, Some(&view));
+    crate::wallet::apply_wallet(&ui, 0, Some(&ready()));
+    settle();
+    let panel = Handle::find_by_element_type_name(&ui, "ConfirmModal").next().expect("still up");
+    assert!(has_text(&panel, ADDRESS) && has_text(&panel, &s.get_wl_warning()));
+    ui.global::<Purse>().set_panel_dismissed(true);
+    crate::wallet::apply_wallet(&ui, 0, Some(&ready()));
+    settle();
+    assert!(Handle::find_by_element_type_name(&ui, "ConfirmModal").next().is_none(), "closed for good");
 }
 
 fn charter_step(m: i32, n: i32) -> (AppWindow, Shown) {

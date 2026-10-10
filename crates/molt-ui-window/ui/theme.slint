@@ -2303,6 +2303,9 @@ export global Purse {
     in-out property <string> confirm-url;
     // the panel over the main window (W10); closing it keeps the run going
     in-out property <bool> panel-dismissed;
+    // the run the panel showed just ended in the purse: it stays up with
+    // the address until closed
+    in-out property <bool> run-finished;
     // a damaged key part file waits for its acknowledgement
     in-out property <bool> loss-open;
     callback set-up();

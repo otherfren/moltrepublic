@@ -9208,8 +9208,8 @@ export component AppWindow inherits Window {
 
     // Modal: the purse stage over the main window (W10) while a set-up
     // runs; closing it leaves the run going, the bar stays in the pane.
-    if root.screen == AppScreen.main && Purse.run-active && !Purse.panel-dismissed
-        && Purse.confirm-kind == 0: ConfirmModal {
+    if root.screen == AppScreen.main && (Purse.run-active || Purse.run-finished)
+        && !Purse.panel-dismissed && Purse.confirm-kind == 0: ConfirmModal {
         dialog-width: 560px;
         title: Strings.wl-stage-title;
         body: "";

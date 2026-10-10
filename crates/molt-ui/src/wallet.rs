@@ -237,6 +237,7 @@ fn apply_run(ui: &AppWindow, lang: i32, v: &WalletView) {
     if (active && !line.aborted && (!was_active || was_aborted)) || (asking && !was_asking) {
         p.set_panel_dismissed(false);
     }
+    p.set_run_finished(v.phase == WalletPhase::Ready && (was_active || p.get_run_finished()));
     p.set_run_active(active);
     p.set_run_line(line.text.into());
     p.set_run_missing(line.missing.into());
