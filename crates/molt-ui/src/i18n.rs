@@ -68,6 +68,7 @@ fn localize_wallet_refusal(r: &molt_core::wallet::WalletRefusal) -> String {
         W::NoRun => "keine Einrichtung läuft".into(),
         W::RunActive => "Einrichtung läuft".into(),
         W::NotMine => "nicht das Ergebnis dieses Sitzes".into(),
+        W::Rng => "kein Zufall".into(),
     }
 }
 

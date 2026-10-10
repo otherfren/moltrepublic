@@ -227,6 +227,7 @@ fn wallet_refusals_render_in_german() {
         R::NoRun,
         R::RunActive,
         R::NotMine,
+        R::Rng,
     ] {
         let english = r.to_string();
         let e = molt_core::MoltError::Wallet(r);
