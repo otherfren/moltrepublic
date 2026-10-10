@@ -41,6 +41,8 @@ pub(crate) struct ScanRt {
     state: Option<ScanState>,
     /// The bytes last handed to the writer.
     saved: Option<Zeroizing<Vec<u8>>>,
+    /// The writer dropped the last save.
+    save_due: bool,
     daemon_height: Option<u64>,
     connected: bool,
     paused: Option<String>,
@@ -93,6 +95,11 @@ impl ScanRt {
         self.paused = None;
     }
 
+    /// What the view shows apart from the state's content.
+    fn mark(&self) -> (bool, Option<u64>, bool, bool, Option<String>) {
+        (self.state.is_some(), self.daemon_height, self.connected, self.task.is_some(), self.paused.clone())
+    }
+
     /// A workspace closed: nothing of its scan stays.
     pub(crate) fn reset(&mut self) {
         self.stop();
@@ -134,9 +141,10 @@ impl State {
     /// The beat: a scanner runs exactly while there is a purse, its view
     /// key and a daemon this node may dial.
     pub(crate) fn wallet_scan_tick(&mut self) {
-        let before = self.wallet_scan_shown();
+        // the step drops or keeps the state, never edits it: the cheap mark says
+        let before = self.purse.scan.mark();
         self.wallet_scan_step();
-        if self.wallet_scan_shown() != before {
+        if self.purse.scan.mark() != before {
             self.emit_session(SessionScope::Full);
         }
     }
@@ -241,18 +249,29 @@ impl State {
         if r.generation != Some(self.purse.scan.generation) || self.purse.scan.task.is_none() {
             return Ok(Reply::Ack);
         }
-        let before = self.wallet_scan_shown();
+        let before = self.purse.scan.mark();
+        let mut changed = false;
         let scan = &mut self.purse.scan;
         if !r.state.is_empty() {
             match ScanState::decode(&r.state) {
-                Ok(s) => scan.state = Some(s),
+                Ok(s) => {
+                    changed = scan.state.as_ref() != Some(&s);
+                    scan.state = Some(s);
+                }
                 Err(e) => tracing::error!(error = %e, "wallet_scan=bad_report"),
             }
-            if scan.saved.as_deref() != Some(&r.state) {
-                let bytes = Zeroizing::new(r.state);
-                if self.active.as_ref().is_some_and(|a| a.handle.save_wallet_scan(bytes.clone())) {
-                    self.purse.scan.saved = Some(bytes);
-                }
+        }
+        // an unchanged state comes as empty: a dropped save is retried from memory
+        let bytes = if !r.state.is_empty() {
+            Some(Zeroizing::new(r.state))
+        } else {
+            scan.save_due.then(|| scan.state.as_ref().map(|s| Zeroizing::new(s.encode()))).flatten()
+        };
+        if let Some(bytes) = bytes.filter(|b| scan.saved.as_ref() != Some(b)) {
+            let ok = self.active.as_ref().is_some_and(|a| a.handle.save_wallet_scan(bytes.clone()));
+            self.purse.scan.save_due = !ok;
+            if ok {
+                self.purse.scan.saved = Some(bytes);
             }
         }
         let scan = &mut self.purse.scan;
@@ -276,7 +295,7 @@ impl State {
                 self.emit(Event::WalletScanPaused { reason });
             }
         }
-        if self.wallet_scan_shown() != before {
+        if changed || self.purse.scan.mark() != before {
             self.emit_session(SessionScope::Full);
         }
         Ok(Reply::Ack)
@@ -355,15 +374,23 @@ struct Feed {
 
 impl Feed {
     /// `false` once the engine is gone.
-    async fn report(&self, state: &ScanState, tip: Option<u64>, outcome: &Outcome) -> bool {
+    /// `last`: the bytes sent before; unchanged ones go as empty.
+    async fn report(&self, state: &ScanState, last: &mut Zeroizing<Vec<u8>>, tip: Option<u64>, outcome: &Outcome) -> bool {
         let (paused, error, connected) = outcome.verdict();
+        let bytes = state.encode();
+        let bytes = if bytes == **last {
+            Vec::new()
+        } else {
+            (**last).clone_from(&bytes);
+            bytes
+        };
         let cmd = Command::NetWalletScan {
             scan_height: state.next_height().saturating_sub(1),
             daemon_height: outcome.tip(tip),
             paused,
             error,
             connected,
-            state: molt_core::vault::SecretBytes(state.encode()),
+            state: molt_core::vault::SecretBytes(bytes),
             generation: Some(self.generation),
         };
         let reply = tokio::sync::oneshot::channel().0;
@@ -416,10 +443,11 @@ async fn scan_loop(
     base: Option<Duration>,
 ) {
     let mut pace = Pace::new(base);
+    let mut last = Zeroizing::new(Vec::new());
     loop {
         let mut tip = None;
         let outcome = round(&transport, &mut scanner, &mut state, &mut tip).await;
-        if !feed.report(&state, tip, &outcome).await {
+        if !feed.report(&state, &mut last, tip, &outcome).await {
             return;
         }
         if let Some(wait) = pace.after(&outcome) {
@@ -513,6 +541,7 @@ async fn round(
                 return Outcome::More;
             }
             Step::OutOfOrder => return Outcome::Fault("daemon fault: out of order".to_string()),
+            Step::Full => return Outcome::Fault("daemon fault: too many outputs".to_string()),
         }
     }
     if state.next_height() > tip {

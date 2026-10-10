@@ -24,6 +24,9 @@ const SCAN_TAG: &[u8] = b"molt-wallet-scan-v3";
 pub const CONFIRMATIONS: u64 = 20;
 /// Block hashes kept for reorg detection.
 pub const RECENT_BLOCKS: usize = 100;
+/// Outputs a purse holds at most (~5 MiB of state): a daemon serving
+/// fabricated blocks must not grow it without bound.
+pub const MAX_OUTPUTS: usize = 50_000;
 
 /// One output received by the purse.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +174,8 @@ pub enum Step {
     Reorg,
     /// Not the block at [`ScanState::next_height`]; nothing changed.
     OutOfOrder,
+    /// Its outputs would pass [`MAX_OUTPUTS`]; nothing changed.
+    Full,
 }
 
 /// The scanner's progress from the birthday on.
@@ -240,14 +245,19 @@ impl ScanState {
                 return Step::Reorg;
             }
         }
+        let mut fresh = BTreeSet::new();
+        let new: Vec<Received> = found
+            .into_iter()
+            .filter(|r| !self.seen.contains(&r.key) && fresh.insert(r.key))
+            .collect();
+        if self.outputs.len() + new.len() > MAX_OUTPUTS {
+            return Step::Full;
+        }
+        self.seen.extend(fresh);
         self.recent.insert(height, (hash, at));
         while self.recent.len() > RECENT_BLOCKS {
             self.recent.pop_first();
         }
-        let new: Vec<Received> = found
-            .into_iter()
-            .filter(|r| self.seen.insert(r.key))
-            .collect();
         self.outputs.extend(new.iter().cloned());
         self.next = height + 1;
         Step::Applied(new)
@@ -337,6 +347,9 @@ impl ScanState {
             s.recent.insert(h, (hash, at));
         }
         let outputs = u32::from_le_bytes(r.array()?);
+        if usize::try_from(outputs).ok()? > MAX_OUTPUTS {
+            return None;
+        }
         for _ in 0..outputs {
             let key = r.array()?;
             let amount = r.u64()?;

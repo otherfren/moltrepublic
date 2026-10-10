@@ -156,3 +156,27 @@ fn a_block_window_apply_could_not_produce_is_refused() {
     let over: Vec<u64> = (10..11 + cap).collect();
     assert!(!decodes(&window(10, 11 + cap, &over)), "beyond the window");
 }
+
+/// A purse holds at most `MAX_OUTPUTS`: a block past it changes nothing
+/// (a hostile daemon cannot grow the state without bound).
+#[test]
+fn the_outputs_are_bounded() {
+    use molt_treasury::scan::{Step, MAX_OUTPUTS};
+    let many = |h: u64, n: usize| -> Vec<Received> {
+        (0..n)
+            .map(|i| {
+                let mut key = [0u8; 32];
+                key[..8].copy_from_slice(&h.to_le_bytes());
+                key[8..16].copy_from_slice(&u64::try_from(i).expect("small").to_le_bytes());
+                Received { key, ..out(0, 1, h, Lock::None) }
+            })
+            .collect()
+    };
+    let mut s = ScanState::new(ADDR, 10);
+    assert!(matches!(s.apply(10, hash(10), hash(9), 0, many(10, MAX_OUTPUTS - 1)), Step::Applied(_)));
+    let before = s.clone();
+    assert!(matches!(s.apply(11, hash(11), hash(10), 0, many(11, 2)), Step::Full));
+    assert_eq!(s, before, "nothing changed");
+    assert!(matches!(s.apply(11, hash(11), hash(10), 0, many(11, 1)), Step::Applied(_)));
+    assert_eq!(s.outputs().len(), MAX_OUTPUTS);
+}
