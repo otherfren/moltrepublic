@@ -24,7 +24,7 @@ const RETRY_SECS: u64 = 10;
 const RETRY_MAX_SECS: u64 = 600;
 /// Paused at a fork this build cannot read: asked again this rarely.
 const PAUSED_SECS: u64 = 3600;
-/// Blocks asked for per round trip.
+/// Blocks asked for per round trip, at most; a failed round halves it.
 const BATCH: u64 = 100;
 /// The paused line for a daemon that answered something wrong.
 pub(crate) const DAEMON_FAULT: &str = "daemon fault";
@@ -448,7 +448,7 @@ async fn scan_loop(
     let mut last = Zeroizing::new(Vec::new());
     loop {
         let mut tip = None;
-        let outcome = round(&transport, network, &mut scanner, &mut state, &mut tip).await;
+        let outcome = round(&transport, network, pace.batch, &mut scanner, &mut state, &mut tip).await;
         if !feed.report(&state, &mut last, tip, &outcome).await {
             return;
         }
@@ -464,6 +464,8 @@ struct Pace {
     retry: Duration,
     paused: Duration,
     backoff: Duration,
+    /// Blocks the next round asks for.
+    batch: u64,
 }
 
 impl Pace {
@@ -475,11 +477,17 @@ impl Pace {
             retry,
             paused: base.unwrap_or(Duration::from_secs(PAUSED_SECS)),
             backoff: retry,
+            batch: BATCH,
         }
     }
 
     /// The wait after `outcome`; none to go on at once.
     fn after(&mut self, outcome: &Outcome) -> Option<Duration> {
+        match outcome {
+            Outcome::More | Outcome::CaughtUp => self.batch = (self.batch * 2).min(BATCH),
+            Outcome::Down(_) => self.batch = (self.batch / 2).max(1),
+            _ => {}
+        }
         match outcome {
             Outcome::More => None,
             Outcome::CaughtUp => {
@@ -500,6 +508,7 @@ impl Pace {
 async fn round(
     transport: &DaemonTransport,
     network: &str,
+    batch: u64,
     scanner: &mut StandardScanner,
     state: &mut ScanState,
     tip_out: &mut Option<u64>,
@@ -518,7 +527,7 @@ async fn round(
     if from > tip {
         return Outcome::CaughtUp;
     }
-    let to = tip.min(from.saturating_add(BATCH - 1));
+    let to = tip.min(from.saturating_add(batch.max(1) - 1));
     let blocks = match monero_rpc::scannable_blocks(transport.clone(), from, to).await {
         Ok(b) => b,
         Err(e) => return failed(e),
@@ -718,6 +727,22 @@ mod tests {
         assert_eq!((paused.as_deref(), connected), (Some(DAEMON_FAULT), true));
         let (paused, _, _) = Outcome::Paused(molt_treasury::scan::ScanFault::UpdateNeeded(17)).verdict();
         assert_eq!(paused.as_deref(), Some("update needed"));
+    }
+
+    /// A round that failed asks for half the blocks next time, down to one;
+    /// good rounds grow it back (a slow route still gets through).
+    #[test]
+    fn a_failing_round_asks_for_fewer_blocks() {
+        let mut p = Pace::new(None);
+        let down = Outcome::Down(String::new());
+        let batches: Vec<u64> = (0..9).map(|_| { p.after(&down); p.batch }).collect();
+        assert_eq!(batches, [50, 25, 12, 6, 3, 1, 1, 1, 1]);
+        p.after(&Outcome::More);
+        assert_eq!(p.batch, 2);
+        for _ in 0..10 {
+            p.after(&Outcome::More);
+        }
+        assert_eq!(p.batch, BATCH);
     }
 
     /// Failures back off doubling to the cap; a good round resets it.

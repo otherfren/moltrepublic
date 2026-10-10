@@ -224,7 +224,8 @@ impl DaemonTransport {
         if let Some(a) = auth {
             headers.push(("Authorization".to_string(), a.to_string()));
         }
-        http::roundtrip(&mut stream, "POST", path, &headers, body, max)
+        // a block batch over Tor can outlast any one cap: bounded by progress
+        http::roundtrip_paced(&mut stream, "POST", path, &headers, body, max, http::DownloadBounds::PRODUCTION)
             .await
             .map_err(|e| DaemonError::Rpc(e.0))
     }

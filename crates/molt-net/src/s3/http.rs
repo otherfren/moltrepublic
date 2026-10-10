@@ -82,10 +82,25 @@ pub async fn roundtrip<S: AsyncRead + AsyncWrite + Unpin>(
 ) -> Result<HttpResponse, HttpError> {
     timeout(
         HTTP_EXCHANGE_TIMEOUT,
-        exchange(stream, method, path_and_query, headers, body, max_response),
+        exchange(stream, method, path_and_query, headers, body, max_response, None),
     )
     .await
     .map_err(|_| HttpError("http exchange timed out".to_string()))?
+}
+
+/// [`roundtrip`] for a possibly large answer over a slow circuit: bounded by
+/// progress (`bounds.idle` per read or write, and the throughput floor over
+/// what arrived), never by one cap over the whole exchange.
+pub async fn roundtrip_paced<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut S,
+    method: &str,
+    path_and_query: &str,
+    headers: &[(String, String)],
+    body: &[u8],
+    max_response: usize,
+    bounds: DownloadBounds,
+) -> Result<HttpResponse, HttpError> {
+    exchange(stream, method, path_and_query, headers, body, max_response, Some(bounds)).await
 }
 
 async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
@@ -95,6 +110,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     headers: &[(String, String)],
     body: &[u8],
     max_response: usize,
+    pace: Option<DownloadBounds>,
 ) -> Result<HttpResponse, HttpError> {
     // --- request ---
     let mut req = format!("{method} {path_and_query} HTTP/1.1\r\n");
@@ -105,38 +121,56 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
         req.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
     req.push_str("Connection: close\r\n\r\n");
-    stream
-        .write_all(req.as_bytes())
-        .await
-        .map_err(|e| HttpError(format!("http write: {e}")))?;
-    if !body.is_empty() {
+    let write = async {
         stream
-            .write_all(body)
+            .write_all(req.as_bytes())
             .await
-            .map_err(|e| HttpError(format!("http write body: {e}")))?;
+            .map_err(|e| HttpError(format!("http write: {e}")))?;
+        if !body.is_empty() {
+            stream
+                .write_all(body)
+                .await
+                .map_err(|e| HttpError(format!("http write body: {e}")))?;
+        }
+        stream
+            .flush()
+            .await
+            .map_err(|e| HttpError(format!("http flush: {e}")))
+    };
+    match pace {
+        Some(b) => timeout(b.idle, write)
+            .await
+            .map_err(|_| HttpError("http write timed out".to_string()))??,
+        None => write.await?,
     }
-    stream
-        .flush()
-        .await
-        .map_err(|e| HttpError(format!("http flush: {e}")))?;
 
     // --- response: read until provably complete or EOF, then parse ---
     let head_only = method == "HEAD";
-    read_full_response(stream, head_only, max_response).await
+    read_full_response(stream, head_only, max_response, pace).await
 }
 
 /// Read one whole HTTP response (head + framed/close-delimited body) into
 /// memory and parse it. Shared by the buffered [`roundtrip`] and the response
-/// tail of [`roundtrip_upload`]; the caller bounds it in time.
+/// tail of [`roundtrip_upload`]; the caller bounds it in time, unless `pace`
+/// bounds each read and the throughput.
 async fn read_full_response<S: AsyncRead + Unpin>(
     stream: &mut S,
     head_only: bool,
     max_response: usize,
+    pace: Option<DownloadBounds>,
 ) -> Result<HttpResponse, HttpError> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 8192];
+    let mut walk = Completion::default();
+    let started = Instant::now();
     loop {
-        let n = match stream.read(&mut chunk).await {
+        let read = match pace {
+            Some(b) => timeout(b.idle, stream.read(&mut chunk))
+                .await
+                .map_err(|_| HttpError("http read timed out".to_string()))?,
+            None => stream.read(&mut chunk).await,
+        };
+        let n = match read {
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
@@ -155,14 +189,69 @@ async fn read_full_response<S: AsyncRead + Unpin>(
         if buf.len() > max_response {
             return Err(too_large(max_response));
         }
+        if let Some(b) = pace.filter(|b| b.min_throughput_bps > 0) {
+            let allowed = b.grace + Duration::from_millis(u64::try_from(buf.len()).unwrap_or(u64::MAX).saturating_mul(1000) / b.min_throughput_bps);
+            if started.elapsed() > allowed {
+                return Err(HttpError("http response too slow".to_string()));
+            }
+        }
         // stop as soon as the response is provably complete — a keep-alive
         // server ignoring our `Connection: close` must not stall us until
         // the timeout (close-delimited bodies still need the EOF above)
-        if response_complete(&buf, head_only, max_response) {
+        if walk.check(&buf, head_only, max_response) {
             break;
         }
     }
     parse_response(&buf, head_only, max_response)
+}
+
+/// [`response_complete`] for a buffer that only grows: a chunked body is
+/// walked once, so a large answer in small chunks costs linear time.
+#[derive(Default)]
+struct Completion {
+    /// Offset of the next chunk header not yet walked.
+    chunk_at: Option<usize>,
+    /// Chunk bytes walked so far.
+    total: usize,
+}
+
+impl Completion {
+    /// `true` once complete, or once broken past repair (the parse says why).
+    fn check(&mut self, raw: &[u8], head_only: bool, max_response: usize) -> bool {
+        let Some((_, headers, body_start)) = parse_head(raw) else {
+            return raw.len() > MAX_DOWNLOAD_HEAD;
+        };
+        if head_only {
+            return true;
+        }
+        if !is_chunked(&headers) {
+            return content_length(&headers).is_some_and(|len| raw.len() - body_start >= len);
+        }
+        let at = self.chunk_at.get_or_insert(body_start);
+        loop {
+            let rest = &raw[*at..];
+            let Some(line_end) = rest.windows(2).position(|w| w == b"\r\n") else {
+                return false;
+            };
+            let size = std::str::from_utf8(&rest[..line_end])
+                .ok()
+                .and_then(|l| usize::from_str_radix(l.split(';').next().unwrap_or("").trim(), 16).ok());
+            let Some(size) = size.filter(|s| *s <= max_response) else {
+                return true;
+            };
+            if size == 0 {
+                return true;
+            }
+            if rest.len() < line_end + 2 + size + 2 {
+                return false;
+            }
+            self.total += size;
+            if self.total > max_response {
+                return true;
+            }
+            *at += line_end + 2 + size + 2;
+        }
+    }
 }
 
 fn too_large(max_response: usize) -> HttpError {
@@ -221,7 +310,7 @@ pub async fn roundtrip_upload<S: AsyncRead + AsyncWrite + Unpin>(
         .map_err(|e| HttpError(format!("http flush: {e}")))?;
 
     // --- response: small head + body, one whole-exchange cap ---
-    timeout(HTTP_EXCHANGE_TIMEOUT, read_full_response(stream, false, MAX_RESPONSE))
+    timeout(HTTP_EXCHANGE_TIMEOUT, read_full_response(stream, false, MAX_RESPONSE, None))
         .await
         .map_err(|_| HttpError("http exchange timed out".to_string()))?
 }
@@ -651,6 +740,53 @@ mod tests {
         assert_eq!(parse_response(raw, false, 5).expect("fits").body, b"hello");
         assert!(parse_response(raw, false, 4).is_err());
         assert!(!response_complete(raw, false, 4));
+    }
+
+    /// A chunked body is walked once as it arrives, not re-decoded per read.
+    #[test]
+    fn a_chunked_body_is_walked_once() {
+        let raw = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n";
+        let mut walk = Completion::default();
+        let mut last = 0;
+        // complete at the 0-chunk's line, as `dechunk` reads it
+        for end in 0..raw.len() - 2 {
+            assert!(!walk.check(&raw[..end], false, MAX_RESPONSE), "incomplete at {end}");
+            let at = walk.chunk_at.unwrap_or(0);
+            assert!(at >= last, "the walk only moves forward");
+            last = at;
+        }
+        assert!(walk.check(raw, false, MAX_RESPONSE));
+        let mut walk = Completion::default();
+        assert!(walk.check(raw, false, 8), "past the cap it stops; the parse refuses");
+        assert!(parse_response(raw, false, 8).is_err());
+    }
+
+    /// A slow but moving answer is read to the end; a stall is not.
+    #[tokio::test(start_paused = true)]
+    async fn a_paced_exchange_waits_for_progress_not_for_the_whole() {
+        let bounds = DownloadBounds { idle: Duration::from_secs(30), grace: Duration::from_secs(30), min_throughput_bps: 0 };
+        let serve = |gap: u64| {
+            let (client, mut server) = tokio::io::duplex(1 << 16);
+            tokio::spawn(async move {
+                let mut req = [0u8; 1024];
+                let _ = server.read(&mut req).await;
+                let body = b"0123456789";
+                let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+                let _ = server.write_all(head.as_bytes()).await;
+                for b in body {
+                    tokio::time::sleep(Duration::from_secs(gap)).await;
+                    let _ = server.write_all(&[*b]).await;
+                }
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+            });
+            async move {
+                let mut c = client;
+                roundtrip_paced(&mut c, "POST", "/x", &[], b"q", MAX_RESPONSE, bounds).await
+            }
+        };
+        let r = serve(10).await.expect("100 s of steady progress");
+        assert_eq!(r.body, b"0123456789");
+        assert!(serve(40).await.is_err(), "a 40 s stall");
     }
 
     #[test]
