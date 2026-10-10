@@ -1091,6 +1091,7 @@ impl State {
                 self.wallet_ingest(pos, f);
             }
         }
+        self.wallet_supersede_dead();
         self.wallet_on_commit();
     }
 
@@ -1115,27 +1116,7 @@ impl State {
         }
         self.purse.run.settled = Some(purse.id);
         let c = &purse.created;
-        let siblings: Vec<u64> = self
-            .proposals
-            .iter()
-            .filter(|(id, p)| {
-                Some(**id) != purse.id
-                    && p.surface == Surface::Wallet
-                    && p.state == ProposalState::Proposed
-                    && parse_created(&p.payload).is_some()
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for id in siblings {
-            if let Some(p) = self.proposals.get_mut(&id) {
-                p.state = ProposalState::Rejected;
-                p.superseded = true;
-                p.superseded_kind = Some(molt_core::SupersededKind::Conflict);
-            }
-            self.stash_voted(id);
-            self.chain.pending_sigs.remove(&id);
-            tracing::info!(id, "wallet_created=superseded");
-        }
+        self.wallet_supersede_dead();
         if self.wallet_purse_record(c).is_some() {
             self.purse.run.watch_only = false;
         } else {
@@ -1149,6 +1130,35 @@ impl State {
         tracing::info!(address = %c.address, "wallet_purse=committed");
         self.wallet_prune_final();
         true
+    }
+
+    /// Cards that can never pass die: a second init once one applied, a
+    /// created card once the purse committed - whenever either arrives.
+    pub(crate) fn wallet_supersede_dead(&mut self) {
+        let init = self.wallet_init_applied().map(|i| i.id);
+        let purse = self.wallet_purse().map(|p| p.id);
+        let dead: Vec<u64> = self
+            .proposals
+            .iter()
+            .filter(|(id, p)| {
+                p.surface == Surface::Wallet
+                    && p.state == ProposalState::Proposed
+                    && ((init.is_some_and(|i| i != Some(**id)) && parse_init(&p.payload).is_some())
+                        || (purse.is_some_and(|i| i != Some(**id)) && parse_created(&p.payload).is_some()))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in dead {
+            if let Some(p) = self.proposals.get_mut(&id) {
+                p.state = ProposalState::Rejected;
+                p.superseded = true;
+                p.superseded_kind = Some(molt_core::SupersededKind::Conflict);
+            }
+            self.stash_voted(id);
+            self.chain.pending_sigs.remove(&id);
+            self.purse.consent.remove(&id);
+            tracing::info!(id, "wallet_card=superseded");
+        }
     }
 
     pub(crate) fn wallet_purse_record(&self, c: &Created) -> Option<usize> {
@@ -1231,6 +1241,7 @@ impl State {
                 Vec::new()
             }
         };
+        self.wallet_supersede_dead();
         if self.wallet_purse().is_some() {
             self.wallet_settle();
             return;

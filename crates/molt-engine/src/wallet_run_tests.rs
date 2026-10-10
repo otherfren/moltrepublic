@@ -1022,3 +1022,54 @@ fn an_acknowledged_loss_writes_back_the_part_held_in_memory() {
     assert_eq!(st.wallet_own_status(), ShareStatus::Held);
     assert_eq!(records_on_disk(&mut st, &dir), vec![mine.to_vec()], "the part is on disk again");
 }
+
+fn dead(st: &State, id: u64) {
+    let p = st.proposals.get(&id).expect("card");
+    assert_eq!(p.state, ProposalState::Rejected, "card {id}");
+    assert!(p.superseded, "card {id}");
+}
+
+/// §3.1/§3.5: a card that arrives after its slot closed dies - a second
+/// init once one applied, a created card once the purse committed.
+#[test]
+fn a_card_arriving_after_its_slot_closed_dies() {
+    let mut b = with_init();
+    let (purse, _) = purse_run(&b, 4, 3000, Network::Mainnet);
+    let (late, _) = purse_run(&b, 5, 3000, Network::Mainnet);
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    let card = |id: u64, payload: Value| molt_core::WorkspaceEvent::Proposed {
+        id: molt_core::ProposalId(id),
+        surface: Surface::Wallet,
+        payload,
+    };
+    crate::chain::test_support::wire(&mut st, "b", 1, card(8, init_payload(3000, "mainnet")));
+    dead(&st, 8);
+
+    commit(&mut b, 6, created_value(&purse));
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    st.wallet_on_open(Ok(Vec::new()));
+    crate::chain::test_support::wire(&mut st, "b", 1, card(7, created_value(&late)));
+    dead(&st, 7);
+}
+
+/// §3.1: an init card still open when another init applies dies with it.
+#[test]
+fn an_open_init_card_dies_when_another_init_applies() {
+    let mut b = Builder::new(&ABC, 2);
+    let mut st = genesis_seat("c", &b, b.blocks.clone());
+    crate::chain::test_support::wire(
+        &mut st,
+        "b",
+        1,
+        molt_core::WorkspaceEvent::Proposed {
+            id: molt_core::ProposalId(7),
+            surface: Surface::Wallet,
+            payload: init_payload(3000, "mainnet"),
+        },
+    );
+    assert_eq!(st.proposals.get(&7).map(|p| p.state), Some(ProposalState::Proposed));
+    commit(&mut b, INIT, init_payload(3000, "mainnet"));
+    st.adopt_chain(b.blocks.clone());
+    st.after_wallet_applied(INIT, &init_payload(3000, "mainnet"));
+    dead(&st, 7);
+}

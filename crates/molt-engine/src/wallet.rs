@@ -406,7 +406,7 @@ impl State {
                     self.chain_sign_and_gossip_approval(id);
                 }
                 // an approved card that aged out could never re-sign: it dies
-                Err(r @ (WalletRefusal::Birthday | WalletRefusal::Network)) if !declined => {
+                Err(r @ (WalletRefusal::Birthday | WalletRefusal::Network | WalletRefusal::Bounds)) if !declined => {
                     tracing::warn!(id, reason = %r, "wallet_init=declined");
                     self.purse.consent.remove(&id);
                     if let Err(e) = self.cmd_decline(ProposalId(id), None) {
@@ -424,7 +424,8 @@ impl State {
     /// A peer's init card landed: judge it, asking the daemon first if the
     /// height is stale.
     pub(crate) fn after_wallet_proposed(&mut self, id: u64) {
-        if !self.proposals.get(&id).is_some_and(|p| is_init(&p.payload)) {
+        self.wallet_supersede_dead();
+        if !self.proposals.get(&id).is_some_and(|p| p.state == ProposalState::Proposed && is_init(&p.payload)) {
             return;
         }
         self.wallet_review();
@@ -453,6 +454,7 @@ impl State {
     /// asked again.
     pub(crate) fn wallet_tick(&mut self) {
         if self.wallet_init_pending()
+            && self.wallet_gates().is_ok()
             && self.fresh_height().is_none()
             && !self.purse.probing
             && !self.session.settings.wallet_daemon_url.is_empty()

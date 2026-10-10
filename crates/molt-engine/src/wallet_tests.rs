@@ -293,6 +293,16 @@ fn a_seat_whose_daemon_has_not_answered_abstains_on_another_network() {
     assert_eq!(st.proposals.get(&5).map(|p| p.state), Some(ProposalState::Rejected), "another network");
 }
 
+/// An init card outside W1 can never pass: it dies on arrival.
+#[test]
+fn an_init_card_outside_the_bounds_is_declined() {
+    let b = Builder::new(&ABC, 3);
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    card_from(&mut st, "b", 5, init(3100, "mainnet"));
+    assert_eq!(st.proposals.get(&5).map(|p| p.state), Some(ProposalState::Rejected));
+    assert!(!st.wallet_init_pending());
+}
+
 /// An approve kept as consent says so.
 #[test]
 fn a_held_approve_says_it_is_held() {
