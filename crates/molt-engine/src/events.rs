@@ -805,6 +805,7 @@ impl State {
         if let Some(group) = self.group_net.take() {
             tokio::spawn(async move { group.handle.shutdown().await });
         }
+        self.group_mls_parked = None;
         self.chain.blocks.clear();
         self.chain.block_ts.clear();
         self.chain.head = None;

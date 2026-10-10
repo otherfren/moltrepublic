@@ -288,31 +288,26 @@ impl State {
         *pool = parsed;
     }
 
-    /// R6: the governed pool moved — carry it into the LIVE transport. The
-    /// runtime rebuild is the accepted whole-group blip (Track C option A,
-    /// 2026-07-23); the ratchet is handed over as the SHARED Arc, exactly
-    /// like the mesh-extension rebuild, so no sender generation is reused.
-    /// A workspace without a live runtime just adopts the list.
+    /// R6: the governed pool moved — carry it into the LIVE transport
+    /// ([`Self::dialable_relays_changed`]). A workspace without a live
+    /// runtime just adopts the list.
     pub(crate) fn adopt_pool_change(&mut self) {
         let pool = self.effective_relays();
-        let Some(nostr) = self.nostr.as_mut() else {
+        let Some(nostr) = self.nostr.as_ref() else {
             return;
         };
         if pool.is_empty() || nostr.relays == pool {
             return;
         }
-        nostr.relays = pool;
-        if let Some(old) = self.group_net.take() {
-            tracing::info!(
-                relays = self.nostr.as_ref().map_or(0, |n| n.relays.len()),
-                "the governed relay pool moved - rebuilding the group runtime"
-            );
-            let mls = old.mls.clone();
-            // dropping the handle latches the stop (watch, not Notify) —
-            // the old outbox ends at its next poll
-            drop(old);
-            self.group_net = self.build_group_net_shared(mls);
+        let before = self.dialable_group_relays();
+        if let Some(nostr) = self.nostr.as_mut() {
+            nostr.relays = pool;
         }
+        tracing::info!(
+            relays = self.nostr.as_ref().map_or(0, |n| n.relays.len()),
+            "governed relay pool moved"
+        );
+        self.dialable_relays_changed(&before);
     }
 
     /// The ratified GROUP pool: the checkpoint summary's if this holder

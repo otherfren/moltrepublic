@@ -184,12 +184,14 @@ impl State {
     pub(crate) fn cmd_relay_remove(&mut self, url: String) -> Result<Reply, MoltError> {
         let url = molt_core::relay::normalize_relay_url(&url)
             .map_err(|e| MoltError::Settings(e.to_string()))?;
+        let dialable = self.dialable_group_relays();
         let before = self.session.settings.relays.len();
         self.session.settings.relays.retain(|r| r.url != url);
         self.note_if_invites_went_stale();
         if self.session.settings.relays.len() == before {
             return Err(MoltError::Settings(format!("{url} is not in the relay pool")));
         }
+        self.dialable_relays_changed(&dialable);
         self.persist_settings(false);
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
@@ -260,8 +262,10 @@ impl State {
         if accept_clearnet
             && molt_core::relay::relay_kind(&url) != molt_core::relay::RelayKind::Onion
         {
+            let dialable = self.dialable_group_relays();
             self.clearnet_session = true;
             self.session.settings.clearnet_relays_enabled = true;
+            self.dialable_relays_changed(&dialable);
         }
         self.persist_settings(false);
         self.emit_session(SessionScope::Full);
@@ -345,11 +349,13 @@ impl State {
         if confirm {
             // the entry may have been removed while the probe ran — a
             // verdict for a gone entry is a no-op, never a re-insert
+            let dialable = self.dialable_group_relays();
             if let Some(entry) =
                 self.session.settings.relays.iter_mut().find(|r| r.url == url)
             {
                 entry.confirmed = true;
                 self.note_if_invites_went_stale();
+                self.dialable_relays_changed(&dialable);
                 self.persist_settings(false);
             }
         }
@@ -367,6 +373,7 @@ impl State {
     pub(crate) fn cmd_relay_revoke(&mut self, url: String) -> Result<Reply, MoltError> {
         let url = molt_core::relay::normalize_relay_url(&url)
             .map_err(|e| MoltError::Settings(e.to_string()))?;
+        let dialable = self.dialable_group_relays();
         let entry = self
             .session
             .settings
@@ -375,6 +382,7 @@ impl State {
             .find(|r| r.url == url)
             .ok_or_else(|| MoltError::Settings(format!("{url} is not in the relay pool")))?;
         entry.confirmed = false;
+        self.dialable_relays_changed(&dialable);
         self.persist_settings(false);
         self.note_if_invites_went_stale();
         self.emit_session(SessionScope::Full);
@@ -391,8 +399,10 @@ impl State {
     /// remembered for the same reason: a deliberate OFF must not be undone
     /// by the next restart.
     pub(crate) fn cmd_relay_clearnet_session(&mut self, unlock: bool) -> Result<Reply, MoltError> {
+        let dialable = self.dialable_group_relays();
         self.clearnet_session = unlock;
         self.session.settings.clearnet_relays_enabled = unlock;
+        self.dialable_relays_changed(&dialable);
         self.persist_settings(false);
         self.note_if_invites_went_stale();
         self.emit_session(SessionScope::Full);

@@ -609,11 +609,14 @@ impl State {
         // durably. Without this the reopen restores the founding blob and the
         // next publish reuses sender generations — replay-rejected and
         // silently lost at every peer.
-        if let Some(group) = self.group_net.take() {
-            let snap = group.mls.lock().ok().and_then(|g| g.snapshot().ok());
+        let mls = match self.group_net.take() {
             // signals stop and aborts the inbox; the outbox finishes its
             // in-flight publish and exits on its own
-            drop(group);
+            Some(group) => Some(group.mls.clone()),
+            None => self.group_mls_parked.take(),
+        };
+        if let Some(mls) = mls {
+            let snap = mls.lock().ok().and_then(|g| g.snapshot().ok());
             if let (Some(active), Some(snap)) = (self.active.as_ref(), snap) {
                 if !active.handle.persist_crypto_blocking(Some(snap), None) {
                     tracing::error!("the group ratchet did not reach the disk on close");
@@ -673,6 +676,73 @@ impl State {
         .filter(|v| v.blocked.is_none())
         .map(|v| v.url.clone())
         .collect()
+    }
+
+    /// The dialable set moved (a pool vote, or this node's consent given or
+    /// withdrawn): every long-lived relay task restarts on the new set, so a
+    /// withdrawn relay is never redialed (`relay_pool.md` §3 rule 3). The
+    /// runtime rebuild is the accepted whole-group blip (Track C option A);
+    /// the ratchet travels as the SHARED Arc, so no sender generation is
+    /// reused.
+    pub(crate) fn dialable_relays_changed(&mut self, before: &[String]) {
+        let after = self.dialable_group_relays();
+        let same = |a: &[String], b: &[String]| {
+            a.len() == b.len() && a.iter().all(|r| b.contains(r))
+        };
+        if same(before, &after) {
+            return;
+        }
+        let live = self.group_net.is_some()
+            || self.group_mls_parked.is_some()
+            || self.recovery.seat_inbox.is_some();
+        self.rebuild_group_net();
+        if live {
+            self.spawn_seat_inbox_if_nostr();
+        }
+        if before.iter().all(|r| after.contains(r)) {
+            return;
+        }
+        // withdrawn: what still holds the old list stops (a re-mint or the
+        // mirror's next plan picks up the new one)
+        let inboxes = self.recovery.inboxes.len();
+        for task in self.recovery.inboxes.drain(..) {
+            task.abort();
+        }
+        if inboxes > 0 {
+            tracing::warn!(inboxes, "recovery inbox stopped: relay withdrawn - re-mint the link");
+        }
+        for (_, fetch) in self.files.mirror_fetches.drain() {
+            fetch.abort();
+        }
+        self.files.mirror_pending.clear();
+        self.files.mirror_planned_at = 0;
+    }
+
+    /// Restart the group runtime on the current dialable set, or park its
+    /// ratchet while there is none.
+    fn rebuild_group_net(&mut self) {
+        let mls = match self.group_net.take() {
+            // the drop latches the stop; the old outbox ends at its next poll
+            Some(old) => old.mls.clone(),
+            None => match self.group_mls_parked.take() {
+                Some(mls) => mls,
+                None => return,
+            },
+        };
+        self.group_net = self.build_group_net_shared(mls.clone());
+        if self.group_net.is_some() {
+            self.recompute_net_health();
+            return;
+        }
+        // the stopped outbox may have advanced it since the last merge
+        let snap = mls.lock().ok().and_then(|g| g.snapshot().ok());
+        if let (Some(active), Some(snap)) = (self.active.as_ref(), snap) {
+            let _ = active.handle.merge_mls_async(snap);
+        }
+        self.group_mls_parked = Some(mls);
+        self.session.net_health = molt_core::NetHealth::Down {
+            reason: crate::session::NOSTR_RUNTIME_PENDING.to_string(),
+        };
     }
 
     /// Bring up the kind-445 GROUP runtime of a Nostr workspace (N5.2).

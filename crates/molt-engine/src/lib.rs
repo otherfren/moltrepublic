@@ -1244,6 +1244,9 @@ pub(crate) struct State {
     /// wakeup its outbox reads. `None` on a legacy/queue workspace, and on a
     /// Nostr one whose MLS group or relay set did not come up.
     pub(crate) group_net: Option<GroupNet>,
+    /// The live ratchet of a runtime stopped because no relay is dialable
+    /// any more; the runtime resumes on it, never on a stale disk copy.
+    pub(crate) group_mls_parked: Option<std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>>,
     pub(crate) delivery: DeliveryState,
     pub(crate) recovery: RecoveryState,
     pub(crate) chain: ChainProjection,
@@ -1518,6 +1521,7 @@ impl State {
             wallet_seams: std::sync::Arc::default(),
             vault_grants: vault::grant::GrantRuntime::default(),
             group_net: None,
+            group_mls_parked: None,
             delivery: DeliveryState {
                 last_group_ack: None,
                 accepted: std::collections::BTreeMap::new(),

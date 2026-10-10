@@ -197,7 +197,11 @@ than read the pool directly.
    is given up, knowingly: "after a restart no clearnet packet leaves until a
    human acts again" no longer holds for a node whose operator switched it
    on. What is gained: the consent is a decision the operator makes once,
-   instead of a prompt they learn to click through.
+   instead of a prompt they learn to click through. A withdrawal (switch
+   off, revoke, remove) reaches the RUNNING republic at once: the group
+   runtime, seat inbox and mirror fetches restart on the remaining set, an
+   open recovery inbox stops (re-mint), and only a publish already in
+   flight may finish (`State::dialable_relays_changed`).
 
 Tor does not waive rule 3. Routing a clearnet relay over Tor hides the node's
 IP from the relay operator, but it is still a clearnet endpoint with a

@@ -402,3 +402,95 @@ async fn an_unusable_relay_is_never_confirmed() {
     );
     assert!(s.notice.contains("kind 445"), "the one reason travels: {:?}", s.notice);
 }
+
+/// A TCP forwarder in front of the relay that counts every dial it accepts.
+struct CountingProxy {
+    url: String,
+    dials: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    forwards: std::sync::Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+}
+
+impl CountingProxy {
+    async fn run(target: &str) -> Self {
+        use std::sync::atomic::Ordering;
+        let target = target.trim_start_matches("ws://").trim_end_matches('/').to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+        let port = listener.local_addr().expect("addr").port();
+        let dials = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let forwards = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (d, fw) = (dials.clone(), forwards.clone());
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                d.fetch_add(1, Ordering::SeqCst);
+                let target = target.clone();
+                fw.lock().await.push(tokio::spawn(async move {
+                    if let Ok(mut outbound) = tokio::net::TcpStream::connect(&target).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    }
+                }));
+            }
+        });
+        Self { url: format!("ws://127.0.0.1:{port}"), dials, forwards }
+    }
+
+    /// Drop every live connection and zero the counter.
+    async fn cut(&self) {
+        for f in self.forwards.lock().await.drain(..) {
+            f.abort();
+        }
+        self.dials.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn dials(&self) -> usize {
+        self.dials.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// relay_pool.md §3 rule 3 on a RUNNING republic: withdrawing consent (the
+/// non-onion switch off, or a revoke) reaches the live transport at once -
+/// the withdrawn relay is not redialed - and switching back on resumes it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_withdrawn_relay_is_not_redialed_by_the_running_republic() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let proxy = CountingProxy::run(&relay.url().await.to_string()).await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b) = found_two_of_two(tmp.path(), &proxy.url).await;
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+
+    let say = |body: &'static str| {
+        let a = a.clone();
+        async move {
+            a.execute(Command::Chat {
+                body: body.to_string(),
+                quote: None,
+                channel: molt_core::ChannelRef::Group,
+            })
+            .await
+            .expect("walter speaks");
+        }
+    };
+
+    a.execute(Command::RelayClearnetSession { unlock: false }).await.expect("switch off");
+    proxy.cut().await;
+    say("after off").await;
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(proxy.dials(), 0, "switched off, yet the relay was redialed");
+
+    a.execute(Command::RelayClearnetSession { unlock: true }).await.expect("switch on");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while proxy.dials() == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "switched on, the runtime never came back");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // the resumed outbox drains its backlog; a publish in flight at the
+    // withdrawal may finish (the close path's drain semantics), so let it
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    a.execute(Command::RelayRevoke { url: proxy.url.clone() }).await.expect("revoke");
+    proxy.cut().await;
+    say("after revoke").await;
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(proxy.dials(), 0, "revoked, yet the relay was redialed");
+
+    a.execute(Command::CloseWorkspace).await.expect("close a");
+}
