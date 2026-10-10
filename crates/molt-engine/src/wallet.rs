@@ -174,9 +174,7 @@ impl State {
                 if self.session.settings.wallet_daemon_url.is_empty() {
                     return Err(WalletRefusal::NoDaemon);
                 }
-                if network != self.session.settings.wallet_network {
-                    return Err(WalletRefusal::Network);
-                }
+                // …and so does one whose daemon has not answered (plan §14 step 6)
                 let Some(height) = self.fresh_height() else {
                     return Err(if self.purse.probing || self.purse.probe_error.is_empty() {
                         WalletRefusal::Checking
@@ -184,6 +182,9 @@ impl State {
                         WalletRefusal::Daemon(self.purse.probe_error.clone())
                     });
                 };
+                if network != self.session.settings.wallet_network {
+                    return Err(WalletRefusal::Network);
+                }
                 if !birthday_ok(birthday, height) {
                     return Err(WalletRefusal::Birthday);
                 }

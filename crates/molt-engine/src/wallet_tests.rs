@@ -276,6 +276,23 @@ fn a_seat_without_a_daemon_abstains_on_another_network() {
     refused(st.cmd_approve(ProposalId(5), None), &WalletRefusal::Held(Box::new(WalletRefusal::NoDaemon)));
 }
 
+/// Plan §14 step 6: a daemon with no fresh height (syncing, unreachable)
+/// abstains on any network too; the network is judged once it answers.
+#[test]
+fn a_seat_whose_daemon_has_not_answered_abstains_on_another_network() {
+    let b = Builder::new(&ABC, 2);
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    st.session.settings.wallet_daemon_url = "http://127.0.0.1:18081".to_string();
+    st.purse.probe_error = "daemon: syncing".to_string();
+    card_from(&mut st, "b", 5, init(3100, "stagenet"));
+    let p = st.proposals.get(&5).expect("card");
+    assert_eq!(p.state, ProposalState::Proposed);
+    assert!(p.decliners.is_empty(), "abstained, not declined");
+    st.purse.height = Some((3100, crate::now_secs()));
+    st.wallet_review();
+    assert_eq!(st.proposals.get(&5).map(|p| p.state), Some(ProposalState::Rejected), "another network");
+}
+
 /// An approve kept as consent says so.
 #[test]
 fn a_held_approve_says_it_is_held() {
