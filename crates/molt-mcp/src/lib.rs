@@ -571,6 +571,12 @@ fn strip_seat_secrets(v: &mut Value) {
             for key in ["seed", "mcp_token", "mcp_read_token", "s3_secret_key", "wallet_daemon_login", "wallet"] {
                 o.remove(key);
             }
+            // where this seat saved a file is host detail, and a failure
+            // reason may quote that path
+            if let Some(Value::Object(d)) = o.get_mut("download") {
+                d.remove("path");
+                d.remove("error");
+            }
             for (key, child) in o.iter_mut() {
                 if key != "props" {
                     strip_seat_secrets(child);
@@ -4470,6 +4476,31 @@ pub(crate) mod tests {
         strip_seat_secrets(&mut reply);
         let text = reply.to_string();
         assert!(!text.contains("4purse") && !text.contains("hunter2"), "{text}");
+    }
+
+    /// A finished download's local path is the seat's: the read key sees
+    /// the phase, never where the file landed.
+    #[test]
+    fn the_read_key_sees_no_local_download_path() {
+        let download = json!({ "phase": "failed", "percent": 0,
+            "path": "/home/u/Downloads/x.pdf", "error": "open /home/u/Downloads/x.pdf: denied" });
+        let mut uploads = json!({ "uploads": [{ "name": "x.pdf", "download": download.clone() }] });
+        let mut resolved = present(
+            "resolve_upload",
+            &json!({}),
+            json!({ "upload": { "name": "x.pdf", "download": download.clone() },
+                    "local": { "path": "/home/u/x.pdf" } }),
+        )
+        .expect("present");
+        let seat_view = resolved.to_string();
+        assert!(seat_view.contains("/home/u/Downloads"), "the seat keeps it: {seat_view}");
+        strip_seat_secrets(&mut uploads);
+        strip_seat_secrets(&mut resolved);
+        for v in [uploads, resolved] {
+            let text = v.to_string();
+            assert!(!text.contains("/home/u"), "{text}");
+            assert!(text.contains("\"phase\":\"failed\""), "{text}");
+        }
     }
 
     /// An empty read key is OFF, never "anyone may read".

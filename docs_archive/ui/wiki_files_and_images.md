@@ -100,7 +100,8 @@ first.
   (`relay-held` · `sharer-only` · `gone`), `expires_ts`, `persistent`,
   `mirrors` / `mirror_held` / `mirror_of`, and a live `download`
   (`DownloadView { phase, percent, path, error }`). MCP `read_uploads`
-  serves the same projection; `download_file { id, dest? }` fetches into
+  serves the same projection (the read-only key without `download.path`
+  and `download.error`); `download_file { id, dest? }` fetches into
   the exchange folder (`download_dir`) and verifies the checksum
   (`status-kind` 2 done / 3 failed in the GUI row).
 - **Bytes on this device** come three ways today: the SHARER's own file
