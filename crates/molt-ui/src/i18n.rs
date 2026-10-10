@@ -917,6 +917,7 @@ lexicon! {
     feat_wallet: "Wallet", "Wallet";
     // suffix on an enable-able feature whose pane is still a mock (vault)
     feat_mock: " (ui mock)", " (ui mock)";
+    feat_wip: " (Work in Progress)", " (Work in Progress)";
     feat_vault_bounds: "needs a threshold of 2 or more and 2 more members than that", "braucht Schwelle ab 2 und 2 Mitglieder mehr als die Schwelle";
     feat_vault_low: "needs a threshold of 2 or more", "braucht Schwelle ab 2";
     feat_vault_high: "needs 2 more members than the threshold", "braucht 2 Mitglieder mehr als die Schwelle";

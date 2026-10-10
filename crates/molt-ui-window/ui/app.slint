@@ -3985,16 +3985,16 @@ export component AppWindow inherits Window {
                                         GridLayout {
                                             spacing: 10px;
                                             Row {
-                                                AppCheck { width: 180px; label: Strings.feat-chat; checked: true; enabled: false; }
-                                                AppCheck { width: 180px; label: Strings.feat-memory; checked <=> root.cw-feat-memory; }
+                                                AppCheck { width: 250px; label: Strings.feat-chat; checked: true; enabled: false; }
+                                                AppCheck { width: 250px; label: Strings.feat-memory; checked <=> root.cw-feat-memory; }
                                             }
                                             Row {
-                                                AppCheck { width: 180px; label: Strings.feat-quests; checked <=> root.cw-feat-quests; }
+                                                AppCheck { width: 250px; label: Strings.feat-quests + Strings.feat-wip; checked <=> root.cw-feat-quests; }
                                                 HorizontalLayout {
                                                     spacing: 10px;
                                                     AppCheck {
-                                                        width: 180px;
-                                                        label: Strings.feat-vault;
+                                                        width: 250px;
+                                                        label: Strings.feat-vault + Strings.feat-wip;
                                                         checked <=> root.cw-feat-vault;
                                                         enabled: root.cw-vault-allowed;
                                                     }
@@ -4010,13 +4010,13 @@ export component AppWindow inherits Window {
                                                 HorizontalLayout {
                                                     spacing: 10px;
                                                     if root.cw-wallet-allowed: AppCheck {
-                                                        width: 180px;
-                                                        label: Strings.feat-wallet;
+                                                        width: 250px;
+                                                        label: Strings.feat-wallet + Strings.feat-wip;
                                                         checked <=> root.cw-feat-wallet;
                                                     }
                                                     if !root.cw-wallet-allowed: AppCheck {
-                                                        width: 180px;
-                                                        label: Strings.feat-wallet;
+                                                        width: 250px;
+                                                        label: Strings.feat-wallet + Strings.feat-wip;
                                                         checked: false;
                                                         enabled: false;
                                                     }
@@ -6429,16 +6429,16 @@ export component AppWindow inherits Window {
                                                 AppCheck { label: Strings.feat-memory; checked: root.org-feat-memory; enabled: false; }
                                             }
                                             Row {
-                                                AppCheck { label: Strings.feat-quests; checked: root.org-feat-quests; enabled: false; }
+                                                AppCheck { label: Strings.feat-quests + Strings.feat-wip; checked: root.org-feat-quests; enabled: false; }
                                                 AppCheck {
                                                     // the mock suffix only where no real vault can exist (a v5 genesis)
-                                                    label: Strings.feat-vault + (!root.vault-real && (root.org-vault-enable == 0 || root.org-vault-enable == 2) ? Strings.feat-mock : "");
+                                                    label: Strings.feat-vault + Strings.feat-wip + (!root.vault-real && (root.org-vault-enable == 0 || root.org-vault-enable == 2) ? Strings.feat-mock : "");
                                                     checked: root.org-feat-vault;
                                                     enabled: false;
                                                 }
                                             }
                                             Row {
-                                                AppCheck { label: Strings.feat-wallet; checked: root.org-wallet-on; enabled: false; }
+                                                AppCheck { label: Strings.feat-wallet + Strings.feat-wip; checked: root.org-wallet-on; enabled: false; }
                                             }
                                         }
                                         AppButton {
@@ -10020,22 +10020,22 @@ export component AppWindow inherits Window {
                 enabled: !root.org-feat-memory;
             }
             AppCheck {
-                label: Strings.feat-quests;
+                label: Strings.feat-quests + Strings.feat-wip;
                 checked <=> root.of-quests-draft;
                 enabled: !root.org-feat-quests;
             }
             // vault (spec §3, E4): votable only in a prepared republic
             // within the bounds; otherwise the row names why
-            if root.org-vault-enable == 0: AppCheck { label: Strings.feat-vault; checked: true; enabled: false; }
+            if root.org-vault-enable == 0: AppCheck { label: Strings.feat-vault + Strings.feat-wip; checked: true; enabled: false; }
             if root.org-vault-enable == 1: AppCheck {
-                label: Strings.feat-vault;
+                label: Strings.feat-vault + Strings.feat-wip;
                 checked <=> root.of-vault-draft;
             }
             if root.org-vault-enable >= 2: HorizontalLayout {
                 height: 28px * Theme.ui-scale;
                 spacing: 10px;
                 Text {
-                    text: Strings.feat-vault;
+                    text: Strings.feat-vault + Strings.feat-wip;
                     color: Theme.dim;
                     font-size: Theme.fs-body;
                     vertical-alignment: center;
@@ -10048,9 +10048,9 @@ export component AppWindow inherits Window {
                 }
             }
             // the purse (W4): its own set-up vote, never a set_features key
-            if root.org-wallet-on: AppCheck { label: Strings.feat-wallet; checked: true; enabled: false; }
+            if root.org-wallet-on: AppCheck { label: Strings.feat-wallet + Strings.feat-wip; checked: true; enabled: false; }
             if !root.org-wallet-on && Purse.phase == 2: AppCheck {
-                label: Strings.feat-wallet;
+                label: Strings.feat-wallet + Strings.feat-wip;
                 checked <=> root.of-wallet-draft;
             }
             // ticking it is consenting to these (design §3.3); the set-up
@@ -10061,7 +10061,7 @@ export component AppWindow inherits Window {
                 height: 28px * Theme.ui-scale;
                 spacing: 10px;
                 Text {
-                    text: Strings.feat-wallet;
+                    text: Strings.feat-wallet + Strings.feat-wip;
                     color: Theme.dim;
                     font-size: Theme.fs-body;
                     vertical-alignment: center;

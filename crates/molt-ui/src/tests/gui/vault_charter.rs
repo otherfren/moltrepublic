@@ -63,7 +63,7 @@ fn charter_step(m: i32, n: i32) -> (AppWindow, Shown) {
 }
 
 fn wizard_vault_box(ui: &AppWindow) -> Handle {
-    let label = ui.global::<Strings>().get_feat_vault().to_string();
+    let label = format!("{}{}", ui.global::<Strings>().get_feat_vault(), ui.global::<Strings>().get_feat_wip());
     let mut found = checks_in(&window_root(ui), &label);
     assert_eq!(found.len(), 1, "one vault box on the charter step");
     found.remove(0)
@@ -157,7 +157,7 @@ fn the_charter_echo_shows_the_vault() {
     let view = Handle::find_by_element_type_name(&ui, "CharterView")
         .next()
         .expect("the charter fold renders its CharterView");
-    let label = ui.global::<Strings>().get_feat_vault().to_string();
+    let label = format!("{}{}", ui.global::<Strings>().get_feat_vault(), ui.global::<Strings>().get_feat_wip());
     let vault = checks_in(&view, &label);
     assert_eq!(vault.len(), 1, "the echo has one vault row");
     assert!(has_text(&vault[0], "✓"), "the founder echo shows the proposed vault");
@@ -224,8 +224,8 @@ fn the_org_modal_names_why_the_vault_is_locked() {
         let s = ui.global::<Strings>();
         let dlg = modal(&ui);
         assert!(
-            checks_in(&dlg, &s.get_feat_vault()).is_empty()
-                && checks_in(&dlg, &format!("{}{}", s.get_feat_vault(), s.get_feat_mock())).is_empty(),
+            checks_in(&dlg, &format!("{}{}", s.get_feat_vault(), s.get_feat_wip())).is_empty()
+                && checks_in(&dlg, &format!("{}{}{}", s.get_feat_vault(), s.get_feat_wip(), s.get_feat_mock())).is_empty(),
             "no vault checkbox in the dialog"
         );
         let why = if enable == NEWER { s.get_vault_newer_republic() } else { s.get_feat_vault_bounds() };
@@ -240,7 +240,7 @@ fn the_org_modal_names_why_the_vault_is_locked() {
 #[test]
 fn the_org_modal_offers_the_vault_when_it_can_be_enabled() {
     let (ui, _shown, got) = org_modal(OFFER);
-    let vault = ui.global::<Strings>().get_feat_vault().to_string();
+    let vault = format!("{}{}", ui.global::<Strings>().get_feat_vault(), ui.global::<Strings>().get_feat_wip());
     let mut boxes = checks_in(&modal(&ui), &vault);
     assert_eq!(boxes.len(), 1, "one vault box");
     click(&ui, &boxes.remove(0));
@@ -272,7 +272,7 @@ fn an_org_proposal_in_a_vault_republic_carries_no_vault() {
 fn a_ticked_kanban_reaches_create_propose() {
     i_slint_backend_testing::init_no_event_loop();
     let (ui, _shown) = charter_step(2, 4);
-    let label = ui.global::<Strings>().get_feat_quests().to_string();
+    let label = format!("{}{}", ui.global::<Strings>().get_feat_quests(), ui.global::<Strings>().get_feat_wip());
     let mut found = checks_in(&window_root(&ui), &label);
     assert_eq!(found.len(), 1, "one kanban box on the charter step");
     assert!(!ui.get_cw_feat_quests(), "off by default");
@@ -283,11 +283,26 @@ fn a_ticked_kanban_reaches_create_propose() {
     );
 }
 
+/// The unfinished features say so wherever they are chosen.
+#[test]
+fn the_unfinished_features_say_work_in_progress() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = charter_step(2, 4);
+    let s = ui.global::<Strings>();
+    assert_eq!(s.get_feat_wip(), " (Work in Progress)");
+    for label in [s.get_feat_quests(), s.get_feat_vault(), s.get_feat_wallet()] {
+        let found = checks_in(&window_root(&ui), &format!("{label}{}", s.get_feat_wip()));
+        assert_eq!(found.len(), 1, "{label} carries the suffix on the charter step");
+    }
+    let memory = checks_in(&window_root(&ui), &format!("{}{}", s.get_feat_memory(), s.get_feat_wip()));
+    assert!(memory.is_empty(), "a finished feature has no suffix");
+}
+
 /// S4: the Organization modal votes the Kanban in.
 #[test]
 fn the_org_modal_votes_the_kanban_in() {
     let (ui, _shown, got) = org_modal(NEWER);
-    let quests = ui.global::<Strings>().get_feat_quests().to_string();
+    let quests = format!("{}{}", ui.global::<Strings>().get_feat_quests(), ui.global::<Strings>().get_feat_wip());
     let mut boxes = checks_in(&modal(&ui), &quests);
     assert_eq!(boxes.len(), 1, "one kanban box");
     click(&ui, &boxes.remove(0));

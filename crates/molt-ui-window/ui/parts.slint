@@ -2164,15 +2164,15 @@ export component CharterView inherits Rectangle {
                     GridLayout {
                         spacing: 10px;
                         Row {
-                            AppCheck { width: 180px; label: Strings.feat-chat; checked: true; enabled: false; }
-                            AppCheck { width: 180px; label: Strings.feat-memory; checked: root.feat-memory; enabled: false; }
+                            AppCheck { width: 250px; label: Strings.feat-chat; checked: true; enabled: false; }
+                            AppCheck { width: 250px; label: Strings.feat-memory; checked: root.feat-memory; enabled: false; }
                         }
                         Row {
-                            AppCheck { width: 180px; label: Strings.feat-quests; checked: root.feat-quests; enabled: false; }
-                            AppCheck { width: 180px; label: Strings.feat-vault; checked: root.feat-vault; enabled: false; }
+                            AppCheck { width: 250px; label: Strings.feat-quests + Strings.feat-wip; checked: root.feat-quests; enabled: false; }
+                            AppCheck { width: 250px; label: Strings.feat-vault + Strings.feat-wip; checked: root.feat-vault; enabled: false; }
                         }
                         Row {
-                            AppCheck { width: 180px; label: Strings.feat-wallet; checked: root.feat-wallet; enabled: false; }
+                            AppCheck { width: 250px; label: Strings.feat-wallet + Strings.feat-wip; checked: root.feat-wallet; enabled: false; }
                         }
                     }
                     // ratifying the purse is consenting to these (design §3.3)

@@ -346,7 +346,7 @@ fn the_org_modal_proposes_the_set_up() {
         settle();
         let s = ui.global::<Strings>();
         let dlg = Handle::find_by_element_type_name(&ui, "ConfirmModal").next().expect("the dialog");
-        let label = s.get_feat_wallet().to_string();
+        let label = format!("{}{}", s.get_feat_wallet(), s.get_feat_wip());
         let boxes: Vec<Handle> = dlg
             .query_descendants()
             .match_type_name("AppCheck")
@@ -451,7 +451,7 @@ fn the_org_modal_asks_the_node_and_shows_the_consent() {
     let s = ui.global::<Strings>();
     let dlg = Handle::find_by_element_type_name(&ui, "ConfirmModal").next().expect("the dialog");
     assert!(!has_text(&dlg, &s.get_wl_note_sees()), "unticked: no lines");
-    let label = s.get_feat_wallet().to_string();
+    let label = format!("{}{}", s.get_feat_wallet(), s.get_feat_wip());
     let purse_box = dlg
         .query_descendants()
         .match_type_name("AppCheck")
