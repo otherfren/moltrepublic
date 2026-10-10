@@ -215,7 +215,8 @@ A crash, timeout, decline or abort before round 2 ends the run with no
 trace. A restart never revives a run: on reopen, a seat with neither run
 state nor a keys record for an unfinished run aborts it; a seat **with** a
 keys record never aborts that run, it re-attests (§3.5). Only a new start
-frame begins another run.
+frame begins another run. Every seat answers such a frame, so it answers
+one per sender per resend window, and at most 256 runs in all.
 
 ### 3.4 The rounds
 

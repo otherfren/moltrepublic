@@ -35,6 +35,9 @@ const RESEND_SECS: u64 = 10;
 const EARLY_MAX: usize = 256;
 /// Attestation sets of runs this seat holds no record of.
 const FOREIGN_RUNS_MAX: usize = 8;
+/// Runs this seat answers as lost; past it a round frame of an unknown run
+/// is dropped (its starter's beat still restarts the set-up).
+const LOST_RUNS_MAX: usize = 256;
 /// The abort reasons a peer may name; anything else reads `aborted`.
 const REASONS: [&str; 9] =
     ["declined", "not ready", "timeout", "restart", "invalid", "equivocation", "transcript", "storage", "aborted"];
@@ -109,6 +112,8 @@ pub(crate) struct RunRt {
     /// Aborted runs: when their answer last went out, and whether this
     /// seat declined them (the answer is then the decline).
     aborted: BTreeMap<[u8; 32], (u64, bool)>,
+    /// When each position last earned a "restart" for a run unknown here.
+    lost_at: BTreeMap<u16, u64>,
     early: Vec<(u16, WalletFrame)>,
     /// This seat's keys records, decoded (one per attested run).
     pub(crate) records: Vec<KeysRecord>,
@@ -496,6 +501,13 @@ impl State {
         // a round frame means every seat was ready, this one too: its state is lost (§3.3)
         let held = self.purse.run.records.iter().any(|r| r.run.run == nonce);
         if matches!(frame, WalletFrame::Round1(_) | WalletFrame::Round2(_)) && !held {
+            // every seat answers, so one answer per sender per resend window
+            let recent = self.purse.run.lost_at.get(&pos).is_some_and(|t| now.saturating_sub(*t) < RESEND_SECS);
+            if recent || self.purse.run.aborted.len() >= LOST_RUNS_MAX {
+                tracing::debug!(run = %short(&nonce), from = pos, recent, "wallet_lost=dropped");
+                return;
+            }
+            self.purse.run.lost_at.insert(pos, now);
             tracing::warn!(run = %short(&nonce), from = pos, reason = "lost", "wallet_abort");
             self.purse.run.seen.insert(nonce);
             self.wallet_send_abort(nonce, "restart");

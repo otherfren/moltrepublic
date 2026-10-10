@@ -1101,3 +1101,30 @@ fn a_voted_set_up_without_a_run_can_be_started() {
     st.purse.run.auto_from = Some((INIT, T0));
     assert!(!st.wallet_view().can_start, "the automatic start is still due");
 }
+
+/// A stream of round frames for invented runs: one "restart" abort per
+/// sender per resend window, and no map entry for an unanswered one.
+#[test]
+fn invented_runs_earn_one_restart_per_sender_per_window() {
+    let (b, mut s) = three(true);
+    let r1 = all_in_round1(&mut s, [7; 32]);
+    let mut reopened = run_seat(&b, "b", true);
+    let forged: Vec<WalletFrame> = (1..=20u8)
+        .map(|i| {
+            let mut f = r1[0].clone();
+            if let WalletFrame::Round1(x) = &mut f {
+                x.run = hex::encode([i; 32]);
+            }
+            f
+        })
+        .collect();
+    deliver(&mut reopened, "a", &forged);
+    let aborts = sent(&reopened).into_iter().filter(|f| matches!(f, WalletFrame::Abort(_))).count();
+    assert_eq!(aborts, 1, "one answer per window");
+    assert_eq!(reopened.purse.run.seen.len(), 1);
+    assert_eq!(reopened.purse.run.aborted.len(), 1);
+    reopened.presence.clock_override = Some(T0 + RESEND_SECS);
+    deliver(&mut reopened, "a", &forged[1..2]);
+    let aborts = sent(&reopened).into_iter().filter(|f| matches!(f, WalletFrame::Abort(_))).count();
+    assert_eq!(aborts, 1, "the next window answers again");
+}
