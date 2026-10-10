@@ -110,6 +110,8 @@ impl State {
         // anchors on (WP4b 4c) — persisted next to the chain.
         full_chain: Option<Vec<molt_core::ChainBlock>>,
         checkpoint_blob: Option<molt_core::CheckpointState>,
+        // a retired local copy of this seat whose keys records move over
+        carry_keys: Option<&std::path::Path>,
         err: fn(String) -> MoltError,
     ) -> Result<WorkspaceId, MoltError> {
         // captured before `shape` is consumed into the TransportState below
@@ -160,6 +162,12 @@ impl State {
         }
         let mut opened = molt_storage::create_workspace(&root, &entropy, &genesis)
             .map_err(|e| err(e.to_string()))?;
+        let carried = carry_keys.map(|old| {
+            if let Err(e) = opened.carry_wallet_keys(old) {
+                tracing::error!(error = %e, from = %old.display(), "wallet_keys=not_carried");
+            }
+            opened.read_wallet_keys()
+        });
         // seal the node's own MLS group state + assembled mesh into
         // transport.state **durably and synchronously**, before the writer task
         // takes over the file: the group was just born in the ritual and a
@@ -285,6 +293,9 @@ impl State {
         // B2: a fresh materialization seeds the seat's read cursors (a
         // founding/join has little history; a restore may carry plenty)
         self.adopt_read_cursors();
+        if let Some(records) = carried {
+            self.wallet_on_open(records);
+        }
         Ok(id)
     }
 
@@ -1102,6 +1113,7 @@ impl State {
                 Vec::new(),
                 None, // a founding's chain IS the genesis
                 None, // …rooted, never pruned at birth
+                None,
                 MoltError::Create,
             )?;
             // truthful marker: only a sim-seam founding has simulated
@@ -1600,6 +1612,7 @@ impl State {
                 mesh,
                 None, // a join's chain IS the genesis
                 None, // …rooted, never pruned at birth
+                None,
                 MoltError::Join,
             ) {
                 Ok(id) => {
@@ -2154,6 +2167,7 @@ impl State {
         // on it killed the exact path the detached notice recommends. The
         // copy retires to the trash (recoverable 30 days); the verified
         // recovered state replaces it. Closed first when it is the open one.
+        let mut retired = None;
         if self.persist {
             if let Ok(entropy) = molt_storage::seed_entropy(&phrase) {
                 let ws_id = molt_storage::derive_workspace_id(&entropy, &member);
@@ -2164,7 +2178,8 @@ impl State {
                         self.session.active_workspace = String::new();
                     }
                     match molt_storage::trash_workspace(&root, &dir) {
-                        Ok(_trashed) => {
+                        Ok(trashed) => {
+                            retired = Some(trashed);
                             self.session.workspaces.retain(|w| w.id != ws_id);
                             self.reclassify_backups();
                             tracing::info!(%ws_id, "recovery replaces the local copy - retired to the trash");
@@ -2201,6 +2216,7 @@ impl State {
             mesh, // the re-established mesh (empty = option A, state only)
             Some(blocks),
             checkpoint_blob.clone(),
+            retired.as_deref(),
             MoltError::Recover,
         ) {
             Ok(id) => id,

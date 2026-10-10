@@ -1371,6 +1371,62 @@ async fn a_recovery_replaces_a_local_copy_of_the_seat() {
     }
 }
 
+/// Design I12/W5: the local copy a recovery retires may hold a key part
+/// of the purse; its keys records move into the recovered workspace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recovery_keeps_the_key_parts_of_the_local_copy() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let root = tmp.path().join("rejoiner");
+    let c = engine(&root);
+    adopt_relay(&c, &url).await;
+    let record = b"a key part".to_vec();
+    for round in 0..2u8 {
+        a.execute(Command::RecoverInviteStart {
+            member: "petra".to_string(),
+        })
+        .await
+        .expect("mint");
+        let s = wait_for(&a, "the recovery link", |s| {
+            s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+        })
+        .await;
+        let link = s
+            .notice
+            .strip_prefix("recovery-link:")
+            .unwrap_or_else(|| panic!("the mint must succeed: {:?}", s.notice))
+            .to_string();
+        c.execute(Command::RecoverStart {
+            link,
+            phrase: petra_phrase.clone(),
+        })
+        .await
+        .expect("recover start");
+        let s = wait_for(&c, "the recovery to open", |s| {
+            (s.screen == molt_core::Screen::Main && s.notice.starts_with("recovered:"))
+                || s.notice.starts_with("recover-failed:")
+        })
+        .await;
+        assert!(s.notice.starts_with("recovered:"), "round {round}: {:?}", s.notice);
+        let ws_id = s.workspaces[0].id.clone();
+        c.execute(Command::CloseWorkspace).await.expect("close");
+        let dir = molt_storage::find_workspace_dir(&root, &ws_id).expect("the recovered dir");
+        let (opened, _) = molt_storage::open_workspace(&dir).expect("open");
+        if round == 0 {
+            opened.append_wallet_keys(&record).expect("a key part");
+        } else {
+            let held = opened.read_wallet_keys().expect("keys");
+            assert!(
+                held.iter().any(|r| r.as_slice() == record.as_slice()),
+                "the retired copy's key part must survive the recovery"
+            );
+        }
+    }
+}
+
 /// **Detached reattach keystone (`detached_reattach.md`, user decision
 /// 2026-08-24): a restored workspace reconnects to the live republic with
 /// NO ritual — no link, no `RecoverInviteStart`, nobody clicking.** petra's

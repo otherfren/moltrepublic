@@ -1804,6 +1804,14 @@ impl OpenedWorkspace {
         self.write_wallet_keys(&records)
     }
 
+    /// A retired copy's keys records join this workspace's (design I12).
+    ///
+    /// # Errors
+    /// I/O; a damaged file here is never rewritten.
+    pub fn carry_wallet_keys(&self, old_dir: &Path) -> Result<(), StorageError> {
+        merge_wallet_keys(old_dir, &self.dir, &self.key, &self.id)
+    }
+
     /// The acknowledged loss (wallet design W5): a damaged keys file moves
     /// aside as `.wallet_keys.state.lost<n>`, which nothing exports or
     /// reads. `false` when there is no file.
@@ -2182,6 +2190,47 @@ pub(crate) fn decode_wallet_keys_file(
 }
 
 /// Write `wallet_keys.state` into `dir` (atomic, sealed).
+/// `old_dir`'s keys records join `dir`'s (design I12). A damaged file
+/// the target cannot replace is carried as is, so the loss stays loud.
+pub(crate) fn merge_wallet_keys(
+    old_dir: &Path,
+    dir: &Path,
+    ws_key: &[u8; 32],
+    id: &[u8; 32],
+) -> Result<(), StorageError> {
+    let old = old_dir.join(WALLET_KEYS_FILE);
+    let target = dir.join(WALLET_KEYS_FILE);
+    let old_records = match read_capped(&old, READ_CAP_STATE, WALLET_KEYS_FILE) {
+        Ok(data) => decode_wallet_keys_file(ws_key, id, &data).ok(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::InvalidData => None,
+        Err(e) => return Err(e.into()),
+    };
+    let Some(old_records) = old_records else {
+        if !target.exists() {
+            fs::copy(&old, &target)?;
+            File::open(&target)?.sync_all()?;
+        }
+        return Ok(());
+    };
+    let mut records = if target.exists() {
+        let data = read_capped(&target, READ_CAP_STATE, WALLET_KEYS_FILE)?;
+        decode_wallet_keys_file(ws_key, id, &data)?
+    } else {
+        Vec::new()
+    };
+    let held = records.len();
+    for r in old_records {
+        if !records.contains(&r) {
+            records.push(r);
+        }
+    }
+    if records.len() == held {
+        return Ok(());
+    }
+    write_wallet_keys_at(dir, ws_key, id, &records)
+}
+
 pub(crate) fn write_wallet_keys_at(
     dir: &Path,
     ws_key: &[u8; 32],

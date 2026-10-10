@@ -584,40 +584,9 @@ impl ImportStaging {
     }
 
     /// Design I12: the replaced dir's keys records join the staged ones,
-    /// since the blob may predate a share. A damaged file the blob cannot
-    /// replace is carried as is, so the loss stays loud.
+    /// since the blob may predate a share.
     fn keep_wallet_keys(&self, old_dir: &Path, id: &[u8; 32]) -> Result<(), StorageError> {
-        let old = old_dir.join(crate::WALLET_KEYS_FILE);
-        let staged = self.dir.join(crate::WALLET_KEYS_FILE);
-        let old_records = match crate::read_capped(&old, crate::READ_CAP_STATE, crate::WALLET_KEYS_FILE) {
-            Ok(data) => crate::decode_wallet_keys_file(&self.workspace_key, id, &data).ok(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => None,
-            Err(e) => return Err(e.into()),
-        };
-        let Some(old_records) = old_records else {
-            if !staged.exists() {
-                fs::copy(&old, &staged)?;
-                fs::File::open(&staged)?.sync_all()?;
-            }
-            return Ok(());
-        };
-        let mut records = if staged.exists() {
-            let data = crate::read_capped(&staged, crate::READ_CAP_STATE, crate::WALLET_KEYS_FILE)?;
-            crate::decode_wallet_keys_file(&self.workspace_key, id, &data)?
-        } else {
-            Vec::new()
-        };
-        let held = records.len();
-        for r in old_records {
-            if !records.contains(&r) {
-                records.push(r);
-            }
-        }
-        if records.len() == held {
-            return Ok(());
-        }
-        crate::write_wallet_keys_at(&self.dir, &self.workspace_key, id, &records)
+        crate::merge_wallet_keys(old_dir, &self.dir, &self.workspace_key, id)
     }
 
     /// Discard the staging (explicit spelling of drop).
