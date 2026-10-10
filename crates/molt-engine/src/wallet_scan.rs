@@ -61,7 +61,7 @@ impl std::fmt::Debug for ScanRt {
 /// One [`Command::NetWalletScan`], unpacked.
 pub(crate) struct ScanReport {
     pub(crate) scan_height: u64,
-    pub(crate) daemon_height: u64,
+    pub(crate) daemon_height: Option<u64>,
     pub(crate) paused: Option<String>,
     pub(crate) error: String,
     pub(crate) connected: bool,
@@ -265,8 +265,8 @@ impl State {
         }
         scan.connected = r.connected;
         scan.error = r.error;
-        if r.connected {
-            scan.daemon_height = Some(r.daemon_height);
+        if let Some(h) = r.daemon_height.filter(|_| r.connected) {
+            scan.daemon_height = Some(h);
         }
         let newly_paused = r.paused.is_some() && scan.paused != r.paused;
         scan.paused = r.paused;
@@ -298,8 +298,9 @@ impl State {
             };
         };
         let scan_height = state.next_height().saturating_sub(1);
-        // the daemon's top block number; a chain holds one block more
-        let chain = scan.daemon_height.map_or(state.next_height(), |h| h.saturating_add(1));
+        // the daemon's top block number; a chain holds one block more. Never
+        // past the blocks it served and the scan linked: a claimed tip is cheap
+        let chain = scan.daemon_height.map_or(state.next_height(), |h| h.saturating_add(1).min(state.next_height()));
         let (balance, pending) = state.balance(chain);
         let mut txs: std::collections::BTreeMap<(u64, [u8; 32]), WalletTxView> = std::collections::BTreeMap::new();
         for o in state.outputs() {
@@ -354,11 +355,11 @@ struct Feed {
 
 impl Feed {
     /// `false` once the engine is gone.
-    async fn report(&self, state: &ScanState, tip: u64, outcome: &Outcome) -> bool {
+    async fn report(&self, state: &ScanState, tip: Option<u64>, outcome: &Outcome) -> bool {
         let (paused, error, connected) = outcome.verdict();
         let cmd = Command::NetWalletScan {
             scan_height: state.next_height().saturating_sub(1),
-            daemon_height: tip,
+            daemon_height: outcome.tip(tip),
             paused,
             error,
             connected,
@@ -371,6 +372,14 @@ impl Feed {
 }
 
 impl Outcome {
+    /// The round's tip, where the round could trust it.
+    fn tip(&self, tip: Option<u64>) -> Option<u64> {
+        match self {
+            Self::CaughtUp | Self::More | Self::Paused(_) => tip,
+            Self::Fault(_) | Self::Down(_) | Self::Syncing(_) => None,
+        }
+    }
+
     /// `(paused, error, connected)` as reported.
     fn verdict(&self) -> (Option<String>, String, bool) {
         match self {
@@ -407,8 +416,8 @@ async fn scan_loop(
     base: Option<Duration>,
 ) {
     let mut pace = Pace::new(base);
-    let mut tip = 0;
     loop {
+        let mut tip = None;
         let outcome = round(&transport, &mut scanner, &mut state, &mut tip).await;
         if !feed.report(&state, tip, &outcome).await {
             return;
@@ -458,21 +467,27 @@ impl Pace {
 }
 
 /// One batch: the tip, the blocks above the cursor, each scanned and applied.
-async fn round(transport: &DaemonTransport, scanner: &mut StandardScanner, state: &mut ScanState, tip: &mut u64) -> Outcome {
+async fn round(
+    transport: &DaemonTransport,
+    scanner: &mut StandardScanner,
+    state: &mut ScanState,
+    tip_out: &mut Option<u64>,
+) -> Outcome {
     let failed = |e: DaemonError| match e {
         DaemonError::Fault(_) => Outcome::Fault(e.to_string()),
         DaemonError::Syncing => Outcome::Syncing(e.to_string()),
         other => Outcome::Down(other.to_string()),
     };
-    *tip = match monero_rpc::daemon_height(transport.clone()).await {
+    let tip = match monero_rpc::daemon_height(transport.clone()).await {
         Ok(h) => h,
         Err(e) => return failed(e),
     };
+    *tip_out = Some(tip);
     let from = state.next_height();
-    if from > *tip {
+    if from > tip {
         return Outcome::CaughtUp;
     }
-    let to = (*tip).min(from.saturating_add(BATCH - 1));
+    let to = tip.min(from.saturating_add(BATCH - 1));
     let blocks = match monero_rpc::scannable_blocks(transport.clone(), from, to).await {
         Ok(b) => b,
         Err(e) => return failed(e),
@@ -500,7 +515,7 @@ async fn round(transport: &DaemonTransport, scanner: &mut StandardScanner, state
             Step::OutOfOrder => return Outcome::Fault("daemon fault: out of order".to_string()),
         }
     }
-    if state.next_height() > *tip {
+    if state.next_height() > tip {
         Outcome::CaughtUp
     } else {
         Outcome::More
@@ -526,6 +541,17 @@ mod tests {
         s
     }
 
+    /// Empty linked blocks on top of `s` through `to`.
+    fn scanned_to(mut s: ScanState, to: u64) -> ScanState {
+        while s.next_height() <= to {
+            let h = s.next_height();
+            let hash = |h: u64| Sha256::digest(h.to_le_bytes()).into();
+            let previous = if h == s.birthday() + 1 { [1; 32] } else { hash(h - 1) };
+            s.apply(h, hash(h), previous, 1_700_000_000, Vec::new());
+        }
+        s
+    }
+
     /// One row per transaction, its outputs summed, newest first; the
     /// daemon's top block counts as a confirmation (Monero's convention).
     #[test]
@@ -535,12 +561,13 @@ mod tests {
         let mut s = ScanState::new("p", 100);
         s.apply(100, [1; 32], [0; 32], 0, vec![out(1, 7, 100, 5), out(2, 7, 100, 6)]);
         s.apply(101, [2; 32], [1; 32], 0, vec![out(3, 8, 101, 4)]);
-        st.purse.scan.state = Some(s);
+        s.apply(102, Sha256::digest(102u64.to_le_bytes()).into(), [2; 32], 0, Vec::new());
+        st.purse.scan.state = Some(scanned_to(s, 119));
         st.purse.scan.daemon_height = Some(119);
         let shown = st.wallet_scan_shown();
         let rows: Vec<(u64, u64, u64)> = shown.history.iter().map(|t| (t.height, t.amount, t.confirmations)).collect();
         assert_eq!(rows, vec![(101, 4, 19), (100, 11, 20)]);
-        assert_eq!((shown.balance, shown.pending, shown.scan_height), (11, 4, 101));
+        assert_eq!((shown.balance, shown.pending, shown.scan_height), (11, 4, 119));
         assert!(shown.history.iter().all(|t| t.incoming));
         assert_eq!(shown.connected, None, "no scanner: the probe speaks");
     }
@@ -567,7 +594,7 @@ mod tests {
         let (_, records) = purse_run(&b, 11, 3000, Network::Mainnet);
         let (mut st, c) = seat_with_purse("a", &records[..1]);
         st.session.settings.wallet_daemon_url = String::new();
-        st.purse.scan.state = Some(paid("another purse", c.birthday));
+        st.purse.scan.state = Some(scanned_to(paid("another purse", c.birthday), c.birthday + 100));
         st.purse.scan.daemon_height = Some(c.birthday + 100);
         assert_eq!(st.wallet_view().balance, 5, "shown before the beat");
         st.wallet_scan_tick();
@@ -598,13 +625,56 @@ mod tests {
         let b = with_init();
         let (_, records) = purse_run(&b, 11, 3000, Network::Mainnet);
         let (mut c, created) = seat_with_purse("c", &[]);
-        c.purse.scan.state = Some(paid(&created.address, created.birthday));
+        c.purse.scan.state = Some(scanned_to(paid(&created.address, created.birthday), created.birthday + 100));
         c.purse.scan.daemon_height = Some(created.birthday + 100);
         let v = c.wallet_view();
         assert_eq!((v.balance, v.pending, v.history.len(), v.can_watch), (0, 0, 0, false), "a stale file shows nothing");
         c.cmd_net_wallet_view_answer(&"a".to_string(), &records[0].view[..]).expect("ack");
         let v = c.wallet_view();
         assert_eq!((v.balance, v.history.len(), v.can_watch), (5, 1, true));
+    }
+
+    /// Design §7: a claimed tip never confirms more than the blocks the
+    /// daemon served and the scan linked.
+    #[test]
+    fn confirmations_count_only_scanned_blocks() {
+        let b = with_init();
+        let (_, records) = purse_run(&b, 11, 3000, Network::Mainnet);
+        let (mut st, c) = seat_with_purse("a", &records[..1]);
+        st.purse.scan.state = Some(paid(&c.address, c.birthday));
+        st.purse.scan.daemon_height = Some(c.birthday + 10_000);
+        let v = st.wallet_view();
+        assert_eq!((v.balance, v.pending), (0, 5));
+        assert_eq!(v.history[0].confirmations, 1);
+    }
+
+    /// A round that got no trusted tip (syncing, a fault, down) reports
+    /// none, and the last known height stands.
+    #[tokio::test]
+    async fn a_round_without_a_tip_keeps_the_known_height() {
+        assert_eq!(Outcome::CaughtUp.tip(Some(7)), Some(7));
+        assert_eq!(Outcome::Paused(molt_treasury::scan::ScanFault::UpdateNeeded(1)).tip(Some(7)), Some(7));
+        assert_eq!(Outcome::Fault("bad".into()).tip(Some(7)), None);
+        assert_eq!(Outcome::Syncing("syncing".into()).tip(None), None);
+        let (mut st, c) = seat_with_purse("a", &[]);
+        st.purse.scan.task = Some(tokio::spawn(async {}));
+        let generation = Some(st.purse.scan.generation);
+        let report = |daemon_height| ScanReport {
+            scan_height: c.birthday,
+            daemon_height,
+            paused: None,
+            error: "daemon: syncing".to_string(),
+            connected: true,
+            state: Vec::new(),
+            generation,
+        };
+        let first = report(None);
+        st.cmd_net_wallet_scan(first).expect("ack");
+        assert_eq!(st.purse.scan.daemon_height, None);
+        st.purse.scan.daemon_height = Some(c.birthday + 50);
+        let again = report(None);
+        st.cmd_net_wallet_scan(again).expect("ack");
+        assert_eq!(st.purse.scan.daemon_height, Some(c.birthday + 50));
     }
 
     /// A syncing daemon answers: connected, not paused; a fault is not the fork.

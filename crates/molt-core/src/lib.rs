@@ -5057,8 +5057,9 @@ pub enum Command {
     NetWalletScan {
         /// Scanned up to here.
         scan_height: u64,
-        /// The daemon's height.
-        daemon_height: u64,
+        /// The daemon's height, when this round got a trusted one.
+        #[serde(default)]
+        daemon_height: Option<u64>,
         /// Why scanning stopped, if it did.
         #[serde(default)]
         paused: Option<String>,

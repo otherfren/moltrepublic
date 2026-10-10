@@ -736,7 +736,9 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    with `connected` true; only `update needed` emits `WalletScanPaused`.
    History is one row per transaction, newest first; confirmations are
    `daemon_height + 1 - height` (the daemon's top block counts, as in
-   Monero's wallet), as the balance rule counts them. A time lock opens
+   Monero's wallet), as the balance rule counts them, capped at the
+   scanned chain (fix round: a claimed tip is cheap); only a round that
+   read blocks or caught up reports its tip. A time lock opens
    on the newest scanned block's time. The scan layout is
    `molt-wallet-scan-v3`: the purse's address (another purse's file, or
    a purse swapped in session, rescans), each remembered block's time,

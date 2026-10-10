@@ -107,7 +107,7 @@ async fn the_unbuilt_doors_refuse_compactly() {
     }
     let scan = Command::NetWalletScan {
         scan_height: 1,
-        daemon_height: 2,
+        daemon_height: Some(2),
         paused: Some("update needed".to_string()),
         error: String::new(),
         connected: true,
