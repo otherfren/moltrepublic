@@ -95,6 +95,9 @@ pub enum RelayUrlError {
     Fragment,
     /// Longer than [`MAX_URL_LEN`] bytes.
     TooLong,
+    /// A `?query` on a daemon URL: requests go to `<path>/<route>`, so it
+    /// would never be sent. Relay URLs keep theirs.
+    Query,
     /// The spelling is not what the WHATWG parser would dial: a percent
     /// escape, an alternate IPv4 notation (`0x7f.1`, plain integer, octal,
     /// leading zeros), an odd port spelling. Every real client dials the
@@ -122,6 +125,7 @@ impl core::fmt::Display for RelayUrlError {
             Self::Userinfo => f.write_str("credentials do not belong in a relay URL"),
             Self::Fragment => f.write_str("a relay URL cannot carry a #fragment"),
             Self::TooLong => write!(f, "the relay URL is longer than {MAX_URL_LEN} bytes"),
+            Self::Query => f.write_str("the URL cannot carry a ?query"),
             Self::NonCanonical => f.write_str(
                 "not the canonical spelling - write host, IP and port plainly \
                  (e.g. wss://relay.example.org or ws://192.168.1.5:7777)",
@@ -170,6 +174,7 @@ impl core::fmt::Display for DaemonUrlError {
             RelayUrlError::Junk => f.write_str("the node URL contains whitespace or control characters"),
             RelayUrlError::Fragment => f.write_str("a node URL cannot carry a #fragment"),
             RelayUrlError::TooLong => write!(f, "the node URL is longer than {MAX_URL_LEN} bytes"),
+            RelayUrlError::Query => f.write_str("a node URL cannot carry a ?query"),
             RelayUrlError::NonCanonical => f.write_str(
                 "not the canonical spelling - write host, IP and port plainly \
                  (e.g. https://node.example.org:18089)",
@@ -183,7 +188,11 @@ impl core::fmt::Display for DaemonUrlError {
 /// the relay host rule with the web schemes. Unlike
 /// [`relay_kind`] it fails closed: a refused URL is never dialed.
 pub fn daemon_kind(url: &str) -> Result<(String, RelayKind), DaemonUrlError> {
-    classified(url, Schemes::DAEMON).map_err(DaemonUrlError)
+    let (url, kind) = classified(url, Schemes::DAEMON).map_err(DaemonUrlError)?;
+    if url.contains('?') {
+        return Err(DaemonUrlError(RelayUrlError::Query));
+    }
+    Ok((url, kind))
 }
 
 /// The secure and the plaintext scheme a URL family accepts.
@@ -1119,6 +1128,8 @@ mod tests {
             ("http://0x7f.1:18081", RelayUrlError::NonCanonical),
             ("https://node.example.org#x", RelayUrlError::Fragment),
             ("http://x.onion", RelayUrlError::OnionAddress),
+            // the daemon is asked at `<path>/<route>`: a query would be dropped
+            ("https://node.example.org/rpc?key=abc", RelayUrlError::Query),
         ] {
             assert_eq!(daemon_kind(bad), Err(DaemonUrlError(want)), "must reject {bad:?}");
         }
@@ -1132,6 +1143,7 @@ mod tests {
             RelayUrlError::Fragment,
             RelayUrlError::TooLong,
             RelayUrlError::NonCanonical,
+            RelayUrlError::Query,
         ] {
             let text = DaemonUrlError(e).to_string();
             assert!(!text.contains("relay") && !text.contains("ws://"), "{e:?}: {text}");

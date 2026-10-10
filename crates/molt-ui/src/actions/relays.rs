@@ -222,7 +222,7 @@ pub(crate) fn relay_add_check(lang: i32, raw: &str, pool: &[String]) -> Result<S
         Err(RelayUrlError::Userinfo) => Err(l.rp_err_userinfo),
         Err(RelayUrlError::Fragment) => Err(l.rp_err_fragment),
         Err(RelayUrlError::TooLong) => Err(l.rp_err_toolong),
-        Err(RelayUrlError::NonCanonical) => Err(l.rp_err_noncanon),
+        Err(RelayUrlError::NonCanonical | RelayUrlError::Query) => Err(l.rp_err_noncanon),
         Ok(url) if pool.contains(&url) => Err(l.rp_err_dup),
         Ok(url) => Ok(url),
     }
