@@ -553,6 +553,12 @@ pub(crate) fn apply_session(
         } else {
             (String::new(), false)
         };
+        // W5: a fresh export refused over a damaged key part file offers
+        // to set it aside
+        let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+        if failed && ex.result.ends_with(&damaged) && ui.get_export_note() != note.as_str() {
+            ui.global::<crate::Purse>().set_loss_open(true);
+        }
         ui.set_export_note(note.into());
         ui.set_export_failed(failed);
         ui.set_export_ws(ex.workspace.as_str().into());
@@ -682,7 +688,12 @@ pub(crate) fn apply_session(
             // in-progress note, not an error
             ui.invoke_show_toast(s.get_toast_reattaching());
         } else if let Some(err) = sv.notice.strip_prefix("backup-failed:") {
-            ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_failed()).into());
+            // W5: a damaged key part file holds every backup until set aside
+            if err == molt_storage::StorageError::WalletKeysDamaged.to_string() {
+                ui.global::<crate::Purse>().set_loss_open(true);
+            } else {
+                ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_failed()).into());
+            }
         } else if let Some(err) = sv.notice.strip_prefix("backup-prune-failed:") {
             ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_prune()).into());
         } else if let Some(err) = sv.notice.strip_prefix("backup-quota:") {
@@ -771,6 +782,8 @@ pub(crate) fn apply_session(
     // a draft field: push it on every update, even while an unsaved form edit
     // suppresses the draft mirror
     apply_relays(ui, sv);
+    // …and so is the purse's node (its one door is patch_settings)
+    crate::wallet::apply_node(ui, lang, &sv.settings);
 
     if !settings_changed {
         apply_strings(ui, lang);
@@ -1502,6 +1515,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // authority, this is what the member-picture fit aims at
     ui.set_mp_img_budget(i32::try_from(b.org_stats.image_budget).unwrap_or(i32::MAX));
     crate::surfaces::apply_vault(ui, b);
+    crate::wallet::apply_wallet(ui, b.lang, b.wallet.as_ref());
     crate::actions::kanban::apply(ui, b);
 }
 

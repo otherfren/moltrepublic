@@ -19,7 +19,8 @@ steps 2-5, 2026-10-09); the init vote with its daemon transport (step 6,
 2026-10-10); the run, the attestations, the purse record and the
 restart (step 7a, 2026-10-10); the founding's purse stage, the status
 frames and the view key for a seat without a key part (step 7b,
-2026-10-10); the scanner (step 8, 2026-10-10). **Scope is Stage 1 only:** found the
+2026-10-10); the scanner (step 8, 2026-10-10); the purse UI (step 9,
+2026-10-10). **Scope is Stage 1 only:** found the
 purse, receive, watch. Spending (Stage 2) is gated on upstream (§8).
 
 ---

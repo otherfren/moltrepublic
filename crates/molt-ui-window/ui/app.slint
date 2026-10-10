@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick, VaultDepositRow, VaultGrantRow, VaultUnsealedRow } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
@@ -30,9 +30,9 @@ import {
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
-import { MemoryPane, QuestsPane, BasketBar, VaultPane, WalletPane } from "surfaces.slint";
+import { MemoryPane, QuestsPane, BasketBar, VaultPane, WalletPane, PurseStage } from "surfaces.slint";
 
-export { Strings, Theme, WikiState, PatchView, Poke, HintTip, Kanban }
+export { Strings, Theme, WikiState, PatchView, Poke, HintTip, Kanban, Purse }
 
 // A settings form group: caption sitting tight above its control(s), so a
 // label+field pair reads as one unit inside the wider panel rhythm.
@@ -1987,12 +1987,15 @@ export component AppWindow inherits Window {
     // the one charter length limit, engine and UI alike (AGENDA_MAX)
     property <int> cw-agenda-max: 4096;
     // the charter step's feature selection (charter_features.md): chat is
-    // core and not a property; shared memory defaults on; the wallet is
-    // locked off (not built). Read by the Rust create-propose handler,
-    // reset with the form.
+    // core and not a property; shared memory defaults on. Read by the Rust
+    // create-propose handler, reset with the form.
     in-out property <bool> cw-feat-memory: true;
     in-out property <bool> cw-feat-quests: false;
     in-out property <bool> cw-feat-vault: false;
+    // the purse (W9): on by default where W1 (2 <= m <= n-1) holds
+    in-out property <bool> cw-feat-wallet: true;
+    out property <bool> cw-wallet-allowed: root.cw-threshold >= 2
+        && root.cw-threshold <= root.cw-members - 1;
     // vault spec §3: m >= 2 and m <= n-2; m and n are fixed at setup
     out property <bool> cw-vault-allowed: root.cw-threshold >= 2
         && root.cw-threshold <= root.cw-members - 2;
@@ -2367,6 +2370,7 @@ export component AppWindow inherits Window {
     property <bool> of-memory-draft;
     property <bool> of-quests-draft;
     property <bool> of-vault-draft;
+    property <bool> of-wallet-draft;
     in-out property <bool> org-relays-modal-open: false;
     // R6 pool-edit modal: the draft as ROWS plus the space-joined payload
     // string — the Rust side keeps the two in step (set-relay-draft-rows)
@@ -2435,6 +2439,8 @@ export component AppWindow inherits Window {
     property <string> relay-clearnet-url;
     property <int> relay-clearnet-kind: 1; // 1 clearnet · 2 local
     property <bool> relay-clearnet-ack: false;
+    // the node's twin of the acknowledgement, unchecked on every open
+    property <bool> wl-node-ack: false;
     function open-clearnet-warning(url: string, kind: int) {
         root.relay-clearnet-url = url;
         root.relay-clearnet-kind = kind;
@@ -2817,6 +2823,7 @@ export component AppWindow inherits Window {
         root.cw-feat-memory = true;
         root.cw-feat-quests = false;
         root.cw-feat-vault = false;
+        root.cw-feat-wallet = true;
         root.cw-fold = -1;
     }
 
@@ -3414,14 +3421,16 @@ export component AppWindow inherits Window {
             if root.screen == AppScreen.create: WizardFrame {
                 // steps: configure · ritual/invites · charter · phrase & enter
                 property <int> cur: root.cw-step == 0 ? 0
-                    : (root.cw-outcome == 1 ? 3
+                    : (root.cw-outcome == 1 ? (Purse.founding ? 4 : 3)
                     : ((root.cw-can-propose || root.cw-proposed) && root.cw-outcome == 0 ? 2 : 1));
                 title: Strings.cw-title;
-                steps: 4;
+                // the purse stage is the last step where the charter has it (W9)
+                steps: Purse.founding || root.cw-prop-wallet ? 5 : 4;
                 step: self.cur;
                 step-label: self.cur == 0 ? Strings.wiz-step-setup
                     : (self.cur == 1 ? Strings.wiz-step-invites
-                    : (self.cur == 2 ? Strings.wiz-step-charter : Strings.wiz-step-enter));
+                    : (self.cur == 2 ? Strings.wiz-step-charter
+                    : (self.cur == 4 ? Strings.wl-stage-title : Strings.wiz-step-enter)));
                 // always armed: a stuck ritual (a spent link, absent
                 // joiners) must be abortable. Mid-run it asks first —
                 // aborting voids every distributed invite link.
@@ -3825,6 +3834,13 @@ export component AppWindow inherits Window {
                         title: root.cw-name;
                         hint: "\{root.cw-threshold}-of-\{root.cw-members}";
                     }
+                    // then the purse stage on its own (W9); Enter republic
+                    // stays open throughout (I15)
+                    if root.cw-outcome == 1 && Purse.founding: RestoreWay {
+                        title: Strings.wl-stage-title;
+                        icon: @image-url("assets/treasury.svg");
+                        PurseStage { }
+                    }
 
                     // the charter is OUT — the founder waits, and the screen
                     // must SAY so (a silent lobby right after "Propose &
@@ -3943,9 +3959,7 @@ export component AppWindow inherits Window {
                             }
                             // the feature selection, ratified with the
                             // charter: chat is core (locked on); the
-                            // wallet is not built yet (locked off);
-                            // the vault is founding-only and bounded by
-                            // m and n
+                            // vault and the purse are bounded by m and n
                             // content-sized, anchored left - the panel must
                             // not stretch across the step's width
                             HorizontalLayout {
@@ -3991,7 +4005,35 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                             Row {
-                                                AppCheck { width: 180px; label: Strings.feat-wallet; checked: false; enabled: false; }
+                                                HorizontalLayout {
+                                                    spacing: 10px;
+                                                    if root.cw-wallet-allowed: AppCheck {
+                                                        width: 180px;
+                                                        label: Strings.feat-wallet;
+                                                        checked <=> root.cw-feat-wallet;
+                                                    }
+                                                    if !root.cw-wallet-allowed: AppCheck {
+                                                        width: 180px;
+                                                        label: Strings.feat-wallet;
+                                                        checked: false;
+                                                        enabled: false;
+                                                    }
+                                                    if !root.cw-wallet-allowed: Text {
+                                                        text: root.cw-threshold < 2 ? Strings.wl-bounds-low : Strings.wl-bounds-high;
+                                                        color: Theme.faint;
+                                                        font-size: Theme.fs-cap;
+                                                        vertical-alignment: center;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // what ticking the purse consents to (design §3.3)
+                                        if root.cw-wallet-allowed && root.cw-feat-wallet: VerticalLayout {
+                                            spacing: 2px;
+                                            for line in [Strings.wl-note-sees, Strings.wl-note-lost, Strings.wl-note-spend]: Text {
+                                                text: line;
+                                                color: Theme.dim;
+                                                font-size: Theme.fs-cap;
                                             }
                                         }
                                     }
@@ -4672,15 +4714,16 @@ export component AppWindow inherits Window {
                 // steps mirror the founder's four: invite · joining ·
                 // charter & features (the proposal arrived; ratify + phrase
                 // proof) · enter — so both sides' headers read the same
-                property <int> cur: root.jw-sealed ? 3
+                property <int> cur: root.jw-sealed ? (Purse.founding ? 4 : 3)
                     : (root.jw-step == 0 ? 0
                     : (root.jw-proposed-name != "" ? 2 : 1));
                 title: Strings.jw-title;
-                steps: 4;
+                steps: Purse.founding || root.jw-feat-wallet ? 5 : 4;
                 step: self.cur;
                 step-label: self.cur == 0 ? Strings.wiz-step-invite
                     : (self.cur == 1 ? Strings.wiz-step-joining
-                    : (self.cur == 2 ? Strings.wiz-step-charter : Strings.wiz-step-enter));
+                    : (self.cur == 2 ? Strings.wiz-step-charter
+                    : (self.cur == 4 ? Strings.wl-stage-title : Strings.wiz-step-enter)));
                 // always armed: a joiner stuck waiting (spent link,
                 // vanished founder) must never be trapped — cancel
                 // invalidates the in-flight join task engine-side
@@ -4874,6 +4917,11 @@ export component AppWindow inherits Window {
                     if root.jw-sealed: SealedPanel {
                         title: root.jw-republic;
                         hint: root.jw-rule;
+                    }
+                    if root.jw-sealed && Purse.founding: RestoreWay {
+                        title: Strings.wl-stage-title;
+                        icon: @image-url("assets/treasury.svg");
+                        PurseStage { }
                     }
                     if !root.jw-sealed: RunView {
                         vertical-stretch: 0;
@@ -6402,6 +6450,7 @@ export component AppWindow inherits Window {
                                                 root.of-memory-draft = root.org-feat-memory;
                                                 root.of-quests-draft = root.org-feat-quests;
                                                 root.of-vault-draft = false;
+                                                root.of-wallet-draft = false;
                                                 root.org-features-modal-open = true;
                                             }
                                         }
@@ -7495,7 +7544,8 @@ export component AppWindow inherits Window {
                                 root.show-toast(Strings.toast-copied);
                             }
                         }
-                        if s.key == "wallet" && root.selected-view != "status": WalletPane {
+                        if s.key == "wallet": WalletPane {
+                            vertical-stretch: root.selected-view == "status" ? 0 : 1;
                             view: root.selected-view;
                         }
 
@@ -9119,6 +9169,77 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Modal: the same outside-Tor warning for the purse's node - the one
+    // path from the GUI to a confirmed clearnet or local node.
+    if Purse.confirm-kind > 0: ConfirmModal {
+        dialog-width: 520px;
+        title: Purse.confirm-kind == 2 ? Strings.wl-cn-title-local : Strings.wl-cn-title;
+        body: Purse.confirm-kind == 2 ? Strings.wl-cn-body-local
+            : (root.net-tor-active ? Strings.wl-cn-body-tor : Strings.wl-cn-body-plain);
+        confirm-label: Strings.wl-cn-confirm;
+        confirm-enabled: root.wl-node-ack;
+        dismissed => {
+            Purse.confirm-kind = 0;
+            root.wl-node-ack = false;
+        }
+        confirmed => {
+            Purse.confirm-kind = 0;
+            root.wl-node-ack = false;
+            Purse.node-confirmed(Purse.confirm-url);
+        }
+        Text {
+            text: Purse.confirm-url;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+        AppCheck {
+            label: Strings.wl-cn-ack;
+            checked <=> root.wl-node-ack;
+        }
+        Text {
+            text: Strings.rp-cn-note;
+            color: Theme.faint;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
+        }
+    }
+
+    // Modal: the purse stage over the main window (W10) while a set-up
+    // runs; closing it leaves the run going, the bar stays in the pane.
+    if root.screen == AppScreen.main && Purse.run-active && !Purse.panel-dismissed
+        && Purse.confirm-kind == 0: ConfirmModal {
+        dialog-width: 560px;
+        title: Strings.wl-stage-title;
+        body: "";
+        cancel-label: "";
+        confirm-label: Strings.set-close;
+        dismissed => {
+            Purse.panel-dismissed = true;
+        }
+        confirmed => {
+            Purse.panel-dismissed = true;
+        }
+        PurseStage {
+            later: true;
+        }
+    }
+
+    // Modal: a damaged key part file (W5) - set it aside, view only.
+    if Purse.loss-open: ConfirmModal {
+        title: Strings.wl-loss-title;
+        body: Strings.wl-loss-body;
+        confirm-label: Strings.wl-loss-confirm;
+        dismissed => {
+            Purse.loss-open = false;
+        }
+        confirmed => {
+            Purse.loss-open = false;
+            Purse.acknowledge-loss();
+        }
+    }
+
     // Modal: confirm quitting the program while a workspace is open
     // (raised from Rust's window close-requested handler).
     // Modal: leaving the settings screen with unsaved draft edits. Three ways
@@ -9899,22 +10020,31 @@ export component AppWindow inherits Window {
         confirm-label: Strings.oc-propose;
         confirm-enabled: (root.of-memory-draft && !root.org-feat-memory)
             || (root.of-quests-draft && !root.org-feat-quests)
-            || (root.of-vault-draft && root.org-vault-enable == 1);
+            || (root.of-vault-draft && root.org-vault-enable == 1)
+            || (root.of-wallet-draft && !root.org-feat-wallet && Purse.phase == 2);
         dismissed => {
             root.org-features-modal-open = false;
         }
         confirmed => {
             root.org-features-modal-open = false;
+            if (root.of-wallet-draft && !root.org-feat-wallet && Purse.phase == 2) {
+                Purse.set-up();
+            }
             // OR-in the LIVE flags: a peer's enable can commit while the
             // modal is open, and the stale draft would then propose a set
             // omitting it - refused by the engine for a box the user never
             // touched (review 2026-08-12)
             // the wallet never rides: only its set-up vote adds it, and
-            // the engine keeps an enabled vault or wallet by union
-            root.org-propose("set_features",
-                (root.of-memory-draft || root.org-feat-memory ? " memory" : "")
-                + (root.of-quests-draft || root.org-feat-quests ? " quests" : "")
-                + (root.of-vault-draft && root.org-vault-enable == 1 ? " vault" : ""));
+            // the engine keeps an enabled vault or wallet by union; a
+            // purse alone proposes no set_features
+            if ((root.of-memory-draft && !root.org-feat-memory)
+                || (root.of-quests-draft && !root.org-feat-quests)
+                || (root.of-vault-draft && root.org-vault-enable == 1)) {
+                root.org-propose("set_features",
+                    (root.of-memory-draft || root.org-feat-memory ? " memory" : "")
+                    + (root.of-quests-draft || root.org-feat-quests ? " quests" : "")
+                    + (root.of-vault-draft && root.org-vault-enable == 1 ? " vault" : ""));
+            }
         }
         VerticalLayout {
             spacing: 4px;
@@ -9952,11 +10082,27 @@ export component AppWindow inherits Window {
                     vertical-alignment: center;
                 }
             }
-            // the wallet is not built yet: locked like in the wizard
-            AppCheck {
+            // the purse (W4): its own set-up vote, never a set_features key
+            if root.org-feat-wallet: AppCheck { label: Strings.feat-wallet; checked: true; enabled: false; }
+            if !root.org-feat-wallet && Purse.phase == 2: AppCheck {
                 label: Strings.feat-wallet;
-                checked: root.org-feat-wallet;
-                enabled: false;
+                checked <=> root.of-wallet-draft;
+            }
+            if !root.org-feat-wallet && Purse.phase != 2: HorizontalLayout {
+                height: 28px * Theme.ui-scale;
+                spacing: 10px;
+                Text {
+                    text: Strings.feat-wallet;
+                    color: Theme.dim;
+                    font-size: Theme.fs-body;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: Purse.phase == 1 ? Strings.wl-bounds : Strings.wl-not-chain;
+                    color: Theme.faint;
+                    font-size: Theme.fs-cap;
+                    vertical-alignment: center;
+                }
             }
         }
     }

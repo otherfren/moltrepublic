@@ -2175,6 +2175,15 @@ export component CharterView inherits Rectangle {
                             AppCheck { width: 180px; label: Strings.feat-wallet; checked: root.feat-wallet; enabled: false; }
                         }
                     }
+                    // ratifying the purse is consenting to these (design §3.3)
+                    if root.feat-wallet: VerticalLayout {
+                        spacing: 2px;
+                        for line in [Strings.wl-note-sees, Strings.wl-note-lost, Strings.wl-note-spend]: Text {
+                            text: line;
+                            color: Theme.dim;
+                            font-size: Theme.fs-cap;
+                        }
+                    }
                 }
             }
         }

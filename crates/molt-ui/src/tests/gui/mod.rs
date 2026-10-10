@@ -29,6 +29,8 @@ mod vault;
 #[cfg(feature = "live-preview")]
 mod vault_charter;
 mod version_panel;
+#[cfg(feature = "live-preview")]
+mod wallet;
 mod wiki;
 #[cfg(feature = "live-preview")]
 mod wiki_files;

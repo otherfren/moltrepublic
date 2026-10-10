@@ -106,18 +106,18 @@ fn the_vault_box_is_off_by_default() {
     i_slint_backend_testing::init_no_event_loop();
     let (ui, _shown) = charter_step(2, 4);
     assert!(!ui.get_cw_feat_vault(), "unticked");
-    assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string()]);
+    assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string(), "wallet".to_string()]);
 }
 
 #[test]
 fn a_ticked_vault_reaches_create_propose() {
     i_slint_backend_testing::init_no_event_loop();
     let (ui, _shown) = charter_step(2, 4);
-    assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string()]);
+    assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string(), "wallet".to_string()]);
     click(&ui, &wizard_vault_box(&ui));
     assert_eq!(
         crate::actions::ritual::charter_features(&ui),
-        vec!["memory".to_string(), "vault".to_string()]
+        vec!["memory".to_string(), "vault".to_string(), "wallet".to_string()]
     );
 }
 
@@ -279,7 +279,7 @@ fn a_ticked_kanban_reaches_create_propose() {
     click(&ui, &found.remove(0));
     assert_eq!(
         crate::actions::ritual::charter_features(&ui),
-        vec!["memory".to_string(), "quests".to_string()]
+        vec!["memory".to_string(), "quests".to_string(), "wallet".to_string()]
     );
 }
 

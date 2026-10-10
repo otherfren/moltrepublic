@@ -748,7 +748,22 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    Regtest: monerod (fakechain) takes mainnet addresses.
    §10 tests: `tests/wallet_scan.rs`, `tests/wallet_regtest.rs`
    (`#[ignore]`, `MOLT_TEST_MONEROD`).
-9. [ ] §11 UI.
+9. [x] §11 UI (2026-10-10). The `Purse` global (`theme.slint`) carries
+   one rendered state for the pane, the wizard's last step and the panel;
+   `molt-ui/src/wallet.rs` fills it from `WalletView` (amounts, the U2
+   line, the QR as `monero:<address>` with a 4-module quiet zone) and
+   `actions/wallet.rs` drives the four seat tools and the node
+   (`patch_settings`; a non-onion node gets the relay-style
+   acknowledgement once, then non-onion dialing goes on like a confirmed
+   relay's). Details (U6) are the `status` view, open rather than
+   collapsed, above the purse's votes; `settings` is the node field. The
+   gather reads the Wallet snapshot even without a nav row, so the
+   organization dialog knows the phase. The panel opens on a new run or
+   a new consent question; closed, the bar stays in Balance. The loss
+   dialog opens on the backup hold's notice and on a manual export
+   refused for the damaged file. English refusal toasts stay the MCP
+   text (one names `wallet_init`; no GUI path reaches it).
+   Tests: `tests/wallet.rs`, `tests/gui/wallet.rs` (live-preview).
 10. [ ] clippy pro Crate = 0; Suiten grün; Review über den Gesamt-Diff;
     master.
 

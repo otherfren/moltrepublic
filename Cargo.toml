@@ -199,6 +199,8 @@ tantivy = { version = "0.26", default-features = false, features = ["lz4-compres
 # block-level diffs for the wiki's pending-change preview (molt-ui) — the
 # insta/cargo-insta diff engine, not a hand-rolled LCS
 similar     = "2"
+# the purse's deposit QR (wallet plan §6): module grid only, no image stack
+qrcode      = { version = "0.14", default-features = false }
 
 [workspace.package]
 version    = "0.0.8"

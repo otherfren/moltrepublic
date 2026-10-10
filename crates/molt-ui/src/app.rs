@@ -175,6 +175,7 @@ pub fn run_app(
     actions::chat::wire(&ui, &ctx);
     actions::org::wire(&ui, &ctx);
     actions::vault::wire(&ui, &ctx);
+    actions::wallet::wire(&ui, &ctx);
     actions::kanban::wire(&ui, &ctx);
     // Quit confirmed from the modal: end the Slint event loop so `ui.run()`
     // returns and the process shuts down.

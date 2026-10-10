@@ -190,6 +190,9 @@ pub(crate) struct SurfacesBundle {
     pub(crate) group_unread: i32,
     /// The vault's read model (`None` = no vault surface in this charter).
     pub(crate) vault: Option<molt_core::vault::VaultView>,
+    /// The purse's read model, read whether or not the nav lists the
+    /// surface (the set-up offer lives outside it); `None` = nothing open.
+    pub(crate) wallet: Option<molt_core::wallet::WalletView>,
     /// The open workspace (a switch resets the board's local state).
     pub(crate) workspace: String,
     /// The Kanban board (`None` = no quests surface in this charter).
@@ -1139,6 +1142,16 @@ pub(crate) async fn gather_surfaces(
         .iter()
         .find(|(sf, _)| *sf == Surface::Vault)
         .and_then(|(_, snap)| snap.vault.clone());
+    let purse = match snaps.iter().find(|(sf, _)| *sf == Surface::Wallet) {
+        Some((_, snap)) => snap.wallet.as_deref().cloned(),
+        None => match wallet
+            .execute(Command::ReadState { surface: Surface::Wallet, channel: None, view: None })
+            .await
+        {
+            Ok(Reply::State(snap)) => snap.wallet.map(|v| *v),
+            _ => None,
+        },
+    };
     let quests = snaps.iter().find(|(sf, _)| *sf == Surface::Quests).map(|(_, snap)| snap.clone());
     let kanban = match quests {
         Some(snap) => {
@@ -1195,6 +1208,7 @@ pub(crate) async fn gather_surfaces(
         org_stats,
         group_unread,
         vault,
+        wallet: purse,
         workspace: active_ws.clone(),
         kanban,
     };
@@ -1821,6 +1835,9 @@ pub(crate) fn display_title(lang: i32, v: &serde_json::Value) -> String {
         };
     }
     if let Some(t) = vault_title(lang, v, &VaultView::default(), false) {
+        return t;
+    }
+    if let Some(t) = crate::wallet::op_title(lang, op) {
         return t;
     }
     op.and_then(|o| org_op_label(lang, o))

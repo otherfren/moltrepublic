@@ -2178,31 +2178,138 @@ export global Strings {
     in property <string> vt-t-replace;
     in property <string> vt-t-grant;
     in property <string> vt-t-to;
-    // Wallet (Monero multisig)
+    // the purse (wallet plan §11): no crypto words (U1)
+    in property <string> wl-bounds-low;
+    in property <string> wl-bounds-high;
+    in property <string> wl-bounds;
+    in property <string> wl-not-chain;
+    in property <string> wl-note-sees;
+    in property <string> wl-note-lost;
+    in property <string> wl-note-spend;
+    in property <string> wl-warning;
     in property <string> wl-title-balance;
-    in property <string> wl-hint-balance;
-    in property <string> wl-unlocked;
-    in property <string> wl-locked;
-    in property <string> wl-rule-sample;
-    in property <string> wl-pending-sigs;
-    in property <string> wl-title-history;
-    in property <string> wl-hint-history;
-    in property <string> wl-title-send;
-    in property <string> wl-hint-send;
-    in property <string> wl-to-address;
-    in property <string> wl-amount;
-    in property <string> wl-priority;
-    in property <string> wl-prio-low;
-    in property <string> wl-prio-normal;
-    in property <string> wl-prio-high;
-    in property <string> wl-fee;
-    in property <string> wl-propose-transfer;
+    in property <string> wl-pending;
+    in property <string> wl-set-up;
+    in property <string> wl-seal-title;
+    in property <string> wl-not-visible;
     in property <string> wl-title-receive;
-    in property <string> wl-hint-receive;
-    in property <string> wl-subaddress;
-    in property <string> wl-title-settings;
-    in property <string> wl-hint-settings;
+    in property <string> wl-copy;
+    in property <string> wl-no-address;
+    in property <string> wl-title-history;
+    in property <string> wl-copy-txid;
+    in property <string> wl-empty-history;
+    in property <string> wl-title-send;
+    in property <string> wl-send-locked;
+    in property <string> wl-title-details;
     in property <string> wl-node;
-    in property <string> wl-sync;
-    in property <string> wl-signer-set;
+    in property <string> wl-height;
+    in property <string> wl-network;
+    in property <string> wl-parts-held;
+    in property <string> wl-part-held;
+    in property <string> wl-part-view;
+    in property <string> wl-part-unknown;
+    in property <string> wl-paused-update;
+    in property <string> wl-node-fault;
+    in property <string> wl-node-offline;
+    in property <string> wl-no-node;
+    in property <string> wl-title-settings;
+    in property <string> wl-choose-node;
+    in property <string> wl-use;
+    in property <string> wl-waiting;
+    in property <string> wl-missing;
+    in property <string> wl-creating;
+    in property <string> wl-confirming;
+    in property <string> wl-sealing;
+    in property <string> wl-ready;
+    in property <string> wl-try-again;
+    in property <string> wl-online;
+    in property <string> wl-agree;
+    in property <string> wl-decline;
+    in property <string> wl-stage-title;
+    in property <string> wl-r-offline-one;
+    in property <string> wl-r-offline-many;
+    in property <string> wl-r-declined;
+    in property <string> wl-r-restart;
+    in property <string> wl-r-invalid;
+    in property <string> wl-r-mismatch;
+    in property <string> wl-r-storage;
+    in property <string> wl-r-stopped;
+    in property <string> wl-bad-url;
+    in property <string> wl-cn-title;
+    in property <string> wl-cn-title-local;
+    in property <string> wl-cn-body-tor;
+    in property <string> wl-cn-body-plain;
+    in property <string> wl-cn-body-local;
+    in property <string> wl-cn-ack;
+    in property <string> wl-cn-confirm;
+    in property <string> wl-loss-title;
+    in property <string> wl-loss-body;
+    in property <string> wl-loss-confirm;
+}
+
+// One received transfer of the purse (WalletView.history, pre-rendered).
+export struct WalletTxRow {
+    incoming: bool,
+    amount: string, // "+ 1.25 XMR"
+    date: string,
+    conf: string, // "3/20" until confirmed
+    confirmed: bool,
+    txid: string,
+}
+
+// One seat's key part, under the purse's Details (U6).
+export struct WalletSeatRow {
+    name: string,
+    part: string, // "key part" · "view only" · "unknown"
+    held: bool,
+}
+
+// The purse (wallet plan §11): one state for the pane, the founding
+// wizard's last step and the panel over the main window. Rendered in Rust
+// from the engine's WalletView; U1: no crypto words in any of it.
+export global Purse {
+    // 0 not a chain republic · 1 outside the bounds · 2 no purse ·
+    // 3 set-up voted, no purse yet · 4 ready
+    in property <int> phase;
+    // this session founded the republic with the purse: the wizard ends
+    // with the purse stage
+    in property <bool> founding;
+    in property <string> balance; // "1.25 XMR"
+    in property <string> pending; // "0.5 XMR pending" ("" = none)
+    in property <bool> can-watch;
+    in property <string> address;
+    in property <image> qr; // the monero: URI
+    in property <[WalletTxRow]> history;
+    in property <[WalletSeatRow]> seats;
+    in property <string> node-line;
+    in property <string> height-line;
+    in property <string> network;
+    in property <string> parts-line; // "4/5"
+    in property <string> fault-line; // "" = scanning normally
+    // the current set-up (U2): one bar, one line
+    in property <bool> run-active; // a run is on and not done
+    in property <string> run-line;
+    in property <string> run-missing;
+    in property <float> run-progress;
+    in property <bool> run-aborted;
+    in property <bool> needs-consent;
+    // the node, like the Monero GUI's remote node: one field, one button
+    in property <string> node;
+    in-out property <string> node-draft;
+    in-out property <string> node-error;
+    // a non-onion node waits for the exposure acknowledgement:
+    // 0 none · 1 clearnet · 2 local
+    in-out property <int> confirm-kind;
+    in-out property <string> confirm-url;
+    // the panel over the main window (W10); closing it keeps the run going
+    in-out property <bool> panel-dismissed;
+    // a damaged key part file waits for its acknowledgement
+    in-out property <bool> loss-open;
+    callback set-up();
+    callback consent(bool);
+    callback retry();
+    callback use-node(string);
+    callback node-confirmed(string);
+    callback acknowledge-loss();
+    callback copy(string);
 }

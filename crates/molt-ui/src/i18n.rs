@@ -56,13 +56,13 @@ fn localize_wallet_refusal(r: &molt_core::wallet::WalletRefusal) -> String {
         W::Bounds => "braucht 2 <= m <= n-1".into(),
         W::InitExists => "schon eingerichtet".into(),
         W::InitPending => "Abstimmung läuft".into(),
-        W::NoDaemon => "kein Daemon".into(),
-        W::Checking => "Daemon wird gefragt".into(),
+        W::NoDaemon => "kein Node".into(),
+        W::Checking => "Node wird gefragt".into(),
         W::Daemon(t) => t.clone(),
         W::Birthday => "Starthöhe außerhalb des Bereichs".into(),
         W::Network => "anderes Netzwerk".into(),
         W::UnknownOp => "unbekannte Op".into(),
-        W::UseInit => "wallet_init verwenden".into(),
+        W::UseInit => "über Kasse einrichten".into(),
         W::Held(inner) => format!("{} - Zustimmung vorgemerkt", localize_wallet_refusal(inner)),
         W::Cancelled => "Einrichtung abgebrochen".into(),
         W::NoRun => "keine Einrichtung läuft".into(),
@@ -1660,30 +1660,70 @@ lexicon! {
     vt_t_replace: "replace", "Ersetzen";
     vt_t_grant: "grant", "Freigabe";
     vt_t_to: "to", "an";
-    wl_title_balance: "Treasury balance", "Kassenstand";
-    wl_hint_balance: "The shared Monero multisig wallet - no single member can spend from it.", "Die gemeinsame Monero-Multisig-Wallet - kein einzelnes Mitglied kann daraus ausgeben.";
-    wl_unlocked: "unlocked", "verfügbar";
-    wl_locked: "locked", "in Bestätigung";
-    wl_rule_sample: "3-of-4 multisig", "3-von-4-Multisig";
-    wl_pending_sigs: "Awaiting signatures", "Warten auf Signaturen";
-    wl_title_history: "Transfers", "Transfers";
-    wl_hint_history: "Every movement of the treasury, confirmations included.", "Jede Bewegung der Kasse, samt Bestätigungen.";
-    wl_title_send: "Send from the treasury", "Aus der Kasse senden";
-    wl_hint_send: "A transfer is a threshold vote.", "Ein Transfer ist ein Threshold-Vote.";
-    wl_to_address: "Recipient address", "Empfängeradresse";
-    wl_amount: "Amount (XMR)", "Betrag (XMR)";
-    wl_priority: "Priority", "Priorität";
-    wl_prio_low: "Low", "Niedrig";
-    wl_prio_normal: "Normal", "Normal";
-    wl_prio_high: "High", "Hoch";
-    wl_fee: "network fee", "Netzwerkgebühr";
-    wl_propose_transfer: "Propose transfer", "Transfer vorschlagen";
-    wl_title_receive: "Receive into the treasury", "In die Kasse empfangen";
-    wl_hint_receive: "Deposits land in the treasury - visible to every member.", "Einzahlungen landen in der Kasse - sichtbar für jedes Mitglied.";
-    wl_subaddress: "Shared subaddress", "Gemeinsame Subadresse";
-    wl_title_settings: "Wallet settings", "Wallet-Einstellungen";
-    wl_hint_settings: "This node's Monero connection - the signers are fixed.", "Die Monero-Anbindung dieses Nodes - der Signer-Kreis ist fest.";
-    wl_node: "Monero node", "Monero-Node";
-    wl_sync: "Sync height", "Sync-Höhe";
-    wl_signer_set: "Signer set", "Signer-Kreis";
+    wl_bounds_low: "needs a threshold of 2 or more", "braucht Schwelle ab 2";
+    wl_bounds_high: "needs a threshold below the member count", "braucht Schwelle unter der Mitgliederzahl";
+    wl_bounds: "needs a threshold from 2 to one below the member count", "braucht Schwelle von 2 bis eins unter der Mitgliederzahl";
+    wl_not_chain: "needs a chain republic", "braucht eine Chain-Republik";
+    wl_note_sees: "Every member sees the purse's balance.", "Jedes Mitglied sieht den Kassenstand.";
+    wl_note_lost: "A key part lost without a backup is gone.", "Ein Schlüsselteil ohne Backup ist bei Verlust weg.";
+    wl_note_spend: "Spending does not work yet.", "Ausgeben geht noch nicht.";
+    wl_warning: "Spending does not work yet. Money sent here is gone.", "Ausgeben geht noch nicht. Hierher gesendetes Geld ist verloren.";
+    wl_title_balance: "Balance", "Kassenstand";
+    wl_pending: "pending", "ausstehend";
+    wl_set_up: "Set up the purse", "Kasse einrichten";
+    wl_seal_title: "Seal the purse", "Kasse besiegeln";
+    wl_not_visible: "Balance not visible yet", "Kassenstand noch nicht sichtbar";
+    wl_title_receive: "Receive", "Empfangen";
+    wl_copy: "Copy", "Kopieren";
+    wl_no_address: "No purse yet", "Noch keine Kasse";
+    wl_title_history: "History", "Verlauf";
+    wl_copy_txid: "Copy txid", "txid kopieren";
+    wl_empty_history: "Nothing received yet", "Noch nichts empfangen";
+    wl_title_send: "Send", "Senden";
+    wl_send_locked: "Spending is not available yet.", "Ausgeben ist noch nicht verfügbar.";
+    wl_title_details: "Details", "Details";
+    wl_node: "Node", "Node";
+    wl_height: "Height", "Höhe";
+    wl_network: "Network", "Netzwerk";
+    wl_parts_held: "Key parts held", "Schlüsselteile gehalten";
+    wl_part_held: "key part", "Schlüsselteil";
+    wl_part_view: "view only", "nur ansehen";
+    wl_part_unknown: "unknown", "unbekannt";
+    wl_paused_update: "Scanning paused: update needed", "Abgleich pausiert: Update nötig";
+    wl_node_fault: "Node fault", "Node-Fehler";
+    wl_node_offline: "Node not reachable", "Node nicht erreichbar";
+    wl_no_node: "none", "keiner";
+    wl_title_settings: "Node", "Node";
+    wl_choose_node: "Choose a node", "Node wählen";
+    wl_use: "Use", "Verwenden";
+    wl_waiting: "Waiting for members", "Warte auf Mitglieder";
+    wl_missing: "Missing:", "Es fehlen:";
+    wl_creating: "Creating the purse", "Kasse wird erstellt";
+    wl_confirming: "Confirming", "Bestätigung";
+    wl_sealing: "Sealing", "Besiegeln";
+    wl_ready: "The purse is ready", "Die Kasse steht";
+    wl_try_again: "Try again", "Erneut versuchen";
+    wl_online: "Everyone must be online.", "Alle müssen online sein.";
+    wl_agree: "Agree", "Zustimmen";
+    wl_decline: "Decline", "Ablehnen";
+    wl_stage_title: "Purse", "Kasse";
+    wl_r_offline_one: "is offline", "ist offline";
+    wl_r_offline_many: "are offline", "sind offline";
+    wl_r_declined: "declined", "hat abgelehnt";
+    wl_r_restart: "A member restarted", "Ein Mitglied hat neu gestartet";
+    wl_r_invalid: "A member sent bad data", "Ein Mitglied hat fehlerhafte Daten gesendet";
+    wl_r_mismatch: "Members saw different data", "Mitglieder sahen verschiedene Daten";
+    wl_r_storage: "Could not save the key part", "Schlüsselteil nicht gespeichert";
+    wl_r_stopped: "Set-up stopped", "Einrichtung abgebrochen";
+    wl_bad_url: "not a node address", "keine Node-Adresse";
+    wl_cn_title: "Use a clearnet node?", "Einen Clearnet-Node benutzen?";
+    wl_cn_title_local: "Use a local node?", "Einen lokalen Node benutzen?";
+    wl_cn_body_tor: "Not a .onion service: its operator sees which blocks this node reads and when it is online. Tor hides your IP address - the endpoint stays in someone else's hands.", "Kein .onion-Dienst: Sein Betreiber sieht, welche Blöcke dieser Knoten liest und wann er online ist. Tor verbirgt deine IP-Adresse - der Endpunkt bleibt in fremder Hand.";
+    wl_cn_body_plain: "Not a .onion service: its operator sees your IP address, which blocks this node reads and when it is online. Tor is off, so nothing hides where you connect from.", "Kein .onion-Dienst: Sein Betreiber sieht deine IP-Adresse, welche Blöcke dieser Knoten liest und wann er online ist. Tor ist aus, nichts verbirgt, von wo du dich verbindest.";
+    wl_cn_body_local: "This node is on your machine or local network - reached directly, Tor is not involved. Whoever runs it still sees which blocks this node reads and when it is online.", "Dieser Node liegt auf deinem Rechner oder lokalen Netz - er wird direkt erreicht, ohne Tor. Wer ihn betreibt, sieht trotzdem, welche Blöcke dieser Knoten liest und wann er online ist.";
+    wl_cn_ack: "I understand this and want to use the node.", "Ich habe das verstanden und will den Node benutzen.";
+    wl_cn_confirm: "Confirm node", "Node bestätigen";
+    wl_loss_title: "Key part damaged", "Schlüsselteil beschädigt";
+    wl_loss_body: "The key part file is unreadable. Set it aside to continue view only; backups resume.", "Die Schlüsselteil-Datei ist unlesbar. Beiseitelegen, um nur ansehend weiterzumachen; Backups laufen wieder.";
+    wl_loss_confirm: "Set aside", "Beiseitelegen";
 }

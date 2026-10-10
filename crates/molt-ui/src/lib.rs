@@ -73,6 +73,7 @@ mod net_tor;
 mod patchview;
 mod settings;
 mod surfaces;
+mod wallet;
 mod wiki;
 mod wiki_bridge;
 

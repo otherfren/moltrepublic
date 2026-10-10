@@ -19,6 +19,7 @@ mod ritual;
 mod seed_words;
 mod settings;
 mod surfaces;
+mod wallet;
 
 use std::cell::RefCell;
 use std::collections::HashMap;

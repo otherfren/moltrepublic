@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
-// DESIGN MOCKS for the staged surfaces: Memory (shared brain) and Wallet
-// (Monero multisig); the Vault and the Kanban panes are real (their rows
-// come from the engine).
+// DESIGN MOCKS for the staged surfaces: Memory (shared brain); the Vault,
+// the Kanban and the Wallet panes are real (their rows come from the
+// engine).
 //
 // These panes are badged UX drafts to iterate on look & feel — every dataset
 // below is .slint-side sample data, never engine state. Actions either work
@@ -21,7 +21,7 @@
 // Each pane is one component taking only the selected sub-view key, so the
 // panes stay independently editable under scripts/dev-ui.sh hot-reload.
 
-import { Theme, Strings, HintTip, Kanban, KbCard, KbLine, KbPick, KbType, KbCheck, KbCalBlock, WikiState, WikiNavRow, WikiTabRow, WikiBlock, WikiSpan, WikiProp, VaultDepositRow, VaultGrantRow, VaultUnsealedRow } from "theme.slint";
+import { Theme, Strings, HintTip, Kanban, KbCard, KbLine, KbPick, KbType, KbCheck, KbCalBlock, WikiState, WikiNavRow, WikiTabRow, WikiBlock, WikiSpan, WikiProp, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
 import { AppButton, AppField, AppArea, AppDropdown, ScrollHint, DotLabel, InsetWell } from "components.slint";
 
 // ---------------------------------------------------------------------------
@@ -194,37 +194,6 @@ component TagChip inherits Rectangle {
             height: 100%;
             vertical-alignment: center;
         }
-    }
-}
-
-// The signature-collection meter (the pending-proposal progress idiom):
-// a thin track with an accent fill plus the "x/y signed" caption.
-component SigMeter inherits HorizontalLayout {
-    in property <int> signed;
-    in property <int> need;
-    // the counted word — "signed" by default; the vault's unseal meter
-    // counts re-sealed key shares instead
-    in property <string> word: Strings.vt-signed-word;
-    spacing: 10px;
-    Rectangle {
-        height: 6px;
-        y: (parent.height - self.height) / 2;
-        border-radius: Theme.win95 ? 0px : 3px;
-        background: Theme.line;
-        horizontal-stretch: 1;
-        Rectangle {
-            x: 0;
-            height: parent.height;
-            border-radius: parent.border-radius;
-            width: parent.width * min(1.0, root.signed * 1.0 / max(root.need, 1));
-            background: Theme.accent;
-        }
-    }
-    Text {
-        text: "\{root.signed}/\{root.need} \{root.word}";
-        color: Theme.dim;
-        font-size: Theme.fs-cap;
-        vertical-alignment: center;
     }
 }
 
@@ -4666,36 +4635,15 @@ export component VaultPane inherits VerticalLayout {
     }
 }
 
-// A signer mark on a mock card (the wallet pane).
-struct MockSigner {
-    name: string,
-    signed: bool,
-}
-
 // ---------------------------------------------------------------------------
-// Wallet — Monero multisig
+// Wallet: the purse (wallet plan §11) - looks and reads like the Monero
+// GUI's simple mode; the multi-party machinery stays invisible (U1)
 // ---------------------------------------------------------------------------
-
-struct MockTransfer {
-    incoming: bool,
-    amount: string, // "12.0000"
-    label: string,
-    when: string,
-    conf: int, // confirmations, capped at 10
-    txid: string,
-}
-
-struct MockPendingTx {
-    label: string,
-    amount: string,
-    signed: int,
-    need: int,
-    signers: [MockSigner],
-}
 
 component SettingRow inherits Rectangle {
     in property <string> label;
     in property <string> value;
+    in property <color> tone: Theme.text;
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 8px;
     border-width: Theme.border-w;
@@ -4716,10 +4664,186 @@ component SettingRow inherits Rectangle {
         }
         Text {
             text: root.value;
-            color: Theme.text;
+            color: root.tone;
             font-size: Theme.fs-body;
             vertical-alignment: center;
             overflow: elide;
+        }
+    }
+}
+
+// The node, like the Monero GUI's remote node: one field, one button.
+export component NodeChooser inherits VerticalLayout {
+    spacing: 6px;
+    Text {
+        text: Strings.wl-choose-node;
+        color: Theme.text;
+        font-size: Theme.fs-body;
+        font-weight: 700;
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        AppField {
+            horizontal-stretch: 1;
+            placeholder: "http://….onion:18081";
+            text <=> Purse.node-draft;
+            invalid: Purse.node-error != "";
+            accepted => {
+                Purse.use-node(Purse.node-draft);
+            }
+        }
+        wl-use-btn := AppButton {
+            label: Strings.wl-use;
+            primary: true;
+            enabled: Purse.node-draft != "";
+            clicked => {
+                Purse.use-node(Purse.node-draft);
+            }
+        }
+    }
+    if Purse.node-error != "": Text {
+        text: Purse.node-error;
+        color: Theme.bad;
+        font-size: Theme.fs-cap;
+    }
+}
+
+// The deposit address with the W11 warning directly above it - never
+// dismissable while spending is unbuilt (design §7) - the QR and Copy.
+export component PurseAddress inherits HorizontalLayout {
+    spacing: 16px;
+    // a QR needs light ground on every theme
+    Rectangle {
+        width: 168px;
+        height: 168px;
+        background: #ffffff;
+        border-radius: Theme.win95 ? 0px : 8px;
+        border-width: Theme.border-w;
+        border-color: Theme.line;
+        Image {
+            x: 8px;
+            y: 8px;
+            width: parent.width - 16px;
+            height: parent.height - 16px;
+            source: Purse.qr;
+            image-rendering: pixelated;
+            accessible-role: image;
+            accessible-label: "QR";
+        }
+    }
+    VerticalLayout {
+        spacing: 8px;
+        alignment: start;
+        horizontal-stretch: 1;
+        wl-warning := Text {
+            text: Strings.wl-warning;
+            color: Theme.bad;
+            font-size: Theme.fs-h2;
+            font-weight: 800;
+            wrap: word-wrap;
+            preferred-width: 0;
+        }
+        Rectangle {
+            background: Theme.bg;
+            border-radius: Theme.win95 ? 0px : 6px;
+            border-width: Theme.border-w;
+            border-color: Theme.line;
+            VerticalLayout {
+                padding: 10px;
+                wl-address := Text {
+                    text: Purse.address;
+                    color: Theme.text;
+                    font-size: Theme.fs-cap;
+                    font-family: "monospace";
+                    wrap: char-wrap;
+                    preferred-width: 0;
+                }
+            }
+        }
+        HorizontalLayout {
+            alignment: start;
+            AppButton {
+                label: Strings.wl-copy;
+                clicked => {
+                    Purse.copy(Purse.address);
+                }
+            }
+        }
+    }
+}
+
+// The purse stage (U2, U4): the node first if none is set, then the one
+// bar, then the address. The founding wizard's last step and the panel
+// over the main window (`later`) are this one component.
+export component PurseStage inherits VerticalLayout {
+    in property <bool> later: false;
+    spacing: 10px;
+    if Purse.phase == 4 && Purse.address != "": PurseAddress { }
+    if Purse.phase != 4 && Purse.node == "": NodeChooser { }
+    if Purse.phase != 4 && Purse.node != "": VerticalLayout {
+        spacing: 8px;
+        Text {
+            text: Purse.run-line;
+            color: Purse.run-aborted ? Theme.bad : Theme.text;
+            font-size: Theme.fs-body;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+        Rectangle {
+            height: 8px;
+            border-radius: Theme.win95 ? 0px : 4px;
+            background: Theme.line;
+            Rectangle {
+                x: 0;
+                height: parent.height;
+                border-radius: parent.border-radius;
+                width: parent.width * max(0.0, min(1.0, Purse.run-progress));
+                background: Purse.run-aborted ? Theme.bad : Theme.accent;
+            }
+        }
+        if Purse.run-missing != "": Text {
+            text: Purse.run-missing;
+            color: Theme.dim;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
+        }
+        if root.later && !Purse.run-aborted: Text {
+            text: Strings.wl-online;
+            color: Theme.dim;
+            font-size: Theme.fs-cap;
+        }
+        if Purse.needs-consent: VerticalLayout {
+            spacing: 4px;
+            for line in [Strings.wl-note-sees, Strings.wl-note-lost, Strings.wl-note-spend]: Text {
+                text: line;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+                wrap: word-wrap;
+            }
+        }
+        if Purse.needs-consent || Purse.run-aborted: HorizontalLayout {
+            spacing: 8px;
+            alignment: start;
+            if Purse.needs-consent: AppButton {
+                label: Strings.wl-agree;
+                primary: true;
+                clicked => {
+                    Purse.consent(true);
+                }
+            }
+            if Purse.needs-consent: AppButton {
+                label: Strings.wl-decline;
+                clicked => {
+                    Purse.consent(false);
+                }
+            }
+            if Purse.run-aborted: AppButton {
+                label: Strings.wl-try-again;
+                primary: true;
+                clicked => {
+                    Purse.retry();
+                }
+            }
         }
     }
 }
@@ -4728,153 +4852,71 @@ export component WalletPane inherits VerticalLayout {
     in property <string> view;
     spacing: 8px;
 
-    // sample data — design mock only, never engine state
-    property <[MockTransfer]> transfers: [
-        { incoming: true, amount: "0.5028", label: "Donation (anonymous)", when: "5 h", conf: 3, txid: "b41c…9e" },
-        { incoming: true, amount: "12.0000", label: "Member top-up - mara", when: "2 d", conf: 10, txid: "9f3c…a1" },
-        { incoming: false, amount: "4.0000", label: "Quest reward - multisig setup", when: "1 w", conf: 10, txid: "77ab…04" },
-        { incoming: true, amount: "25.0000", label: "Member top-up - petra", when: "2 w", conf: 10, txid: "c2d8…5f" },
-        { incoming: false, amount: "2.4000", label: "Relay hosting Q2", when: "1 m", conf: 10, txid: "e901…bc" },
-        { incoming: false, amount: "0.8000", label: "Domain renewal", when: "1 m", conf: 10, txid: "12fe…77" },
-        { incoming: true, amount: "100.0000", label: "Founding treasury", when: "4 m", conf: 10, txid: "a0b1…c2" },
-    ];
-    property <[MockPendingTx]> pending-tx: [
-        { label: "Quest reward - recovery drill → jonas", amount: "5.0000", signed: 1, need: 3, signers: [
-            { name: "petra", signed: true }, { name: "walter", signed: false }, { name: "mara", signed: false }, { name: "jonas", signed: false }] },
-        { label: "Relay hosting Q3", amount: "2.4000", signed: 0, need: 3, signers: [
-            { name: "petra", signed: false }, { name: "walter", signed: false }, { name: "mara", signed: false }, { name: "jonas", signed: false }] },
-    ];
-    // send form: pure pane state for design iteration — the drafts are
-    // bound so typed input survives a view switch (a field that forgets
-    // on tab-away reads as broken, mock or not)
-    property <int> prio: 1;
-    property <string> send-addr;
-    property <string> send-amount;
-
-    // the receive card's decorative pseudo-QR: a deterministic 17×17
-    // module pattern with the three finder squares — design chrome only,
-    // NOT an encoding of the (equally fictional) address below it
-    pure function qr-cell(row: int, col: int) -> bool {
-        if (row <= 6 && col <= 6) {
-            return row == 0 || row == 6 || col == 0 || col == 6 || (row >= 2 && row <= 4 && col >= 2 && col <= 4);
-        }
-        if (row <= 6 && col >= 10) {
-            return row == 0 || row == 6 || col == 10 || col == 16 || (row >= 2 && row <= 4 && col >= 12 && col <= 14);
-        }
-        if (row >= 10 && col <= 6) {
-            return row == 10 || row == 16 || col == 0 || col == 6 || (row >= 12 && row <= 14 && col >= 2 && col <= 4);
-        }
-        return Math.mod(row * 17 + col * 31 + row * col * 7, 11) < 5;
-    }
-
     if root.view != "history" && root.view != "send" && root.view != "receive"
-        && root.view != "settings": VerticalLayout {
+        && root.view != "settings" && root.view != "status": VerticalLayout {
         spacing: 8px;
         PaneHeader {
             glyph: "💰";
             title: Strings.wl-title-balance;
-            hint: Strings.wl-hint-balance;
+            mock: false;
         }
-        // the balance figure — the wallet's signature moment. A real
-        // padded layout, not an anchored one (the parts.slint mis-measure
-        // trap), and the figure rides the font ladder.
-        Rectangle {
-            background: Theme.panel;
-            border-radius: Theme.win95 ? 0px : 8px;
-            border-width: Theme.border-w;
-            border-color: Theme.line;
-            VerticalLayout {
-                padding: 18px;
-                spacing: 8px;
-                HorizontalLayout {
-                    spacing: 10px;
-                    Text {
-                        text: "128.4062";
-                        color: Theme.text;
-                        font-size: Theme.fs-h1 + 10px;
-                        font-weight: 800;
-                    }
-                    Text {
-                        text: "XMR";
-                        color: Theme.faint;
-                        font-size: Theme.fs-h2;
-                        font-weight: 700;
-                        vertical-alignment: bottom;
-                    }
-                    Rectangle {
-                        horizontal-stretch: 1;
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        TagChip {
-                            label: Strings.wl-rule-sample;
-                        }
-                    }
+        PanePanel {
+            if Purse.phase == 4 && Purse.can-watch: VerticalLayout {
+                spacing: 6px;
+                padding: 8px;
+                wl-balance := Text {
+                    text: Purse.balance;
+                    color: Theme.text;
+                    font-size: Theme.fs-h1 + 10px;
+                    font-weight: 800;
                 }
-                HorizontalLayout {
-                    spacing: 18px;
-                    alignment: start;
-                    GlyphCaption {
-                        glyph: "🔓";
-                        label: "121.9034 XMR \{Strings.wl-unlocked}";
-                        tone: Theme.dim;
-                    }
-                    GlyphCaption {
-                        glyph: "⏳";
-                        label: "6.5028 XMR \{Strings.wl-locked}";
-                        tone: Theme.dim;
+                if Purse.pending != "": Text {
+                    text: Purse.pending;
+                    color: Theme.dim;
+                    font-size: Theme.fs-body;
+                }
+            }
+            if Purse.phase == 4 && !Purse.can-watch: VaultNote {
+                text: Strings.wl-not-visible;
+            }
+            if Purse.phase == 4 && Purse.fault-line != "": Text {
+                text: Purse.fault-line;
+                color: Theme.warn;
+                font-size: Theme.fs-cap;
+            }
+            if Purse.phase == 3: PurseStage { }
+            if Purse.phase == 2 && Purse.node == "": NodeChooser { }
+            if Purse.phase == 2 && !Purse.run-active: HorizontalLayout {
+                alignment: start;
+                wl-setup-btn := AppButton {
+                    label: Strings.wl-set-up;
+                    primary: true;
+                    enabled: Purse.node != "";
+                    clicked => {
+                        Purse.set-up();
                     }
                 }
             }
+            if Purse.phase == 1: VaultNote {
+                text: Strings.wl-bounds;
+            }
+            if Purse.phase == 0: VaultNote {
+                text: Strings.wl-not-chain;
+            }
         }
-        // transfers awaiting the threshold's signatures
-        Text {
-            text: Strings.wl-pending-sigs;
-            color: Theme.dim;
-            font-size: Theme.fs-cap;
-            font-weight: 600;
+    }
+
+    if root.view == "receive": VerticalLayout {
+        spacing: 8px;
+        PaneHeader {
+            glyph: "📥";
+            title: Strings.wl-title-receive;
+            mock: false;
         }
         PanePanel {
-            for t in root.pending-tx: Rectangle {
-                background: Theme.panel-2;
-                border-radius: Theme.win95 ? 0px : 8px;
-                border-width: Theme.border-w;
-                border-color: Theme.line;
-                VerticalLayout {
-                    padding: 11px;
-                    spacing: 7px;
-                    HorizontalLayout {
-                        spacing: 10px;
-                        Text {
-                            text: t.label;
-                            color: Theme.text;
-                            font-size: Theme.fs-body;
-                            font-weight: 600;
-                            overflow: elide;
-                            horizontal-stretch: 1;
-                        }
-                        Text {
-                            text: "- \{t.amount} XMR";
-                            color: Theme.text;
-                            font-size: Theme.fs-body;
-                            font-weight: 700;
-                            vertical-alignment: center;
-                        }
-                    }
-                    SigMeter {
-                        signed: t.signed;
-                        need: t.need;
-                    }
-                    HorizontalLayout {
-                        spacing: 6px;
-                        alignment: start;
-                        for m in t.signers: TagChip {
-                            glyph: m.signed ? "✍️" : "";
-                            label: m.name;
-                            muted: !m.signed;
-                        }
-                    }
-                }
+            if Purse.address != "": PurseAddress { }
+            if Purse.address == "": VaultNote {
+                text: Strings.wl-no-address;
             }
         }
     }
@@ -4884,24 +4926,26 @@ export component WalletPane inherits VerticalLayout {
         PaneHeader {
             glyph: "📜";
             title: Strings.wl-title-history;
-            hint: Strings.wl-hint-history;
+            mock: false;
         }
         PanePanel {
-            for t in root.transfers: Rectangle {
+            if Purse.history.length == 0: VaultNote {
+                text: Strings.wl-empty-history;
+            }
+            for t in Purse.history: Rectangle {
                 background: Theme.panel-2;
                 border-radius: Theme.win95 ? 0px : 8px;
                 border-width: Theme.border-w;
                 border-color: Theme.line;
-                // follows the font ladder — a fixed 52px clipped the two
-                // stacked lines at larger app fonts
-                height: max(52px, Theme.fs-body * 1.4 + Theme.fs-cap * 1.4 + 20px);
+                height: max(44px, Theme.fs-body * 1.4 + 20px);
+                accessible-role: list-item;
+                accessible-label: t.amount;
                 HorizontalLayout {
                     padding-left: 12px;
                     padding-right: 12px;
                     spacing: 10px;
                     Rectangle {
                         width: 20px;
-                        height: 100%;
                         clip: true;
                         Text {
                             text: t.incoming ? "📥" : "📤";
@@ -4913,40 +4957,53 @@ export component WalletPane inherits VerticalLayout {
                             vertical-alignment: center;
                         }
                     }
-                    VerticalLayout {
-                        alignment: center;
-                        spacing: 2px;
-                        horizontal-stretch: 1;
-                        Text {
-                            text: t.label;
-                            color: Theme.text;
-                            font-size: Theme.fs-body;
-                            font-weight: 600;
-                            overflow: elide;
-                        }
-                        Text {
-                            text: "\{t.when} · \{t.txid}";
-                            color: Theme.faint;
-                            font-size: Theme.fs-cap;
-                            overflow: elide;
-                        }
-                    }
-                    // the tone alone says "confirmed" — a plain-text ✓ would
-                    // render as a thin monochrome outline (the Twemoji rule)
                     Text {
-                        text: "\{min(t.conf, 10)}/10";
-                        color: t.conf >= 10 ? Theme.good : Theme.warn;
-                        font-size: Theme.fs-cap;
-                        vertical-alignment: center;
-                    }
-                    Text {
-                        text: t.incoming ? "+ \{t.amount}" : "- \{t.amount}";
+                        text: t.amount;
                         color: t.incoming ? Theme.good : Theme.text;
                         font-size: Theme.fs-body;
                         font-weight: 700;
                         vertical-alignment: center;
-                        horizontal-alignment: right;
-                        width: max(90px, Theme.fs-body * 6);
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: t.date;
+                        color: Theme.faint;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                    }
+                    // the tone says "confirmed"; a Twemoji check, never a
+                    // thin text glyph
+                    if !t.confirmed: Text {
+                        text: t.conf;
+                        color: Theme.warn;
+                        font-size: Theme.fs-cap;
+                        vertical-alignment: center;
+                    }
+                    if t.confirmed: Text {
+                        text: "✅";
+                        font-family: "Twemoji Mozilla";
+                        font-size: 14px;
+                        vertical-alignment: center;
+                    }
+                }
+                TouchArea {
+                    pointer-event(ev) => {
+                        if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                            txmenu.show({ x: self.mouse-x, y: self.mouse-y });
+                        }
+                    }
+                }
+                txmenu := ContextMenuArea {
+                    width: 0px;
+                    height: 0px;
+                    enabled: false;
+                    Menu {
+                        MenuItem {
+                            title: Strings.wl-copy-txid;
+                            activated => {
+                                Purse.copy(t.txid);
+                            }
+                        }
                     }
                 }
             }
@@ -4958,158 +5015,49 @@ export component WalletPane inherits VerticalLayout {
         PaneHeader {
             glyph: "📤";
             title: Strings.wl-title-send;
-            hint: Strings.wl-hint-send;
+            mock: false;
         }
         PanePanel {
-            VerticalLayout {
-                spacing: 4px;
-                Text {
-                    text: Strings.wl-to-address;
-                    color: Theme.dim;
-                    font-size: Theme.fs-cap;
-                }
-                AppField {
-                    placeholder: "4…";
-                    text <=> root.send-addr;
-                }
-            }
-            VerticalLayout {
-                spacing: 4px;
-                Text {
-                    text: Strings.wl-amount;
-                    color: Theme.dim;
-                    font-size: Theme.fs-cap;
-                }
-                AppField {
-                    placeholder: "0.0000";
-                    text <=> root.send-amount;
-                }
-            }
-            VerticalLayout {
-                spacing: 4px;
-                Text {
-                    text: Strings.wl-priority;
-                    color: Theme.dim;
-                    font-size: Theme.fs-cap;
-                }
-                HorizontalLayout {
-                    spacing: 8px;
-                    alignment: start;
-                    AppButton {
-                        label: Strings.wl-prio-low;
-                        primary: root.prio == 0;
-                        clicked => {
-                            root.prio = 0;
-                        }
-                    }
-                    AppButton {
-                        label: Strings.wl-prio-normal;
-                        primary: root.prio == 1;
-                        clicked => {
-                            root.prio = 1;
-                        }
-                    }
-                    AppButton {
-                        label: Strings.wl-prio-high;
-                        primary: root.prio == 2;
-                        clicked => {
-                            root.prio = 2;
-                        }
-                    }
-                }
-            }
-            HorizontalLayout {
-                spacing: 12px;
-                AppButton {
-                    emoji: "🗳️";
-                    label: Strings.wl-propose-transfer;
-                    primary: true;
-                    enabled: false;
-                    tooltip: Strings.not-implemented-yet;
-                    tooltip-below: true;
-                }
-                Text {
-                    text: "\{Strings.wl-fee} ~0.000021 XMR";
-                    color: Theme.faint;
-                    font-size: Theme.fs-cap;
-                    vertical-alignment: center;
-                }
-                Rectangle {
-                    horizontal-stretch: 1;
-                }
+            VaultNote {
+                text: Strings.wl-send-locked;
             }
         }
     }
 
-    if root.view == "receive": VerticalLayout {
+    // Details (U6): the technique, and only here. The wallet's votes list
+    // below it in the same view (app.slint).
+    if root.view == "status": VerticalLayout {
         spacing: 8px;
         PaneHeader {
-            glyph: "📥";
-            title: Strings.wl-title-receive;
-            hint: Strings.wl-hint-receive;
+            glyph: "🔎";
+            title: Strings.wl-title-details;
+            mock: false;
         }
-        PanePanel {
-            HorizontalLayout {
-                spacing: 16px;
-                // no alignment:start here — it cancelled the address
-                // column's horizontal-stretch and left the pane's right
-                // half dead space
-                // decorative pseudo-QR on a light well (QR needs light
-                // ground on every theme)
-                Rectangle {
-                    width: 17 * 6px + 24px;
-                    height: 17 * 6px + 24px;
-                    background: #ffffff;
-                    border-radius: Theme.win95 ? 0px : 8px;
-                    border-width: Theme.border-w;
-                    border-color: Theme.line;
-                    for i in 289: Rectangle {
-                        x: 12px + Math.mod(i, 17) * 6px;
-                        y: 12px + Math.floor(i / 17) * 6px;
-                        width: 6px;
-                        height: 6px;
-                        background: root.qr-cell(Math.floor(i / 17), Math.mod(i, 17)) ? #1a1d21 : transparent;
-                    }
-                }
-                VerticalLayout {
-                    spacing: 8px;
-                    alignment: center;
-                    horizontal-stretch: 1;
-                    Text {
-                        text: Strings.wl-subaddress;
-                        color: Theme.dim;
-                        font-size: Theme.fs-cap;
-                        font-weight: 600;
-                    }
-                    Rectangle {
-                        background: Theme.bg;
-                        border-radius: Theme.win95 ? 0px : 6px;
-                        border-width: Theme.border-w;
-                        border-color: Theme.line;
-                        VerticalLayout {
-                            padding: 10px;
-                            // deliberately mid-truncated: a design-mock
-                            // address must never be transcribable into a
-                            // send field
-                            Text {
-                                text: "8BdKQ9wJ3mPZxVtF7nRqYcLhG2sD4eTv … PxQbUcFgAt2iE9oRk4";
-                                color: Theme.text;
-                                font-size: Theme.fs-cap;
-                                wrap: char-wrap;
-                            }
-                        }
-                    }
-                    HorizontalLayout {
-                        alignment: start;
-                        AppButton {
-                            label: Strings.ow-copy;
-                            enabled: false;
-                            tooltip: Strings.not-implemented-yet;
-                            tooltip-below: true;
-                        }
-                    }
-                }
-            }
+        SettingRow {
+            label: Strings.wl-node;
+            value: Purse.node-line;
+        }
+        SettingRow {
+            label: Strings.wl-height;
+            value: Purse.height-line;
+        }
+        SettingRow {
+            label: Strings.wl-network;
+            value: Purse.network;
+        }
+        if Purse.phase == 4: SettingRow {
+            label: Strings.wl-parts-held;
+            value: Purse.parts-line;
+        }
+        for s in Purse.seats: SettingRow {
+            label: s.name;
+            value: s.part;
+            tone: s.held ? Theme.text : Theme.dim;
+        }
+        if Purse.fault-line != "": Text {
+            text: Purse.fault-line;
+            color: Theme.warn;
+            font-size: Theme.fs-cap;
         }
     }
 
@@ -5118,21 +5066,14 @@ export component WalletPane inherits VerticalLayout {
         PaneHeader {
             glyph: "⚙️";
             title: Strings.wl-title-settings;
-            hint: Strings.wl-hint-settings;
+            mock: false;
         }
         PanePanel {
             SettingRow {
                 label: Strings.wl-node;
-                value: "node.example.org:18081 · Tor";
+                value: Purse.node-line;
             }
-            SettingRow {
-                label: Strings.wl-sync;
-                value: "3 214 502";
-            }
-            SettingRow {
-                label: Strings.wl-signer-set;
-                value: "\{Strings.wl-rule-sample} - petra, walter, mara, jonas";
-            }
+            NodeChooser { }
         }
     }
 }
