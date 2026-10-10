@@ -71,13 +71,7 @@ impl State {
         // earlier frame of this broadcast) already coordinates — a second,
         // ticketed request would re-key with its KeyPackage while the first
         // block's Welcome goes to a dead anchor, stranding the seat
-        if self.chain.proposal_changes.values().any(|c| {
-            matches!(c, molt_core::ChainChange::Membership {
-                op: molt_core::MembershipOp::Restored,
-                member: m,
-                ..
-            } if m == &member)
-        }) {
+        if self.readmission_in_flight(&member) {
             tracing::warn!(%member, ticketed, "recovery request while a re-admission is pending - dropped");
             return Ok(Reply::Ack);
         }

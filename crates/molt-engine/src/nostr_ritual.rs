@@ -916,8 +916,9 @@ async fn recovery_rejoin(
     let mut mls =
         molt_net::MlsMember::new(&sk, &ctx.member).map_err(|e| format!("mls identity: {e}"))?;
     let kp_hex = hex::encode(mls.key_package().map_err(|e| format!("key package: {e}"))?);
-    // the seat proof binds the new anchor AND the relay declaration, so a
-    // relay or a hostile coordinator can swap neither on the way
+    // the seat proof binds the new anchor AND the relay declaration against
+    // a relay; only the coordinator checks it, survivors see the consent,
+    // which binds the anchor but not the relays (known debt)
     let declared = ctx.dial_relays.clone();
     let seat_proof = crate::founding::make_seat_proof(
         &sk,

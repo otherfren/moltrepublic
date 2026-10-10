@@ -224,6 +224,12 @@ impl State {
             tracing::warn!(%id, "refusing a membership proposal with an implausible id");
             return false;
         }
+        // a change no vote could ever seal must not occupy the registry: it
+        // would hold the pending cap and R3 for good (nothing sweeps it)
+        if let Err(why) = self.sealable_membership(id, change) {
+            tracing::warn!(%id, reason = why, "refusing an unsealable membership proposal");
+            return false;
+        }
         // L3: pending membership changes are bounded by what can ever be
         // open at once — one re-admission per seat plus slack for Joined
         // seats not on the roster yet
@@ -253,6 +259,95 @@ impl State {
             return false;
         }
         true
+    }
+
+    /// Whether a wire membership change could ever seal: `Joined` is
+    /// verifier-refused, a `Restored` must keep the anchored identity and
+    /// carry a consent that verifies, and a consent-less (legacy, human-
+    /// voted) card is held once per seat.
+    fn sealable_membership(&self, id: u64, change: &ChainChange) -> Result<(), &'static str> {
+        let ChainChange::Membership { op, member, identity_pk, nostr_pk, consent, .. } = change else {
+            return Ok(());
+        };
+        if *op == MembershipOp::Joined {
+            return Err("joined is reserved");
+        }
+        if self.anchored_identity(member).as_deref() != Some(identity_pk.as_str()) {
+            return Err("not the anchored identity");
+        }
+        match consent {
+            Some(c) => {
+                if !self.restore_consent_verifies(member, nostr_pk.as_deref(), c) {
+                    return Err("consent does not verify");
+                }
+            }
+            None => {
+                let held = self.chain.proposal_changes.iter().any(|(other, c)| {
+                    *other != id
+                        && matches!(c, ChainChange::Membership {
+                            op: MembershipOp::Restored,
+                            member: m,
+                            consent: None,
+                            ..
+                        } if m == member)
+                });
+                if held && !self.restore_sealed(change) {
+                    return Err("a consent-less card for this seat is pending");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The seat's identity key as the chain head anchors it.
+    fn anchored_identity(&self, member: &str) -> Option<String> {
+        self.chain
+            .head
+            .as_ref()?
+            .identities
+            .iter()
+            .find(|i| i.member == member)
+            .map(|i| i.identity_pk.clone())
+    }
+
+    /// A restore consent verifies against the seat's anchored key.
+    fn restore_consent_verifies(&self, member: &str, nostr_pk: Option<&str>, consent: &str) -> bool {
+        let Some(anchored) = self.anchored_identity(member) else {
+            return false;
+        };
+        let bytes = molt_core::chain::restore_consent_bytes(
+            &self.republic_id(),
+            member,
+            &anchored,
+            nostr_pk.unwrap_or(""),
+        );
+        molt_storage::identity_verify(&anchored, &bytes, consent)
+    }
+
+    /// A re-admission of `member` is in flight (R3): one this node
+    /// coordinates, or a pending consented restore that can still seal.
+    /// A consent-less card does not count - any member could plant one.
+    pub(crate) fn readmission_in_flight(&self, member: &str) -> bool {
+        if self.recovery.pending.contains_key(member) {
+            return true;
+        }
+        self.chain.proposal_changes.values().any(|c| {
+            let ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member: m,
+                identity_pk,
+                nostr_pk,
+                consent: Some(consent),
+                ..
+            } = c
+            else {
+                return false;
+            };
+            m == member
+                && self.anchored_identity(m).as_deref() == Some(identity_pk.as_str())
+                && !nostr_pk.as_deref().is_some_and(|pk| self.anchor_seen_in_chain(pk))
+                && self.restore_consent_verifies(m, nostr_pk.as_deref(), consent)
+        })
     }
 
     /// Auto-approve a `Membership{Restored}` proposal whose consent THIS node
@@ -396,6 +491,15 @@ impl State {
             seat_proof,
         ) {
             return Err(format!("seat proof for {member} does not verify"));
+        }
+        // the join path's pairing (founding.rs): survivors refuse any other
+        // leaf, and a re-key with it strands the coordinator alone
+        let kp_binds = hex::decode(key_package_hex)
+            .ok()
+            .and_then(|b| molt_net::mls::key_package_binding(&b).ok())
+            .is_some_and(|(id, sig)| id == member.as_bytes() && hex::encode(sig) == anchored);
+        if !kp_binds {
+            return Err(format!("key package for {member} is not its anchored key"));
         }
         // the rejoiner's consent — its automatic co-approval (recovery
         // approval design, 2026-08-08). Verified HERE, in the one validation

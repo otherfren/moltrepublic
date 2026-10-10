@@ -32,6 +32,28 @@ republic (`kanban_workflows.md` §11 Q1).
   exports without the keys file and refuses to import a blob carrying it.
   Say so in the first release notes that ship the purse.
 
+## A restore consent binds neither its relays nor a position (audit 2026-10-10)
+
+`restore_consent_bytes` (`molt-restore-consent-v1`) signs republic id,
+seat, identity key and nostr anchor only, yet `block_signers` counts it
+as a full voice. Two consequences, both from one member:
+
+- **Relays.** Only the coordinator checks the seat proof that binds the
+  declared relays; survivors auto-sign any `relays` beside a valid
+  consent, so a hostile coordinator (or any member re-gossiping the
+  consent under a fresh id) writes the seat's ledger entry. That freezes
+  R6 pool votes and fails R5 for every other seat's recovery.
+- **Replay.** On m = 2 one member plus a published consent seals a
+  `Restored` block at any height: rolling the seat back to an earlier
+  anchor, or rewriting its relays. Neither the verifier nor the receive
+  path checks anchor freshness on blocks.
+
+Fix direction (user decision, signed layout): a `molt-restore-consent-v2`
+over the relays and a single-use value (the KeyPackage hash or ticket),
+conditional like roster-v5 so sealed v1 blocks still verify; plus a
+verifier anchor-freshness rule for v2 blocks only (pre-C8 chains may hold
+replayed-anchor blocks, field storm 2026-08-24).
+
 ## `SaveTransport` overwrites `vault_status` wholesale
 
 `molt-storage` writer, `WriterMsg::SaveTransport`: the supervisor's clone

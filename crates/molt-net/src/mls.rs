@@ -545,6 +545,18 @@ impl MlsMember {
         let validated = kp_in
             .validate(self.provider.crypto(), ProtocolVersion::Mls10)
             .map_err(|e| MlsError::Wire(format!("invalid key package: {e:?}")))?;
+        // the survivors' decrypt check, applied before merging: a leaf they
+        // refuse would leave this node alone on the new epoch
+        if let Some(roster) = &self.roster_keys {
+            let leaf = validated.leaf_node();
+            if leaf.credential().serialized_content() != member.as_bytes()
+                || roster.get(member).map(Vec::as_slice) != Some(leaf.signature_key().as_slice())
+            {
+                return Err(MlsError::Wire(format!(
+                    "re-key refused: leaf for {member} is not its anchored key"
+                )));
+            }
+        }
         let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
         // the leaf whose credential handle is this member (its lost identity)
         let old_leaf = group
@@ -1646,6 +1658,45 @@ mod tests {
             "a leaf for bob under a foreign key is refused"
         );
         assert_eq!(founder.epoch(), epoch, "nothing merged");
+    }
+
+    /// The committer refuses the leaf the survivors would refuse: with the
+    /// roster armed, a re-key whose KeyPackage is not the seat's own name
+    /// and anchored key never merges locally, so it cannot strand the
+    /// committer alone on an epoch nobody else takes.
+    #[test]
+    fn restore_member_refuses_a_leaf_the_roster_does_not_anchor() {
+        let (mut cara, _bob) = {
+            let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+            let bob = MlsMember::new(&key(2), "bob").expect("bob");
+            let cara = MlsMember::new(&key(3), "cara").expect("cara");
+            founder.create_group().expect("create");
+            let welcome = founder
+                .add_members(&[bob.key_package().expect("kp"), cara.key_package().expect("kp")])
+                .expect("add")
+                .expect("welcome");
+            let mut cara = cara;
+            cara.join_from_welcome(&welcome).expect("cara joins");
+            (cara, bob)
+        };
+        let roster: BTreeMap<String, Vec<u8>> = [(1u8, "founder"), (2, "bob"), (3, "cara")]
+            .into_iter()
+            .map(|(k, n)| (n.to_string(), key(k).verifying_key().to_bytes().to_vec()))
+            .collect();
+        cara.set_roster_keys(roster);
+        let epoch = cara.epoch();
+        let foreign = MlsMember::new(&key(9), "bob").expect("foreign key");
+        assert!(cara
+            .restore_member("bob", &foreign.key_package().expect("kp"), NO_CARRIER_STAMP)
+            .is_err());
+        let renamed = MlsMember::new(&key(1), "founder").expect("another seat");
+        assert!(cara
+            .restore_member("bob", &renamed.key_package().expect("kp"), NO_CARRIER_STAMP)
+            .is_err());
+        assert_eq!(cara.epoch(), epoch, "nothing merged");
+        let genuine = MlsMember::new(&key(2), "bob").expect("bob2");
+        cara.restore_member("bob", &genuine.key_package().expect("kp"), NO_CARRIER_STAMP)
+            .expect("the seat's own key re-keys");
     }
 
     /// A founder that slips a second leaf named "bob" under its own key into

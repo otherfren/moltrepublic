@@ -2291,7 +2291,12 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
     let b_entropy = molt_storage::seed_entropy(&b_phrase_for_sig).expect("b entropy");
     let b_ws = molt_storage::derive_workspace_id(&b_entropy, "member");
     let (b_sk, _) = molt_storage::derive_identity_key(&b_entropy, &b_ws);
-    let kp_hex = "abcd"; // an opaque fresh key package for this test
+    let kp_hex = &hex::encode(
+        molt_net::MlsMember::new(&b_sk, "member-b")
+            .expect("mls")
+            .key_package()
+            .expect("key package"),
+    );
 
     // the surviving coordinator mints a recovery link for member-b — a real
     // dedicated queue on its running mesh transport, listening for the request
@@ -4489,7 +4494,12 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
         .identity_pk
         .clone();
     let (c_sk, _) = member_identity(&c_phrase);
-    let kp_hex = "abcd"; // an opaque fresh key package for this test
+    let kp_hex = &hex::encode(
+        molt_net::MlsMember::new(&c_sk, "member-c")
+            .expect("mls")
+            .key_package()
+            .expect("key package"),
+    );
     let seat_proof =
         molt_engine::make_seat_proof(&c_sk, &material.ticket, kp_hex, &material.republic_id, "", &[]);
     let request = invite::RitualMsg::Recover(invite::RecoverRequest {

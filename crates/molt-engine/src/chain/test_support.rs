@@ -404,3 +404,9 @@ pub(crate) fn propose(st: &mut crate::State, surface: Surface, payload: serde_js
         other => panic!("unexpected reply {other:?}"),
     }
 }
+
+/// A real MLS KeyPackage for `member`, signed with its roster key, as hex.
+pub(crate) fn kp_hex_for(b: &Builder, member: &str) -> String {
+    let mls = molt_net::MlsMember::new(b.key(member), member).expect("mls member");
+    hex::encode(mls.key_package().expect("key package"))
+}

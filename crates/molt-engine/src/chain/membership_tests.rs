@@ -120,7 +120,7 @@ fn a_membership_proposal_cannot_hijack_a_colliding_surface_id() {
     ));
     // the reverse: a surface proposal cannot shadow a pending membership
     let mut walter2 = chain_signer("walter", &b, b.blocks.clone());
-    walter2.receive_membership_proposal(6, MembershipOp::Joined, "dora", &"cd".repeat(32), None, Vec::new(), None);
+    walter2.receive_membership_proposal(6, MembershipOp::Restored, "petra", &b.pk("petra"), None, Vec::new(), None);
     walter2.receive_proposed(6, Surface::Memory, json!({"op": "add_note"}), "peer");
     assert!(matches!(
         walter2.proposal_change(6),
@@ -139,7 +139,7 @@ fn a_coordinator_re_admits_only_a_valid_seat_proof() {
     let mut coord = chain_signer("petra", &b, b.blocks.clone());
     let rid = b.republic_id.clone();
     let ticket = "recovery-ticket-xyz";
-    let kp_hex = "beef";
+    let kp_hex = &kp_hex_for(&b, "dora");
 
     // the returning member (dora) signs the seat proof with its OWN key
     let good = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
@@ -244,7 +244,7 @@ fn a_membership_proposal_is_a_visible_approvable_record() {
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
     let rid = b.republic_id.clone();
     let ticket = "recovery-ticket-xyz";
-    let kp_hex = "beef";
+    let kp_hex = &kp_hex_for(&b, "dora");
     let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
     let id = coord
         .verify_and_propose_restore(
@@ -348,7 +348,7 @@ fn a_consented_restore_is_approved_without_a_human() {
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
     let rid = b.republic_id.clone();
     let ticket = "recovery-ticket-xyz";
-    let kp_hex = "beef";
+    let kp_hex = &kp_hex_for(&b, "dora");
     let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
     let consent = consent_for(&b, "dora", "");
     let id = coord
@@ -452,7 +452,7 @@ fn the_coordinator_reports_the_vote_progress_for_a_pending_recovery() {
     let mut coord = chain_signer("petra", &b, b.blocks.clone());
     let rid = b.republic_id.clone();
     let ticket = "recovery-ticket-xyz";
-    let kp_hex = "beef";
+    let kp_hex = &kp_hex_for(&b, "dora");
     let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
     let consent = consent_for(&b, "dora", "");
     let id = coord
@@ -552,7 +552,6 @@ fn a_restore_claiming_a_foreign_anchor_never_auto_signs() {
 #[test]
 fn a_rejoin_over_a_foreign_relay_is_refused_naming_it() {
     let ticket = "recovery-ticket-r5";
-    let kp_hex = "beef";
     let declared = vec!["wss://relay.two.example".to_string()];
 
     // republic pool: relay.one only — dora's declared relay bridges nobody
@@ -562,6 +561,7 @@ fn a_rejoin_over_a_foreign_relay_is_refused_naming_it() {
         vec!["wss://relay.one".to_string()],
     );
     let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    let kp_hex = &kp_hex_for(&b, "dora");
     let proof = crate::make_seat_proof(
         b.key("dora"),
         ticket,
@@ -596,6 +596,7 @@ fn a_rejoin_over_a_foreign_relay_is_refused_naming_it() {
         vec!["wss://relay.one".to_string(), "wss://relay.two.example".to_string()],
     );
     let mut coord2 = chain_signer("petra", &b2, b2.blocks.clone());
+    let kp_hex = &kp_hex_for(&b2, "dora");
     let proof2 = crate::make_seat_proof(
         b2.key("dora"),
         ticket,
@@ -877,4 +878,151 @@ fn a_restore_proposal_already_sealed_arrives_settled() {
     );
     let card = walter.proposals.get(&7).expect("the card exists");
     assert_ne!(card.state, ProposalState::Proposed, "a sealed restore is no open vote");
+}
+
+/// A KeyPackage that is not the seat's own (a foreign signature key, or
+/// another seat's name) is refused before anything is proposed: survivors
+/// refuse such a leaf, so re-keying with it strands the coordinator alone.
+#[test]
+fn a_restore_with_a_key_package_not_bound_to_the_seat_is_refused() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    let ticket = "recovery-ticket-kp";
+    let try_kp = |coord: &mut crate::State, kp: &str| {
+        let proof = crate::make_seat_proof(b.key("dora"), ticket, kp, &b.republic_id, "", &[]);
+        coord.verify_and_propose_restore(true, "dora", &b.pk("dora"), kp, ticket, &proof, "", &[], "", "")
+    };
+    let foreign_key = hex::encode(
+        molt_net::MlsMember::new(b.key("petra"), "dora")
+            .expect("mls")
+            .key_package()
+            .expect("kp"),
+    );
+    assert!(try_kp(&mut coord, &foreign_key).is_err(), "dora's name under petra's key");
+    let other_name = hex::encode(
+        molt_net::MlsMember::new(b.key("dora"), "walter")
+            .expect("mls")
+            .key_package()
+            .expect("kp"),
+    );
+    assert!(try_kp(&mut coord, &other_name).is_err(), "dora's key under walter's name");
+    assert!(try_kp(&mut coord, "beef").is_err(), "not a key package");
+    assert!(coord.recovery.pending.is_empty(), "nothing registered");
+    try_kp(&mut coord, &kp_hex_for(&b, "dora")).expect("the seat's own key package passes");
+}
+
+/// A Restored change no recovery could seal must not enter the registry:
+/// a swapped identity, a consent that does not verify, a reserved Joined,
+/// or a second consent-less card for the same seat.
+#[test]
+fn an_unsealable_membership_proposal_is_not_registered() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora", "erika"], 3);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let restored = |id: u64, identity_pk: String, consent: Option<String>| {
+        WorkspaceEvent::MembershipProposed {
+            id: ProposalId(id),
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk,
+            nostr_pk: None,
+            relays: Vec::new(),
+            consent,
+        }
+    };
+    wire(&mut walter, "petra", 1, restored(11, "00".to_string(), None));
+    wire(&mut walter, "petra", 2, restored(12, b.pk("dora"), Some(consent_for(&b, "erika", ""))));
+    wire(
+        &mut walter,
+        "petra",
+        3,
+        WorkspaceEvent::MembershipProposed {
+            id: ProposalId(13),
+            op: MembershipOp::Joined,
+            member: "mallory".to_string(),
+            identity_pk: "ab".repeat(32),
+            nostr_pk: None,
+            relays: Vec::new(),
+            consent: None,
+        },
+    );
+    wire(&mut walter, "petra", 4, restored(14, b.pk("dora"), None));
+    wire(&mut walter, "petra", 5, restored(15, b.pk("dora"), None));
+    for id in [11, 12, 13, 15] {
+        assert!(!walter.chain.proposal_changes.contains_key(&id), "{id} registered");
+        assert!(!walter.proposals.contains_key(&id), "{id} carded");
+    }
+    assert!(walter.chain.proposal_changes.contains_key(&14), "one consent-less card stays votable");
+}
+
+/// One re-admission at a time (R3) must not be a lever for any member:
+/// a consent-less card another node planted does not block this node's
+/// verified recovery, while a genuine consented one in flight still does.
+#[test]
+fn a_planted_restore_card_does_not_block_a_recovery() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora", "erika"], 3);
+    let request = |walter: &mut crate::State, ticket: &str| {
+        walter.recovery.tickets.insert(ticket.to_string(), "dora".to_string());
+        let kp = kp_hex_for(&b, "dora");
+        let proof = crate::make_seat_proof(b.key("dora"), ticket, &kp, &b.republic_id, "", &[]);
+        walter
+            .cmd_net_recover_requested(
+                "dora".to_string(),
+                b.pk("dora"),
+                kp,
+                ticket.to_string(),
+                proof,
+                String::new(),
+                Vec::new(),
+                consent_for(&b, "dora", ""),
+                String::new(),
+                String::new(),
+                None,
+            )
+            .expect("ack");
+        walter.recovery.pending.contains_key("dora")
+    };
+
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    wire(
+        &mut walter,
+        "petra",
+        1,
+        WorkspaceEvent::MembershipProposed {
+            id: ProposalId(21),
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk: b.pk("dora"),
+            nostr_pk: None,
+            relays: Vec::new(),
+            consent: None,
+        },
+    );
+    assert!(request(&mut walter, "t-1"), "a planted card does not block the recovery");
+
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    wire(
+        &mut walter,
+        "petra",
+        1,
+        WorkspaceEvent::MembershipProposed {
+            id: ProposalId(22),
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk: b.pk("dora"),
+            nostr_pk: None,
+            relays: Vec::new(),
+            consent: Some(consent_for(&b, "dora", "")),
+        },
+    );
+    assert!(!request(&mut walter, "t-2"), "a consented re-admission in flight still blocks");
 }
