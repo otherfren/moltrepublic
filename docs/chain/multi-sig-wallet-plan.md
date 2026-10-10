@@ -759,10 +759,14 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    collapsed, above the purse's votes; `settings` is the node field. The
    gather reads the Wallet snapshot even without a nav row, so the
    organization dialog knows the phase. The panel opens on a new run or
-   a new consent question; closed, the bar stays in Balance. The loss
-   dialog opens on the backup hold's notice and on a manual export
-   refused for the damaged file. English refusal toasts stay the MCP
-   text (one names `wallet_init`; no GUI path reaches it).
+   a new consent question; closed, the bar stays in Balance; a workspace
+   switch starts that state afresh. Agree/Decline need no node. The
+   organization dialog's purse box shows the consent lines and asks for
+   the node first; a `wallet_init` card carries the consent lines too.
+   The loss dialog opens for the open republic only (its set-aside acts
+   there): on its backup hold, once per damage, and on its refused manual
+   export; a closed republic's hold is a toast naming it. English refusal
+   toasts stay the MCP text but for the daemon and op words (U1).
    Tests: `tests/wallet.rs`, `tests/gui/wallet.rs` (live-preview).
 10. [ ] clippy pro Crate = 0; Suiten grün; Review über den Gesamt-Diff;
     master.

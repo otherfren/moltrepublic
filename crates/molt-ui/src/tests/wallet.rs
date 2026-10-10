@@ -121,7 +121,7 @@ fn purse() -> WalletView {
 #[test]
 fn the_qr_encodes_the_monero_uri() {
     let ui = window();
-    crate::wallet::apply_wallet(&ui, 0, Some(&purse()));
+    crate::wallet::apply_wallet(&ui, 0, "w", Some(&purse()));
     let img = ui.global::<Purse>().get_qr().to_rgb8().expect("an RGB pixel buffer");
     let code = qrcode::QrCode::new(format!("monero:{ADDRESS}")).expect("encodable");
     let modules = code.width();
@@ -148,7 +148,7 @@ fn the_qr_encodes_the_monero_uri() {
 #[test]
 fn the_purse_renders_its_rows() {
     let ui = window();
-    crate::wallet::apply_wallet(&ui, 0, Some(&purse()));
+    crate::wallet::apply_wallet(&ui, 0, "w", Some(&purse()));
     let p = ui.global::<Purse>();
     assert_eq!(p.get_balance(), "1.25 XMR");
     assert_eq!(p.get_pending(), "0.5 XMR pending");
@@ -172,16 +172,16 @@ fn the_purse_renders_its_rows() {
     assert_eq!(p.get_height_line(), "90 / 100");
     assert_eq!(p.get_fault_line(), "");
     let paused = WalletView { scan_paused: Some("update needed".to_string()), pending: 0, ..purse() };
-    crate::wallet::apply_wallet(&ui, 0, Some(&paused));
+    crate::wallet::apply_wallet(&ui, 0, "w", Some(&paused));
     assert_eq!(p.get_pending(), "", "nothing pending: no line");
     assert_eq!(p.get_fault_line(), "Scanning paused: update needed");
     let fault = WalletView { scan_paused: Some("daemon fault".to_string()), ..purse() };
-    crate::wallet::apply_wallet(&ui, 0, Some(&fault));
+    crate::wallet::apply_wallet(&ui, 0, "w", Some(&fault));
     assert_eq!(p.get_fault_line(), "Node fault");
     let offline = WalletView { connected: false, ..purse() };
-    crate::wallet::apply_wallet(&ui, 0, Some(&offline));
+    crate::wallet::apply_wallet(&ui, 0, "w", Some(&offline));
     assert_eq!(p.get_fault_line(), "Node not reachable");
-    crate::wallet::apply_wallet(&ui, 0, None);
+    crate::wallet::apply_wallet(&ui, 0, "w", None);
     assert_eq!(p.get_phase(), 0, "no workspace: no purse");
     assert_eq!(p.get_address(), "");
 }
@@ -221,12 +221,18 @@ fn no_crypto_words_in_wallet_strings() {
         }
     }
     use molt_core::wallet::WalletRefusal as R;
-    for r in [
-        R::NotYet, R::NoKeysFile, R::KeysIntact, R::NotChain, R::Bounds, R::InitExists, R::InitPending,
-        R::NoDaemon, R::Checking, R::Birthday, R::Network, R::UnknownOp, R::UseInit, R::Cancelled,
-        R::NoRun, R::RunActive, R::NotMine, R::Rng,
-    ] {
-        texts.push(localize_error(1, &molt_core::MoltError::Wallet(r)));
+    let refusals = || {
+        [
+            R::NotYet, R::NoKeysFile, R::KeysIntact, R::NotChain, R::Bounds, R::InitExists, R::InitPending,
+            R::NoDaemon, R::Checking, R::Birthday, R::Network, R::UnknownOp, R::UseInit, R::Cancelled,
+            R::NoRun, R::RunActive, R::NotMine, R::Rng, R::Daemon("daemon: engine stopped".to_string()),
+            R::Held(Box::new(R::NoDaemon)),
+        ]
+    };
+    for lang in [0, 1] {
+        for r in refusals() {
+            texts.push(localize_error(lang, &molt_core::MoltError::Wallet(r)));
+        }
     }
     for text in &texts {
         let lower = text.to_lowercase();
@@ -238,32 +244,161 @@ fn no_crypto_words_in_wallet_strings() {
     }
 }
 
-/// W5: a backup held by a damaged key part file asks once to set it
-/// aside; any other backup failure stays a toast.
+/// A session with two republics, `a` open; `damaged` lists the ids whose
+/// backup the damaged key part file holds.
+fn two_republics(open: bool, damaged: &[usize], notice: &str) -> SessionView {
+    let err = molt_storage::StorageError::WalletKeysDamaged.to_string();
+    let workspaces = ["a", "b"]
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            serde_json::from_value::<molt_core::WorkspaceInfo>(serde_json::json!({
+                "id": format!("ws-{name}"), "name": name, "detail": "2-of-3", "synced": true, "state": 0,
+                "last_sync_min": 0, "sync_queue": 0, "s3": true, "net": "", "members": [],
+                "backup_error": if damaged.contains(&i) { err.clone() } else { String::new() },
+            }))
+            .expect("a workspace entry")
+        })
+        .collect();
+    let mut sv = SessionView { notice: notice.to_string(), workspaces, ..SessionView::default() };
+    sv.active_workspace = if open { sv.workspaces[0].id.clone() } else { String::new() };
+    sv
+}
+
+/// W5: a backup held by a damaged key part file of the OPEN republic asks
+/// once to set it aside; any other backup failure stays a toast.
 #[test]
 fn a_damaged_key_part_file_opens_the_loss_dialog() {
     let ui = window();
     let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
     let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
-    let sv = |notice: String| SessionView { notice, ..SessionView::default() };
-    apply_session(&ui, &sv("backup-failed:bucket full".to_string()), false, &chat_ui);
+    apply_session(&ui, &two_republics(true, &[], "backup-failed:bucket full"), false, &chat_ui);
     assert!(!ui.global::<Purse>().get_loss_open());
-    apply_session(&ui, &sv(format!("backup-failed:{damaged}")), false, &chat_ui);
+    apply_session(&ui, &two_republics(true, &[0], &format!("backup-failed:{damaged}")), false, &chat_ui);
     assert!(ui.global::<Purse>().get_loss_open());
     ui.global::<Purse>().set_loss_open(false);
-    apply_session(&ui, &sv(format!("backup-failed:{damaged}")), false, &chat_ui);
-    assert!(!ui.global::<Purse>().get_loss_open(), "once per notice");
+    apply_session(&ui, &two_republics(true, &[0], &format!("backup-failed:{damaged} ")), false, &chat_ui);
+    apply_session(&ui, &two_republics(true, &[0], &format!("backup-failed:{damaged}")), false, &chat_ui);
+    assert!(!ui.global::<Purse>().get_loss_open(), "once per damage");
+    apply_session(&ui, &two_republics(true, &[], ""), false, &chat_ui);
+    apply_session(&ui, &two_republics(true, &[0], ""), false, &chat_ui);
+    assert!(ui.global::<Purse>().get_loss_open(), "a new damage asks again");
 }
 
-/// The node: an onion is taken as is, a clearnet one is classified for
-/// the acknowledgement, a URL with a login is refused under the field.
+/// W5: the set-aside acts on the open republic only, so a closed one's
+/// damage is a toast naming it, and the dialog waits until it is opened.
+#[test]
+fn a_closed_republics_damage_names_it_and_waits_for_its_open() {
+    let ui = window();
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+    let mut sv = two_republics(true, &[1], &format!("backup-failed:{damaged}"));
+    apply_session(&ui, &sv, false, &chat_ui);
+    assert!(!ui.global::<Purse>().get_loss_open(), "b is not open");
+    assert!(ui.get_toast_text().contains("b:"), "{}", ui.get_toast_text());
+    sv.active_workspace = sv.workspaces[1].id.clone();
+    sv.notice = String::new();
+    apply_session(&ui, &sv, false, &chat_ui);
+    assert!(ui.global::<Purse>().get_loss_open(), "b opened: the dialog");
+}
+
+/// W5: a manual export refused over the damaged file asks to set it aside
+/// when it is the open republic's; another's keeps the red note only.
+#[test]
+fn a_refused_export_opens_the_loss_dialog_for_the_open_republic() {
+    let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    for (which, opens) in [(0, true), (1, false)] {
+        let ui = window();
+        let mut sv = two_republics(true, &[], "");
+        sv.export.workspace = sv.workspaces[which].id.clone();
+        sv.export.result = format!("error: {damaged}");
+        apply_session(&ui, &sv, false, &chat_ui);
+        assert_eq!(ui.global::<Purse>().get_loss_open(), opens, "export of {which}");
+        assert!(ui.get_export_failed());
+    }
+}
+
+/// A workspace switch starts the purse's run state afresh: no finished
+/// panel carried over, and the new republic's run brings its panel.
+#[test]
+fn a_workspace_switch_starts_the_run_state_afresh() {
+    let ui = window();
+    let p = ui.global::<Purse>();
+    let running = WalletView {
+        phase: WalletPhase::Init,
+        run: Some(run(RunStage::Ready, 1, 3)),
+        ..WalletView::default()
+    };
+    crate::wallet::apply_wallet(&ui, 0, "a", Some(&running));
+    assert!(p.get_run_active());
+    crate::wallet::apply_wallet(&ui, 0, "b", Some(&purse()));
+    assert!(!p.get_run_finished(), "b's purse did not just finish");
+    assert!(!p.get_run_active());
+    crate::wallet::apply_wallet(&ui, 0, "a", Some(&running));
+    p.set_panel_dismissed(true);
+    crate::wallet::apply_wallet(&ui, 0, "b", Some(&running));
+    assert!(!p.get_panel_dismissed(), "b's run brings its panel");
+}
+
+/// A purse set-up card shows what approving it consents to (design §3.3).
+#[test]
+fn the_set_up_card_carries_the_consent_lines() {
+    let card = |op: &str, surface: Surface| {
+        let mut p = super::channels::view_of(1, "", molt_core::ProposalState::Proposed);
+        p.surface = surface;
+        p.payload = serde_json::json!({ "op": op });
+        proposal_row(0, &p).notes
+    };
+    let notes = card("wallet_init", Surface::Wallet);
+    let l = crate::i18n::Lexicon::en();
+    for line in [l.wl_note_sees, l.wl_note_lost, l.wl_note_spend] {
+        assert!(notes.contains(line), "{line:?} in {notes:?}");
+    }
+    assert_eq!(card("wallet_created", Surface::Wallet), "");
+    assert_eq!(card("set_name", Surface::Organization), "");
+}
+
+/// The node: an onion is taken outright, a clearnet or local one waits
+/// for the acknowledgement, a URL with a login is refused under the field.
 #[test]
 fn a_node_url_is_classified_like_a_relay() {
-    use molt_core::relay::RelayKind;
-    let kind = |u: &str| crate::wallet::node_choice(0, u).map(|(_, k)| k);
-    assert_eq!(kind("http://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion:18081"), Ok(RelayKind::Onion));
-    assert_eq!(kind("https://node.example.org:18089"), Ok(RelayKind::Clearnet));
-    assert_eq!(kind("http://127.0.0.1:18081"), Ok(RelayKind::Local));
-    assert_eq!(kind("http://u:p@node.example.org"), Err("not a node address".to_string()));
-    assert_eq!(kind("ws://abc.onion"), Err("not a node address".to_string()));
+    use crate::wallet::NodeStep;
+    let onion = "http://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion:18081";
+    assert_eq!(crate::wallet::node_step(0, onion), NodeStep::Take(onion.to_string()));
+    assert_eq!(
+        crate::wallet::node_step(0, " https://node.example.org:18089 "),
+        NodeStep::Confirm("https://node.example.org:18089".to_string(), 1)
+    );
+    assert_eq!(crate::wallet::node_step(0, "http://127.0.0.1:18081"), NodeStep::Confirm("http://127.0.0.1:18081".to_string(), 2));
+    assert_eq!(crate::wallet::node_step(0, "http://u:p@node.example.org"), NodeStep::Bad("not a node address".to_string()));
+    assert_eq!(crate::wallet::node_step(0, "ws://abc.onion"), NodeStep::Bad("not a node address".to_string()));
+}
+
+/// The node is stored confirmed; only a non-onion one switches non-onion
+/// dialing on, as a confirmed relay does.
+#[test]
+fn a_taken_node_is_stored_confirmed_and_only_a_clearnet_one_opens_dialing() {
+    let patch = |cmds: &[Command]| match cmds.first() {
+        Some(Command::PatchSettings { patch }) => patch.clone(),
+        other => panic!("a settings patch first: {other:?}"),
+    };
+    let onion = crate::wallet::node_commands("http://x.onion:18081", false);
+    assert_eq!(onion.len(), 1, "{onion:?}");
+    assert_eq!(patch(&onion), serde_json::json!({ "wallet_daemon_url": "http://x.onion:18081", "wallet_daemon_confirmed": true }));
+    let clear = crate::wallet::node_commands("https://n.example.org", true);
+    assert_eq!(patch(&clear)["wallet_daemon_confirmed"], serde_json::json!(true));
+    assert!(matches!(clear.get(1), Some(Command::RelayClearnetSession { unlock: true })), "{clear:?}");
+    assert_eq!(clear.len(), 2);
+}
+
+/// The purse's buttons are the four seat tools, consent carrying its answer.
+#[test]
+fn the_purse_buttons_are_the_seat_tools() {
+    use crate::wallet::PurseAct;
+    assert!(matches!(PurseAct::SetUp.command(), Command::WalletInit));
+    assert!(matches!(PurseAct::Consent(true).command(), Command::WalletConsent { accept: true }));
+    assert!(matches!(PurseAct::Consent(false).command(), Command::WalletConsent { accept: false }));
+    assert!(matches!(PurseAct::Retry.command(), Command::WalletRetry));
+    assert!(matches!(PurseAct::AcknowledgeLoss.command(), Command::WalletAcknowledgeLoss));
 }

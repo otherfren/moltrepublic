@@ -2306,8 +2306,12 @@ export global Purse {
     // the run the panel showed just ended in the purse: it stays up with
     // the address until closed
     in-out property <bool> run-finished;
-    // a damaged key part file waits for its acknowledgement
+    // a damaged key part file waits for its acknowledgement; loss-ws is
+    // the open republic it last asked for
     in-out property <bool> loss-open;
+    in-out property <string> loss-ws;
+    // the republic the run state above belongs to
+    in-out property <string> workspace;
     callback set-up();
     callback consent(bool);
     callback retry();

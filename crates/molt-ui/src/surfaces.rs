@@ -1623,7 +1623,12 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
         .get("op")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
-    let (notes, notes_bad) = kanban_notes(lang, p);
+    let (notes, notes_bad) = if p.surface == Surface::Wallet && op == "wallet_init" {
+        // approving the card is this seat's consent to the run (design §3.3)
+        (crate::wallet::consent_notes(lang), false)
+    } else {
+        kanban_notes(lang, p)
+    };
     ProposalRowData {
         id: p.id.0 as i32,
         text: display_title(lang, &p.payload),

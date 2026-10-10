@@ -553,10 +553,14 @@ pub(crate) fn apply_session(
         } else {
             (String::new(), false)
         };
-        // W5: a fresh export refused over a damaged key part file offers
-        // to set it aside
+        // W5: a fresh export of the open republic refused over a damaged
+        // key part file offers to set it aside (the set-aside acts there only)
         let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
-        if failed && ex.result.ends_with(&damaged) && ui.get_export_note() != note.as_str() {
+        if failed
+            && ex.result.ends_with(&damaged)
+            && ex.workspace == sv.active_workspace
+            && ui.get_export_note() != note.as_str()
+        {
             ui.global::<crate::Purse>().set_loss_open(true);
         }
         ui.set_export_note(note.into());
@@ -688,9 +692,15 @@ pub(crate) fn apply_session(
             // in-progress note, not an error
             ui.invoke_show_toast(s.get_toast_reattaching());
         } else if let Some(err) = sv.notice.strip_prefix("backup-failed:") {
-            // W5: a damaged key part file holds every backup until set aside
+            // W5: a damaged key part file holds every backup until set
+            // aside; the open republic's asks below, a closed one is named
             if err == molt_storage::StorageError::WalletKeysDamaged.to_string() {
-                ui.global::<crate::Purse>().set_loss_open(true);
+                let names = crate::wallet::damaged_elsewhere(sv);
+                if !names.is_empty() {
+                    ui.invoke_show_toast_error(
+                        format!("{} {}: {err}", s.get_toast_backup_failed(), names.join(", ")).into(),
+                    );
+                }
             } else {
                 ui.invoke_show_toast_error(format!("{} {err}", s.get_toast_backup_failed()).into());
             }
@@ -784,6 +794,7 @@ pub(crate) fn apply_session(
     apply_relays(ui, sv);
     // …and so is the purse's node (its one door is patch_settings)
     crate::wallet::apply_node(ui, lang, &sv.settings);
+    crate::wallet::apply_loss(ui, sv);
 
     if !settings_changed {
         apply_strings(ui, lang);
@@ -1515,7 +1526,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // authority, this is what the member-picture fit aims at
     ui.set_mp_img_budget(i32::try_from(b.org_stats.image_budget).unwrap_or(i32::MAX));
     crate::surfaces::apply_vault(ui, b);
-    crate::wallet::apply_wallet(ui, b.lang, b.wallet.as_ref());
+    crate::wallet::apply_wallet(ui, b.lang, &b.workspace, b.wallet.as_ref());
     crate::actions::kanban::apply(ui, b);
 }
 

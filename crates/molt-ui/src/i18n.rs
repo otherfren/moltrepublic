@@ -46,8 +46,20 @@ pub(crate) fn localize_headline(lang: i32, phrase: &str) -> String {
     .to_string()
 }
 
-fn localize_wallet_refusal(r: &molt_core::wallet::WalletRefusal) -> String {
+/// One purse refusal in the active language; English keeps the MCP text
+/// except the daemon and op words (U1).
+fn localize_wallet_refusal(lang: i32, r: &molt_core::wallet::WalletRefusal) -> String {
     use molt_core::wallet::WalletRefusal as W;
+    if lang != 1 {
+        return match r {
+            W::NoDaemon => "no node".into(),
+            W::Checking => "asking the node".into(),
+            W::Daemon(_) => Lexicon::en().wl_node_offline.into(),
+            W::UseInit => Lexicon::en().wl_set_up.into(),
+            W::Held(inner) => format!("{} - approval held", localize_wallet_refusal(lang, inner)),
+            other => other.to_string(),
+        };
+    }
     match r {
         W::NotYet => "noch nicht verfügbar".into(),
         W::NoKeysFile => "keine Schlüsseldatei".into(),
@@ -58,12 +70,12 @@ fn localize_wallet_refusal(r: &molt_core::wallet::WalletRefusal) -> String {
         W::InitPending => "Abstimmung läuft".into(),
         W::NoDaemon => "kein Node".into(),
         W::Checking => "Node wird gefragt".into(),
-        W::Daemon(t) => t.clone(),
+        W::Daemon(_) => Lexicon::de().wl_node_offline.into(),
         W::Birthday => "Starthöhe außerhalb des Bereichs".into(),
         W::Network => "anderes Netzwerk".into(),
         W::UnknownOp => "unbekannte Op".into(),
         W::UseInit => "über Kasse einrichten".into(),
-        W::Held(inner) => format!("{} - Zustimmung vorgemerkt", localize_wallet_refusal(inner)),
+        W::Held(inner) => format!("{} - Zustimmung vorgemerkt", localize_wallet_refusal(lang, inner)),
         W::Cancelled => "Einrichtung abgebrochen".into(),
         W::NoRun => "keine Einrichtung läuft".into(),
         W::RunActive => "Einrichtung läuft".into(),
@@ -107,6 +119,9 @@ pub(crate) fn localize_vault_refusal(lang: i32, r: &molt_core::vault::VaultRefus
 pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
     use molt_core::MoltError as E;
     if lang != 1 {
+        if let E::Wallet(r) = e {
+            return format!("purse: {}", localize_wallet_refusal(lang, r));
+        }
         return e.to_string();
     }
     match e {
@@ -123,7 +138,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
             format!("Der Vault wird geholt ({have} von {size} Bytes)")
         }
         E::Vault(r) => format!("Vault: {}", localize_vault_refusal(lang, r)),
-        E::Wallet(r) => format!("Kasse: {}", localize_wallet_refusal(r)),
+        E::Wallet(r) => format!("Kasse: {}", localize_wallet_refusal(lang, r)),
         E::FeatureDisabled(k) => format!("{k}: nicht aktiviert"),
         E::AlreadyTerminal(id, st) => format!("Vorschlag #{} ist bereits {st:?}", id.0),
         E::NotTheProposer(id) => format!("Vorschlag #{}: nur wer vorschlägt, zieht zurück", id.0),

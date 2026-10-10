@@ -30,7 +30,7 @@ import {
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
-import { MemoryPane, QuestsPane, BasketBar, VaultPane, WalletPane, PurseStage } from "surfaces.slint";
+import { MemoryPane, QuestsPane, BasketBar, VaultPane, WalletPane, PurseStage, PurseNotes, NodeChooser } from "surfaces.slint";
 
 export { Strings, Theme, WikiState, PatchView, Poke, HintTip, Kanban, Purse }
 
@@ -9169,43 +9169,6 @@ export component AppWindow inherits Window {
         }
     }
 
-    // Modal: the same outside-Tor warning for the purse's node - the one
-    // path from the GUI to a confirmed clearnet or local node.
-    if Purse.confirm-kind > 0: ConfirmModal {
-        dialog-width: 520px;
-        title: Purse.confirm-kind == 2 ? Strings.wl-cn-title-local : Strings.wl-cn-title;
-        body: Purse.confirm-kind == 2 ? Strings.wl-cn-body-local
-            : (root.net-tor-active ? Strings.wl-cn-body-tor : Strings.wl-cn-body-plain);
-        confirm-label: Strings.wl-cn-confirm;
-        confirm-enabled: root.wl-node-ack;
-        dismissed => {
-            Purse.confirm-kind = 0;
-            root.wl-node-ack = false;
-        }
-        confirmed => {
-            Purse.confirm-kind = 0;
-            root.wl-node-ack = false;
-            Purse.node-confirmed(Purse.confirm-url);
-        }
-        Text {
-            text: Purse.confirm-url;
-            color: Theme.text;
-            font-size: Theme.fs-body;
-            font-weight: 700;
-            wrap: word-wrap;
-        }
-        AppCheck {
-            label: Strings.wl-cn-ack;
-            checked <=> root.wl-node-ack;
-        }
-        Text {
-            text: Strings.rp-cn-note;
-            color: Theme.faint;
-            font-size: Theme.fs-cap;
-            wrap: word-wrap;
-        }
-    }
-
     // Modal: the purse stage over the main window (W10) while a set-up
     // runs; closing it leaves the run going, the bar stays in the pane.
     if root.screen == AppScreen.main && (Purse.run-active || Purse.run-finished)
@@ -10021,13 +9984,13 @@ export component AppWindow inherits Window {
         confirm-enabled: (root.of-memory-draft && !root.org-feat-memory)
             || (root.of-quests-draft && !root.org-feat-quests)
             || (root.of-vault-draft && root.org-vault-enable == 1)
-            || (root.of-wallet-draft && !root.org-feat-wallet && Purse.phase == 2);
+            || (root.of-wallet-draft && !root.org-feat-wallet && Purse.phase == 2 && Purse.node != "");
         dismissed => {
             root.org-features-modal-open = false;
         }
         confirmed => {
             root.org-features-modal-open = false;
-            if (root.of-wallet-draft && !root.org-feat-wallet && Purse.phase == 2) {
+            if (root.of-wallet-draft && !root.org-feat-wallet && Purse.phase == 2 && Purse.node != "") {
                 Purse.set-up();
             }
             // OR-in the LIVE flags: a peer's enable can commit while the
@@ -10088,6 +10051,10 @@ export component AppWindow inherits Window {
                 label: Strings.feat-wallet;
                 checked <=> root.of-wallet-draft;
             }
+            // ticking it is consenting to these (design §3.3); the set-up
+            // needs this seat's node first (U4)
+            if !root.org-feat-wallet && Purse.phase == 2 && root.of-wallet-draft: PurseNotes { }
+            if !root.org-feat-wallet && Purse.phase == 2 && root.of-wallet-draft && Purse.node == "": NodeChooser { }
             if !root.org-feat-wallet && Purse.phase != 2: HorizontalLayout {
                 height: 28px * Theme.ui-scale;
                 spacing: 10px;
@@ -10104,6 +10071,44 @@ export component AppWindow inherits Window {
                     vertical-alignment: center;
                 }
             }
+        }
+    }
+
+    // Modal: the same outside-Tor warning for the purse's node - the one
+    // path from the GUI to a confirmed clearnet or local node. After the
+    // organization dialog, so it draws above the node field there.
+    if Purse.confirm-kind > 0: ConfirmModal {
+        dialog-width: 520px;
+        title: Purse.confirm-kind == 2 ? Strings.wl-cn-title-local : Strings.wl-cn-title;
+        body: Purse.confirm-kind == 2 ? Strings.wl-cn-body-local
+            : (root.net-tor-active ? Strings.wl-cn-body-tor : Strings.wl-cn-body-plain);
+        confirm-label: Strings.wl-cn-confirm;
+        confirm-enabled: root.wl-node-ack;
+        dismissed => {
+            Purse.confirm-kind = 0;
+            root.wl-node-ack = false;
+        }
+        confirmed => {
+            Purse.confirm-kind = 0;
+            root.wl-node-ack = false;
+            Purse.node-confirmed(Purse.confirm-url);
+        }
+        Text {
+            text: Purse.confirm-url;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+        AppCheck {
+            label: Strings.wl-cn-ack;
+            checked <=> root.wl-node-ack;
+        }
+        Text {
+            text: Strings.rp-cn-note;
+            color: Theme.faint;
+            font-size: Theme.fs-cap;
+            wrap: word-wrap;
         }
     }
 

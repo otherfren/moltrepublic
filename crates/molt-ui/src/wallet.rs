@@ -5,6 +5,7 @@
 
 use molt_core::relay::RelayKind;
 use molt_core::wallet::{RunStage, ShareStatus, WalletPhase, WalletRunView, WalletView};
+use molt_core::Command;
 use slint::{ComponentHandle, ModelRc, VecModel};
 
 use crate::i18n::Lexicon;
@@ -166,7 +167,7 @@ fn phase_index(phase: WalletPhase) -> i32 {
 
 /// Fill the `Purse` global from the engine's view (`None` = no open
 /// republic).
-pub(crate) fn apply_wallet(ui: &AppWindow, lang: i32, view: Option<&WalletView>) {
+pub(crate) fn apply_wallet(ui: &AppWindow, lang: i32, ws: &str, view: Option<&WalletView>) {
     let l = lex(lang);
     let empty = WalletView::default();
     let v = view.unwrap_or(&empty);
@@ -219,13 +220,22 @@ pub(crate) fn apply_wallet(ui: &AppWindow, lang: i32, view: Option<&WalletView>)
         None => "",
     };
     p.set_fault_line(fault.into());
-    apply_run(ui, lang, v);
+    apply_run(ui, lang, ws, v);
 }
 
 /// The run's one bar; a new run or a new consent question brings the
 /// panel back (W10).
-fn apply_run(ui: &AppWindow, lang: i32, v: &WalletView) {
+fn apply_run(ui: &AppWindow, lang: i32, ws: &str, v: &WalletView) {
     let p = ui.global::<Purse>();
+    // the edges below compare against this republic's last state, never another's
+    if p.get_workspace() != ws {
+        p.set_workspace(ws.into());
+        p.set_run_active(false);
+        p.set_run_aborted(false);
+        p.set_needs_consent(false);
+        p.set_run_finished(false);
+        p.set_panel_dismissed(false);
+    }
     let (was_active, was_aborted, was_asking) = (p.get_run_active(), p.get_run_aborted(), p.get_needs_consent());
     let run = v.run.as_ref().filter(|_| v.phase != WalletPhase::Ready);
     let line = match run {
@@ -258,9 +268,85 @@ pub(crate) fn apply_node(ui: &AppWindow, lang: i32, settings: &molt_core::Sessio
     p.set_node_line(if url.is_empty() { lex(lang).wl_no_node } else { url }.into());
 }
 
-/// A typed node: an onion is taken outright; a clearnet or local one
-/// waits for the same acknowledgement a relay needs. `Err` = the line
-/// under the field.
-pub(crate) fn node_choice(lang: i32, url: &str) -> Result<(String, RelayKind), String> {
-    molt_core::relay::daemon_kind(url.trim()).map_err(|_| lex(lang).wl_bad_url.to_string())
+/// What a typed node leads to.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum NodeStep {
+    /// Not a node address: the line under the field.
+    Bad(String),
+    /// An onion: stored outright.
+    Take(String),
+    /// Clearnet (1) or local (2): waits for the relay-style acknowledgement.
+    Confirm(String, i32),
+}
+
+/// Classify a typed node by the relay host rule.
+pub(crate) fn node_step(lang: i32, url: &str) -> NodeStep {
+    match molt_core::relay::daemon_kind(url.trim()) {
+        Err(_) => NodeStep::Bad(lex(lang).wl_bad_url.to_string()),
+        Ok((url, RelayKind::Onion)) => NodeStep::Take(url),
+        Ok((url, RelayKind::Local)) => NodeStep::Confirm(url, 2),
+        Ok((url, _)) => NodeStep::Confirm(url, 1),
+    }
+}
+
+/// Storing a node: confirmed, and a non-onion one also switches
+/// non-onion dialing on, as a confirmed relay does.
+pub(crate) fn node_commands(url: &str, outside_tor: bool) -> Vec<Command> {
+    let patch = serde_json::json!({ "wallet_daemon_url": url, "wallet_daemon_confirmed": true });
+    let mut cmds = vec![Command::PatchSettings { patch }];
+    if outside_tor {
+        cmds.push(Command::RelayClearnetSession { unlock: true });
+    }
+    cmds
+}
+
+/// The purse's buttons: the four seat tools an MCP agent drives.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PurseAct {
+    SetUp,
+    Consent(bool),
+    Retry,
+    AcknowledgeLoss,
+}
+
+impl PurseAct {
+    pub(crate) fn command(self) -> Command {
+        match self {
+            PurseAct::SetUp => Command::WalletInit,
+            PurseAct::Consent(accept) => Command::WalletConsent { accept },
+            PurseAct::Retry => Command::WalletRetry,
+            PurseAct::AcknowledgeLoss => Command::WalletAcknowledgeLoss,
+        }
+    }
+}
+
+/// What consenting to the purse means (design §3.3), one line each.
+pub(crate) fn consent_notes(lang: i32) -> String {
+    let l = lex(lang);
+    [l.wl_note_sees, l.wl_note_lost, l.wl_note_spend].join("\n")
+}
+
+/// W5: the set-aside acts on the open republic only, so the dialog asks
+/// once per damage of the open one's key part file.
+pub(crate) fn apply_loss(ui: &AppWindow, sv: &molt_core::SessionView) {
+    let p = ui.global::<Purse>();
+    let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+    let open = &sv.active_workspace;
+    let hit = !open.is_empty() && sv.workspaces.iter().any(|w| &w.id == open && w.backup_error == damaged);
+    if !hit {
+        p.set_loss_ws("".into());
+    } else if p.get_loss_ws() != open.as_str() {
+        p.set_loss_ws(open.as_str().into());
+        p.set_loss_open(true);
+    }
+}
+
+/// The closed republics a damaged key part file holds, by name.
+pub(crate) fn damaged_elsewhere(sv: &molt_core::SessionView) -> Vec<String> {
+    let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+    sv.workspaces
+        .iter()
+        .filter(|w| w.id != sv.active_workspace && w.backup_error == damaged)
+        .map(|w| w.name.clone())
+        .collect()
 }

@@ -214,16 +214,19 @@ fn vault_refusals_render_in_german() {
     assert!(de.contains(": b"), "{de}");
 }
 
-/// Every purse refusal has a German arm; English stays the MCP text.
+/// Every purse refusal has a German arm; English stays the MCP text but
+/// for the daemon and op words (U1).
 #[test]
 fn wallet_refusals_render_in_german() {
     use molt_core::wallet::WalletRefusal as R;
+    let held = molt_core::MoltError::Wallet(R::Held(Box::new(R::NoDaemon)));
+    assert_eq!(super::localize_error(0, &held), "purse: no node - approval held");
+    assert_eq!(super::localize_error(1, &held), "Kasse: kein Node - Zustimmung vorgemerkt");
     for r in [
         R::NotYet,
         R::NoKeysFile,
         R::KeysIntact,
         R::Cancelled,
-        R::Held(Box::new(R::NoDaemon)),
         R::NoRun,
         R::RunActive,
         R::NotMine,

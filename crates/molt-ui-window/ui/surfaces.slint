@@ -4772,6 +4772,17 @@ export component PurseAddress inherits HorizontalLayout {
     }
 }
 
+// What consenting to the purse means (design §3.3).
+export component PurseNotes inherits VerticalLayout {
+    spacing: 2px;
+    for line in [Strings.wl-note-sees, Strings.wl-note-lost, Strings.wl-note-spend]: Text {
+        text: line;
+        color: Theme.dim;
+        font-size: Theme.fs-cap;
+        wrap: word-wrap;
+    }
+}
+
 // The purse stage (U2, U4): the node first if none is set, then the one
 // bar, then the address. The founding wizard's last step and the panel
 // over the main window (`later`) are this one component.
@@ -4812,36 +4823,35 @@ export component PurseStage inherits VerticalLayout {
             color: Theme.dim;
             font-size: Theme.fs-cap;
         }
-        if Purse.needs-consent: VerticalLayout {
-            spacing: 4px;
-            for line in [Strings.wl-note-sees, Strings.wl-note-lost, Strings.wl-note-spend]: Text {
-                text: line;
-                color: Theme.dim;
-                font-size: Theme.fs-cap;
-                wrap: word-wrap;
+        if Purse.run-aborted: HorizontalLayout {
+            alignment: start;
+            AppButton {
+                label: Strings.wl-try-again;
+                primary: true;
+                clicked => {
+                    Purse.retry();
+                }
             }
         }
-        if Purse.needs-consent || Purse.run-aborted: HorizontalLayout {
+    }
+    // a decline needs no node (W6)
+    if Purse.phase != 4 && Purse.needs-consent: VerticalLayout {
+        spacing: 8px;
+        PurseNotes { }
+        HorizontalLayout {
             spacing: 8px;
             alignment: start;
-            if Purse.needs-consent: AppButton {
+            AppButton {
                 label: Strings.wl-agree;
                 primary: true;
                 clicked => {
                     Purse.consent(true);
                 }
             }
-            if Purse.needs-consent: AppButton {
+            AppButton {
                 label: Strings.wl-decline;
                 clicked => {
                     Purse.consent(false);
-                }
-            }
-            if Purse.run-aborted: AppButton {
-                label: Strings.wl-try-again;
-                primary: true;
-                clicked => {
-                    Purse.retry();
                 }
             }
         }
