@@ -2434,3 +2434,18 @@ fn a_stored_verdict_on_an_applied_card_is_healed_on_load() {
     assert!(!p.superseded, "an applied card carries no verdict");
     assert_eq!(p.superseded_kind, None);
 }
+
+/// Audit (chain, low): a cut's base entry is the engine's own record. A
+/// card wearing its op would, once applied, name a base nobody holds and
+/// freeze the wiki and every later cut for good.
+#[test]
+fn a_base_commitment_op_is_never_a_proposal() {
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    for (surface, op) in [(Surface::Memory, "wiki_base"), (Surface::Vault, "vault_base")] {
+        let payload = json!({ "op": op, "hash": "00", "size": 1 });
+        assert!(walter.cmd_propose(surface, payload.clone()).is_err(), "{op} is refused locally");
+        assert!(!walter.receive_proposed(700, surface, payload, "petra"), "{op} is refused on the wire");
+    }
+    assert!(walter.wiki_base_committed().is_none());
+}

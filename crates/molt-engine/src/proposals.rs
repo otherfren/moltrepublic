@@ -652,7 +652,8 @@ impl State {
         if matches!(
             payload.get("op").and_then(Value::as_str),
             Some("restore_member" | "add_member")
-        ) {
+        ) || crate::chain::is_base_entry_op(&payload)
+        {
             return Err(MoltError::BadPayload("reserved op".into()));
         }
         // a member profile belongs to its member (`member_profiles_plan.md`

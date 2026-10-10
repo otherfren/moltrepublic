@@ -1034,6 +1034,10 @@ impl State {
             tracing::warn!(%id, "refusing a proposal with an implausible id");
             return false;
         }
+        if is_base_entry_op(&payload) {
+            tracing::warn!(%id, %by, "refusing a proposal with a reserved op");
+            return false;
+        }
         if let Some(r) = self.vault_enable_refusal(surface, &payload) {
             tracing::warn!(%id, %by, refusal = %r, "refusing a set_features adding the vault");
             return false;

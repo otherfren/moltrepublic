@@ -127,6 +127,15 @@ pub(crate) struct FoldedCut {
 }
 
 pub(crate) use wiki_base::{base_commitment_of, commitment as wiki_base_commitment, rev_at_cut_of};
+
+/// Whether `payload` wears a cut's base-entry op - written only by the fold,
+/// never a proposal.
+pub(crate) fn is_base_entry_op(payload: &serde_json::Value) -> bool {
+    matches!(
+        payload.get("op").and_then(serde_json::Value::as_str),
+        Some(wiki_base::WIKI_BASE_OP | vault_base::VAULT_BASE_OP)
+    )
+}
 pub(crate) use governance::PendingApproval;
 pub(crate) use membership::{NostrRekey, PendingRecovery, RecoverProgressReport};
 
