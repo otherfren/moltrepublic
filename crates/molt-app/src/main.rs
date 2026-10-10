@@ -647,7 +647,13 @@ fn repair_config(path: &Path) -> anyhow::Result<()> {
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let parseable = is_well_formed(&text);
     let was_valid = parse(&text).is_ok();
-    let settings = salvage(&text);
+    let mut settings = salvage(&text);
+    // a broken config refuses to start; its repair must not start it open
+    let minted = !was_valid && settings.mcp_token.is_empty();
+    if minted {
+        settings.mcp_token = molt_config::random_token()
+            .with_context(|| "cannot mint an MCP token, so nothing is repaired")?;
+    }
 
     let backup = backup_path(path);
     // through write_private, not fs::copy: a copy keeps the source's mode,
@@ -675,6 +681,11 @@ fn repair_config(path: &Path) -> anyhow::Result<()> {
         );
     }
     println!("Backup of the original: {}", backup.display());
+    if minted {
+        println!();
+        println!("New MCP API token (shown once):");
+        println!("    {}", settings.mcp_token);
+    }
     Ok(())
 }
 
@@ -1014,5 +1025,29 @@ mod tests {
         // …while the deliberate wide binds are untouched
         assert_eq!(parse_mcp_allow("0.0.0.0").0, "0.0.0.0");
         assert_eq!(parse_mcp_allow("192.168.1.10").0, "0.0.0.0");
+    }
+
+    fn repaired_token(original: &str) -> String {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, original).expect("write");
+        repair_config(&path).expect("repair");
+        let text = std::fs::read_to_string(&path).expect("read back");
+        parse(&text).expect("a valid config").mcp.token
+    }
+
+    /// A broken config refuses to start; its repair must not start it with
+    /// authentication off.
+    #[test]
+    fn repairing_a_broken_config_mints_a_token() {
+        assert!(!repaired_token("[mcp\ntoken = \"x\"").is_empty(), "unparseable");
+        assert!(!repaired_token("[mcp]\nport = \"x\"\n").is_empty(), "token key lost");
+        assert_eq!(repaired_token("[mcp]\ntoken = \"kept\"\nport = \"x\"\n"), "kept");
+    }
+
+    /// A valid config keeps what it already runs with, an empty token included.
+    #[test]
+    fn repairing_a_valid_config_keeps_its_token() {
+        assert_eq!(repaired_token("[mcp]\ntoken = \"\"\n"), "");
     }
 }
