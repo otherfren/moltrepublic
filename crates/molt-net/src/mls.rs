@@ -141,6 +141,30 @@ fn classify_process_error<E: std::fmt::Debug>(e: ProcessMessageError<E>) -> MlsE
     }
 }
 
+/// A leaf that replaces leaf `idx` (an update path or an Update proposal)
+/// must keep that leaf's name and, once the roster is armed, carry the
+/// name's anchored key.
+fn check_replacement(
+    group: &MlsGroup,
+    roster: Option<&BTreeMap<String, Vec<u8>>>,
+    idx: Option<LeafNodeIndex>,
+    leaf: &LeafNode,
+) -> Result<(), MlsError> {
+    let old = idx
+        .and_then(|i| group.member_at(i))
+        .ok_or_else(|| MlsError::Wire("leaf update: no such sender leaf".into()))?;
+    let name = String::from_utf8_lossy(old.credential.serialized_content()).into_owned();
+    if leaf.credential().serialized_content() != old.credential.serialized_content() {
+        return Err(MlsError::Wire(format!("leaf update: {name} renamed")));
+    }
+    if let Some(roster) = roster {
+        if roster.get(&name).map(Vec::as_slice) != Some(leaf.signature_key().as_slice()) {
+            return Err(MlsError::Wire(format!("leaf update: {name} is not its anchored key")));
+        }
+    }
+    Ok(())
+}
+
 /// What a decrypted inbound MLS message turned out to be.
 #[derive(Debug)]
 pub enum MlsIncoming {
@@ -702,7 +726,8 @@ impl MlsMember {
                 && protocol.content_type() == openmls::framing::ContentType::Commit
             {
                 let foreign = CommitKey::new(created_at, wire);
-                if *own_key <= foreign {
+                // the commit we merged, under another (unauthenticated) stamp
+                if own_key.digest == foreign.digest || *own_key <= foreign {
                     return Ok(MlsIncoming::CommitSuperseded);
                 }
                 return self.rewind_and_apply(wire, created_at);
@@ -729,6 +754,10 @@ impl MlsMember {
         if self.rewind_forbidden.contains(&from) {
             return Err(MlsError::Wire(format!("removed leaf {from}: cannot win the epoch")));
         }
+        let sender_leaf = match processed.sender() {
+            Sender::Member(idx) => Some(*idx),
+            _ => None,
+        };
         match processed.into_content() {
             // NOTE (review 2026-07-31): application traffic must NOT clear
             // the slot. Doing so re-opened the bystander fork: a member that
@@ -737,8 +766,9 @@ impl MlsMember {
             // slot is already bounded — `arm_prior_slot` runs on EVERY merge,
             // so it always points exactly one epoch back — and a replay of
             // the commit we applied is a no-op, because the tiebreak treats
-            // an equal key as superseded. Only a strictly LOWER key rewinds,
-            // which is precisely the convergence rule.
+            // an equal key (or the same digest) as superseded. Only a strictly
+            // LOWER key of a different commit rewinds, which is precisely the
+            // convergence rule.
             ProcessedMessageContent::ApplicationMessage(app) => Ok(MlsIncoming::Application {
                 from,
                 plaintext: app.into_bytes(),
@@ -778,6 +808,22 @@ impl MlsMember {
                                 "re-key refused: leaf for {name} is not its anchored key"
                             )));
                         }
+                    }
+                }
+                // a REPLACED leaf keeps its seat: openmls leaves this
+                // identity check to the application (`credentials_to_verify`)
+                {
+                    let group = self.group.as_ref().ok_or(MlsError::NoGroup)?;
+                    let roster = self.roster_keys.as_ref();
+                    if let Some(leaf) = staged.update_path_leaf_node() {
+                        check_replacement(group, roster, sender_leaf, leaf)?;
+                    }
+                    for update in staged.update_proposals() {
+                        let idx = match update.sender() {
+                            Sender::Member(idx) => Some(*idx),
+                            _ => None,
+                        };
+                        check_replacement(group, roster, idx, update.update_proposal().leaf_node())?;
                     }
                 }
                 // WHO this commit removes, read BEFORE the merge drops the
@@ -1763,6 +1809,158 @@ mod tests {
         let mut short = honest_roster;
         short.remove("cara");
         assert!(f2.check_tree(&short).is_err(), "a leaf beyond the roster is refused");
+    }
+
+    /// founder, bob and cara in one group, every one of them joined
+    fn three_seats() -> (MlsMember, MlsMember, MlsMember) {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let mut bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let mut cara = MlsMember::new(&key(3), "cara").expect("cara");
+        founder.create_group().expect("create");
+        let welcome = founder
+            .add_members(&[bob.key_package().expect("kp"), cara.key_package().expect("kp")])
+            .expect("add")
+            .expect("welcome");
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        cara.join_from_welcome(&welcome).expect("cara joins");
+        (founder, bob, cara)
+    }
+
+    fn honest_roster() -> BTreeMap<String, Vec<u8>> {
+        [(1u8, "founder"), (2, "bob"), (3, "cara")]
+            .into_iter()
+            .map(|(k, n)| (n.to_string(), key(k).verifying_key().to_bytes().to_vec()))
+            .collect()
+    }
+
+    fn as_bob(signature_key: &[u8]) -> CredentialWithKey {
+        CredentialWithKey {
+            credential: BasicCredential::new(b"bob".to_vec()).into(),
+            signature_key: signature_key.to_vec().into(),
+        }
+    }
+
+    /// **A commit's update path cannot rename the committer's leaf.**
+    /// openmls leaves the identity check of a replaced leaf to the
+    /// application (`credentials_to_verify`): cara re-keying her own leaf
+    /// as "bob" would otherwise hold a second bob leaf (audit 2026-10, HIGH).
+    #[test]
+    fn an_update_path_cannot_rename_the_committers_leaf() {
+        let (mut founder, mut bob, mut cara) = three_seats();
+        founder.set_roster_keys(honest_roster());
+        let epoch = founder.epoch();
+
+        // under a fresh key: the roster refuses it
+        let k9 = key(9);
+        let fresh = SignatureKeyPair::from_raw(
+            SignatureScheme::ED25519,
+            k9.to_bytes().to_vec(),
+            k9.verifying_key().to_bytes().to_vec(),
+        );
+        let group = cara.group.as_mut().expect("group");
+        let (commit, _, _) = group
+            .self_update_with_new_signer(
+                &cara.provider,
+                &cara.signer,
+                NewSignerBundle { signer: &fresh, credential_with_key: as_bob(fresh.public()) },
+                LeafNodeParameters::default(),
+            )
+            .expect("cara can build it")
+            .into_messages();
+        group.clear_pending_commit(cara.provider.storage()).expect("clear");
+        let commit = commit.to_bytes().expect("bytes");
+        assert!(founder.decrypt(&commit).is_err(), "a fresh-key bob leaf is refused");
+        assert_eq!(founder.epoch(), epoch, "nothing merged");
+
+        // under her own key, at a node with no roster armed: still refused
+        let own = as_bob(cara.signer.public());
+        let group = cara.group.as_mut().expect("group");
+        let (commit, _, _) = group
+            .self_update(
+                &cara.provider,
+                &cara.signer,
+                LeafNodeParameters::builder().with_credential_with_key(own).build(),
+            )
+            .expect("cara can build it")
+            .into_messages();
+        group.clear_pending_commit(cara.provider.storage()).expect("clear");
+        let commit = commit.to_bytes().expect("bytes");
+        assert!(bob.decrypt(&commit).is_err(), "a renamed leaf is refused");
+        assert_eq!(bob.epoch(), epoch, "nothing merged");
+
+        // a plain self-update keeps its name and merges
+        let group = cara.group.as_mut().expect("group");
+        let (commit, _, _) = group
+            .self_update(&cara.provider, &cara.signer, LeafNodeParameters::default())
+            .expect("self update")
+            .into_messages();
+        let commit = commit.to_bytes().expect("bytes");
+        assert!(matches!(founder.decrypt(&commit), Ok(MlsIncoming::Commit { .. })));
+    }
+
+    /// The same rename carried by an Update PROPOSAL that an honest member
+    /// commits: the leaf it installs is checked like an update path's.
+    #[test]
+    fn an_update_proposal_cannot_rename_the_proposers_leaf() {
+        let (mut founder, mut bob, mut cara) = three_seats();
+        bob.set_roster_keys(honest_roster());
+        let epoch = bob.epoch();
+        let renamed = as_bob(cara.signer.public());
+        let group = cara.group.as_mut().expect("group");
+        let (proposal, _) = group
+            .propose_self_update(
+                &cara.provider,
+                &cara.signer,
+                LeafNodeParameters::builder().with_credential_with_key(renamed).build(),
+            )
+            .expect("cara can propose it");
+        let proposal = proposal.to_bytes().expect("bytes");
+        assert!(matches!(founder.decrypt(&proposal), Ok(MlsIncoming::Proposal)));
+        assert!(matches!(bob.decrypt(&proposal), Ok(MlsIncoming::Proposal)));
+        let group = founder.group.as_mut().expect("group");
+        let (commit, _, _) = group
+            .commit_to_pending_proposals(&founder.provider, &founder.signer)
+            .expect("founder commits it");
+        let commit = commit.to_bytes().expect("bytes");
+        assert!(bob.decrypt(&commit).is_err(), "the renamed leaf is refused");
+        assert_eq!(bob.epoch(), epoch, "nothing merged");
+    }
+
+    /// **A re-stamped copy of the commit already merged is a no-op.** The
+    /// carrier stamp is unauthenticated; the same commit under a lower
+    /// stamp must not rewind and re-merge it (audit 2026-10, MEDIUM).
+    #[test]
+    fn a_restamped_copy_of_the_merged_commit_is_a_no_op() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        founder.create_group().expect("create");
+        let mut alice = MlsMember::new(&key(2), "alice").expect("alice");
+        let mut bob = MlsMember::new(&key(3), "bob").expect("bob");
+        let carol = MlsMember::new(&key(4), "carol").expect("carol");
+        let welcome = founder
+            .add_members(&[
+                alice.key_package().expect("kp"),
+                bob.key_package().expect("kp"),
+                carol.key_package().expect("kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        alice.join_from_welcome(&welcome).expect("alice joins");
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        let carol_again = MlsMember::new(&key(4), "carol").expect("carol again");
+        let (commit, _) = alice
+            .restore_member("carol", &carol_again.key_package().expect("kp"), 100)
+            .expect("alice re-keys carol");
+        assert!(matches!(bob.decrypt_at(&commit, 100), Ok(MlsIncoming::Commit { .. })));
+        let m1 = bob.encrypt(b"one").expect("encrypt");
+        assert_app(alice.decrypt(&m1).expect("m1"), "bob", b"one");
+        for stamp in [99u64, 50, 1] {
+            assert!(
+                matches!(bob.decrypt_at(&commit, stamp), Ok(MlsIncoming::CommitSuperseded)),
+                "stamp {stamp}: the merged commit again"
+            );
+        }
+        let m2 = bob.encrypt(b"two").expect("encrypt");
+        assert_app(alice.decrypt(&m2).expect("m2"), "bob", b"two");
     }
 
     /// **An evicted leaf cannot undo its eviction with a back-dated commit.**
