@@ -113,6 +113,9 @@ pub(crate) fn nostr_rekey(
     Ok(NostrRekey { commit, welcome, prev_exporter, stamp })
 }
 
+/// Pending consented restores one seat may hold: a retry or two.
+const CONSENTED_PER_SEAT: usize = 3;
+
 impl State {
     /// Propose a membership change (re-admit a returning member, or add a seat)
     /// and co-sign it — the producer for `Membership` blocks (recovery step ❹).
@@ -230,21 +233,10 @@ impl State {
             tracing::warn!(%id, reason = why, "refusing an unsealable membership proposal");
             return false;
         }
-        // L3: pending membership changes are bounded by what can ever be
-        // open at once — one re-admission per seat plus slack for Joined
-        // seats not on the roster yet
-        let pending_membership = self
-            .chain.proposal_changes
-            .values()
-            .filter(|c| matches!(c, ChainChange::Membership { .. }))
-            .count();
-        let cap = self
-            .replica
-            .as_ref()
-            .map(|r| r.roster.len().saturating_add(8))
-            .unwrap_or(16);
-        if pending_membership >= cap && !self.chain.proposal_changes.contains_key(&id) {
-            tracing::warn!(%id, "refusing a membership proposal beyond the pending cap");
+        // L3: bounded PER SEAT, so one member's cards never crowd out
+        // another seat's recovery
+        if !self.chain.proposal_changes.contains_key(&id) && self.seat_cards_full(change) {
+            tracing::warn!(%id, "refusing a membership proposal beyond the seat's pending cap");
             return false;
         }
         // SECURITY: the id is peer-chosen. `proposal_change` resolves an id
@@ -259,6 +251,22 @@ impl State {
             return false;
         }
         true
+    }
+
+    /// The seat already holds [`CONSENTED_PER_SEAT`] pending consented
+    /// restores (consent-less ones are held to one by `sealable_membership`).
+    fn seat_cards_full(&self, change: &ChainChange) -> bool {
+        let ChainChange::Membership { member, consent: Some(_), .. } = change else {
+            return false;
+        };
+        self.chain
+            .proposal_changes
+            .values()
+            .filter(|c| {
+                matches!(c, ChainChange::Membership { member: m, consent: Some(_), .. } if m == member)
+            })
+            .count()
+            >= CONSENTED_PER_SEAT
     }
 
     /// Whether a wire membership change could ever seal: `Joined` is

@@ -1026,3 +1026,41 @@ fn a_planted_restore_card_does_not_block_a_recovery() {
     );
     assert!(!request(&mut walter, "t-2"), "a consented re-admission in flight still blocks");
 }
+
+/// One member's own restore cards must not exhaust the registry for every
+/// other seat: the bound is per seat, so a flood of self-consented cards
+/// leaves another seat's genuine recovery votable.
+#[test]
+fn a_flood_of_one_seats_restore_cards_leaves_room_for_another_seat() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora", "erika"], 3);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let restore = |id: u64, member: &str, relay: String| WorkspaceEvent::MembershipProposed {
+        id: ProposalId(id),
+        op: MembershipOp::Restored,
+        member: member.to_string(),
+        identity_pk: b.pk(member),
+        nostr_pk: None,
+        relays: vec![relay],
+        consent: Some(consent_for(&b, member, "")),
+    };
+    for i in 0..16u64 {
+        wire(&mut walter, "erika", i + 1, restore(31 + i, "erika", format!("wss://r{i}.example")));
+    }
+    let erika_cards = walter
+        .chain
+        .proposal_changes
+        .values()
+        .filter(|c| matches!(c, ChainChange::Membership { member, .. } if member == "erika"))
+        .count();
+    assert!(erika_cards < 16, "the flood is bounded per seat");
+    wire(&mut walter, "petra", 100, restore(60, "dora", "wss://relay.one".to_string()));
+    assert!(
+        walter.chain.proposal_changes.contains_key(&60),
+        "dora's recovery is registered despite erika's flood"
+    );
+}
