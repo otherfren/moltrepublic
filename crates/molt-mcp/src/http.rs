@@ -32,14 +32,15 @@ use tokio::net::TcpStream;
 use tower_service::Service;
 
 use crate::{
-    call_tool, supported_versions, tool_defs, tools, Credentials, Scope, INSTRUCTIONS,
-    MAX_RPC_LINE,
+    call_tool, live_tokens, supported_versions, tool_defs, tools, Credentials, Scope,
+    INSTRUCTIONS, MAX_RPC_LINE,
 };
 
 /// The HTTP face of one listener; cloned per connection.
 #[derive(Clone)]
 pub(crate) struct Http {
     svc: StreamableHttpService<Seat, LocalSessionManager>,
+    handle: WalletHandle,
 }
 
 impl Http {
@@ -53,12 +54,13 @@ impl Http {
         if !loopback_only {
             config = config.disable_allowed_hosts();
         }
+        let seat = handle.clone();
         let svc = StreamableHttpService::new(
-            move || Ok(Seat { handle: handle.clone() }),
+            move || Ok(Seat { handle: seat.clone() }),
             Arc::new(LocalSessionManager::default()),
             config,
         );
-        Self { svc }
+        Self { svc, handle }
     }
 
     /// A connection whose requests have all been refused is closed at
@@ -76,9 +78,15 @@ impl Http {
         let seen = authed.clone();
         let svc = service_fn(move |req: Request<Incoming>| {
             let mut inner = self.svc.clone();
+            let handle = self.handle.clone();
             let creds = creds.clone();
             let seen = seen.clone();
-            async move { Ok::<_, Infallible>(gate(&creds, &seen, peer, req, &mut inner).await) }
+            async move {
+                // per request: a kept-alive connection must not outlive a revoked key
+                let live = live_tokens(&handle).await;
+                let creds = live.as_ref().unwrap_or(&creds);
+                Ok::<_, Infallible>(gate(creds, &seen, peer, req, &mut inner).await)
+            }
         });
         let conn = hyper::server::conn::http1::Builder::new()
             .timer(TokioTimer::new())
@@ -482,6 +490,62 @@ mod tests {
         assert_eq!(offered.last().and_then(Value::as_str), Some("2025-11-25"), "{body}");
         let (_, _, body) = post(addr, SEAT, initialize("2026-07-28")).await;
         assert_eq!(body["result"]["protocolVersion"], "2025-11-25", "{body}");
+    }
+
+    /// One request on a kept-alive socket; the reply is read by its length.
+    async fn keep_alive_post(s: &mut TcpStream, token: &str, msg: &Value) -> u16 {
+        let body = msg.to_string();
+        let req = format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\
+             Accept: application/json, text/event-stream\r\nContent-Type: application/json\r\n\
+             Authorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        s.write_all(req.as_bytes()).await.expect("write");
+        let mut raw = Vec::new();
+        let mut byte = [0u8; 1];
+        while !raw.ends_with(b"\r\n\r\n") {
+            tokio::time::timeout(std::time::Duration::from_secs(5), s.read_exact(&mut byte))
+                .await
+                .expect("reply head within 5s")
+                .expect("read head");
+            raw.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&raw).into_owned();
+        let len: usize = head
+            .lines()
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.trim().parse().ok())
+            .unwrap_or(0);
+        let mut rest = vec![0u8; len];
+        s.read_exact(&mut rest).await.expect("read body");
+        head.split_whitespace().nth(1).and_then(|c| c.parse().ok()).expect("status")
+    }
+
+    #[tokio::test]
+    async fn http_revoked_read_key_stops_on_a_kept_alive_connection() {
+        let handle = wallet();
+        handle
+            .execute(molt_core::Command::PatchSettings {
+                patch: json!({ "mcp_token": SEAT, "mcp_read_token": READ }),
+            })
+            .await
+            .expect("seed the live keys");
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let served = handle.clone();
+        tokio::spawn(async move {
+            let _ = serve_listener(served, listener, false, vec!["127.0.0.1".parse().expect("ip")], SEAT.into(), READ.into()).await;
+        });
+        let mut s = TcpStream::connect(addr).await.expect("connect");
+        let list = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" });
+        assert_eq!(keep_alive_post(&mut s, READ, &list).await, 200);
+        handle
+            .execute(molt_core::Command::PatchSettings { patch: json!({ "mcp_read_token": "" }) })
+            .await
+            .expect("revoke");
+        assert_eq!(keep_alive_post(&mut s, READ, &list).await, 401);
     }
 
     #[tokio::test]

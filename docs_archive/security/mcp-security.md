@@ -86,9 +86,10 @@ refusal on both, auth failures come back as JSON-RPC error `-32001`:
 
   After that it lives only in `config.toml`.
 * **Rotate it** anytime from the GUI: *Settings → MCP → Rotieren*. That mints a new
-  token, writes it to the config, and takes effect immediately — existing sessions
-  keep working, but the next `initialize` must use the new value. The accept loop
-  reads the running session's token per connection, so no restart is involved.
+  token, writes it to the config, and takes effect immediately — existing line
+  sessions keep working, but the next `initialize` must use the new value; an HTTP
+  request is checked against the running session's keys every time, so a kept-alive
+  connection stops at once. No restart is involved.
 * An **empty** `token = ""` disables token auth (the node logs a warning on start).
   The peer-IP allowlist still applies, so loopback-only + empty token is a common,
   reasonable local setup.
