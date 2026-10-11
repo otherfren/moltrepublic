@@ -46,8 +46,20 @@ const PEER_GRACE_WINDOWS: u64 = 2;
 
 /// Ack-progress grace (F4b): a peer in contact whose hold has not moved for
 /// this many windows stops holding the floor. A gap between two rounds
-/// longer than one window is our own absence and is not counted.
+/// longer than one window (at least two days) is our own absence and is not
+/// counted.
 const ACK_GRACE_WINDOWS: u64 = 2;
+
+fn ack_clock_for(window: u64, now: u64) -> molt_storage::AckClock {
+    // the beat's own gap is a day plus tick lag: at a 1-day window it must
+    // not read as absence
+    let absence_secs = window.max(2 * COMPACT_EVERY_SECS);
+    molt_storage::AckClock {
+        now,
+        stall_secs: window.saturating_mul(ACK_GRACE_WINDOWS).max(absence_secs),
+        absence_secs,
+    }
+}
 
 impl State {
     /// The instant before which chat content is **physically** dropped:
@@ -83,12 +95,7 @@ impl State {
 
     /// The ack-progress grace of a round at `now` (F4b).
     pub(crate) fn ack_clock(&self, now: u64) -> molt_storage::AckClock {
-        let window = self.org_effective().retention_days * 86_400;
-        molt_storage::AckClock {
-            now,
-            stall_secs: window.saturating_mul(ACK_GRACE_WINDOWS),
-            absence_secs: window,
-        }
+        ack_clock_for(self.org_effective().retention_days * 86_400, now)
     }
 
     /// Physically drop expired chat from the LIVE state and return the
@@ -181,8 +188,12 @@ impl State {
     /// round would lose the race against `Close` and silently never happen.
     pub(crate) fn compact_now(&mut self, now: u64, wait: bool) {
         let cutoff = self.compaction_cutoff(now);
-        let Some((dump, dropped)) = self.compact_chat(cutoff) else {
-            return;
+        let (dump, dropped) = match self.compact_chat(cutoff) {
+            Some(trimmed) => trimmed,
+            // F4b: once pruned, every beat runs the round, or a quiet
+            // republic's ack clock would stop and a lurker pin the floor
+            None if self.chat_pruned => (self.dump(), 0),
+            None => return,
         };
         let holding_peers = self.peers_holding_the_log(now);
         let clock = self.ack_clock(now);
@@ -195,7 +206,9 @@ impl State {
             return;
         };
         let handle = active.handle.clone();
-        tracing::info!(dropped, cutoff, "compacting the ephemeral log");
+        if dropped > 0 {
+            tracing::info!(dropped, cutoff, "compacting the ephemeral log");
+        }
         let run = move || {
             let out = handle.compact_blocking(snapshot, holding_peers, clock);
             if out.segments_dropped > 0 {
@@ -213,7 +226,9 @@ impl State {
         }
         // a dropped message must leave the readers' views now, not at the
         // next open — the session push is what makes them re-read
-        self.emit_session(molt_core::SessionScope::Full);
+        if dropped > 0 {
+            self.emit_session(molt_core::SessionScope::Full);
+        }
     }
 }
 
@@ -407,6 +422,116 @@ mod tests {
         assert_eq!(clock.now, 42);
         assert_eq!(clock.stall_secs, 2 * window);
         assert_eq!(clock.absence_secs, window);
+    }
+
+    /// F4b: the daily beat itself is never our absence, even at the
+    /// shortest retention (1 day), or a lurker would never be charged.
+    #[test]
+    fn the_daily_beat_is_never_absence() {
+        let jitter = 3_600;
+        for days in [1, 2, 7, 365] {
+            let clock = super::ack_clock_for(days * 86_400, 42);
+            assert!(
+                clock.absence_secs > super::COMPACT_EVERY_SECS + jitter,
+                "retention {days}d"
+            );
+            assert!(clock.stall_secs >= clock.absence_secs, "retention {days}d");
+        }
+    }
+
+    /// F4b (audit #32 follow-up): once content has been pruned, the round
+    /// runs on every daily beat even when nothing new expires, so a
+    /// lurker's stall clock keeps running in a quiet republic.
+    #[test]
+    fn a_quiet_republic_still_runs_the_daily_ack_round() {
+        const DAY: u64 = 86_400;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed =
+            molt_storage::seed_entropy(&molt_storage::generate_seed_phrase().expect("phrase"))
+                .expect("entropy");
+        let genesis = molt_core::EventEnvelope { prev_seq: 0,
+            seq: 1,
+            ts: 10,
+            by: "me".to_string(),
+            body: molt_core::WorkspaceEvent::Founded {
+                name: "Compaction".to_string(),
+                rule_m: 1,
+                rule_n: 1,
+                member: "me".to_string(),
+                roster: vec!["me".to_string()],
+                identities: Vec::new(),
+                attestations: Vec::new(),
+                republic_id: String::new(),
+                agenda: String::new(),
+                relays: Vec::new(),
+                features: None,
+            },
+        };
+        let ws = molt_storage::create_workspace(tmp.path(), &seed, &genesis).expect("create");
+        let dir = ws.dir().to_path_buf();
+        let mut st = plain_state();
+        st.apply(&genesis);
+        let t0 = 100 * DAY;
+        let old = ChatMessage::text(molt_core::MessageId([1u8; 16]), "me", "ancient", t0);
+        st.apply(&molt_core::EventEnvelope { prev_seq: 0,
+            seq: 2,
+            ts: t0,
+            by: "me".to_string(),
+            body: molt_core::WorkspaceEvent::Chat(old),
+        });
+        st.next_seq = 3;
+        let roster = vec!["me".to_string(), "lurker".to_string()];
+        st.replica = Some(crate::ReplicaState {
+            member: "me".to_string(),
+            roster: roster.clone(),
+            rule_m: 1,
+            ..Default::default()
+        });
+        let id = "w-compact".to_string();
+        st.session.active_workspace = id.clone();
+        st.session.workspaces.push(molt_core::WorkspaceInfo {
+            id: id.clone(),
+            name: "Compaction".to_string(),
+            detail: "1-of-2".to_string(),
+            synced: true,
+            state: 0,
+            last_sync_min: 0,
+            sync_queue: 0,
+            s3: false,
+            size_kib: 0,
+            last_backup_min: molt_core::WorkspaceInfo::NEVER,
+            backup_copies: 0,
+            backup_error: String::new(),
+            has_seed: false,
+            net: "none".to_string(),
+            encrypted: false,
+            restored: false,
+            members: molt_core::roster_members(&roster, t0, |_| molt_core::MemberInfo::NEVER),
+            agenda: String::new(),
+        });
+        st.active = Some(crate::ActiveStorage {
+            id,
+            dir: dir.clone(),
+            prefs: molt_core::WorkspacePrefs::default(),
+            handle: molt_storage::start_writer(ws),
+        });
+
+        let first = t0 + 15 * DAY;
+        let last = first + 20 * DAY;
+        let mut now = first;
+        while now <= last {
+            for m in &mut st.session.workspaces[0].members {
+                m.last_seen = now;
+            }
+            st.compact_now(now, true);
+            now += DAY;
+        }
+        st.active.take().expect("active").handle.close(None);
+
+        let (reopened, _) = molt_storage::open_workspace(&dir).expect("reopen");
+        let seen = reopened.read_transport_state().ack_progress["lurker"];
+        assert_eq!(seen.checked, last, "every daily beat ran the round");
+        assert_eq!(seen.since, first, "a daily beat is not our absence");
     }
 
     /// The daily gate (F8): without an open workspace nothing runs at all, and

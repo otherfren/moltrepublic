@@ -71,9 +71,15 @@ Segmente. Floor-Regeln:
   Zustellgarantie für den Teil unter dem Floor (C2). Präzisierungen
   (konservativ, nicht Teil der Entscheidung): (a) gemessen wird pro
   Kompaktorlauf, also täglich — die Freigabe kommt bis zu einen Tag
-  später; (b) eine Lücke zwischen zwei Läufen > 1 Fenster ist UNSERE
-  Abwesenheit (der Peer konnte niemandem acken, der nicht lief) und wird
-  ihm nicht angerechnet; (c) ein Peer, der aus der haltenden Liste fällt,
+  später. Täglich heißt: sobald einmal Chat gekappt wurde (`chat_pruned`),
+  läuft der Lauf auf JEDEM Tages-Beat, auch wenn nichts Neues abläuft —
+  sonst stünde die Uhr in einer stillen Republik und der Lurker hielte den
+  Floor ewig. Vor dem ersten Kappen läuft kein Lauf (nichts zu löschen);
+  (b) eine Lücke zwischen zwei Läufen > 1 Fenster, mindestens aber
+  > 2 Tage, ist UNSERE Abwesenheit (der Peer konnte niemandem acken, der
+  nicht lief) und wird ihm nicht angerechnet — der Tages-Beat selbst
+  (1 Tag + Tick-Verzug) darf bei 1-Tages-Retention nicht als Abwesenheit
+  zählen; die Stall-Karenz ist entsprechend mindestens 2 Tage; (c) ein Peer, der aus der haltenden Liste fällt,
   verliert seinen Eintrag und startet bei Rückkehr frisch.
 
 Vorgaben aus der offenen F6–F9-Runde (werden so gebaut, solange kein
