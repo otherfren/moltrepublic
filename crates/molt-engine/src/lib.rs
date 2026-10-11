@@ -50,6 +50,7 @@ mod proposals;
 mod recovery;
 mod ritual_member;
 mod relay_msg;
+pub use founding::HANDLE_CHARSET_REFUSAL;
 pub use relay_msg::known_headlines;
 pub use relay_msg::{known_log_shapes, LogShape};
 mod session;

@@ -164,8 +164,8 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::NotYourFile(_) => "Nur wer die Datei geteilt hat, kann sie entfernen".to_string(),
         E::NotYourMessage(_) => "Nur wer die Nachricht geschrieben hat, kann sie löschen".to_string(),
         E::Restore(t) => format!("Restore: {t}"),
-        E::Create(t) => format!("Gründung: {t}"),
-        E::Join(t) => format!("Beitritt: {t}"),
+        E::Create(t) => format!("Gründung: {}", handle_err_de(t)),
+        E::Join(t) => format!("Beitritt: {}", handle_err_de(t)),
         E::Recover(t) => format!("Recovery: {t}"),
         E::Poke(t) => format!(
             "Anstupsen: {}",
@@ -190,6 +190,16 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
             }
         ),
         E::Engine(t) => format!("Engine: {t}"),
+    }
+}
+
+/// A create/join refusal: the handle charset rule in German, anything
+/// else carried through.
+fn handle_err_de(t: &str) -> &str {
+    if t == molt_engine::HANDLE_CHARSET_REFUSAL {
+        "Name nur aus ASCII und ä ö ü ß"
+    } else {
+        t
     }
 }
 

@@ -2795,7 +2795,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "the new republic's name (must be unique locally)" },
-                    "member": { "type": "string", "description": "the founder's handle" },
+                    "member": { "type": "string", "description": "the founder's handle (ASCII + ä ö ü ß)" },
                     "threshold": { "type": "integer", "description": "approvals required (m), 2..=members" },
                     "members": { "type": "integer", "description": "member count (n), 2..=13" }
                 },
@@ -2969,7 +2969,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "invite": { "type": "string", "description": "the molt://invite/… link (one opaque segment; older path-shaped links still parse)" },
-                    "member": { "type": "string", "description": "the joiner's handle" }
+                    "member": { "type": "string", "description": "the joiner's handle (ASCII + ä ö ü ß)" }
                 },
                 "required": ["invite", "member"]
             }),

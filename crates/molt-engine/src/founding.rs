@@ -1101,26 +1101,14 @@ fn check_roster_anchors(identities: &[molt_core::MemberIdentity]) -> Result<(), 
     Ok(())
 }
 
-/// The `roster` field must be exactly the identities' members, in order.
-///
-/// `SealedRoster.roster` is CONSTITUTIONAL — it becomes the `Founded` event's
-/// member list and thus `State::roster()` — but it is covered by NO signature:
-/// it is absent from `roster_canonical_bytes` (every version) and from
-/// `republic_id` (molt-republic-id-v2). Without this check every attestation
-/// can verify over an honest identity table while the member list a member
-/// actually reads names a different set.
-///
-/// Checked rather than bound into the signed bytes (user decision
-/// 2026-08-01): the field is fully DERIVABLE from `identities`, so equality
-/// closes the hole with no byte-layout bump and no recompute-site ripple.
-/// Recovery already derives it (`recovery.rs::sealed_roster_from_blob`).
-/// The constitutional numbers must describe the table they ride with:
-/// `n` seats in the identity table and a threshold inside `1..=n` — the
-/// same shape `verify_genesis` enforces, checked here before a member
-/// ratifies and before a joiner writes anything (review 2026-08-25).
-/// A member handle as it may be anchored: non-empty, at most
-/// [`MAX_HANDLE_CHARS`] characters, one line, no control characters — it
-/// becomes forever-bytes in the roster and one line of every run log.
+/// The refusal of a new handle outside ASCII + ä ö ü ß; molt-ui keys its
+/// German rendering on it.
+pub const HANDLE_CHARSET_REFUSAL: &str = "the handle may contain only ASCII and ä ö ü ß";
+
+/// A NEW member handle as it may be anchored: non-empty, at most
+/// [`MAX_HANDLE_CHARS`] characters, one line, no control characters, ASCII
+/// plus ä ö ü ß — it becomes forever-bytes in the roster and one line of
+/// every run log.
 pub(crate) fn check_handle(raw: &str) -> Result<(), String> {
     let handle = raw.trim();
     if handle.is_empty() {
@@ -1139,6 +1127,11 @@ pub(crate) fn check_handle(raw: &str) -> Result<(), String> {
         || handle.chars().any(|c| (c.is_whitespace() && c != ' ') || is_default_ignorable(c))
     {
         return Err("the handle has invisible or unusual spacing".to_string());
+    }
+    // other scripts hold look-alikes of Latin letters (audit #20); an
+    // anchored roster is never re-checked against this
+    if !handle.chars().all(|c| c.is_ascii() || "äöüÄÖÜß".contains(c)) {
+        return Err(HANDLE_CHARSET_REFUSAL.to_string());
     }
     Ok(())
 }
@@ -1182,6 +1175,10 @@ pub(crate) fn identity_key_table(
 /// The longest handle a seat may carry.
 pub(crate) const MAX_HANDLE_CHARS: usize = 64;
 
+/// The constitutional numbers must describe the table they ride with:
+/// `n` seats in the identity table and a threshold inside `1..=n` — the
+/// same shape `verify_genesis` enforces, checked here before a member
+/// ratifies and before a joiner writes anything (review 2026-08-25).
 fn check_rule_shape(rule_m: u8, rule_n: u8, seats: usize) -> Result<(), String> {
     if usize::from(rule_n) != seats {
         return Err(format!("rule n={rule_n} does not match {seats} seats"));
@@ -1192,6 +1189,19 @@ fn check_rule_shape(rule_m: u8, rule_n: u8, seats: usize) -> Result<(), String> 
     Ok(())
 }
 
+/// The `roster` field must be exactly the identities' members, in order.
+///
+/// `SealedRoster.roster` is CONSTITUTIONAL — it becomes the `Founded` event's
+/// member list and thus `State::roster()` — but it is covered by NO signature:
+/// it is absent from `roster_canonical_bytes` (every version) and from
+/// `republic_id` (molt-republic-id-v2). Without this check every attestation
+/// can verify over an honest identity table while the member list a member
+/// actually reads names a different set.
+///
+/// Checked rather than bound into the signed bytes (user decision
+/// 2026-08-01): the field is fully DERIVABLE from `identities`, so equality
+/// closes the hole with no byte-layout bump and no recompute-site ripple.
+/// Recovery already derives it (`recovery.rs::sealed_roster_from_blob`).
 fn check_roster_matches_identities(
     roster: &[String],
     identities: &[molt_core::MemberIdentity],
@@ -3170,17 +3180,23 @@ mod tests {
     /// these identities, so a rejection isolates the anchor checks (it can
     /// never hide behind a signature failure).
     fn signed_roster_with(npk_a: &str, npk_b: &str) -> SealedRoster {
+        signed_roster_named(["founder", "member"], npk_a, npk_b)
+    }
+
+    /// [`signed_roster_with`] over two chosen handles.
+    fn signed_roster_named(names: [&str; 2], npk_a: &str, npk_b: &str) -> SealedRoster {
+        let [founder, member] = names;
         let (sk_a, pk_a) = molt_storage::derive_identity_key(&[1u8; 32], "a");
         let (sk_b, pk_b) = molt_storage::derive_identity_key(&[2u8; 32], "b");
         let identities = vec![
             MemberIdentity {
-                member: "founder".into(),
+                member: founder.into(),
                 identity_pk: pk_a,
                 nostr_pk: npk_a.to_string(),
                 vault_pk: String::new(),
             },
             MemberIdentity {
-                member: "member".into(),
+                member: member.into(),
                 identity_pk: pk_b,
                 nostr_pk: npk_b.to_string(),
                 vault_pk: String::new(),
@@ -3189,15 +3205,15 @@ mod tests {
         let republic_id = molt_storage::republic_id("R", 2, 2, &identities);
         let table = molt_core::roster_canonical_bytes(&republic_id, 2, 2, &identities, "charter", &[], None);
         let attestations = vec![
-            RosterAttestation { member: "founder".into(), sig: molt_storage::identity_sign(&sk_a, &table) },
-            RosterAttestation { member: "member".into(), sig: molt_storage::identity_sign(&sk_b, &table) },
+            RosterAttestation { member: founder.into(), sig: molt_storage::identity_sign(&sk_a, &table) },
+            RosterAttestation { member: member.into(), sig: molt_storage::identity_sign(&sk_b, &table) },
         ];
         SealedRoster {
             name: "R".into(),
             republic_id,
             rule_m: 2,
             rule_n: 2,
-            roster: vec!["founder".into(), "member".into()],
+            roster: vec![founder.into(), member.into()],
             identities,
             attestations,
             agenda: "charter".into(),
@@ -3662,9 +3678,44 @@ mod tests {
         ] {
             assert!(check_handle(spoof).is_err(), "{spoof:?}");
         }
-        for ok in ["alice", "Alice Smith", "J\u{fc}rgen", "\u{674e}\u{96f7}", "o'neil-2"] {
+        for ok in ["alice", "Alice Smith", "o'neil-2"] {
             assert!(check_handle(ok).is_ok(), "{ok:?}");
         }
+    }
+
+    /// A NEW handle is ASCII plus the German umlauts and ß (user decision
+    /// 2026-10-11, audit #20): every other script carries look-alikes of
+    /// Latin letters a byte compare cannot see.
+    #[test]
+    fn a_new_handle_is_ascii_or_german() {
+        for spoof in [
+            "\u{0430}lice",       // Cyrillic a
+            "b\u{043E}b",         // Cyrillic o
+            "\u{03BF}tto",        // Greek omicron
+            "\u{FF41}lice",       // fullwidth a
+            "u\u{0308}lf",        // u + combining diaeresis (only the precomposed form)
+            "\u{674e}\u{96f7}",  // CJK
+            "J\u{e9}r\u{f4}me",  // Latin-1 beyond the German set
+        ] {
+            assert_eq!(check_handle(spoof), Err(HANDLE_CHARSET_REFUSAL.to_string()), "{spoof:?}");
+        }
+        for ok in ["J\u{fc}rgen", "\u{c4}nne \u{d6}z \u{dc}lf", "Stra\u{df}e", "m\u{e4}x m\u{f6}ller", "a~b{c}|d"] {
+            assert!(check_handle(ok).is_ok(), "{ok:?}");
+        }
+    }
+
+    /// The charset rule binds only NEW handles: a seat already anchored
+    /// under another script still ratifies, seals and verifies as a chain.
+    #[test]
+    fn an_anchored_non_ascii_handle_still_verifies() {
+        let names = ["\u{0430}lice", "\u{674e}\u{96f7}"];
+        let s = signed_roster_named(names, &npk_founder(), &npk_member());
+        verify_sealed_roster(&s).expect("the sealed roster verifies");
+        let id = &s.identities[1];
+        verify_seal_proposal(&s, names[1], &id.identity_pk, &id.nostr_pk, "").expect("the seat ratifies");
+        let chain = crate::tests::plain_state().genesis_chain(&s);
+        assert_eq!(chain.len(), 1);
+        crate::chain::verify_chain(&chain).expect("the genesis verifies");
     }
 
     /// A bare, unactivated seat holding `ticket`.

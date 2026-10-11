@@ -95,6 +95,8 @@ LOW = bounded nuisance, latent or local-only.
   ACCEPTED 2026-10-11 (below).
 - **Homoglyph handles** (#20 residual): closing them needs a UTS #39
   skeleton uniqueness check - product policy and a dependency.
+  Decided 2026-10-11: a new handle is ASCII + ä ö ü ß, anchored rosters
+  are never re-validated (`founding_ritual.md` §4 ❸).
 - **Compaction floor** (#32): decided 2026-10-11 - ack-progress grace of
   two retention windows (`log_compaction.md` F4b), built.
 

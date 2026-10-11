@@ -197,6 +197,18 @@ Only then does `F` spend the ticket, anchor `{name, pkᵢ, nostrpkᵢ}` and keep
 `kpᵢ` for the group. The seat turns green. A bad or replayed MAC — or a
 missing KeyPackage — is dropped without a trace.
 
+**The handle rule** (`founding::check_handle`, at create start, join start
+and this ingest — an invalid handle is dropped before it is logged): non-empty,
+at most `MAX_HANDLE_CHARS` characters, one line, no control or invisible
+characters, no padding, and — for every NEW handle since 2026-10-11 (audit
+#20) — only ASCII plus the precomposed `ä ö ü Ä Ö Ü ß`. Other scripts carry
+look-alikes of Latin letters (Cyrillic `а`) that a byte-exact uniqueness
+check cannot see; a decomposed umlaut (`u` + U+0308) is refused rather than
+normalized. Handles already anchored in a signed roster are never
+re-validated: a sealed table, a ratification and a chain verify whatever
+script their names use. ASCII-internal look-alikes (`l`/`I`, `0`/`O`) stay
+possible.
+
 **❹ Deliberate & seal round.** Once *every* seat's key is in, the ritual does
 **not** auto-seal. `F` proposes the **final DAO name**, a free-text
 **agenda/charter**, and the **feature selection** (which optional surfaces

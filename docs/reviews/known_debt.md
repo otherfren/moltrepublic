@@ -60,7 +60,9 @@ node checks against every seat before it hands out a v2 anchor.
 From `docs_archive/reviews/security_audit_2026-10-10.md` (its accepted
 residuals are listed there, not here):
 
-- **#20 homoglyph handles**: needs a UTS #39 skeleton uniqueness check.
+- **#20 homoglyph handles**: new handles are ASCII + ä ö ü ß since
+  2026-10-11; ASCII look-alikes (`l`/`I`, `0`/`O`) and already anchored
+  rosters remain.
 
 ## `SaveTransport` overwrites `vault_status` wholesale
 

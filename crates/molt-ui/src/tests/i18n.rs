@@ -183,6 +183,17 @@ fn engine_errors_render_in_the_active_language() {
     assert!(super::localize_error(1, &e).contains("versiegelt"));
 }
 
+/// The handle charset refusal (audit #20) reads German on both doors.
+#[test]
+fn the_handle_charset_refusal_renders_in_german() {
+    let msg = molt_engine::HANDLE_CHARSET_REFUSAL.to_string();
+    let create = molt_core::MoltError::Create(msg.clone());
+    assert_eq!(super::localize_error(0, &create), create.to_string());
+    assert_eq!(super::localize_error(1, &create), "Gründung: Name nur aus ASCII und ä ö ü ß");
+    let join = molt_core::MoltError::Join(msg);
+    assert_eq!(super::localize_error(1, &join), "Beitritt: Name nur aus ASCII und ä ö ü ß");
+}
+
 /// Every vault refusal has a German arm (no English reason inside a
 /// German toast); English stays the MCP text.
 #[test]
