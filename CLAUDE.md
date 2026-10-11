@@ -431,6 +431,14 @@ both verified red-without/green-with).
 
 ## Build, test, run
 
+- **Watch the disk (`df -h /home`); at 90 %+ clear stale build output
+  before building on.** cargo never prunes: `target/` reached 1.3 TB and
+  filled `/home` (2026-10-11, agents died on ENOSPC). Safe to delete
+  once no cargo/rustc uses that target dir (check `/proc/<pid>/cwd` and
+  `CARGO_TARGET_DIR`): `target/*/incremental` and `target/*/deps` under
+  `debug` and `dev-ui/debug`. Keep `target/release` and
+  `target/embedded-tor` (a ~40 min rebuild). Worktree agents build their
+  own `target/`, so a parallel run multiplies the usage.
 - `cargo build` builds the whole workspace including the Slint GUI (slow first
   build). Headless vs GUI is a runtime choice, not a separate build.
 - **The Slint-generated window lives in its own crate, `molt-ui-window`, as a
