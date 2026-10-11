@@ -120,6 +120,7 @@ pub(crate) fn spawn(
         conflict: None,
         engine_tx,
         rx,
+        deferred: Vec::new(),
     }));
     Ok(ConfigStoreHandle { tx })
 }
@@ -140,6 +141,8 @@ struct Store {
     conflict: Option<String>,
     engine_tx: mpsc::Sender<Envelope>,
     rx: mpsc::Receiver<StoreRequest>,
+    /// Non-persist requests drained while a write merged an external edit.
+    deferred: Vec<StoreRequest>,
 }
 
 async fn store_task(mut store: Store) {
@@ -154,6 +157,8 @@ async fn store_task(mut store: Store) {
                     let (settings, notify, deferred) =
                         coalesce(&mut store.rx, settings, notify).await;
                     store.write(&settings, notify).await;
+                    let mut deferred = deferred;
+                    deferred.append(&mut store.deferred);
                     deferred
                 }
                 Some(other) => vec![other],
@@ -213,7 +218,11 @@ async fn coalesce(
 impl Store {
     /// One format-preserving, atomic write; reports the outcome as a notice.
     async fn write(&mut self, settings: &Settings, notify: bool) {
-        match self.write_inner(settings) {
+        let mut notify = notify;
+        let Some(settings) = self.merge_external(settings, &mut notify).await else {
+            return;
+        };
+        match self.write_inner(&settings) {
             Ok(()) => {
                 if notify {
                     self.notice("saved").await;
@@ -223,6 +232,58 @@ impl Store {
                 // A failed write must be visible, notify or not.
                 tracing::warn!(path = %self.path.display(), %detail, "config save failed");
                 self.notice(&format!("save-failed: {detail}")).await;
+            }
+        }
+    }
+
+    /// A valid hand edit the watcher has not mirrored yet is merged field by
+    /// field (an edited key wins) and reloaded before the write, so a save
+    /// never silently reverts it. `None`: the engine refused the edit.
+    async fn merge_external(&mut self, ours: &Settings, notify: &mut bool) -> Option<Settings> {
+        let Ok(disk) = std::fs::read_to_string(&self.path) else {
+            return Some(ours.clone());
+        };
+        if disk == self.last_good {
+            return Some(ours.clone());
+        }
+        // an invalid file is refused by the write itself
+        let Ok(config) = molt_config::parse(&disk) else {
+            return Some(ours.clone());
+        };
+        let theirs = Settings::from(&config);
+        let base = molt_config::parse(&self.last_good)
+            .map(|c| Settings::from(&c))
+            .unwrap_or_else(|_| molt_config::salvage(&self.last_good));
+        let mut ours = ours.clone();
+        loop {
+            let merged = merge3(&base, ours, &theirs);
+            let cmd = Command::ReloadSettings {
+                settings: session_settings(&merged),
+                language: merged.lang.clone(),
+                theme: merged.theme.clone(),
+            };
+            if let Err(e) = self.send(cmd).await {
+                if self.conflict.as_deref() != Some(disk.as_str()) {
+                    tracing::warn!(path = %self.path.display(), error = %e, "external config edit rejected");
+                    self.conflict = Some(disk);
+                    self.notice("config-conflict").await;
+                }
+                return None;
+            }
+            // a persist queued before the reload landed lacks the edit
+            let mut stale = None;
+            while let Ok(req) = self.rx.try_recv() {
+                match req {
+                    StoreRequest::Persist { settings, notify: n } => {
+                        stale = Some(settings);
+                        *notify |= n;
+                    }
+                    other => self.deferred.push(other),
+                }
+            }
+            match stale {
+                Some(settings) => ours = *settings,
+                None => return Some(merged),
             }
         }
     }
@@ -392,6 +453,30 @@ pub(crate) fn file_settings(s: &SessionSettings, language: &str, theme: &str) ->
         wallet_daemon_login: s.wallet_daemon_login.clone(),
         wallet_network: s.wallet_network.clone(),
     }
+}
+
+/// Three-way merge: a key the file changed since `base` wins, every other
+/// key keeps `ours`. The literal names every field, so a new one must be
+/// listed here or this stops compiling.
+fn merge3(base: &Settings, ours: Settings, theirs: &Settings) -> Settings {
+    macro_rules! merge {
+        ($($f:ident),* $(,)?) => {{
+            let Settings { $($f),* } = ours;
+            Settings {
+                $($f: if theirs.$f != base.$f { theirs.$f.clone() } else { $f }),*
+            }
+        }};
+    }
+    merge!(
+        headless, workspace_dir, s3_backup, s3_endpoint, s3_access_key, s3_secret_key,
+        s3_bucket, s3_interval_min, s3_keep_copies, s3_max_bytes, download_dir,
+        file_cap_bytes, mirror_publish_interval_secs, mirror_daily_bytes, sound_message,
+        sound_vote, sound_poke, poke_enabled, poke_wake_command, wake_min_interval_secs,
+        wake_on, task_wake_lead_min, read_receipts, anonymity, tor_mode, tor_port, mcp_port,
+        mcp_allow, mcp_token, mcp_read_token, lang, theme, font_app, font_nav, font_editor,
+        renderer, relays, clearnet_relays_enabled, wallet_daemon_url, wallet_daemon_confirmed,
+        wallet_daemon_login, wallet_network,
+    )
 }
 
 /// The session-shaped settings for a file value (language/theme travel
@@ -820,6 +905,36 @@ mod tests {
             std::fs::write(&path, &edited).expect("fix");
             store.poll_now().await;
             assert_eq!(session(&wallet).await.settings.mcp_port, 6060);
+        });
+    }
+
+    /// A hand edit the watcher has not seen yet survives a save that lands
+    /// first: the save merges over it instead of writing the stale session.
+    #[test]
+    fn a_save_before_the_poll_keeps_the_external_edit() {
+        rt().block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (path, wallet, _store) = node(&dir);
+            let text = std::fs::read_to_string(&path).expect("read");
+            let edited = molt_config::update(
+                &text,
+                &Settings {
+                    mcp_token: "rotated".to_string(),
+                    ..molt_config::salvage(&text)
+                },
+            )
+            .expect("edit");
+            std::fs::write(&path, &edited).expect("write");
+            wallet
+                .execute(Command::SetLanguage { lang: "de".to_string() })
+                .await
+                .expect("language");
+            let text = wait_for_file(&path, |t| t.contains("lang = \"de\"")).await;
+            let on_disk = Settings::from(&molt_config::parse(&text).expect("parses"));
+            assert_eq!(on_disk.mcp_token, "rotated", "the save undid the hand edit");
+            let sv = session(&wallet).await;
+            assert_eq!(sv.settings.mcp_token, "rotated");
+            assert_eq!(sv.language, "de");
         });
     }
 

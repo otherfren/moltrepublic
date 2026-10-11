@@ -198,6 +198,8 @@ Restart-required changes still persist and still mirror into the session
 | file deleted externally | watcher treats as external change to “nothing”; recreate from session on next save; notice |
 | invalid TOML appears externally | keep last good, `config-conflict` notice, keep polling |
 | valid TOML but invalid values (threshold rules etc.) | same as invalid TOML, with the validation message |
+| a save lands before the poll saw a valid hand edit | three-way merge against the last known-good file (an edited key wins), reloaded into the session, then written; an edit the engine refuses raises `config-conflict` and the save waits |
+| `transport.nostr.clearnet_enabled` edited by hand | `false` stops non-onion dialing at once; `true` is consent only from the next start (restart-required) |
 | crash between temp write and rename | stale temp file; startup sweeps `config.toml.tmp-*` older than the boot |
 | two nodes, one config | second node fails fast on the flock |
 
