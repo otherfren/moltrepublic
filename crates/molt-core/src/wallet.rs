@@ -93,7 +93,7 @@ pub struct WalletRunView {
     pub daemon_hint: String,
 }
 
-/// One incoming or outgoing transfer.
+/// One incoming or outgoing transfer, or the one dust row.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WalletTxView {
@@ -109,6 +109,9 @@ pub struct WalletTxView {
     pub at: Option<u64>,
     /// Confirmations so far.
     pub confirmations: u64,
+    /// The dust row: payments below 0.0001 XMR summed in `amount`, never
+    /// in the balance; no txid, height or time. 0 = one transfer.
+    pub dust: u64,
 }
 
 /// The Wallet surface's read model (`SurfaceSnapshot.wallet`).
@@ -285,6 +288,12 @@ mod tests {
                 height: 10,
                 at: Some(11),
                 confirmations: 3,
+                dust: 0,
+            }, WalletTxView {
+                incoming: true,
+                amount: 300_000_000,
+                dust: 1204,
+                ..WalletTxView::default()
             }],
             can_spend: false,
             can_watch: true,
@@ -320,7 +329,16 @@ mod tests {
                 "amount": 9,
                 "height": 10,
                 "at": 11,
-                "confirmations": 3
+                "confirmations": 3,
+                "dust": 0
+            }, {
+                "txid": "",
+                "incoming": true,
+                "amount": 300_000_000,
+                "height": 0,
+                "at": null,
+                "confirmations": 0,
+                "dust": 1204
             }],
             "can_spend": false,
             "can_watch": true,

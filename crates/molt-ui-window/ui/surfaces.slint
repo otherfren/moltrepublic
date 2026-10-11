@@ -4947,18 +4947,20 @@ export component WalletPane inherits VerticalLayout {
                 border-radius: Theme.win95 ? 0px : 8px;
                 border-width: Theme.border-w;
                 border-color: Theme.line;
-                height: max(44px, Theme.fs-body * 1.4 + 20px);
+                height: max(44px, Theme.fs-body * 1.4 + 20px, txrow.preferred-height);
                 accessible-role: list-item;
                 accessible-label: t.amount;
-                HorizontalLayout {
+                txrow := HorizontalLayout {
                     padding-left: 12px;
                     padding-right: 12px;
+                    padding-top: t.dust ? 10px : 0px;
+                    padding-bottom: t.dust ? 10px : 0px;
                     spacing: 10px;
                     Rectangle {
                         width: 20px;
                         clip: true;
                         Text {
-                            text: t.incoming ? "📥" : "📤";
+                            text: t.dust ? "🧹" : t.incoming ? "📥" : "📤";
                             font-family: "Twemoji Mozilla";
                             font-size: 14px;
                             width: 100%;
@@ -4967,13 +4969,18 @@ export component WalletPane inherits VerticalLayout {
                             vertical-alignment: center;
                         }
                     }
-                    Text {
-                        text: t.amount;
-                        color: t.incoming ? Theme.good : Theme.text;
-                        font-size: Theme.fs-body;
-                        font-weight: 700;
-                        vertical-alignment: center;
+                    // a layout of its own: the dust sentence wraps to the row's width
+                    VerticalLayout {
                         horizontal-stretch: 1;
+                        alignment: center;
+                        Text {
+                            text: t.amount;
+                            color: t.dust ? Theme.faint : t.incoming ? Theme.good : Theme.text;
+                            font-size: Theme.fs-body;
+                            font-weight: t.dust ? 400 : 700;
+                            wrap: t.dust ? word-wrap : no-wrap;
+                            vertical-alignment: center;
+                        }
                     }
                     Text {
                         text: t.date;
@@ -4983,7 +4990,7 @@ export component WalletPane inherits VerticalLayout {
                     }
                     // the tone says "confirmed"; a Twemoji check, never a
                     // thin text glyph
-                    if !t.confirmed: Text {
+                    if !t.confirmed && !t.dust: Text {
                         text: t.conf;
                         color: Theme.warn;
                         font-size: Theme.fs-cap;
@@ -4998,7 +5005,7 @@ export component WalletPane inherits VerticalLayout {
                 }
                 TouchArea {
                     pointer-event(ev) => {
-                        if (ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
+                        if (!t.dust && ev.kind == PointerEventKind.down && ev.button == PointerEventButton.right) {
                             txmenu.show({ x: self.mouse-x, y: self.mouse-y });
                         }
                     }

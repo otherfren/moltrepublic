@@ -18,15 +18,51 @@ use molt_core::{put_bytes, put_count};
 use crate::keys::view_pair;
 use crate::{Reader, TreasuryError};
 
-const SCAN_TAG: &[u8] = b"molt-wallet-scan-v3";
+const SCAN_TAG: &[u8] = b"molt-wallet-scan-v4";
 
 /// Confirmations before an output counts as balance.
 pub const CONFIRMATIONS: u64 = 20;
 /// Block hashes kept for reorg detection.
 pub const RECENT_BLOCKS: usize = 100;
 /// Outputs a purse holds at most (~5 MiB of state): a daemon serving
-/// fabricated blocks must not grow it without bound.
+/// fabricated blocks must not grow it without bound. Dust is not counted.
 pub const MAX_OUTPUTS: usize = 50_000;
+/// Piconero (0.0001 XMR) below which an output is dust.
+pub const DUST: u64 = 100_000_000;
+
+/// Dust received: counted, never held output by output (design §7).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Dust {
+    /// Outputs.
+    pub count: u64,
+    /// Piconero.
+    pub total: u64,
+}
+
+impl Dust {
+    fn add(&mut self, o: Self) {
+        self.count = self.count.saturating_add(o.count);
+        self.total = self.total.saturating_add(o.total);
+    }
+
+    /// Each output below [`DUST`]: no total without a count, none past it.
+    fn possible(self) -> bool {
+        self.total <= self.count.saturating_mul(DUST - 1)
+    }
+
+    /// `self` holds at least `part`.
+    fn covers(self, part: Self) -> bool {
+        self.count >= part.count && self.total >= part.total
+    }
+}
+
+/// A remembered block: its hash, time and the dust it brought.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Recent {
+    hash: [u8; 32],
+    at: u64,
+    dust: Dust,
+}
 
 /// One output received by the purse.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -185,10 +221,11 @@ pub struct ScanState {
     address: String,
     birthday: u64,
     next: u64,
-    /// Height to (hash, block time).
-    recent: BTreeMap<u64, ([u8; 32], u64)>,
+    recent: BTreeMap<u64, Recent>,
     seen: BTreeSet<[u8; 32]>,
     outputs: Vec<Received>,
+    /// All dust, the remembered blocks' included.
+    dust: Dust,
 }
 
 impl ScanState {
@@ -201,6 +238,7 @@ impl ScanState {
             recent: BTreeMap::new(),
             seen: BTreeSet::new(),
             outputs: Vec::new(),
+            dust: Dust::default(),
         }
     }
 
@@ -224,9 +262,15 @@ impl ScanState {
         &self.outputs
     }
 
+    /// The dust received, never part of the balance.
+    pub fn dust(&self) -> Dust {
+        self.dust
+    }
+
     /// Block `height` with its hash, its parent's hash, its time and what
     /// the scanner found. A repeated output key is dropped (burning bug:
-    /// only the first counts).
+    /// only the first counts); dust is only counted, so a dust key repeated
+    /// across blocks counts twice there, never in the balance.
     pub fn apply(
         &mut self,
         height: u64,
@@ -239,22 +283,31 @@ impl ScanState {
             return Step::OutOfOrder;
         }
         let parent = height.checked_sub(1);
-        if let Some((held, _)) = parent.and_then(|p| self.recent.get(&p)) {
-            if *held != previous {
+        if let Some(held) = parent.and_then(|p| self.recent.get(&p)) {
+            if held.hash != previous {
                 self.rewind();
                 return Step::Reorg;
             }
         }
         let mut fresh = BTreeSet::new();
+        let mut dust = Dust::default();
         let new: Vec<Received> = found
             .into_iter()
             .filter(|r| !self.seen.contains(&r.key) && fresh.insert(r.key))
+            .filter(|r| {
+                let small = r.amount < DUST;
+                if small {
+                    dust.add(Dust { count: 1, total: r.amount });
+                }
+                !small
+            })
             .collect();
         if self.outputs.len() + new.len() > MAX_OUTPUTS {
             return Step::Full;
         }
-        self.seen.extend(fresh);
-        self.recent.insert(height, (hash, at));
+        self.seen.extend(new.iter().map(|r| r.key));
+        self.dust.add(dust);
+        self.recent.insert(height, Recent { hash, at, dust });
         while self.recent.len() > RECENT_BLOCKS {
             self.recent.pop_first();
         }
@@ -267,7 +320,7 @@ impl ScanState {
     /// chain (the daemon's `get_height`); pending until confirmed and
     /// unlocked, a time lock against the newest scanned block's time.
     pub fn balance(&self, chain_height: u64) -> (u64, u64) {
-        let chain_time = self.recent.last_key_value().map_or(0, |(_, (_, at))| *at);
+        let chain_time = self.recent.last_key_value().map_or(0, |(_, b)| b.at);
         self.outputs.iter().fold((0, 0), |(ok, wait), r| {
             if chain_height.saturating_sub(r.height) >= CONFIRMATIONS
                 && r.lock.open_at(chain_height, chain_time)
@@ -280,8 +333,9 @@ impl ScanState {
     }
 
     /// The scan file's bytes: `tag ‖ address ‖ birthday ‖ next ‖ count ‖
-    /// (height ‖ hash ‖ time)* ‖ count ‖ (key ‖ amount ‖ height ‖ at ‖ tx ‖ index ‖ lock kind ‖
-    /// lock value)*`; the seen keys are the outputs' keys.
+    /// (height ‖ hash ‖ time ‖ dust count ‖ dust total)* ‖ dust count ‖ dust total ‖
+    /// count ‖ (key ‖ amount ‖ height ‖ at ‖ tx ‖ index ‖ lock kind ‖ lock value)*`;
+    /// the seen keys are the outputs' keys.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         put_bytes(&mut out, SCAN_TAG);
@@ -289,11 +343,17 @@ impl ScanState {
         out.extend_from_slice(&self.birthday.to_le_bytes());
         out.extend_from_slice(&self.next.to_le_bytes());
         put_count(&mut out, self.recent.len());
-        for (h, (hash, at)) in &self.recent {
+        let put_dust = |out: &mut Vec<u8>, d: Dust| {
+            out.extend_from_slice(&d.count.to_le_bytes());
+            out.extend_from_slice(&d.total.to_le_bytes());
+        };
+        for (h, b) in &self.recent {
             out.extend_from_slice(&h.to_le_bytes());
-            out.extend_from_slice(hash);
-            out.extend_from_slice(&at.to_le_bytes());
+            out.extend_from_slice(&b.hash);
+            out.extend_from_slice(&b.at.to_le_bytes());
+            put_dust(&mut out, b.dust);
         }
+        put_dust(&mut out, self.dust);
         put_count(&mut out, self.outputs.len());
         for r in &self.outputs {
             out.extend_from_slice(&r.key);
@@ -336,15 +396,22 @@ impl ScanState {
         if blocks > RECENT_BLOCKS {
             return None;
         }
+        let mut windowed = Dust::default();
         for _ in 0..blocks {
             let h = r.u64()?;
             let hash = r.array()?;
             let at = r.u64()?;
+            let dust = Dust { count: r.u64()?, total: r.u64()? };
             let ascending = !matches!(s.recent.last_key_value(), Some((top, _)) if *top >= h);
-            if !ascending || h < birthday || h >= next {
+            if !ascending || h < birthday || h >= next || !dust.possible() {
                 return None;
             }
-            s.recent.insert(h, (hash, at));
+            windowed.add(dust);
+            s.recent.insert(h, Recent { hash, at, dust });
+        }
+        s.dust = Dust { count: r.u64()?, total: r.u64()? };
+        if !s.dust.possible() || !s.dust.covers(windowed) {
+            return None;
         }
         let outputs = u32::from_le_bytes(r.array()?);
         if usize::try_from(outputs).ok()? > MAX_OUTPUTS {
@@ -381,7 +448,7 @@ impl ScanState {
 
     /// Drop the newest block; past the remembered window, start over.
     fn rewind(&mut self) {
-        let Some((top, _)) = self.recent.pop_last() else {
+        let Some((top, block)) = self.recent.pop_last() else {
             *self = Self::new(&self.address, self.birthday);
             return;
         };
@@ -389,6 +456,8 @@ impl ScanState {
             *self = Self::new(&self.address, self.birthday);
             return;
         }
+        self.dust.count = self.dust.count.saturating_sub(block.dust.count);
+        self.dust.total = self.dust.total.saturating_sub(block.dust.total);
         let seen = &mut self.seen;
         self.outputs.retain(|r| {
             let keep = r.height < top;

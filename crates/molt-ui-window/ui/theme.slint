@@ -2203,6 +2203,7 @@ export global Strings {
     in property <string> wl-title-history;
     in property <string> wl-copy-txid;
     in property <string> wl-empty-history;
+    in property <string> wl-dust; // template: {n} payments, {xmr} total
     in property <string> wl-title-send;
     in property <string> wl-send-locked;
     in property <string> wl-title-details;
@@ -2262,6 +2263,7 @@ export struct WalletTxRow {
     conf: string, // "3/20" until confirmed
     confirmed: bool,
     txid: string,
+    dust: bool, // the one dust row: `amount` is its whole sentence
 }
 
 // One seat's key part, under the purse's Details (U6).

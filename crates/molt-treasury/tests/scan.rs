@@ -3,7 +3,7 @@
 //! (design §7, §9; plan §10.11-12).
 
 use molt_treasury::scan::{
-    BlockScanner, Lock, Received, ScanFault, ScanState, StandardScanner, Step, CONFIRMATIONS,
+    BlockScanner, Lock, Received, ScanFault, ScanState, StandardScanner, Step, CONFIRMATIONS, DUST,
     RECENT_BLOCKS,
 };
 use molt_treasury::{EdwardsPoint, MoneroScalar};
@@ -14,10 +14,11 @@ use monero_wallet::interface::ScannableBlock;
 use monero_wallet::transaction::{Input, Output, Timelock, Transaction, TransactionPrefix};
 use zeroize::Zeroizing;
 
-fn out(key: u8, amount: u64, height: u64) -> Received {
+/// An output of `units` x `DUST` (never dust itself).
+fn out(key: u8, units: u64, height: u64) -> Received {
     Received {
         key: [key; 32],
-        amount,
+        amount: units * DUST,
         height,
         at: 0,
         tx: [key; 32],
@@ -27,6 +28,12 @@ fn out(key: u8, amount: u64, height: u64) -> Received {
 }
 
 const ADDR: &str = "the purse";
+
+/// `(balance, pending)` in `DUST` units.
+fn units(s: &ScanState, chain_height: u64) -> (u64, u64) {
+    let (ok, wait) = s.balance(chain_height);
+    (ok / DUST, wait / DUST)
+}
 
 fn hash(h: u64, fork: u8) -> [u8; 32] {
     let mut b = [fork; 32];
@@ -62,9 +69,9 @@ fn twenty_confirmations_split_balance_and_pending() {
     s.apply(10, hash(10, 0), hash(9, 0), 0, vec![out(1, 5, 10)]);
     s.apply(11, hash(11, 0), hash(10, 0), 0, vec![out(2, 3, 11)]);
     assert_eq!(CONFIRMATIONS, 20);
-    assert_eq!(s.balance(30), (5, 3));
-    assert_eq!(s.balance(31), (8, 0));
-    assert_eq!(s.balance(12), (0, 8));
+    assert_eq!(units(&s, 30), (5, 3));
+    assert_eq!(units(&s, 31), (8, 0));
+    assert_eq!(units(&s, 12), (0, 8));
 }
 
 #[test]
@@ -79,18 +86,18 @@ fn a_locked_output_stays_pending_until_it_unlocks() {
         ..out(2, 3, 10)
     };
     s.apply(10, hash(10, 0), hash(9, 0), 1_699_999_000, vec![mined, timed]);
-    assert_eq!(s.balance(30), (0, 8));
-    assert_eq!(s.balance(69), (0, 8));
-    assert_eq!(s.balance(70), (5, 3));
+    assert_eq!(units(&s, 30), (0, 8));
+    assert_eq!(units(&s, 69), (0, 8));
+    assert_eq!(units(&s, 70), (5, 3));
     // a time lock opens on the scanned chain's clock
     for h in 11..30 {
         s.apply(h, hash(h, 0), hash(h - 1, 0), 1_699_999_000 + h, vec![]);
     }
     s.apply(30, hash(30, 0), hash(29, 0), 1_700_000_000, vec![]);
-    assert_eq!(s.balance(70), (8, 0));
+    assert_eq!(units(&s, 70), (8, 0));
     // a reorg back below that block closes it again
     s.apply(31, hash(31, 1), hash(30, 1), 1_700_000_100, vec![]);
-    assert_eq!(s.balance(70), (5, 3));
+    assert_eq!(units(&s, 70), (5, 3));
 }
 
 #[test]
@@ -233,16 +240,16 @@ fn mined_block(number: usize, amount: u64) -> ScannableBlock {
 
 #[test]
 fn a_mined_output_carries_its_lock() {
-    let found = scanner().scan_block(mined_block(500, 9)).expect("scan");
+    let found = scanner().scan_block(mined_block(500, 9 * DUST)).expect("scan");
     assert_eq!(found.len(), 1);
-    assert_eq!((found[0].amount, found[0].height), (9, 500));
+    assert_eq!((found[0].amount, found[0].height), (9 * DUST, 500));
     assert_eq!(found[0].lock, Lock::Block(560));
     assert_eq!(found[0].at, 1_600_000_500, "the block's time");
 
     let mut s = ScanState::new(ADDR, 500);
     s.apply(500, hash(500, 0), hash(499, 0), 0, found);
-    assert_eq!(s.balance(520), (0, 9));
-    assert_eq!(s.balance(560), (9, 0));
+    assert_eq!(units(&s, 520), (0, 9));
+    assert_eq!(units(&s, 560), (9, 0));
 }
 
 #[test]

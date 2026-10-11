@@ -418,6 +418,19 @@ Two files, because one secret must never be lost and the rest is cheap:
   **seen output keys** and ignores any repeat (documented as mandatory
   against the burning bug). It needs only the spend public key and the
   view key.
+- **Dust (user decision 2026-10-11).** An output below 0.0001 XMR
+  (`molt_treasury::scan::DUST`, 100,000,000 piconero) is not stored and
+  does not count toward the 50,000-output cap (`MAX_OUTPUTS`); the scan
+  state keeps only its count and total (`molt-wallet-scan-v4`, per
+  remembered block too, so a reorg takes a rewound block's dust with it;
+  a v3 file rescans from the birthday). **Dust is never balance or
+  pending** (conservative: an output not held cannot be spent from this
+  state, and it mostly costs more to spend than it is worth). The history
+  shows it as one row after the transfers (`WalletTxView.dust` = the
+  count, `amount` = the total, no txid): "Dust: 1,204 tiny payments
+  (0.0003 XMR) - often sent to track a wallet, shown together". A dust
+  key repeated across blocks counts twice in that row (only within a
+  block is it deduplicated); a held output's key is never counted as dust.
 - **Main address only.** Subaddresses with multisig are unverified upstream.
 - **Confirmations: 20.** Shown as pending below (the network saw an
   18-block reorg in September 2025); an output under an additional

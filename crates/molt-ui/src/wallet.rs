@@ -22,18 +22,25 @@ fn lex(lang: i32) -> Lexicon {
     }
 }
 
+/// `n` with its thousands grouped per locale.
+fn grouped(lang: i32, n: u64) -> String {
+    let group = if lang == 1 { '.' } else { ',' };
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(group);
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// An amount in XMR (U3): trailing zeros trimmed, never piconero, the
 /// whole part grouped per locale.
 pub(crate) fn xmr(lang: i32, pico: u64) -> String {
-    let (group, point) = if lang == 1 { ('.', ',') } else { (',', '.') };
-    let digits = (pico / PICO).to_string();
-    let mut whole = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            whole.push(group);
-        }
-        whole.push(c);
-    }
+    let point = if lang == 1 { ',' } else { '.' };
+    let whole = grouped(lang, pico / PICO);
     let frac = format!("{:012}", pico % PICO);
     let frac = frac.trim_end_matches('0');
     if frac.is_empty() {
@@ -184,13 +191,20 @@ pub(crate) fn apply_wallet(ui: &AppWindow, lang: i32, ws: &str, view: Option<&Wa
     let history: Vec<WalletTxRow> = v
         .history
         .iter()
-        .map(|t| WalletTxRow {
-            incoming: t.incoming,
-            amount: format!("{} {}", if t.incoming { "+" } else { "-" }, xmr(lang, t.amount)).into(),
-            date: t.at.map(crate::labels::file_date_label).unwrap_or_default().into(),
-            conf: format!("{}/{CONFIRMATIONS}", t.confirmations.min(CONFIRMATIONS)).into(),
-            confirmed: t.confirmations >= CONFIRMATIONS,
-            txid: t.txid.as_str().into(),
+        .map(|t| {
+            if t.dust > 0 {
+                let line = l.wl_dust.replace("{n}", &grouped(lang, t.dust)).replace("{xmr}", &xmr(lang, t.amount));
+                return WalletTxRow { incoming: true, amount: line.into(), dust: true, ..WalletTxRow::default() };
+            }
+            WalletTxRow {
+                incoming: t.incoming,
+                amount: format!("{} {}", if t.incoming { "+" } else { "-" }, xmr(lang, t.amount)).into(),
+                date: t.at.map(crate::labels::file_date_label).unwrap_or_default().into(),
+                conf: format!("{}/{CONFIRMATIONS}", t.confirmations.min(CONFIRMATIONS)).into(),
+                confirmed: t.confirmations >= CONFIRMATIONS,
+                txid: t.txid.as_str().into(),
+                dust: false,
+            }
         })
         .collect();
     p.set_history(ModelRc::new(VecModel::from(history)));

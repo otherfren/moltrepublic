@@ -3,7 +3,7 @@
 //! survives a restart; a damaged image is refused, never half-read.
 
 use molt_core::put_bytes;
-use molt_treasury::scan::{Lock, Received, ScanState};
+use molt_treasury::scan::{Dust, Lock, Received, ScanState, Step, DUST, MAX_OUTPUTS};
 use molt_treasury::TreasuryError;
 
 fn out(key: u8, amount: u64, height: u64, lock: Lock) -> Received {
@@ -28,14 +28,14 @@ fn hash(h: u64) -> [u8; 32] {
 
 fn scanned() -> ScanState {
     let mut s = ScanState::new(ADDR, 10);
-    s.apply(10, hash(10), hash(9), 0, vec![out(1, 5, 10, Lock::Block(70))]);
+    s.apply(10, hash(10), hash(9), 0, vec![out(1, 5 * DUST, 10, Lock::Block(70))]);
     s.apply(11, hash(11), hash(10), 0, vec![]);
     s.apply(
         12,
         hash(12),
         hash(11),
         0,
-        vec![out(2, 3, 12, Lock::Time(9)), out(3, 4, 12, Lock::None)],
+        vec![out(2, 3 * DUST, 12, Lock::Time(9)), out(3, 4 * DUST, 12, Lock::None)],
     );
     s
 }
@@ -48,7 +48,7 @@ fn the_scan_state_round_trips() {
     // the seen keys come back too: a repeat stays ignored after a restart
     let mut back = back;
     let step = back.apply(13, hash(13), hash(12), 0, vec![out(2, 9, 13, Lock::None)]);
-    assert_eq!(step, molt_treasury::scan::Step::Applied(vec![]));
+    assert_eq!(step, Step::Applied(vec![]));
     assert_eq!(
         ScanState::decode(&ScanState::new(ADDR, 5).encode()).expect("empty"),
         ScanState::new(ADDR, 5)
@@ -59,9 +59,15 @@ fn the_scan_state_round_trips() {
 #[test]
 fn the_scan_state_layout_is_pinned() {
     let mut s = ScanState::new(ADDR, 10);
-    s.apply(10, hash(10), hash(9), 1_700_000_010, vec![out(1, 5, 10, Lock::Block(70))]);
+    s.apply(
+        10,
+        hash(10),
+        hash(9),
+        1_700_000_010,
+        vec![out(1, 5 * DUST, 10, Lock::Block(70)), out(2, DUST - 1, 10, Lock::None), out(3, 7, 10, Lock::None)],
+    );
     let mut want = Vec::new();
-    put_bytes(&mut want, b"molt-wallet-scan-v3");
+    put_bytes(&mut want, b"molt-wallet-scan-v4");
     put_bytes(&mut want, ADDR.as_bytes());
     want.extend_from_slice(&10u64.to_le_bytes());
     want.extend_from_slice(&11u64.to_le_bytes());
@@ -69,9 +75,14 @@ fn the_scan_state_layout_is_pinned() {
     want.extend_from_slice(&10u64.to_le_bytes());
     want.extend_from_slice(&hash(10));
     want.extend_from_slice(&1_700_000_010u64.to_le_bytes());
+    // the block's dust, then the purse's
+    want.extend_from_slice(&2u64.to_le_bytes());
+    want.extend_from_slice(&(DUST + 6).to_le_bytes());
+    want.extend_from_slice(&2u64.to_le_bytes());
+    want.extend_from_slice(&(DUST + 6).to_le_bytes());
     want.extend_from_slice(&1u32.to_le_bytes());
     want.extend_from_slice(&[1; 32]);
-    want.extend_from_slice(&5u64.to_le_bytes());
+    want.extend_from_slice(&(5 * DUST).to_le_bytes());
     want.extend_from_slice(&10u64.to_le_bytes());
     want.extend_from_slice(&1_700_000_010u64.to_le_bytes());
     want.extend_from_slice(&[0xfe; 32]);
@@ -79,6 +90,7 @@ fn the_scan_state_layout_is_pinned() {
     want.push(1);
     want.extend_from_slice(&70u64.to_le_bytes());
     assert_eq!(s.encode(), want);
+    assert_eq!(ScanState::decode(&want).expect("decodes"), s);
 }
 
 #[test]
@@ -94,7 +106,7 @@ fn a_damaged_scan_state_is_refused() {
     // an output outside [birthday, next), a repeated key, an unknown lock,
     // a lock-free output with a value, `next` not past what it holds
     let mut s = ScanState::new(ADDR, 10);
-    s.apply(10, hash(10), hash(9), 0, vec![out(1, 5, 10, Lock::None)]);
+    s.apply(10, hash(10), hash(9), 0, vec![out(1, 5 * DUST, 10, Lock::None)]);
     let base = s.encode();
     let at = |field_from_end: usize| base.len() - field_from_end;
     let mut low = base.clone();
@@ -110,8 +122,8 @@ fn a_damaged_scan_state_is_refused() {
     assert!(refused(&none_value), "a lock-free output carries no value");
 
     let mut twice = ScanState::new(ADDR, 10);
-    twice.apply(10, hash(10), hash(9), 0, vec![out(1, 5, 10, Lock::None)]);
-    twice.apply(11, hash(11), hash(10), 0, vec![out(2, 5, 11, Lock::None)]);
+    twice.apply(10, hash(10), hash(9), 0, vec![out(1, 5 * DUST, 10, Lock::None)]);
+    twice.apply(11, hash(11), hash(10), 0, vec![out(2, 5 * DUST, 11, Lock::None)]);
     let mut dup = twice.encode();
     let second = dup.len() - (32 + 8 + 8 + 8 + 32 + 8 + 1 + 8);
     dup[second..second + 32].copy_from_slice(&[1; 32]);
@@ -119,7 +131,7 @@ fn a_damaged_scan_state_is_refused() {
 
     let mut ahead = base;
     // `next` sits after the tag and the birthday
-    let n = 4 + b"molt-wallet-scan-v3".len() + 4 + ADDR.len() + 8;
+    let n = 4 + b"molt-wallet-scan-v4".len() + 4 + ADDR.len() + 8;
     ahead[n..n + 8].copy_from_slice(&10u64.to_le_bytes());
     assert!(refused(&ahead), "next at a held block and output");
 }
@@ -127,7 +139,7 @@ fn a_damaged_scan_state_is_refused() {
 /// An output-free image: `birthday`, `next`, and the remembered heights.
 fn window(birthday: u64, next: u64, heights: &[u64]) -> Vec<u8> {
     let mut b = Vec::new();
-    put_bytes(&mut b, b"molt-wallet-scan-v3");
+    put_bytes(&mut b, b"molt-wallet-scan-v4");
     put_bytes(&mut b, ADDR.as_bytes());
     b.extend_from_slice(&birthday.to_le_bytes());
     b.extend_from_slice(&next.to_le_bytes());
@@ -136,7 +148,9 @@ fn window(birthday: u64, next: u64, heights: &[u64]) -> Vec<u8> {
         b.extend_from_slice(&h.to_le_bytes());
         b.extend_from_slice(&hash(*h));
         b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&[0; 16]);
     }
+    b.extend_from_slice(&[0; 16]);
     b.extend_from_slice(&0u32.to_le_bytes());
     b
 }
@@ -161,17 +175,7 @@ fn a_block_window_apply_could_not_produce_is_refused() {
 /// (a hostile daemon cannot grow the state without bound).
 #[test]
 fn the_outputs_are_bounded() {
-    use molt_treasury::scan::{Step, MAX_OUTPUTS};
-    let many = |h: u64, n: usize| -> Vec<Received> {
-        (0..n)
-            .map(|i| {
-                let mut key = [0u8; 32];
-                key[..8].copy_from_slice(&h.to_le_bytes());
-                key[8..16].copy_from_slice(&u64::try_from(i).expect("small").to_le_bytes());
-                Received { key, ..out(0, 1, h, Lock::None) }
-            })
-            .collect()
-    };
+    let many = |h: u64, n: usize| many_of(h, n, DUST);
     let mut s = ScanState::new(ADDR, 10);
     assert!(matches!(s.apply(10, hash(10), hash(9), 0, many(10, MAX_OUTPUTS - 1)), Step::Applied(_)));
     let before = s.clone();
@@ -179,4 +183,96 @@ fn the_outputs_are_bounded() {
     assert_eq!(s, before, "nothing changed");
     assert!(matches!(s.apply(11, hash(11), hash(10), 0, many(11, 1)), Step::Applied(_)));
     assert_eq!(s.outputs().len(), MAX_OUTPUTS);
+}
+
+/// `n` outputs of `amount` in block `h`, each with its own key.
+fn many_of(h: u64, n: usize, amount: u64) -> Vec<Received> {
+    (0..n)
+        .map(|i| {
+            let mut key = [0u8; 32];
+            key[..8].copy_from_slice(&h.to_le_bytes());
+            key[8..16].copy_from_slice(&u64::try_from(i).expect("small").to_le_bytes());
+            key[16] = 0xd0;
+            Received { key, ..out(0, amount, h, Lock::None) }
+        })
+        .collect()
+}
+
+/// Dust (below `DUST`) is a count and a total, never an output: 60k of it
+/// neither fills the purse nor pauses the scan, and the cap still holds
+/// for real outputs.
+#[test]
+fn dust_never_fills_the_purse() {
+    let mut s = ScanState::new(ADDR, 10);
+    for h in 10..16 {
+        let step = s.apply(h, hash(h), hash(h - 1), 0, many_of(h, 10_000, DUST - 1));
+        assert_eq!(step, Step::Applied(vec![]), "block {h}");
+    }
+    assert!(s.outputs().is_empty());
+    assert_eq!(s.dust(), Dust { count: 60_000, total: 60_000 * (DUST - 1) });
+    assert_eq!(s.next_height(), 16);
+    assert!(s.encode().len() < 20_000, "the state stays small");
+    assert_eq!(ScanState::decode(&s.encode()).expect("decodes"), s);
+    assert!(matches!(s.apply(16, hash(16), hash(15), 0, many_of(16, MAX_OUTPUTS - 1, DUST)), Step::Applied(_)));
+    assert_eq!(s.apply(17, hash(17), hash(16), 0, many_of(17, 2, DUST)), Step::Full);
+}
+
+/// Conservative: dust is shown, never counted in the balance or pending;
+/// a purse cannot spend what it does not hold.
+#[test]
+fn dust_is_not_balance() {
+    let mut s = ScanState::new(ADDR, 10);
+    s.apply(10, hash(10), hash(9), 0, vec![out(1, DUST, 10, Lock::None), out(2, DUST - 1, 10, Lock::None)]);
+    assert_eq!(s.balance(100), (DUST, 0));
+    assert_eq!(s.balance(11), (0, DUST));
+    assert_eq!(s.dust(), Dust { count: 1, total: DUST - 1 });
+}
+
+/// A dust key repeated in one block counts once, and a dust copy of a
+/// held output's key is dropped (burning bug).
+#[test]
+fn dust_repeats_are_dropped() {
+    let mut s = ScanState::new(ADDR, 10);
+    s.apply(10, hash(10), hash(9), 0, vec![out(1, 5 * DUST, 10, Lock::None), out(2, 9, 10, Lock::None), out(2, 9, 10, Lock::None)]);
+    s.apply(11, hash(11), hash(10), 0, vec![out(1, 3, 11, Lock::None)]);
+    assert_eq!(s.dust(), Dust { count: 1, total: 9 });
+}
+
+/// A reorg takes the rewound block's dust with it.
+#[test]
+fn a_reorg_rewinds_the_dust() {
+    let mut s = ScanState::new(ADDR, 10);
+    s.apply(10, hash(10), hash(9), 0, vec![out(1, 4, 10, Lock::None)]);
+    s.apply(11, hash(11), hash(10), 0, vec![out(2, 6, 11, Lock::None), out(3, 7, 11, Lock::None)]);
+    assert_eq!(s.dust(), Dust { count: 3, total: 17 });
+    assert_eq!(s.apply(12, hash(12), [9; 32], 0, vec![]), Step::Reorg);
+    assert_eq!(s.dust(), Dust { count: 1, total: 4 });
+    assert_eq!(s.next_height(), 11);
+}
+
+/// Dust figures `apply` could not produce are refused: a total past what
+/// the count allows, a window holding more than the purse, a v3 file.
+#[test]
+fn inconsistent_dust_is_refused() {
+    let refused = |b: &[u8]| ScanState::decode(b) == Err(TreasuryError::ScanState);
+    let mut s = ScanState::new(ADDR, 10);
+    s.apply(10, hash(10), hash(9), 0, vec![out(2, 9, 10, Lock::None)]);
+    let good = s.encode();
+    assert!(!refused(&good));
+    // the purse's dust count and total sit just before the output count
+    let purse = good.len() - 4 - 16;
+    let block = purse - 16;
+    let set = |at: usize, v: u64| {
+        let mut b = good.clone();
+        b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        b
+    };
+    assert!(refused(&set(purse, 0)), "the purse holds less than its window");
+    assert!(refused(&set(purse + 8, 8)), "the purse total below its window's");
+    assert!(refused(&set(block + 8, DUST)), "a block total past count x DUST");
+    assert!(refused(&set(block, 0)), "a total without a count");
+    assert!(!refused(&set(purse, 2)), "dust from blocks past the window");
+    let mut v3 = good.clone();
+    v3[4 + b"molt-wallet-scan-v".len()] = b'3';
+    assert!(refused(&v3), "an older file rescans");
 }

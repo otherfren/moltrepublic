@@ -109,8 +109,8 @@ fn purse() -> WalletView {
             ("c".to_string(), ShareStatus::Unknown),
         ],
         history: vec![
-            WalletTxView { txid: "aa".to_string(), incoming: true, amount: XMR, height: 98, at: Some(0), confirmations: 3 },
-            WalletTxView { txid: "bb".to_string(), incoming: true, amount: XMR / 4, height: 10, at: Some(0), confirmations: 91 },
+            WalletTxView { txid: "aa".to_string(), incoming: true, amount: XMR, height: 98, at: Some(0), confirmations: 3, dust: 0 },
+            WalletTxView { txid: "bb".to_string(), incoming: true, amount: XMR / 4, height: 10, at: Some(0), confirmations: 91, dust: 0 },
         ],
         can_watch: true,
         ..WalletView::default()
@@ -184,6 +184,28 @@ fn the_purse_renders_its_rows() {
     crate::wallet::apply_wallet(&ui, 0, "w", None);
     assert_eq!(p.get_phase(), 0, "no workspace: no purse");
     assert_eq!(p.get_address(), "");
+}
+
+/// Dust is one row: count, total and why, no txid or confirmations.
+#[test]
+fn dust_is_one_row() {
+    let ui = window();
+    let mut v = purse();
+    v.history.push(WalletTxView { incoming: true, amount: 300_000_000, dust: 1204, ..WalletTxView::default() });
+    crate::wallet::apply_wallet(&ui, 0, "w", Some(&v));
+    let rows: Vec<WalletTxRow> = ui.global::<Purse>().get_history().iter().collect();
+    assert_eq!(rows.len(), 3);
+    assert!(!rows[0].dust && !rows[1].dust);
+    let d = &rows[2];
+    assert!(d.dust);
+    assert_eq!(d.amount, "Dust: 1,204 tiny payments (0.0003 XMR) - often sent to track a wallet, shown together");
+    assert_eq!((d.txid.as_str(), d.date.as_str(), d.conf.as_str()), ("", "", ""));
+    crate::wallet::apply_wallet(&ui, 1, "w", Some(&v));
+    let rows: Vec<WalletTxRow> = ui.global::<Purse>().get_history().iter().collect();
+    assert_eq!(
+        rows[2].amount,
+        "Staub: 1.204 Kleinstzahlungen (0,0003 XMR) - oft gesendet, um eine Kasse zu verfolgen, zusammen gezeigt"
+    );
 }
 
 /// U1: no crypto vocabulary in any wallet string, English or German.

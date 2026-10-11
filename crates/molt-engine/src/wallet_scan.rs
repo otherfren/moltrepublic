@@ -333,9 +333,14 @@ impl State {
                     height: o.height,
                     at: Some(o.at),
                     confirmations: chain.saturating_sub(o.height),
+                    dust: 0,
                 });
         }
-        let history: Vec<WalletTxView> = txs.into_values().rev().collect();
+        let mut history: Vec<WalletTxView> = txs.into_values().rev().collect();
+        let dust = state.dust();
+        if dust.count > 0 {
+            history.push(WalletTxView { incoming: true, amount: dust.total, dust: dust.count, ..WalletTxView::default() });
+        }
         ScanShown {
             balance,
             pending,
@@ -568,7 +573,7 @@ mod tests {
     use super::*;
     use crate::chain::test_support::{genesis_seat, Builder};
     use crate::wallet_run::tests::{purse_run, seat_with_purse, with_init};
-    use molt_treasury::scan::{Lock, Received};
+    use molt_treasury::scan::{Lock, Received, DUST as D};
     use molt_treasury::Network;
 
     fn out(key: u8, tx: u8, height: u64, amount: u64) -> Received {
@@ -578,7 +583,7 @@ mod tests {
     /// A state for `address` from `birthday` with one paid block.
     fn paid(address: &str, birthday: u64) -> ScanState {
         let mut s = ScanState::new(address, birthday);
-        s.apply(birthday, [1; 32], [0; 32], 1_700_000_000, vec![out(1, 7, birthday, 5)]);
+        s.apply(birthday, [1; 32], [0; 32], 1_700_000_000, vec![out(1, 7, birthday, 5 * D)]);
         s
     }
 
@@ -600,17 +605,41 @@ mod tests {
         let b = Builder::new(&["a", "b", "c"], 2);
         let mut st = genesis_seat("a", &b, b.blocks.clone());
         let mut s = ScanState::new("p", 100);
-        s.apply(100, [1; 32], [0; 32], 0, vec![out(1, 7, 100, 5), out(2, 7, 100, 6)]);
-        s.apply(101, [2; 32], [1; 32], 0, vec![out(3, 8, 101, 4)]);
+        s.apply(100, [1; 32], [0; 32], 0, vec![out(1, 7, 100, 5 * D), out(2, 7, 100, 6 * D)]);
+        s.apply(101, [2; 32], [1; 32], 0, vec![out(3, 8, 101, 4 * D)]);
         s.apply(102, Sha256::digest(102u64.to_le_bytes()).into(), [2; 32], 0, Vec::new());
         st.purse.scan.state = Some(scanned_to(s, 119));
         st.purse.scan.daemon_height = Some(119);
         let shown = st.wallet_scan_shown();
         let rows: Vec<(u64, u64, u64)> = shown.history.iter().map(|t| (t.height, t.amount, t.confirmations)).collect();
-        assert_eq!(rows, vec![(101, 4, 19), (100, 11, 20)]);
-        assert_eq!((shown.balance, shown.pending, shown.scan_height), (11, 4, 119));
+        assert_eq!(rows, vec![(101, 4 * D, 19), (100, 11 * D, 20)]);
+        assert_eq!((shown.balance, shown.pending, shown.scan_height), (11 * D, 4 * D, 119));
         assert!(shown.history.iter().all(|t| t.incoming));
         assert_eq!(shown.connected, None, "no scanner: the probe speaks");
+    }
+
+    /// Dust is one row, last: count and total, no txid; never balance.
+    #[test]
+    fn dust_shows_as_one_row_outside_the_balance() {
+        let b = Builder::new(&["a", "b", "c"], 2);
+        let mut st = genesis_seat("a", &b, b.blocks.clone());
+        let mut s = ScanState::new("p", 100);
+        s.apply(100, [1; 32], [0; 32], 0, vec![out(1, 7, 100, D), out(2, 8, 100, 3), out(3, 9, 100, D - 1)]);
+        s.apply(101, [2; 32], [1; 32], 0, vec![out(4, 10, 101, 5)]);
+        s.apply(102, Sha256::digest(102u64.to_le_bytes()).into(), [2; 32], 0, Vec::new());
+        st.purse.scan.state = Some(scanned_to(s, 140));
+        st.purse.scan.daemon_height = Some(140);
+        let shown = st.wallet_scan_shown();
+        assert_eq!((shown.balance, shown.pending), (D, 0));
+        assert_eq!(shown.history.len(), 2);
+        assert_eq!((shown.history[0].amount, shown.history[0].dust), (D, 0));
+        let dust = &shown.history[1];
+        assert_eq!(
+            (dust.dust, dust.amount, dust.txid.as_str(), dust.height, dust.at, dust.incoming),
+            (3, D + 7, "", 0, None, true)
+        );
+        st.purse.scan.state = Some(paid("p", 100));
+        assert!(st.wallet_scan_shown().history.iter().all(|t| t.dust == 0), "no dust, no row");
     }
 
     /// A scan file is the progress of one purse: another address or
@@ -637,7 +666,7 @@ mod tests {
         st.session.settings.wallet_daemon_url = String::new();
         st.purse.scan.state = Some(scanned_to(paid("another purse", c.birthday), c.birthday + 100));
         st.purse.scan.daemon_height = Some(c.birthday + 100);
-        assert_eq!(st.wallet_view().balance, 5, "shown before the beat");
+        assert_eq!(st.wallet_view().balance, 5 * D, "shown before the beat");
         st.wallet_scan_tick();
         assert!(st.purse.scan.state.is_none());
         assert_eq!((st.wallet_view().balance, st.wallet_view().history.len()), (0, 0));
@@ -672,7 +701,7 @@ mod tests {
         assert_eq!((v.balance, v.pending, v.history.len(), v.can_watch), (0, 0, 0, false), "a stale file shows nothing");
         c.cmd_net_wallet_view_answer(&"a".to_string(), &records[0].view[..]).expect("ack");
         let v = c.wallet_view();
-        assert_eq!((v.balance, v.history.len(), v.can_watch), (5, 1, true));
+        assert_eq!((v.balance, v.history.len(), v.can_watch), (5 * D, 1, true));
     }
 
     /// Design §7: a claimed tip never confirms more than the blocks the
@@ -685,7 +714,7 @@ mod tests {
         st.purse.scan.state = Some(paid(&c.address, c.birthday));
         st.purse.scan.daemon_height = Some(c.birthday + 10_000);
         let v = st.wallet_view();
-        assert_eq!((v.balance, v.pending), (0, 5));
+        assert_eq!((v.balance, v.pending), (0, 5 * D));
         assert_eq!(v.history[0].confirmations, 1);
     }
 

@@ -23,8 +23,10 @@ republic (`kanban_workflows.md` §11 Q1).
   it are kept for good; only a restore or removing the file releases
   them. The dialog offers no restore. Decide on a restore-from-S3 action.
 - **Output cap**: `molt_treasury::scan::MAX_OUTPUTS` (50k) never shrinks
-  (no spend detection in Stage 1), so a purse past it (dust spam) stops
-  scanning for good as `daemon fault: too many outputs`.
+  (no spend detection in Stage 1). Dust no longer counts (design §7,
+  2026-10-11), but 50k outputs of 0.0001 XMR or more (about 5 XMR spent
+  on spam) still stop scanning for good as `daemon fault: too many
+  outputs`.
 - **Release note, backup version skew** (design §6): an older build
   exports without the keys file and refuses to import a blob carrying it.
   Say so in the first release notes that ship the purse.

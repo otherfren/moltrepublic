@@ -134,6 +134,37 @@ fn the_balance_shows_the_figure_or_the_set_up() {
     assert!(!shown(&ui, "0 XMR"));
 }
 
+/// The dust row wraps inside its row: the whole sentence stays readable.
+#[test]
+fn the_dust_row_wraps_inside_its_row() {
+    use molt_core::wallet::WalletTxView;
+    let mut v = ready();
+    v.history = vec![
+        WalletTxView { txid: "aa".to_string(), incoming: true, amount: 1_000_000_000_000, height: 9, at: Some(0), confirmations: 30, dust: 0 },
+        WalletTxView { incoming: true, amount: 300_000_000, dust: 1204, ..WalletTxView::default() },
+    ];
+    let (ui, _shown) = wallet_screen("history", &v);
+    ui.window().set_size(slint::PhysicalSize::new(700, 900));
+    settle();
+    let line = "Dust: 1,204 tiny payments (0.0003 XMR) - often sent to track a wallet, shown together";
+    let rows: Vec<Handle> = Handle::find_by_accessible_label(&ui, line).collect();
+    let row = rows
+        .iter()
+        .find(|h| h.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::ListItem))
+        .expect("the dust row");
+    let text = rows
+        .iter()
+        .find(|h| h.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Text))
+        .expect("the dust text");
+    let (r, t) = (row.absolute_position(), text.absolute_position());
+    assert!(t.y >= r.y - 0.5 && t.y + text.size().height <= r.y + row.size().height + 0.5, "the text inside its row");
+    assert!(t.x + text.size().width <= r.x + row.size().width + 0.5, "no overflow to the right");
+    let normal = Handle::find_by_accessible_label(&ui, "+ 1 XMR")
+        .find(|h| h.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Text))
+        .expect("a plain amount");
+    assert!(text.size().height > normal.size().height * 1.5, "wrapped: {}", text.size().height);
+}
+
 /// Send is locked with one line.
 #[test]
 fn send_is_one_locked_line() {

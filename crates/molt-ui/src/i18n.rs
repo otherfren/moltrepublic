@@ -1714,6 +1714,7 @@ lexicon! {
     wl_title_history: "History", "Verlauf";
     wl_copy_txid: "Copy txid", "txid kopieren";
     wl_empty_history: "Nothing received yet", "Noch nichts empfangen";
+    wl_dust: "Dust: {n} tiny payments ({xmr}) - often sent to track a wallet, shown together", "Staub: {n} Kleinstzahlungen ({xmr}) - oft gesendet, um eine Kasse zu verfolgen, zusammen gezeigt";
     wl_title_send: "Send", "Senden";
     wl_send_locked: "Spending is not available yet.", "Ausgeben ist noch nicht verfügbar.";
     wl_title_details: "Details", "Details";
