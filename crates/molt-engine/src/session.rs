@@ -265,6 +265,7 @@ impl State {
             let dialable = self.dialable_group_relays();
             self.clearnet_session = true;
             self.session.settings.clearnet_relays_enabled = true;
+            self.mark_restart_required();
             self.dialable_relays_changed(&dialable);
         }
         self.persist_settings(false);
@@ -402,6 +403,7 @@ impl State {
         let dialable = self.dialable_group_relays();
         self.clearnet_session = unlock;
         self.session.settings.clearnet_relays_enabled = unlock;
+        self.mark_restart_required();
         self.dialable_relays_changed(&dialable);
         self.persist_settings(false);
         self.note_if_invites_went_stale();
@@ -610,9 +612,19 @@ impl State {
         self.invalidate_backup_listing_on_target_change(&settings);
         self.invalidate_tor_test_on_anonymity_change(&settings);
         let moved = daemon_moved(&self.session.settings, &settings);
+        let dialable = self.dialable_group_relays();
+        let was_clearnet = self.clearnet_session;
+        // fail closed: an edit can withdraw clearnet consent, never grant it
+        self.clearnet_session &= settings.clearnet_relays_enabled;
+        let pool_moved = self.session.settings.relays != settings.relays
+            || was_clearnet != self.clearnet_session;
         self.session.settings = settings;
         self.session.language = language;
         self.session.theme = theme;
+        self.dialable_relays_changed(&dialable);
+        if pool_moved {
+            self.note_if_invites_went_stale();
+        }
         self.mark_restart_required();
         if moved {
             self.wallet_daemon_changed();
@@ -1091,6 +1103,9 @@ impl State {
         }
         if live.tor_port != boot.tor_port {
             keys.push("transport.anonymity.tor.port".to_string());
+        }
+        if live.clearnet_relays_enabled && !self.clearnet_session {
+            keys.push("transport.nostr.clearnet_enabled".to_string());
         }
         self.session.restart_required = keys;
     }
@@ -3001,6 +3016,40 @@ two" }),
         .expect("save");
         let s = settings(&w).await;
         assert_eq!((s.font_app, s.font_nav, s.font_editor), (16, 12, 15));
+    }
+
+    /// A hand edit that switches clearnet off goes dark at once; one that
+    /// switches it on is no consent until the next start.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reloaded_clearnet_off_stops_dialing_and_on_does_not_grant() {
+        let w = node();
+        let live = |w: crate::WalletHandle| async move {
+            match w.execute(Command::ReadSession).await.expect("read") {
+                Reply::Session(s) => s.clearnet_session,
+                other => panic!("unexpected: {other:?}"),
+            }
+        };
+        w.execute(Command::RelayClearnetSession { unlock: true }).await.expect("unlock");
+        let reload = |on: bool, base: molt_core::SessionSettings| Command::ReloadSettings {
+            settings: molt_core::SessionSettings { clearnet_relays_enabled: on, ..base },
+            language: String::new(),
+            theme: String::new(),
+        };
+        w.execute(reload(false, settings(&w).await)).await.expect("reload off");
+        assert!(!live(w.clone()).await, "a reloaded off must stop clearnet dialing");
+        w.execute(reload(true, settings(&w).await)).await.expect("reload on");
+        assert!(!live(w.clone()).await, "a reloaded on must not grant clearnet");
+        let pending = match w.execute(Command::ReadSession).await.expect("read") {
+            Reply::Session(s) => s.restart_required,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(pending.iter().any(|k| k == "transport.nostr.clearnet_enabled"), "{pending:?}");
+        w.execute(Command::RelayClearnetSession { unlock: true }).await.expect("unlock");
+        let pending = match w.execute(Command::ReadSession).await.expect("read") {
+            Reply::Session(s) => s.restart_required,
+            other => panic!("unexpected: {other:?}"),
+        };
+        assert!(pending.is_empty(), "{pending:?}");
     }
 
     /// A typo must not read as "that setting did not take": an ignored key
