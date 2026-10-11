@@ -185,8 +185,10 @@ pub async fn serve_tcp(
 
 /// Why a TCP endpoint must not start with this seat key, or `None`.
 pub fn tcp_refusal(seat_token: &str) -> Option<&'static str> {
-    seat_token.is_empty().then_some("[mcp].token empty - TCP MCP off")
+    seat_token.is_empty().then_some(TCP_OFF)
 }
+
+const TCP_OFF: &str = "[mcp].token empty - TCP MCP off";
 
 /// [`serve_tcp`] on a listener the caller bound (tests bind port 0).
 pub async fn serve_listener(
@@ -216,46 +218,189 @@ async fn serve_listener_with(
     if let Some(why) = tcp_refusal(&token) {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, why));
     }
+    let boot = Credentials { seat: token, read: read_token };
+    let mut acceptor = Acceptor::new(handle, listener, allow_all, allowlist, boot, pre_auth);
+    loop {
+        acceptor.accept_one().await;
+    }
+}
+
+/// What a TCP endpoint does with the live seat key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpGate {
+    /// Bind and serve.
+    Start,
+    /// Stop accepting and close every connection.
+    Stop,
+    /// Leave it as it is.
+    Keep,
+}
+
+/// The gate for an endpoint that is `running` while the live seat key is
+/// `seat_token`: no key, no port ([`tcp_refusal`]).
+pub fn tcp_gate(running: bool, seat_token: &str) -> TcpGate {
+    match (running, tcp_refusal(seat_token).is_none()) {
+        (false, true) => TcpGate::Start,
+        (true, false) => TcpGate::Stop,
+        _ => TcpGate::Keep,
+    }
+}
+
+/// Serve TCP on `addr` while the RUNNING session holds a seat key: a key
+/// set at runtime binds the port, a key cleared at runtime closes it and
+/// every connection on it. Ends on a bind error or with the engine.
+pub async fn serve_tcp_live(
+    handle: WalletHandle,
+    addr: String,
+    allow_all: bool,
+    allowlist: Vec<IpAddr>,
+) -> std::io::Result<()> {
+    serve_tcp_live_with(handle, addr, allow_all, allowlist, PRE_AUTH).await
+}
+
+async fn serve_tcp_live_with(
+    handle: WalletHandle,
+    addr: String,
+    allow_all: bool,
+    allowlist: Vec<IpAddr>,
+    pre_auth: std::time::Duration,
+) -> std::io::Result<()> {
+    use tokio::sync::broadcast::error::RecvError;
+    // subscribed before the first read, so no change slips between them
+    let mut events = handle.subscribe();
+    let off = Credentials { seat: String::new(), read: String::new() };
+    let mut creds = live_tokens(&handle).await.unwrap_or(off);
+    let mut acceptor: Option<Acceptor> = None;
+    if tcp_refusal(&creds.seat).is_some() {
+        tracing::warn!(%addr, "{TCP_OFF}");
+    }
+    loop {
+        match tcp_gate(acceptor.is_some(), &creds.seat) {
+            TcpGate::Start => {
+                let listener = TcpListener::bind(&addr).await?;
+                tracing::info!(%addr, allow_all, allowed = allowlist.len(), "MCP server on tcp");
+                acceptor = Some(Acceptor::new(
+                    handle.clone(),
+                    listener,
+                    allow_all,
+                    allowlist.clone(),
+                    creds.clone(),
+                    pre_auth,
+                ));
+            }
+            TcpGate::Stop => {
+                acceptor = None; // drops the listener and aborts every connection
+                tracing::warn!(%addr, "{TCP_OFF}");
+            }
+            TcpGate::Keep => {}
+        }
+        enum Woke {
+            Accepted,
+            Settings,
+            Other,
+        }
+        let woke = tokio::select! {
+            ev = events.recv() => match ev {
+                Ok(molt_core::Event::SessionChanged { scope: molt_core::SessionScope::Full })
+                | Err(RecvError::Lagged(_)) => Woke::Settings,
+                Ok(_) => Woke::Other,
+                Err(RecvError::Closed) => return Ok(()),
+            },
+            () = async {
+                match acceptor.as_mut() {
+                    Some(a) => a.accept_one().await,
+                    None => std::future::pending().await,
+                }
+            } => Woke::Accepted,
+        };
+        match woke {
+            Woke::Settings => {
+                if let Some(live) = live_tokens(&handle).await {
+                    creds = live;
+                    if let Some(a) = acceptor.as_mut() {
+                        a.fallback = creds.clone();
+                    }
+                }
+            }
+            Woke::Accepted | Woke::Other => {}
+        }
+    }
+}
+
+/// One bound TCP endpoint and the connections it accepted. Dropping it
+/// closes the port and every connection.
+struct Acceptor {
+    handle: WalletHandle,
+    listener: TcpListener,
+    allow_all: bool,
+    allowlist: Vec<IpAddr>,
+    /// The keys a connection falls back to when the engine cannot be read.
+    fallback: Credentials,
+    pre_auth: std::time::Duration,
     // bounded (review F7): every accepted socket holds a buffer and costs
     // the actor a session read before it authenticates — a flood must not
     // exhaust either, and one accept error must not end the endpoint
-    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
-    let loopback_only = !allow_all && allowlist.iter().all(|ip| ip.is_loopback());
-    let http_face = http::Http::new(handle.clone(), loopback_only);
-    loop {
-        let (sock, peer) = match listener.accept().await {
+    slots: std::sync::Arc<tokio::sync::Semaphore>,
+    http_face: http::Http,
+    conns: tokio::task::JoinSet<()>,
+}
+
+impl Acceptor {
+    fn new(
+        handle: WalletHandle,
+        listener: TcpListener,
+        allow_all: bool,
+        allowlist: Vec<IpAddr>,
+        fallback: Credentials,
+        pre_auth: std::time::Duration,
+    ) -> Acceptor {
+        let loopback_only = !allow_all && allowlist.iter().all(|ip| ip.is_loopback());
+        let http_face = http::Http::new(handle.clone(), loopback_only);
+        Acceptor {
+            handle,
+            listener,
+            allow_all,
+            allowlist,
+            fallback,
+            pre_auth,
+            slots: std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
+            http_face,
+            conns: tokio::task::JoinSet::new(),
+        }
+    }
+
+    /// Accept one connection and spawn its session. Cancel-safe: the only
+    /// await before the spawn is the accept itself.
+    async fn accept_one(&mut self) {
+        while self.conns.try_join_next().is_some() {}
+        let (sock, peer) = match self.listener.accept().await {
             Ok(accepted) => accepted,
             Err(e) => {
                 tracing::warn!(error = %e, "MCP accept failed - retrying");
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                continue;
+                return;
             }
         };
-        if !allow_all && !allowlist.contains(&peer.ip()) {
+        if !self.allow_all && !self.allowlist.contains(&peer.ip()) {
             tracing::warn!(%peer, "MCP connection refused: peer IP not on the allowlist");
-            continue; // sock dropped here -> connection closed
+            return; // sock dropped here -> connection closed
         }
-        let Ok(permit) = slots.clone().try_acquire_owned() else {
+        let Ok(permit) = self.slots.clone().try_acquire_owned() else {
             tracing::warn!(%peer, max = MAX_CONNECTIONS, "MCP connection refused: too many open");
-            continue;
+            return;
         };
-        let h = handle.clone();
-        let http_face = http_face.clone();
-        // the LIVE token, per connection. `mcp-security.md` promises a
-        // rotation "takes effect immediately"; a copy captured at startup
-        // kept the leaked value working until the next restart and refused
-        // the new one. The running session is the one source of truth, so
-        // rotating through either surface applies at once. A failed read
-        // falls back to the boot token — never to none.
-        let creds = live_tokens(&handle)
-            .await
-            .unwrap_or_else(|| Credentials {
-                seat: token.clone(),
-                read: read_token.clone(),
-            });
-        let deadline = tokio::time::Instant::now() + pre_auth;
-        tokio::spawn(async move {
+        let h = self.handle.clone();
+        let http_face = self.http_face.clone();
+        let fallback = self.fallback.clone();
+        let deadline = tokio::time::Instant::now() + self.pre_auth;
+        self.conns.spawn(async move {
             let _permit = permit; // released with the connection
+            // the LIVE token, per connection. `mcp-security.md` promises a
+            // rotation "takes effect immediately"; a copy captured at startup
+            // kept the leaked value working until the next restart and refused
+            // the new one. A failed read falls back to the last known keys —
+            // never to none.
+            let creds = live_tokens(&h).await.unwrap_or(fallback);
             // one port, two protocols: an HTTP request opens with its
             // method, a JSON-RPC line with `{`
             let mut first = [0u8; 1];
@@ -5204,5 +5349,122 @@ pub(crate) mod tests {
             .expect("closed, not idle")
             .unwrap_or(0);
         assert_eq!(n, 0, "the session is closed: {answer}");
+    }
+
+    #[test]
+    fn the_tcp_gate_follows_the_live_seat_key() {
+        assert_eq!(tcp_gate(false, ""), TcpGate::Keep);
+        assert_eq!(tcp_gate(false, "k"), TcpGate::Start);
+        assert_eq!(tcp_gate(true, "k"), TcpGate::Keep);
+        assert_eq!(tcp_gate(true, ""), TcpGate::Stop);
+    }
+
+    async fn set_seat(handle: &WalletHandle, seat: &str) {
+        handle
+            .execute(Command::PatchSettings { patch: json!({ "mcp_token": seat }) })
+            .await
+            .expect("patch the seat key");
+    }
+
+    fn free_addr() -> std::net::SocketAddr {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("a free port")
+    }
+
+    /// `serve_tcp_live` on a free port with a long pre-auth deadline, so a
+    /// close the test sees is the stop, never the deadline.
+    fn spawn_live(handle: &WalletHandle) -> std::net::SocketAddr {
+        let addr = free_addr();
+        let (h, a) = (handle.clone(), addr.to_string());
+        tokio::spawn(async move {
+            let _ = serve_tcp_live_with(
+                h,
+                a,
+                false,
+                vec!["127.0.0.1".parse().expect("ip")],
+                std::time::Duration::from_secs(60),
+            )
+            .await;
+        });
+        addr
+    }
+
+    /// Whether the port accepts within `within`.
+    async fn opens_within(addr: std::net::SocketAddr, within: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + within;
+        while tokio::time::Instant::now() < deadline {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// Whether the port refuses within `within`.
+    async fn shuts_within(addr: std::net::SocketAddr, within: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + within;
+        while tokio::time::Instant::now() < deadline {
+            if tokio::net::TcpStream::connect(addr).await.is_err() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    async fn initialize_on(addr: std::net::SocketAddr, token: &str) -> (BufReader<tokio::net::tcp::OwnedReadHalf>, tokio::net::tcp::OwnedWriteHalf, String) {
+        let s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (r, mut w) = s.into_split();
+        let mut r = BufReader::new(r);
+        let mut line = serde_json::to_string(&init_req(token)).expect("json");
+        line.push('\n');
+        w.write_all(line.as_bytes()).await.expect("write");
+        let mut answer = String::new();
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), r.read_line(&mut answer)).await;
+        (r, w, answer)
+    }
+
+    /// A seat key set while the node runs opens the TCP endpoint at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_seat_key_set_at_runtime_opens_the_tcp_endpoint() {
+        let handle = wallet();
+        let addr = spawn_live(&handle);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(tokio::net::TcpStream::connect(addr).await.is_err(), "bound without a key");
+        set_seat(&handle, "live").await;
+        assert!(opens_within(addr, std::time::Duration::from_secs(5)).await, "never opened");
+        let (_r, _w, answer) = initialize_on(addr, "live").await;
+        assert!(answer.contains("\"result\""), "{answer}");
+    }
+
+    /// A seat key cleared while the node runs closes the port and every
+    /// connection on it; a key set again reopens it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clearing_the_seat_key_closes_the_tcp_endpoint() {
+        let handle = wallet();
+        set_seat(&handle, "seat").await;
+        let addr = spawn_live(&handle);
+        assert!(opens_within(addr, std::time::Duration::from_secs(5)).await, "never opened");
+        let mut silent = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (mut authed, _w, answer) = initialize_on(addr, "seat").await;
+        assert!(answer.contains("\"result\""), "{answer}");
+        set_seat(&handle, "").await;
+        assert!(shuts_within(addr, std::time::Duration::from_secs(5)).await, "still accepting");
+        assert!(
+            closed_within(&mut silent, std::time::Duration::from_secs(5)).await,
+            "an unauthenticated peer outlived the stop"
+        );
+        let mut rest = String::new();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), authed.read_line(&mut rest))
+            .await
+            .expect("closed, not idle")
+            .unwrap_or(0);
+        assert_eq!(n, 0, "an authenticated session outlived the stop: {rest}");
+        set_seat(&handle, "again").await;
+        assert!(opens_within(addr, std::time::Duration::from_secs(5)).await, "never reopened");
+        let (_r, _w, answer) = initialize_on(addr, "again").await;
+        assert!(answer.contains("\"result\""), "{answer}");
     }
 }

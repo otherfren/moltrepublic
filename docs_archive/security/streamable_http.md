@@ -53,9 +53,9 @@ exist; only the HTTP frame around them is missing.
    LIVE tokens (`live_tokens`, same as TCP - rotation applies at once), and
    inserts the resulting `Scope` into the request extensions. Missing or
    wrong token → `401` with `WWW-Authenticate: Bearer realm="moltrepublic"`,
-   empty body. An empty seat token starts no TCP endpoint at all, and one
-   emptied at runtime admits nobody (decided 2026-10-11,
-   `mcp-security.md`). The read token maps to
+   empty body. The port is bound only while the live seat token is
+   non-empty: set at runtime it binds, cleared it closes the port and its
+   connections (decided 2026-10-11, `mcp-security.md`). The read token maps to
    `Scope::Read`.
 3. **Handler adapter.** `impl rmcp::ServerHandler for HttpSeat`:
    `get_info` → the same `serverInfo`/`instructions` the line loop sends;

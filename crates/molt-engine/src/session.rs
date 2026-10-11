@@ -1085,8 +1085,8 @@ impl State {
     /// restart-required keys changed — shared session state, so the GUI can
     /// warn persistently and an MCP agent sees the same list. Keys are the
     /// config-file names. Hot keys (workspace/S3/UI) never appear here;
-    /// `mcp.allow` / `mcp.token` move off this list once live rotation of the
-    /// MCP acceptor lands (concept-config-bidirection §3.5, C4).
+    /// `mcp.allow` moves off this list once the MCP acceptor rebinds live
+    /// (concept-config-bidirection §3.5, C4).
     fn mark_restart_required(&mut self) {
         let boot = &self.boot_settings;
         let live = &self.session.settings;
@@ -1100,9 +1100,8 @@ impl State {
         if live.mcp_allow != boot.mcp_allow {
             keys.push("mcp.allow".to_string());
         }
-        // NOT the tokens: the accept loop reads them live per connection
-        // (`molt_mcp::live_token`), so a rotation reaches the next client
-        // without a restart
+        // NOT the tokens: `molt_mcp::serve_tcp_live` reads them live, opens
+        // the port on a seat key and closes it when the key is cleared
         if live.anonymity != boot.anonymity {
             keys.push("transport.anonymity.network".to_string());
         }

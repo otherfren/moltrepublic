@@ -347,35 +347,23 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("binding the engine to {}", config_path.display()))?
     };
 
-    // MCP over TCP, UI + headless. The bind address, peer-IP allowlist
-    // and required token all come from [mcp] in the config; no token, no port.
+    // MCP over TCP, UI + headless. The bind address and peer-IP allowlist
+    // come from [mcp]; the port is open exactly while the running session
+    // holds a seat key (no token, no port - set or cleared live).
     let (bind_ip, allow_all, allowlist) = parse_mcp_allow(&config.mcp.allow);
     let mcp_addr = format!("{bind_ip}:{}", config.mcp.port);
-    let mcp_token = config.mcp.token.clone();
-    let mcp_read_token = config.mcp.read_token.clone();
-    if let Some(why) = molt_mcp::tcp_refusal(&mcp_token) {
-        tracing::warn!("{why}");
-    } else {
+    {
         let mcp_wallet = wallet.clone();
         let listen_addr = mcp_addr.clone();
         let allowlist = allowlist.clone();
-        let token = mcp_token.clone();
-        let read_token = mcp_read_token.clone();
         rt.spawn(async move {
-            if let Err(e) = molt_mcp::serve_tcp(
-                mcp_wallet,
-                &listen_addr,
-                allow_all,
-                allowlist,
-                token,
-                read_token,
-            )
-            .await
-            {
+            if let Err(e) = molt_mcp::serve_tcp_live(mcp_wallet, listen_addr, allow_all, allowlist).await {
                 tracing::warn!(error = %e, "MCP TCP server stopped");
             }
         });
-        tracing::info!(mcp = %mcp_addr, allow = %config.mcp.allow, "MCP server listening (co-equal operator, token-gated)");
+        if molt_mcp::tcp_refusal(&config.mcp.token).is_none() {
+            tracing::info!(mcp = %mcp_addr, allow = %config.mcp.allow, "MCP server listening (co-equal operator, token-gated)");
+        }
     }
 
     if !config.node.open_on_start.is_empty() {
@@ -391,8 +379,6 @@ fn main() -> anyhow::Result<()> {
             cli.mcp_tcp.as_deref(),
             allow_all,
             allowlist,
-            mcp_token,
-            mcp_read_token,
         )
     } else {
         // UI mode (default): GUI on main thread; fall back to headless stdio
@@ -438,8 +424,6 @@ fn main() -> anyhow::Result<()> {
                     cli.mcp_tcp.as_deref(),
                     allow_all,
                     allowlist,
-                    mcp_token,
-                    mcp_read_token,
                 )
             }
         }
@@ -761,18 +745,15 @@ fn run_headless(
     mcp_tcp: Option<&str>,
     allow_all: bool,
     allowlist: Vec<IpAddr>,
-    token: String,
-    read_token: String,
 ) -> anyhow::Result<()> {
     rt.block_on(async {
         tokio::select! {
             r = async {
                 match mcp_tcp {
-                    // the node stays up without MCP (the startup line said why)
-                    Some(_) if molt_mcp::tcp_refusal(&token).is_some() => std::future::pending().await,
+                    // without a seat key the node stays up, port closed
                     Some(addr) => {
                         tracing::info!(%addr, "MCP transport: tcp");
-                        molt_mcp::serve_tcp(wallet, addr, allow_all, allowlist, token, read_token).await
+                        molt_mcp::serve_tcp_live(wallet, addr.to_string(), allow_all, allowlist).await
                     }
                     None => {
                         tracing::info!("MCP transport: stdio");

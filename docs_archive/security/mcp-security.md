@@ -93,14 +93,23 @@ refusal on both, auth failures come back as JSON-RPC error `-32001`:
   token, writes it to the config, and takes effect immediately. Every request,
   HTTP or line, is checked against the running session's keys: an HTTP request
   with the old bearer gets `401`, a line session holding the old key gets
-  `unauthorized: key revoked` and is closed. No restart is involved, unless
-  the node started without a token (below).
-* **No token, no port.** An empty or missing `token` starts no TCP endpoint,
-  neither HTTP nor line; the node logs `[mcp].token empty - TCP MCP off` once
-  and stdio stays. A token set while it runs opens the port only at the next
-  start. Under `--mcp-tcp` the node stays up without MCP (whoever
-  operates it decides). A seat key emptied at runtime (a hand edit, a patch)
-  admits nobody until a new one is set.
+  `unauthorized: key revoked` and is closed. No restart is involved.
+* **No token, no port** - at start and while it runs. With an empty or
+  missing `token` no TCP endpoint is bound, neither HTTP nor line; the node
+  logs `[mcp].token empty - TCP MCP off addr=<addr>` per endpoint and stdio
+  stays. Under `--mcp-tcp` the node stays up without MCP (whoever operates
+  it decides). The running session's seat key drives the port live
+  (`molt_mcp::serve_tcp_live`, 2026-10-11):
+  * a key set at runtime (`patch_settings`, `set_node_posture`, the GUI, a
+    config hand edit) binds the configured endpoint(s) at once, the
+    always-on `[mcp].port` and `--mcp-tcp` alike;
+  * a key cleared at runtime closes the port and **every** connection on
+    it, unauthenticated and authenticated alike (an authenticated one holds
+    a key that no longer maps, so it is closed now rather than at its next
+    request); a key set again rebinds.
+  A bind error ends that endpoint (`MCP TCP server stopped`); under
+  `--mcp-tcp` the node then exits, as at start. Only `mcp.port` and
+  `mcp.allow` still need a restart.
 
 ## The read-only key
 
@@ -207,7 +216,7 @@ fastest way to spot a misconfiguration:
 
 ```
 INFO moltd: MCP server listening (co-equal operator, token-gated) mcp=127.0.0.1:4040 allow=127.0.0.1
-WARN moltd: [mcp].token empty - TCP MCP off
+WARN molt_mcp: [mcp].token empty - TCP MCP off addr=127.0.0.1:4040
 WARN molt_mcp: MCP connection refused: peer IP not on the allowlist peer=192.168.1.50:41022
 ```
 

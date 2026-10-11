@@ -854,7 +854,7 @@ lexicon! {
     set_rotate: "Rotate", "Rotieren";
     set_issue: "Issue", "Erzeugen";
     set_revoke: "Revoke", "Entziehen";
-    set_token_note: "Sent by clients as the token (Bearer or initialize). A rotation applies at once (from empty: after a restart).", "Von Clients als Token gesendet (Bearer oder initialize). Eine Rotation gilt sofort (von leer: nach Neustart).";
+    set_token_note: "Sent by clients as the token (Bearer or initialize). A rotation applies at once.", "Von Clients als Token gesendet (Bearer oder initialize). Eine Rotation gilt sofort.";
     set_read_token_note: "Reads only the wiki and the shared files. Empty = off.", "Liest nur das Wiki und die geteilten Dateien. Leer = aus.";
     peek_show: "Reveal", "Anzeigen";
     peek_hide: "Hide", "Verbergen";
