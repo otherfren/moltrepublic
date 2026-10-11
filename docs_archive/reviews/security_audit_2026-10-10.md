@@ -118,6 +118,7 @@ reviewed, landed on master:
 | Restore consent v2 (#5, #6): signs the block's relays, the consent anchor and the replaced working anchor; single use, 1024-block window; v1 verifies but is never auto-signed | `3a373694`, `f730d758`, `694a87aa` |
 | MLS concurrent commits (#9): order by `sha256(commit)` only, no carrier stamp; an evicted committer's commit loses in every arrival order; a bare removal is refused | `48831155`, `95d9f30d`, `7b2e0778` |
 | MCP auth (#11, #12, #35): no `[mcp].token` starts no TCP endpoint; an emptied seat key admits nobody; a line session re-checks its key per request and closes once revoked | `ecdce46e`, `ef3241fd` |
+| MCP live TCP: a seat key set at runtime binds the TCP endpoint(s) without a restart; cleared, it closes the port and every connection on it | `c261c52e` |
 
 Accepted residuals (no work planned):
 
