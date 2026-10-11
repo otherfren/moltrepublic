@@ -111,6 +111,7 @@ async fn enable_then_cut_then_recover_and_read() {
         Reply::Seed { seed } => seed,
         other => panic!("unexpected: {other:?}"),
     };
+    vault_support::every_seat_announced(&all).await;
     let d = all.pop().expect("d");
     d.execute(Command::CloseWorkspace).await.expect("d goes away");
     drop(d);

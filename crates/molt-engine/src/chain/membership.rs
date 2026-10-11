@@ -331,13 +331,34 @@ impl State {
 
     /// What a rejoiner's v2 consent binds, as this node sees the chain
     /// (`recovery_auto_approval.md` §7e): head height and the seat's
-    /// working anchor. `None` before a chain exists.
+    /// working anchor. `None` before a chain exists, and while any other
+    /// seat has not announced the v2 capability (the rejoiner signs v1).
     pub(crate) fn consent_anchor_for(&self, member: &str) -> Option<molt_core::chain::ConsentAnchor> {
         let head = self.chain.head.as_ref()?;
+        let missing = self.seats_without_consent_v2();
+        if !missing.is_empty() {
+            tracing::info!(seat = %member, missing = %missing.join(","), "restore consent v1: seats not v2-capable");
+            return None;
+        }
         Some(molt_core::chain::ConsentAnchor {
             height: head.height,
             prev_anchor: self.working_nostr_pk(member),
         })
+    }
+
+    /// Roster seats whose last status did not announce
+    /// [`molt_core::chain::RESTORE_CONSENT_V2_CAP`]; this node is capable.
+    fn seats_without_consent_v2(&self) -> Vec<molt_core::MemberId> {
+        let me = self.member();
+        let cap = molt_core::chain::RESTORE_CONSENT_V2_CAP;
+        let known = self.active.as_ref().map(|a| &a.prefs.seat_caps);
+        self.roster()
+            .into_iter()
+            .filter(|m| {
+                *m != me
+                    && !known.and_then(|k| k.get(m)).is_some_and(|caps| caps.iter().any(|c| c == cap))
+            })
+            .collect()
     }
 
     /// The height the next block takes.

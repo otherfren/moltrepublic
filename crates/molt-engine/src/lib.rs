@@ -1792,11 +1792,11 @@ impl State {
             Command::ReadMirror => Ok(Reply::Mirror(Box::new(self.mirror_view()))),
             Command::SetMirror { on, quota_bytes } => self.cmd_set_mirror(on, quota_bytes),
             Command::SetMirrorDir { path } => self.cmd_set_mirror_dir(path),
-            Command::NetMirrorDecl { from, on, quota, rev, generation } => {
+            Command::NetMirrorDecl { from, on, quota, rev, caps, generation } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
-                self.cmd_net_mirror_decl(&from, on, quota, rev)
+                self.cmd_net_mirror_decl(&from, on, quota, rev, caps)
             }
             Command::NetMirrorStatus { from, holds, gen, page, pages, generation } => {
                 if !self.net_generation_current(generation) {

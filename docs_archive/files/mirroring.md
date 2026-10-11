@@ -241,11 +241,16 @@ Three control frames (`molt_net::mirror_gossip`), each its own tag and
 version boundary, authenticated by the MLS credential like the poke, and
 `by` checked against it:
 
-- `MirrorDecl { on, quota, rev }` (`\x00molt-mdecl-v1`) - sent at runtime
-  start, on `set_mirror`, and every 6 h; stored per member in
+- `MirrorDecl { on, quota, rev, caps }` (`\x00molt-mdecl-v1`) - sent as
+  soon as a transport is up (the 1 s delivery tick, also over the loopback
+  mesh), on `set_mirror`, and every 6 h; stored per member in
   `TransportState.mirror.decls`, last-wins by `rev` (unix seconds of the
   change; a lower revision never overwrites). A member without one reads
-  `known: false`.
+  `known: false`. `caps` (additive, 2026-10-11) is the seat's status: the
+  capabilities its build understands, absent on an older build, kept per
+  member in `prefs.toml` (`seat_caps`) rather than the decls; the only
+  one so far gates the restore consent v2
+  (`docs_archive/ritual/recovery_auto_approval.md` §7e).
 - `MirrorStatus { holds: [(id, held, of)] }` (`\x00molt-mstat-v1`) - what
   the seat holds; in M3 its own available v2 shares, whole (M4 adds the
   mirrored series). Sent when the list changed (at most once a minute)
@@ -256,8 +261,8 @@ version boundary, authenticated by the MLS credential like the poke, and
   holder answers with its status, at most once an hour.
 
 All three are gossip, never chain state; a seat that was offline learns
-them from the next periodic send or its own ask at start. The beat rides
-the 30 s presence tick; this seat's own switch, quota and revision live
+them from the next periodic send or its own ask at start. The status and
+ask beat rides the 30 s presence tick; this seat's own switch, quota and revision live
 in `TransportState.mirror` too (default on, 1 GiB), carried by the
 storage writer's transport merge like the cursors.
 

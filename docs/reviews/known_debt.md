@@ -49,14 +49,6 @@ the seat until a new request replaces it. After a reorg that lowers the
 head, a card swept as spent comes back only through re-served open
 governance. Fix direction: drop the pending entry with the card.
 
-## v2 restore consents need every seat upgraded first
-
-`recovery_auto_approval.md` §7e: an older build refuses a v2 `Restored`
-as an invalid consent and keeps sealing; older builds holding m voices
-split the chain. Nothing gates v2 emission, since no peer reports its
-build. Fix direction: a capability signal in presence that a minting
-node checks against every seat before it hands out a v2 anchor.
-
 ## Security audit 2026-10-10 - other open items
 
 From `docs_archive/reviews/security_audit_2026-10-10.md` (its accepted

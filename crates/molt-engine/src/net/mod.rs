@@ -147,6 +147,7 @@ impl EngineSink for CmdSink {
                 on: decl.on,
                 quota: decl.quota,
                 rev: decl.rev,
+                caps: decl.caps.clone(),
                 generation: self.generation,
             })
             .await;

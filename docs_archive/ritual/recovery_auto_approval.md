@@ -22,7 +22,10 @@ a_spent_or_stale_v2_consent_is_refused_at_the_coordinator,
 a_v1_consent_is_not_cosigned_by_the_coordinator,
 a_spent_v2_card_is_swept_from_the_registry,
 a_stale_v2_card_is_swept_from_the_registry,
-a_lagging_survivor_registers_and_signs_a_v2_card_on_arrival}`, the
+a_lagging_survivor_registers_and_signs_a_v2_card_on_arrival,
+a_seat_without_the_v2_capability_keeps_the_consent_at_v1,
+every_seat_announcing_the_v2_capability_mints_a_v2_consent,
+the_v2_capability_survives_a_reopen}` (the capability gate), the
 molt-core byte pins `restore_consent_v{1,2}_bytes_are_pinned`.
 
 ## 1. The field defect
@@ -307,18 +310,34 @@ consent from the chain; closing that needs a cutoff height, which a v1-era
 chain cannot be retrofitted with.
 
 **New rejoiners emit v2** whenever their link (or the detached reattach
-context) carries a `ConsentAnchor`; a link minted by an older build carries
-none, and the rejoiner falls back to v1 (human approvals). Every new mint
-carries one.
+context) carries a `ConsentAnchor`; a link minted by an older build, or
+while a seat has not announced the capability (below), carries none, and
+the rejoiner falls back to v1 (human approvals).
 
 **Version skew.** An older build cannot verify a v2 consent (its v1
 preimage does not match): it refuses the proposal and the block as an
 invalid consent, not as an unknown layout, and keeps sealing its own
 proposals. Where older builds together hold m voices they extend past
-the v2 block and the chain splits until they upgrade. Nothing gates v2
-emission (no peer reports its build), so every seat must run a v2 build
-before a recovery link is minted - the coordinated-upgrade rule every
-signed layout change here follows.
+the v2 block and the chain splits until they upgrade.
+
+**Capability gate (decided 2026-10-11, built the same day).** Every seat
+announces `molt-restore-consent-v2`
+(`molt_core::chain::RESTORE_CONSENT_V2_CAP`) in the `caps` field of its
+status frame - the mirror declaration (`docs_archive/files/mirroring.md`
+§3.4), sent as soon as its transport is up and every 6 h. Absent field =
+not capable, so an older build never counts. The receiver keeps the last
+seen list per seat in `WorkspacePrefs.seat_caps` (`prefs.toml`, beside
+the presence memory; replaced by every accepted declaration, so a later
+status without the field withdraws it). A restart keeps it, and so does a
+restored backup (`transport.state` never travels, the prefs do), which
+is what lets the detached self-service reattach still sign v2. A node puts a `ConsentAnchor` into a recovery link
+(or the detached reattach context) only when every OTHER roster seat
+announced the capability (`State::consent_anchor_for`; this node runs the
+build); otherwise the link carries none and the rejoiner signs v1, which
+survivors keep accepting as before (the human card). Conservative choices
+the decision left open: the seat being restored counts as well (its last
+announcement from before the loss), and a downgrade is seen only from
+that seat's next status.
 
 **Freshness window, conservative choice.** 1024 blocks bounds how late a
 consent may seal; single use (rule 3) is what closes the replay. A link

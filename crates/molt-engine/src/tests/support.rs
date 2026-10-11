@@ -351,7 +351,7 @@ pub(super) fn recovering_state(
 }
 
 /// Reopen a materialized workspace directory once its writer is gone.
-pub(super) fn reopen(dir: &std::path::Path) -> molt_storage::OpenedWorkspace {
+pub(crate) fn reopen(dir: &std::path::Path) -> molt_storage::OpenedWorkspace {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         match molt_storage::open_workspace(dir) {

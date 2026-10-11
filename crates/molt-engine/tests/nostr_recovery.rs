@@ -213,7 +213,26 @@ async fn found_republic(
         s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
     })
     .await;
+    every_seat_announced(&[&a, &b]).await;
     (a, b, petra_phrase, walter_phrase)
+}
+
+/// Each node has every other seat's status: a recovery link minted now
+/// carries the v2 consent anchor (`recovery_auto_approval.md` §7e).
+async fn every_seat_announced(nodes: &[&WalletHandle]) {
+    for w in nodes {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let Reply::Mirror(v) = w.execute(Command::ReadMirror).await.expect("read mirror") else {
+                panic!("read mirror");
+            };
+            if v.members.iter().all(|m| m.known) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the seats never announced: {v:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
 }
 
 /// Field keystone (found 2026-08-17, recovery attempt 3g of the incident
@@ -405,6 +424,7 @@ async fn found_three_at(
         })
         .await;
     }
+    every_seat_announced(&[&a, &b, &v]).await;
     (a, b, v, petra_phrase)
 }
 

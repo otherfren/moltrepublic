@@ -19,6 +19,25 @@ pub async fn read_session(w: &WalletHandle) -> Box<SessionView> {
     }
 }
 
+/// Every node holds every other seat's status frame, so a recovery link
+/// minted now carries the v2 consent anchor (`recovery_auto_approval.md`
+/// §7e).
+pub async fn every_seat_announced(nodes: &[WalletHandle]) {
+    for w in nodes {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let Reply::Mirror(v) = w.execute(Command::ReadMirror).await.expect("read mirror") else {
+                panic!("read mirror");
+            };
+            if v.members.iter().all(|m| m.known) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the seats never announced: {v:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
 pub async fn wait_for(
     w: &WalletHandle,
     what: &str,

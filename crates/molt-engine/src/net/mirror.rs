@@ -40,6 +40,11 @@ const PLAN_EVERY_SECS: u64 = 5;
 /// bottleneck, and one at a time IS the pull pacing.
 const MIRROR_FETCHES_AT_ONCE: usize = 1;
 
+/// What this build announces in its declaration.
+fn own_caps() -> Vec<String> {
+    vec![molt_core::chain::RESTORE_CONSENT_V2_CAP.to_string()]
+}
+
 impl State {
     /// Adopt the persisted gossip at open.
     pub(crate) fn load_mirror(&mut self, state: &molt_core::TransportState) {
@@ -69,9 +74,31 @@ impl State {
     }
 
     fn publish_mirror_frame(&self, frame: Vec<u8>) -> bool {
-        self.group_net
-            .as_ref()
-            .is_some_and(|group| group.handle.publish_control(frame))
+        if let Some(group) = self.group_net.as_ref() {
+            return group.handle.publish_control(frame);
+        }
+        // the queue mesh (the test transport): one ping per leg
+        let Some(net) = self.net.as_ref().filter(|n| n.is_real()) else {
+            return false;
+        };
+        let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
+            return false;
+        };
+        let peers: Vec<PeerLink> = net.mesh().iter().filter_map(PeerLink::from_mesh).collect();
+        for peer in &peers {
+            tokio::spawn(Self::send_ping(transport.clone(), group.clone(), peer.clone(), frame.clone()));
+        }
+        !peers.is_empty()
+    }
+
+    /// The declaration doubles as the seat's status frame (its build's
+    /// capabilities, §7e): out as soon as a transport is up, then every
+    /// [`DECL_REPEAT_SECS`]. Rides the 1 s delivery tick.
+    pub(crate) fn mirror_decl_tick(&mut self, now: u64) {
+        let sent = self.files.mirror_decl_sent;
+        if sent == 0 || now.saturating_sub(sent) >= DECL_REPEAT_SECS {
+            self.send_mirror_decl(now);
+        }
     }
 
     /// This seat's declaration, as the members see it.
@@ -91,9 +118,11 @@ impl State {
             on: decl.on,
             quota: decl.quota,
             rev: decl.rev,
+            caps: own_caps(),
         };
         if self.publish_mirror_frame(frame.to_frame()) {
-            self.files.mirror_decl_sent = now;
+            // never 0, the "not yet sent" mark
+            self.files.mirror_decl_sent = now.max(1);
         }
     }
 
@@ -435,9 +464,6 @@ impl State {
         if self.group_net.is_none() {
             return;
         }
-        if now.saturating_sub(self.files.mirror_decl_sent) >= DECL_REPEAT_SECS {
-            self.send_mirror_decl(now);
-        }
         let holds = self.own_mirror_holds();
         let since = now.saturating_sub(self.files.mirror_status_sent);
         let changed = holds != self.files.mirror_status_last;
@@ -533,6 +559,7 @@ impl State {
         on: bool,
         quota: u64,
         rev: u64,
+        caps: Vec<String>,
     ) -> Result<Reply, MoltError> {
         if *from == self.member() || !self.roster().contains(from) {
             return Ok(Reply::Ack);
@@ -541,8 +568,26 @@ impl State {
         if newer {
             self.files.mirror.decls.insert(from.clone(), MirrorDecl { on, quota, rev });
             self.persist_mirror();
+            self.remember_caps(from, caps);
         }
         Ok(Reply::Ack)
+    }
+
+    /// The member's last announced capabilities, kept in the prefs (they
+    /// travel with an export, so a restored copy still mints v2).
+    fn remember_caps(&mut self, from: &MemberId, caps: Vec<String>) {
+        let Some(a) = &mut self.active else {
+            return;
+        };
+        if a.prefs.seat_caps.get(from).map_or(caps.is_empty(), |known| *known == caps) {
+            return;
+        }
+        if caps.is_empty() {
+            a.prefs.seat_caps.remove(from);
+        } else {
+            a.prefs.seat_caps.insert(from.clone(), caps);
+        }
+        a.handle.set_prefs(a.prefs.clone());
     }
 
     /// A member's hold status landed - one page of a generation: the

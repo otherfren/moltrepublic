@@ -95,6 +95,10 @@ pub struct MirrorDeclFrame {
     pub quota: u64,
     /// Revision; a lower one never overwrites a higher one.
     pub rev: u64,
+    /// What this seat's build understands (`recovery_auto_approval.md`
+    /// §7e); absent on an older build.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<String>,
 }
 
 impl MirrorDeclFrame {
@@ -227,11 +231,25 @@ impl MirrorWhoFrame {
 mod tests {
     use super::*;
 
+    /// The capability list is additive: an older build's declaration (no
+    /// field) reads as none, and an empty list is not written.
+    #[test]
+    fn a_declaration_without_caps_reads_as_no_capabilities() {
+        let mut old = MIRROR_DECL_TAG.to_vec();
+        old.extend_from_slice(br#"{"v":1,"by":"p","on":true,"quota":5,"rev":9}"#);
+        let decl = MirrorDeclFrame::from_frame(&old).expect("an old declaration parses");
+        assert!(decl.caps.is_empty());
+        assert_eq!(decl.to_frame(), old, "no caps, no field");
+        let capable = MirrorDeclFrame { caps: vec!["molt-restore-consent-v2".into()], ..decl };
+        assert_eq!(MirrorDeclFrame::from_frame(&capable.to_frame()).expect("caps"), capable);
+    }
+
     /// Each frame round-trips under its own tag only; the tags never
     /// cross each other or the poke's.
     #[test]
     fn the_three_frames_round_trip_and_keep_to_their_tags() {
-        let decl = MirrorDeclFrame { v: MIRROR_V, by: "petra".into(), on: true, quota: 5, rev: 9 };
+        let decl =
+            MirrorDeclFrame { v: MIRROR_V, by: "petra".into(), on: true, quota: 5, rev: 9, caps: Vec::new() };
         let status = MirrorStatusFrame {
             v: MIRROR_V,
             by: "petra".into(),

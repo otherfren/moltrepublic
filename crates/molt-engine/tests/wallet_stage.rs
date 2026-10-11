@@ -100,6 +100,7 @@ async fn reveal_seed(w: &WalletHandle) -> String {
 /// a fresh one; the old handle is dropped.
 async fn recover_c(all: &mut Vec<WalletHandle>, url: &str, tmp: &std::path::Path) -> WalletHandle {
     let phrase = reveal_seed(&all[2]).await;
+    vault_support::every_seat_announced(all).await;
     let c = all.pop().expect("c");
     c.execute(Command::CloseWorkspace).await.expect("c goes away");
     drop(c);

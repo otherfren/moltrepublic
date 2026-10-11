@@ -1765,6 +1765,11 @@ pub struct WorkspacePrefs {
     /// is simply false.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub last_seen: std::collections::BTreeMap<String, u64>,
+    /// Member name → the capabilities its last status frame announced
+    /// (`recovery_auto_approval.md` §7e). Kept here, beside the presence
+    /// memory, so a restart and a restored backup keep it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub seat_caps: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl Default for WorkspacePrefs {
@@ -1780,6 +1785,7 @@ impl Default for WorkspacePrefs {
             read_cursors: std::collections::BTreeMap::new(),
             local_copies: std::collections::BTreeMap::new(),
             last_seen: std::collections::BTreeMap::new(),
+            seat_caps: std::collections::BTreeMap::new(),
             mirror_dir: String::new(),
         }
     }
@@ -5926,6 +5932,9 @@ pub enum Command {
         quota: u64,
         /// Revision; last wins.
         rev: u64,
+        /// The capabilities the declarer's build announces.
+        #[serde(default)]
+        caps: Vec<String>,
         /// Transport incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,

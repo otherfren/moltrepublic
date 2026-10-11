@@ -365,6 +365,10 @@ pub fn restore_consent_bytes(
 /// replay; this only bounds how late a consent may land.
 pub const RESTORE_CONSENT_WINDOW: u64 = 1024;
 
+/// The capability a seat announces when its build verifies a v2 restore
+/// consent; a v2 anchor is minted only once every seat announced it.
+pub const RESTORE_CONSENT_V2_CAP: &str = "molt-restore-consent-v2";
+
 /// What a v2 restore consent anchors to: the chain height its signer saw
 /// and the seat's working transport anchor the restore replaces. Minted
 /// into the recovery link (a total-loss rejoiner holds no chain).

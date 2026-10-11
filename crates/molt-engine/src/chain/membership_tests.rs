@@ -1258,3 +1258,96 @@ fn a_flood_of_one_seats_restore_cards_leaves_room_for_another_seat() {
         "dora's recovery is registered despite erika's flood"
     );
 }
+
+/// A member's status frame as it lands from the wire, with `caps`.
+fn announce(st: &mut crate::State, from: &str, caps: &[&str]) {
+    st.cmd_net_mirror_decl(
+        &from.to_string(),
+        true,
+        0,
+        0,
+        caps.iter().map(|c| (*c).to_string()).collect(),
+    )
+    .expect("declaration");
+}
+
+/// The consent a rejoiner signs from what `coord` would mint for dora.
+fn minted_consent_kind(coord: &crate::State, b: &Builder) -> crate::chain::ConsentKind {
+    let anchor = coord.consent_anchor_for("dora");
+    let consent = crate::founding::make_restore_consent(
+        b.key("dora"),
+        &b.republic_id,
+        "dora",
+        &b.pk("dora"),
+        "",
+        &[],
+        anchor.as_ref(),
+    );
+    let height = coord.chain.head.as_ref().expect("head").height + 1;
+    crate::chain::verify_restore_consent(&b.republic_id, &b.pk("dora"), height, "dora", None, &[], &consent)
+        .expect("the consent verifies")
+}
+
+const ROSTER: [&str; 3] = ["petra", "walter", "dora"];
+
+/// §7e version skew: one seat that never announced the v2 capability, or
+/// announced a status without the field (an older build), keeps the mint
+/// at v1.
+#[test]
+fn a_seat_without_the_v2_capability_keeps_the_consent_at_v1() {
+    let cap = molt_core::chain::RESTORE_CONSENT_V2_CAP;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&ROSTER, 2);
+    let (mut petra, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
+    assert!(petra.consent_anchor_for("dora").is_none(), "nobody announced");
+    announce(&mut petra, "walter", &[cap]);
+    assert!(petra.consent_anchor_for("dora").is_none(), "dora never announced");
+    announce(&mut petra, "dora", &[]);
+    assert!(petra.consent_anchor_for("dora").is_none(), "an old peer is not capable");
+    assert_eq!(minted_consent_kind(&petra, &b), crate::chain::ConsentKind::V1);
+}
+
+/// Every other seat announced the capability (this node is capable by
+/// running this build): the mint carries the anchor, the consent is v2.
+#[test]
+fn every_seat_announcing_the_v2_capability_mints_a_v2_consent() {
+    let cap = molt_core::chain::RESTORE_CONSENT_V2_CAP;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&ROSTER, 2);
+    let (mut petra, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
+    announce(&mut petra, "walter", &["something-else", cap]);
+    announce(&mut petra, "dora", &[cap]);
+    assert!(petra.consent_anchor_for("dora").is_some());
+    assert!(matches!(minted_consent_kind(&petra, &b), crate::chain::ConsentKind::V2 { .. }));
+    // a later status without the field (a downgrade) withdraws it
+    announce(&mut petra, "walter", &[]);
+    assert!(petra.consent_anchor_for("dora").is_none(), "the last status wins");
+}
+
+/// The last seen capability lives in `prefs.toml`, so a reopened node (or
+/// a restored backup) mints v2 before any peer speaks again.
+#[test]
+fn the_v2_capability_survives_a_reopen() {
+    let cap = molt_core::chain::RESTORE_CONSENT_V2_CAP;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&ROSTER, 2);
+    let (mut petra, _tmp, dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
+    announce(&mut petra, "walter", &[cap]);
+    announce(&mut petra, "dora", &[cap]);
+    let active = petra.active.take().expect("active");
+    active.handle.close(None);
+    drop(petra);
+    let ws = crate::tests::support::reopen(&dir);
+    let mut back = chain_signer("petra", &b, b.blocks.clone());
+    assert!(back.consent_anchor_for("dora").is_none(), "no prefs, no capability");
+    back.active = Some(crate::ActiveStorage {
+        id: "w-store".to_string(),
+        dir: dir.clone(),
+        prefs: molt_storage::read_prefs(&dir),
+        handle: molt_storage::start_writer(ws),
+    });
+    assert!(back.consent_anchor_for("dora").is_some(), "the capability came back from disk");
+}

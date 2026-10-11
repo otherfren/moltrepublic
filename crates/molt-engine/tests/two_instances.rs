@@ -35,6 +35,24 @@ use molt_net::{
 };
 use tokio::sync::watch;
 
+/// The status frame of seats this file plays without an engine (raw
+/// ritual tasks, raw supervisors): v2-capable, so a mint carries the
+/// consent anchor (`recovery_auto_approval.md` §7e).
+async fn announce_v2(w: &WalletHandle, seats: &[&str]) {
+    for seat in seats {
+        w.execute(Command::NetMirrorDecl {
+            from: (*seat).to_string(),
+            on: true,
+            quota: 0,
+            rev: 0,
+            caps: vec![molt_core::chain::RESTORE_CONSENT_V2_CAP.to_string()],
+            generation: None,
+        })
+        .await
+        .expect("status frame");
+    }
+}
+
 async fn read_session(w: &WalletHandle) -> Box<SessionView> {
     match w.execute(Command::ReadSession).await.expect("read session") {
         Reply::Session(s) => s,
@@ -2467,6 +2485,7 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
     a.execute(Command::CreateFinish).await.expect("enter");
 
     // ❶ the surviving coordinator mints the recovery link
+    announce_v2(&a, &["member-b"]).await;
     a.execute(Command::RecoverInviteStart {
         member: "member-b".to_string(),
     })
@@ -2809,6 +2828,7 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
     a.execute(Command::CreateFinish).await.expect("enter");
 
     // ── ROUND 1: the recovery attempt that DIES from the rejoiner's side ──
+    announce_v2(&a, &["member-b"]).await;
     a.execute(Command::RecoverInviteStart {
         member: "member-b".to_string(),
     })
@@ -2906,6 +2926,7 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
     // ── ROUND 2: the re-mint failover — a full second round, for real ──
     // a second mint for the same seat works while round 1's queue still
     // listens, and a second single-use ticket coexists with the first
+    announce_v2(&a, &["member-b"]).await;
     a.execute(Command::RecoverInviteStart {
         member: "member-b".to_string(),
     })
@@ -3129,6 +3150,7 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
     );
 
     // the coordinator mints; the rejoiner drives the real recovery
+    announce_v2(&a, &["member-b", "member-c"]).await;
     a.execute(Command::RecoverInviteStart {
         member: "member-b".to_string(),
     })
@@ -4192,6 +4214,7 @@ async fn a_malformed_announce_does_not_burn_the_recovery_window() {
 
     // mint + full rejoin WITHOUT the built-in mesh phase — the test drives the
     // announces itself so it can inject a malformed one first
+    announce_v2(&a, &["member-b"]).await;
     a.execute(Command::RecoverInviteStart {
         member: "member-b".to_string(),
     })

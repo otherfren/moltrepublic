@@ -148,6 +148,7 @@ async fn deposit_cut_recover_grant_to_the_recovered_seat_reads() {
     cut(&all).await;
 
     let phrase = reveal_seed(&all[3]).await;
+    vault_support::every_seat_announced(&all).await;
     let d = all.pop().expect("d");
     d.execute(Command::CloseWorkspace).await.expect("d goes away");
     drop(d);
