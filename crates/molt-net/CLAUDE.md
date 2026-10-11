@@ -29,14 +29,16 @@ Two members can commit at the SAME epoch (two recoveries at once). Without a
 shared rule they merge their own and diverge permanently under one epoch
 number, silently. The convergence rule:
 
-- `CommitKey(created_at, sha256(commit))` is the total order — **lowest wins**,
-  timestamp first, digest last so it is not grindable.
-- The stamp must come from the SAME source on both sides. There is no
-  wall-clock default: `restore_member` REQUIRES `created_at`, and while the
-  transport carries no per-event timestamp both sides pass `NO_CARRIER_STAMP`
-  (the order then degrades to the digest — symmetric, just grindable). A
-  local clock on the send side against a `0` on the receive side makes the own
-  commit always lose, which is worse than not having the mechanism at all.
+- `CommitKey = sha256(commit)` is the total order — **lowest digest wins**.
+  NEVER the carrier `created_at` (decided 2026-10-11, audit #9): the 445
+  stamp is publisher-chosen and unauthenticated, so anyone holding a losing
+  commit could re-publish it earlier and pull every later receiver onto it
+  while earlier ones stay put — a split. The digest is the same on every
+  node from the bytes alone. Its one cost: a committer can grind for a low
+  digest, which wins only a race it is already party to. Neither
+  `restore_member` nor `decrypt` takes a stamp, so none can creep back in;
+  the carrier stamp a commit is PUBLISHED at (`MlsCommit.stamp`,
+  `publish_frame_at`) only keeps its `h` tag and resends in one window.
 - The prior-state slot is armed on EVERY merge (committers AND bystanders), so
   it always points exactly one epoch back and every node can rewind onto the
   winner. Do NOT add a traffic-based expiry: it strands any bystander that

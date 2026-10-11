@@ -163,7 +163,9 @@ Three event kinds carry MLS over relays:
 - **Commit races:** a sender waits for a relay ACK before applying its own
   commit locally; concurrent commits of the same epoch are broken
   deterministically (lowest `created_at`, then lowest event id); clients keep
-  the prior state briefly to heal forks.
+  the prior state briefly to heal forks. **We deviate (2026-10-11, audit
+  #9):** our order is the lowest SHA-256 of the commit bytes alone, never
+  `created_at` (§5).
 - **Security properties:** compromise of the Nostr identity key gives NO
   access to group messages (MLS keys are independent); forward secrecy as in
   MLS ("keys deleted as soon as used").
@@ -440,9 +442,22 @@ signature maps to no `admin_pubkeys` entry at all, so `admin_pubkeys` carries
   only fills in the `ChainChange::TransportPolicy` block type. (Without this,
   N3 can go green while the fork-proofness is untestable until N6 — a
   meaningless-etappe smell.)
-- NIP-EE's `created_at` tiebreak stays confined to the MLS epoch mechanics;
-  republic STATE is still decided solely by our chain (signatures, positions,
-  hard-reject).
+- **The same-epoch commit order is the commit digest alone** (decided
+  2026-10-11, security audit #9, replacing NIP-EE's `created_at`-first
+  rule): `CommitKey = sha256(commit bytes)`, lowest wins, on committers and
+  bystanders alike. The 445 `created_at` is publisher-chosen and signed only
+  by a throwaway key, so a stamp-first order let anyone re-publish a losing
+  commit under an earlier stamp: receivers that had not yet decided rewound
+  onto it, those that had did not, and the group split. The digest depends
+  on the bytes only, so every arrival order and every carrier stamp yields
+  the same winner, and a re-stamped copy of a decided commit is a no-op.
+  Accepted cost: a committer can grind its commit toward a low digest; it
+  wins only a race it is already part of, and a removed leaf still cannot
+  win the epoch it was evicted in. A fleet mixing a stamp-ordering build
+  with a digest-ordering one can still split on a concurrent race; update
+  all seats before relying on it.
+- The tiebreak stays confined to the MLS epoch mechanics; republic STATE is
+  still decided solely by our chain (signatures, positions, hard-reject).
 
 ## 6. Delivery-guarantee interplay — and the forward-secrecy tension (finding 1, HIGH)
 
