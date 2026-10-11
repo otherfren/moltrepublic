@@ -3023,10 +3023,10 @@ pub enum WorkspaceEvent {
     MlsCommit {
         /// Hex of the MLS commit's wire bytes.
         commit: String,
-        /// The carrier stamp the commit was keyed at on Nostr (`0` = none:
-        /// the loopback/mesh path carries no stamp). A RESEND must ride the
-        /// same stamp, or the receivers' `CommitKey` differs from the
-        /// original's and a tiebreak splits (review M8). Additive.
+        /// The carrier stamp the commit is published at on Nostr (`0` =
+        /// none: the loopback/mesh path carries no stamp). A RESEND rides the
+        /// same stamp, so it lands in the same `h` window (review M8). It
+        /// orders nothing: concurrent commits order by digest. Additive.
         #[serde(default)]
         stamp: u64,
     },

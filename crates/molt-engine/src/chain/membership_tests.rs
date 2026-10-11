@@ -932,16 +932,10 @@ fn a_nostr_rekey_commit_opens_for_the_survivors_it_is_meant_for() {
     );
 }
 
-/// The stamp the commit is KEYED with is the stamp it is carried at.
-///
-/// `CommitKey(created_at, digest)` breaks a concurrent same-epoch race,
-/// and both ends must derive it from the same value — the 445 receive side
-/// reads the real `created_at` off the wire. A coordinator that let the
-/// outbox pick the publish time would key its own commit at one value
-/// while every receiver keys it at another, and the two would pick
-/// different winners under ONE epoch number, silently.
+/// The re-key carries the stamp it was pinned at, so the original publish
+/// and every resend share one `h` window.
 #[test]
-fn the_rekey_carries_the_stamp_it_was_keyed_with() {
+fn the_rekey_carries_the_stamp_it_was_pinned_at() {
     let (coord, _survivor, _dora) = mls_trio();
     let returning =
         molt_net::MlsMember::new(&SigningKey::from_bytes(&[2u8; 32]), "walter").expect("kp");
@@ -952,8 +946,7 @@ fn the_rekey_carries_the_stamp_it_was_keyed_with() {
     let rekey = nostr_rekey(&mls, "walter", &kp, pinned).expect("the re-key runs");
     assert_eq!(
         rekey.stamp, pinned,
-        "the re-key must carry its own pinned stamp - the delivery has no other \
-         source for it, and re-reading a clock is exactly the divergence"
+        "the re-key must carry its own pinned stamp - the delivery has no other source for it"
     );
 }
 

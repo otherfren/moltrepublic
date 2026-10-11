@@ -74,21 +74,15 @@ pub(crate) struct NostrRekey {
     /// forward (`9900f36`). The queue path has no outer layer, which is why
     /// this only bites on 445.
     pub prev_exporter: [u8; 32],
-    /// The carrier stamp the commit was keyed with, and the one it MUST be
-    /// published at.
-    ///
-    /// `CommitKey(created_at, sha256(commit))` breaks a concurrent same-epoch
-    /// race, and the rule (`molt-net/CLAUDE.md`) is that the stamp comes from
-    /// the same source on both sides. The 445 receive side reads the real
-    /// `created_at` off the wire, so a sender that let the outbox pick the
-    /// publish time would key its own commit at one value while every
-    /// receiver keys it at another — the two ends then pick different winners
-    /// and diverge permanently under ONE epoch number, silently.
+    /// The carrier stamp the commit is published, and re-published, at -
+    /// one `h` window for the original and every resend. It orders nothing:
+    /// a concurrent-commit race is decided by the digest alone
+    /// (`molt-net/CLAUDE.md`).
     pub stamp: u64,
 }
 
-/// Re-key a Nostr republic's group: replace `member`'s leaf, at a carrier
-/// stamp the caller pinned **before** the commit was made.
+/// Re-key a Nostr republic's group: replace `member`'s leaf; `stamp` is the
+/// carrier stamp the caller publishes it at.
 ///
 /// The mesh twin is `NetRuntime::restore_member_on_group`, which reaches the
 /// group through `real_crypto` — a Nostr republic has no `NetRuntime` at all,
@@ -103,7 +97,7 @@ pub(crate) fn nostr_rekey(
         .lock()
         .map_err(|_| "the group lock is poisoned".to_string())?;
     let (commit, welcome) = group
-        .restore_member(member, key_package, stamp)
+        .restore_member(member, key_package)
         .map_err(|e| e.to_string())?;
     // read AFTER the commit: the ring's newest entry is now the epoch the
     // commit was made from, which is where its recipients still are

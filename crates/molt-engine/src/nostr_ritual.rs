@@ -441,7 +441,7 @@ async fn publish_frame_now(
 /// snapshot `finalize_founding` deliberately takes AFTER the genesis encrypt,
 /// and every member would meet `SecretReuseError` on reopen. So the retry
 /// republishes the SAME ciphertext — for an application frame that is safe:
-/// `decrypt_at`'s carrier stamp only feeds the concurrent-COMMIT tiebreak.
+/// the carrier stamp enters no decrypt.
 pub(crate) enum FramePayload {
     /// Encrypt this message against the group, then publish. Boxed: a
     /// `RitualMsg` (a `RecoverRequest` is its widest arm) dwarfs `Sealed`.
@@ -575,14 +575,12 @@ pub(crate) fn spawn_publish_frame(
 }
 
 /// Open one 445 frame against the group: strip the outer exporter layer
-/// (current secret first, then the ring), then MLS-decrypt WITH the carrier
-/// stamp (`decrypt_at` — the N3 tiebreak's receive side). Undecryptable
+/// (current secret first, then the ring), then MLS-decrypt. Undecryptable
 /// frames (our own publishes echoed back, replays across a rewind) are a
 /// normal part of the stream — skipped, never fatal.
 fn open_group_frame(
     group: &Arc<Mutex<molt_net::MlsMember>>,
     content: &str,
-    created_at: u64,
 ) -> Option<(RitualMsg, String)> {
     let mut g = group.lock().ok()?;
     let mut secrets = Vec::with_capacity(1 + molt_net::mls::EXPORTER_RING_K);
@@ -597,7 +595,7 @@ fn open_group_frame(
             return None;
         }
     };
-    match g.decrypt_at(&wire, created_at) {
+    match g.decrypt(&wire) {
         // `from` is the MLS-authenticated leaf credential — the ONLY
         // authenticator a 445 has (the event itself is signed by a fresh
         // ephemeral key by design). Dropping it is what let any group member
@@ -710,8 +708,8 @@ pub(crate) fn spawn_founder_group_recv(
         }
         let mut was_deaf = false;
         loop {
-            let (content, created_at) = match sub.recv(RECV_SLICE).await {
-                molt_net::ritual_net::GroupRecv::Frame { content, created_at } => {
+            let content = match sub.recv(RECV_SLICE).await {
+                molt_net::ritual_net::GroupRecv::Frame { content, .. } => {
                     if was_deaf {
                         was_deaf = false;
                         let _ = send_cmd(
@@ -723,7 +721,7 @@ pub(crate) fn spawn_founder_group_recv(
                         )
                         .await;
                     }
-                    (content, created_at)
+                    content
                 }
                 molt_net::ritual_net::GroupRecv::Idle => continue,
                 // loud, never fatal: a one-shot founding must survive a blip
@@ -742,7 +740,7 @@ pub(crate) fn spawn_founder_group_recv(
                     continue;
                 }
             };
-            let Some((msg, from)) = open_group_frame(&group, &content, created_at) else {
+            let Some((msg, from)) = open_group_frame(&group, &content) else {
                 continue;
             };
             let cmd = match msg {
@@ -809,7 +807,6 @@ pub(crate) struct RecoverCtx {
 fn open_group_envelope(
     group: &Arc<Mutex<molt_net::MlsMember>>,
     content: &str,
-    created_at: u64,
 ) -> Option<molt_core::EventEnvelope> {
     let mut g = group.lock().ok()?;
     let mut secrets = Vec::with_capacity(1 + molt_net::mls::EXPORTER_RING_K);
@@ -818,7 +815,7 @@ fn open_group_envelope(
     }
     secrets.extend_from_slice(g.exporter_ring());
     let wire = molt_net::envelope::open_outer(&secrets, content).ok()?;
-    match g.decrypt_at(&wire, created_at) {
+    match g.decrypt(&wire) {
         Ok(molt_net::MlsIncoming::Application { plaintext, .. }) => {
             serde_json::from_slice(&plaintext).ok()
         }
@@ -1112,11 +1109,11 @@ async fn recovery_rejoin(
                     .to_string(),
             );
         }
-        let (content, created_at) = match sub.recv((deadline - now).min(RECV_SLICE)).await {
-            molt_net::ritual_net::GroupRecv::Frame { content, created_at } => (content, created_at),
+        let content = match sub.recv((deadline - now).min(RECV_SLICE)).await {
+            molt_net::ritual_net::GroupRecv::Frame { content, .. } => content,
             _ => continue,
         };
-        let Some(env) = open_group_envelope(&group, &content, created_at) else {
+        let Some(env) = open_group_envelope(&group, &content) else {
             continue;
         };
         match env.body {
@@ -1372,13 +1369,13 @@ impl RitualLeg for NostrLeg {
             let Some((_, sub)) = self.chan.as_mut() else {
                 continue;
             };
-            let (content, created_at) = match sub.recv(RECV_SLICE).await {
-                molt_net::ritual_net::GroupRecv::Frame { content, created_at } => {
+            let content = match sub.recv(RECV_SLICE).await {
+                molt_net::ritual_net::GroupRecv::Frame { content, .. } => {
                     if self.was_deaf {
                         self.was_deaf = false;
                         self.pending_note = Some("✓ the group channel is back".to_string());
                     }
-                    (content, created_at)
+                    content
                 }
                 molt_net::ritual_net::GroupRecv::Idle => {
                     // the genesis wait is deliberately UNBOUNDED (every seat
@@ -1414,7 +1411,7 @@ impl RitualLeg for NostrLeg {
             let Some(group) = self.group.as_ref() else {
                 continue;
             };
-            let Some((msg, from)) = open_group_frame(group, &content, created_at) else {
+            let Some((msg, from)) = open_group_frame(group, &content) else {
                 continue;
             };
             // the MLS-authenticated author is the whole gate: an ungated

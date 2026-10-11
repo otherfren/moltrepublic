@@ -435,12 +435,9 @@ impl GroupChannel {
 
     /// [`Self::publish_frame`] at a **caller-chosen** `created_at`.
     ///
-    /// A commit's sender has to key it at the value every receiver will read
-    /// off the wire — `CommitKey(created_at, digest)`, and the rule is that
-    /// the stamp comes from the same source on both sides
-    /// (`molt-net/CLAUDE.md`). Choosing it afterwards is too late: the MLS
-    /// commit is already made. So the coordinator picks the stamp, commits at
-    /// it, and publishes at exactly it.
+    /// A commit and its resends ride one recorded stamp (`MlsCommit.stamp`).
+    /// It orders nothing: the concurrent-commit order is the digest alone
+    /// (`molt-net/CLAUDE.md`).
     ///
     /// The supplied value drives the **h tag** as well, for the same reason
     /// the generated one does: a tag and a stamp from different clocks can

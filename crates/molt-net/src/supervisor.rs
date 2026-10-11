@@ -223,22 +223,11 @@ impl MlsChannel {
     /// Decrypt one inbound MLS message, classified for the recv loop's ack
     /// discipline. MLS itself rejects replays, so there is no separate dedup
     /// window here.
-    fn decode(&self, wire: &[u8]) -> MlsDecode {
-        self.decode_at(wire, crate::mls::NO_CARRIER_STAMP)
-    }
-
-    /// [`Self::decode`] with the carrier event's `created_at`.
-    ///
-    /// kind-445 is the FIRST transport that carries one, and it is half of the
-    /// `CommitKey` that breaks a concurrent same-epoch commit race. The queue
-    /// path has no per-event stamp, so it keeps passing `NO_CARRIER_STAMP` —
-    /// symmetric zero on both sides, which degrades the order to the digest
-    /// rather than making our own commit always lose.
-    pub(crate) fn decode_at(&self, wire: &[u8], created_at: u64) -> MlsDecode {
+    pub(crate) fn decode(&self, wire: &[u8]) -> MlsDecode {
         let Ok(mut m) = self.member.lock() else {
             return MlsDecode::Discard;
         };
-        match m.decrypt_at(wire, created_at) {
+        match m.decrypt(wire) {
             Ok(MlsIncoming::Application { from, plaintext }) => {
                 // control frames, one table (`CONTROL_FRAMES`): the frame's
                 // tag picks its parser, an unusable frame of a known kind is
@@ -309,7 +298,7 @@ pub(crate) struct GroupFrame {
     pub(crate) ciphertext: Vec<u8>,
     pub(crate) exporter: [u8; 32],
     /// A commit's carrier stamp (review M8): the outbox publishes it AT this
-    /// stamp so a resend keys identically to the original; `None` = now.
+    /// stamp so a resend shares the original's `h` window; `None` = now.
     pub(crate) stamp: Option<u64>,
 }
 
@@ -321,7 +310,7 @@ type ControlParser = fn(MemberId, &[u8]) -> Option<MlsDecode>;
 /// The control frames the MLS plaintext can carry, by tag — the ONE place
 /// that lists them. Each tag is its own version boundary: a build that
 /// predates a tag drops the frame at the NUL rule in
-/// [`MlsChannel::decode_at`], never mis-parsing it as an event.
+/// [`MlsChannel::decode`], never mis-parsing it as an event.
 const CONTROL_FRAMES: &[(&[u8], ControlParser)] = &[
     // a delivery ACK (delivery guarantee §4.3): the peer reports what it has
     // engine-accepted of OUR events. Authenticated by the MLS credential

@@ -47,7 +47,7 @@ LOW = bounded nuisance, latent or local-only.
 | 6 | MED | recovery | A restore consent has no position or freshness; replayable into any block | v2 (§7e), v1 residual open |
 | 7 | MED | recovery | A junk MembershipProposed blocks a seat's recovery for good (R3 gate) | `810ec2a4` |
 | 8 | MED | recovery | Coordinator merges a re-key KeyPackage not bound to the seat, strands itself | `810ec2a4` |
-| 9 | MED | mls | Concurrent-commit tie-break on unauthenticated `created_at`; replay forces rewinds | `e42a267a` |
+| 9 | MED | mls | Concurrent-commit tie-break on unauthenticated `created_at`; replay forces rewinds | `e42a267a`, digest-only order 2026-10-11 |
 | 10 | MED | wire | Unproven hold claims; a silent lowest-named seat starves every re-seed | `9b8eb420` |
 | 11 | MED | mcp, configstore | 64 connection slots held forever by unauthenticated peers (no pre-auth timeout) | `052986b7` |
 | 12 | MED | mcp, hooks | `--repair-config` writes an empty MCP token, i.e. authentication off | `9d787d22` |

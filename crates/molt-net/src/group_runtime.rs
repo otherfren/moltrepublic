@@ -1242,8 +1242,6 @@ impl SeenCiphertexts {
     }
 }
 
-// (content, created_at) travel as one pair: they are the FRAME, everything
-// else is the channel the frame lands in
 async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
     mls: &MlsChannel,
     log: &L,
@@ -1251,9 +1249,8 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
     sink: &K,
     me: &MemberId,
     seen: &mut SeenCiphertexts,
-    frame: (&str, u64),
+    content: &str,
 ) -> Ingest {
-    let (content, created_at) = frame;
     // an exact re-delivery of a frame this node already consumed: turn
     // around before the ratchet is asked (a second decrypt is a wasted
     // `MlsError::Stale` round)
@@ -1272,10 +1269,9 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
         }
         Err(_) => return Ingest::Opaque,
     };
-    // the CARRIER stamp, never NO_CARRIER_STAMP: 445 is the first transport
-    // that carries one, and it is half of the CommitKey that breaks a
-    // concurrent same-epoch commit race
-    let outcome = mls.decode_at(&wire, created_at);
+    // the carrier stamp stays out: it is publisher-chosen, and the
+    // concurrent-commit order is the digest alone (audit #9)
+    let outcome = mls.decode(&wire);
     // consumed outcomes enter the dedup ring — their re-delivery can never
     // decode again. Held ones (FutureEpoch/Opaque) must stay retryable and
     // do NOT. Commit outcomes (EpochAdvanced) stay out DELIBERATELY even
@@ -1413,10 +1409,8 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
 /// frames, so one pass is not enough. Returns the stamps of the frames that
 /// stayed permanently unreadable, for the operator counters.
 ///
-/// Each frame is retried at its ORIGINAL `created_at`: that stamp is half of
-/// the `CommitKey` both ends must agree on, and re-stamping it here with the
-/// retry time would make this node compute a different key from everyone
-/// else's for the same commit.
+/// Each frame keeps its carrier `created_at` for the live/history split of
+/// the loss counters only.
 ///
 /// **A frame still opaque after an advance is opaque for good.** That is the
 /// eviction rule, and it is what keeps the hold from growing without bound:
@@ -1453,8 +1447,7 @@ impl<L: OutboxLog, S: StateStore, K: EngineSink> crate::epoch_hold::HeldIngest<(
 {
     async fn ingest(&mut self, item: &mut (String, u64)) -> crate::epoch_hold::Held {
         use crate::epoch_hold::Held;
-        let (content, at) = item;
-        match ingest_one(self.mls, self.log, self.store, self.sink, self.me, self.seen, (content, *at)).await {
+        match ingest_one(self.mls, self.log, self.store, self.sink, self.me, self.seen, &item.0).await {
             Ingest::EngineGone => Held::Stop,
             Ingest::FutureEpoch => Held::Still,
             Ingest::Opaque => Held::Opaque,
@@ -1530,7 +1523,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                 if state.deaf.take().is_some() {
                     let _ = health.send(state.clone());
                 }
-                match ingest_one(&mls, &log, &store, &sink, &me, &mut seen, (&content, created_at)).await {
+                match ingest_one(&mls, &log, &store, &sink, &me, &mut seen, &content).await {
                     Ingest::EngineGone => return,
                     // NOT counted yet, and not dropped. On 445 the epoch shows
                     // up at the OUTER layer, not at the MLS decode: a frame
@@ -1759,12 +1752,12 @@ mod tests {
         let e_c1 = alice.exporter_secret().expect("pre-C1 exporter");
         let cara2 = MlsMember::new(&key(14), "cara").expect("cara's 2nd device");
         let (c1, _w1) = alice
-            .restore_member("cara", &cara2.key_package().expect("kp"), 1_760_000_000)
+            .restore_member("cara", &cara2.key_package().expect("kp"))
             .expect("re-key 1");
         let e_c2 = alice.exporter_secret().expect("pre-C2 exporter");
         let cara3 = MlsMember::new(&key(15), "cara").expect("cara's 3rd device");
         let (c2, _w2) = alice
-            .restore_member("cara", &cara3.key_package().expect("kp"), 1_760_000_100)
+            .restore_member("cara", &cara3.key_package().expect("kp"))
             .expect("re-key 2");
         assert_ne!(e_c1, e_c2, "two epochs, two exporters");
 
@@ -1841,7 +1834,7 @@ mod tests {
         // alice re-keys cara's seat: this is the RECOVERY shape, and it is the
         // only API that hands the commit out for someone else to merge
         let (commit, _w) = alice
-            .restore_member("cara", &cara2.key_package().expect("kp"), 1_760_000_000)
+            .restore_member("cara", &cara2.key_package().expect("kp"))
             .expect("re-key");
         drop(cara);
 
@@ -1956,6 +1949,151 @@ mod tests {
         assert_eq!(h.live_opaque, 0, "history is not a live loss");
     }
 
+    /// **The 445 carrier stamp never picks the commit winner** (audit #9,
+    /// decided 2026-10-11). Two concurrent commits reach a bystander's
+    /// runtime, the losing one under the EARLIER stamp and then once more
+    /// re-published earlier still; the bystander must end on the
+    /// lower-digest commit in either arrival order.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_carrier_stamp_never_picks_the_commit_winner() {
+        for loser_first in [true, false] {
+            carrier_race(loser_first).await;
+        }
+    }
+
+    async fn carrier_race(loser_first: bool) {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        use nostr_relay_builder::MockRelay;
+        use sha2::Digest as _;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<molt_core::EventEnvelope>>>);
+        impl EngineSink for Sink {
+            async fn deliver(
+                &self,
+                _from: &MemberId,
+                env: molt_core::EventEnvelope,
+            ) -> Result<(), crate::NetError> {
+                self.0.lock().expect("sink").push(env);
+                Ok(())
+            }
+            async fn peer_seen(&self, _m: &MemberId) {}
+            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+        }
+
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut alice = MlsMember::new(&key(21), "alice").expect("alice");
+        let mut bob = MlsMember::new(&key(22), "bob").expect("bob");
+        let mut cara = MlsMember::new(&key(23), "cara").expect("cara");
+        let dave = MlsMember::new(&key(24), "dave").expect("dave");
+        let erin = MlsMember::new(&key(25), "erin").expect("erin");
+        alice.create_group().expect("group");
+        let welcome = alice
+            .add_members(&[
+                bob.key_package().expect("kp"),
+                cara.key_package().expect("kp"),
+                dave.key_package().expect("kp"),
+                erin.key_package().expect("kp"),
+            ])
+            .expect("add")
+            .expect("a welcome");
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        cara.join_from_welcome(&welcome).expect("cara joins");
+        let dave2 = MlsMember::new(&key(24), "dave").expect("dave2");
+        let erin2 = MlsMember::new(&key(25), "erin").expect("erin2");
+        let (commit_a, _) = alice
+            .restore_member("dave", &dave2.key_package().expect("kp"))
+            .expect("alice re-keys dave");
+        let (commit_c, _) = cara
+            .restore_member("erin", &erin2.key_package().expect("kp"))
+            .expect("cara re-keys erin");
+        let (alice, cara) = (MlsChannel::new(alice), MlsChannel::new(cara));
+        let a_wins = sha2::Sha256::digest(&commit_a) < sha2::Sha256::digest(&commit_c);
+        let ((winner, w_commit, w_name), (loser, l_commit)) = if a_wins {
+            ((&alice, &commit_a, "alice"), (&cara, &commit_c))
+        } else {
+            ((&cara, &commit_c, "cara"), (&alice, &commit_a))
+        };
+        let env = |by: &str, body: molt_core::WorkspaceEvent| molt_core::EventEnvelope {
+            prev_seq: 0,
+            seq: 1,
+            ts: 1_751_000_000,
+            by: by.to_string(),
+            body,
+        };
+        let now = crate::ritual_net::now_secs();
+        let commit_frame = |chan: &MlsChannel, by: &str, c: &[u8], stamp: u64| {
+            chan.group_frame(&env(by, molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(c), stamp }))
+                .expect("commit frame")
+        };
+        let w_frame = commit_frame(winner, w_name, w_commit, now - 10);
+        let l_frame = commit_frame(loser, "loser", l_commit, now - 20);
+        let probe = winner
+            .group_frame(&env(
+                w_name,
+                molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+                    molt_core::MessageId([3u8; 16]),
+                    w_name,
+                    "one group",
+                    1,
+                )),
+            ))
+            .expect("probe frame");
+
+        let relay = MockRelay::run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let seed = [8u8; 32];
+        let pub_chan =
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url.clone()], seed);
+        let sink = Sink::default();
+        let (_wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, _health) = watch::channel(GroupHealth::default());
+        let bob_chan = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], seed);
+        let handle = spawn_group(
+            bob_chan,
+            MlsChannel::new(bob),
+            GroupNetConfig::fast("bob".into(), vec!["alice".into(), "cara".into()]),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            sink.clone(),
+            wake_rx,
+            health_tx,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        let order = if loser_first {
+            [(&l_frame, now - 20), (&w_frame, now - 10), (&l_frame, now - 40)]
+        } else {
+            [(&w_frame, now - 10), (&l_frame, now - 20), (&l_frame, now - 40)]
+        };
+        for (frame, stamp) in order {
+            pub_chan
+                .publish_frame_at(&frame.exporter, &frame.ciphertext, stamp)
+                .await
+                .expect("publish a commit");
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+        pub_chan
+            .publish_frame(&probe.exporter, &probe.ciphertext)
+            .await
+            .expect("publish the probe");
+
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if !sink.0.lock().expect("sink").is_empty() {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "loser_first={loser_first}: bob is not on the lower-digest branch"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        handle.shutdown().await;
+    }
+
     /// Bob's runtime meets one frame no epoch opens, then the commit whose
     /// retry proves it lost; `historic` publishes that frame before bob
     /// subscribes, stamped ten minutes back.
@@ -1996,7 +2134,7 @@ mod tests {
         bob.join_from_welcome(&welcome).expect("bob joins");
         let cara2 = MlsMember::new(&key(4), "cara").expect("cara's fresh device");
         let (commit, _w) = alice
-            .restore_member("cara", &cara2.key_package().expect("kp"), 1_760_000_000)
+            .restore_member("cara", &cara2.key_package().expect("kp"))
             .expect("re-key");
         drop(cara);
 
