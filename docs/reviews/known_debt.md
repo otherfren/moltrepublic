@@ -34,6 +34,8 @@ republic (`kanban_workflows.md` §11 Q1).
 
 ## A restore consent binds neither its relays nor a position (audit 2026-10-10)
 
+Audit #5, #6 (`docs_archive/reviews/security_audit_2026-10-10.md`).
+
 `restore_consent_bytes` (`molt-restore-consent-v1`) signs republic id,
 seat, identity key and nostr anchor only, yet `block_signers` counts it
 as a full voice. Two consequences, both from one member:
@@ -53,6 +55,18 @@ over the relays and a single-use value (the KeyPackage hash or ticket),
 conditional like roster-v5 so sealed v1 blocks still verify; plus a
 verifier anchor-freshness rule for v2 blocks only (pre-C8 chains may hold
 replayed-anchor blocks, field storm 2026-08-24).
+
+## Security audit 2026-10-10 - other open items
+
+From `docs_archive/reviews/security_audit_2026-10-10.md`:
+
+- **#32 compaction floor**: a peer in contact that never acks pins the
+  floor at 0, so expired chat is never erased. Needs a never-acks grace.
+- **#1 deliberation leaf**: a founder-planted leaf can forge ephemeral
+  deliberation frames before the seal. Recommended: accept.
+- **#1 rejoiner tree**: a recovery Welcome's extra leaf is muted and
+  warned, not refused. Policy call.
+- **#20 homoglyph handles**: needs a UTS #39 skeleton uniqueness check.
 
 ## `SaveTransport` overwrites `vault_status` wholesale
 
