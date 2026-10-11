@@ -73,7 +73,7 @@ tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zeroize            = { version = "1", features = ["derive"] }
 arboard            = { version = "3", default-features = false }
-chrono             = { version = "0.4", default-features = false, features = ["clock"] }
+chrono             = { version = "0.4", default-features = false, features = ["std"] }
 strum              = { version = "0.27", features = ["derive"] }
 paste              = "1"
 url                = "2.5"    # the WHATWG parser every real client dials with — the relay

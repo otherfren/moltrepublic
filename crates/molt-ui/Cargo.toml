@@ -36,7 +36,7 @@ arboard.workspace = true
 rfd.workspace = true
 base64.workspace = true
 image.workspace = true
-chrono.workspace = true
+chrono = { workspace = true, features = ["clock"] } # local time display
 paste.workspace = true
 # wiki pane: markdown pseudo-render + block diffs for the pending-change view
 pulldown-cmark.workspace = true

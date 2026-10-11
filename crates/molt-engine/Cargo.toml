@@ -48,6 +48,7 @@ pulldown-cmark.workspace = true
 tantivy.workspace = true
 
 [dev-dependencies]
+chrono = { workspace = true, features = ["clock"] }
 # the in-process monerod double for the purse tests
 molt-net = { workspace = true, features = ["stub-daemon"] }
 # real blocks paying the purse for the stub daemon
