@@ -43,8 +43,8 @@ LOW = bounded nuisance, latent or local-only.
 | 2 | HIGH | mls | Update path / Update proposal can rename the sender's leaf to another member | `e42a267a` |
 | 3 | HIGH | chain | Junk attestation grinds a block's hash; tie-break reorgs every holder and drops all blocks above | `8abe1ec2` |
 | 4 | HIGH | files | A chat message reusing a persisted share's id becomes that share's identity | `ca7cd1ae` |
-| 5 | MED | recovery, chain | Restored relays not covered by the consent; a coordinator can swap them, survivors auto-sign | open |
-| 6 | MED | recovery | A restore consent has no position or freshness; replayable into any block | open |
+| 5 | MED | recovery, chain | Restored relays not covered by the consent; a coordinator can swap them, survivors auto-sign | v2 (§7e), v1 residual open |
+| 6 | MED | recovery | A restore consent has no position or freshness; replayable into any block | v2 (§7e), v1 residual open |
 | 7 | MED | recovery | A junk MembershipProposed blocks a seat's recovery for good (R3 gate) | `810ec2a4` |
 | 8 | MED | recovery | Coordinator merges a re-key KeyPackage not bound to the seat, strands itself | `810ec2a4` |
 | 9 | MED | mls | Concurrent-commit tie-break on unauthenticated `created_at`; replay forces rewinds | `e42a267a` |
@@ -79,7 +79,8 @@ LOW = bounded nuisance, latent or local-only.
 
 ## Open decisions
 
-- **Restore consent v2** (#5, #6): `molt-restore-consent-v1` signs
+- **Restore consent v2** (#5, #6) - BUILT 2026-10-11
+  (`recovery_auto_approval.md` §7e; v1 residual in known debt): `molt-restore-consent-v1` signs
   neither the relays nor a single-use value. Proposed: a conditional v2
   over relays plus the KeyPackage hash or ticket, and an anchor-freshness
   verifier rule for v2 blocks only. Signed layout and consensus rule -

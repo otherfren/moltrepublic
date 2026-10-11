@@ -390,11 +390,13 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Err(MoltError::Recover("engine stopped".to_string()));
         };
+        let consent_anchor = self.consent_anchor_for(&member);
         crate::recovery::spawn_recovery_provisioning(
             transport,
             member,
             republic,
             republic_id,
+            consent_anchor,
             ticket,
             wrap,
             // recovery loops are scoped to the open WORKSPACE (a mesh rebuild
@@ -510,6 +512,7 @@ impl State {
             .and_then(|r| r.identities.iter().find(|i| i.member == member))
             .map(|i| i.identity_pk.clone())
             .unwrap_or_default();
+        let consent_anchor = self.consent_anchor_for(&member);
         let task = crate::nostr_ritual::spawn_recovery_inbox(
             net,
             member,
@@ -517,6 +520,7 @@ impl State {
             republic,
             republic_id,
             anchored_pk,
+            consent_anchor,
             // recovery loops are scoped to the open WORKSPACE
             self.net_scope,
             cmd_tx.downgrade(),

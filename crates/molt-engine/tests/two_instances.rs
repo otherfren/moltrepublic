@@ -3570,6 +3570,7 @@ async fn a_rejoiner_re_enters_the_mls_group_from_the_coordinators_welcome() {
     let recover_wrap = WrapKey::fresh().expect("recovery wrap");
     let republic_id = "content-derived-republic-id";
     let inv = molt_engine::RecoveryInvite {
+        consent_anchor: None,
         republic: "Guild".to_string(),
         member: "bob".to_string(),
         ticket: molt_net::invite::mint_ticket().expect("ticket"),
@@ -3703,6 +3704,7 @@ fn recovery_invite(
     republic_id: &str,
 ) -> molt_engine::RecoveryInvite {
     molt_engine::RecoveryInvite {
+        consent_anchor: None,
         republic: "Guild".to_string(),
         member: member.to_string(),
         ticket,

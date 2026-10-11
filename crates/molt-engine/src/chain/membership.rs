@@ -274,7 +274,7 @@ impl State {
     /// carry a consent that verifies, and a consent-less (legacy, human-
     /// voted) card is held once per seat.
     fn sealable_membership(&self, id: u64, change: &ChainChange) -> Result<(), &'static str> {
-        let ChainChange::Membership { op, member, identity_pk, nostr_pk, consent, .. } = change else {
+        let ChainChange::Membership { op, member, identity_pk, consent, .. } = change else {
             return Ok(());
         };
         if *op == MembershipOp::Joined {
@@ -284,10 +284,8 @@ impl State {
             return Err("not the anchored identity");
         }
         match consent {
-            Some(c) => {
-                if !self.restore_consent_verifies(member, nostr_pk.as_deref(), c) {
-                    return Err("consent does not verify");
-                }
+            Some(_) => {
+                self.restore_consent_at(change, self.next_chain_height())?;
             }
             None => {
                 let held = self.chain.proposal_changes.iter().any(|(other, c)| {
@@ -318,18 +316,46 @@ impl State {
             .map(|i| i.identity_pk.clone())
     }
 
-    /// A restore consent verifies against the seat's anchored key.
-    fn restore_consent_verifies(&self, member: &str, nostr_pk: Option<&str>, consent: &str) -> bool {
-        let Some(anchored) = self.anchored_identity(member) else {
-            return false;
+    /// What a rejoiner's v2 consent binds, as this node sees the chain
+    /// (`recovery_auto_approval.md` §7e): head height and the seat's
+    /// working anchor. `None` before a chain exists.
+    pub(crate) fn consent_anchor_for(&self, member: &str) -> Option<molt_core::chain::ConsentAnchor> {
+        let head = self.chain.head.as_ref()?;
+        Some(molt_core::chain::ConsentAnchor {
+            height: head.height,
+            prev_anchor: self.working_nostr_pk(member),
+        })
+    }
+
+    /// The height the next block takes.
+    fn next_chain_height(&self) -> u64 {
+        self.chain.head.as_ref().map_or(1, |h| h.height.saturating_add(1))
+    }
+
+    /// A consented change's consent as the verifier would judge it in a
+    /// block at `height` on this chain (`recovery_auto_approval.md` §7e):
+    /// signature, window, and - for v2 - the seat's current working anchor.
+    pub(crate) fn restore_consent_at(
+        &self,
+        change: &ChainChange,
+        height: u64,
+    ) -> Result<ConsentKind, &'static str> {
+        let ChainChange::Membership { member, nostr_pk, relays, consent: Some(consent), .. } = change
+        else {
+            return Err("no consent");
         };
-        let bytes = molt_core::chain::restore_consent_bytes(
+        let anchored = self.anchored_identity(member).ok_or("not an anchored seat")?;
+        let kind = verify_restore_consent(
             &self.republic_id(),
-            member,
             &anchored,
-            nostr_pk.unwrap_or(""),
-        );
-        molt_storage::identity_verify(&anchored, &bytes, consent)
+            height,
+            member,
+            nostr_pk.as_deref(),
+            relays,
+            consent,
+        )?;
+        consent_spends(change, |m| self.working_nostr_pk(m))?;
+        Ok(kind)
     }
 
     /// A re-admission of `member` is in flight (R3): one this node
@@ -345,7 +371,7 @@ impl State {
                 member: m,
                 identity_pk,
                 nostr_pk,
-                consent: Some(consent),
+                consent: Some(_),
                 ..
             } = c
             else {
@@ -354,7 +380,7 @@ impl State {
             m == member
                 && self.anchored_identity(m).as_deref() == Some(identity_pk.as_str())
                 && !nostr_pk.as_deref().is_some_and(|pk| self.anchor_seen_in_chain(pk))
-                && self.restore_consent_verifies(m, nostr_pk.as_deref(), consent)
+                && self.restore_consent_at(c, self.next_chain_height()).is_ok()
         })
     }
 
@@ -370,8 +396,8 @@ impl State {
     ///   its anchored identity key (the `apply_membership` invariant);
     /// - a claimed transport anchor is canonical and collides with no other
     ///   living seat (the ingest gate's twin — blocks never re-check this);
-    /// - the consent verifies over [`molt_core::chain::restore_consent_bytes`]
-    ///   against the ANCHORED key;
+    /// - the consent is v2 and passes every §7e rule at the next height
+    ///   (a v1 consent binds neither relays nor position: human card);
     /// - replay guard (the checkpoint pattern): at most one signature per
     ///   member per height, so a re-received frame never amplifies.
     ///
@@ -383,18 +409,13 @@ impl State {
             member,
             identity_pk,
             nostr_pk,
-            consent: Some(consent),
+            consent: Some(_),
             ..
         }) = self.chain.proposal_changes.get(&id)
         else {
             return;
         };
-        let (member, identity_pk, nostr_pk, consent) = (
-            member.clone(),
-            identity_pk.clone(),
-            nostr_pk.clone(),
-            consent.clone(),
-        );
+        let (member, identity_pk, nostr_pk) = (member.clone(), identity_pk.clone(), nostr_pk.clone());
         // a settled record must not re-arm (a re-served proposal after the
         // block applied), and the restored seat itself never counts twice
         if matches!(self.proposals.get(&id), Some(p) if p.state != ProposalState::Proposed) {
@@ -432,15 +453,19 @@ impl State {
                 return;
             }
         }
-        let bytes = molt_core::chain::restore_consent_bytes(
-            &self.republic_id(),
-            &member,
-            &anchored,
-            nostr_pk.as_deref().unwrap_or(""),
-        );
-        if !molt_storage::identity_verify(&anchored, &bytes, &consent) {
-            tracing::warn!(%id, %member, "restore consent does not verify - not auto-signing");
-            return;
+        let change = self.chain.proposal_changes.get(&id).cloned();
+        match change.map(|c| self.restore_consent_at(&c, head.height.saturating_add(1))) {
+            Some(Ok(ConsentKind::V2 { .. })) => {}
+            // binds neither relays nor position (§7e): the human card
+            Some(Ok(ConsentKind::V1)) => {
+                tracing::info!(%id, %member, consent = "v1", "restore left to the human vote");
+                return;
+            }
+            Some(Err(why)) => {
+                tracing::warn!(%id, %member, reason = why, "restore consent refused - not auto-signing");
+                return;
+            }
+            None => return,
         }
         // replay guard: one signature per member per height
         if self.own_signature_stands(id) {
@@ -509,21 +534,43 @@ impl State {
         if !kp_binds {
             return Err(format!("key package for {member} is not its anchored key"));
         }
-        // the rejoiner's consent — its automatic co-approval (recovery
-        // approval design, 2026-08-08). Verified HERE, in the one validation
-        // ladder, against the ANCHORED key over the exact content the
-        // `Restored` change will carry; present-but-invalid is fail-closed
-        // (a doctored consent must not ride a block m members then sign)
-        if !consent.is_empty() {
-            let bytes = molt_core::chain::restore_consent_bytes(
-                &rid,
-                member,
-                &anchored,
-                new_nostr_pk,
-            );
-            if !molt_storage::identity_verify(&anchored, &bytes, consent) {
-                return Err(format!("restore consent for {member} does not verify"));
-            }
+        // R3b/R5: the seat's OWN declaration when it made one; else the pool
+        // it was welcomed over (none on loopback). A v2 consent signs the
+        // declaration itself, so its block carries exactly that list (§7e).
+        let v2 = matches!(
+            molt_core::chain::parse_restore_consent(consent),
+            Some(molt_core::chain::RestoreConsent::V2 { .. })
+        );
+        let anchor = if new_nostr_pk.is_empty() {
+            None
+        } else {
+            Some(new_nostr_pk.to_string())
+        };
+        let relays = if v2 || !declared_relays.is_empty() {
+            declared_relays.to_vec()
+        } else if anchor.is_some() {
+            self.ratified_relays()
+        } else {
+            Vec::new()
+        };
+        let consent = if consent.is_empty() {
+            None
+        } else {
+            Some(consent.to_string())
+        };
+        let change = ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: member.to_string(),
+            identity_pk: anchored.clone(),
+            nostr_pk: anchor.clone(),
+            relays: relays.clone(),
+            consent: consent.clone(),
+        };
+        // the rejoiner's consent, verified HERE over the exact change the
+        // block will carry: present-but-invalid is fail-closed
+        if consent.is_some() {
+            self.restore_consent_at(&change, self.next_chain_height())
+                .map_err(|why| format!("restore {why} for {member}"))?;
         }
         // R5 — the re-join gate: a declaration that shares no relay with
         // some member would commit the very split R4 exists to detect. The
@@ -551,29 +598,6 @@ impl State {
                 reply: reply.to_string(),
             },
         );
-        // the verified new transport anchor rides the block — this is what
-        // makes it authoritative for every member that APPLIES it, rather
-        // than something each node infers from live traffic
-        let anchor = if new_nostr_pk.is_empty() {
-            None
-        } else {
-            Some(new_nostr_pk.to_string())
-        };
-        // R3b/R5: the seat's OWN declaration when it made one; else the pool
-        // it was welcomed over — on the loopback path there is no pool and
-        // the declaration stays empty
-        let relays = if !declared_relays.is_empty() {
-            declared_relays.to_vec()
-        } else if anchor.is_some() {
-            self.ratified_relays()
-        } else {
-            Vec::new()
-        };
-        let consent = if consent.is_empty() {
-            None
-        } else {
-            Some(consent.to_string())
-        };
         Ok(self.propose_membership(MembershipOp::Restored, member, &anchored, anchor, relays, consent))
     }
 

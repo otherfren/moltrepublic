@@ -292,6 +292,7 @@ pub(super) fn recovered_chain_with(
 
 pub(super) fn recover_link(member: &str, republic_id: &str) -> String {
     crate::recovery::RecoveryInvite {
+        consent_anchor: None,
         republic: "Guild".to_string(),
         member: member.to_string(),
         ticket: "ab".repeat(8),

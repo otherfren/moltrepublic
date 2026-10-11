@@ -10,6 +10,16 @@ molt-ui checklist mapping + restore-modal state machine tests. Supersedes produc
 `docs_archive/ritual/recovery_approval_design.md` (membership proposals as
 human-approved cards): for a **consented** re-admission the approval is now
 automatic; the card remains as a visible record.
+**§7e (restore consent v2, 2026-10-11): built.** Keystones:
+`verify_tests::{a_v2_consent_replayed_at_another_height_rejects_the_chain,
+a_v2_consent_replayed_after_a_cut_rejects_the_suffix,
+a_v2_consent_with_swapped_relays_rejects_the_chain,
+a_v2_consent_outside_its_window_rejects_the_chain,
+a_v1_consent_chain_still_verifies}`,
+`membership_tests::{a_v1_consent_is_left_to_the_human_vote,
+a_v2_consent_beside_swapped_relays_never_auto_signs,
+a_spent_or_stale_v2_consent_is_refused_at_the_coordinator}`, the
+molt-core byte pins `restore_consent_v{1,2}_bytes_are_pinned`.
 
 ## 1. The field defect
 
@@ -209,7 +219,7 @@ ui-scale 1.43), `a_double_click_on_an_orphan_row_arms_the_restore_modal`.
 
 ## 7e. Restore consent v2 (audit 2026-10-10 #5, #6; decided 2026-10-11)
 
-**Status: design note, written before the code.** v1 signs `(republic_id,
+**Status: built 2026-10-11** (design note written before the code). v1 signs `(republic_id,
 member, identity_pk, nostr_pk)` only, yet counts as a full voice: survivors
 auto-signed any `relays` beside it (#5), and on m = 2 one member plus a
 consent from the public chain sealed a `Restored` at any height, rolling the
@@ -234,7 +244,8 @@ length + bytes, as everywhere):
   (`ConsentAnchor`, additive on both link shapes).
 - `prev_anchor` is the seat's WORKING transport anchor the restore
   replaces (the last `Restored` block's `nostr_pk`, else the founding
-  roster's; empty on loopback).
+  roster's). Loopback anchors are empty, so single use holds only where
+  restores carry a transport anchor (every production restore does).
 
 **Carriage.** The consent string is self-describing:
 `v2:<anchor_height>:<prev_anchor>:<sig hex>` - decimal height without

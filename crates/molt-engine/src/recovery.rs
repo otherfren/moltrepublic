@@ -63,6 +63,10 @@ pub struct RecoveryInvite {
     /// preview-only link), which is why it is additive rather than replacing
     /// the fields above.
     pub handover: Option<molt_net::invite::RecoveryHandoverV2>,
+    /// What the rejoiner's v2 restore consent binds
+    /// (`recovery_auto_approval.md` §7e); the handover's copy on a v2
+    /// link. `None` on a link minted by an older build (v1 consent).
+    pub consent_anchor: Option<molt_core::chain::ConsentAnchor>,
 }
 
 /// The neutral link's envelope: the display names plus EITHER the v2 Nostr
@@ -85,6 +89,8 @@ struct NeutralRecoveryWire {
     wrap: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     republic_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    at: Option<molt_core::chain::ConsentAnchor>,
 }
 
 /// The neutral-envelope version — the third link generation (path+queue,
@@ -112,6 +118,8 @@ impl RecoveryInvite {
                 queue_id: String::new(),
                 wrap: String::new(),
                 republic_id: String::new(),
+                // inside the handover
+                at: None,
             },
             _ => NeutralRecoveryWire {
                 v: RECOVERY_LINK_VERSION,
@@ -123,6 +131,7 @@ impl RecoveryInvite {
                 queue_id: self.queue_id.clone(),
                 wrap: self.wrap.clone(),
                 republic_id: self.republic_id.clone(),
+                at: self.consent_anchor.clone(),
             },
         };
         format!(
@@ -153,6 +162,7 @@ impl RecoveryInvite {
                 queue_id: String::new(),
                 wrap: String::new(),
                 republic_id: h.republic_id.clone(),
+                consent_anchor: h.consent_anchor.clone(),
                 handover: Some(h),
             });
         }
@@ -173,6 +183,7 @@ impl RecoveryInvite {
             wrap: wire.wrap,
             republic_id: wire.republic_id,
             handover: None,
+            consent_anchor: wire.at,
         })
     }
 
@@ -207,6 +218,7 @@ impl RecoveryInvite {
                 queue_id: String::new(),
                 wrap: String::new(),
                 republic_id: h.republic_id.clone(),
+                consent_anchor: h.consent_anchor.clone(),
                 handover: Some(h),
             });
         }
@@ -233,6 +245,7 @@ impl RecoveryInvite {
             wrap,
             republic_id,
             handover: None,
+            consent_anchor: None,
         })
     }
 }
@@ -319,6 +332,7 @@ pub(crate) fn spawn_recovery_provisioning(
     member: String,
     republic: String,
     republic_id: String,
+    consent_anchor: Option<molt_core::chain::ConsentAnchor>,
     ticket: String,
     wrap: WrapKey,
     generation: u64,
@@ -366,6 +380,7 @@ pub(crate) fn spawn_recovery_provisioning(
             wrap: hex::encode(wrap.to_bytes()),
             republic_id: republic_id.clone(),
             handover: None,
+            consent_anchor,
         }
         .render();
         // report the shareable link to the operator (GUI/MCP read it back)
@@ -575,9 +590,14 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
     );
     // the automatic co-approval of the own re-admission (recovery approval
     // design, 2026-08-08): one distinct signer toward the threshold
-    let consent = molt_storage::identity_sign(
+    let consent = crate::founding::make_restore_consent(
         &sk,
-        &molt_core::chain::restore_consent_bytes(&inv.republic_id, &inv.member, &pk, &new_nostr_pk),
+        &inv.republic_id,
+        &inv.member,
+        &pk,
+        &new_nostr_pk,
+        &[],
+        inv.consent_anchor.as_ref(),
     );
     let request = invite::RitualMsg::Recover(invite::RecoverRequest {
         member: inv.member.clone(),
@@ -812,6 +832,7 @@ mod tests {
     fn a_recovery_link_round_trips_its_v2_handover() {
         let (_, npub) = molt_net::nostr_identity(b"coordinator-entropy", "rec");
         let inv = super::RecoveryInvite {
+            consent_anchor: None,
             republic: "Chess Club".to_string(),
             member: "dora".to_string(),
             ticket: "ab".repeat(32),
@@ -820,6 +841,7 @@ mod tests {
             wrap: String::new(),
             republic_id: "f00dcafe".to_string(),
             handover: Some(molt_net::invite::RecoveryHandoverV2 {
+                consent_anchor: None,
                 ticket: "ab".repeat(32),
                 npub: npub.clone(),
                 relays: vec!["wss://relay.example.org".to_string()],
@@ -838,6 +860,7 @@ mod tests {
 
         // the legacy queue-shaped link still parses, with no v2 handover
         let legacy = super::RecoveryInvite {
+            consent_anchor: None,
             republic: "Chess Club".to_string(),
             member: "dora".to_string(),
             ticket: "cd".repeat(8),
@@ -858,6 +881,7 @@ mod tests {
 
     fn sample() -> RecoveryInvite {
         RecoveryInvite {
+            consent_anchor: None,
             republic: "Chess Club".to_string(),
             member: "walter".to_string(),
             ticket: "k9x2m4q7aa".to_string(),
@@ -877,6 +901,52 @@ mod tests {
         assert_eq!(RecoveryInvite::parse(&link).as_ref(), Some(&inv));
     }
 
+    /// The consent anchor rides both link shapes (§7e), and the rejoiner's
+    /// consent from it is v2 over the declared relays.
+    #[test]
+    fn a_recovery_link_carries_the_consent_anchor() {
+        let anchor = molt_core::chain::ConsentAnchor { height: 9, prev_anchor: "ab".repeat(32) };
+        let inv = RecoveryInvite { consent_anchor: Some(anchor.clone()), ..sample() };
+        assert_eq!(RecoveryInvite::parse(&inv.render()).as_ref(), Some(&inv), "queue shape");
+
+        let (_, npub) = molt_net::nostr_identity(b"coordinator-entropy", "rec");
+        let h = molt_net::invite::RecoveryHandoverV2 {
+            ticket: "ab".repeat(32),
+            npub,
+            relays: vec!["wss://relay.example.org".to_string()],
+            republic_id: "f00dcafe".to_string(),
+            identity_pk: String::new(),
+            consent_anchor: Some(anchor.clone()),
+        };
+        let v2 = RecoveryInvite {
+            republic_id: "f00dcafe".to_string(),
+            ticket: "ab".repeat(32),
+            server: String::new(),
+            queue_id: String::new(),
+            wrap: String::new(),
+            handover: Some(h),
+            consent_anchor: Some(anchor.clone()),
+            ..sample()
+        };
+        let back = RecoveryInvite::parse(&v2.render()).expect("v2 link parses");
+        assert_eq!(back.consent_anchor, Some(anchor.clone()), "nostr shape");
+
+        let (sk, pk) = molt_storage::derive_identity_key(&[7u8; 32], "walter");
+        let relays = vec!["wss://a".to_string()];
+        let consent =
+            crate::founding::make_restore_consent(&sk, "f00d", "walter", &pk, "cd", &relays, Some(&anchor));
+        assert_eq!(
+            crate::chain::verify_restore_consent("f00d", &pk, 10, "walter", Some("cd"), &relays, &consent),
+            Ok(crate::chain::ConsentKind::V2 { prev_anchor: "ab".repeat(32) })
+        );
+        let legacy = crate::founding::make_restore_consent(&sk, "f00d", "walter", &pk, "cd", &relays, None);
+        assert_eq!(
+            crate::chain::verify_restore_consent("f00d", &pk, 10, "walter", Some("cd"), &relays, &legacy),
+            Ok(crate::chain::ConsentKind::V1),
+            "an anchor-less link falls back to v1"
+        );
+    }
+
     /// The link is NEUTRAL (2026-08-08): one opaque hex segment. Republic and
     /// member ride inside it — a URL glimpsed over a shoulder, in a chat log
     /// or a link preview names neither the workspace nor the seat. Both
@@ -885,6 +955,7 @@ mod tests {
     fn a_recovery_link_is_neutral() {
         let (_, npub) = molt_net::nostr_identity(b"coordinator-entropy", "rec");
         let v2 = RecoveryInvite {
+            consent_anchor: None,
             republic: "Chess Club".to_string(),
             member: "dora".to_string(),
             ticket: "ab".repeat(32),
@@ -893,6 +964,7 @@ mod tests {
             wrap: String::new(),
             republic_id: "f00dcafe".to_string(),
             handover: Some(molt_net::invite::RecoveryHandoverV2 {
+                consent_anchor: None,
                 ticket: "ab".repeat(32),
                 npub,
                 relays: vec!["wss://relay.example.org".to_string()],
@@ -901,6 +973,7 @@ mod tests {
             }),
         };
         let legacy = RecoveryInvite {
+            consent_anchor: None,
             republic: "Chess Club".to_string(),
             member: "dora".to_string(),
             ticket: "cd".repeat(8),
@@ -939,6 +1012,7 @@ mod tests {
         // v2 blob straight as the fourth segment
         let (_, npub) = molt_net::nostr_identity(b"coordinator-entropy", "rec");
         let h = molt_net::invite::RecoveryHandoverV2 {
+            consent_anchor: None,
             ticket: "ab".repeat(32),
             npub,
             relays: vec!["wss://relay.example.org".to_string()],
@@ -1017,6 +1091,7 @@ mod tests {
         let dead_q = transport.create_queue().await.expect("coordinator queue");
         let wrap = WrapKey::fresh().expect("wrap");
         let inv = RecoveryInvite {
+            consent_anchor: None,
             republic: "Guild".to_string(),
             member: "walter".to_string(),
             ticket: "0011223344".to_string(),
@@ -1216,6 +1291,7 @@ mod tests {
 
     fn recovery_inv(member: &str, republic_id: &str) -> RecoveryInvite {
         RecoveryInvite {
+            consent_anchor: None,
             republic: "Guild".to_string(),
             member: member.to_string(),
             ticket: "0011223344".to_string(),

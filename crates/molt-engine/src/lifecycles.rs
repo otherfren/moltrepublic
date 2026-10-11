@@ -1787,6 +1787,9 @@ impl State {
             relays: dial_relays.clone(),
             republic_id: republic_id.clone(),
             identity_pk: anchored,
+            // the seat's own view: a stale chain is refused at the
+            // coordinator rather than trusted (recovery_auto_approval.md §7e)
+            consent_anchor: self.consent_anchor_for(&member),
         };
         let republic = self
             .replica
@@ -1802,6 +1805,7 @@ impl State {
                 queue_id: String::new(),
                 wrap: String::new(),
                 republic_id,
+                consent_anchor: handover.consent_anchor.clone(),
                 handover: Some(handover.clone()),
             },
             phrase.clone().into(),

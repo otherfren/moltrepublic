@@ -62,6 +62,8 @@ pub(crate) use verify::{
 pub(crate) use verify::block_hash;
 #[cfg(test)]
 pub(crate) use verify::walk_suffix_chain;
+#[cfg(test)]
+pub(crate) use verify::{verify_restore_consent, ConsentKind};
 /// The ratified wiki as the fold produces it: path -> document.
 pub(crate) type WikiTree = std::collections::BTreeMap<String, String>;
 

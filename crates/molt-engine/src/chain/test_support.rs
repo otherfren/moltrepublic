@@ -410,3 +410,34 @@ pub(crate) fn kp_hex_for(b: &Builder, member: &str) -> String {
     let mls = molt_net::MlsMember::new(b.key(member), member).expect("mls member");
     hex::encode(mls.key_package().expect("key package"))
 }
+
+/// A v2 consent string (`recovery_auto_approval.md` §7e): bound to the
+/// block's relays, anchored at `anchor_height`, replacing `prev_anchor`.
+pub(crate) fn consent_v2_for(
+    b: &Builder,
+    member: &str,
+    nostr_pk: &str,
+    relays: &[String],
+    anchor_height: u64,
+    prev_anchor: &str,
+) -> String {
+    let sig = molt_storage::identity_sign(
+        b.key(member),
+        &molt_core::chain::restore_consent_bytes_v2(
+            &b.republic_id,
+            member,
+            &b.pk(member),
+            nostr_pk,
+            relays,
+            anchor_height,
+            prev_anchor,
+        ),
+    );
+    molt_core::chain::render_restore_consent_v2(
+        &molt_core::chain::ConsentAnchor {
+            height: anchor_height,
+            prev_anchor: prev_anchor.to_string(),
+        },
+        &sig,
+    )
+}

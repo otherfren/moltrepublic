@@ -1338,6 +1338,41 @@ pub fn make_seat_proof(
     )
 }
 
+/// The rejoiner's restore consent (`recovery_auto_approval.md` §7e): v2
+/// over the declared relays whenever its link carries an anchor, else v1
+/// (a link minted by an older build).
+pub fn make_restore_consent(
+    identity_sk: &molt_storage::SigningKey,
+    republic_id: &str,
+    member: &str,
+    identity_pk: &str,
+    new_nostr_pk: &str,
+    relays: &[String],
+    anchor: Option<&molt_core::chain::ConsentAnchor>,
+) -> String {
+    match anchor {
+        Some(a) => molt_core::chain::render_restore_consent_v2(
+            a,
+            &molt_storage::identity_sign(
+                identity_sk,
+                &molt_core::chain::restore_consent_bytes_v2(
+                    republic_id,
+                    member,
+                    identity_pk,
+                    new_nostr_pk,
+                    relays,
+                    a.height,
+                    &a.prev_anchor,
+                ),
+            ),
+        ),
+        None => molt_storage::identity_sign(
+            identity_sk,
+            &molt_core::chain::restore_consent_bytes(republic_id, member, identity_pk, new_nostr_pk),
+        ),
+    }
+}
+
 /// The **approver** verifies a seat proof against the seat's *anchored* public
 /// key (from the genesis identity table). A leaked recovery link (transport +
 /// ticket) without the phrase cannot produce a signature that verifies here, and

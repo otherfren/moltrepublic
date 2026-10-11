@@ -1207,3 +1207,142 @@ fn a_foreign_bundle_format_is_refused() {
         "an unknown format tag is not verified on hope"
     );
 }
+
+// ---- restore consent v2 (recovery_auto_approval.md §7e) ---------------
+
+const FOUNDING_NPK: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+const NEW_NPK: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+fn relays_of(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// dora's restore onto `NEW_NPK` with a v2 consent over `signed` relays,
+/// the block carrying `carried`.
+fn restore_v2(b: &Builder, anchor_height: u64, prev: &str, signed: &[&str], carried: &[&str]) -> ChainChange {
+    ChainChange::Membership {
+        op: MembershipOp::Restored,
+        member: "dora".to_string(),
+        identity_pk: b.pk("dora"),
+        nostr_pk: Some(NEW_NPK.to_string()),
+        relays: relays_of(carried),
+        consent: Some(consent_v2_for(b, "dora", NEW_NPK, &relays_of(signed), anchor_height, prev)),
+    }
+}
+
+#[test]
+fn a_v2_consent_counts_as_the_restored_seats_voice() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut chain = b.blocks.clone();
+    chain.push(b.seal(1, restore_v2(&b, 0, FOUNDING_NPK, &["wss://a"], &["wss://a"]), &["petra"]));
+    verify_chain(&chain).expect("one survivor + a v2 consent reaches m");
+}
+
+/// Audit #5: the relays a survivor signs beside a consent are the ones the
+/// rejoiner declared, or the block is refused.
+#[test]
+fn a_v2_consent_with_swapped_relays_rejects_the_chain() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut chain = b.blocks.clone();
+    chain.push(b.seal(1, restore_v2(&b, 0, FOUNDING_NPK, &["wss://a"], &["wss://evil"]), &["petra"]));
+    let err = verify_chain(&chain).expect_err("swapped relays must reject");
+    assert!(err.contains("consent"), "{err}");
+}
+
+/// Audit #6: a sealed v2 consent never seals a second time - the restore
+/// moved the seat's working anchor the consent names.
+#[test]
+fn a_v2_consent_replayed_at_another_height_rejects_the_chain() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let change = restore_v2(&b, 0, FOUNDING_NPK, &[], &[]);
+    let first = b.seal(1, change.clone(), &["petra"]);
+    b.push(first);
+    b.commit_applied(9, &["petra", "walter"]);
+    verify_chain(&b.blocks).expect("the honest prefix verifies");
+    let replay = b.seal(3, change, &["walter"]);
+    b.push(replay);
+    let err = verify_chain(&b.blocks).expect_err("the replay must reject");
+    assert!(err.contains("spent"), "{err}");
+}
+
+/// The replay is refused across a cut too: the suffix walk reads the
+/// working anchor from the blob, so full and suffix holders agree.
+#[test]
+fn a_v2_consent_replayed_after_a_cut_rejects_the_suffix() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let change = restore_v2(&b, 0, FOUNDING_NPK, &[], &[]);
+    let first = b.seal(1, change.clone(), &["petra"]);
+    b.push(first);
+    let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+    let anchor = b.seal(
+        2,
+        ChainChange::Checkpoint { upto: 1, state_hash: checkpoint_state_hash(&blob) },
+        &["petra", "walter", "dora"],
+    );
+    b.push(anchor);
+    let replay = b.seal(3, change, &["walter"]);
+    b.push(replay);
+    let suffix: Vec<ChainBlock> = b.blocks[2..].to_vec();
+    let err = verify_suffix_chain(&blob, &suffix, &b.republic_id, None)
+        .expect_err("the suffix refuses the replay");
+    assert!(err.contains("spent"), "{err}");
+    assert!(verify_chain(&b.blocks).is_err(), "and so does the full walk");
+}
+
+/// The freshness window: a consent seals strictly above its anchor height
+/// and at most RESTORE_CONSENT_WINDOW blocks past it.
+#[test]
+fn a_v2_consent_outside_its_window_rejects_the_chain() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut chain = b.blocks.clone();
+    chain.push(b.seal(1, restore_v2(&b, 1, FOUNDING_NPK, &[], &[]), &["petra"]));
+    let err = verify_chain(&chain).expect_err("an anchor at the block's own height is refused");
+    assert!(err.contains("stale"), "{err}");
+
+    let w = molt_core::chain::RESTORE_CONSENT_WINDOW;
+    let roster = verify_chain(&b.blocks).expect("genesis").identities;
+    let voices = |height: u64| {
+        let block = b.seal(height, restore_v2(&b, 3, FOUNDING_NPK, &[], &[]), &["petra"]);
+        block_signers(&b.republic_id, &roster, &block).map(|s| s.len())
+    };
+    assert_eq!(voices(4), Ok(2), "one block past the anchor");
+    assert_eq!(voices(3 + w), Ok(2), "the window's last height");
+    assert!(voices(4 + w).is_err_and(|e| e.contains("stale")), "past the window");
+    assert!(voices(3).is_err(), "at the anchor itself");
+}
+
+/// v1 consents keep verifying byte-identically (a sealed-v1 chain).
+#[test]
+fn a_v1_consent_chain_still_verifies() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut chain = b.blocks.clone();
+    chain.push(b.seal(
+        1,
+        ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk: b.pk("dora"),
+            nostr_pk: Some(NEW_NPK.to_string()),
+            relays: relays_of(&["wss://any"]),
+            consent: Some(consent_for(&b, "dora", NEW_NPK)),
+        },
+        &["petra"],
+    ));
+    verify_chain(&chain).expect("a v1 consent still counts");
+}
+
+/// The export walk applies the single-use rule from the membership blocks
+/// it ships.
+#[test]
+fn a_wiki_export_refuses_a_replayed_v2_consent() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let change = restore_v2(&b, 0, FOUNDING_NPK, &[], &[]);
+    let first = b.seal(1, change.clone(), &["petra"]);
+    b.push(first);
+    let tree = std::collections::BTreeMap::new();
+    verify_wiki_export(&bundle_json(&b.blocks), &tree).expect("one restore exports");
+    let replay = b.seal(2, change, &["walter"]);
+    b.push(replay);
+    let err = verify_wiki_export(&bundle_json(&b.blocks), &tree).expect_err("the replay is refused");
+    assert!(err.contains("spent"), "{err}");
+}

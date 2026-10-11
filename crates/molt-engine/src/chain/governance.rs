@@ -429,6 +429,13 @@ impl State {
                 consent: Some(_),
                 ..
             } => {
+                // §7e: re-judged at THIS height - a re-based v2 consent may
+                // have left its window or been spent meanwhile, and the
+                // verifier rejects such a block whole
+                if let Err(why) = self.restore_consent_at(&change, target) {
+                    tracing::warn!(%id, reason = why, "consented restore no longer seals");
+                    return;
+                }
                 valid.retain(|a| a.member != *member);
                 1
             }

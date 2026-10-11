@@ -318,6 +318,8 @@ pub(crate) fn spawn_recovery_inbox(
     // the seat's ANCHORED identity pk — rides the link so the rejoiner can
     // resolve the ritual's derivation convention (founder vs joiner salt)
     identity_pk: String,
+    // what the rejoiner's v2 consent binds (recovery_auto_approval.md §7e)
+    consent_anchor: Option<molt_core::chain::ConsentAnchor>,
     generation: u64,
     tx: mpsc::WeakSender<Envelope>,
 ) -> tokio::task::JoinHandle<()> {
@@ -356,6 +358,7 @@ pub(crate) fn spawn_recovery_inbox(
             relays: net.relays().to_vec(),
             republic_id: republic_id.clone(),
             identity_pk,
+            consent_anchor: consent_anchor.clone(),
         };
         // encode EXPLICITLY: `RecoveryInvite::render` falls back to the legacy
         // queue shape when the handover cannot encode, and with the empty
@@ -374,6 +377,7 @@ pub(crate) fn spawn_recovery_inbox(
             wrap: String::new(),
             republic_id,
             handover: Some(handover),
+            consent_anchor,
         }
         .render();
         if !send_cmd(
@@ -916,9 +920,8 @@ async fn recovery_rejoin(
     let mut mls =
         molt_net::MlsMember::new(&sk, &ctx.member).map_err(|e| format!("mls identity: {e}"))?;
     let kp_hex = hex::encode(mls.key_package().map_err(|e| format!("key package: {e}"))?);
-    // the seat proof binds the new anchor AND the relay declaration against
-    // a relay; only the coordinator checks it, survivors see the consent,
-    // which binds the anchor but not the relays (known debt)
+    // the seat proof binds the new anchor AND the relay declaration for
+    // the coordinator; the v2 consent binds both for every survivor
     let declared = ctx.dial_relays.clone();
     let seat_proof = crate::founding::make_seat_proof(
         &sk,
@@ -930,14 +933,14 @@ async fn recovery_rejoin(
     );
     // the automatic co-approval of the own re-admission (recovery approval
     // design, 2026-08-08): one distinct signer toward the threshold
-    let consent = molt_storage::identity_sign(
+    let consent = crate::founding::make_restore_consent(
         &sk,
-        &molt_core::chain::restore_consent_bytes(
-            &h.republic_id,
-            &ctx.member,
-            &pk,
-            &new_nostr_pk,
-        ),
+        &h.republic_id,
+        &ctx.member,
+        &pk,
+        &new_nostr_pk,
+        &declared,
+        h.consent_anchor.as_ref(),
     );
     // every coordinator anchor this run addresses; answers are accepted
     // from any of them (the reattach broadcast — one entry on the ticketed

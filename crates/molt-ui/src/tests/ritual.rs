@@ -35,6 +35,7 @@ fn invite_link() -> String {
 
 fn recovery_link() -> String {
     molt_engine::RecoveryInvite {
+        consent_anchor: None,
         republic: "Chess Club".to_string(),
         member: "petra".to_string(),
         ticket: "c".repeat(64),
@@ -43,6 +44,7 @@ fn recovery_link() -> String {
         wrap: String::new(),
         republic_id: "d".repeat(64),
         handover: Some(molt_net::invite::RecoveryHandoverV2 {
+            consent_anchor: None,
             identity_pk: String::new(),
             ticket: "c".repeat(64),
             npub: anchor(2),

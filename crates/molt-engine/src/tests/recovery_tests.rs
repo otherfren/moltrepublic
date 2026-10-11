@@ -40,6 +40,7 @@ fn a_recover_refusal_names_the_relays_it_diagnosed() {
         None,
     );
     let link = crate::recovery::RecoveryInvite {
+        consent_anchor: None,
         republic: "Guild".to_string(),
         member: "bob".to_string(),
         ticket: "ab".repeat(32),
@@ -48,6 +49,7 @@ fn a_recover_refusal_names_the_relays_it_diagnosed() {
         wrap: String::new(),
         republic_id: "f00d".to_string(),
         handover: Some(molt_net::invite::RecoveryHandoverV2 {
+            consent_anchor: None,
             ticket: "ab".repeat(32),
             npub: "12".repeat(32),
             relays: vec!["wss://coordinator.example".to_string()],

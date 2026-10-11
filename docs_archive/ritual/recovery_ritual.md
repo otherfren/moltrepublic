@@ -147,7 +147,11 @@ counts as one distinct signer — which is what lets an m = n republic
 re-admit a seat at all. Since 2026-08-23 (`recovery_auto_approval.md`) a
 survivor that verifies that consent ITSELF co-signs automatically — the
 recovery completes as soon as m survivors are online, no card-clicking;
-only a consent-less (legacy) request still waits for human approvals. The
+only a consent-less (legacy) request still waits for human approvals. Since
+2026-10-11 the consent is v2 (`recovery_auto_approval.md` §7e): it binds
+`R`'s relay declaration, the link's mint height and the seat's previous
+anchor, so it seals once, within 1024 blocks; a v1 consent (a link from an
+older build) is left to human approvals. The
 coordinator reports the vote to the waiting `R` as `RecoverProgress`
 frames (the rejoiner's checklist). The block
 records, tamper-evidently, that the group re-admitted `R` at height `H+1`.

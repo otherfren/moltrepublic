@@ -444,6 +444,7 @@ fn a_recovery_handover_round_trips_and_fails_closed() {
     let (_, npub) = nostr_identity(b"coordinator-entropy", "rec");
     let h = RecoveryHandoverV2 {
         identity_pk: String::new(),
+        consent_anchor: None,
         ticket: "ab".repeat(32),
         npub: npub.clone(),
         relays: vec!["wss://relay.example.org".to_string()],
@@ -479,4 +480,31 @@ fn a_recovery_handover_round_trips_and_fails_closed() {
     let mut many = h.clone();
     many.relays = (0..9).map(|i| format!("wss://r{i}.example")).collect();
     assert!(many.encode().is_err(), "more relays than a link may carry");
+}
+
+/// Restore consent v2 (`recovery_auto_approval.md` §7e): the link carries
+/// the anchor the rejoiner's consent binds; a link minted by an older build
+/// carries none and still decodes.
+#[test]
+fn a_recovery_handover_carries_its_consent_anchor() {
+    use molt_core::chain::ConsentAnchor;
+    use molt_net::invite::RecoveryHandoverV2;
+
+    let (_, npub) = nostr_identity(b"coordinator-entropy", "rec");
+    let h = RecoveryHandoverV2 {
+        identity_pk: String::new(),
+        consent_anchor: Some(ConsentAnchor { height: 41, prev_anchor: "cd".repeat(32) }),
+        ticket: "ab".repeat(32),
+        npub: npub.clone(),
+        relays: vec!["wss://relay.example.org".to_string()],
+        republic_id: "f00dcafe".to_string(),
+    };
+    let back = RecoveryHandoverV2::decode(&h.encode().expect("encodes")).expect("decodes");
+    assert_eq!(back, h, "the anchor round-trips");
+
+    let old = RecoveryHandoverV2 { consent_anchor: None, ..h };
+    let blob = old.encode().expect("encodes");
+    let wire = String::from_utf8(hex::decode(&blob).expect("hex")).expect("utf8");
+    assert!(!wire.contains("consent"), "an anchor-less link keeps the older wire shape: {wire}");
+    assert_eq!(RecoveryHandoverV2::decode(&blob).expect("decodes").consent_anchor, None);
 }

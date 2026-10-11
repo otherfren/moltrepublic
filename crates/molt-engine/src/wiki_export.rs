@@ -311,7 +311,11 @@ of any signature and is not checked here.
    repeated member all count once or not at all. On a `restored` block the
    returning member's own `consent` counts as one further signer if it
    verifies against its anchored key over the consent bytes and that member
-   does not also appear in `sigs`. Require at least `rule_m`. Refuse any block
+   does not also appear in `sigs`. A v2 consent must also lie in its window
+   (`anchor_height < height <= anchor_height + 1024`) and name, as
+   `prev_anchor`, the seat's transport anchor before this block: its last
+   `restored` block's `nostr_pk`, else its genesis `nostr_pk`. Require at
+   least `rule_m`. Refuse any block
    that is neither a membership block nor an applied wiki patch, and refuse a
    proposal id that appears twice.
 4. **Fold.** Apply the patches in height order (below) and compare the result
@@ -370,6 +374,14 @@ ascending as byte strings (identity_pk first, nostr_pk as tie-break).
     "molt-restore-consent-v1\0" F(republic_id) F(member) F(identity_pk)
     0x00                        (empty transport anchor)
     0x01 F(nostr_pk)            (otherwise)
+
+A consent string `v2:<anchor_height>:<prev_anchor>:<sig>` signs v2 instead,
+with `relays` the block's own list:
+
+    "molt-restore-consent-v2\0" F(republic_id) F(member) F(identity_pk)
+    0x00 | 0x01 F(nostr_pk)
+    le64(count) F(relay)...
+    le64(anchor_height) F(prev_anchor)
 
 ## The fold
 

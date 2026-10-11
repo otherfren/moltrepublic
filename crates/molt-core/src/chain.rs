@@ -360,6 +360,100 @@ pub fn restore_consent_bytes(
     out
 }
 
+/// How many blocks past its anchor height a v2 restore consent may seal
+/// (`recovery_auto_approval.md` §7e). Single use is what closes the
+/// replay; this only bounds how late a consent may land.
+pub const RESTORE_CONSENT_WINDOW: u64 = 1024;
+
+/// What a v2 restore consent anchors to: the chain height its signer saw
+/// and the seat's working transport anchor the restore replaces. Minted
+/// into the recovery link (a total-loss rejoiner holds no chain).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsentAnchor {
+    /// The minting node's head height.
+    pub height: u64,
+    /// The seat's working transport anchor at that head ("" on loopback).
+    #[serde(default)]
+    pub prev_anchor: String,
+}
+
+/// A parsed restore consent string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreConsent<'a> {
+    /// The legacy bare signature over [`restore_consent_bytes`].
+    V1 {
+        /// Hex Ed25519 signature.
+        sig: &'a str,
+    },
+    /// `v2:<height>:<prev_anchor>:<sig>` over [`restore_consent_bytes_v2`].
+    V2 {
+        /// The height the consent anchors to.
+        anchor_height: u64,
+        /// The working anchor the restore replaces.
+        prev_anchor: &'a str,
+        /// Hex Ed25519 signature.
+        sig: &'a str,
+    },
+}
+
+fn is_lower_hex(s: &str) -> bool {
+    s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Parse a consent string. `None` = a `v2:` string that is not in its one
+/// canonical rendering (refused, never normalized: the string is inside the
+/// block's signed bytes).
+pub fn parse_restore_consent(s: &str) -> Option<RestoreConsent<'_>> {
+    let Some(rest) = s.strip_prefix("v2:") else {
+        return Some(RestoreConsent::V1 { sig: s });
+    };
+    let mut parts = rest.splitn(3, ':');
+    let (h, prev, sig) = (parts.next()?, parts.next()?, parts.next()?);
+    let anchor_height: u64 = h.parse().ok()?;
+    if anchor_height.to_string() != h || !is_lower_hex(prev) || sig.is_empty() || !is_lower_hex(sig) {
+        return None;
+    }
+    Some(RestoreConsent::V2 { anchor_height, prev_anchor: prev, sig })
+}
+
+/// Render a v2 consent string from its anchor and signature hex.
+pub fn render_restore_consent_v2(anchor: &ConsentAnchor, sig: &str) -> String {
+    format!("v2:{}:{}:{sig}", anchor.height, anchor.prev_anchor)
+}
+
+/// **The v2 restore consent preimage** (`recovery_auto_approval.md` §7e):
+/// v1's fields plus the block's relay declaration, the anchor height and
+/// the working anchor the restore replaces - so a consent binds the ledger
+/// entry it writes and seals at most once.
+pub fn restore_consent_bytes_v2(
+    republic_id: &str,
+    member: &str,
+    identity_pk: &str,
+    nostr_pk: &str,
+    relays: &[String],
+    anchor_height: u64,
+    prev_anchor: &str,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"molt-restore-consent-v2\0");
+    put_bytes(&mut out, republic_id.as_bytes());
+    put_bytes(&mut out, member.as_bytes());
+    put_bytes(&mut out, identity_pk.as_bytes());
+    if nostr_pk.is_empty() {
+        out.push(0);
+    } else {
+        out.push(1);
+        put_bytes(&mut out, nostr_pk.as_bytes());
+    }
+    out.extend_from_slice(&u64::try_from(relays.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+    for r in relays {
+        put_bytes(&mut out, r.as_bytes());
+    }
+    out.extend_from_slice(&anchor_height.to_le_bytes());
+    put_bytes(&mut out, prev_anchor.as_bytes());
+    out
+}
+
 /// The projected republic state a checkpoint attests — everything a
 /// suffix-only bootstrapper needs, and nothing a node could disagree on:
 /// every field is derived from the totally ordered chain, so equal chains
@@ -1397,6 +1491,93 @@ mod tests {
             restore_consent_bytes("beef", "dora", "aabb", "ccdd"),
             "the republic id is bound"
         );
+    }
+
+    /// v1 byte pin: the legacy layout stays byte-identical, so every sealed
+    /// v1 consent keeps verifying.
+    #[test]
+    fn restore_consent_v1_bytes_are_pinned() {
+        let mut want = b"molt-restore-consent-v1\0".to_vec();
+        for f in ["f00d", "dora", "aabb"] {
+            want.extend_from_slice(&u32::try_from(f.len()).expect("short").to_le_bytes());
+            want.extend_from_slice(f.as_bytes());
+        }
+        want.push(1);
+        want.extend_from_slice(&4u32.to_le_bytes());
+        want.extend_from_slice(b"ccdd");
+        assert_eq!(restore_consent_bytes("f00d", "dora", "aabb", "ccdd"), want);
+    }
+
+    /// v2 byte pin (audit 2026-10-10 #5/#6): relays, anchor height and the
+    /// replaced anchor are inside the signed bytes.
+    #[test]
+    fn restore_consent_v2_bytes_are_pinned() {
+        let f = |out: &mut Vec<u8>, s: &str| {
+            out.extend_from_slice(&u32::try_from(s.len()).expect("short").to_le_bytes());
+            out.extend_from_slice(s.as_bytes());
+        };
+        let mut want = b"molt-restore-consent-v2\0".to_vec();
+        for s in ["f00d", "dora", "aabb"] {
+            f(&mut want, s);
+        }
+        want.push(1);
+        f(&mut want, "ccdd");
+        want.extend_from_slice(&2u64.to_le_bytes());
+        f(&mut want, "wss://a");
+        f(&mut want, "wss://b");
+        want.extend_from_slice(&7u64.to_le_bytes());
+        f(&mut want, "ee");
+        let relays = vec!["wss://a".to_string(), "wss://b".to_string()];
+        assert_eq!(
+            restore_consent_bytes_v2("f00d", "dora", "aabb", "ccdd", &relays, 7, "ee"),
+            want
+        );
+        let mut empty = b"molt-restore-consent-v2\0".to_vec();
+        for s in ["f00d", "dora", "aabb"] {
+            f(&mut empty, s);
+        }
+        empty.push(0);
+        empty.extend_from_slice(&0u64.to_le_bytes());
+        empty.extend_from_slice(&0u64.to_le_bytes());
+        f(&mut empty, "");
+        assert_eq!(restore_consent_bytes_v2("f00d", "dora", "aabb", "", &[], 0, ""), empty);
+    }
+
+    #[test]
+    fn restore_consent_v2_binds_relays_height_and_prev_anchor() {
+        let r = |v: &[&str]| v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let base = restore_consent_bytes_v2("f00d", "dora", "aabb", "cc", &r(&["wss://a"]), 5, "ee");
+        for other in [
+            restore_consent_bytes_v2("f00d", "dora", "aabb", "cc", &r(&["wss://x"]), 5, "ee"),
+            restore_consent_bytes_v2("f00d", "dora", "aabb", "cc", &r(&[]), 5, "ee"),
+            restore_consent_bytes_v2("f00d", "dora", "aabb", "cc", &r(&["wss://a"]), 6, "ee"),
+            restore_consent_bytes_v2("f00d", "dora", "aabb", "cc", &r(&["wss://a"]), 5, "ef"),
+            restore_consent_bytes_v2("f00d", "dora", "aabb", "cc", &r(&["wss://a", "wss://b"]), 5, "ee"),
+        ] {
+            assert_ne!(base, other);
+        }
+        assert_ne!(base, restore_consent_bytes("f00d", "dora", "aabb", "cc"));
+    }
+
+    /// The consent string: v1 is the bare signature, v2 is
+    /// `v2:<height>:<prev_anchor>:<sig>` in one canonical rendering.
+    #[test]
+    fn restore_consent_strings_parse_canonically() {
+        assert_eq!(parse_restore_consent("abcd"), Some(RestoreConsent::V1 { sig: "abcd" }));
+        let anchor = ConsentAnchor { height: 12, prev_anchor: "ee".to_string() };
+        let s = render_restore_consent_v2(&anchor, "abcd");
+        assert_eq!(s, "v2:12:ee:abcd");
+        assert_eq!(
+            parse_restore_consent(&s),
+            Some(RestoreConsent::V2 { anchor_height: 12, prev_anchor: "ee", sig: "abcd" })
+        );
+        assert_eq!(
+            parse_restore_consent("v2:0::abcd"),
+            Some(RestoreConsent::V2 { anchor_height: 0, prev_anchor: "", sig: "abcd" })
+        );
+        for bad in ["v2:012:ee:abcd", "v2:+1:ee:abcd", "v2:1:EE:abcd", "v2:1:ee:", "v2:1:ee", "v2::ee:ab", "v2:1:e:e:ab"] {
+            assert_eq!(parse_restore_consent(bad), None, "{bad} is not canonical");
+        }
     }
 
     /// Height is inside the signed bytes: the *same* change at a different

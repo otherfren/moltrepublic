@@ -350,7 +350,7 @@ fn a_consented_restore_is_approved_without_a_human() {
     let ticket = "recovery-ticket-xyz";
     let kp_hex = &kp_hex_for(&b, "dora");
     let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
-    let consent = consent_for(&b, "dora", "");
+    let consent = consent_v2_for(&b, "dora", "", &[], 0, &"cc".repeat(32));
     let id = coord
         .verify_and_propose_restore(
             true,
@@ -416,6 +416,94 @@ fn a_consented_restore_is_approved_without_a_human() {
         "the commit settles the record without a human approve"
     );
     verify_chain(&walter.chain.blocks).expect("the sealed chain verifies from zero");
+}
+
+/// A v1 consent binds neither relays nor position (audit 2026-10-10 #5,
+/// #6): it still registers and still counts as a voice, but no survivor
+/// signs it unattended (`recovery_auto_approval.md` §7e).
+#[test]
+fn a_v1_consent_is_left_to_the_human_vote() {
+    let b = Builder::new(&["petra", "walter", "dora"], 3);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    walter.receive_membership_proposal(
+        7,
+        MembershipOp::Restored,
+        "dora",
+        &b.pk("dora"),
+        Some("dd".repeat(32)),
+        vec!["wss://any".to_string()],
+        Some(consent_for(&b, "dora", &"dd".repeat(32))),
+    );
+    assert!(walter.chain.proposal_changes.contains_key(&7), "the card registers");
+    assert!(
+        !walter.chain.pending_sigs.get(&7).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter")),
+        "a v1 consent never auto-signs"
+    );
+}
+
+/// Audit #5: a survivor signs only the relays the rejoiner declared.
+#[test]
+fn a_v2_consent_beside_swapped_relays_never_auto_signs() {
+    let b = Builder::new(&["petra", "walter", "dora"], 3);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let npk = "dd".repeat(32);
+    let signed = vec!["wss://a".to_string()];
+    let consent = consent_v2_for(&b, "dora", &npk, &signed, 0, &"cc".repeat(32));
+    walter.receive_membership_proposal(
+        7,
+        MembershipOp::Restored,
+        "dora",
+        &b.pk("dora"),
+        Some(npk.clone()),
+        vec!["wss://evil".to_string()],
+        Some(consent.clone()),
+    );
+    assert!(!walter.chain.proposal_changes.contains_key(&7), "an unsealable card is refused");
+    assert!(!walter.chain.pending_sigs.get(&7).is_some_and(|p| !p.sigs.is_empty()));
+    // the honest relays sign
+    walter.receive_membership_proposal(
+        8,
+        MembershipOp::Restored,
+        "dora",
+        &b.pk("dora"),
+        Some(npk),
+        signed,
+        Some(consent),
+    );
+    assert!(
+        walter.chain.pending_sigs.get(&8).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter")),
+        "the declared relays auto-sign"
+    );
+}
+
+/// Audit #6 at the coordinator: a sealed v2 consent never proposes again,
+/// and one minted for a far-off height is stale.
+#[test]
+fn a_spent_or_stale_v2_consent_is_refused_at_the_coordinator() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    let rid = b.republic_id.clone();
+    let kp_hex = &kp_hex_for(&b, "dora");
+    let npk = "dd".repeat(32);
+    let relays = vec!["wss://a".to_string()];
+    let propose = |coord: &mut crate::State, ticket: &str, consent: &str| {
+        let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, &npk, &relays);
+        coord.verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, ticket, &proof, &npk, &relays, consent, "")
+    };
+    let stale = consent_v2_for(&b, "dora", &npk, &relays, 5, &"cc".repeat(32));
+    let err = propose(&mut coord, "t0", &stale).expect_err("an anchor above the head is refused");
+    assert!(err.contains("stale"), "{err}");
+
+    let consent = consent_v2_for(&b, "dora", &npk, &relays, 0, &"cc".repeat(32));
+    propose(&mut coord, "t1", &consent).expect("a fresh consent proposes");
+    assert_eq!(coord.chain.head.as_ref().expect("head").height, 1, "petra + consent seal at m = 2");
+    let ChainChange::Membership { relays: carried, .. } = &coord.chain.blocks[1].change else {
+        panic!("a membership block");
+    };
+    assert_eq!(carried, &relays, "the block carries the signed declaration");
+    let err = propose(&mut coord, "t2", &consent).expect_err("the replay is refused");
+    assert!(err.contains("spent"), "{err}");
+    verify_chain(&coord.chain.blocks).expect("the sealed chain verifies");
 }
 
 /// The chain IS the replay register (field storm 2026-08-24): every

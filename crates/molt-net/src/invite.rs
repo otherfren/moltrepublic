@@ -153,6 +153,10 @@ pub struct RecoveryHandoverV2 {
     /// seat's identity used (founder vs joiner salt) and to refuse a wrong
     /// phrase locally. Additive: empty on links minted by older builds.
     pub identity_pk: String,
+    /// What the rejoiner's v2 restore consent binds (the minting head and
+    /// the seat's working anchor). `None` on links minted by older builds:
+    /// the rejoiner then signs a v1 consent.
+    pub consent_anchor: Option<molt_core::chain::ConsentAnchor>,
 }
 
 const RECOVERY_HANDOVER_VERSION: u8 = 2;
@@ -166,6 +170,8 @@ struct RecoveryWire {
     republic_id: String,
     #[serde(default)]
     identity_pk: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    consent_anchor: Option<molt_core::chain::ConsentAnchor>,
 }
 
 impl RecoveryHandoverV2 {
@@ -196,6 +202,7 @@ impl RecoveryHandoverV2 {
             relays,
             republic_id: self.republic_id.clone(),
             identity_pk: self.identity_pk.clone(),
+            consent_anchor: self.consent_anchor.clone(),
         };
         Ok(hex::encode(
             serde_json::to_string(&wire).map_err(|e| NetError::Framing(e.to_string()))?,
@@ -237,6 +244,9 @@ impl RecoveryHandoverV2 {
         {
             return Err(NetError::Framing("recovery identity pk is malformed".into()));
         }
+        if parsed.consent_anchor.as_ref().is_some_and(|a| !a.prev_anchor.is_empty() && !is_lower_hex(&a.prev_anchor)) {
+            return Err(NetError::Framing("recovery consent anchor is malformed".into()));
+        }
         use nostr::nips::nip19::FromBech32;
         let pk = nostr::PublicKey::from_bech32(&parsed.npub)
             .map_err(|e| NetError::Framing(format!("recovery npub: {e}")))?;
@@ -249,6 +259,7 @@ impl RecoveryHandoverV2 {
             relays,
             republic_id: parsed.republic_id,
             identity_pk: parsed.identity_pk,
+            consent_anchor: parsed.consent_anchor,
         })
     }
 }

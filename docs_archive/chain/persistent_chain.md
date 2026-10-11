@@ -140,6 +140,12 @@ rejoiner that trusted a prefix could fork the republic's state. The checks:
   one (recovery re-keys the MLS leaf, not the roster identity;
   `recovery_ritual.md` §6) — so a newcomer's signatures count on the blocks
   that follow and a restored member's keep counting unchanged.
+- **Restore consent.** A `Restored` block's `consent` counts as the returning
+  seat's voice. A v2 consent (2026-10-11, `recovery_auto_approval.md` §7e)
+  also binds the block's relays, lies in its window (`anchor_height < height
+  <= anchor_height + 1024`) and names the seat's working anchor before the
+  block - a sealed consent never seals twice, on full and suffix walks
+  alike. A v1 consent verifies as before.
 
 ### 6.1 Extending a prefix we already verified
 

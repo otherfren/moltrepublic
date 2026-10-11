@@ -1165,6 +1165,7 @@ async fn recovery_invalidates_an_in_flight_join() {
     let _ = b
         .execute(Command::RecoverStart {
             link: molt_engine::RecoveryInvite {
+                consent_anchor: None,
                 republic: "Guild".to_string(),
                 member: "petra".to_string(),
                 ticket: "ab".repeat(8),

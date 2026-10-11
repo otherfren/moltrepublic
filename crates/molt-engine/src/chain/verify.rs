@@ -285,6 +285,7 @@ pub(super) fn block_signers(
         op,
         member,
         nostr_pk,
+        relays,
         consent: Some(consent),
         ..
     } = &block.change
@@ -306,21 +307,116 @@ pub(super) fn block_signers(
             .find(|i| i.member == *member)
             .map(|i| i.identity_pk.clone())
             .ok_or_else(|| format!("block {} restores an unknown member", block.height))?;
-        let consent_bytes = molt_core::chain::restore_consent_bytes(
+        verify_restore_consent(
             republic_id,
-            member,
             &anchored,
-            nostr_pk.as_deref().unwrap_or(""),
-        );
-        if !molt_storage::identity_verify(&anchored, &consent_bytes, consent) {
-            return Err(format!(
-                "block {} carries a consent that does not verify for {member}",
-                block.height
-            ));
-        }
+            block.height,
+            member,
+            nostr_pk.as_deref(),
+            relays,
+            consent,
+        )
+        .map_err(|why| format!("block {}: {member}'s {why}", block.height))?;
         signers.insert(member.clone());
     }
     Ok(signers)
+}
+
+/// Which consent layout verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConsentKind {
+    /// The legacy layout: binds neither relays nor position.
+    V1,
+    /// `molt-restore-consent-v2`, spending `prev_anchor`.
+    V2 {
+        /// The working anchor the restore must replace (rule 3).
+        prev_anchor: String,
+    },
+}
+
+/// The block-local half of a restore consent check
+/// (`recovery_auto_approval.md` §7e rules 1-2): the signature over the
+/// layout the string names, against the ANCHORED key; for v2 also the
+/// block's relays and the freshness window at `height`. Rule 3 (single
+/// use) needs the walk state: [`consent_spends`].
+pub(crate) fn verify_restore_consent(
+    republic_id: &str,
+    anchored: &str,
+    height: u64,
+    member: &str,
+    nostr_pk: Option<&str>,
+    relays: &[String],
+    consent: &str,
+) -> Result<ConsentKind, &'static str> {
+    use molt_core::chain::RestoreConsent;
+    let npk = nostr_pk.unwrap_or("");
+    match molt_core::chain::parse_restore_consent(consent) {
+        None => Err("consent is malformed"),
+        Some(RestoreConsent::V1 { sig }) => {
+            let bytes = molt_core::chain::restore_consent_bytes(republic_id, member, anchored, npk);
+            if molt_storage::identity_verify(anchored, &bytes, sig) {
+                Ok(ConsentKind::V1)
+            } else {
+                Err("consent does not verify")
+            }
+        }
+        Some(RestoreConsent::V2 { anchor_height, prev_anchor, sig }) => {
+            let bytes = molt_core::chain::restore_consent_bytes_v2(
+                republic_id,
+                member,
+                anchored,
+                npk,
+                relays,
+                anchor_height,
+                prev_anchor,
+            );
+            if !molt_storage::identity_verify(anchored, &bytes, sig) {
+                return Err("consent does not verify");
+            }
+            let fresh = height > anchor_height
+                && height - anchor_height <= molt_core::chain::RESTORE_CONSENT_WINDOW;
+            if !fresh {
+                return Err("consent is stale");
+            }
+            Ok(ConsentKind::V2 { prev_anchor: prev_anchor.to_string() })
+        }
+    }
+}
+
+/// Rule 3 of §7e: a v2 consent in `change` must replace exactly the seat's
+/// working anchor `working` resolves. A sealed restore moves that anchor,
+/// so the same consent never seals twice. `Ok` for every other change.
+pub(crate) fn consent_spends(
+    change: &ChainChange,
+    working: impl Fn(&str) -> String,
+) -> Result<(), &'static str> {
+    let ChainChange::Membership { member, consent: Some(consent), .. } = change else {
+        return Ok(());
+    };
+    match molt_core::chain::parse_restore_consent(consent) {
+        Some(molt_core::chain::RestoreConsent::V2 { prev_anchor, .. }) => {
+            if prev_anchor == working(member) {
+                Ok(())
+            } else {
+                Err("consent is spent")
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// A seat's working transport anchor in a walk's running state: its last
+/// re-anchor, else its roster anchor (the [`State::working_nostr_pk`] twin).
+fn walk_working_anchor(state: &molt_core::CheckpointState, member: &str) -> String {
+    if let Ok(i) = state.anchors.binary_search_by(|(m, _)| m.as_str().cmp(member)) {
+        return state.anchors[i].1.clone();
+    }
+    state
+        .roster
+        .iter()
+        .find(|i| i.member == member)
+        .map(|i| i.nostr_pk.clone())
+        .unwrap_or_default()
 }
 
 /// Verify one post-genesis block against the current head. Returns the
@@ -468,6 +564,8 @@ impl ChainWalk {
     /// (round 3, D9).
     pub(super) fn step(&mut self, block: &ChainBlock, held: Held<'_>) -> Result<(), String> {
         let (head, consumed) = verify_next(&self.head, block, &self.seen)?;
+        consent_spends(&block.change, |m| walk_working_anchor(&self.running, m))
+            .map_err(|why| format!("block {}: {why}", block.height))?;
         let cut = CutKind::of(&block.change);
         if let Some((_, _, kind)) = cut {
             // one variant per republic kind (plan 1.3.6)
@@ -853,6 +951,7 @@ pub fn verify_wiki_export(
     // 2 + 3. the roster walk and the per-patch threshold check, one pass
     let mut identities = head.identities.clone();
     let mut membership_blocks = 0usize;
+    let mut anchors: BTreeMap<String, String> = BTreeMap::new();
     let mut payloads: Vec<serde_json::Value> = Vec::new();
     let mut seen: BTreeSet<u64> = BTreeSet::new();
     let mut last_height = 0u64;
@@ -869,6 +968,19 @@ pub fn verify_wiki_export(
             ));
         }
         let signers = block_signers(&head.republic_id, &identities, block)?;
+        // §7e rule 3 over the shipped membership blocks: every re-anchor
+        // rides the bundle, so the working anchors fold exactly
+        consent_spends(&block.change, |m| {
+            anchors.get(m).cloned().unwrap_or_else(|| {
+                identities.iter().find(|i| i.member == m).map(|i| i.nostr_pk.clone()).unwrap_or_default()
+            })
+        })
+        .map_err(|why| format!("block {}: {why}", block.height))?;
+        if let ChainChange::Membership { member, nostr_pk: Some(pk), .. } = &block.change {
+            if !pk.is_empty() {
+                anchors.insert(member.clone(), pk.clone());
+            }
+        }
         if signers.len() < usize::from(head.rule_m) {
             return Err(format!(
                 "block {}: {} valid approvals, threshold is {}",
