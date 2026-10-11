@@ -596,8 +596,8 @@ pub fn default_renderer() -> String {
 /// signature: it used to open `/dev/urandom` by path and return `""` when
 /// that failed — in a sandbox without the device node, or on any non-Unix
 /// target, `--generate-config` then wrote `token = ""` and reported success.
-/// An empty token disables MCP authentication (the check is a string
-/// compare), so the quiet failure handed out an unauthenticated node.
+/// An empty token then disabled MCP authentication, so the quiet failure
+/// handed out an unauthenticated node (today it starts no MCP port).
 pub fn random_token() -> Result<String, TokenError> {
     let mut buf = [0u8; 24];
     getrandom::getrandom(&mut buf).map_err(|e| TokenError(e.to_string()))?;
@@ -940,7 +940,7 @@ mirror_publish_interval_secs = {mirror_publish_interval_secs}
 mirror_daily_bytes = {mirror_daily_bytes}
 
 [mcp]
-# MCP server TCP port. Always served (UI + headless).
+# MCP server TCP port (UI + headless). Not served while token is empty.
 port = {mcp_port}
 # allow = which client IPs may connect over TCP:
 #   "127.0.0.1" = loopback only (default)

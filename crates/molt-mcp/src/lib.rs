@@ -166,7 +166,7 @@ pub async fn serve_stdio(handle: WalletHandle) -> std::io::Result<()> {
 /// Serve the MCP protocol over a TCP listener. A connection is refused unless the
 /// peer IP is on `allowlist` (or `allow_all` is set), and every client must
 /// present `token` in its `initialize` request. Each connection runs on its own
-/// task.
+/// task. An empty `token` serves nothing ([`tcp_refusal`]).
 pub async fn serve_tcp(
     handle: WalletHandle,
     addr: &str,
@@ -175,9 +175,17 @@ pub async fn serve_tcp(
     token: String,
     read_token: String,
 ) -> std::io::Result<()> {
+    if let Some(why) = tcp_refusal(&token) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, why));
+    }
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, allow_all, allowed = allowlist.len(), "MCP server on tcp");
     serve_listener(handle, listener, allow_all, allowlist, token, read_token).await
+}
+
+/// Why a TCP endpoint must not start with this seat key, or `None`.
+pub fn tcp_refusal(seat_token: &str) -> Option<&'static str> {
+    seat_token.is_empty().then_some("[mcp].token empty - TCP MCP off")
 }
 
 /// [`serve_tcp`] on a listener the caller bound (tests bind port 0).
@@ -205,6 +213,9 @@ async fn serve_listener_with(
     read_token: String,
     pre_auth: std::time::Duration,
 ) -> std::io::Result<()> {
+    if let Some(why) = tcp_refusal(&token) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, why));
+    }
     // bounded (review F7): every accepted socket holds a buffer and costs
     // the actor a session read before it authenticates — a flood must not
     // exhaust either, and one accept error must not end the endpoint
@@ -284,7 +295,7 @@ pub enum Scope {
 /// The two keys a TCP endpoint accepts.
 #[derive(Debug, Clone)]
 struct Credentials {
-    /// The seat key. Empty keeps today's meaning: everybody is the seat.
+    /// The seat key. Empty matches NOBODY; no endpoint starts on one.
     seat: String,
     /// The read-only key. Empty matches NOBODY — never "unauthenticated".
     read: String,
@@ -310,9 +321,9 @@ impl Credentials {
     /// WHICH key it guessed: a guess of a given length runs exactly one
     /// `ct_eq` either way, and the scope is chosen only after both verdicts
     /// exist. (The lengths themselves still leak, as they always did.) An
-    /// empty read key matches nobody — "off", never "unauthenticated".
+    /// empty key matches nobody — "off", never "unauthenticated".
     fn scope_for(&self, given: &str) -> Option<Scope> {
-        let seat_ok = secret_eq(given, &self.seat);
+        let seat_ok = !self.seat.is_empty() && secret_eq(given, &self.seat);
         let read_ok = !self.read.is_empty() && secret_eq(given, &self.read);
         if seat_ok {
             Some(Scope::Seat)
@@ -334,6 +345,24 @@ fn secret_eq(given: &str, required: &str) -> bool {
         ))
 }
 
+/// One line connection's authentication.
+#[derive(Debug, Default)]
+struct LineSession {
+    /// What the presented key admits; `None` before `initialize`.
+    scope: Option<Scope>,
+    /// The key `initialize` presented.
+    key: String,
+    /// The key stopped mapping to `scope`; the connection ends.
+    revoked: bool,
+}
+
+impl LineSession {
+    /// stdio is the seat from the start: the host owns the pipe.
+    fn stdio() -> Self {
+        Self { scope: Some(Scope::Seat), ..Self::default() }
+    }
+}
+
 /// The newline-delimited JSON-RPC loop, generic over any reader/writer. When
 /// `auth` is `Some` the client must call `initialize` with a matching `token`
 /// before its deadline and before any other method works; `None` (stdio)
@@ -353,10 +382,10 @@ where
         None => (None, None),
     };
     // stdio (auth == None) is trusted from the start; TCP starts unauthenticated.
-    let mut authed: Option<Scope> = auth.is_none().then_some(Scope::Seat);
+    let mut authed = if auth.is_none() { LineSession::stdio() } else { LineSession::default() };
     let mut io = (reader, writer);
     loop {
-        let pending = deadline.filter(|_| authed.is_none());
+        let pending = deadline.filter(|_| authed.scope.is_none());
         let step = serve_line(&handle, &mut io, auth.as_ref(), &mut authed);
         let more = match pending {
             Some(d) => match tokio::time::timeout_at(d, step).await {
@@ -379,7 +408,7 @@ async fn serve_line<R, W>(
     handle: &WalletHandle,
     (reader, writer): &mut (R, W),
     auth: Option<&Credentials>,
-    authed: &mut Option<Scope>,
+    authed: &mut LineSession,
 ) -> std::io::Result<bool>
 where
     R: AsyncBufRead + Unpin,
@@ -423,7 +452,18 @@ where
             continue;
         }
         let response = match serde_json::from_str::<Value>(trimmed) {
-            Ok(req) => handle_rpc(handle, req, auth, authed).await,
+            Ok(req) => match auth {
+                // per request, like HTTP: a revoked key must not keep a
+                // session; a pre-auth refusal needs no keys, so costs no read
+                Some(boot)
+                    if authed.scope.is_some()
+                        || req.get("method").and_then(Value::as_str) == Some("initialize") =>
+                {
+                    let live = live_tokens(handle).await;
+                    handle_rpc(handle, req, Some(live.as_ref().unwrap_or(boot)), authed).await
+                }
+                _ => handle_rpc(handle, req, auth, authed).await,
+            },
             Err(e) => Some(error_response(
                 Value::Null,
                 -32700,
@@ -436,7 +476,7 @@ where
             writer.write_all(out.as_bytes()).await?;
             writer.flush().await?;
         }
-        return Ok(true);
+        return Ok(!authed.revoked);
     }
 }
 
@@ -453,7 +493,7 @@ async fn handle_rpc(
     handle: &WalletHandle,
     req: Value,
     auth: Option<&Credentials>,
-    authed: &mut Option<Scope>,
+    authed: &mut LineSession,
 ) -> Option<Value> {
     let has_id = req.get("id").is_some();
     let id = req.get("id").cloned().unwrap_or(Value::Null);
@@ -471,7 +511,8 @@ async fn handle_rpc(
                     "unauthorized: missing or invalid MCP token (send it as params.token)",
                 ));
             };
-            *authed = Some(scope);
+            authed.scope = Some(scope);
+            authed.key = given.to_string();
         }
         return Some(ok(
             id,
@@ -485,7 +526,14 @@ async fn handle_rpc(
     }
 
     // Everything else requires an authenticated connection.
-    let Some(scope) = *authed else {
+    if let (Some(cred), Some(scope)) = (auth, authed.scope) {
+        if cred.scope_for(&authed.key) != Some(scope) {
+            tracing::warn!("MCP line session closed: key revoked");
+            *authed = LineSession { revoked: true, ..LineSession::default() };
+            return Some(error_response(id, -32001, "unauthorized: key revoked"));
+        }
+    }
+    let Some(scope) = authed.scope else {
         return has_id.then(|| {
             error_response(
                 id,
@@ -4207,26 +4255,26 @@ pub(crate) mod tests {
     async fn tcp_requires_matching_token() {
         let h = wallet();
         let cred = seat_only("secret");
-        let mut authed = None;
+        let mut authed = LineSession::default();
         // Wrong token: rejected, connection stays unauthenticated.
         let resp = handle_rpc(&h, init_req("nope"), Some(&cred), &mut authed)
             .await
             .expect("initialize always replies");
         assert_eq!(resp["error"]["code"], -32001);
-        assert_eq!(authed, None);
+        assert_eq!(authed.scope, None);
         // Correct token: authenticated, handshake returns a result.
         let resp = handle_rpc(&h, init_req("secret"), Some(&cred), &mut authed)
             .await
             .expect("initialize always replies");
         assert!(resp.get("result").is_some());
-        assert_eq!(authed, Some(Scope::Seat));
+        assert_eq!(authed.scope, Some(Scope::Seat));
     }
 
     #[tokio::test]
     async fn methods_refused_until_authenticated() {
         let h = wallet();
         let cred = seat_only("secret");
-        let mut authed = None;
+        let mut authed = LineSession::default();
         let resp = handle_rpc(&h, tools_list(), Some(&cred), &mut authed)
             .await
             .expect("tools/list replies");
@@ -4355,12 +4403,12 @@ pub(crate) mod tests {
             seat: "seat".to_string(),
             read: "readonly".to_string(),
         };
-        let mut authed = None;
+        let mut authed = LineSession::default();
         let resp = handle_rpc(&h, init_req("readonly"), Some(&cred), &mut authed)
             .await
             .expect("initialize always replies");
         assert!(resp.get("result").is_some());
-        assert_eq!(authed, Some(Scope::Read));
+        assert_eq!(authed.scope, Some(Scope::Read));
 
         let call = |name: &str, args: Value| {
             json!({
@@ -4425,9 +4473,9 @@ pub(crate) mod tests {
         assert!(resp.get("error").is_none(), "wiki_resolve is a read");
 
         // …and the SEAT key still carries everything
-        let mut seat = None;
+        let mut seat = LineSession::default();
         let _ = handle_rpc(&h, init_req("seat"), Some(&cred), &mut seat).await;
-        assert_eq!(seat, Some(Scope::Seat));
+        assert_eq!(seat.scope, Some(Scope::Seat));
     }
 
     /// Wallet plan test 42: the read key never sees the purse - no wallet
@@ -4440,7 +4488,7 @@ pub(crate) mod tests {
             seat: "seat".to_string(),
             read: "readonly".to_string(),
         };
-        let mut authed = None;
+        let mut authed = LineSession::default();
         let _ = handle_rpc(&h, init_req("readonly"), Some(&cred), &mut authed).await;
         let call = |name: &str, args: Value| {
             json!({
@@ -4511,12 +4559,12 @@ pub(crate) mod tests {
             seat: "seat".to_string(),
             read: String::new(),
         };
-        let mut authed = None;
+        let mut authed = LineSession::default();
         let resp = handle_rpc(&h, init_req(""), Some(&cred), &mut authed)
             .await
             .expect("initialize always replies");
         assert_eq!(resp["error"]["code"], -32001);
-        assert_eq!(authed, None, "the empty string is not a credential");
+        assert_eq!(authed.scope, None, "the empty string is not a credential");
     }
 
     /// A read-only client is not told about verbs it cannot call.
@@ -4537,7 +4585,7 @@ pub(crate) mod tests {
                 .collect()
         };
 
-        let mut read = None;
+        let mut read = LineSession::default();
         let _ = handle_rpc(&h, init_req("readonly"), Some(&cred), &mut read).await;
         let resp = handle_rpc(&h, tools_list(), Some(&cred), &mut read)
             .await
@@ -4552,7 +4600,7 @@ pub(crate) mod tests {
             tools().iter().filter(|t| t.scope == Scope::Read).count()
         );
 
-        let mut seat = None;
+        let mut seat = LineSession::default();
         let _ = handle_rpc(&h, init_req("seat"), Some(&cred), &mut seat).await;
         let resp = handle_rpc(&h, tools_list(), Some(&cred), &mut seat)
             .await
@@ -4640,7 +4688,7 @@ pub(crate) mod tests {
     async fn stdio_needs_no_token() {
         let h = wallet();
         // stdio: serve_conn seeds the SEAT scope, i.e. already trusted.
-        let mut authed = Some(Scope::Seat);
+        let mut authed = LineSession::stdio();
         let resp = handle_rpc(&h, init_req(""), None, &mut authed)
             .await
             .expect("initialize always replies");
@@ -4653,7 +4701,7 @@ pub(crate) mod tests {
 
     /// One `tools/call` over the seat scope: the reply's JSON, or the error text.
     async fn call(h: &WalletHandle, name: &str, args: Value) -> Result<Value, String> {
-        let mut authed = Some(Scope::Seat);
+        let mut authed = LineSession::stdio();
         let req = json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call",
             "params": { "name": name, "arguments": args } });
         let resp = handle_rpc(h, req, None, &mut authed).await.expect("a reply");
@@ -4898,9 +4946,12 @@ pub(crate) mod tests {
     const PRE_AUTH_TEST: std::time::Duration = std::time::Duration::from_millis(300);
 
     async fn spawn_bounded(seat: &str) -> std::net::SocketAddr {
+        spawn_bounded_on(wallet(), seat).await
+    }
+
+    async fn spawn_bounded_on(handle: WalletHandle, seat: &str) -> std::net::SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("addr");
-        let handle = wallet();
         handle
             .execute(molt_core::Command::PatchSettings {
                 patch: json!({ "mcp_token": seat }),
@@ -5038,5 +5089,95 @@ pub(crate) mod tests {
         let _ = tokio::time::timeout(PRE_AUTH_TEST * 6, r.read_line(&mut answer)).await;
         assert!(answer.contains("\"result\""), "seat locked out: {answer:?}");
         drop(squatters);
+    }
+
+    /// An empty seat key starts no TCP endpoint at all (line or HTTP).
+    #[tokio::test]
+    async fn an_empty_seat_token_starts_no_tcp_endpoint() {
+        assert!(tcp_refusal("").is_some_and(|why| why.contains("[mcp].token")));
+        assert_eq!(tcp_refusal("x"), None);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let served = serve_listener(
+            wallet(),
+            listener,
+            false,
+            vec!["127.0.0.1".parse().expect("ip")],
+            String::new(),
+            "readonly".to_string(),
+        );
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), served)
+            .await
+            .expect("refused at once, not served")
+            .expect_err("an empty seat key must not serve");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err.to_string().contains("[mcp].token"), "{err}");
+    }
+
+    /// A live seat key emptied at runtime admits nobody, the empty string
+    /// included.
+    #[test]
+    fn an_empty_seat_key_matches_nobody() {
+        let cred = Credentials { seat: String::new(), read: String::new() };
+        assert_eq!(cred.scope_for(""), None);
+        assert_eq!(cred.scope_for("x"), None);
+    }
+
+    /// A line session re-checks its key on every request: rotated or moved
+    /// to another scope, the session ends with one error.
+    #[tokio::test]
+    async fn a_line_session_ends_when_its_key_no_longer_maps() {
+        let h = wallet();
+        let first = seat_only("first");
+        for after in [
+            seat_only("second"),
+            Credentials { seat: "other".to_string(), read: "first".to_string() },
+        ] {
+            let mut authed = LineSession::default();
+            let _ = handle_rpc(&h, init_req("first"), Some(&first), &mut authed).await;
+            let resp = handle_rpc(&h, tools_list(), Some(&first), &mut authed)
+                .await
+                .expect("tools/list replies");
+            assert!(resp["result"]["tools"].is_array(), "{resp}");
+            let resp = handle_rpc(&h, tools_list(), Some(&after), &mut authed)
+                .await
+                .expect("the refusal replies");
+            assert_eq!(resp["error"]["code"], -32001, "{resp}");
+            assert_eq!(resp["error"]["message"], "unauthorized: key revoked");
+            assert!(authed.revoked, "the connection ends");
+            assert_eq!(authed.scope, None);
+        }
+    }
+
+    /// End to end: a rotation through the engine ends a live line session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rotating_the_seat_key_ends_a_live_line_session() {
+        let handle = wallet();
+        let addr = spawn_bounded_on(handle.clone(), "first").await;
+        let s = tokio::net::TcpStream::connect(addr).await.expect("connect");
+        let (r, mut w) = s.into_split();
+        let mut r = BufReader::new(r);
+        let send = |v: Value| {
+            let mut l = serde_json::to_string(&v).expect("json");
+            l.push('\n');
+            l
+        };
+        w.write_all(send(init_req("first")).as_bytes()).await.expect("write");
+        let mut answer = String::new();
+        r.read_line(&mut answer).await.expect("initialize reply");
+        assert!(answer.contains("\"result\""), "{answer}");
+        handle
+            .execute(Command::PatchSettings { patch: json!({ "mcp_token": "second" }) })
+            .await
+            .expect("rotate");
+        w.write_all(send(tools_list()).as_bytes()).await.expect("write");
+        answer.clear();
+        r.read_line(&mut answer).await.expect("refusal");
+        assert!(answer.contains("key revoked"), "{answer}");
+        answer.clear();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), r.read_line(&mut answer))
+            .await
+            .expect("closed, not idle")
+            .unwrap_or(0);
+        assert_eq!(n, 0, "the session is closed: {answer}");
     }
 }

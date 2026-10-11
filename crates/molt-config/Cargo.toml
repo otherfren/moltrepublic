@@ -17,7 +17,7 @@ workspace = true
 molt-core.workspace = true
 serde.workspace = true
 # the OS CSPRNG for the MCP token — never a /dev/urandom path open, whose
-# failure mode is an EMPTY token that silently disables authentication
+# failure mode is an EMPTY token, i.e. no authenticated MCP port
 getrandom.workspace = true
 toml.workspace = true
 toml_edit.workspace = true

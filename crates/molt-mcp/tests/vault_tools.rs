@@ -105,7 +105,7 @@ async fn serve(w: &WalletHandle) -> u16 {
     let port = listener.local_addr().expect("addr").port();
     let h = w.clone();
     tokio::spawn(async move {
-        let _ = molt_mcp::serve_listener(h, listener, false, vec!["127.0.0.1".parse().expect("ip")], String::new(), String::new())
+        let _ = molt_mcp::serve_listener(h, listener, false, vec!["127.0.0.1".parse().expect("ip")], SEAT.to_string(), READ.to_string())
             .await;
     });
     port

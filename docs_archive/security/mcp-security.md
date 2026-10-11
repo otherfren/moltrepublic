@@ -18,7 +18,7 @@ Both are configured in the `[mcp]` section of `config.toml`:
 
 ```toml
 [mcp]
-# MCP server TCP port. Always served (UI + headless).
+# MCP server TCP port (UI + headless). Not served while token is empty.
 port = 4040
 # allow = which client IPs may connect over TCP:
 #   "127.0.0.1" = loopback only (default)
@@ -34,8 +34,8 @@ token = "2d6f1183510ee92cb59ba355a3f1b502274df9bf708f1bce"
 
 | Transport | Peer-IP allowlist | Token |
 |-----------|-------------------|-------|
-| **HTTP** (`[mcp].port`, `/mcp`, always on; also `--mcp-tcp`) | yes | yes, `Authorization: Bearer` per request |
-| **line** (same port, newline-delimited JSON-RPC) | yes | yes, `initialize` `params.token` per connection |
+| **HTTP** (`[mcp].port`, `/mcp`; also `--mcp-tcp`) | yes | yes, `Authorization: Bearer` per request |
+| **line** (same port, newline-delimited JSON-RPC) | yes | yes, `initialize` `params.token`, re-checked per request |
 | **stdio** (`moltd` headless, no `--mcp-tcp`) | n/a | no |
 
 * **stdio is trusted.** The agent host spawns the process and owns its stdin/stdout,
@@ -46,7 +46,8 @@ token = "2d6f1183510ee92cb59ba355a3f1b502274df9bf708f1bce"
   is closed immediately with no reply — before a byte is read, so HTTP and line
   clients are refused alike. A surviving HTTP request must carry the token as
   `Authorization: Bearer`; a surviving line connection must call `initialize`
-  with it before any other method works. Over HTTP the server is stateless (no
+  with it before any other method works, and every later request re-checks
+  that key against the running session's keys. Over HTTP the server is stateless (no
   `Mcp-Session-Id`, GET/DELETE answer 405) and answers `application/json`; the
   client's `Host` must be loopback while `allow` is loopback-only (DNS-rebinding
   guard), and a browser `Origin` is not validated.
@@ -72,6 +73,9 @@ refusal on both, auth failures come back as JSON-RPC error `-32001`:
 
 * wrong/missing token in `initialize` → `unauthorized: missing or invalid MCP token`.
 * any method before a successful `initialize` → `unauthorized: call initialize with a valid token first`.
+* the session's key no longer maps to its scope (rotated, revoked, or moved
+  between seat and read) → `unauthorized: key revoked`, and the connection
+  is closed.
 * a seat-scope tool called with the read-only key → `unauthorized: read-only token`.
 
 ## The token
@@ -86,13 +90,15 @@ refusal on both, auth failures come back as JSON-RPC error `-32001`:
 
   After that it lives only in `config.toml`.
 * **Rotate it** anytime from the GUI: *Settings → MCP → Rotieren*. That mints a new
-  token, writes it to the config, and takes effect immediately — existing line
-  sessions keep working, but the next `initialize` must use the new value; an HTTP
-  request is checked against the running session's keys every time, so a kept-alive
-  connection stops at once. No restart is involved.
-* An **empty** `token = ""` disables token auth (the node logs a warning on start).
-  The peer-IP allowlist still applies, so loopback-only + empty token is a common,
-  reasonable local setup.
+  token, writes it to the config, and takes effect immediately. Every request,
+  HTTP or line, is checked against the running session's keys: an HTTP request
+  with the old bearer gets `401`, a line session holding the old key gets
+  `unauthorized: key revoked` and is closed. No restart is involved.
+* **No token, no port.** An empty or missing `token` starts no TCP endpoint,
+  neither HTTP nor line; the node logs `[mcp].token empty - TCP MCP off` once
+  and stdio stays. Under `--mcp-tcp` the node stays up without MCP (whoever
+  operates it decides). A seat key emptied at runtime (a hand edit, a patch)
+  admits nobody until a new one is set.
 
 ## The read-only key
 
@@ -120,8 +126,7 @@ never reads one back, and a read-only client never sees a secret at all.
 * `tools/list` shows a read-only client only its own scope; a seat tool called
   with the read key answers `-32001 unauthorized: read-only token`.
 * **Empty means OFF**, never "unauthenticated": an empty `read_token` matches
-  no credential at all. The seat key keeps its own meaning — an empty one still
-  admits everybody as the seat.
+  no credential at all, and an empty seat key starts no TCP endpoint (above).
 * The key is absent from a generated config and is written only once one is
   issued, so a config this build writes still opens on a build that predates it.
 * The scope is **host-local**. The republic knows no roles and no rights; the
@@ -186,22 +191,21 @@ hand-rolled:
   above does exactly this.
 * Keep `allow = "127.0.0.1"`. Loopback-only means only processes on your machine can
   reach it, so a leaked token off-box is still useless.
-* For a throwaway local session you can set `token = ""` to skip the handshake
-  entirely. Do this only on a loopback-bound dev node; never on anything that binds
-  `0.0.0.0`.
+* There is no tokenless port: `token = ""` switches TCP MCP off. A throwaway
+  session without a secret is what stdio is for.
 * Debugging from another machine (e.g. an agent on a LAN host): add that host's IP
   to `allow` **and** hand it the token. Reach for `0.0.0.0` only when you truly
   cannot enumerate the clients, and understand it exposes the full command set to
   anyone who reaches the port with the token.
-* After **Rotieren**, update whatever you pasted the old token into — old value stops
-  working on the next `initialize`.
+* After **Rotieren**, update whatever you pasted the old token into — an open
+  session holding the old value is closed on its next request.
 
 **Reading the logs.** On start the node prints what it is enforcing, which is the
 fastest way to spot a misconfiguration:
 
 ```
 INFO moltd: MCP server listening (co-equal operator, token-gated) mcp=127.0.0.1:4040 allow=127.0.0.1
-WARN moltd: MCP token is empty — the TCP endpoint is unauthenticated; run `moltd --generate-config` or set [mcp].token
+WARN moltd: [mcp].token empty - TCP MCP off
 WARN molt_mcp: MCP connection refused: peer IP not on the allowlist peer=192.168.1.50:41022
 ```
 

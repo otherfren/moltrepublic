@@ -353,11 +353,27 @@ mod tests {
         assert!(headers["www-authenticate"].starts_with("Bearer"));
     }
 
+    /// A live seat key emptied at runtime admits nobody, headerless or not.
     #[tokio::test]
-    async fn http_empty_seat_token_admits_without_header() {
-        let addr = spawn(vec!["127.0.0.1".parse().expect("ip")], "", "").await;
-        let (status, _, body) = http(addr, "POST", &[], &initialize("2025-06-18").to_string()).await;
-        assert_eq!(status, 200, "{body}");
+    async fn http_empty_live_seat_key_admits_nobody() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        // the session's live keys are empty; the boot key is not
+        let handle = wallet();
+        tokio::spawn(async move {
+            let allow = vec!["127.0.0.1".parse().expect("ip")];
+            let _ = serve_listener(handle, listener, false, allow, SEAT.into(), String::new()).await;
+        });
+        let (status, _, _) = http(addr, "POST", &[], &initialize("2025-06-18").to_string()).await;
+        assert_eq!(status, 401);
+        let (status, _, _) = http(
+            addr,
+            "POST",
+            &[("Authorization", "Bearer ")],
+            &initialize("2025-06-18").to_string(),
+        )
+        .await;
+        assert_eq!(status, 401);
     }
 
     #[tokio::test]

@@ -346,24 +346,15 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("binding the engine to {}", config_path.display()))?
     };
 
-    // Always-on MCP over TCP, UI + headless. The bind address, peer-IP allowlist
-    // and required token all come from [mcp] in the config.
+    // MCP over TCP, UI + headless. The bind address, peer-IP allowlist
+    // and required token all come from [mcp] in the config; no token, no port.
     let (bind_ip, allow_all, allowlist) = parse_mcp_allow(&config.mcp.allow);
     let mcp_addr = format!("{bind_ip}:{}", config.mcp.port);
-    if config.mcp.token.is_empty() {
-        tracing::warn!(key = "[mcp].token", "MCP token is empty - the TCP endpoint is unauthenticated");
-        if !config.mcp.read_token.is_empty() {
-            // an empty seat token admits everybody AS THE SEAT, so the
-            // read-only key it sits next to restricts nobody
-            tracing::warn!(
-                key = "[mcp].read_token",
-                "a read-only key is set while the seat token is empty - it grants nothing"
-            );
-        }
-    }
     let mcp_token = config.mcp.token.clone();
     let mcp_read_token = config.mcp.read_token.clone();
-    {
+    if let Some(why) = molt_mcp::tcp_refusal(&mcp_token) {
+        tracing::warn!("{why}");
+    } else {
         let mcp_wallet = wallet.clone();
         let listen_addr = mcp_addr.clone();
         let allowlist = allowlist.clone();
@@ -383,8 +374,8 @@ fn main() -> anyhow::Result<()> {
                 tracing::warn!(error = %e, "MCP TCP server stopped");
             }
         });
+        tracing::info!(mcp = %mcp_addr, allow = %config.mcp.allow, "MCP server listening (co-equal operator, token-gated)");
     }
-    tracing::info!(mcp = %mcp_addr, allow = %config.mcp.allow, "MCP server listening (co-equal operator, token-gated)");
 
     if !config.node.open_on_start.is_empty() {
         open_on_start(&rt, &wallet, config.node.open_on_start.clone());
@@ -611,9 +602,8 @@ fn generate_config(path: &Path) -> anyhow::Result<()> {
     }
     ensure_parent_dir(path)?;
     // Mint a fresh MCP API token and write it into the config. A failing
-    // CSPRNG ABORTS: an empty token disables MCP authentication, and a
-    // config written with one would report success while handing out an
-    // unauthenticated node.
+    // CSPRNG ABORTS: an empty token starts no MCP port, and a config
+    // written with one would report success for a node nobody can drive.
     let settings = Settings {
         mcp_token: molt_config::random_token()
             .with_context(|| "cannot mint an MCP token, so no config is written")?,
@@ -777,6 +767,8 @@ fn run_headless(
         tokio::select! {
             r = async {
                 match mcp_tcp {
+                    // the node stays up without MCP (the startup line said why)
+                    Some(_) if molt_mcp::tcp_refusal(&token).is_some() => std::future::pending().await,
                     Some(addr) => {
                         tracing::info!(%addr, "MCP transport: tcp");
                         molt_mcp::serve_tcp(wallet, addr, allow_all, allowlist, token, read_token).await
