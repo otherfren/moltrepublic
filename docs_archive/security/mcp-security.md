@@ -107,8 +107,10 @@ refusal on both, auth failures come back as JSON-RPC error `-32001`:
     it, unauthenticated and authenticated alike (an authenticated one holds
     a key that no longer maps, so it is closed now rather than at its next
     request); a key set again rebinds.
-  A bind error ends that endpoint (`MCP TCP server stopped`); under
-  `--mcp-tcp` the node then exits, as at start. Only `mcp.port` and
+  A bind error at start ends that endpoint (`MCP TCP server stopped`);
+  under `--mcp-tcp` the node then exits. A bind failing at runtime only
+  logs `MCP TCP bind failed`; the endpoint stays off and the next
+  settings change retries it. Only `mcp.port` and
   `mcp.allow` still need a restart.
 
 ## The read-only key

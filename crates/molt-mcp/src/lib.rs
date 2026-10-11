@@ -248,7 +248,8 @@ pub fn tcp_gate(running: bool, seat_token: &str) -> TcpGate {
 
 /// Serve TCP on `addr` while the RUNNING session holds a seat key: a key
 /// set at runtime binds the port, a key cleared at runtime closes it and
-/// every connection on it. Ends on a bind error or with the engine.
+/// every connection on it. Ends with the engine, or on a bind error at
+/// start; a bind failing at runtime waits for the next settings change.
 pub async fn serve_tcp_live(
     handle: WalletHandle,
     addr: String,
@@ -271,29 +272,40 @@ async fn serve_tcp_live_with(
     let off = Credentials { seat: String::new(), read: String::new() };
     let mut creds = live_tokens(&handle).await.unwrap_or(off);
     let mut acceptor: Option<Acceptor> = None;
+    let mut at_start = true;
+    // false after a failed runtime bind, so other engine events don't retry it
+    let mut may_bind = true;
     if tcp_refusal(&creds.seat).is_some() {
         tracing::warn!(%addr, "{TCP_OFF}");
     }
     loop {
         match tcp_gate(acceptor.is_some(), &creds.seat) {
-            TcpGate::Start => {
-                let listener = TcpListener::bind(&addr).await?;
-                tracing::info!(%addr, allow_all, allowed = allowlist.len(), "MCP server on tcp");
-                acceptor = Some(Acceptor::new(
-                    handle.clone(),
-                    listener,
-                    allow_all,
-                    allowlist.clone(),
-                    creds.clone(),
-                    pre_auth,
-                ));
-            }
+            TcpGate::Start if may_bind => match TcpListener::bind(&addr).await {
+                Err(e) if at_start => return Err(e),
+                Err(e) => {
+                    may_bind = false;
+                    tracing::warn!(%addr, error = %e, "MCP TCP bind failed");
+                }
+                Ok(listener) => {
+                    tracing::info!(%addr, allow_all, allowed = allowlist.len(), "MCP server on tcp");
+                    acceptor = Some(Acceptor::new(
+                        handle.clone(),
+                        listener,
+                        allow_all,
+                        allowlist.clone(),
+                        creds.clone(),
+                        pre_auth,
+                    ));
+                }
+            },
+            TcpGate::Start => {}
             TcpGate::Stop => {
                 acceptor = None; // drops the listener and aborts every connection
                 tracing::warn!(%addr, "{TCP_OFF}");
             }
             TcpGate::Keep => {}
         }
+        at_start = false;
         enum Woke {
             Accepted,
             Settings,
@@ -315,6 +327,7 @@ async fn serve_tcp_live_with(
         };
         match woke {
             Woke::Settings => {
+                may_bind = true;
                 if let Some(live) = live_tokens(&handle).await {
                     creds = live;
                     if let Some(a) = acceptor.as_mut() {
@@ -5465,6 +5478,29 @@ pub(crate) mod tests {
         set_seat(&handle, "again").await;
         assert!(opens_within(addr, std::time::Duration::from_secs(5)).await, "never reopened");
         let (_r, _w, answer) = initialize_on(addr, "again").await;
+        assert!(answer.contains("\"result\""), "{answer}");
+    }
+
+    /// A port taken when the key is set at runtime fails that bind only:
+    /// the endpoint stays live and the next key change binds it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_runtime_bind_failure_retries_on_the_next_key_change() {
+        let handle = wallet();
+        let blocker = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = blocker.local_addr().expect("addr");
+        let (h, a) = (handle.clone(), addr.to_string());
+        let ip = vec!["127.0.0.1".parse().expect("ip")];
+        let live = tokio::spawn(async move {
+            serve_tcp_live_with(h, a, false, ip, std::time::Duration::from_secs(60)).await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        set_seat(&handle, "taken").await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(!live.is_finished(), "a runtime bind failure ended the endpoint: {:?}", live.await);
+        drop(blocker);
+        set_seat(&handle, "free").await;
+        assert!(opens_within(addr, std::time::Duration::from_secs(5)).await, "never rebound");
+        let (_r, _w, answer) = initialize_on(addr, "free").await;
         assert!(answer.contains("\"result\""), "{answer}");
     }
 }

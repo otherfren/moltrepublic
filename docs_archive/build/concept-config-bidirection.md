@@ -14,9 +14,10 @@ draft edits. Deliberate implementation deviations from the text below:
 * Cross-instance safety uses a `<config>.lock` PID file (fail fast naming the
   holder, stale locks swept via `/proc/<pid>`) instead of `flock` — no added
   dependency, and the error can name the PID portably.
-* Still open from C4: applying `mcp.token` / `mcp.allow` rotation to the
-  *live* MCP acceptor (until then they are honestly listed as
-  restart-required) and per-field "needs restart" hints next to each widget
+* Still open from C4: applying `mcp.allow` (and `mcp.port`) to the *live*
+  MCP acceptor (until then they are honestly listed as restart-required;
+  the tokens are live since 2026-10-11, `security/mcp-security.md`) and
+  per-field "needs restart" hints next to each widget
   (today: one persistent warning line naming the changed keys).
 
 ## 1. Goal and non-goals
