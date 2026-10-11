@@ -198,7 +198,7 @@ Only then does `F` spend the ticket, anchor `{name, pkᵢ, nostrpkᵢ}` and keep
 missing KeyPackage — is dropped without a trace.
 
 **The handle rule** (`founding::check_handle`, at create start, join start
-and this ingest — an invalid handle is dropped before it is logged): non-empty,
+and this ingest): non-empty,
 at most `MAX_HANDLE_CHARS` characters, one line, no control or invisible
 characters, no padding, and — for every NEW handle since 2026-10-11 (audit
 #20) — only ASCII plus the precomposed `ä ö ü Ä Ö Ü ß`. Other scripts carry
@@ -208,6 +208,13 @@ normalized. Handles already anchored in a signed roster are never
 re-validated: a sealed table, a ratification and a chain verify whatever
 script their names use. ASCII-internal look-alikes (`l`/`I`, `0`/`O`) stay
 possible.
+At this ingest the shape part (length, one line, no control or invisible
+characters) runs first and drops a bad request silently, before anything is
+logged. The charset part runs after the ticket MAC verifies: a joiner on an
+older build, which still accepts other scripts, is refused with one run-log
+line (`the handle may contain only ASCII and ä ö ü ß - refused, the ticket
+stays usable`) and nothing is anchored. The joiner itself gets no wire
+notice (an older build would not parse one); the founder tells them off-band.
 
 **❹ Deliberate & seal round.** Once *every* seat's key is in, the ritual does
 **not** auto-seal. `F` proposes the **final DAO name**, a free-text

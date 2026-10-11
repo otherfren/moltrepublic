@@ -1105,11 +1105,17 @@ fn check_roster_anchors(identities: &[molt_core::MemberIdentity]) -> Result<(), 
 /// German rendering on it.
 pub const HANDLE_CHARSET_REFUSAL: &str = "the handle may contain only ASCII and ä ö ü ß";
 
-/// A NEW member handle as it may be anchored: non-empty, at most
-/// [`MAX_HANDLE_CHARS`] characters, one line, no control characters, ASCII
-/// plus ä ö ü ß — it becomes forever-bytes in the roster and one line of
-/// every run log.
+/// A NEW member handle as it may be anchored: [`check_handle_shape`] plus
+/// ASCII and ä ö ü ß only.
 pub(crate) fn check_handle(raw: &str) -> Result<(), String> {
+    check_handle_shape(raw)?;
+    check_handle_charset(raw)
+}
+
+/// Non-empty, at most [`MAX_HANDLE_CHARS`] characters, one line, no control
+/// characters — safe to anchor as forever-bytes and to print as one line of
+/// every run log.
+pub(crate) fn check_handle_shape(raw: &str) -> Result<(), String> {
     let handle = raw.trim();
     if handle.is_empty() {
         return Err("the handle must not be empty".to_string());
@@ -1128,8 +1134,12 @@ pub(crate) fn check_handle(raw: &str) -> Result<(), String> {
     {
         return Err("the handle has invisible or unusual spacing".to_string());
     }
-    // other scripts hold look-alikes of Latin letters (audit #20); an
-    // anchored roster is never re-checked against this
+    Ok(())
+}
+
+/// Other scripts hold look-alikes of Latin letters (audit #20); an anchored
+/// roster is never re-checked against this.
+fn check_handle_charset(handle: &str) -> Result<(), String> {
     if !handle.chars().all(|c| c.is_ascii() || "äöüÄÖÜß".contains(c)) {
         return Err(HANDLE_CHARSET_REFUSAL.to_string());
     }
@@ -2253,7 +2263,7 @@ mod ritual_ops {
             // a handle is forever-bytes and one line of the run log: bound it
             // BEFORE it is logged or anchored (review R6) — the request is
             // unauthenticated at this point, so the drop is silent
-            if let Err(e) = check_handle(&member) {
+            if let Err(e) = check_handle_shape(&member) {
                 tracing::warn!(seat, error = %e, "join request with an invalid handle - dropped");
                 return Ok(molt_core::Reply::Ack);
             }
@@ -2302,6 +2312,12 @@ mod ritual_ops {
                     "the ticket code does not match - refused (wrong, edited or foreign link)"
                         .to_string(),
                 );
+            }
+            // an older build accepts handles the charset rule refuses: its
+            // ticket holder is told here, not dropped silently
+            if let Err(e) = check_handle_charset(&member) {
+                tracing::warn!(seat, "founding join rejected: handle charset");
+                return self.refuse_join(idx, format!("{e} - refused, the ticket stays usable"));
             }
             // only a ticket holder gets lines naming it: everything above
             // is unauthenticated and logs fixed text at most once per seat
@@ -3921,6 +3937,93 @@ mod tests {
             carol_npk,
             "the CANONICAL lowercase form is anchored"
         );
+    }
+
+    /// A ticket holder on an older build may send a handle that build
+    /// accepts but the charset rule refuses (audit #20): the founder's run
+    /// log names the refusal and the ticket stays usable. An unverified
+    /// request with such a handle stays silent.
+    #[test]
+    fn a_verified_join_outside_the_charset_is_refused_visibly() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let _guard = rt.enter();
+        let mut st = crate::tests::plain_state();
+        let (founder_sk, founder_pk) = molt_storage::derive_identity_key(&[9u8; 32], "f");
+        let hub = LoopbackHub::calm();
+        st.net_ritual = Some(RitualRuntime {
+            transport: hub.transport(),
+            name: "R".to_string(),
+            agenda: String::new(),
+            charter_proposed: false,
+            founded_ts: 0,
+            features: None,
+            rule_m: 2,
+            rule_n: 2,
+            founder: MemberIdentity {
+                member: "founder".to_string(),
+                identity_pk: founder_pk,
+                nostr_pk: npk_founder(),
+                vault_pk: String::new(),
+            },
+            founder_sk,
+            founder_nostr_sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+            seats: vec![bare_seat("t0")],
+            generation: 0,
+            _sim: Vec::new(),
+            seq: std::sync::atomic::AtomicU64::new(0),
+            nostr: None,
+        });
+        let reply = serde_json::to_string(&invite::ReplyHandover {
+            server: String::new(),
+            queue_id: "aa".to_string(),
+            wrap: "ef".repeat(32),
+        })
+        .expect("handover json");
+        let npk = molt_net::nostr_identity(b"j-entropy", "t0").1;
+        let join = |st: &mut State, member: &str, ticket: &str| {
+            let (sk, pk) = molt_storage::derive_identity_key(&[5u8; 32], member);
+            let kp = hex::encode(
+                molt_net::MlsMember::new(&sk, member)
+                    .expect("mls")
+                    .key_package()
+                    .expect("kp"),
+            );
+            st.cmd_net_join_requested(
+                0,
+                member.to_string(),
+                pk.clone(),
+                npk.clone(),
+                invite::join_mac(ticket, member, &pk, &npk),
+                reply.clone(),
+                String::new(),
+                kp,
+                Vec::new(),
+                crate::vault::seat_vault_key(member.as_bytes(), &npk, &pk).1,
+                None,
+            )
+            .expect("handler never errors");
+        };
+        let refusal = format!("✗ invite 1: {HANDLE_CHARSET_REFUSAL} - refused, the ticket stays usable");
+        let anchored = |st: &State| st.net_ritual.as_ref().expect("ritual").seats[0].identity.clone();
+
+        join(&mut st, "J\u{e9}r\u{f4}me", "wrong");
+        assert!(anchored(&st).is_none());
+        assert!(!st.session.create.run.log.contains(&refusal), "unverified stays silent");
+
+        join(&mut st, "J\u{e9}r\u{f4}me", "t0");
+        assert!(anchored(&st).is_none(), "a refused handle is not anchored");
+        assert!(st.session.create.run.log.contains(&refusal), "{:?}", st.session.create.run.log);
+        let tail = format!(": {HANDLE_CHARSET_REFUSAL} - refused, the ticket stays usable");
+        assert!(
+            crate::known_log_shapes().iter().any(|s| s.len() == 2 && s[0] == "✗ invite " && s[1] == tail),
+            "the refusal has a log shape"
+        );
+
+        join(&mut st, "Jerome", "t0");
+        assert_eq!(anchored(&st).expect("the retry anchors").member, "Jerome");
     }
 
     /// N1 PIN — sign-what-you-see closes at the GENESIS: the roster a member

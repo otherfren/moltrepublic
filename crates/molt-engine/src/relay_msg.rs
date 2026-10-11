@@ -265,6 +265,7 @@ pub fn known_log_shapes() -> &'static [LogShape] {
         &["✗ invite ", ": the request claims a transport key it did not sign with - refused"],
         &["✗ invite ", ": the ticket code does not match - refused (wrong, edited or foreign link)"],
         &["✗ invite ", ": malformed transport key (", ") - refused, the ticket stays usable"],
+        &["✗ invite ", ": the handle may contain only ASCII and ä ö ü ß - refused, the ticket stays usable"],
         &["✗ invite ", ": the name ", " is already taken in this founding - refused"],
         &["✗ invite ", ": that transport key is already used by another seat - refused"],
         &["✗ invite ", ": no usable reply address in the request - refused"],

@@ -661,6 +661,10 @@ pub(crate) static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["✗ Einladung ", ": fehlgeformter Transport-Schlüssel (", ") - abgelehnt, das Ticket bleibt nutzbar"],
     ),
     (
+        &["✗ invite ", ": the handle may contain only ASCII and ä ö ü ß - refused, the ticket stays usable"],
+        &["✗ Einladung ", ": Name nur aus ASCII und ä ö ü ß - abgelehnt, das Ticket bleibt nutzbar"],
+    ),
+    (
         &["✗ invite ", ": the name ", " is already taken in this founding - refused"],
         &["✗ Einladung ", ": der Name ", " ist in dieser Gründung schon vergeben - abgelehnt"],
     ),
