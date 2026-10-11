@@ -207,6 +207,92 @@ inert). The budget now scales its fixed columns. Keystones (dev-ui chain):
 `the_orphan_restore_button_sits_in_the_local_column_and_fits` (geometry at
 ui-scale 1.43), `a_double_click_on_an_orphan_row_arms_the_restore_modal`.
 
+## 7e. Restore consent v2 (audit 2026-10-10 #5, #6; decided 2026-10-11)
+
+**Status: design note, written before the code.** v1 signs `(republic_id,
+member, identity_pk, nostr_pk)` only, yet counts as a full voice: survivors
+auto-signed any `relays` beside it (#5), and on m = 2 one member plus a
+consent from the public chain sealed a `Restored` at any height, rolling the
+seat back to an old anchor (#6).
+
+**Preimage** (`molt_core::chain::restore_consent_bytes_v2`; `F` = le32
+length + bytes, as everywhere):
+
+    "molt-restore-consent-v2\0" F(republic_id) F(member) F(identity_pk)
+    0x00 | 0x01 F(nostr_pk)          (the block's new anchor, as v1)
+    le64(count) F(relay)...          (the block's `relays`, in block order)
+    le64(anchor_height)
+    F(prev_anchor)
+
+- `relays` is exactly the list the block carries - the ledger entry the
+  seat declares. A v2 restore therefore never takes the ratified-pool
+  fallback: the coordinator puts the declaration in the block as signed.
+- `anchor_height` is the chain height the rejoiner's consent anchors to:
+  the head height of the node that minted its recovery link (a total-loss
+  rejoiner holds no chain), or its own local head on the detached
+  self-service path. The link carries it with `prev_anchor`
+  (`ConsentAnchor`, additive on both link shapes).
+- `prev_anchor` is the seat's WORKING transport anchor the restore
+  replaces (the last `Restored` block's `nostr_pk`, else the founding
+  roster's; empty on loopback).
+
+**Carriage.** The consent string is self-describing:
+`v2:<anchor_height>:<prev_anchor>:<sig hex>` - decimal height without
+leading zeros, `prev_anchor` empty or lowercase hex. A v1 consent stays the
+bare signature hex. The string rides `RecoverRequest.consent` and
+`ChainChange::Membership.consent` unchanged in shape (no new wire or block
+field), so `approval_bytes` binds the height and the previous anchor
+through the consent bytes it already signs; a non-canonical rendering is
+refused rather than normalized.
+
+**Rules for a v2 consent**, one shared check
+(`chain::verify::check_restore_consent`) on every path - the verifier's
+full, suffix and wiki-export walks, the sealer (`try_commit`), the
+registration gate (`sealable_membership`), the auto-approver and the
+coordinator's ladder (`verify_and_propose_restore`):
+
+1. the signature verifies over the v2 preimage against the ANCHORED
+   identity key, with the block's own relays;
+2. freshness window: `anchor_height < H <= anchor_height +
+   RESTORE_CONSENT_WINDOW` (1024 blocks), `H` the block's height (the
+   proposal's next height on the live paths);
+3. single use: `prev_anchor` equals the seat's working anchor at `H - 1`.
+   A sealed restore moves that anchor, so the same consent never seals
+   twice, and an older unsealed consent dies with the first restore after
+   it. The walk carries the working anchors (checkpoint-v5 `anchors`), so
+   full and suffix holders decide identically; the export walk folds them
+   from the genesis and every membership block it ships.
+
+Rules 1-2 are block-local (they also gate the tie-break's cheap signature
+check); rule 3 needs the walk state.
+
+**v1 acceptance.** A v1 consent keeps verifying byte-identically wherever
+it did: the verifier and the sealer still count it as one voice, so every
+sealed v1 block and every pre-v2 chain verifies unchanged, and the
+coordinator still proposes a v1 request (its seat proof binds the
+relays). What changes: a survivor **never auto-signs a v1 consent** - it
+binds neither relays nor position, so it gets the human card, like a
+consent-less restore. Residual (accepted, recorded in known debt): a
+hostile member holding m - 1 voices can still seal a block around a v1
+consent from the chain; closing that needs a cutoff height, which a v1-era
+chain cannot be retrofitted with.
+
+**New rejoiners emit v2** whenever their link (or the detached reattach
+context) carries a `ConsentAnchor`; a link minted by an older build carries
+none, and the rejoiner falls back to v1 (human approvals). Every new mint
+carries one.
+
+**Version skew.** An older build cannot verify a v2 consent (its v1
+preimage does not match), so it refuses a v2 `Restored` block and stops
+extending until it upgrades - the coordinated-upgrade rule every signed
+layout change here follows.
+
+**Freshness window, conservative choice.** 1024 blocks bounds how late a
+consent may seal; single use (rule 3) is what closes the replay. A link
+whose mint height fell out of the window, or a detached seat more than
+1024 blocks behind, is refused at the coordinator
+(`restore consent is stale`); a fresh mint fixes it.
+
 ## 8. Execution order & landing
 
 WP1 → WP2 → WP3+4 (one window build at the end) → WP5. TDD per WP; commit +
