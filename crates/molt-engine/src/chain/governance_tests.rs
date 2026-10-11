@@ -257,14 +257,14 @@ fn only_the_proposer_may_withdraw() {
         "petra",
         1,
         WorkspaceEvent::Proposed {
-            id: ProposalId(9),
+            id: ProposalId(8),
             surface: Surface::Organization,
             payload: json!({ "op": "set_name", "value": "Petras" }),
         },
     );
     // walter is not the proposer — the command refuses
     assert!(matches!(
-        peer.cmd_withdraw(ProposalId(9), None),
+        peer.cmd_withdraw(ProposalId(8), None),
         Err(molt_core::MoltError::NotTheProposer(_))
     ));
     // forgery: dora's link carries petra's withdraw — dropped
@@ -272,10 +272,10 @@ fn only_the_proposer_may_withdraw() {
         &mut peer,
         "dora",
         1,
-        WorkspaceEvent::Withdrawn { id: ProposalId(9), by: "petra".to_string() },
+        WorkspaceEvent::Withdrawn { id: ProposalId(8), by: "petra".to_string() },
     );
     assert_eq!(
-        peer.proposals.get(&9).expect("card").state,
+        peer.proposals.get(&8).expect("card").state,
         ProposalState::Proposed
     );
     // dora withdrawing petra's card as herself — not the proposer, dropped
@@ -283,10 +283,10 @@ fn only_the_proposer_may_withdraw() {
         &mut peer,
         "dora",
         2,
-        WorkspaceEvent::Withdrawn { id: ProposalId(9), by: "dora".to_string() },
+        WorkspaceEvent::Withdrawn { id: ProposalId(8), by: "dora".to_string() },
     );
     assert_eq!(
-        peer.proposals.get(&9).expect("card").state,
+        peer.proposals.get(&8).expect("card").state,
         ProposalState::Proposed
     );
     // the real proposer pulls it back
@@ -294,11 +294,48 @@ fn only_the_proposer_may_withdraw() {
         &mut peer,
         "petra",
         2,
-        WorkspaceEvent::Withdrawn { id: ProposalId(9), by: "petra".to_string() },
+        WorkspaceEvent::Withdrawn { id: ProposalId(8), by: "petra".to_string() },
     );
-    let p = peer.proposals.get(&9).expect("card");
+    let p = peer.proposals.get(&8).expect("card");
     assert_eq!(p.state, ProposalState::Rejected);
     assert!(p.withdrawn);
+}
+
+/// The withdraw right is the id's minting seat, never whoever delivered
+/// the card first: a re-serve (or an insider's copy) that lands first must
+/// neither let its sender retract the card nor lock the proposer out.
+#[test]
+fn a_card_delivered_by_another_member_stays_the_proposers_to_withdraw() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut peer = chain_peer_3("walter", &b);
+    // sorted [dora, petra, walter]: petra mints ids = 2 mod 3
+    let card = WorkspaceEvent::Proposed {
+        id: ProposalId(8),
+        surface: Surface::Organization,
+        payload: json!({ "op": "set_name", "value": "Petras" }),
+    };
+    wire(&mut peer, "dora", 1, card.clone());
+    wire(
+        &mut peer,
+        "dora",
+        2,
+        WorkspaceEvent::Withdrawn { id: ProposalId(8), by: "dora".to_string() },
+    );
+    assert_eq!(
+        peer.proposals.get(&8).expect("card").state,
+        ProposalState::Proposed,
+        "the first deliverer cannot retract another seat's card"
+    );
+    wire(&mut peer, "petra", 1, card);
+    wire(
+        &mut peer,
+        "petra",
+        2,
+        WorkspaceEvent::Withdrawn { id: ProposalId(8), by: "petra".to_string() },
+    );
+    let p = peer.proposals.get(&8).expect("card");
+    assert_eq!(p.state, ProposalState::Rejected);
+    assert!(p.withdrawn, "the minting seat retracts it");
 }
 
 /// A withdraw ahead of its proposal parks (G7 orders per sender only)
@@ -312,19 +349,19 @@ fn a_withdraw_ahead_of_its_proposal_parks_and_registers() {
         &mut peer,
         "petra",
         1,
-        WorkspaceEvent::Withdrawn { id: ProposalId(9), by: "petra".to_string() },
+        WorkspaceEvent::Withdrawn { id: ProposalId(8), by: "petra".to_string() },
     );
     wire(
         &mut peer,
         "petra",
         2,
         WorkspaceEvent::Proposed {
-            id: ProposalId(9),
+            id: ProposalId(8),
             surface: Surface::Organization,
             payload: json!({ "op": "set_name", "value": "Gone" }),
         },
     );
-    let p = peer.proposals.get(&9).expect("card");
+    let p = peer.proposals.get(&8).expect("card");
     assert_eq!(p.state, ProposalState::Rejected);
     assert!(p.withdrawn, "the parked withdraw registered on arrival");
 }

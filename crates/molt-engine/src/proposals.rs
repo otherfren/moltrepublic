@@ -545,6 +545,16 @@ impl State {
         id
     }
 
+    /// The seat whose stride `id` falls on (the inverse of
+    /// [`Self::mint_proposal_id`]).
+    pub(crate) fn minting_seat(&self, id: u64) -> Option<String> {
+        let mut roster = self.replica.as_ref()?.roster.clone();
+        roster.sort();
+        let n = u64::try_from(roster.len()).ok().filter(|n| *n > 0)?;
+        let k = usize::try_from((id % n + n - 1) % n).ok()?;
+        roster.get(k).cloned()
+    }
+
     /// `(n, k)`: roster size and this seat's position in the SORTED roster -
     /// deterministic on every node whatever order the Vec arrived in.
     fn seat_stride(&self) -> (u64, u64) {
@@ -1117,6 +1127,7 @@ impl State {
     /// this node does not know yet PARKS the verdict (bounded, one slot
     /// per id — a withdraw has exactly one legitimate author).
     pub(crate) fn register_withdraw(&mut self, id: u64, by: &str, ts: u64) -> WithdrawOutcome {
+        let minter = self.minting_seat(id);
         let Some(p) = self.proposals.get_mut(&id) else {
             if id > self.next_id.saturating_add(PARKED_DECLINE_ID_WINDOW) {
                 tracing::warn!(%id, %by, "dropping a withdraw for an implausible proposal id");
@@ -1137,8 +1148,11 @@ impl State {
         if p.state != ProposalState::Proposed {
             return WithdrawOutcome::Ignored;
         }
-        if p.by != by {
-            tracing::warn!(%id, %by, recorded = %p.by, "dropping a withdraw not from the recorded proposer");
+        // `p.by` is whoever delivered the card first (a re-serve included);
+        // the id's minting seat is the proposer every node agrees on
+        let proposer = minter.unwrap_or_else(|| p.by.clone());
+        if proposer != by {
+            tracing::warn!(%id, %by, %proposer, "dropping a withdraw not from the proposer");
             return WithdrawOutcome::Ignored;
         }
         p.state = ProposalState::Rejected;
