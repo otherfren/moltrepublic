@@ -46,8 +46,8 @@ token = "2d6f1183510ee92cb59ba355a3f1b502274df9bf708f1bce"
   is closed immediately with no reply — before a byte is read, so HTTP and line
   clients are refused alike. A surviving HTTP request must carry the token as
   `Authorization: Bearer`; a surviving line connection must call `initialize`
-  with it before any other method works, and every later request re-checks
-  that key against the running session's keys. Over HTTP the server is stateless (no
+  with it before any other method works, and every later request (a second
+  `initialize` included) re-checks that key against the running session's keys. Over HTTP the server is stateless (no
   `Mcp-Session-Id`, GET/DELETE answer 405) and answers `application/json`; the
   client's `Host` must be loopback while `allow` is loopback-only (DNS-rebinding
   guard), and a browser `Origin` is not validated.
@@ -93,10 +93,12 @@ refusal on both, auth failures come back as JSON-RPC error `-32001`:
   token, writes it to the config, and takes effect immediately. Every request,
   HTTP or line, is checked against the running session's keys: an HTTP request
   with the old bearer gets `401`, a line session holding the old key gets
-  `unauthorized: key revoked` and is closed. No restart is involved.
+  `unauthorized: key revoked` and is closed. No restart is involved, unless
+  the node started without a token (below).
 * **No token, no port.** An empty or missing `token` starts no TCP endpoint,
   neither HTTP nor line; the node logs `[mcp].token empty - TCP MCP off` once
-  and stdio stays. Under `--mcp-tcp` the node stays up without MCP (whoever
+  and stdio stays. A token set while it runs opens the port only at the next
+  start. Under `--mcp-tcp` the node stays up without MCP (whoever
   operates it decides). A seat key emptied at runtime (a hand edit, a patch)
   admits nobody until a new one is set.
 

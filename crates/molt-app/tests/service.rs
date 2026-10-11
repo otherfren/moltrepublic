@@ -16,11 +16,17 @@ const TOKEN: &str = "svc";
 struct Node {
     child: Child,
     port: u16,
+    mcp_tcp: u16,
     stderr: Arc<Mutex<Vec<u8>>>,
 }
 
 impl Node {
     fn spawn(dir: &Path, open_on_start: &str) -> Node {
+        Node::spawn_with(dir, open_on_start, &format!("token = \"{TOKEN}\"\n"))
+    }
+
+    /// `token_line`: the `[mcp]` token entry verbatim, `""` for none.
+    fn spawn_with(dir: &Path, open_on_start: &str, token_line: &str) -> Node {
         let port = free_port();
         let mcp_tcp = free_port();
         let config = dir.join("config.toml");
@@ -29,7 +35,7 @@ impl Node {
             format!(
                 "[node]\nheadless = true\nopen_on_start = \"{open_on_start}\"\n\
                  [storage]\nworkspace_dir = \"{}\"\n\
-                 [mcp]\nport = {port}\nallow = \"127.0.0.1\"\ntoken = \"{TOKEN}\"\n",
+                 [mcp]\nport = {port}\nallow = \"127.0.0.1\"\n{token_line}",
                 dir.join("ws").display()
             ),
         )
@@ -56,7 +62,7 @@ impl Node {
                 sink.lock().expect("stderr lock").extend_from_slice(&buf[..n]);
             }
         });
-        Node { child, port, stderr }
+        Node { child, port, mcp_tcp, stderr }
     }
 
     fn stderr(&self) -> String {
@@ -233,4 +239,28 @@ fn a_phrase_sealed_open_on_start_only_warns_and_the_node_stays_up() {
     assert!(node.child.try_wait().expect("try_wait").is_none(), "the node stays up");
     node.sigterm();
     assert_eq!(node.wait_exit(15), Some(0));
+}
+
+/// No seat token, no TCP port - neither the always-on one nor `--mcp-tcp` -
+/// and the node stays up until stopped.
+#[test]
+fn no_token_binds_no_mcp_port_and_the_node_stays_up() {
+    for token_line in ["token = \"\"\n", ""] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut node = Node::spawn_with(dir.path(), "", token_line);
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !node.stderr().contains("mode: headless") {
+            assert!(Instant::now() < deadline, "never reached headless\n{}", node.stderr());
+            assert!(node.child.try_wait().expect("try_wait").is_none(), "exited\n{}", node.stderr());
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(node.child.try_wait().expect("try_wait").is_none(), "the node stays up\n{}", node.stderr());
+        assert!(node.stderr().contains("[mcp].token empty - TCP MCP off"), "{}", node.stderr());
+        for port in [node.port, node.mcp_tcp] {
+            assert!(TcpStream::connect(("127.0.0.1", port)).is_err(), "port {port} bound\n{}", node.stderr());
+        }
+        node.sigterm();
+        assert_eq!(node.wait_exit(15), Some(0), "{}", node.stderr());
+    }
 }

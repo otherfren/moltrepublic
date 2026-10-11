@@ -500,6 +500,15 @@ async fn handle_rpc(
     let method = req.get("method").and_then(Value::as_str).unwrap_or("");
     let params = req.get("params").cloned().unwrap_or(Value::Null);
 
+    // first, so a re-`initialize` cannot dodge it
+    if let (Some(cred), Some(scope)) = (auth, authed.scope) {
+        if cred.scope_for(&authed.key) != Some(scope) {
+            tracing::warn!("MCP line session closed: key revoked");
+            *authed = LineSession { revoked: true, ..LineSession::default() };
+            return Some(error_response(id, -32001, "unauthorized: key revoked"));
+        }
+    }
+
     // `initialize` carries the token; authenticate here.
     if method == "initialize" {
         if let Some(cred) = auth {
@@ -526,13 +535,6 @@ async fn handle_rpc(
     }
 
     // Everything else requires an authenticated connection.
-    if let (Some(cred), Some(scope)) = (auth, authed.scope) {
-        if cred.scope_for(&authed.key) != Some(scope) {
-            tracing::warn!("MCP line session closed: key revoked");
-            *authed = LineSession { revoked: true, ..LineSession::default() };
-            return Some(error_response(id, -32001, "unauthorized: key revoked"));
-        }
-    }
     let Some(scope) = authed.scope else {
         return has_id.then(|| {
             error_response(
@@ -5145,6 +5147,26 @@ pub(crate) mod tests {
             assert_eq!(resp["error"]["message"], "unauthorized: key revoked");
             assert!(authed.revoked, "the connection ends");
             assert_eq!(authed.scope, None);
+        }
+    }
+
+    /// A re-`initialize` on a session whose key died ends it too, with the
+    /// same error, whatever key the re-initialize carries.
+    #[tokio::test]
+    async fn a_re_initialize_after_revocation_ends_the_session() {
+        let h = wallet();
+        let first = seat_only("first");
+        let after = seat_only("second");
+        for again in ["first", "second"] {
+            let mut authed = LineSession::default();
+            let _ = handle_rpc(&h, init_req("first"), Some(&first), &mut authed).await;
+            let resp = handle_rpc(&h, init_req(again), Some(&after), &mut authed)
+                .await
+                .expect("the refusal replies");
+            assert_eq!(resp["error"]["message"], "unauthorized: key revoked", "{resp}");
+            assert!(authed.revoked, "the connection ends");
+            assert_eq!(authed.scope, None);
+            assert!(authed.key.is_empty());
         }
     }
 
