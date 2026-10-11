@@ -22,9 +22,6 @@ fn no_dev_graph() -> BTreeSet<(String, String)> {
             "all",
             "--prefix",
             "none",
-            // chrono's per-OS time zone lookup (haiku `cc`, macOS/wasm `-sys`)
-            "--prune",
-            "iana-time-zone",
         ])
         .current_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
         .output()
