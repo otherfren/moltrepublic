@@ -12,8 +12,8 @@ use crate::labels::{theme_name, to_screen};
 use crate::mirror::sort_bk_rows;
 use crate::net_tor::tor_probe_args;
 use crate::settings::{
-    apply_settings_fields, browse_start_dir, read_settings_draft, save_draft, settings_draft_differs,
-    stored_settings,
+    apply_settings_fields, browse_start_dir, read_settings_draft, s3_plaintext_ask, save_draft,
+    settings_draft_differs, stored_settings,
 };
 use crate::app::Ctx;
 use crate::{AppScreen, AppWindow, BackupRow, Strings, Theme};
@@ -59,9 +59,10 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
-            let settings = read_settings_draft(&ui, &stored_settings(&cx.last_settings));
-            let wake = ui.get_cfg_poke_wake().to_string();
-            cx.issue_draft(wake, settings);
+            if ask_plaintext_s3(&ui, &cx, S3_THEN_SAVE) {
+                return;
+            }
+            save_now(&ui, &cx);
         });
     }
 
@@ -130,18 +131,39 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
-            // everything comes from the DRAFT, so an unsaved edit is what
-            // gets probed (the media bucket was removed 2026-09-04)
-            let (target, bucket) = (molt_core::S3Target::Workspaces, ui.get_cfg_s3_bucket());
-            cx.issue(
-                Command::NetTestS3 {
-                    target,
-                    endpoint: ui.get_cfg_s3_endpoint().to_string(),
-                    access_key: ui.get_cfg_s3_access().to_string(),
-                    secret_key: ui.get_cfg_s3_secret().to_string(),
-                    bucket: bucket.to_string(),
-                },
-            );
+            if ask_plaintext_s3(&ui, &cx, S3_THEN_TEST) {
+                return;
+            }
+            cx.issue(test_s3_command(&ui));
+        });
+    }
+
+    {
+        // the acknowledgement lands first, then what asked for it
+        let cx = ctx.clone();
+        ui.on_s3_plaintext_confirmed(move |url, then| {
+            let Some(ui) = cx.weak.upgrade() else {
+                return;
+            };
+            let ack = Command::PatchSettings {
+                patch: serde_json::json!({ "s3_plaintext_confirmed": url.as_str() }),
+            };
+            let next = if then == S3_THEN_TEST { Some(test_s3_command(&ui)) } else { None };
+            let w = cx.wallet.clone();
+            let weak = cx.weak.clone();
+            let save = (then == S3_THEN_SAVE).then(|| cx.clone());
+            cx.rt.spawn(async move {
+                if let Err(e) = w.execute(ack).await {
+                    let _ = weak.upgrade_in_event_loop(move |ui| ui.invoke_show_toast_error(error_toast(&ui, &e)));
+                    return;
+                }
+                if let Some(cmd) = next {
+                    let _ = w.execute(cmd).await;
+                }
+                if let Some(cx) = save {
+                    let _ = weak.upgrade_in_event_loop(move |ui| save_now(&ui, &cx));
+                }
+            });
         });
     }
 
@@ -354,5 +376,37 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 });
             });
         });
+    }
+}
+
+const S3_THEN_SAVE: i32 = 1;
+const S3_THEN_TEST: i32 = 2;
+
+/// Open the plaintext acknowledgement for the draft's endpoint when it
+/// needs one; true = asked, the caller waits for the answer.
+fn ask_plaintext_s3(ui: &AppWindow, cx: &Ctx, then: i32) -> bool {
+    let confirmed = stored_settings(&cx.last_settings).s3_plaintext_confirmed;
+    let Some(url) = s3_plaintext_ask(&ui.get_cfg_s3_endpoint(), &confirmed) else {
+        return false;
+    };
+    ui.set_cfg_s3_pt_then(then);
+    ui.set_cfg_s3_pt_url(url.into());
+    true
+}
+
+fn save_now(ui: &AppWindow, cx: &Ctx) {
+    let settings = read_settings_draft(ui, &stored_settings(&cx.last_settings));
+    let wake = ui.get_cfg_poke_wake().to_string();
+    cx.issue_draft(wake, settings);
+}
+
+/// The probe of the DRAFT, so an unsaved edit is what gets tested.
+fn test_s3_command(ui: &AppWindow) -> Command {
+    Command::NetTestS3 {
+        target: molt_core::S3Target::Workspaces,
+        endpoint: ui.get_cfg_s3_endpoint().to_string(),
+        access_key: ui.get_cfg_s3_access().to_string(),
+        secret_key: ui.get_cfg_s3_secret().to_string(),
+        bucket: ui.get_cfg_s3_bucket().to_string(),
     }
 }

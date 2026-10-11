@@ -472,6 +472,7 @@ impl State {
         stored.wallet_daemon_confirmed = merged.wallet_daemon_confirmed;
         stored.wallet_daemon_login = merged.wallet_daemon_login.clone();
         stored.wallet_network = merged.wallet_network.clone();
+        stored.s3_plaintext_confirmed = merged.s3_plaintext_confirmed.clone();
         let named = |key: &str, value: &str| names.contains(key).then(|| value.to_string());
         let secrets = molt_core::NodePosture {
             mcp_token: named("mcp_token", &merged.mcp_token),
@@ -577,6 +578,8 @@ impl State {
         settings.wallet_daemon_url = self.session.settings.wallet_daemon_url.clone();
         settings.wallet_daemon_confirmed = self.session.settings.wallet_daemon_confirmed;
         settings.wallet_network = self.session.settings.wallet_network.clone();
+        // the plaintext S3 acknowledgement too: a save neither grants nor drops it
+        settings.s3_plaintext_confirmed = self.session.settings.s3_plaintext_confirmed.clone();
         self.session.settings = settings;
         self.mark_restart_required();
         if self.store.is_some() {
@@ -734,9 +737,13 @@ impl State {
         let bucket = match target {
             molt_core::S3Target::Workspaces => or_saved(bucket, &s.s3_bucket),
         };
-        let config =
-            match molt_net::s3::S3Config::from_settings(&endpoint, &access_key, &secret_key, &bucket)
-            {
+        let config = match molt_net::s3::S3Config::from_settings(
+            &endpoint,
+            &access_key,
+            &secret_key,
+            &bucket,
+            &s.s3_plaintext_confirmed,
+        ) {
                 Ok(c) => c,
                 Err(e) => {
                     self.set_s3_verdict(target, format!("error: {e}"));
@@ -964,6 +971,7 @@ impl State {
             &s.s3_access_key,
             &s.s3_secret_key,
             &s.s3_bucket,
+            &s.s3_plaintext_confirmed,
         )
         .map_err(|e| e.to_string())
         .and_then(|config| {
@@ -2621,6 +2629,9 @@ fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {
     validate_wake_settings(s)?;
     validate_fonts(s.font_app, s.font_nav, s.font_editor)?;
     validate_wallet_settings(s)?;
+    if !s.s3_plaintext_confirmed.is_empty() && molt_net::s3::S3Endpoint::parse(&s.s3_plaintext_confirmed).is_err() {
+        return Err(MoltError::Settings("s3_plaintext_confirmed: not an endpoint".to_string()));
+    }
     Ok(())
 }
 
@@ -2814,7 +2825,6 @@ mod patch_tests {
 
         for bad in [
             serde_json::json!({ "wallet_daemon_url": "ws://node.onion" }),
-            serde_json::json!({ "wallet_daemon_url": "http://node.example.org" }),
             serde_json::json!({ "wallet_daemon_url": "https://u:p@node.example.org" }),
             serde_json::json!({ "wallet_network": "foonet" }),
             serde_json::json!({ "wallet_daemon_login": "u:p\nX: y" }),
@@ -2824,6 +2834,16 @@ mod patch_tests {
         let s = settings(&w).await;
         assert_eq!(s.wallet_daemon_url, "https://other.example.org");
         assert_eq!(s.wallet_daemon_login, "u:p", "a refused patch changes nothing");
+
+        // plaintext to the clearnet is a daemon too (2026-10-11), unconfirmed
+        // until the same acknowledgement as any non-onion node
+        w.execute(patch(serde_json::json!({ "wallet_daemon_url": "http://node.example.org" })))
+            .await
+            .expect("plaintext clearnet");
+        let s = settings(&w).await;
+        assert_eq!((s.wallet_daemon_url.as_str(), s.wallet_daemon_confirmed), ("http://node.example.org", false));
+        w.execute(patch(serde_json::json!({ "wallet_daemon_confirmed": true }))).await.expect("confirm");
+        assert!(settings(&w).await.wallet_daemon_confirmed);
     }
 
     /// The write-only secrets are not unreachable (ADR-0007): a

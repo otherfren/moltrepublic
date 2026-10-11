@@ -297,3 +297,64 @@ async fn an_account_edit_clears_the_probe_verdict() {
     };
     assert_eq!(sv.s3_test, "", "a new access key unproves the bucket");
 }
+
+async fn s3_verdict(w: &molt_engine::WalletHandle) -> String {
+    let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
+        panic!("read session failed");
+    };
+    sv.s3_test
+}
+
+async fn stored(w: &molt_engine::WalletHandle) -> molt_core::SessionSettings {
+    let Ok(Reply::Session(sv)) = w.execute(Command::ReadSession).await else {
+        panic!("read session failed");
+    };
+    sv.settings
+}
+
+/// Decided 2026-10-11: plaintext to a clearnet host is dialed only after its
+/// one-time acknowledgement, which names the endpoint. TEST-NET-3: the
+/// acknowledged probe passes the gate ("testing") and never reaches a host.
+#[tokio::test]
+async fn a_plaintext_clearnet_endpoint_waits_for_its_acknowledgement() {
+    let plain = "http://203.0.113.9:9000";
+    let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
+    w.execute(cmd_for(plain)).await.expect("NetTestS3 accepted");
+    assert_eq!(s3_verdict(&w).await, "error: endpoint: http:// to a clearnet host: not confirmed");
+
+    let ack = |v: &str| Command::PatchSettings { patch: serde_json::json!({ "s3_plaintext_confirmed": v }) };
+    w.execute(ack("http://203.0.113.10:9000")).await.expect("patched");
+    w.execute(cmd_for(plain)).await.expect("NetTestS3 accepted");
+    assert!(s3_verdict(&w).await.contains("not confirmed"), "another endpoint's acknowledgement");
+
+    w.execute(ack(plain)).await.expect("patched");
+    w.execute(cmd_for(plain)).await.expect("NetTestS3 accepted");
+    assert_eq!(s3_verdict(&w).await, "testing", "the gate let it through");
+}
+
+/// The acknowledgement has one door, `patch_settings`: a wholesale save
+/// neither grants nor drops it, and a value that is no endpoint is refused.
+#[tokio::test]
+async fn the_plaintext_acknowledgement_has_one_door() {
+    let w = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
+    let plain = "http://s3.example.org";
+    w.execute(Command::PatchSettings { patch: serde_json::json!({ "s3_plaintext_confirmed": plain }) })
+        .await
+        .expect("patched");
+    let mut wholesale = stored(&w).await;
+    wholesale.s3_plaintext_confirmed = String::new();
+    save_all(&w, wholesale.clone()).await.expect("saved");
+    assert_eq!(stored(&w).await.s3_plaintext_confirmed, plain, "a save keeps it");
+    wholesale.s3_plaintext_confirmed = "http://other.example.org".to_string();
+    save_all(&w, wholesale).await.expect("saved");
+    assert_eq!(stored(&w).await.s3_plaintext_confirmed, plain, "a save cannot grant one");
+
+    let bad = w
+        .execute(Command::PatchSettings { patch: serde_json::json!({ "s3_plaintext_confirmed": "ftp://x" }) })
+        .await;
+    assert!(bad.is_err(), "{bad:?}");
+    w.execute(Command::PatchSettings { patch: serde_json::json!({ "s3_plaintext_confirmed": "" }) })
+        .await
+        .expect("cleared");
+    assert_eq!(stored(&w).await.s3_plaintext_confirmed, "");
+}

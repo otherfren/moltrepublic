@@ -144,3 +144,16 @@ fn the_embedded_tor_mode_round_trips_and_is_selectable_when_built_in() {
     apply_settings_fields(&ui, &stored);
     assert_eq!(read_settings_draft(&ui, &stored).tor_mode, "embedded");
 }
+
+/// Plaintext to a clearnet S3 host asks once per endpoint (decided
+/// 2026-10-11); onion, localhost, private IPs and https never ask.
+#[test]
+fn a_plaintext_clearnet_endpoint_asks_until_acknowledged() {
+    use crate::settings::s3_plaintext_ask;
+    assert_eq!(s3_plaintext_ask(" http://s3.example.org ", ""), Some("http://s3.example.org".to_string()));
+    assert_eq!(s3_plaintext_ask("http://s3.example.org", "http://other.example.org"), Some("http://s3.example.org".to_string()));
+    assert_eq!(s3_plaintext_ask("http://s3.example.org", "http://s3.example.org"), None);
+    for quiet in ["", "https://s3.example.org", "s3.example.org", "http://127.0.0.1:9000", "http://192.168.1.5:9000"] {
+        assert_eq!(s3_plaintext_ask(quiet, ""), None, "{quiet}");
+    }
+}

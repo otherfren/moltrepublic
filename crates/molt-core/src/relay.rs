@@ -186,7 +186,8 @@ impl core::fmt::Display for DaemonUrlError {
 
 /// A Monero daemon URL (`http`/`https`), normalized, and where it lives -
 /// the relay host rule with the web schemes. Unlike
-/// [`relay_kind`] it fails closed: a refused URL is never dialed.
+/// [`relay_kind`] it fails closed: a refused URL is never dialed. Unlike a
+/// relay, `http://` to a clearnet host passes; its confirmation gates it.
 pub fn daemon_kind(url: &str) -> Result<(String, RelayKind), DaemonUrlError> {
     let (url, kind) = classified(url, Schemes::DAEMON).map_err(DaemonUrlError)?;
     if url.contains('?') {
@@ -195,21 +196,71 @@ pub fn daemon_kind(url: &str) -> Result<(String, RelayKind), DaemonUrlError> {
     Ok((url, kind))
 }
 
+/// Plaintext `http://` to a clearnet daemon: allowed, but its confirmation
+/// carries the plaintext warning. False for anything [`daemon_kind`] refuses.
+#[must_use]
+pub fn daemon_plaintext_clearnet(url: &str) -> bool {
+    matches!(daemon_kind(url), Ok((u, RelayKind::Clearnet)) if u.starts_with(Schemes::DAEMON.plain))
+}
+
+/// Plaintext `http://` to a clearnet S3 endpoint, read like the S3 client
+/// does (a bare host is https). False for anything that does not parse.
+#[must_use]
+pub fn s3_plaintext_clearnet(endpoint: &str) -> bool {
+    let raw = endpoint.trim();
+    let plain = raw
+        .split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("http"));
+    plain
+        && url::Url::parse(raw)
+            .ok()
+            .and_then(|u| u.host().map(|h| s3_host_kind(&h)))
+            == Some(RelayKind::Clearnet)
+}
+
+/// [`host_kind`] for an S3 host, except that any `.onion` name counts as
+/// onion: the dialer routes it over Tor or refuses it, never the clearnet.
+#[must_use]
+pub fn s3_host_kind<S: AsRef<str>>(host: &url::Host<S>) -> RelayKind {
+    match host {
+        url::Host::Domain(d) if d.as_ref().to_ascii_lowercase().ends_with(".onion") => RelayKind::Onion,
+        _ => host_kind(host),
+    }
+}
+
+/// The kind of an already-parsed host by the relay host rule, for a URL
+/// family with its own parser (S3). A host the rule refuses reads as
+/// [`RelayKind::Clearnet`]: the side that asks first.
+#[must_use]
+pub fn host_kind<S: AsRef<str>>(host: &url::Host<S>) -> RelayKind {
+    let kind = match host {
+        url::Host::Domain(d) => domain_kind(&d.as_ref().to_ascii_lowercase()),
+        url::Host::Ipv4(a) => ipv4_kind(*a),
+        url::Host::Ipv6(a) => ipv6_kind(*a),
+    };
+    kind.unwrap_or(RelayKind::Clearnet)
+}
+
 /// The secure and the plaintext scheme a URL family accepts.
 #[derive(Clone, Copy)]
 struct Schemes {
     secure: &'static str,
     plain: &'static str,
+    /// Refuse plaintext to a clearnet host outright (relays); a daemon
+    /// leaves it to its confirmation (decided 2026-10-11).
+    refuse_plain_clearnet: bool,
 }
 
 impl Schemes {
     const RELAY: Self = Self {
         secure: "wss://",
         plain: "ws://",
+        refuse_plain_clearnet: true,
     };
     const DAEMON: Self = Self {
         secure: "https://",
         plain: "http://",
+        refuse_plain_clearnet: false,
     };
 }
 
@@ -293,7 +344,7 @@ fn classified(raw: &str, schemes: Schemes) -> Result<(String, RelayKind), RelayU
         url::Host::Ipv4(a) => ipv4_kind(a)?,
         url::Host::Ipv6(a) => ipv6_kind(a)?,
     };
-    if !secure && kind == RelayKind::Clearnet {
+    if !secure && kind == RelayKind::Clearnet && schemes.refuse_plain_clearnet {
         return Err(RelayUrlError::PlaintextClearnet);
     }
     // canonical path + query from the parse (dot-segments collapsed — the
@@ -1105,6 +1156,46 @@ mod tests {
     }
 
     #[test]
+    fn s3_plaintext_clearnet_reads_the_scheme_and_the_host() {
+        for (raw, plain) in [
+            ("http://s3.example.org", true),
+            (" HTTP://S3.example.org:9000/x ", true),
+            ("http://minio.local:9000", true),
+            ("https://s3.example.org", false),
+            ("s3.example.org", false),
+            ("http://127.0.0.1:9000", false),
+            ("http://localhost", false),
+            ("http://[fd00::1]:9000", false),
+            ("http://", false),
+            ("http://abcdefexample.onion", false),
+            ("", false),
+        ] {
+            assert_eq!(s3_plaintext_clearnet(raw), plain, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn host_kind_reads_a_parsed_host_by_the_relay_rule() {
+        let onion = format!("{}.onion", "a".repeat(56));
+        for (host, kind) in [
+            (onion.as_str(), RelayKind::Onion),
+            ("localhost", RelayKind::Local),
+            ("127.0.0.1", RelayKind::Local),
+            ("192.168.1.5", RelayKind::Local),
+            ("[fd00::1]", RelayKind::Local),
+            ("s3.example.org", RelayKind::Clearnet),
+            ("203.0.113.9", RelayKind::Clearnet),
+            // refused hosts land on the side that asks
+            ("x.onion", RelayKind::Clearnet),
+            ("minio_1.lan", RelayKind::Clearnet),
+            ("0.0.0.0", RelayKind::Clearnet),
+        ] {
+            let parsed = url::Host::parse(host).expect("parses");
+            assert_eq!(host_kind(&parsed), kind, "{host}");
+        }
+    }
+
+    #[test]
     fn daemon_kind_classifies_onion_local_clearnet() {
         let onion = format!("http://{}.onion:18081", "a".repeat(56));
         for (raw, url, kind) in [
@@ -1114,6 +1205,8 @@ mod tests {
             ("https://192.168.1.5:18089", "https://192.168.1.5:18089", RelayKind::Local),
             ("HTTPS://Node.Example.ORG:443/", "https://node.example.org", RelayKind::Clearnet),
             ("https://node.example.org:18089", "https://node.example.org:18089", RelayKind::Clearnet),
+            // plaintext to a clearnet node: allowed, the confirmation gates it
+            ("http://node.example.org:18081", "http://node.example.org:18081", RelayKind::Clearnet),
         ] {
             assert_eq!(daemon_kind(raw), Ok((url.to_string(), kind)), "{raw:?}");
         }
@@ -1121,7 +1214,6 @@ mod tests {
             ("ws://127.0.0.1:18081", RelayUrlError::Scheme),
             ("wss://node.example.org", RelayUrlError::Scheme),
             ("node.example.org:18081", RelayUrlError::Scheme),
-            ("http://node.example.org:18081", RelayUrlError::PlaintextClearnet),
             ("https://user:pass@node.example.org", RelayUrlError::Userinfo),
             ("http://a.onion:1@evil.example.org", RelayUrlError::Userinfo),
             ("https://evil.example.org\\x.onion", RelayUrlError::Junk),
@@ -1148,6 +1240,12 @@ mod tests {
             let text = DaemonUrlError(e).to_string();
             assert!(!text.contains("relay") && !text.contains("ws://"), "{e:?}: {text}");
         }
+        assert!(daemon_plaintext_clearnet("http://node.example.org:18081"));
+        for url in ["https://node.example.org", "http://127.0.0.1:18081", onion.as_str(), "http://x.onion", ""] {
+            assert!(!daemon_plaintext_clearnet(url), "{url:?}");
+        }
+        // the relay side is untouched: ws:// to the clearnet stays refused
+        assert_eq!(normalize_relay_url("ws://relay.example.org"), Err(RelayUrlError::PlaintextClearnet));
         // the relay side is untouched: http is still no relay
         assert_eq!(normalize_relay_url("https://node.example.org"), Err(RelayUrlError::Scheme));
         assert_eq!(relay_kind("http://127.0.0.1:18081"), RelayKind::Clearnet);

@@ -91,13 +91,14 @@ pub struct S3Endpoint {
     /// Normalized base path (no trailing `/`; empty for none) — for
     /// endpoints living under a reverse-proxy prefix.
     pub base_path: String,
+    /// Where the host lives by the relay host rule.
+    pub kind: molt_core::relay::RelayKind,
 }
 
 impl S3Endpoint {
     /// Parse `[scheme://]host[:port][/prefix]`. A missing scheme defaults to
-    /// `https` (never a silent plaintext downgrade); explicit `http://` is
-    /// meant for `.onion`/LAN endpoints but not enforced (a LAN name reads
-    /// like a public one).
+    /// `https` (never a silent plaintext downgrade); `http://` to a clearnet
+    /// host parses, and [`S3Config::from_settings`] gates it.
     pub fn parse(raw: &str) -> Result<S3Endpoint, S3Error> {
         let raw = raw.trim();
         if raw.is_empty() {
@@ -133,6 +134,9 @@ impl S3Endpoint {
         if parsed.query().is_some() || parsed.fragment().is_some() {
             return Err(S3Error::Endpoint("no ?query or #fragment in the endpoint".to_string()));
         }
+        let kind = parsed.host().map_or(molt_core::relay::RelayKind::Clearnet, |h| {
+            molt_core::relay::s3_host_kind(&h)
+        });
         let host = match parsed.host() {
             // one spelling per host: `x.onion.` would dodge the onion check
             Some(url::Host::Domain(d)) if d.ends_with('.') => {
@@ -154,7 +158,13 @@ impl S3Endpoint {
             host,
             port,
             base_path,
+            kind,
         })
+    }
+
+    /// Plaintext `http://` to a host the relay rule places on the clearnet.
+    pub fn plaintext_clearnet(&self) -> bool {
+        self.scheme == S3Scheme::Http && self.kind == molt_core::relay::RelayKind::Clearnet
     }
 
     /// The `Host` header value: the port rides along only when it is not the
@@ -264,13 +274,21 @@ impl S3Config {
     /// Build a config from the persisted backup settings, validating that
     /// every needed piece is present and inferring the region from the
     /// endpoint host. Fails fast (in-actor) — before any network I/O.
+    /// Plaintext to a clearnet host passes only while `plaintext_confirmed`
+    /// names this endpoint (`s3_plaintext_confirmed`).
     pub fn from_settings(
         endpoint: &str,
         access_key: &str,
         secret_key: &str,
         bucket: &str,
+        plaintext_confirmed: &str,
     ) -> Result<S3Config, S3Error> {
         let endpoint = S3Endpoint::parse(endpoint)?;
+        if endpoint.plaintext_clearnet()
+            && S3Endpoint::parse(plaintext_confirmed).ok().as_ref() != Some(&endpoint)
+        {
+            return Err(S3Error::Endpoint("http:// to a clearnet host: not confirmed".to_string()));
+        }
         if access_key.trim().is_empty() {
             return Err(S3Error::Endpoint("no access key configured".to_string()));
         }
@@ -708,7 +726,7 @@ mod tests {
 
     #[test]
     fn from_settings_fails_fast_on_missing_pieces() {
-        let ok = S3Config::from_settings("https://s3.amazonaws.com", "AK", "SK", "b");
+        let ok = S3Config::from_settings("https://s3.amazonaws.com", "AK", "SK", "b", "");
         assert!(ok.is_ok());
         for (e, a, s, b) in [
             ("", "AK", "SK", "b"),
@@ -717,9 +735,51 @@ mod tests {
             ("https://s3.amazonaws.com", "AK", "SK", " "),
         ] {
             assert!(
-                matches!(S3Config::from_settings(e, a, s, b), Err(S3Error::Endpoint(_))),
+                matches!(S3Config::from_settings(e, a, s, b, ""), Err(S3Error::Endpoint(_))),
                 "expected fail-fast for ({e:?},{a:?},{s:?},{b:?})"
             );
         }
+    }
+
+    /// Plaintext to a clearnet host needs the one-time acknowledgement
+    /// (decided 2026-10-11); onion, localhost and private IPs do not.
+    #[test]
+    fn plaintext_to_the_clearnet_is_flagged_by_the_relay_host_rule() {
+        let v3 = format!("http://{}.onion", "a".repeat(56));
+        for (raw, plain) in [
+            ("http://s3.example.org", true),
+            ("http://203.0.113.9:9000", true),
+            // an mDNS name is no address the rule can place: it asks
+            ("http://minio.local:9000", true),
+            ("https://s3.example.org", false),
+            ("s3.example.org", false),
+            ("http://127.0.0.1:9000", false),
+            ("http://localhost:9000", false),
+            ("http://192.168.1.5:9000", false),
+            ("http://[fd00::1]:9000", false),
+            (v3.as_str(), false),
+            // the dialer never takes an onion name to the clearnet
+            ("http://abcdefexample.onion", false),
+        ] {
+            let e = S3Endpoint::parse(raw).expect("parses");
+            assert_eq!(e.plaintext_clearnet(), plain, "{raw}");
+        }
+    }
+
+    #[test]
+    fn a_plaintext_clearnet_endpoint_needs_its_acknowledgement() {
+        let cfg = |e: &str, ack: &str| S3Config::from_settings(e, "AK", "SK", "b", ack);
+        let refused = cfg("http://s3.example.org", "");
+        assert!(
+            matches!(&refused, Err(S3Error::Endpoint(m)) if m == "http:// to a clearnet host: not confirmed"),
+            "{refused:?}"
+        );
+        assert!(cfg("http://s3.example.org", "http://other.example.org").is_err());
+        assert!(cfg("http://s3.example.org", "https://s3.example.org").is_err());
+        // the acknowledgement names the endpoint, not its spelling
+        assert!(cfg("http://s3.example.org", "http://s3.example.org").is_ok());
+        assert!(cfg("http://S3.example.org/", "http://s3.example.org").is_ok());
+        assert!(cfg("http://127.0.0.1:9000", "").is_ok());
+        assert!(cfg("https://s3.example.org", "").is_ok());
     }
 }

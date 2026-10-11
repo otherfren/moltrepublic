@@ -400,6 +400,11 @@ pub struct SessionSettings {
     /// neighbouring `file_cap_bytes` reads 0 as "off"; here 0 is "no limit".
     #[serde(default)]
     pub s3_max_bytes: u64,
+    /// The `http://` endpoint on a clearnet host the operator acknowledged
+    /// as plaintext ("" = none). Such an endpoint is dialed only while this
+    /// names it; one door, `patch_settings` - a wholesale save keeps it.
+    #[serde(default)]
+    pub s3_plaintext_confirmed: String,
     /// MCP server TCP port.
     pub mcp_port: u16,
     /// MCP client allowlist (`"127.0.0.1" | "0.0.0.0" | comma-separated`).
@@ -610,6 +615,7 @@ impl Default for SessionSettings {
             s3_interval_min: default_s3_interval(),
             s3_keep_copies: default_s3_keep_copies(),
             s3_max_bytes: 0,
+            s3_plaintext_confirmed: String::new(),
             mcp_port: 4040,
             mcp_allow: "127.0.0.1".to_string(),
             mcp_token: String::new(),

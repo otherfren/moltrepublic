@@ -4,7 +4,8 @@
 //! monero-daemon-rpc's [`HttpTransport`] over the crate's own HTTP client
 //! ([`crate::s3::http`]) and the fail-closed [`Dialer`]. An onion daemon
 //! rides Tor; a local or clearnet one is dialed only when it was confirmed
-//! and non-onion dialing is on, like a relay. One request per connection;
+//! and non-onion dialing is on, like a relay - plaintext `http://` to the
+//! clearnet included. One request per connection;
 //! monerod's `--rpc-login` is answered with HTTP digest (`http-auth`).
 
 use std::sync::{Arc, Mutex};
@@ -652,6 +653,15 @@ mod tests {
             assert_eq!(got, Err(want));
         }
         assert_eq!(d.hits(), 0);
+        // plaintext to the clearnet rides the same two switches (2026-10-11)
+        let plain = "http://node.example.org:18081";
+        for (confirmed, clearnet, want) in [
+            (false, true, Err(DaemonError::Unconfirmed)),
+            (true, false, Err(DaemonError::NonOnionOff)),
+            (true, true, Ok(())),
+        ] {
+            assert_eq!(DaemonTransport::new(plain, "", confirmed, clearnet, &Dialer::Direct).map(|_| ()), want);
+        }
         assert_eq!(
             DaemonTransport::new("https://u:p@node.example.org", "", true, true, &Dialer::Direct).map(|_| ()),
             Err(DaemonError::BadUrl)

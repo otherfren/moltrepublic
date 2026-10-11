@@ -1187,6 +1187,8 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         // must not silently drop a configured quota. Partial changes go
         // through patch_settings.
         s3_max_bytes: bytes("s3_max_bytes")?,
+        // its door is patch_settings; the engine keeps the stored one
+        s3_plaintext_confirmed: d.s3_plaintext_confirmed,
         sound_message: text("sound_message")?,
         sound_vote: text("sound_vote")?,
         // added after the everything-required contract froze: optional, and
@@ -2340,7 +2342,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "patch_settings",
             command: "patch_settings",
             scope: Scope::Seat,
-            description: "Change SOME settings, keeping every field you do not mention - the tool for adjusting one thing (save_settings replaces everything, and its defaults are not neutral). The host posture is reachable here too. Unknown keys are refused rather than ignored; the relay pool keeps its own door (the relay_* tools). The secrets are accepted write-only (they never read back). The purse's daemon is set only here: a non-onion one is dialed only once wallet_daemon_confirmed (naming it is the exposure acknowledgement) and clearnet is on; a new URL starts unconfirmed.",
+            description: "Change SOME settings, keeping every field you do not mention - the tool for adjusting one thing (save_settings replaces everything, and its defaults are not neutral). The host posture is reachable here too. Unknown keys are refused rather than ignored; the relay pool keeps its own door (the relay_* tools). The secrets are accepted write-only (they never read back). The purse's daemon is set only here: a non-onion one is dialed only once wallet_daemon_confirmed (naming it is the exposure acknowledgement) and clearnet is on; a new URL starts unconfirmed. An http:// S3 endpoint on a clearnet host is used only while s3_plaintext_confirmed names it.",
             schema: || json!({
                 "type": "object",
                 "description": "the settings to change, keyed as in read_session.settings",
@@ -2360,7 +2362,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "mcp_token": { "type": "string", "description": "write-only: the seat key" },
                     "mcp_read_token": { "type": "string", "description": "write-only: the read-only key; \"\" switches it off" },
                     "s3_secret_key": { "type": "string", "description": "write-only: the S3 secret" },
-                    "wallet_daemon_url": { "type": "string", "description": "the purse's Monero node: https://, or http:// to an onion or local node; \"\" = none" },
+                    "wallet_daemon_url": { "type": "string", "description": "the purse's Monero node, https:// or http:// (plaintext on the clearnet); \"\" = none" },
                     "wallet_daemon_confirmed": { "type": "boolean", "description": "use this node; for a non-onion one this is the exposure acknowledgement" },
                     "wallet_daemon_login": { "type": "string", "description": "write-only: user:password" },
                     "wallet_network": { "type": "string", "enum": ["mainnet", "stagenet", "testnet"] },
@@ -2371,6 +2373,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "s3_interval_min": { "type": "integer" },
                     "s3_keep_copies": { "type": "integer" },
                     "s3_max_bytes": { "type": "integer", "description": "byte quota for the backup bucket; 0 = no limit. Over it the oldest copies go first, never a workspace's newest" },
+                    "s3_plaintext_confirmed": { "type": "string", "description": "the http:// clearnet endpoint acknowledged as plaintext; \"\" = none" },
                     "file_cap_bytes": { "type": ["integer", "null"], "description": "per-file byte cap for sharing; null = no cap, 0 = sharing off" },
                     "mirror_publish_interval_secs": { "type": "integer", "description": "seconds between two piece publishes of the file trickle (at least 1)" },
                     "mirror_daily_bytes": { "type": "integer", "description": "piece bytes the file trickle may publish per UTC day" },

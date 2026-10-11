@@ -1,6 +1,7 @@
 # The S3 backup bucket (and the media bucket that was removed)
 
-Status: **BUILT (2026-08-21); the MEDIA BUCKET WAS REMOVED 2026-09-04** on
+Status: **BUILT (2026-08-21); the plaintext gate of §8 BUILT 2026-10-11;
+the MEDIA BUCKET WAS REMOVED 2026-09-04** on
 the user's decision - §7 had already closed it as "not needed" (the
 persistent files live on the members' machines through the mirroring,
 `docs_archive/files/mirroring.md`), and a configuration option with no
@@ -26,6 +27,7 @@ One S3 target lives in `[storage]` and serves exactly one errand:
 | `s3_endpoint` / `s3_access_key` / `s3_secret_key` / `s3_bucket` | the one target |
 | `s3_interval_min` | how often the ticker uploads |
 | `s3_keep_copies` | per-workspace retention (count) |
+| `s3_plaintext_confirmed` | the `http://` clearnet endpoint acknowledged as plaintext (§8); written only while set |
 
 `default_s3_bucket()` is `"media-archive"` - a deliberately **inconspicuous
 cover name** (`molt-config/src/lib.rs:332`), not a media bucket. That naming
@@ -179,3 +181,30 @@ consenting seat mirrors the persistent files over the relays, ciphertext
 only, no second host). The "445 chunking, NOT an external blob server"
 decision stands; the media bucket fields stay configuration, and the GUI
 says so.
+
+## 8. Plaintext `http://` to a clearnet host (user decision 2026-10-11)
+
+Security audit 2026-10-10 follow-up. Before, `S3Endpoint::parse` took
+`http://` to any host silently.
+
+- **Who asks.** `http://` to a host the relay host rule
+  (`molt_core::relay::host_kind`) places on the clearnet. Onion, `localhost`,
+  loopback and private/link-local/unique-local IPs are unchanged. A host the
+  rule cannot place (an mDNS `*.local` name) counts as clearnet and asks -
+  the conservative side. Any `.onion` name does not ask: the dialer takes
+  it over Tor or refuses it (`molt_core::relay::s3_host_kind`).
+- **The gate.** `S3Config::from_settings` refuses such an endpoint unless
+  `s3_plaintext_confirmed` parses to the same endpoint
+  (`endpoint: http:// to a clearnet host: not confirmed`). Every S3 path
+  builds its config there: probe, backup ticker, manual backup, listing,
+  restore. A changed endpoint is unconfirmed by construction.
+- **One door.** `patch_settings` sets it; a wholesale `save_settings`
+  neither grants nor drops it (like the purse's daemon).
+- **The GUI.** Test connection and Save open a confirmation for an
+  unacknowledged plaintext endpoint: the URL, one warning line, a tick box;
+  confirming patches the acknowledgement first, then runs what asked.
+- **`clearnet_enabled` is not consulted.** S3 never rode that relay switch
+  (§6.7 of `backup_restore_design.md`: it follows the dialer); the decision
+  kept every existing gate and added none beyond the acknowledgement.
+- **Config.** `[storage] s3_plaintext_confirmed` is written only while set,
+  so a file without one still opens on an older build.

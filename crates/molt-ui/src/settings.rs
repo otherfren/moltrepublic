@@ -158,6 +158,8 @@ pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> S
         s3_interval_min: ui.get_cfg_s3_interval() as u16,
         s3_keep_copies: ui.get_cfg_s3_copies() as u16,
         s3_max_bytes: mib_text_to_bytes(&ui.get_cfg_s3_max(), stored.s3_max_bytes),
+        // its door is the acknowledgement modal (patch_settings)
+        s3_plaintext_confirmed: stored.s3_plaintext_confirmed.clone(),
         mcp_port: ui.get_cfg_mcp_port() as u16,
         mcp_allow: ui.get_cfg_mcp_allow().to_string(),
         mcp_token: ui.get_cfg_mcp_token().to_string(),
@@ -253,4 +255,12 @@ pub(crate) fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_network_index(net_index(&s.anonymity));
     ui.set_cfg_tor_mode_index(mode_index(&s.tor_mode));
     ui.set_cfg_tor_port(s.tor_port as i32);
+}
+
+/// The endpoint to acknowledge before it is used: plaintext to a clearnet
+/// host that `confirmed` does not name yet.
+pub(crate) fn s3_plaintext_ask(endpoint: &str, confirmed: &str) -> Option<String> {
+    let endpoint = endpoint.trim();
+    (molt_core::relay::s3_plaintext_clearnet(endpoint) && confirmed.trim() != endpoint)
+        .then(|| endpoint.to_string())
 }

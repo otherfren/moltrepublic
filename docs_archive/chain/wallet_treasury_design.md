@@ -432,13 +432,18 @@ Two files, because one secret must never be lost and the rest is cheap:
   some of the cross-check below for a click. It is reached through
   monero-daemon-rpc with a transport over the project's HTTP client and
   dialer. Its host is classified by the **same WHATWG-parsed host rule as a
-  relay** (onion / local / clearnet), with `http`/`https` as the schemes
-  (`http` only to an onion or local daemon, as `ws` for relays);
+  relay** (onion / local / clearnet), with `http`/`https` as the schemes;
   userinfo in the URL is refused (login is its own setting). An onion
   daemon is dialed over Tor; a local or clearnet daemon rides the same gate
   as a local or clearnet relay — dialed only when non-onion dialing is on
   (`clearnet_enabled`) and the daemon was confirmed with the exposure
-  acknowledgement. Response-size limits are per call.
+  acknowledgement. Unlike `ws` for a relay, `http` to a **clearnet** daemon
+  is allowed (user decision 2026-10-11): the same confirmation
+  (`wallet_daemon_confirmed`) gates it, and the GUI's confirmation dialog
+  adds one plaintext warning line (`molt_core::relay::daemon_plaintext_clearnet`).
+  A login there is answered with HTTP digest, never sent in the clear; the
+  daemon's answers can be altered on the path, which is no worse than the
+  lying daemon below. Response-size limits are per call.
 - A lying daemon can hide funds from that member or lag; it cannot fake
   ownership. n independent scanners are the cross-check.
 - **Network** (mainnet, stagenet, testnet) is a setting, **mainnet by

@@ -2468,6 +2468,12 @@ export component AppWindow inherits Window {
     // pushed from Rust: "" untested · "testing" · "ok" · "error: …"
     in property <string> cfg-s3-test;
     callback test-s3(string);
+    // a plaintext clearnet endpoint waits for its acknowledgement: the URL
+    // asked about ("" = closed) and what runs after it (1 save, 2 test)
+    in-out property <string> cfg-s3-pt-url;
+    in-out property <int> cfg-s3-pt-then;
+    property <bool> cfg-s3-pt-ack: false;
+    callback s3-plaintext-confirmed(string, int);
     // The Tor probe's verdict, pushed from Rust on every session update (it is
     // transient and lives outside the settings draft, like cfg-s3-test).
     // `cfg-tor-test` is the rung's key (molt_core::TorTestState::as_str) —
@@ -10102,6 +10108,12 @@ export component AppWindow inherits Window {
             font-weight: 700;
             wrap: word-wrap;
         }
+        if Purse.confirm-kind == 3: Text {
+            text: Strings.wl-cn-plaintext;
+            color: Theme.warn;
+            font-size: Theme.fs-body;
+            wrap: word-wrap;
+        }
         AppCheck {
             label: Strings.wl-cn-ack;
             checked <=> root.wl-node-ack;
@@ -10111,6 +10123,36 @@ export component AppWindow inherits Window {
             color: Theme.faint;
             font-size: Theme.fs-cap;
             wrap: word-wrap;
+        }
+    }
+
+    // Modal: plain http:// to a clearnet S3 host, acknowledged once per
+    // endpoint before the save or the probe that asked.
+    if root.cfg-s3-pt-url != "": ConfirmModal {
+        dialog-width: 520px;
+        title: Strings.s3-pt-title;
+        body: Strings.s3-pt-warn;
+        confirm-label: Strings.s3-pt-confirm;
+        confirm-enabled: root.cfg-s3-pt-ack;
+        dismissed => {
+            root.cfg-s3-pt-url = "";
+            root.cfg-s3-pt-ack = false;
+        }
+        confirmed => {
+            root.s3-plaintext-confirmed(root.cfg-s3-pt-url, root.cfg-s3-pt-then);
+            root.cfg-s3-pt-url = "";
+            root.cfg-s3-pt-ack = false;
+        }
+        Text {
+            text: root.cfg-s3-pt-url;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            font-weight: 700;
+            wrap: word-wrap;
+        }
+        AppCheck {
+            label: Strings.s3-pt-ack;
+            checked <=> root.cfg-s3-pt-ack;
         }
     }
 

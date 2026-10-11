@@ -1212,6 +1212,11 @@ lexicon! {
     set_s3_grp_backup: "Workspace backups", "Workspace-Backups";
     field_s3_max: "Limit (MiB)", "Limit (MiB)";
     set_s3_max_hint: "0 = no limit. Oldest copies go first, never a republic's last.", "0 = kein Limit. Älteste Kopien zuerst, nie die letzte einer Republik.";
+    // plaintext http:// to a clearnet S3 host: acknowledged once per endpoint
+    s3_pt_title: "Use S3 over plain http?", "S3 über reines http benutzen?";
+    s3_pt_warn: "Plaintext to a clearnet host: anyone on the path sees the requests and can alter them.", "Klartext zu einem Clearnet-Host: Jeder auf dem Weg sieht die Anfragen und kann sie verändern.";
+    s3_pt_ack: "I understand this and want to use the endpoint.", "Ich habe das verstanden und will den Endpunkt benutzen.";
+    s3_pt_confirm: "Confirm endpoint", "Endpunkt bestätigen";
     toast_backup_quota: "Backup stored, bucket quota:", "Backup gespeichert, Bucket-Limit:";
     s3_ok: "bucket reachable - credentials accepted ✓", "Bucket erreichbar - Zugangsdaten akzeptiert ✓";
     bk_col_local: "Local workspace", "Lokaler Workspace";
@@ -1752,6 +1757,7 @@ lexicon! {
     wl_cn_body_tor: "Not a .onion service: its operator sees which blocks this node reads and when it is online. Tor hides your IP address - the endpoint stays in someone else's hands.", "Kein .onion-Dienst: Sein Betreiber sieht, welche Blöcke dieser Knoten liest und wann er online ist. Tor verbirgt deine IP-Adresse - der Endpunkt bleibt in fremder Hand.";
     wl_cn_body_plain: "Not a .onion service: its operator sees your IP address, which blocks this node reads and when it is online. Tor is off, so nothing hides where you connect from.", "Kein .onion-Dienst: Sein Betreiber sieht deine IP-Adresse, welche Blöcke dieser Knoten liest und wann er online ist. Tor ist aus, nichts verbirgt, von wo du dich verbindest.";
     wl_cn_body_local: "This node is on your machine or local network - reached directly, Tor is not involved. Whoever runs it still sees which blocks this node reads and when it is online.", "Dieser Node liegt auf deinem Rechner oder lokalen Netz - er wird direkt erreicht, ohne Tor. Wer ihn betreibt, sieht trotzdem, welche Blöcke dieser Knoten liest und wann er online ist.";
+    wl_cn_plaintext: "Plain http://: anyone on the path sees the traffic and can alter it.", "Reines http://: Jeder auf dem Weg sieht den Verkehr und kann ihn verändern.";
     wl_cn_ack: "I understand this and want to use the node.", "Ich habe das verstanden und will den Node benutzen.";
     wl_cn_confirm: "Confirm node", "Node bestätigen";
     wl_loss_title: "Key part damaged", "Schlüsselteil beschädigt";

@@ -278,7 +278,8 @@ pub(crate) enum NodeStep {
     Bad(String),
     /// An onion: stored outright.
     Take(String),
-    /// Clearnet (1) or local (2): waits for the relay-style acknowledgement.
+    /// Clearnet (1), local (2) or clearnet over plain http (3): waits for
+    /// the relay-style acknowledgement.
     Confirm(String, i32),
 }
 
@@ -288,6 +289,7 @@ pub(crate) fn node_step(lang: i32, url: &str) -> NodeStep {
         Err(_) => NodeStep::Bad(lex(lang).wl_bad_url.to_string()),
         Ok((url, RelayKind::Onion)) => NodeStep::Take(url),
         Ok((url, RelayKind::Local)) => NodeStep::Confirm(url, 2),
+        Ok((url, _)) if molt_core::relay::daemon_plaintext_clearnet(&url) => NodeStep::Confirm(url, 3),
         Ok((url, _)) => NodeStep::Confirm(url, 1),
     }
 }

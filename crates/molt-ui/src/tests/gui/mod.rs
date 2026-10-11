@@ -22,6 +22,8 @@ mod modals;
 mod poke;
 mod recovery_backup;
 mod ritual_log;
+#[cfg(feature = "live-preview")]
+mod s3_plaintext;
 mod seed_confirm;
 mod snapshot;
 mod tab_order;

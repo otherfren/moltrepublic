@@ -1684,6 +1684,10 @@ export global Strings {
     in property <string> field-s3-bucket;
     in property <string> set-s3-test;
     in property <string> s3-test-tip;
+    in property <string> s3-pt-title;
+    in property <string> s3-pt-warn;
+    in property <string> s3-pt-ack;
+    in property <string> s3-pt-confirm;
     // one account, several buckets (docs_archive/storage/s3_buckets.md)
     in property <string> set-s3-grp-account;
     in property <string> set-s3-grp-backup;
@@ -2243,6 +2247,7 @@ export global Strings {
     in property <string> wl-cn-body-plain;
     in property <string> wl-cn-body-local;
     in property <string> wl-cn-ack;
+    in property <string> wl-cn-plaintext;
     in property <string> wl-cn-confirm;
     in property <string> wl-loss-title;
     in property <string> wl-loss-body;
@@ -2302,7 +2307,7 @@ export global Purse {
     in-out property <string> node-draft;
     in-out property <string> node-error;
     // a non-onion node waits for the exposure acknowledgement:
-    // 0 none · 1 clearnet · 2 local
+    // 0 none · 1 clearnet · 2 local · 3 clearnet over plain http
     in-out property <int> confirm-kind;
     in-out property <string> confirm-url;
     // the panel over the main window (W10); closing it keeps the run going

@@ -411,6 +411,7 @@ pub(crate) fn file_settings(s: &SessionSettings, language: &str, theme: &str) ->
         s3_interval_min: s.s3_interval_min,
         s3_keep_copies: s.s3_keep_copies,
         s3_max_bytes: s.s3_max_bytes,
+        s3_plaintext_confirmed: s.s3_plaintext_confirmed.clone(),
         file_cap_bytes: s.file_cap_bytes,
         mirror_publish_interval_secs: s.mirror_publish_interval_secs,
         mirror_daily_bytes: s.mirror_daily_bytes,
@@ -469,7 +470,8 @@ fn merge3(base: &Settings, ours: Settings, theirs: &Settings) -> Settings {
     }
     merge!(
         headless, workspace_dir, s3_backup, s3_endpoint, s3_access_key, s3_secret_key,
-        s3_bucket, s3_interval_min, s3_keep_copies, s3_max_bytes, download_dir,
+        s3_bucket, s3_interval_min, s3_keep_copies, s3_max_bytes, s3_plaintext_confirmed,
+        download_dir,
         file_cap_bytes, mirror_publish_interval_secs, mirror_daily_bytes, sound_message,
         sound_vote, sound_poke, poke_enabled, poke_wake_command, wake_min_interval_secs,
         wake_on, task_wake_lead_min, read_receipts, anonymity, tor_mode, tor_port, mcp_port,
@@ -493,6 +495,7 @@ fn session_settings(s: &Settings) -> SessionSettings {
         s3_interval_min: s.s3_interval_min,
         s3_keep_copies: s.s3_keep_copies,
         s3_max_bytes: s.s3_max_bytes,
+        s3_plaintext_confirmed: s.s3_plaintext_confirmed.clone(),
         file_cap_bytes: s.file_cap_bytes,
         mirror_publish_interval_secs: s.mirror_publish_interval_secs,
         mirror_daily_bytes: s.mirror_daily_bytes,

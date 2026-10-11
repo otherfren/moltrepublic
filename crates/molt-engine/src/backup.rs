@@ -86,6 +86,7 @@ impl State {
             &s.s3_access_key,
             &s.s3_secret_key,
             &s.s3_bucket,
+            &s.s3_plaintext_confirmed,
         );
         let config = match config {
             Ok(config) if !candidates.is_empty() => config,
@@ -219,6 +220,7 @@ impl State {
             &s.s3_access_key,
             &s.s3_secret_key,
             &s.s3_bucket,
+            &s.s3_plaintext_confirmed,
         )
         .map_err(|e| MoltError::Settings(format!("backup target: {e}")))?;
         let root = self.workspace_root();
@@ -275,6 +277,7 @@ impl State {
             &s.s3_access_key,
             &s.s3_secret_key,
             &s.s3_bucket,
+            &s.s3_plaintext_confirmed,
         )
         .map_err(|e| MoltError::Settings(format!("backup target: {e}")))?;
         let dialer = self

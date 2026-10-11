@@ -539,6 +539,30 @@ fn a_clearnet_node_needs_the_acknowledgement() {
     assert_eq!(ui.global::<Purse>().get_confirm_kind(), 0, "closed");
 }
 
+/// Plaintext to a clearnet node adds one warning line to its
+/// acknowledgement (decided 2026-10-11); https keeps the dialog as it was.
+#[test]
+fn a_plaintext_node_warns_in_its_acknowledgement() {
+    backend();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    let _shown = show_headless(&ui);
+    let warning = ui.global::<Strings>().get_wl_cn_plaintext().to_string();
+    assert!(!warning.is_empty() && !warning.contains('\u{2014}'), "{warning}");
+    let p = ui.global::<Purse>();
+    p.set_confirm_url("https://n.example.org:18089".into());
+    p.set_confirm_kind(1);
+    settle();
+    assert!(shown(&ui, &ui.global::<Strings>().get_wl_cn_title()));
+    assert!(!shown(&ui, &warning), "https: no plaintext line");
+    p.set_confirm_kind(0);
+    p.set_confirm_url("http://n.example.org:18081".into());
+    p.set_confirm_kind(3);
+    settle();
+    assert!(shown(&ui, &ui.global::<Strings>().get_wl_cn_title()));
+    assert!(shown(&ui, &warning), "the plaintext line");
+}
+
 /// The node flow against a real engine: an onion node is stored confirmed
 /// and leaves non-onion dialing off; a clearnet node is stored only once
 /// acknowledged, and then switches non-onion dialing on.
@@ -591,5 +615,13 @@ fn the_node_flow_reaches_the_engine() {
     assert!(
         wait(&|s| s.settings.wallet_daemon_url == clear && s.settings.wallet_daemon_confirmed && s.clearnet_session),
         "the clearnet node, confirmed, dialing on"
+    );
+    let plain = "http://n.example.org:18081";
+    p.invoke_use_node(plain.into());
+    assert_eq!(p.get_confirm_kind(), 3, "the acknowledgement with its plaintext line");
+    p.invoke_node_confirmed(plain.into());
+    assert!(
+        wait(&|s| s.settings.wallet_daemon_url == plain && s.settings.wallet_daemon_confirmed),
+        "the plaintext node, confirmed"
     );
 }

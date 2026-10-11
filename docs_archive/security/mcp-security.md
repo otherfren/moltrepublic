@@ -251,7 +251,12 @@ allowed:
   wholesale save keeps it, a new URL starts unconfirmed, and naming
   `wallet_daemon_confirmed` for a non-onion daemon is its exposure
   acknowledgement (dialing it also needs `clearnet_enabled`, as for a
-  relay).
+  relay). Plain `http://` to a clearnet daemon is allowed behind that same
+  acknowledgement (2026-10-11); the GUI's dialog adds a plaintext line.
+* **Plaintext S3** (`http://` to a clearnet host) has one door too,
+  `patch_settings`: naming the endpoint in `s3_plaintext_confirmed` is its
+  acknowledgement; a wholesale save neither grants nor drops it
+  (`docs_archive/storage/s3_buckets.md` §8).
 
 Consequences worth knowing before opening the port:
 

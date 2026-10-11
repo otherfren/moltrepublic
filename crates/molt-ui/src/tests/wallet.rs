@@ -371,6 +371,11 @@ fn a_node_url_is_classified_like_a_relay() {
         NodeStep::Confirm("https://node.example.org:18089".to_string(), 1)
     );
     assert_eq!(crate::wallet::node_step(0, "http://127.0.0.1:18081"), NodeStep::Confirm("http://127.0.0.1:18081".to_string(), 2));
+    // plaintext to the clearnet: the acknowledgement with its warning line
+    assert_eq!(
+        crate::wallet::node_step(0, "http://node.example.org:18081"),
+        NodeStep::Confirm("http://node.example.org:18081".to_string(), 3)
+    );
     assert_eq!(crate::wallet::node_step(0, "http://u:p@node.example.org"), NodeStep::Bad("not a node address".to_string()));
     assert_eq!(crate::wallet::node_step(0, "ws://abc.onion"), NodeStep::Bad("not a node address".to_string()));
 }

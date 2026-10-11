@@ -57,7 +57,7 @@ pub struct Config {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WalletConfig {
-    /// `https://…`, or `http://…` to an onion or local node; "" = none.
+    /// `https://…` or `http://…`; "" = none.
     #[serde(default)]
     pub daemon_url: String,
     /// The operator confirmed this daemon (a non-onion one needs it).
@@ -246,6 +246,10 @@ pub struct StorageConfig {
     /// 0 = no limit. Mirrors `molt_core::SessionSettings::s3_max_bytes`.
     #[serde(default)]
     pub s3_max_bytes: u64,
+    /// The `http://` clearnet endpoint the operator acknowledged as
+    /// plaintext; "" = none. Written only while set.
+    #[serde(default)]
+    pub s3_plaintext_confirmed: String,
     /// REMOVED 2026-09-04 (nothing ever wrote media to S3). The two keys
     /// are still ACCEPTED so a config an older build wrote still opens -
     /// `deny_unknown_fields` would refuse it otherwise - and `apply`
@@ -301,6 +305,7 @@ impl Default for StorageConfig {
             s3_interval_min: default_s3_interval_min(),
             s3_keep_copies: default_s3_keep_copies(),
             s3_max_bytes: 0,
+            s3_plaintext_confirmed: String::new(),
             _removed_media_bucket: None,
             _removed_media_max: None,
             download_dir: default_download_dir(),
@@ -646,6 +651,8 @@ pub struct Settings {
     pub s3_keep_copies: u16,
     /// Byte quota for the backup bucket, 0 = no limit.
     pub s3_max_bytes: u64,
+    /// The acknowledged plaintext clearnet endpoint ("" = none).
+    pub s3_plaintext_confirmed: String,
     /// Media bucket at the same endpoint/credentials (empty = unconfigured).
     /// Byte quota for the media bucket, 0 = no limit.
     /// Where downloaded chat files land when no explicit destination is given.
@@ -739,6 +746,7 @@ impl Default for Settings {
             s3_interval_min: default_s3_interval_min(),
             s3_keep_copies: default_s3_keep_copies(),
             s3_max_bytes: 0,
+            s3_plaintext_confirmed: String::new(),
             download_dir: default_download_dir(),
             file_cap_bytes: None,
             mirror_publish_interval_secs: default_mirror_publish_interval_secs(),
@@ -811,6 +819,7 @@ impl From<&Config> for Settings {
             s3_interval_min: c.storage.s3_interval_min,
             s3_keep_copies: c.storage.s3_keep_copies,
             s3_max_bytes: c.storage.s3_max_bytes,
+            s3_plaintext_confirmed: c.storage.s3_plaintext_confirmed.clone(),
             download_dir: c.storage.download_dir.clone(),
             file_cap_bytes: c.storage.file_cap_bytes,
             mirror_publish_interval_secs: c.files.mirror_publish_interval_secs,
@@ -919,6 +928,9 @@ s3_keep_copies = {s3_keep_copies}
 # node wrote; over the limit the oldest copies go first, never a workspace's
 # newest one.
 s3_max_bytes = {s3_max_bytes}
+# An http:// endpoint on a clearnet host is used only while its exact URL
+# stands here (the plaintext acknowledgement).
+{s3_plaintext_line}
 # Where downloaded chat files land ("~" = $HOME).
 download_dir = {download_dir}
 # Per-file byte cap for sharing. 0 = file sharing off; absent = no cap.
@@ -1020,6 +1032,11 @@ renderer = {renderer}
         s3_interval_min = settings.s3_interval_min,
         s3_keep_copies = settings.s3_keep_copies,
         s3_max_bytes = settings.s3_max_bytes,
+        s3_plaintext_line = if settings.s3_plaintext_confirmed.is_empty() {
+            "# s3_plaintext_confirmed = \"\"".to_string()
+        } else {
+            format!("s3_plaintext_confirmed = {}", toml_str(&settings.s3_plaintext_confirmed))
+        },
         download_dir = toml_str(&settings.download_dir),
         file_cap_line = match settings.file_cap_bytes {
             Some(n) => format!("file_cap_bytes = {n}"),
@@ -1072,7 +1089,7 @@ fn render_relays(relays: &[RelayConfig]) -> String {
 /// The `[wallet]` section for [`render`]: commented out while it holds only
 /// defaults, so a generated file still opens on a build that predates it.
 fn render_wallet(s: &Settings) -> String {
-    let doc = "# The purse's Monero node: https://, or http:// to an onion or local node.\n\
+    let doc = "# The purse's Monero node: https:// or http:// (plaintext on the clearnet).\n\
                # None ships with the app. A non-onion node also needs daemon_confirmed\n\
                # and clearnet_enabled above. daemon_login = \"user:password\" if it asks.\n\
                # network = \"mainnet\" | \"stagenet\" | \"testnet\".\n";
@@ -1182,6 +1199,9 @@ pub fn salvage(text: &str) -> Settings {
             .and_then(|p| u64::try_from(p).ok())
         {
             s.s3_max_bytes = v;
+        }
+        if let Some(v) = storage.get("s3_plaintext_confirmed").and_then(toml::Value::as_str) {
+            s.s3_plaintext_confirmed = v.to_string();
         }
         let valid_sound = |v: &str| matches!(v, "none" | "bell" | "chime" | "pop");
         if let Some(v) = storage.get("sound_message").and_then(toml::Value::as_str) {
@@ -1505,6 +1525,12 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     // option leaves the file on the first save instead of lingering
     storage.remove("media_s3_bucket");
     storage.remove("media_s3_max_bytes");
+    // only while set: an older build refuses the unknown key
+    if settings.s3_plaintext_confirmed.is_empty() {
+        storage.remove("s3_plaintext_confirmed");
+    } else {
+        set_str(storage, "s3_plaintext_confirmed", &settings.s3_plaintext_confirmed);
+    }
     set_str(storage, "download_dir", &settings.download_dir);
     match settings.file_cap_bytes {
         Some(n) => set_int(storage, "file_cap_bytes", i64::try_from(n).unwrap_or(i64::MAX)),
@@ -2070,6 +2096,7 @@ mod tests {
             s3_interval_min: 15,
             s3_keep_copies: 9,
             s3_max_bytes: 20 * 1024 * 1024 * 1024,
+            s3_plaintext_confirmed: "http://s3.example.org".to_string(),
             // a SECOND bucket at the same endpoint and credentials
             sound_message: "chime".to_string(),
             sound_vote: "pop".to_string(),
@@ -2509,7 +2536,7 @@ mod nym_tests {
     /// reaches the settings. The network is a closed set.
     #[test]
     fn a_bad_daemon_url_is_dropped_and_a_bad_network_refused() {
-        for bad in ["ws://node.onion", "https://u:p@node.example.org", "http://node.example.org"] {
+        for bad in ["ws://node.onion", "https://u:p@node.example.org", "http://x.onion"] {
             let text = format!("[wallet]\ndaemon_url = \"{bad}\"\ndaemon_confirmed = true\n");
             let s = Settings::from(&parse(&text).expect("parses"));
             assert!(s.wallet_daemon_url.is_empty(), "{bad}");
@@ -2519,6 +2546,38 @@ mod nym_tests {
         assert!(parse("[wallet]\nnetwork = \"foonet\"\n").is_err());
         assert!(parse("[wallet]\ndaemon = \"x\"\n").is_err(), "typos are refused");
         assert_eq!(salvage("[wallet]\nnetwork = \"foonet\"\n").wallet_network, "mainnet");
+    }
+
+    /// Plaintext to a clearnet daemon loads, confirmation included
+    /// (decided 2026-10-11): the confirmation is the gate, not the loader.
+    #[test]
+    fn a_plaintext_clearnet_daemon_loads_with_its_confirmation() {
+        let text = "[wallet]\ndaemon_url = \"http://node.example.org:18081\"\ndaemon_confirmed = true\n";
+        let s = Settings::from(&parse(text).expect("parses"));
+        assert_eq!(s.wallet_daemon_url, "http://node.example.org:18081");
+        assert!(s.wallet_daemon_confirmed);
+        assert_eq!(salvage(text), s);
+    }
+
+    /// The plaintext S3 acknowledgement is written only while set, so a
+    /// file without one still opens on an older build.
+    #[test]
+    fn the_plaintext_s3_confirmation_is_written_only_while_set() {
+        let key = |t: &str| t.lines().any(|l| l.trim_start().starts_with("s3_plaintext_confirmed"));
+        assert!(!key(&render(&Settings::default())));
+        assert!(!key(&update("", &Settings::default()).expect("updates")));
+        let set = Settings {
+            s3_endpoint: "http://s3.example.org".to_string(),
+            s3_plaintext_confirmed: "http://s3.example.org".to_string(),
+            ..Settings::default()
+        };
+        for text in [render(&set), update("", &set).expect("updates")] {
+            assert!(key(&text), "{text}");
+            assert_eq!(Settings::from(&parse(&text).expect("parses")), set);
+            assert_eq!(salvage(&text), set);
+        }
+        let cleared = update(&update("", &set).expect("set"), &Settings::default()).expect("clear");
+        assert!(!key(&cleared), "{cleared}");
     }
 
     /// A login the engine would refuse never reaches the settings, or
@@ -2538,12 +2597,12 @@ mod nym_tests {
     /// never held it, so the operator's text stays until they fix it.
     #[test]
     fn a_refused_daemon_line_survives_a_save() {
-        let text = "[wallet]\n# mine\ndaemon_url = \"http://node.example.org:18081\"\n\
+        let text = "[wallet]\n# mine\ndaemon_url = \"https://u:p@node.example.org:18081\"\n\
                     daemon_login = \"u:p\\tx\"\n";
         let s = Settings::from(&parse(text).expect("parses"));
         let saved = update(text, &s).expect("updates");
         assert!(saved.contains("# mine"), "{saved}");
-        assert!(saved.contains("daemon_url = \"http://node.example.org:18081\""), "{saved}");
+        assert!(saved.contains("daemon_url = \"https://u:p@node.example.org:18081\""), "{saved}");
         assert!(saved.contains("daemon_login = \"u:p\\tx\""), "{saved}");
 
         let fixed = update(text, &wallet_settings()).expect("updates");

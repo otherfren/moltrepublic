@@ -614,6 +614,9 @@ abort is safe here; nothing outbound is in flight) and cleans staging.
 * All S3 traffic goes through the configured dialer: Tor-capable,
   **fail-closed** (story-5 contract) — a Tor-mode node never falls back to
   clearnet for a backup.
+* Plaintext `http://` to a clearnet host is used only after its one-time
+  acknowledgement (`s3_plaintext_confirmed`, 2026-10-11,
+  `s3_buckets.md` §8).
 
 ## 7. Interfaces — module boundaries and the command surface
 

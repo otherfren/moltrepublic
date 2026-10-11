@@ -412,6 +412,7 @@ impl State {
                     &s.s3_access_key,
                     &s.s3_secret_key,
                     &s.s3_bucket,
+                    &s.s3_plaintext_confirmed,
                 )
                 .map_err(|e| MoltError::Restore(format!("backup target: {e}")))?;
                 // fail-closed: a Tor misconfiguration aborts the restore
