@@ -45,9 +45,13 @@ Committed, Checkpoint-Gossip — alles in `crosses_wire`,
 mindestens einmal (at-least-once, Empfänger dedupliziert), solange der
 Empfänger innerhalb des **Garantie-Horizonts** zurückkehrt. Der Horizont ist
 die bestehende WP4a-Peer-Karenz (2 × Retention-Window, Default 14 Tage,
-`compaction.rs:66-75`) — dieselbe Grenze, die schon heute bestimmt, wie lange
-ein abwesender Peer den Log hält. Jenseits davon gilt weiterhin die ehrliche
-Lücke (bounded storage schlägt unbounded Queue).
+`peers_holding_the_log` in `compaction.rs`) — dieselbe Grenze, die schon
+heute bestimmt, wie lange ein abwesender Peer den Log hält. Seit 2026-10-11
+(Audit #32, `log_compaction.md` F4b) gilt sie auch für einen Peer, der in
+Kontakt ist, aber nicht ackt: bewegt sich sein acked floor 2 × Retention-Window
+lang nicht, hält er den Log nicht mehr, und die Garantie endet für den Teil
+unter dem Floor. Jenseits davon gilt weiterhin die ehrliche Lücke (bounded
+storage schlägt unbounded Queue).
 
 **Was das NICHT umkehrt:** `chat_bus.md` Q4 („kein History-Backfill") bleibt
 für **Total-Verlust-Rejoiner** (Recovery-Ritual, neues Gerät) bestehen: die
@@ -377,7 +381,8 @@ Mixed-Mesh Alt-Peers mit Resend-Stürmen ab Seq 0 flutet.
   — konkret: der Floor-Kandidat pro Peer ist `acked_floor` falls je ein ACK
   gesehen (sonst wie heute `log_seq`); unbestätigter Schwanz bleibt dadurch
   segmentweise erhalten, bis der Peer bestätigt oder aus der Karenz fällt.
-  Der Horizont selbst (2×Retention) bleibt unverändert.
+  Der Horizont selbst (2×Retention) bleibt unverändert; seit 2026-10-11
+  zählt er auch ab dem letzten ACK-Fortschritt (F4b, §0).
 
 ### 4.10 Bewusste Nicht-Ziele
 

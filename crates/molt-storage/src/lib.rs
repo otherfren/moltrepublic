@@ -3459,6 +3459,7 @@ enum WriterMsg {
     Compact {
         snapshot: WorkspaceSnapshot,
         holding_peers: Vec<String>,
+        clock: AckClock,
         ack: mpsc::SyncSender<CompactionOutcome>,
     },
     /// Flush + fsync everything queued so far, acking when durable. The
@@ -3624,6 +3625,7 @@ impl StorageHandle {
         &self,
         snapshot: WorkspaceSnapshot,
         holding_peers: Vec<String>,
+        clock: AckClock,
     ) -> CompactionOutcome {
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
         if self
@@ -3631,6 +3633,7 @@ impl StorageHandle {
             .send(WriterMsg::Compact {
                 snapshot,
                 holding_peers,
+                clock,
                 ack: ack_tx,
             })
             .is_err()
@@ -4066,6 +4069,20 @@ pub struct CompactionOutcome {
     pub segments_dropped: usize,
 }
 
+/// The ack-progress grace of one compaction round (`log_compaction.md`
+/// F4b): a holding peer whose hold has not moved for `stall_secs` stops
+/// holding; a gap between two rounds longer than `absence_secs` is our own
+/// downtime and is not charged to the peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AckClock {
+    /// Unix seconds of this round.
+    pub now: u64,
+    /// How long a hold may stand still.
+    pub stall_secs: u64,
+    /// The longest gap between two rounds that still counts.
+    pub absence_secs: u64,
+}
+
 /// One compaction round on the writer thread (WP4a §A.4), in the order that
 /// makes every step idempotent and a crash between them harmless:
 ///
@@ -4088,23 +4105,37 @@ fn compact_once(
     ws: &mut OpenedWorkspace,
     snapshot: &WorkspaceSnapshot,
     holding_peers: &[String],
+    clock: AckClock,
 ) -> Result<CompactionOutcome, StorageError> {
     ws.write_snapshot(snapshot)?;
     ws.sync()?;
-    let cursors = ws.read_transport_state().outbound;
+    let mut ts = ws.read_transport_state();
+    let mut progress = std::collections::BTreeMap::new();
     let mut floor = snapshot.at_seq;
     for peer in holding_peers {
         // delivery guarantee §4.9: a proven-acking peer holds the log down to
         // its ACKED floor, not merely to the send cursor — the unacked tail
         // must stay resendable (every rebuild rewinds to the floor). An old
         // (never-acking) peer keeps the plain cursor gate.
-        floor = floor.min(cursors.get(peer).map_or(0, |c| {
+        let hold = ts.outbound.get(peer).map_or(0, |c| {
             if c.ack_seen {
                 c.acked_floor
             } else {
                 c.log_seq
             }
-        }));
+        });
+        let seen = ack_progress(ts.ack_progress.get(peer).copied(), hold, snapshot.at_seq, clock);
+        progress.insert(peer.clone(), seen);
+        if clock.now.saturating_sub(seen.since) <= clock.stall_secs {
+            floor = floor.min(hold);
+        } else {
+            tracing::info!(%peer, hold, since = seen.since, reason = "ack_stall", "compaction hold released");
+        }
+    }
+    // peers that no longer hold drop out; one that holds again starts afresh
+    if ts.ack_progress != progress {
+        ts.ack_progress = progress;
+        ws.write_transport_state(&ts)?;
     }
     if floor == 0 {
         return Ok(CompactionOutcome {
@@ -4121,6 +4152,32 @@ fn compact_once(
         floor: ws.compaction_floor(),
         segments_dropped,
     })
+}
+
+/// One peer's hold progress after this round (F4b). The clock restarts
+/// when the hold advanced or caught up with the snapshot; a gap between
+/// rounds longer than `absence_secs` shifts it forward by that gap.
+fn ack_progress(
+    prev: Option<molt_core::AckProgress>,
+    hold: u64,
+    at_seq: u64,
+    clock: AckClock,
+) -> molt_core::AckProgress {
+    let now = clock.now;
+    let since = match prev {
+        None => now,
+        Some(_) if hold >= at_seq => now,
+        Some(p) if hold > p.floor => now,
+        Some(p) => {
+            let gap = now.saturating_sub(p.checked);
+            if gap > clock.absence_secs {
+                p.since.saturating_add(gap).min(now)
+            } else {
+                p.since.min(now)
+            }
+        }
+    };
+    molt_core::AckProgress { floor: hold, since, checked: now }
 }
 
 /// Move an opened workspace onto its own writer thread and return the handle.
@@ -4377,8 +4434,8 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         };
                         let _ = ack.send(ok);
                     }
-                    Ok(WriterMsg::Compact { snapshot, holding_peers, ack }) => {
-                        let outcome = match compact_once(&mut ws, &snapshot, &holding_peers) {
+                    Ok(WriterMsg::Compact { snapshot, holding_peers, clock, ack }) => {
+                        let outcome = match compact_once(&mut ws, &snapshot, &holding_peers, clock) {
                             Ok(o) => o,
                             Err(e) => {
                                 // compaction is hygiene, never correctness: a
@@ -5165,7 +5222,7 @@ mod tests {
             at_seq,
             state: molt_core::EngineStateDump::default(),
         };
-        let out = handle.compact_blocking(snap, vec!["slowpoke".to_string()]);
+        let out = handle.compact_blocking(snap, vec!["slowpoke".to_string()], ack_clock(0));
         assert_eq!(out.floor, 4, "the floor stops at the slow peer's covered segment");
         assert_eq!(out.segments_dropped, 1, "only segment 1 is fully below it");
         handle.close(None);
@@ -5216,13 +5273,124 @@ mod tests {
             at_seq,
             state: molt_core::EngineStateDump::default(),
         };
-        let out = handle.compact_blocking(snap, vec!["acker".to_string()]);
+        let out = handle.compact_blocking(snap, vec!["acker".to_string()], ack_clock(0));
         assert_eq!(
             out.floor, 4,
             "the ACKED floor gates the round (send cursor 13 would have dropped \
              three segments) — the unacked tail stays resendable"
         );
         assert_eq!(out.segments_dropped, 1, "only the fully-confirmed segment goes");
+        handle.close(None);
+    }
+
+    const DAY: u64 = 86_400;
+
+    /// A 7-day retention window: holds may stand still for two windows, and
+    /// a gap longer than one window is our own absence.
+    fn ack_clock(now: u64) -> AckClock {
+        AckClock { now, stall_secs: 14 * DAY, absence_secs: 7 * DAY }
+    }
+
+    fn snapshot_at(at_seq: u64) -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
+            version: molt_core::STORAGE_VERSION,
+            at_seq,
+            state: molt_core::EngineStateDump::default(),
+        }
+    }
+
+    /// F4b: a peer in contact that never acks holds the log only for the
+    /// ack-progress grace, counted from the first round that saw it.
+    #[test]
+    fn a_silent_but_present_peer_stops_pinning_after_the_ack_grace() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        rotate_n(&mut ws, 3, 3); // segments 1..4, seqs 1..=13
+        let at_seq = ws.next_seq - 1;
+        let handle = start_writer(ws);
+        let t0 = 1_000 * DAY;
+        let lurker = vec!["lurker".to_string()];
+        for now in [t0, t0 + 7 * DAY, t0 + 14 * DAY] {
+            let out = handle.compact_blocking(snapshot_at(at_seq), lurker.clone(), ack_clock(now));
+            assert_eq!(out, CompactionOutcome::default(), "inside the grace it holds");
+        }
+        let out = handle.compact_blocking(snapshot_at(at_seq), lurker, ack_clock(t0 + 15 * DAY));
+        assert_eq!(out.segments_dropped, 3, "past the grace it no longer holds");
+        handle.close(None);
+    }
+
+    /// An acking peer whose floor keeps moving holds the log for as long as
+    /// it is behind, however long that is.
+    #[test]
+    fn an_acking_peer_keeps_pinning_past_the_ack_grace() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        rotate_n(&mut ws, 3, 3); // segments 1..4, seqs 1..=13
+        let at_seq = ws.next_seq - 1;
+        let handle = start_writer(ws);
+        let t0 = 1_000 * DAY;
+        let acker = vec!["acker".to_string()];
+        for (i, floor) in [1u64, 2, 3, 4, 5].into_iter().enumerate() {
+            let mut ts = TransportState::default();
+            ts.outbound.insert(
+                "acker".to_string(),
+                molt_core::OutboundCursor { log_seq: 13, acked_floor: floor, ack_seen: true, ..Default::default() },
+            );
+            handle.save_transport_state(ts);
+            let now = t0 + 7 * DAY * u64::try_from(i).expect("small");
+            let out = handle.compact_blocking(snapshot_at(at_seq), acker.clone(), ack_clock(now));
+            assert!(out.floor <= floor, "the acked floor still gates the round at day {}", 7 * i);
+        }
+        handle.close(None);
+    }
+
+    /// The grace clock lives in `transport.state`: a reopen must not restart
+    /// it, or a node that restarts daily would be pinned forever.
+    #[test]
+    fn the_ack_grace_survives_a_reopen() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        rotate_n(&mut ws, 3, 3);
+        let dir = ws.dir().to_path_buf();
+        let at_seq = ws.next_seq - 1;
+        let lurker = vec!["lurker".to_string()];
+        let t0 = 1_000 * DAY;
+        let handle = start_writer(ws);
+        for now in [t0, t0 + 7 * DAY] {
+            handle.compact_blocking(snapshot_at(at_seq), lurker.clone(), ack_clock(now));
+        }
+        handle.close(None);
+
+        let (ws, _) = open_workspace(&dir).expect("reopen");
+        let handle = start_writer(ws);
+        let out = handle.compact_blocking(snapshot_at(at_seq), lurker.clone(), ack_clock(t0 + 14 * DAY));
+        assert_eq!(out, CompactionOutcome::default(), "still inside the grace");
+        let out = handle.compact_blocking(snapshot_at(at_seq), lurker, ack_clock(t0 + 15 * DAY));
+        assert_eq!(out.segments_dropped, 3, "the stall counted from before the reopen");
+        handle.close(None);
+    }
+
+    /// A gap between two rounds longer than a window is our downtime: the
+    /// peer could not ack a node that was not running.
+    #[test]
+    fn our_own_absence_is_not_charged_to_the_peer() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let mut ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        rotate_n(&mut ws, 3, 3);
+        let at_seq = ws.next_seq - 1;
+        let lurker = vec!["lurker".to_string()];
+        let t0 = 1_000 * DAY;
+        let handle = start_writer(ws);
+        for now in [t0, t0 + 30 * DAY, t0 + 37 * DAY, t0 + 44 * DAY] {
+            let out = handle.compact_blocking(snapshot_at(at_seq), lurker.clone(), ack_clock(now));
+            assert_eq!(out, CompactionOutcome::default(), "the 30-day gap is not the peer's stall");
+        }
+        let out = handle.compact_blocking(snapshot_at(at_seq), lurker, ack_clock(t0 + 45 * DAY));
+        assert_eq!(out.segments_dropped, 3, "two observed windows later it is");
         handle.close(None);
     }
 
@@ -5249,7 +5417,7 @@ mod tests {
             at_seq,
             state: molt_core::EngineStateDump::default(),
         };
-        let out = handle.compact_blocking(snap, vec!["fresh-peer".to_string()]);
+        let out = handle.compact_blocking(snap, vec!["fresh-peer".to_string()], ack_clock(0));
         assert_eq!(out, CompactionOutcome::default(), "nothing dropped, no floor");
         handle.close(None);
         assert!(
@@ -5323,6 +5491,7 @@ mod tests {
         let out = handle.compact_blocking(
             snap,
             vec!["delivered".to_string(), "never-heard-from".to_string()],
+            ack_clock(0),
         );
         assert_eq!(out, CompactionOutcome::default(), "the cursorless peer holds everything");
         handle.close(None);

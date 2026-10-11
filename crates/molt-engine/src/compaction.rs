@@ -14,6 +14,8 @@
 //! * **whose cursor still counts** — a peer that has been out of contact
 //!   longer than two windows (F4) no longer pins the log; it is redirected to
 //!   the chain catch-up (§A.1 C2) like any node that fell too far behind.
+//!   One in contact whose acks stall for two windows is released the same
+//!   way (F4b; the clock lives in storage's `compact_once`).
 //!
 //! Routine rounds are deliberately NOT voted: an "I compacted" signature is
 //! unprovable, a block over local device state would break the ephemeral
@@ -41,6 +43,11 @@ const CONTENT_GRACE_WINDOWS: u64 = 1;
 /// grace — a peer gets strictly longer to come back than the content gets to
 /// survive.
 const PEER_GRACE_WINDOWS: u64 = 2;
+
+/// Ack-progress grace (F4b): a peer in contact whose hold has not moved for
+/// this many windows stops holding the floor. A gap between two rounds
+/// longer than one window is our own absence and is not counted.
+const ACK_GRACE_WINDOWS: u64 = 2;
 
 impl State {
     /// The instant before which chat content is **physically** dropped:
@@ -72,6 +79,16 @@ impl State {
             .filter(|m| *m != me)
             .filter(|m| now.saturating_sub(self.member_last_seen(m)) <= grace)
             .collect()
+    }
+
+    /// The ack-progress grace of a round at `now` (F4b).
+    pub(crate) fn ack_clock(&self, now: u64) -> molt_storage::AckClock {
+        let window = self.org_effective().retention_days * 86_400;
+        molt_storage::AckClock {
+            now,
+            stall_secs: window.saturating_mul(ACK_GRACE_WINDOWS),
+            absence_secs: window,
+        }
     }
 
     /// Physically drop expired chat from the LIVE state and return the
@@ -168,6 +185,7 @@ impl State {
             return;
         };
         let holding_peers = self.peers_holding_the_log(now);
+        let clock = self.ack_clock(now);
         let snapshot = WorkspaceSnapshot {
             version: molt_core::STORAGE_VERSION,
             at_seq: self.next_seq.saturating_sub(1),
@@ -179,7 +197,7 @@ impl State {
         let handle = active.handle.clone();
         tracing::info!(dropped, cutoff, "compacting the ephemeral log");
         let run = move || {
-            let out = handle.compact_blocking(snapshot, holding_peers);
+            let out = handle.compact_blocking(snapshot, holding_peers, clock);
             if out.segments_dropped > 0 {
                 tracing::info!(
                     floor = out.floor,
@@ -377,6 +395,18 @@ mod tests {
         assert!(holding.contains(&"quiet".to_string()), "a merely quiet peer still holds");
         assert!(!holding.contains(&"gone".to_string()), "the long-gone peer is released");
         assert!(!holding.contains(&st.member()), "our own cursor never holds us back");
+    }
+
+    /// F4b: the ack grace is two retention windows, and a gap longer than
+    /// one window is not charged to the peer.
+    #[test]
+    fn the_ack_grace_is_two_windows_and_one_window_of_absence() {
+        let st = plain_state();
+        let window = st.org_effective().retention_days * 86_400;
+        let clock = st.ack_clock(42);
+        assert_eq!(clock.now, 42);
+        assert_eq!(clock.stall_secs, 2 * window);
+        assert_eq!(clock.absence_secs, window);
     }
 
     /// The daily gate (F8): without an open workspace nothing runs at all, and

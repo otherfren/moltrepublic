@@ -60,8 +60,6 @@ node checks against every seat before it hands out a v2 anchor.
 From `docs_archive/reviews/security_audit_2026-10-10.md` (its accepted
 residuals are listed there, not here):
 
-- **#32 compaction floor**: a peer in contact that never acks pins the
-  floor at 0, so expired chat is never erased. Needs a never-acks grace.
 - **#20 homoglyph handles**: needs a UTS #39 skeleton uniqueness check.
 
 ## `SaveTransport` overwrites `vault_status` wholesale

@@ -2122,6 +2122,22 @@ pub struct TransportState {
     /// phrase-only recovery). Sensitive like `vault_seed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wallet_view: Option<vault::SecretBytes>,
+    /// Per peer: when its compaction hold last moved
+    /// (`docs_archive/chain/log_compaction.md` F4b). Written only by the
+    /// compaction round.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ack_progress: BTreeMap<MemberId, AckProgress>,
+}
+
+/// One peer's compaction-hold progress (F4b, ack-progress grace).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AckProgress {
+    /// The hold position seen at the last round.
+    pub floor: u64,
+    /// Unix seconds since which `floor` has not advanced.
+    pub since: u64,
+    /// Unix seconds of the last round that looked.
+    pub checked: u64,
 }
 
 /// A seat's default mirror budget per republic: 1 GiB.

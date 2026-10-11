@@ -59,6 +59,22 @@ Segmente. Floor-Regeln:
   Krypto-Erasure ab der ersten Ausbaustufe. Design §A.3.
 - **F4 — Peer-Karenz = 2× Retention-Fenster** (doppelt so lang wie die
   Inhalts-Karenz), danach Cursor-Umleitung auf Catch-up.
+- **F4b — Ack-Progress-Karenz (2026-10-11, User; Audit #32).** F4 misst
+  nur den KONTAKT; ein Peer, der da ist, aber nie ackt, hielt den Floor
+  ewig auf 0. Jetzt hält ein Peer nur, solange sein Haltewert (acked
+  floor, bzw. Sende-Cursor bei einem Nie-Acker im Alt-Pfad, 0 ohne
+  Cursor) sich innerhalb von **2× Retention-Fenster** bewegt hat. Pro
+  Peer persistiert `transport.state` `ack_progress` (`floor`, `since`,
+  `checked`); geschrieben nur vom Kompaktor (`compact_once`). Die Uhr
+  startet beim ersten Lauf, der den Peer als haltend sieht, und neu, wenn
+  der Wert steigt oder den Snapshot erreicht. Danach endet die
+  Zustellgarantie für den Teil unter dem Floor (C2). Präzisierungen
+  (konservativ, nicht Teil der Entscheidung): (a) gemessen wird pro
+  Kompaktorlauf, also täglich — die Freigabe kommt bis zu einen Tag
+  später; (b) eine Lücke zwischen zwei Läufen > 1 Fenster ist UNSERE
+  Abwesenheit (der Peer konnte niemandem acken, der nicht lief) und wird
+  ihm nicht angerechnet; (c) ein Peer, der aus der haltenden Liste fällt,
+  verliert seinen Eintrag und startet bei Rückkehr frisch.
 
 Vorgaben aus der offenen F6–F9-Runde (werden so gebaut, solange kein
 Widerspruch kommt):
@@ -141,7 +157,8 @@ still ausgeliefert worden wären:
 Inhalts-Cutoff = `now − (1 + F2-Karenz) × Fenster`; Live-State und Snapshot
 werden mit DEMSELBEN Aufruf gestutzt (sie können nicht auseinanderlaufen);
 dann Snapshot schreiben + fsync (R1), Floor = Snapshot-Position, gebremst vom
-Delivery-Cursor jedes Peers INNERHALB seiner Karenz (R2/F4), dann F6-Migration,
+Delivery-Cursor jedes Peers INNERHALB seiner Karenz (R2/F4) und seiner
+Ack-Progress-Karenz (F4b), dann F6-Migration,
 dann Drop (Keys zuerst löschen, dann unlinken). Erster echter Drop hebt die
 Manifest-Version — ältere Binaries verweigern das Workspace höflich, statt es
 als beschädigt zu lesen.

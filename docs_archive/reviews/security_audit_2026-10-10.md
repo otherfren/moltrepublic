@@ -71,7 +71,7 @@ LOW = bounded nuisance, latent or local-only.
 | 29 | LOW | netpriv | Trailing-dot onion S3 endpoint resolved via system DNS; hand-rolled parser | `4e89b00a` |
 | 30 | LOW | ui | Peer chat with kind=System renders as an unattributed engine line | `70ab3175` |
 | 31 | LOW | wallet | Any seat's `wdhint` overwrites the starter's daemon suggestion | `b8ce8889` |
-| 32 | LOW | gov-chat | A silent-but-present member pins the compaction floor at 0; expired chat never erased | open |
+| 32 | LOW | gov-chat | A silent-but-present member pins the compaction floor at 0; expired chat never erased | fixed 2026-10-11 (ack-progress grace, `log_compaction.md` F4b) |
 | 33 | LOW | gov-chat | Withdraw authorized by first-sighting `by`, not the minting seat | `6995b339` |
 | 34 | LOW | gov-chat | Predictable decision-line id lets an insider pre-post a forged line | `70ab3175` |
 | 35 | LOW | configstore | HTTP credentials snapshotted per connection; revoked keys work on keep-alive | `6da54fde` |
@@ -95,8 +95,8 @@ LOW = bounded nuisance, latent or local-only.
   ACCEPTED 2026-10-11 (below).
 - **Homoglyph handles** (#20 residual): closing them needs a UTS #39
   skeleton uniqueness check - product policy and a dependency.
-- **Compaction floor** (#32): needs a policy for a peer that is reachable
-  but never acks (a grace after which it stops pinning the floor).
+- **Compaction floor** (#32): decided 2026-10-11 - ack-progress grace of
+  two retention windows (`log_compaction.md` F4b), built.
 
 ## Final gate
 
