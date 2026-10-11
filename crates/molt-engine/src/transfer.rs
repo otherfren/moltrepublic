@@ -1335,6 +1335,7 @@ pub(crate) fn spawn_mirror_fetch<S: FetchJobStore>(
                 count: job.count,
                 size: job.size,
                 root: Some(job.root.clone()),
+                content: None,
             };
             let (count, started_at) = (job.count, job.started_at);
             let mut sink = MirrorSink {
@@ -1567,6 +1568,7 @@ pub(crate) fn spawn_nostr_fetch_v2<S: FetchJobStore>(
                     count: job.count,
                     size: job.size,
                     root: Some(job.root.clone()),
+                    content: None,
                 };
                 let started = tokio::time::Instant::now();
                 let mut last_ask: Option<tokio::time::Instant> = None;

@@ -252,6 +252,14 @@ const SPILL_MEMORY_MAX: usize = 64 * 1024 * 1024;
 /// candidate for the same index waits here until its chunk decides.
 const SLICE_CANDIDATES_PER_INDEX: usize = 4;
 const SLICE_SIDE_MAX: usize = 32 * 1024 * 1024;
+/// A rootless fetch (no manifest root to check a top record against)
+/// keeps the distinct top records it saw besides its own, rotates to one
+/// when its own stalls, and disowns a top whose series assembles to other
+/// bytes than [`SeriesExpect::content`]: one forged record never owns it.
+const TOP_RIVALS_MAX: usize = 8;
+const TOPS_DISOWNED_MAX: usize = 4_096;
+/// Quiet slices without progress before a rootless fetch doubts its top.
+const TOP_STALL_QUIETS: u32 = 12;
 
 /// The per-file OUTER key: `HKDF-SHA256(ikm = K, info = "molt-piece-outer-v2")`.
 /// One derivation step away from K so the chat's key never seals bytes
@@ -609,6 +617,9 @@ pub struct SeriesExpect {
     /// the chain's threshold-signed content hash). Without it a lying
     /// holder can waste a transfer, never place wrong bytes.
     pub root: Option<String>,
+    /// SHA-256 of the assembled content, hex: lets a rootless fetch
+    /// disown a top record whose series assembles to other bytes.
+    pub content: Option<String>,
 }
 
 /// Where fetched slices land: memory for tests and small files, a `.part`
@@ -635,6 +646,12 @@ pub trait PieceSink {
     fn verified(&mut self, index: u32) {
         let _ = index;
     }
+    /// SHA-256 of the first `size` landed bytes; `None` = this sink
+    /// cannot tell, and [`SeriesExpect::content`] goes unchecked.
+    fn digest(&self, size: u64) -> Option<[u8; 32]> {
+        let _ = size;
+        None
+    }
 }
 
 impl PieceSink for Vec<u8> {
@@ -649,6 +666,11 @@ impl PieceSink for Vec<u8> {
         }
         self[at..end].copy_from_slice(payload);
         Ok(())
+    }
+
+    fn digest(&self, size: u64) -> Option<[u8; 32]> {
+        let size = usize::try_from(size).ok()?;
+        Some(self.get(..size).map_or([0u8; 32], sha))
     }
 }
 
@@ -1138,6 +1160,15 @@ pub async fn fetch_series_v2_with(
     let chunk_slots = usize::try_from(layout.chunks).unwrap_or(usize::MAX);
     let mut sub = chan.subscribe_files_from(start_stamp, MAX_CATCHUP_WINDOWS).await?;
     let mut top: Option<TopRecord> = None;
+    let mut top_hash = [0u8; 32];
+    let mut rivals: std::collections::VecDeque<(TopRecord, [u8; 32])> = std::collections::VecDeque::new();
+    let mut disowned: HashSet<[u8; 32]> = HashSet::new();
+    let content = expect.content.as_ref().map(|c| c.to_lowercase());
+    let stall_after = opts.quiet.saturating_mul(TOP_STALL_QUIETS);
+    let mut mark = (usize::MAX, 0usize);
+    let mut moved = tokio::time::Instant::now();
+    let mut doubt = false;
+    let mut ask_top = false;
     let mut chunks: Vec<Option<Vec<u8>>> = vec![None; chunk_slots];
     let mut candidates = CandidateStore::new(sink.spill_path());
     let mut pending = Unverified::default();
@@ -1149,7 +1180,19 @@ pub async fn fetch_series_v2_with(
         let done = top.is_some()
             && chunks.iter().all(Option::is_some)
             && verified.len() == usize::try_from(count).unwrap_or(usize::MAX);
-        if done {
+        let wrong = done
+            && root.is_none()
+            && content.as_ref().is_some_and(|want| {
+                sink.digest(expect.size).is_some_and(|have| &hex::encode(have) != want)
+            });
+        if wrong {
+            tracing::debug!("file plane: a top record's series is not the committed content - disowned");
+            if disowned.len() < TOPS_DISOWNED_MAX {
+                disowned.insert(top_hash);
+            }
+            top = None;
+            doubt = true;
+        } else if done {
             let top = top.take().ok_or_else(|| NetError::Framing("no top record".into()))?;
             let parts: Vec<Vec<u8>> = chunks.into_iter().flatten().collect();
             return Manifest::from_parts(&top, &parts);
@@ -1158,6 +1201,43 @@ pub async fn fetch_series_v2_with(
             return Err(NetError::Framing(
                 "the fetch budget is spent - the series did not complete".to_string(),
             ));
+        }
+        if root.is_none() {
+            let progress = (verified.len(), chunks.iter().filter(|c| c.is_some()).count());
+            if progress != mark {
+                mark = progress;
+                moved = tokio::time::Instant::now();
+            } else if top.is_some() && moved.elapsed() >= stall_after {
+                doubt = true;
+            }
+        }
+        if doubt {
+            doubt = false;
+            moved = tokio::time::Instant::now();
+            let next = rivals.pop_front();
+            if next.is_some() || top.is_none() {
+                if let Some(old) = top.take() {
+                    rivals.push_back((old, top_hash));
+                }
+                if let Some((record, hash)) = next {
+                    top = Some(record);
+                    top_hash = hash;
+                }
+                tracing::debug!(rivals = rivals.len(), "file plane: rootless fetch restarts on another top record");
+                chunks = vec![None; chunk_slots];
+                verified.clear();
+                pending = Unverified::default();
+                candidates = CandidateStore::new(sink.spill_path());
+                mark = (usize::MAX, 0);
+                ask_top = false;
+                match chan.subscribe_files_from(start_stamp, MAX_CATCHUP_WINDOWS).await {
+                    Ok(fresh) => sub = fresh,
+                    Err(e) => tracing::debug!(error = %e, "file plane: re-placing the fetch subscription failed"),
+                }
+            } else {
+                ask_top = true;
+            }
+            continue;
         }
         match sub.recv(opts.quiet).await {
             GroupRecv::Frame { content, .. } => {
@@ -1172,10 +1252,10 @@ pub async fn fetch_series_v2_with(
                     continue; // a re-share under the same key cannot happen; refuse the geometry anyway
                 }
                 if index == layout.top {
-                    if top.is_some()
-                        || root
-                            .as_ref()
-                            .is_some_and(|r| &hex::encode(sha(payload)) != r)
+                    let hash = sha(payload);
+                    if (top.is_some() && root.is_some())
+                        || root.as_ref().is_some_and(|r| &hex::encode(hash) != r)
+                        || disowned.contains(&hash)
                     {
                         continue; // a record the root disowns is a forgery
                     }
@@ -1185,6 +1265,18 @@ pub async fn fetch_series_v2_with(
                     if record.count != count || record.size != expect.size {
                         continue;
                     }
+                    if top.is_some() {
+                        // rootless: a rival, tried once ours stalls
+                        if hash != top_hash && !rivals.iter().any(|(_, h)| *h == hash) {
+                            if rivals.len() >= TOP_RIVALS_MAX {
+                                rivals.pop_front();
+                            }
+                            rivals.push_back((record, hash));
+                            doubt |= ask_top;
+                        }
+                        continue;
+                    }
+                    top_hash = hash;
                     // the chunks that waited for the record: the one whose
                     // hash it names wins, the rest were forgeries
                     for slot in 0..layout.chunks {
@@ -1281,7 +1373,7 @@ pub async fn fetch_series_v2_with(
                     }
                 }
                 let chunks_known: Vec<bool> = chunks.iter().map(Option::is_some).collect();
-                let missing = missing_ranges(&verified, &chunks_known, top.is_some(), layout);
+                let missing = missing_ranges(&verified, &chunks_known, top.is_some() && !ask_top, layout);
                 if !on_quiet(missing) {
                     return Err(NetError::Framing("the fetch was cancelled".to_string()));
                 }

@@ -339,8 +339,8 @@ async fn a_spent_publish_budget_holds_the_upload() {
 // ---------------------------------------------------------------------------
 
 use molt_net::file_plane::{
-    fetch_series_v2, manifest_of_reader, publish_series_v2, seal_piece, Manifest, SeriesExpect,
-    PIECE_PAYLOAD_LEN,
+    fetch_series_v2, fetch_series_v2_with, manifest_of_reader, publish_series_v2, seal_piece, FetchOpts,
+    Manifest, SeriesExpect, PIECE_PAYLOAD_LEN,
 };
 
 fn unix_now() -> u64 {
@@ -360,7 +360,7 @@ fn write_tmp(dir: &tempfile::TempDir, name: &str, bytes: &[u8]) -> std::path::Pa
 
 fn expect_of(bytes: &[u8]) -> (Manifest, SeriesExpect, String) {
     let (m, sha) = manifest_of_reader(bytes).expect("manifest");
-    let expect = SeriesExpect { count: m.count, size: m.size, root: Some(m.root()) };
+    let expect = SeriesExpect { count: m.count, size: m.size, root: Some(m.root()), content: None };
     (m, expect, sha)
 }
 
@@ -684,6 +684,138 @@ async fn twelve_forged_chunks_for_one_slot_do_not_evict_the_honest_one() {
     let m = fetch_series_v2(&fetcher, &KEY, start, &expect, &mut got, Some(Duration::from_secs(10)))
         .await
         .expect("the honest chunk survives twelve forgeries");
+    assert_eq!(m, manifest);
+    assert_eq!(got, bytes);
+}
+
+/// A rootless expectation (the folded wiki base, the vault): the content
+/// hash is the only commitment.
+fn rootless(m: &Manifest, bytes: &[u8]) -> SeriesExpect {
+    SeriesExpect { count: m.count, size: m.size, root: None, content: Some(sha_hex(bytes)) }
+}
+
+/// Publish every piece of `m` over `bytes` at `stamp`, the top record
+/// only if `with_top`.
+async fn publish_pieces(chan: &GroupChannel, m: &Manifest, bytes: &[u8], stamp: u64, with_top: bool) {
+    let layout = Manifest::layout_for(m.count).expect("layout");
+    for (i, slice) in bytes.chunks(PIECE_PAYLOAD_LEN).enumerate() {
+        let index = u32::try_from(i).expect("index");
+        let piece = seal_piece(&KEY, index, m.count, slice).expect("seal");
+        chan.publish_file_content_at(&piece, stamp).await.expect("slice");
+    }
+    for slot in 0..layout.chunks {
+        let piece = seal_piece(&KEY, m.count + slot, m.count, &m.chunk(slot)).expect("seal");
+        chan.publish_file_content_at(&piece, stamp).await.expect("chunk");
+    }
+    if with_top {
+        let piece = seal_piece(&KEY, layout.top, m.count, &m.top_bytes()).expect("seal");
+        chan.publish_file_content_at(&piece, stamp).await.expect("top");
+    }
+}
+
+/// A forged top record, right geometry and wrong chunk hashes.
+fn forged_top(m: &Manifest) -> String {
+    let layout = Manifest::layout_for(m.count).expect("layout");
+    let mut wrong = m.top_bytes();
+    if let Some(last) = wrong.last_mut() {
+        *last ^= 0xFF;
+    }
+    seal_piece(&KEY, layout.top, m.count, &wrong).expect("seal")
+}
+
+async fn fetch_rootless(
+    chan: &GroupChannel,
+    start: u64,
+    expect: &SeriesExpect,
+    on_quiet: &mut molt_net::file_plane::QuietHook,
+) -> Result<(Manifest, Vec<u8>), molt_net::NetError> {
+    let mut got: Vec<u8> = Vec::new();
+    let opts = FetchOpts {
+        quiet: Duration::from_millis(300),
+        ceiling: Some(Duration::from_secs(30)),
+        on_quiet: Some(on_quiet),
+    };
+    let m = fetch_series_v2_with(chan, &KEY, start, expect, &mut got, opts).await?;
+    got.truncate(usize::try_from(m.size).expect("size"));
+    Ok((m, got))
+}
+
+/// Rootless: a forged top record replayed BEFORE the honest one must not
+/// capture the fetch - its chunks never arrive, the honest rival wins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rootless_fetch_is_not_captured_by_a_forged_top_record() {
+    let (_relay, url) = fast_relay().await;
+    let bytes = pattern(PIECE_PAYLOAD_LEN + 5);
+    let (manifest, _, _) = expect_of(&bytes);
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    let now = unix_now();
+    publish_pieces(&chan, &manifest, &bytes, now - 60, true).await;
+    chan.publish_file_content_at(&forged_top(&manifest), now).await.expect("forged top");
+
+    let fetcher = GroupChannel::new(dialer(), vec![url], SEED);
+    let mut keep = |_: Vec<(u32, u32)>| true;
+    let (m, got) = fetch_rootless(&fetcher, now - 120, &rootless(&manifest, &bytes), &mut keep)
+        .await
+        .expect("the honest top completes the series");
+    assert_eq!(m, manifest);
+    assert_eq!(got, bytes);
+}
+
+/// Rootless: a whole forged series (top, chunks, slices of other bytes)
+/// replayed first completes - and is disowned by the content hash, not
+/// handed back; the honest series follows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rootless_fetch_disowns_a_series_that_assembles_to_other_bytes() {
+    let (_relay, url) = fast_relay().await;
+    let bytes = pattern(PIECE_PAYLOAD_LEN + 5);
+    let fake: Vec<u8> = bytes.iter().map(|b| b ^ 0x5A).collect();
+    let (manifest, _, _) = expect_of(&bytes);
+    let (fake_manifest, _, _) = expect_of(&fake);
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    let now = unix_now();
+    publish_pieces(&chan, &manifest, &bytes, now - 60, true).await;
+    publish_pieces(&chan, &fake_manifest, &fake, now, true).await;
+
+    let fetcher = GroupChannel::new(dialer(), vec![url], SEED);
+    let mut keep = |_: Vec<(u32, u32)>| true;
+    let (m, got) = fetch_rootless(&fetcher, now - 120, &rootless(&manifest, &bytes), &mut keep)
+        .await
+        .expect("the honest series completes");
+    assert_eq!(m, manifest);
+    assert_eq!(got, bytes, "the forged content was not handed back");
+}
+
+/// Rootless: the honest top was never published (holders publish on a
+/// want) and a forgery took the slot - a stalled fetch asks for the top
+/// again, and the answer wins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stalled_rootless_fetch_asks_for_the_top_record_again() {
+    let (_relay, url) = fast_relay().await;
+    let bytes = pattern(PIECE_PAYLOAD_LEN + 5);
+    let (manifest, _, _) = expect_of(&bytes);
+    let layout = Manifest::layout_for(manifest.count).expect("layout");
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    let now = unix_now();
+    publish_pieces(&chan, &manifest, &bytes, now - 60, false).await;
+    chan.publish_file_content_at(&forged_top(&manifest), now).await.expect("forged top");
+
+    let honest_top = seal_piece(&KEY, layout.top, manifest.count, &manifest.top_bytes()).expect("seal");
+    let holder = chan.clone();
+    let mut served = false;
+    let mut serve = move |missing: Vec<(u32, u32)>| {
+        if !served && missing.iter().any(|(lo, hi)| (*lo..=*hi).contains(&layout.top)) {
+            served = true;
+            let (holder, piece) = (holder.clone(), honest_top.clone());
+            tokio::spawn(async move {
+                holder.publish_file_content_at(&piece, unix_now()).await.expect("honest top");
+            });
+        }
+        true
+    };
+    let fetcher = GroupChannel::new(dialer(), vec![url], SEED);
+    let (m, got) = fetch_rootless(&fetcher, now - 120, &rootless(&manifest, &bytes), &mut serve)
+        .await
+        .expect("the answered top completes the series");
     assert_eq!(m, manifest);
     assert_eq!(got, bytes);
 }

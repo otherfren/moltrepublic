@@ -1169,7 +1169,9 @@ chain; a file's persistence stays the `persist` vote's business.
     lands in memory for the same reason. `SeriesExpect.root` became
     optional: the chain commits to CONTENT, so the assembled bytes are
     checked against the threshold-signed hash rather than a root learned
-    from gossip.
+    from gossip. Rootless, the fetch keeps rival top records, rotates on a
+    stall and disowns a top whose series fails that hash, so one forged
+    record cannot hold it (2026-10-11).
   - **K6d Flip `FOLD_CUTS`** - BUILT 2026-09-05, with the
     `CheckpointServed` size guard (§4.9.8): a blob that does not fit one
     transport frame is not served, because an over-budget WorkspaceEvent

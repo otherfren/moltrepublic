@@ -116,6 +116,7 @@ impl crate::State {
                 // CONTENT, not to the transport's framing (§4.9.1), and
                 // the assembled bytes are checked against that commitment
                 root: None,
+                content: Some(series.hash.clone()),
             },
             self.net_scope,
             cmd_tx,

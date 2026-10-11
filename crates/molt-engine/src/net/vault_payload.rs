@@ -304,7 +304,12 @@ impl crate::State {
             named.series(),
             key,
             from,
-            molt_net::file_plane::SeriesExpect { count: named.count(), size: named.size, root: None },
+            molt_net::file_plane::SeriesExpect {
+                count: named.count(),
+                size: named.size,
+                root: None,
+                content: Some(named.hash.clone()),
+            },
             named.hash.clone(),
             self.net_scope,
             cmd_tx,
