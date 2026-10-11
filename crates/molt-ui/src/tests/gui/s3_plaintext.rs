@@ -101,3 +101,55 @@ fn a_plaintext_endpoint_asks_once_with_its_warning_line() {
     assert_eq!(ui.get_cfg_s3_pt_url(), "", "https never asks");
     assert!(!shown(&ui, &warning));
 }
+
+/// An unchanged, unacknowledged endpoint (stored by an older build) never
+/// blocks saving the other settings; using it still asks.
+#[test]
+fn an_unchanged_plaintext_endpoint_does_not_hold_up_save() {
+    backend();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (w, _) = node_with_chat(tmp.path());
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    let cx = Ctx {
+        rt: rt.handle().clone(),
+        wallet: w.clone(),
+        weak: ui.as_weak(),
+        last_settings: Arc::new(Mutex::new(None)),
+        chat_ui: Arc::new(Mutex::new(ChatUiState::default())),
+    };
+    crate::actions::settings::wire(&ui, &cx);
+    let _shown = show_headless(&ui);
+    let session = |w: &WalletHandle| match rt.block_on(w.execute(Command::ReadSession)) {
+        Ok(Reply::Session(s)) => s,
+        other => panic!("a session: {other:?}"),
+    };
+    let plain = "http://203.0.113.9:9000";
+    rt.block_on(w.execute(Command::PatchSettings {
+        patch: serde_json::json!({ "s3_endpoint": plain }),
+    }))
+    .expect("an older build's endpoint");
+    let stored = session(&w).settings;
+    crate::settings::apply_settings_fields(&ui, &stored);
+    *cx.last_settings.lock().expect("settings lock") = Some(stored);
+
+    ui.set_cfg_s3_bucket("other".into());
+    ui.invoke_save_settings();
+    settle();
+    assert_eq!(ui.get_cfg_s3_pt_url(), "", "nothing new to acknowledge");
+    let mut saved = false;
+    for _ in 0..200 {
+        if session(&w).settings.s3_bucket == "other" {
+            saved = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(saved, "the save went through");
+
+    ui.invoke_test_s3("".into());
+    settle();
+    assert_eq!(ui.get_cfg_s3_pt_url(), plain, "using it still asks");
+}

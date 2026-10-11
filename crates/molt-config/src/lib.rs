@@ -111,6 +111,12 @@ pub fn usable_daemon_login(login: &str) -> String {
     if molt_core::wallet::daemon_login_ok(login) { login.to_string() } else { String::new() }
 }
 
+/// The plaintext S3 acknowledgement, or "" when the engine would refuse it.
+#[must_use]
+pub fn usable_s3_plaintext_confirmed(endpoint: &str) -> String {
+    if molt_core::relay::parse_s3_endpoint(endpoint).is_ok() { endpoint.to_string() } else { String::new() }
+}
+
 /// Node-level runtime settings (`[node]`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -819,7 +825,7 @@ impl From<&Config> for Settings {
             s3_interval_min: c.storage.s3_interval_min,
             s3_keep_copies: c.storage.s3_keep_copies,
             s3_max_bytes: c.storage.s3_max_bytes,
-            s3_plaintext_confirmed: c.storage.s3_plaintext_confirmed.clone(),
+            s3_plaintext_confirmed: usable_s3_plaintext_confirmed(&c.storage.s3_plaintext_confirmed),
             download_dir: c.storage.download_dir.clone(),
             file_cap_bytes: c.storage.file_cap_bytes,
             mirror_publish_interval_secs: c.files.mirror_publish_interval_secs,
@@ -1201,7 +1207,7 @@ pub fn salvage(text: &str) -> Settings {
             s.s3_max_bytes = v;
         }
         if let Some(v) = storage.get("s3_plaintext_confirmed").and_then(toml::Value::as_str) {
-            s.s3_plaintext_confirmed = v.to_string();
+            s.s3_plaintext_confirmed = usable_s3_plaintext_confirmed(v);
         }
         let valid_sound = |v: &str| matches!(v, "none" | "bell" | "chime" | "pop");
         if let Some(v) = storage.get("sound_message").and_then(toml::Value::as_str) {
@@ -1525,9 +1531,16 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     // option leaves the file on the first save instead of lingering
     storage.remove("media_s3_bucket");
     storage.remove("media_s3_max_bytes");
-    // only while set: an older build refuses the unknown key
+    // only while set: an older build refuses the unknown key; a line the
+    // loader refused stays as written until a usable value replaces it
+    let refused = storage
+        .get("s3_plaintext_confirmed")
+        .and_then(toml_edit::Item::as_str)
+        .is_some_and(|v| !v.trim().is_empty() && usable_s3_plaintext_confirmed(v).is_empty());
     if settings.s3_plaintext_confirmed.is_empty() {
-        storage.remove("s3_plaintext_confirmed");
+        if !refused {
+            storage.remove("s3_plaintext_confirmed");
+        }
     } else {
         set_str(storage, "s3_plaintext_confirmed", &settings.s3_plaintext_confirmed);
     }
@@ -2578,6 +2591,24 @@ mod nym_tests {
         }
         let cleared = update(&update("", &set).expect("set"), &Settings::default()).expect("clear");
         assert!(!key(&cleared), "{cleared}");
+    }
+
+    /// An S3 acknowledgement the engine would refuse never reaches the
+    /// settings, or every later save fails on it; its line survives a save.
+    #[test]
+    fn a_bad_s3_plaintext_confirmation_is_dropped() {
+        for bad in ["http://s3.example.org/?x", "ftp://s3", "http://u:p@s3.example.org", "http://"] {
+            let text = format!("[storage]\ns3_plaintext_confirmed = \"{bad}\"\n");
+            let s = Settings::from(&parse(&text).expect("parses"));
+            assert!(s.s3_plaintext_confirmed.is_empty(), "{bad}");
+            assert!(salvage(&text).s3_plaintext_confirmed.is_empty(), "{bad}");
+            let saved = update(&text, &s).expect("updates");
+            assert!(saved.contains(&format!("s3_plaintext_confirmed = \"{bad}\"")), "{saved}");
+        }
+        let good = "[storage]\ns3_plaintext_confirmed = \"http://s3.example.org\"\n";
+        let s = Settings::from(&parse(good).expect("parses"));
+        assert_eq!(s.s3_plaintext_confirmed, "http://s3.example.org");
+        assert_eq!(salvage(good).s3_plaintext_confirmed, "http://s3.example.org");
     }
 
     /// A login the engine would refuse never reaches the settings, or

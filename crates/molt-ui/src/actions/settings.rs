@@ -385,8 +385,13 @@ const S3_THEN_TEST: i32 = 2;
 /// Open the plaintext acknowledgement for the draft's endpoint when it
 /// needs one; true = asked, the caller waits for the answer.
 fn ask_plaintext_s3(ui: &AppWindow, cx: &Ctx, then: i32) -> bool {
-    let confirmed = stored_settings(&cx.last_settings).s3_plaintext_confirmed;
-    let Some(url) = s3_plaintext_ask(&ui.get_cfg_s3_endpoint(), &confirmed) else {
+    let stored = stored_settings(&cx.last_settings);
+    let endpoint = ui.get_cfg_s3_endpoint();
+    // Save gates only a new endpoint: an unchanged one is not used by saving
+    if then == S3_THEN_SAVE && endpoint.trim() == stored.s3_endpoint.trim() {
+        return false;
+    }
+    let Some(url) = s3_plaintext_ask(&endpoint, &stored.s3_plaintext_confirmed) else {
         return false;
     };
     ui.set_cfg_s3_pt_then(then);

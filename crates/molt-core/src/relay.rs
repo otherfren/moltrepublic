@@ -218,6 +218,73 @@ pub fn s3_plaintext_clearnet(endpoint: &str) -> bool {
             == Some(RelayKind::Clearnet)
 }
 
+/// A parsed S3 endpoint, transport-free: the S3 client wraps it, and the
+/// config loader uses it to drop a value the engine would refuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct S3EndpointParts {
+    /// `https://` (else `http://`).
+    pub https: bool,
+    /// Hostname (or IP literal).
+    pub host: String,
+    /// TCP port (defaulted from the scheme when absent).
+    pub port: u16,
+    /// Normalized base path (no trailing `/`; empty for none).
+    pub base_path: String,
+    /// Where the host lives by the relay host rule.
+    pub kind: RelayKind,
+}
+
+/// Parse `[scheme://]host[:port][/prefix]`. A missing scheme defaults to
+/// `https` (never a silent plaintext downgrade); `http://` to a clearnet
+/// host parses, the acknowledgement gates it.
+pub fn parse_s3_endpoint(raw: &str) -> Result<S3EndpointParts, String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err("no endpoint configured".to_string());
+    }
+    // the WHATWG parser reads the authority, never string slicing
+    if raw.chars().any(|c| c.is_whitespace() || c.is_control() || c == '\\') {
+        return Err("junk characters in endpoint".to_string());
+    }
+    // the dialer's onion check and the SOCKS username assume an ASCII,
+    // lowercase host (review 2026-08-25 T7); IDNA would rewrite it
+    if !raw.is_ascii() {
+        return Err("host must be ASCII".to_string());
+    }
+    let (https, full) = match raw.split_once("://") {
+        Some((s, _)) if s.eq_ignore_ascii_case("https") => (true, raw.to_string()),
+        Some((s, _)) if s.eq_ignore_ascii_case("http") => (false, raw.to_string()),
+        Some((other, _)) => {
+            return Err(format!("unsupported scheme `{other}` (use https:// or http://)"))
+        }
+        None => (true, format!("https://{raw}")),
+    };
+    let parsed = url::Url::parse(&full).map_err(|e| format!("bad endpoint: {e}"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("no credentials in the endpoint".to_string());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("no ?query or #fragment in the endpoint".to_string());
+    }
+    let kind = parsed.host().map_or(RelayKind::Clearnet, |h| s3_host_kind(&h));
+    let host = match parsed.host() {
+        // one spelling per host: `x.onion.` would dodge the onion check
+        Some(url::Host::Domain(d)) if d.ends_with('.') => {
+            return Err("no trailing dot in the host".to_string())
+        }
+        Some(url::Host::Domain(d)) if !d.is_empty() => d.to_string(),
+        Some(url::Host::Ipv4(a)) => a.to_string(),
+        Some(url::Host::Ipv6(a)) => a.to_string(),
+        _ => return Err("no host in endpoint".to_string()),
+    };
+    let port = match parsed.port_or_known_default() {
+        Some(p) if p != 0 => p,
+        _ => return Err("bad port".to_string()),
+    };
+    let base_path = parsed.path().trim_end_matches('/').to_string();
+    Ok(S3EndpointParts { https, host, port, base_path, kind })
+}
+
 /// [`host_kind`] for an S3 host, except that any `.onion` name counts as
 /// onion: the dialer routes it over Tor or refuses it, never the clearnet.
 #[must_use]

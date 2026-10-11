@@ -200,11 +200,20 @@ Security audit 2026-10-10 follow-up. Before, `S3Endpoint::parse` took
   restore. A changed endpoint is unconfirmed by construction.
 - **One door.** `patch_settings` sets it; a wholesale `save_settings`
   neither grants nor drops it (like the purse's daemon).
-- **The GUI.** Test connection and Save open a confirmation for an
-  unacknowledged plaintext endpoint: the URL, one warning line, a tick box;
-  confirming patches the acknowledgement first, then runs what asked.
+- **The GUI.** Test connection, and Save of a CHANGED endpoint, open a
+  confirmation for an unacknowledged plaintext endpoint: the URL, one
+  warning line, a tick box; confirming patches the acknowledgement first,
+  then runs what asked. Save with the endpoint unchanged does not ask, so
+  an older endpoint never blocks saving the other settings.
+- **An endpoint stored before the gate.** The backup ticker sets each
+  candidate row's status to `http:// to a clearnet host: not confirmed`
+  instead of stopping silently; the acknowledgement lets the next tick go on.
 - **`clearnet_enabled` is not consulted.** S3 never rode that relay switch
   (§6.7 of `backup_restore_design.md`: it follows the dialer); the decision
   kept every existing gate and added none beyond the acknowledgement.
 - **Config.** `[storage] s3_plaintext_confirmed` is written only while set,
-  so a file without one still opens on an older build.
+  so a file without one still opens on an older build. A value that does
+  not parse as an endpoint (`molt_core::relay::parse_s3_endpoint`, the one
+  parser the S3 client wraps) is dropped at load - else every later
+  settings patch fails on it - and its line stays as written until a usable
+  value replaces it.

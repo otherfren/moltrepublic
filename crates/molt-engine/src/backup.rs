@@ -27,6 +27,9 @@ pub(crate) const BACKUP_TICK_MS: u64 = 60_000;
 
 /// The honest per-workspace status of a sealed-at-rest skip (design P6).
 const SEALED_SKIP: &str = "sealed at rest - backup skipped until decrypted";
+/// The status of a backup row whose endpoint is http:// to a clearnet host
+/// and not yet acknowledged.
+const PLAINTEXT_UNCONFIRMED: &str = "http:// to a clearnet host: not confirmed";
 /// The first wait after a failure a retry cannot heal; it doubles per repeat.
 const BACKUP_HOLD_FIRST_SECS: u64 = 3_600;
 /// The longest wait between two such attempts.
@@ -90,6 +93,19 @@ impl State {
         );
         let config = match config {
             Ok(config) if !candidates.is_empty() => config,
+            _ if molt_net::s3::S3Endpoint::parse(&s.s3_endpoint)
+                .is_ok_and(|e| e.plaintext_unconfirmed(&s.s3_plaintext_confirmed)) =>
+            {
+                // stored before the acknowledgement existed: say so per row,
+                // a silent stop is found only at restore time
+                for id in &candidates {
+                    changed |= self.set_backup_error(id, PLAINTEXT_UNCONFIRMED);
+                }
+                if changed {
+                    self.emit_session(SessionScope::Full);
+                }
+                return Ok(Reply::Ack);
+            }
             _ => {
                 if changed {
                     self.emit_session(SessionScope::Full);
@@ -885,6 +901,35 @@ mod tests {
         st.cmd_net_backup_done(id.clone(), 1, "o".to_string(), 1, String::new(), String::new())
             .expect("ack");
         assert!(!st.backup_hold.contains_key(&id), "an upload lifts the hold");
+    }
+
+    /// An http:// clearnet endpoint stored before the acknowledgement
+    /// existed must not stop the backups silently: each candidate row says
+    /// why, and the acknowledgement lets the next tick go on.
+    #[test]
+    fn an_unconfirmed_plaintext_endpoint_marks_every_candidate() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let mut st = crate::tests::support::plain_state();
+        st.persist = true;
+        let s = &mut st.session.settings;
+        s.workspace_dir = tmp.path().display().to_string();
+        s.s3_backup = true;
+        s.s3_endpoint = "http://s3.example.org:9000".to_string();
+        s.s3_access_key = "a".to_string();
+        s.s3_secret_key = "b".to_string();
+        s.s3_bucket = "c".to_string();
+        let mut ws = molt_core::WorkspaceInfo::demo_set().remove(0);
+        ws.s3 = true;
+        ws.encrypted = false;
+        st.session.workspaces = vec![ws];
+        let error = |st: &crate::State| st.session.workspaces[0].backup_error.clone();
+
+        st.cmd_backup_tick().expect("tick");
+        assert_eq!(error(&st), super::PLAINTEXT_UNCONFIRMED);
+
+        st.session.settings.s3_plaintext_confirmed = "http://s3.example.org:9000".to_string();
+        st.cmd_backup_tick().expect("tick");
+        assert_eq!(error(&st), "workspace directory missing", "acknowledged: the tick goes on");
     }
 
     /// C4: the quota never counts or prunes another node's backups.

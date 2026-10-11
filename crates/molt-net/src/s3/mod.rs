@@ -100,71 +100,24 @@ impl S3Endpoint {
     /// `https` (never a silent plaintext downgrade); `http://` to a clearnet
     /// host parses, and [`S3Config::from_settings`] gates it.
     pub fn parse(raw: &str) -> Result<S3Endpoint, S3Error> {
-        let raw = raw.trim();
-        if raw.is_empty() {
-            return Err(S3Error::Endpoint("no endpoint configured".to_string()));
-        }
-        // the WHATWG parser reads the authority, never string slicing
-        if raw
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
-        {
-            return Err(S3Error::Endpoint("junk characters in endpoint".to_string()));
-        }
-        // the dialer's onion check and the SOCKS username assume an ASCII,
-        // lowercase host (review 2026-08-25 T7); IDNA would rewrite it
-        if !raw.is_ascii() {
-            return Err(S3Error::Endpoint("host must be ASCII".to_string()));
-        }
-        let (scheme, full) = match raw.split_once("://") {
-            Some((s, _)) if s.eq_ignore_ascii_case("https") => (S3Scheme::Https, raw.to_string()),
-            Some((s, _)) if s.eq_ignore_ascii_case("http") => (S3Scheme::Http, raw.to_string()),
-            Some((other, _)) => {
-                return Err(S3Error::Endpoint(format!(
-                    "unsupported scheme `{other}` (use https:// or http://)"
-                )))
-            }
-            None => (S3Scheme::Https, format!("https://{raw}")),
-        };
-        let parsed =
-            url::Url::parse(&full).map_err(|e| S3Error::Endpoint(format!("bad endpoint: {e}")))?;
-        if !parsed.username().is_empty() || parsed.password().is_some() {
-            return Err(S3Error::Endpoint("no credentials in the endpoint".to_string()));
-        }
-        if parsed.query().is_some() || parsed.fragment().is_some() {
-            return Err(S3Error::Endpoint("no ?query or #fragment in the endpoint".to_string()));
-        }
-        let kind = parsed.host().map_or(molt_core::relay::RelayKind::Clearnet, |h| {
-            molt_core::relay::s3_host_kind(&h)
-        });
-        let host = match parsed.host() {
-            // one spelling per host: `x.onion.` would dodge the onion check
-            Some(url::Host::Domain(d)) if d.ends_with('.') => {
-                return Err(S3Error::Endpoint("no trailing dot in the host".to_string()))
-            }
-            Some(url::Host::Domain(d)) if !d.is_empty() => d.to_string(),
-            Some(url::Host::Ipv4(a)) => a.to_string(),
-            Some(url::Host::Ipv6(a)) => a.to_string(),
-            _ => return Err(S3Error::Endpoint("no host in endpoint".to_string())),
-        };
-        let port = match parsed.port_or_known_default() {
-            Some(p) if p != 0 => p,
-            _ => return Err(S3Error::Endpoint("bad port".to_string())),
-        };
-        let path = parsed.path();
-        let base_path = path.trim_end_matches('/').to_string();
+        let p = molt_core::relay::parse_s3_endpoint(raw).map_err(S3Error::Endpoint)?;
         Ok(S3Endpoint {
-            scheme,
-            host,
-            port,
-            base_path,
-            kind,
+            scheme: if p.https { S3Scheme::Https } else { S3Scheme::Http },
+            host: p.host,
+            port: p.port,
+            base_path: p.base_path,
+            kind: p.kind,
         })
     }
 
     /// Plaintext `http://` to a host the relay rule places on the clearnet.
     pub fn plaintext_clearnet(&self) -> bool {
         self.scheme == S3Scheme::Http && self.kind == molt_core::relay::RelayKind::Clearnet
+    }
+
+    /// [`Self::plaintext_clearnet`] while `confirmed` does not name this endpoint.
+    pub fn plaintext_unconfirmed(&self, confirmed: &str) -> bool {
+        self.plaintext_clearnet() && S3Endpoint::parse(confirmed).ok().as_ref() != Some(self)
     }
 
     /// The `Host` header value: the port rides along only when it is not the
@@ -284,9 +237,7 @@ impl S3Config {
         plaintext_confirmed: &str,
     ) -> Result<S3Config, S3Error> {
         let endpoint = S3Endpoint::parse(endpoint)?;
-        if endpoint.plaintext_clearnet()
-            && S3Endpoint::parse(plaintext_confirmed).ok().as_ref() != Some(&endpoint)
-        {
+        if endpoint.plaintext_unconfirmed(plaintext_confirmed) {
             return Err(S3Error::Endpoint("http:// to a clearnet host: not confirmed".to_string()));
         }
         if access_key.trim().is_empty() {

@@ -257,7 +257,7 @@ fn main() -> anyhow::Result<()> {
             s3_interval_min: config.storage.s3_interval_min,
             s3_keep_copies: config.storage.s3_keep_copies,
             s3_max_bytes: config.storage.s3_max_bytes,
-            s3_plaintext_confirmed: config.storage.s3_plaintext_confirmed.clone(),
+            s3_plaintext_confirmed: flat.s3_plaintext_confirmed.clone(),
             sound_message: config.storage.sound_message.clone(),
             sound_vote: config.storage.sound_vote.clone(),
             sound_poke: config.storage.sound_poke.clone(),
