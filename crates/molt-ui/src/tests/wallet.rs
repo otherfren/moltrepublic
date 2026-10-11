@@ -208,6 +208,23 @@ fn dust_is_one_row() {
     );
 }
 
+/// A single dust output reads in the singular.
+#[test]
+fn one_dust_output_is_singular() {
+    let ui = window();
+    let mut v = purse();
+    v.history.push(WalletTxView { incoming: true, amount: 50_000_000, dust: 1, ..WalletTxView::default() });
+    crate::wallet::apply_wallet(&ui, 0, "w", Some(&v));
+    let rows: Vec<WalletTxRow> = ui.global::<Purse>().get_history().iter().collect();
+    assert_eq!(rows[2].amount, "Dust: 1 tiny payment (0.00005 XMR) - often sent to track a wallet, shown together");
+    crate::wallet::apply_wallet(&ui, 1, "w", Some(&v));
+    let rows: Vec<WalletTxRow> = ui.global::<Purse>().get_history().iter().collect();
+    assert_eq!(
+        rows[2].amount,
+        "Staub: 1 Kleinstzahlung (0,00005 XMR) - oft gesendet, um eine Kasse zu verfolgen, zusammen gezeigt"
+    );
+}
+
 /// U1: no crypto vocabulary in any wallet string, English or German.
 #[test]
 fn no_crypto_words_in_wallet_strings() {

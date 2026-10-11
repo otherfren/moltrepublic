@@ -193,7 +193,7 @@ pub(crate) fn apply_wallet(ui: &AppWindow, lang: i32, ws: &str, view: Option<&Wa
         .iter()
         .map(|t| {
             if t.dust > 0 {
-                let line = l.wl_dust.replace("{n}", &grouped(lang, t.dust)).replace("{xmr}", &xmr(lang, t.amount));
+                let line = if t.dust == 1 { l.wl_dust_one } else { l.wl_dust }.replace("{n}", &grouped(lang, t.dust)).replace("{xmr}", &xmr(lang, t.amount));
                 return WalletTxRow { incoming: true, amount: line.into(), dust: true, ..WalletTxRow::default() };
             }
             WalletTxRow {
