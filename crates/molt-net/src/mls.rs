@@ -314,8 +314,9 @@ struct CommitKeyV4 {
 }
 
 /// The prior-state slot: the epoch, the pre-merge snapshot, the merged
-/// commit's key, the leaves it removed.
-type PriorSlot = (u64, Vec<u8>, CommitKey, Vec<String>);
+/// commit's key, the leaves it removed, its committer (empty = unknown, a
+/// v4 slot).
+type PriorSlot = (u64, Vec<u8>, CommitKey, Vec<String>, String);
 
 /// One node's live MLS membership: the provider (holding all secret state), the
 /// signer built from the node's identity key, the node's own handle, and — once
@@ -330,9 +331,9 @@ pub struct MlsMember {
     /// wins the tiebreak — without it, a losing committer would sit in a
     /// state nobody else shares (a silent permanent fork). Cleared as soon
     /// as the epoch moves on.
-    /// The fourth element names the leaves that commit REMOVED: a rewind
-    /// onto a commit from one of them is refused (an evicted device would
-    /// otherwise undo its own eviction with a ground low-digest commit).
+    /// The removed leaves and the committer decide a race before the
+    /// digest does: a commit whose committer the other removed loses in
+    /// every arrival order (an evicted device grinds its digest).
     prior: Option<PriorSlot>,
     /// The anchored identity key per roster member — the ONLY signature key
     /// a leaf added for that member may carry. `None` = no authority set
@@ -340,9 +341,6 @@ pub struct MlsMember {
     /// they did before the review 2026-08-25 finding. The engine sets it
     /// from the chain's identity table at every runtime build.
     roster_keys: Option<BTreeMap<String, Vec<u8>>>,
-    /// While a rewind is applying the winning commit: the leaves the merged
-    /// commit removed, whose commit must not win (see `prior`).
-    rewind_forbidden: Vec<String>,
     /// The bounded ring of PAST epochs' exporter secrets (newest first), for
     /// the outer envelope layer only — see [`EXPORTER_RING_K`].
     exporter_ring: Vec<[u8; EXPORTER_LEN]>,
@@ -376,7 +374,8 @@ struct MlsSnapshot {
     /// restarted between two concurrent same-epoch commits decided the
     /// tiebreak differently from one that did not (no slot = the loser's
     /// commit is refused instead of rewound onto): a silent fork among
-    /// survivors (review 2026-08-25 M3). v5: the key is the digest alone.
+    /// survivors (review 2026-08-25 M3). v5: the key is the digest alone,
+    /// and the slot names its committer.
     prior: Option<PriorSlot>,
 }
 
@@ -456,7 +455,6 @@ impl MlsMember {
             group: None,
             prior: None,
             roster_keys: None,
-            rewind_forbidden: Vec::new(),
             exporter_ring: Vec::new(),
             exporter_ring_epochs: Vec::new(),
         })
@@ -609,7 +607,8 @@ impl MlsMember {
         // PRIOR-STATE SLOT before we merge our own commit: a concurrent
         // same-epoch commit may win the tiebreak, and then we must rewind to
         // exactly this state instead of forking the group (N3 §1)
-        self.arm_prior_slot(&commit_bytes, vec![member.to_string()])?;
+        let me = self.name.clone();
+        self.arm_prior_slot(&commit_bytes, me, vec![member.to_string()])?;
         self.retire_exporter();
         let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
         group
@@ -696,23 +695,25 @@ impl MlsMember {
         // in-flight commit was built on. Both commits are valid, both nodes
         // merged their own — without a shared rule they now hold different
         // key schedules under the same epoch number, forever and silently.
-        // The rule: lowest CommitKey (the digest) wins. We either keep ours (the other
-        // side rewinds to it) or rewind to the state our commit was built on
-        // and apply theirs.
+        // The rule: a commit whose committer the other removed loses;
+        // otherwise the lowest CommitKey (the digest) wins. We either keep
+        // ours or rewind to the state ours was built on and apply theirs.
         // …and ONLY for a commit: an application message of the prior epoch
         // is a forward-secrecy question, not a race. Treating one as a
         // commit would rewind the group into a state that can still read
         // old traffic — the exact hole `max_past_epochs = 0` exists to
         // close. The content type rides in the cleartext framing header.
-        if let Some((prior_epoch, _, own_key, _)) = &self.prior {
+        if let Some((prior_epoch, _, own_key, _, _)) = &self.prior {
             if protocol.epoch().as_u64() == *prior_epoch
                 && protocol.content_type() == openmls::framing::ContentType::Commit
             {
-                // equal = the commit we merged, re-delivered
-                if *own_key <= CommitKey::new(wire) {
+                let theirs = CommitKey::new(wire);
+                // the commit we merged, re-delivered
+                if *own_key == theirs {
                     return Ok(MlsIncoming::CommitSuperseded);
                 }
-                return self.rewind_and_apply(wire);
+                let lower = theirs < *own_key;
+                return self.contest(wire, lower);
             }
         }
         let processed = group
@@ -729,12 +730,6 @@ impl MlsMember {
             if key.is_none() || roster.get(&from) != key.as_ref() {
                 return Err(MlsError::Wire(format!("sender {from} is not its anchored key")));
             }
-        }
-        // during a REWIND only: the commit we are about to undo removed
-        // these leaves — one of them re-deciding the epoch with a lower
-        // (ground, self-chosen) digest would undo its own eviction
-        if self.rewind_forbidden.contains(&from) {
-            return Err(MlsError::Wire(format!("removed leaf {from}: cannot win the epoch")));
         }
         let sender_leaf = match processed.sender() {
             Sender::Member(idx) => Some(*idx),
@@ -824,6 +819,11 @@ impl MlsMember {
                         })
                         .collect()
                 };
+                // the one removal the protocol makes is a seat's re-key: a
+                // bare kick would let an evicted leaf evict its evictor
+                if let Some(name) = removed.iter().find(|n| !readmitted.contains(n)) {
+                    return Err(MlsError::Wire(format!("removal of {name} without its re-key")));
+                }
                 let retiring = self.exporter_secret().ok();
                 let retiring_epoch = self.epoch();
                 // BYSTANDERS CONVERGE TOO (review finding 2026-07-31): a node
@@ -832,7 +832,7 @@ impl MlsMember {
                 // and without a rewind slot the loser's branch would be its
                 // permanent home. Arming the slot on EVERY merge gives every
                 // node the same rule as the committers.
-                self.arm_prior_slot(wire, removed)?;
+                self.arm_prior_slot(wire, from, removed)?;
                 let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
                 group
                     .merge_staged_commit(&self.provider, *staged)
@@ -922,47 +922,63 @@ impl MlsMember {
 
     /// Snapshot the CURRENT (pre-merge) state into the prior slot, so a
     /// losing concurrent commit can be rewound (N3 §1).
-    fn arm_prior_slot(&mut self, commit_bytes: &[u8], removed: Vec<String>) -> Result<(), MlsError> {
+    fn arm_prior_slot(
+        &mut self,
+        commit_bytes: &[u8],
+        committer: String,
+        removed: Vec<String>,
+    ) -> Result<(), MlsError> {
         let epoch = self.epoch();
         let snapshot = self.snapshot()?;
-        self.prior = Some((epoch, snapshot, CommitKey::new(commit_bytes), removed));
+        self.prior = Some((epoch, snapshot, CommitKey::new(commit_bytes), removed, committer));
         Ok(())
     }
 
-    /// Rewind to the prior slot and apply the WINNING foreign commit instead
-    /// of our own. The snapshot is the exact state our commit was built on,
-    /// so processing the winner there is what every node that never saw our
-    /// commit does.
-    fn rewind_and_apply(&mut self, winner: &[u8]) -> Result<MlsIncoming, MlsError> {
-        let Some((_, snapshot, _, removed)) = self.prior.clone() else {
+    /// Decide a race between our merged commit and a foreign one of the
+    /// same epoch, rewinding onto the foreign one if it wins. The foreign
+    /// commit is applied on the state ours was built on (what every node
+    /// that never saw ours does) to learn its committer and removals; if it
+    /// loses, that is undone. `lower`: its digest is the lower one.
+    fn contest(&mut self, wire: &[u8], lower: bool) -> Result<MlsIncoming, MlsError> {
+        // TRANSACTIONAL: the frame is unauthenticated until it processes
+        // (the content type is cleartext framing), so a forged one must not
+        // roll this node back. DISARM first: the frame re-enters decrypt,
+        // and a still-armed slot would send it straight back here.
+        let Some(ours) = self.prior.take() else {
             return Err(MlsError::NoGroup);
         };
-        // TRANSACTIONAL: the "winner" is unauthenticated until it processes
-        // (the content type is cleartext framing, so anything can claim to
-        // be a commit). Keep the current state; only commit to the rewind
-        // once the winner really applies, otherwise a forged frame could
-        // roll a node back at will.
         let current = self.snapshot()?;
-        let armed = self.prior.take(); // DISARM first: the winner re-enters
-                                       // decrypt, and a still-armed slot
-                                       // would send it straight back here
-        let rewound = MlsMember::restore(&snapshot)?;
-        self.provider_swap(rewound);
-        self.rewind_forbidden = removed;
-        let outcome = self.decrypt(winner);
-        self.rewind_forbidden.clear();
-        match outcome {
-            // the winner merged — but say WHOSE work was dropped doing so
-            Ok(MlsIncoming::Commit { readmitted }) => Ok(MlsIncoming::CommitRewound { readmitted }),
-            Ok(outcome) => Ok(outcome),
-            Err(e) => {
-                // the "winner" did not apply after all — undo the rewind and
-                // re-arm, so a forged frame cannot roll this node back
-                let back = MlsMember::restore(&current)?;
-                self.provider_swap(back);
-                self.prior = armed;
-                Err(e)
+        let ring = (self.exporter_ring.clone(), self.exporter_ring_epochs.clone());
+        self.provider_swap(MlsMember::restore(&ours.1)?);
+        let outcome = self.decrypt(wire);
+        let theirs_win = match (&outcome, &self.prior) {
+            (Ok(MlsIncoming::Commit { .. }), Some(theirs)) => {
+                // an evicted device grinds its digest: eviction decides first
+                let we_evict_them = ours.3.contains(&theirs.4);
+                let they_evict_us = theirs.3.contains(&ours.4);
+                match (they_evict_us, we_evict_them) {
+                    (true, false) => true,
+                    (false, true) => false,
+                    _ => lower,
+                }
             }
+            _ => false,
+        };
+        if theirs_win {
+            if let Ok(MlsIncoming::Commit { readmitted }) = outcome {
+                // the winner merged — but say WHOSE work was dropped doing so
+                return Ok(MlsIncoming::CommitRewound { readmitted });
+            }
+        }
+        self.provider_swap(MlsMember::restore(&current)?);
+        (self.exporter_ring, self.exporter_ring_epochs) = ring;
+        self.prior = Some(ours);
+        match outcome {
+            Ok(MlsIncoming::Commit { .. }) => Ok(MlsIncoming::CommitSuperseded),
+            // a higher digest was never a threat: no need to say it was junk
+            Err(_) | Ok(_) if !lower => Ok(MlsIncoming::CommitSuperseded),
+            Err(e) => Err(e),
+            Ok(other) => Err(MlsError::Wire(format!("not a commit: {other:?}"))),
         }
     }
 
@@ -1072,7 +1088,7 @@ impl MlsMember {
                     exporter_ring: v4.exporter_ring,
                     exporter_ring_epochs: v4.exporter_ring_epochs,
                     prior: v4.prior.map(|(epoch, snap, key, removed)| {
-                        (epoch, snap, CommitKey { digest: key.digest }, removed)
+                        (epoch, snap, CommitKey { digest: key.digest }, removed, String::new())
                     }),
                 }
             }
@@ -1149,7 +1165,6 @@ impl MlsMember {
             // v4 carries the slot; older blobs restore without one
             prior: snap.prior,
             roster_keys: None,
-            rewind_forbidden: Vec::new(),
             // v2 blobs carry the ring; a v1 blob restored it empty above
             exporter_ring: snap.exporter_ring,
             exporter_ring_epochs: snap.exporter_ring_epochs,
@@ -1632,10 +1647,11 @@ mod tests {
         let blob = cara.snapshot().expect("snapshot");
         let restored = MlsMember::restore(&blob).expect("restore");
         assert_eq!(
-            restored.prior.as_ref().map(|p| (p.0, p.2, p.3.clone())),
-            cara.prior.as_ref().map(|p| (p.0, p.2, p.3.clone())),
-            "epoch, key and removed leaves ride the snapshot"
+            restored.prior.as_ref().map(|p| (p.0, p.2, p.3.clone(), p.4.clone())),
+            cara.prior.as_ref().map(|p| (p.0, p.2, p.3.clone(), p.4.clone())),
+            "epoch, key, removed leaves and committer ride the snapshot"
         );
+        assert_eq!(cara.prior.as_ref().map(|p| p.4.as_str()), Some("cara"));
         // and a pre-v4 blob still restores, without a slot
         let v3 = MlsSnapshotV3 {
             version: 3,
@@ -1659,15 +1675,15 @@ mod tests {
             storage: v5.storage,
             exporter_ring: v5.exporter_ring,
             exporter_ring_epochs: v5.exporter_ring_epochs,
-            prior: v5.prior.map(|(e, snap, k, removed)| {
+            prior: v5.prior.map(|(e, snap, k, removed, _)| {
                 (e, snap, CommitKeyV4 { _created_at: 1_760_000_000, digest: k.digest }, removed)
             }),
         };
         let old = MlsMember::restore(&bincode::serialize(&v4).expect("v4 bytes")).expect("v4");
         assert_eq!(
-            old.prior.as_ref().map(|p| (p.0, p.2, p.3.clone())),
-            cara.prior.as_ref().map(|p| (p.0, p.2, p.3.clone())),
-            "a v4 slot restores under its digest"
+            old.prior.as_ref().map(|p| (p.0, p.2, p.3.clone(), p.4.clone())),
+            cara.prior.as_ref().map(|p| (p.0, p.2, p.3.clone(), String::new())),
+            "a v4 slot restores under its digest, its committer unknown"
         );
     }
 
@@ -2082,15 +2098,11 @@ mod tests {
         let epoch = founder.epoch();
 
         // the evicted device, still at the old epoch, grinds a commit with a
-        // LOWER digest — the tiebreak alone would hand it the epoch
+        // LOWER digest that evicts its evictor
         let old_device = bob.snapshot().expect("snapshot");
         let undo = (0..256)
             .find_map(|_| {
-                let mut bob = MlsMember::restore(&old_device).expect("restore");
-                let cara2 = MlsMember::new(&key(3), "cara").expect("cara2");
-                let (undo, _) = bob
-                    .restore_member("cara", &cara2.key_package().expect("kp"))
-                    .expect("the old device can still build a commit");
+                let undo = kick(&mut MlsMember::restore(&old_device).expect("restore"), "cara");
                 (CommitKey::new(&undo) < CommitKey::new(&rekey)).then_some(undo)
             })
             .expect("a lower digest within 256 tries");
@@ -2102,6 +2114,116 @@ mod tests {
         assert_eq!(founder.epoch(), epoch, "the re-key stands");
         let stolen = bob.encrypt(b"still here?").expect("enc");
         assert!(!matches!(founder.decrypt(&stolen), Ok(MlsIncoming::Application { .. })));
+    }
+
+    /// A commit from `m` that removes `name`'s leaf and adds nothing.
+    fn kick(m: &mut MlsMember, name: &str) -> Vec<u8> {
+        let group = m.group.as_mut().expect("group");
+        let leaf = group
+            .members()
+            .find(|x| x.credential.serialized_content() == name.as_bytes())
+            .expect("leaf")
+            .index;
+        let bundle = group
+            .commit_builder()
+            .propose_removals([leaf])
+            .load_psks(m.provider.storage())
+            .expect("psks")
+            .build(m.provider.rand(), m.provider.crypto(), &m.signer, |_| true)
+            .expect("build")
+            .stage_commit(&m.provider)
+            .expect("stage");
+        bundle.into_messages().0.to_bytes().expect("bytes")
+    }
+
+    /// **A removal must re-key the seat it removes.** The only removal the
+    /// protocol makes is `restore_member`'s remove+add of one seat; a bare
+    /// kick would let any leaf drop another seat - and let an evicted leaf
+    /// evict its own evictor to contest the epoch.
+    #[test]
+    fn a_commit_that_removes_a_seat_without_rekeying_it_is_refused() {
+        let (mut founder, mut bob, _cara) = three_seats();
+        let epoch = founder.epoch();
+        let commit = kick(&mut bob, "cara");
+        assert!(founder.decrypt(&commit).is_err(), "a bare removal is refused");
+        assert_eq!(founder.epoch(), epoch);
+    }
+
+    /// **The evicted leaf loses in EVERY arrival order** (audit #9 review).
+    /// A bystander that merged the evicted device's ground low-digest commit
+    /// before the re-key must still land on the re-key: the re-key removes
+    /// that commit's committer, so it wins whatever the digests say. Only a
+    /// commit that re-keys the re-keyer under its anchored key (a peer, not
+    /// a stolen leaf) is a plain race, decided by the digest.
+    #[test]
+    fn an_evicted_leafs_commit_loses_in_every_arrival_order() {
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        founder.create_group().expect("create");
+        let mut bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let mut cara = MlsMember::new(&key(3), "cara").expect("cara");
+        let mut dave = MlsMember::new(&key(4), "dave").expect("dave");
+        let welcome = founder
+            .add_members(&[
+                bob.key_package().expect("kp"),
+                cara.key_package().expect("kp"),
+                dave.key_package().expect("kp"),
+            ])
+            .expect("add")
+            .expect("welcome");
+        for m in [&mut bob, &mut cara, &mut dave] {
+            m.join_from_welcome(&welcome).expect("join");
+        }
+        let bystander = founder.snapshot().expect("snapshot");
+        let old_device = bob.snapshot().expect("snapshot");
+        let (rekey, _) = cara
+            .restore_member("bob", &MlsMember::new(&key(2), "bob").expect("b").key_package().expect("kp"))
+            .expect("cara re-keys bob");
+        let grind = |target: &str, seed: u8| {
+            (0..256)
+                .find_map(|_| {
+                    let mut bob = MlsMember::restore(&old_device).expect("restore");
+                    let kp = MlsMember::new(&key(seed), target).expect("t").key_package().expect("kp");
+                    let (undo, _) = bob.restore_member(target, &kp).expect("old device commits");
+                    (CommitKey::new(&undo) < CommitKey::new(&rekey)).then_some(undo)
+                })
+                .expect("a lower digest within 256 tries")
+        };
+        // the evicted device re-keys an uninvolved seat: the re-key wins
+        let undo = grind("dave", 4);
+        for undo_first in [true, false] {
+            let mut f = MlsMember::restore(&bystander).expect("restore");
+            let order = if undo_first { [&undo, &rekey] } else { [&rekey, &undo] };
+            for wire in order {
+                let _ = f.decrypt(wire);
+            }
+            let probe = cara.encrypt(b"the re-key stands").expect("probe");
+            assert_app(
+                f.decrypt(&probe).unwrap_or_else(|e| panic!("undo first {undo_first}: {e}")),
+                "cara",
+                b"the re-key stands",
+            );
+        }
+        let to_cara = cara.decrypt(&undo).expect("cara keeps its re-key");
+        assert!(matches!(to_cara, MlsIncoming::CommitSuperseded), "{to_cara:?}");
+        // a bare kick of the re-keyer is refused, not a contest
+        let kick_cara = kick(&mut MlsMember::restore(&old_device).expect("restore"), "cara");
+        let mut f = MlsMember::restore(&bystander).expect("restore");
+        assert!(f.decrypt(&kick_cara).is_err(), "a bare kick is refused");
+        assert!(matches!(f.decrypt(&rekey), Ok(MlsIncoming::Commit { .. })));
+        assert!(!matches!(f.decrypt(&kick_cara), Ok(MlsIncoming::CommitRewound { .. })));
+        // two re-keys of each other's committer: a plain race, every order
+        // lands on the same commit
+        let mutual = grind("cara", 3);
+        let mut tips = Vec::new();
+        for mutual_first in [true, false] {
+            let mut f = MlsMember::restore(&bystander).expect("restore");
+            let order = if mutual_first { [&mutual, &rekey] } else { [&rekey, &mutual] };
+            for wire in order {
+                let _ = f.decrypt(wire);
+            }
+            tips.push(f.exporter_secret().expect("secret"));
+        }
+        assert_eq!(tips[0], tips[1], "one epoch in both orders");
     }
 
     /// **Cross-epoch delivery, backward direction — deliberately NOT

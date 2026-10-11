@@ -452,8 +452,13 @@ signature maps to no `admin_pubkeys` entry at all, so `admin_pubkeys` carries
   on the bytes only, so every arrival order and every carrier stamp yields
   the same winner, and a re-stamped copy of a decided commit is a no-op.
   Accepted cost: a committer can grind its commit toward a low digest; it
-  wins only a race it is already part of, and a removed leaf still cannot
-  win the epoch it was evicted in. A fleet mixing a stamp-ordering build
+  wins only a race it is already part of. Eviction decides before the
+  digest: a commit whose committer the other commit removed loses in every
+  arrival order, so a removed leaf cannot win the epoch it was evicted in,
+  not even on a bystander that merged its commit first; and a commit may
+  remove a leaf only to re-key that same seat (a bare kick is refused).
+  Two commits that re-key each other's committer are a plain race (the
+  digest). A fleet mixing a stamp-ordering build
   with a digest-ordering one can still split on a concurrent race; update
   all seats before relying on it.
 - The tiebreak stays confined to the MLS epoch mechanics; republic STATE is

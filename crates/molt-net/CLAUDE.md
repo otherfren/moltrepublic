@@ -39,6 +39,14 @@ number, silently. The convergence rule:
   `restore_member` nor `decrypt` takes a stamp, so none can creep back in;
   the carrier stamp a commit is PUBLISHED at (`MlsCommit.stamp`,
   `publish_frame_at`) only keeps its `h` tag and resends in one window.
+- **Eviction decides before the digest.** A commit whose committer the
+  other commit removed loses in every arrival order (an evicted device
+  grinds its digest); only when neither or both evict the other does the
+  digest decide. That needs both commits' committer and removals, so a
+  contest applies the foreign commit on the prior snapshot and undoes it if
+  it loses. A removal must re-key the seat it removes (`restore_member`'s
+  shape) - a bare kick is refused, else an evicted leaf evicts its evictor
+  and the race falls back to its ground digest.
 - The prior-state slot is armed on EVERY merge (committers AND bystanders), so
   it always points exactly one epoch back and every node can rewind onto the
   winner. Do NOT add a traffic-based expiry: it strands any bystander that

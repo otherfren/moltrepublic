@@ -185,11 +185,10 @@ async fn a_445_frame_round_trips_through_the_group_channel() {
 
 /// **The stamp can be PINNED, and it drives the h tag with it.**
 ///
-/// A recovery re-key has to key its own commit at the same `created_at`
-/// every receiver will read off the wire — `CommitKey(created_at, digest)`,
-/// lowest wins, "the stamp must come from the SAME source on both sides"
-/// (`molt-net/CLAUDE.md`). The sender therefore has to choose the value
-/// BEFORE it commits, which `publish_frame` cannot do: it generates `now`
+/// A commit and its resends ride one recorded stamp, so they sit in one
+/// `h` window. The stamp orders nothing (the commit order is the digest
+/// alone, `molt-net/CLAUDE.md`); the sender just has to choose it BEFORE it
+/// publishes, which `publish_frame` cannot do: it generates `now`
 /// internally and only reports it afterwards.
 ///
 /// The subscriber must still see it, which is the second half of the claim:
