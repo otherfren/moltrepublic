@@ -1,7 +1,8 @@
 # Security audit 2026-10-10
 
 Status: EXECUTED - audit log, 2026-10-10. Fixes landed on master
-`3d79122c`..`5541059b` (2026-10-10/11, audit base `fdd8c48b`). What is
+`3d79122c`..`5541059b` (2026-10-10/11, audit base `fdd8c48b`), the
+decided follow-ups 2026-10-11 at the end. What is
 still open is carried by `docs/reviews/known_debt.md`; nothing here is
 open work on its own.
 
@@ -88,11 +89,10 @@ LOW = bounded nuisance, latent or local-only.
 - **Deliberation-time leaf forgery** (#1 residual): a joiner enters the
   group from the Welcome before it knows the identity table, so a
   founder-planted leaf can forge ephemeral deliberation frames until the
-  seal. Recommended: accept while deliberation frames carry no authority.
+  seal. ACCEPTED 2026-10-11 (below).
 - **Recovery rejoiner tree check** (#1 residual): a coordinator's Welcome
   tree is only warned about and the extra leaf muted, not refused.
-  Hard refusal could strand a live republic with a historically imperfect
-  tree.
+  ACCEPTED 2026-10-11 (below).
 - **Homoglyph handles** (#20 residual): closing them needs a UTS #39
   skeleton uniqueness check - product policy and a dependency.
 - **Compaction floor** (#32): needs a policy for a peer that is reachable
@@ -105,3 +105,38 @@ live-preview suite. The gate found one pre-existing red:
 `molt-vault/tests/pure_rust_guard.rs` saw `cc` via chrono's `clock`
 feature (kanban S1). `clock` now rides only molt-ui and molt-engine's
 dev graph.
+
+## Follow-ups 2026-10-11
+
+The user decided the open questions on 2026-10-11. Built test-first,
+reviewed, landed on master:
+
+| Decision | Commits |
+|---|---|
+| Restore consent v2 (#5, #6): signs the block's relays, the consent anchor and the replaced working anchor; single use, 1024-block window; v1 verifies but is never auto-signed | `3a373694`, `f730d758`, `694a87aa` |
+| MLS concurrent commits (#9): order by `sha256(commit)` only, no carrier stamp; an evicted committer's commit loses in every arrival order; a bare removal is refused | `48831155`, `95d9f30d`, `7b2e0778` |
+| MCP auth (#11, #12, #35): no `[mcp].token` starts no TCP endpoint; an emptied seat key admits nobody; a line session re-checks its key per request and closes once revoked | `ecdce46e`, `ef3241fd` |
+
+Accepted residuals (no work planned):
+
+- **Recovery Welcome foreign leaf** (#1): warned and muted, not refused.
+- **Device-sealed `prefs.toml`** (#13): stays plaintext; only a
+  phrase-sealed workspace seals it.
+- **No purse emergency exit** (wallet design §5): not built.
+- **Deliberation leaf** (#1): ephemeral deliberation frames carry no
+  authority before the seal.
+- **Block-link grind** (#3): a seat can still grind an attestation list
+  to win a slot; the re-link keeps every decision.
+- **Wallet start rate** (#23): a seat's own run starts are not
+  rate-limited; only lost-run answers are.
+- **No idle cap on authenticated line sessions** (#11): the pre-auth
+  timeout bounds only unauthenticated peers.
+
+Still open, in `docs/reviews/known_debt.md`: the v1 restore-consent
+residual, v2 emission before every seat is upgraded, homoglyph handles
+(#20) and the compaction floor (#32).
+
+Final gate: every crate's tests and per-crate clippy, molt-ui on the
+live-preview suite, `ring` absent from molt-net's graph, doc refs clean.
+It found one red: molt-treasury's graph guard pruned `iana-time-zone`,
+which left the graph with `c40e1452`; fixed in `0fc25826`.

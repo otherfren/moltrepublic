@@ -16,9 +16,6 @@ republic (`kanban_workflows.md` §11 Q1).
 
 ## Wallet Stage 1 - open items (2026-10-10)
 
-- **Emergency exit** (design §5): m holders can rebuild the spend key and
-  sweep. Recorded, not built; needs a user decision whether it gets a
-  governed path.
 - **Manual three-instance walk** (plan §16) not run: founding with the
   purse stage, same address, warning, mining, close/reopen, export/import,
   phrase recovery watch-only, a later enable via the panel.
@@ -42,6 +39,14 @@ rewriting its relays). No node auto-signs one any more, the coordinator
 included. Closing it needs a v1 cutoff height, which an existing chain
 cannot be given.
 
+## A swept restore card stays in flight on the coordinator
+
+`recovery_auto_approval.md` §7e: a dead v2 card the sweep drops leaves
+its `recovery.pending` entry, so `readmission_in_flight` still reports
+the seat until a new request replaces it. After a reorg that lowers the
+head, a card swept as spent comes back only through re-served open
+governance. Fix direction: drop the pending entry with the card.
+
 ## v2 restore consents need every seat upgraded first
 
 `recovery_auto_approval.md` §7e: an older build refuses a v2 `Restored`
@@ -52,14 +57,11 @@ node checks against every seat before it hands out a v2 anchor.
 
 ## Security audit 2026-10-10 - other open items
 
-From `docs_archive/reviews/security_audit_2026-10-10.md`:
+From `docs_archive/reviews/security_audit_2026-10-10.md` (its accepted
+residuals are listed there, not here):
 
 - **#32 compaction floor**: a peer in contact that never acks pins the
   floor at 0, so expired chat is never erased. Needs a never-acks grace.
-- **#1 deliberation leaf**: a founder-planted leaf can forge ephemeral
-  deliberation frames before the seal. Recommended: accept.
-- **#1 rejoiner tree**: a recovery Welcome's extra leaf is muted and
-  warned, not refused. Policy call.
 - **#20 homoglyph handles**: needs a UTS #39 skeleton uniqueness check.
 
 ## `SaveTransport` overwrites `vault_status` wholesale
