@@ -133,8 +133,8 @@ Accepted residuals (no work planned):
   timeout bounds only unauthenticated peers.
 
 Still open, in `docs/reviews/known_debt.md`: the v1 restore-consent
-residual, v2 emission before every seat is upgraded, homoglyph handles
-(#20) and the compaction floor (#32).
+residual, v2 emission before every seat is upgraded and homoglyph
+handles (#20).
 
 Final gate: every crate's tests and per-crate clippy, molt-ui on the
 live-preview suite, `ring` absent from molt-net's graph, doc refs clean.
