@@ -2838,11 +2838,26 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
     let dead_reply_wrap = WrapKey::fresh().expect("round-1 reply wrap");
     let seat_proof =
         molt_engine::make_seat_proof(&b_sk, &material1.ticket, &kp_hex, &material1.republic_id, "", &[]);
-    // the seat's real consent — at 2-of-2 the Restored block seals from the
-    // coordinator's signature plus exactly this
-    let consent = molt_storage::identity_sign(
-        &b_sk,
-        &molt_core::chain::restore_consent_bytes(&material1.republic_id, "member-b", &b_pk, ""),
+    // the seat's real v2 consent (a v1 one is never co-signed, §7e) — at
+    // 2-of-2 the Restored block seals from the coordinator's signature plus
+    // exactly this, bound to the anchor the link carries
+    let anchor = molt_engine::RecoveryInvite::parse(&material1.link)
+        .and_then(|i| i.consent_anchor)
+        .expect("a new mint carries the consent anchor");
+    let consent = molt_core::chain::render_restore_consent_v2(
+        &anchor,
+        &molt_storage::identity_sign(
+            &b_sk,
+            &molt_core::chain::restore_consent_bytes_v2(
+                &material1.republic_id,
+                "member-b",
+                &b_pk,
+                "",
+                &[],
+                anchor.height,
+                &anchor.prev_anchor,
+            ),
+        ),
     );
     let request = invite::RitualMsg::Recover(invite::RecoverRequest {
         new_nostr_pk: String::new(),

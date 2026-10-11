@@ -900,6 +900,7 @@ impl State {
                 self.chain_sign_and_gossip_approval(id);
             }
         }
+        self.sweep_consented_restores();
     }
 
     /// WP4b stage 4: verify a candidate chain in THIS holder's context —

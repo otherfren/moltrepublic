@@ -18,7 +18,11 @@ a_v2_consent_outside_its_window_rejects_the_chain,
 a_v1_consent_chain_still_verifies}`,
 `membership_tests::{a_v1_consent_is_left_to_the_human_vote,
 a_v2_consent_beside_swapped_relays_never_auto_signs,
-a_spent_or_stale_v2_consent_is_refused_at_the_coordinator}`, the
+a_spent_or_stale_v2_consent_is_refused_at_the_coordinator,
+a_v1_consent_is_not_cosigned_by_the_coordinator,
+a_spent_v2_card_is_swept_from_the_registry,
+a_stale_v2_card_is_swept_from_the_registry,
+a_lagging_survivor_registers_and_signs_a_v2_card_on_arrival}`, the
 molt-core byte pins `restore_consent_v{1,2}_bytes_are_pinned`.
 
 ## 1. The field defect
@@ -256,11 +260,14 @@ field), so `approval_bytes` binds the height and the previous anchor
 through the consent bytes it already signs; a non-canonical rendering is
 refused rather than normalized.
 
-**Rules for a v2 consent**, one shared check
-(`chain::verify::check_restore_consent`) on every path - the verifier's
-full, suffix and wiki-export walks, the sealer (`try_commit`), the
-registration gate (`sealable_membership`), the auto-approver and the
-coordinator's ladder (`verify_and_propose_restore`):
+**Rules for a v2 consent**, checked on every path - the verifier's full,
+suffix and wiki-export walks, the sealer (`try_commit`), the registration
+gate (`sealable_membership`), the auto-approver and the coordinator's
+ladder (`verify_and_propose_restore`). Rules 1-2 are
+`chain::verify::verify_restore_consent`, rule 3 is
+`chain::verify::consent_spends` (in `ChainWalk::step` and
+`verify_wiki_export`); the live paths run both through
+`State::restore_consent_at`:
 
 1. the signature verifies over the v2 preimage against the ANCHORED
    identity key, with the block's own relays;
@@ -277,13 +284,24 @@ coordinator's ladder (`verify_and_propose_restore`):
 Rules 1-2 are block-local (they also gate the tie-break's cheap signature
 check); rule 3 needs the walk state.
 
+**Registry.** A registered v2 card that can no longer seal - spent, or
+past its window - is dropped from the registry after every head move
+(`State::sweep_consented_restores`), so it never holds the seat's
+pending cap or R3; its card record is left as it is. A v2 consent
+anchored at or above the receiver's head (the receiver lags the minter)
+is not yet reachable rather than stale: it registers if its signature
+verifies at `anchor_height + 1` (rule 3 waits for the sealer), and the
+survivor auto-signs once its head reaches the anchor. One anchored a
+full window or more above the head is refused.
+
 **v1 acceptance.** A v1 consent keeps verifying byte-identically wherever
 it did: the verifier and the sealer still count it as one voice, so every
 sealed v1 block and every pre-v2 chain verifies unchanged, and the
 coordinator still proposes a v1 request (its seat proof binds the
-relays). What changes: a survivor **never auto-signs a v1 consent** - it
-binds neither relays nor position, so it gets the human card, like a
-consent-less restore. Residual (accepted, recorded in known debt): a
+relays). What changes: no node **auto-signs a v1 consent** - neither a
+survivor nor the coordinator, which proposes it without its own
+co-signature - it binds neither relays nor position, so it gets the
+human card, like a consent-less restore. Residual (accepted, recorded in known debt): a
 hostile member holding m - 1 voices can still seal a block around a v1
 consent from the chain; closing that needs a cutoff height, which a v1-era
 chain cannot be retrofitted with.
@@ -294,9 +312,13 @@ none, and the rejoiner falls back to v1 (human approvals). Every new mint
 carries one.
 
 **Version skew.** An older build cannot verify a v2 consent (its v1
-preimage does not match), so it refuses a v2 `Restored` block and stops
-extending until it upgrades - the coordinated-upgrade rule every signed
-layout change here follows.
+preimage does not match): it refuses the proposal and the block as an
+invalid consent, not as an unknown layout, and keeps sealing its own
+proposals. Where older builds together hold m voices they extend past
+the v2 block and the chain splits until they upgrade. Nothing gates v2
+emission (no peer reports its build), so every seat must run a v2 build
+before a recovery link is minted - the coordinated-upgrade rule every
+signed layout change here follows.
 
 **Freshness window, conservative choice.** 1024 blocks bounds how late a
 consent may seal; single use (rule 3) is what closes the replay. A link

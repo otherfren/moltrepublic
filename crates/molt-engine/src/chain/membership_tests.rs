@@ -506,6 +506,119 @@ fn a_spent_or_stale_v2_consent_is_refused_at_the_coordinator() {
     verify_chain(&coord.chain.blocks).expect("the sealed chain verifies");
 }
 
+/// A v1 consent at the coordinator gets the human card too (§7e): no
+/// self-cosign, so on m = 2 it does not seal with the consent alone.
+#[test]
+fn a_v1_consent_is_not_cosigned_by_the_coordinator() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    let rid = b.republic_id.clone();
+    let kp_hex = &kp_hex_for(&b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &rid, "", &[]);
+    let consent = consent_for(&b, "dora", "");
+    let id = coord
+        .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
+        .expect("a v1 request still proposes");
+    assert_eq!(coord.chain.head.as_ref().expect("head").height, 0, "nothing sealed");
+    assert!(
+        !coord.chain.pending_sigs.get(&id).is_some_and(|p| p.sigs.iter().any(|a| a.member == "petra")),
+        "the coordinator does not sign a v1 consent unattended"
+    );
+}
+
+fn register_v2(st: &mut crate::State, b: &Builder, id: u64, npk: &str, anchor_height: u64) {
+    let consent = consent_v2_for(b, "dora", npk, &[], anchor_height, &"cc".repeat(32));
+    st.receive_membership_proposal(
+        id,
+        MembershipOp::Restored,
+        "dora",
+        &b.pk("dora"),
+        Some(npk.to_string()),
+        Vec::new(),
+        Some(consent),
+    );
+}
+
+/// A registered v2 card that can no longer seal (spent by a sibling
+/// restore) leaves the registry, so it never pins the seat's pending cap.
+#[test]
+fn a_spent_v2_card_is_swept_from_the_registry() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora", "erika"], 4);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    for (i, id) in [7u64, 8, 9].into_iter().enumerate() {
+        register_v2(&mut walter, &b, id, &format!("d{i}").repeat(32), 0);
+    }
+    assert_eq!(walter.chain.proposal_changes.len(), 3, "three cards register");
+    let block = b.commit(
+        ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk: b.pk("dora"),
+            nostr_pk: Some("ee".repeat(32)),
+            relays: Vec::new(),
+            consent: None,
+        },
+        &["petra", "walter", "erika", "dora"],
+    );
+    assert!(walter.append_committed_block(block.clone()), "the sibling restore applies");
+    walter.after_block_applied(&block);
+    assert!(walter.chain.proposal_changes.is_empty(), "spent cards are swept");
+    // the cap is free again for a consent over the new anchor
+    let consent = consent_v2_for(&b, "dora", &"ff".repeat(32), &[], 1, &"ee".repeat(32));
+    walter.receive_membership_proposal(
+        10,
+        MembershipOp::Restored,
+        "dora",
+        &b.pk("dora"),
+        Some("ff".repeat(32)),
+        Vec::new(),
+        Some(consent),
+    );
+    assert!(walter.chain.proposal_changes.contains_key(&10), "a fresh consent registers");
+}
+
+/// A registered v2 card whose window closed leaves the registry.
+#[test]
+fn a_stale_v2_card_is_swept_from_the_registry() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let w = molt_core::chain::RESTORE_CONSENT_WINDOW;
+    let mut b = Builder::new(&["petra", "walter", "dora"], 3);
+    for id in 0..w - 1 {
+        b.commit_applied(100 + id, &["petra", "walter", "dora"]);
+    }
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    register_v2(&mut walter, &b, 7, &"dd".repeat(32), 0);
+    assert!(walter.chain.proposal_changes.contains_key(&7), "the last fresh height registers");
+    b.commit_applied(100 + w, &["petra", "walter", "dora"]);
+    let block = b.blocks.last().cloned().expect("block");
+    assert!(walter.append_committed_block(block.clone()));
+    walter.after_block_applied(&block);
+    assert!(!walter.chain.proposal_changes.contains_key(&7), "a stale card is swept");
+}
+
+/// A survivor one block behind the minter registers the card instead of
+/// calling it stale, and auto-signs once it reaches the anchor.
+#[test]
+fn a_lagging_survivor_registers_and_signs_a_v2_card_on_arrival() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 3);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    register_v2(&mut walter, &b, 7, &"dd".repeat(32), 1);
+    assert!(walter.chain.proposal_changes.contains_key(&7), "not yet reachable is not stale");
+    b.commit_applied(100, &["petra", "walter", "dora"]);
+    let block = b.blocks.last().cloned().expect("block");
+    assert!(walter.append_committed_block(block.clone()));
+    walter.after_block_applied(&block);
+    assert!(
+        walter.chain.pending_sigs.get(&7).is_some_and(|p| p.height == 2 && p.sigs.iter().any(|a| a.member == "walter")),
+        "the survivor signs once the anchor is reached"
+    );
+}
+
 /// The chain IS the replay register (field storm 2026-08-24): every
 /// anchor that was ever anchored — genesis or a Restored block — refuses
 /// a replayed self-service request; a fresh salt passes.
@@ -542,7 +655,7 @@ fn the_coordinator_reports_the_vote_progress_for_a_pending_recovery() {
     let ticket = "recovery-ticket-xyz";
     let kp_hex = &kp_hex_for(&b, "dora");
     let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
-    let consent = consent_for(&b, "dora", "");
+    let consent = consent_v2_for(&b, "dora", "", &[], 0, &"cc".repeat(32));
     let id = coord
         .verify_and_propose_restore(
             true,

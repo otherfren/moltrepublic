@@ -121,6 +121,7 @@ impl State {
     /// and co-sign it — the producer for `Membership` blocks (recovery step ❹).
     /// Further approvals arrive from the other members; a block seals at m-of-n.
     /// Returns the proposal id.
+    #[cfg(test)]
     pub(crate) fn propose_membership(
         &mut self,
         op: MembershipOp,
@@ -129,6 +130,22 @@ impl State {
         nostr_pk: Option<String>,
         relays: Vec<String>,
         consent: Option<String>,
+    ) -> u64 {
+        let cosign = self.config.self_cosign;
+        self.propose_membership_with(op, member, identity_pk, nostr_pk, relays, consent, cosign)
+    }
+
+    /// [`State::propose_membership`], the proposer's own co-signature chosen.
+    #[allow(clippy::too_many_arguments)] // one change's fields plus the cosign choice
+    fn propose_membership_with(
+        &mut self,
+        op: MembershipOp,
+        member: &str,
+        identity_pk: &str,
+        nostr_pk: Option<String>,
+        relays: Vec<String>,
+        consent: Option<String>,
+        cosign: bool,
     ) -> u64 {
         let id = self.mint_proposal_id();
         self.chain.proposal_changes.insert(
@@ -158,7 +175,7 @@ impl State {
             },
         );
         self.record(env);
-        if self.config.self_cosign {
+        if cosign {
             self.chain_sign_and_gossip_approval(id);
         }
         id
@@ -285,7 +302,9 @@ impl State {
         }
         match consent {
             Some(_) => {
-                self.restore_consent_at(change, self.next_chain_height())?;
+                if let Some(why) = self.consent_never_seals(change) {
+                    return Err(why);
+                }
             }
             None => {
                 let held = self.chain.proposal_changes.iter().any(|(other, c)| {
@@ -380,8 +399,78 @@ impl State {
             m == member
                 && self.anchored_identity(m).as_deref() == Some(identity_pk.as_str())
                 && !nostr_pk.as_deref().is_some_and(|pk| self.anchor_seen_in_chain(pk))
-                && self.restore_consent_at(c, self.next_chain_height()).is_ok()
+                && self.consent_never_seals(c).is_none()
         })
+    }
+
+    /// Why a consented change can seal at no height from the next one on
+    /// (`recovery_auto_approval.md` §7e). A v2 consent anchored at or above
+    /// this node's head is not yet reachable: judged at its first height,
+    /// rule 3 left to the sealer (a lagging node lacks the anchor it spends).
+    pub(crate) fn consent_never_seals(&self, change: &ChainChange) -> Option<&'static str> {
+        let next = self.next_chain_height();
+        if let ChainChange::Membership { member, nostr_pk, relays, consent: Some(c), .. } = change {
+            if let Some(molt_core::chain::RestoreConsent::V2 { anchor_height, .. }) =
+                molt_core::chain::parse_restore_consent(c)
+            {
+                if next <= anchor_height {
+                    if anchor_height - next >= molt_core::chain::RESTORE_CONSENT_WINDOW {
+                        return Some("consent is ahead of the chain");
+                    }
+                    let Some(anchored) = self.anchored_identity(member) else {
+                        return Some("not an anchored seat");
+                    };
+                    return verify_restore_consent(
+                        &self.republic_id(),
+                        &anchored,
+                        anchor_height.saturating_add(1),
+                        member,
+                        nostr_pk.as_deref(),
+                        relays,
+                        c,
+                    )
+                    .err();
+                }
+            }
+        }
+        self.restore_consent_at(change, next).err()
+    }
+
+    /// After the head moved (§7e): drop registered v2 restores that can no
+    /// longer seal - spent or past their window - so they never hold the
+    /// seat's pending cap; sign the ones the head just made reachable.
+    pub(super) fn sweep_consented_restores(&mut self) {
+        let Some(head) = self.chain.head.as_ref().map(|h| h.height) else {
+            return;
+        };
+        let me = self.member();
+        let mut dead = Vec::new();
+        let mut reachable = Vec::new();
+        for (id, c) in &self.chain.proposal_changes {
+            let ChainChange::Membership { consent: Some(consent), .. } = c else {
+                continue;
+            };
+            let Some(molt_core::chain::RestoreConsent::V2 { anchor_height, .. }) =
+                molt_core::chain::parse_restore_consent(consent)
+            else {
+                continue;
+            };
+            if let Some(why) = self.consent_never_seals(c) {
+                dead.push((*id, why));
+            } else if head >= anchor_height
+                && !self.chain.own_approvals.contains(id)
+                && !self.proposals.get(id).is_some_and(|p| p.decliners.contains(&me))
+            {
+                reachable.push(*id);
+            }
+        }
+        for (id, why) in dead {
+            tracing::info!(%id, reason = why, "consented restore can no longer seal - dropped");
+            self.forget_vote(id);
+        }
+        for id in reachable {
+            self.auto_approve_restore(id);
+        }
     }
 
     /// Auto-approve a `Membership{Restored}` proposal whose consent THIS node
@@ -452,6 +541,9 @@ impl State {
                 tracing::warn!(%id, %member, "restore proposal reuses an anchor the chain knows - not auto-signing");
                 return;
             }
+        }
+        if self.proposals.get(&id).is_some_and(|p| p.decliners.contains(&me)) {
+            return;
         }
         let change = self.chain.proposal_changes.get(&id).cloned();
         match change.map(|c| self.restore_consent_at(&c, head.height.saturating_add(1))) {
@@ -598,7 +690,9 @@ impl State {
                 reply: reply.to_string(),
             },
         );
-        Ok(self.propose_membership(MembershipOp::Restored, member, &anchored, anchor, relays, consent))
+        // §7e: a v1 consent binds neither relays nor position - the human card
+        let cosign = self.config.self_cosign && (v2 || consent.is_none());
+        Ok(self.propose_membership_with(MembershipOp::Restored, member, &anchored, anchor, relays, consent, cosign))
     }
 
     /// The live re-admission vote for a recovery THIS node coordinates

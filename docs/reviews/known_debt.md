@@ -38,8 +38,17 @@ Audit #5, #6 closed for v2 (`recovery_auto_approval.md` §7e). Residual:
 the verifier and sealer keep counting a v1 consent so v1-era chains
 verify, so on m = 2 a hostile member can still seal a `Restored` around a
 v1 consent taken from the chain (rolling the seat's anchor back or
-rewriting its relays). No survivor auto-signs one any more. Closing it
-needs a v1 cutoff height, which an existing chain cannot be given.
+rewriting its relays). No node auto-signs one any more, the coordinator
+included. Closing it needs a v1 cutoff height, which an existing chain
+cannot be given.
+
+## v2 restore consents need every seat upgraded first
+
+`recovery_auto_approval.md` §7e: an older build refuses a v2 `Restored`
+as an invalid consent and keeps sealing; older builds holding m voices
+split the chain. Nothing gates v2 emission, since no peer reports its
+build. Fix direction: a capability signal in presence that a minting
+node checks against every seat before it hands out a v2 anchor.
 
 ## Security audit 2026-10-10 - other open items
 
