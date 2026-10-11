@@ -327,8 +327,11 @@ status frame - the mirror declaration (`docs_archive/files/mirroring.md`
 §3.4), sent as soon as its transport is up and every 6 h. Absent field =
 not capable, so an older build never counts. The receiver keeps the last
 seen list per seat in `WorkspacePrefs.seat_caps` (`prefs.toml`, beside
-the presence memory; replaced by every accepted declaration, so a later
-status without the field withdraws it). A restart keeps it, and so does a
+the presence memory, sealed with it in a phrase-sealed dir; only the
+capabilities this build knows, so a peer's list cannot outgrow the prefs
+read cap). Every declaration replaces it whatever its mirror `rev` - a
+recovered seat restarts that revision - so a later status without the
+field withdraws it. A restart keeps it, and so does a
 restored backup (`transport.state` never travels, the prefs do), which
 is what lets the detached self-service reattach still sign v2. A node puts a `ConsentAnchor` into a recovery link
 (or the detached reattach context) only when every OTHER roster seat

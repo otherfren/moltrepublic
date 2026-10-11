@@ -248,7 +248,8 @@ version boundary, authenticated by the MLS credential like the poke, and
   change; a lower revision never overwrites). A member without one reads
   `known: false`. `caps` (additive, 2026-10-11) is the seat's status: the
   capabilities its build understands, absent on an older build, kept per
-  member in `prefs.toml` (`seat_caps`) rather than the decls; the only
+  member in `prefs.toml` (`seat_caps`) rather than the decls, from every
+  declaration regardless of `rev`, filtered to the ones this build knows; the only
   one so far gates the restore consent v2
   (`docs_archive/ritual/recovery_auto_approval.md` §7e).
 - `MirrorStatus { holds: [(id, held, of)] }` (`\x00molt-mstat-v1`) - what

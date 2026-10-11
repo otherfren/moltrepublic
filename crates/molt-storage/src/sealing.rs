@@ -191,6 +191,8 @@ struct SealedPrefs {
     mirror_dir: String,
     #[serde(default)]
     last_seen: std::collections::BTreeMap<String, u64>,
+    #[serde(default)]
+    seat_caps: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl SealedPrefs {
@@ -201,12 +203,14 @@ impl SealedPrefs {
             && p.read_cursors.is_empty()
             && p.local_copies.is_empty()
             && p.mirror_dir.is_empty()
-            && p.last_seen.is_empty());
+            && p.last_seen.is_empty()
+            && p.seat_caps.is_empty());
         self.shared_files.append(&mut p.shared_files);
         self.shared_file_mtimes.append(&mut p.shared_file_mtimes);
         self.read_cursors.append(&mut p.read_cursors);
         self.local_copies.append(&mut p.local_copies);
         self.last_seen.append(&mut p.last_seen);
+        self.seat_caps.append(&mut p.seat_caps);
         if !p.mirror_dir.is_empty() {
             self.mirror_dir = std::mem::take(&mut p.mirror_dir);
         }
@@ -220,11 +224,13 @@ impl SealedPrefs {
         self.read_cursors.append(&mut p.read_cursors);
         self.local_copies.append(&mut p.local_copies);
         self.last_seen.append(&mut p.last_seen);
+        self.seat_caps.append(&mut p.seat_caps);
         p.shared_files = self.shared_files;
         p.shared_file_mtimes = self.shared_file_mtimes;
         p.read_cursors = self.read_cursors;
         p.local_copies = self.local_copies;
         p.last_seen = self.last_seen;
+        p.seat_caps = self.seat_caps;
         if p.mirror_dir.is_empty() {
             p.mirror_dir = self.mirror_dir;
         }
@@ -962,6 +968,7 @@ mod tests {
         let mut p = crate::read_prefs(dir);
         p.s3_backup = true;
         p.last_seen.insert("juno".to_string(), 1_700_000_000);
+        p.seat_caps.insert("kepler".to_string(), vec!["molt-restore-consent-v2".to_string()]);
         p.read_cursors.insert("topic:secret-plans".to_string(), "00".repeat(16));
         p.shared_files.insert("ab".repeat(16), "/home/petra/plans.pdf".to_string());
         p.shared_file_mtimes.insert("ab".repeat(16), 7);
@@ -986,7 +993,7 @@ mod tests {
             plain.extend(fs::read(&entry).unwrap_or_default());
         }
         let plain = String::from_utf8_lossy(&plain);
-        for needle in ["juno", "secret-plans", "/home/petra", "/srv/mirror-petra", &"cd".repeat(32)] {
+        for needle in ["juno", "kepler", "secret-plans", "/home/petra", "/srv/mirror-petra", &"cd".repeat(32)] {
             assert!(!plain.contains(needle), "{needle} readable in a sealed dir");
         }
         assert!(crate::read_prefs(&dir).s3_backup, "local switches stay plaintext");

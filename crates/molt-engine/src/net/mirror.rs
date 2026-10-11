@@ -552,7 +552,9 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// A member's declaration landed: last wins by revision.
+    /// A member's declaration landed: last wins by revision; its
+    /// capabilities follow every declaration (a recovered seat restarts
+    /// its revision).
     pub(crate) fn cmd_net_mirror_decl(
         &mut self,
         from: &MemberId,
@@ -568,17 +570,22 @@ impl State {
         if newer {
             self.files.mirror.decls.insert(from.clone(), MirrorDecl { on, quota, rev });
             self.persist_mirror();
-            self.remember_caps(from, caps);
         }
+        self.remember_caps(from, caps);
         Ok(Reply::Ack)
     }
 
     /// The member's last announced capabilities, kept in the prefs (they
-    /// travel with an export, so a restored copy still mints v2).
-    fn remember_caps(&mut self, from: &MemberId, caps: Vec<String>) {
+    /// travel with an export, so a restored copy still mints v2). Only the
+    /// ones this build knows: a peer's list must not outgrow the prefs cap.
+    fn remember_caps(&mut self, from: &MemberId, mut caps: Vec<String>) {
         let Some(a) = &mut self.active else {
             return;
         };
+        let ours = own_caps();
+        caps.retain(|c| ours.contains(c));
+        caps.sort();
+        caps.dedup();
         if a.prefs.seat_caps.get(from).map_or(caps.is_empty(), |known| *known == caps) {
             return;
         }

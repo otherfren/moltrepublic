@@ -1326,6 +1326,52 @@ fn every_seat_announcing_the_v2_capability_mints_a_v2_consent() {
     assert!(petra.consent_anchor_for("dora").is_none(), "the last status wins");
 }
 
+/// Only capabilities this build knows are kept: a peer's oversized list
+/// must not push `prefs.toml` past its read cap (which would reset every
+/// local pref at the next open).
+#[test]
+fn only_known_capabilities_reach_the_prefs() {
+    let cap = molt_core::chain::RESTORE_CONSENT_V2_CAP;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&ROSTER, 2);
+    let (mut petra, _tmp, dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
+    let junk: Vec<String> = (0..2_000).map(|i| format!("future-cap-{i:040}")).collect();
+    let mut caps: Vec<&str> = junk.iter().map(String::as_str).collect();
+    caps.push(cap);
+    announce(&mut petra, "walter", &caps);
+    announce(&mut petra, "dora", &junk.iter().map(String::as_str).collect::<Vec<_>>());
+    let known = &petra.active.as_ref().expect("active").prefs.seat_caps;
+    assert_eq!(known.get("walter"), Some(&vec![cap.to_string()]));
+    assert!(!known.contains_key("dora"), "unknown capabilities only = none");
+    let active = petra.active.take().expect("active");
+    active.handle.close(None);
+    assert_eq!(molt_storage::read_prefs(&dir).seat_caps.get("walter"), Some(&vec![cap.to_string()]));
+}
+
+/// The mirror revision lives in `transport.state`, which a recovered seat
+/// starts over: its capabilities follow every declaration, whatever its
+/// revision, so a downgrade (or an upgrade) after a recovery is seen.
+#[test]
+fn capabilities_follow_a_declaration_with_a_lower_revision() {
+    let cap = molt_core::chain::RESTORE_CONSENT_V2_CAP;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&ROSTER, 2);
+    let (mut petra, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
+    let decl = |st: &mut crate::State, from: &str, rev: u64, caps: &[&str]| {
+        st.cmd_net_mirror_decl(&from.to_string(), true, 0, rev, caps.iter().map(|c| (*c).to_string()).collect())
+            .expect("declaration");
+    };
+    decl(&mut petra, "walter", 1_700_000_000, &[cap]);
+    decl(&mut petra, "dora", 1_700_000_000, &[cap]);
+    assert!(petra.consent_anchor_for("dora").is_some());
+    decl(&mut petra, "walter", 0, &[]);
+    assert!(petra.consent_anchor_for("dora").is_none(), "a restored older build withdraws it");
+    decl(&mut petra, "walter", 0, &[cap]);
+    assert!(petra.consent_anchor_for("dora").is_some(), "a restored newer build announces it");
+}
+
 /// The last seen capability lives in `prefs.toml`, so a reopened node (or
 /// a restored backup) mints v2 before any peer speaks again.
 #[test]
