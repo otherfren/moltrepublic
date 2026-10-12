@@ -61,18 +61,6 @@ the years read every earlier deposit. Fix direction: proactive refresh
 (each holder adds a share of a random zero-polynomial) under a refresh
 epoch in the deposit record; needs its own plan.
 
-## A `rebase` verdict is not reproduced after a hard-kill reopen
-
-From `docs_archive/reviews/supersede_verdict_survives_apply.md` §3: the
-tail replay of a reopen walks nothing until the chain is adopted, and the
-walk after the adoption is `supersede_stale_wiki(None)`, which writes no
-`Rebase` (that needs the block's `moved` paths). An open patch a live seat
-showed as `superseded: "rebase"` reads `null` on the seat that was
-hard-killed after its last snapshot; the card itself is intact and
-votable. Fix direction: walk the suffix blocks' `moved` paths in the
-adoption walk, and pin it with a propose-then-ratify ordering in
-`checkpoint_under_load.rs`.
-
 ## A wiki base near 512 MiB fails the whole backup
 
 `READ_CAP_WIKI_BASE` and the restore cap (`RESTORE_MAX_BYTES`) are both

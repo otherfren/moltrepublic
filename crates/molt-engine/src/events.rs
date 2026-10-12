@@ -355,6 +355,10 @@ impl State {
                 // one into this log); every other one waits for
                 // `reverify_all_pending`, run once the chain is adopted.
                 if !sig.is_empty() {
+                    if self.chain.adoption_pending {
+                        let at = self.chain.replay_signed_at.entry(id.0).or_insert(*height);
+                        *at = (*at).min(*height);
+                    }
                     self.collect_sig(id.0, *height, by, sig, mine);
                     // `collect_sig` only CLEARS the old verdict — the
                     // verified mark is the caller's, as in every signing path
@@ -811,6 +815,7 @@ impl State {
         self.chain.block_ts.clear();
         self.chain.head = None;
         self.chain.adoption_pending = false;
+        self.chain.replay_signed_at.clear();
         self.set_checkpoint_blob(None);
         self.chain.pending_served_blob = None;
         self.chain.applied.clear();

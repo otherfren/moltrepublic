@@ -3886,9 +3886,7 @@ impl State {
         moved: Option<&std::collections::BTreeSet<String>>,
     ) {
         // no tree to judge against yet: the walk after the adoption
-        // re-checks the tail's cards against the adopted tree (a `rebase`
-        // a live node showed is not reproduced from log + chain - known
-        // residual, `docs/reviews/known_debt.md`)
+        // re-checks the tail's cards against the adopted tree
         if self.chain.adoption_pending {
             return;
         }
@@ -3906,6 +3904,7 @@ impl State {
             .collect();
         if cands.is_empty() {
             self.wiki_pending.clear();
+            self.chain.replay_signed_at.clear();
             return;
         }
         for id in &cands {
@@ -3927,7 +3926,10 @@ impl State {
         // important line of K6 (§4.9.6): run against a base this node does
         // not hold, every pending patch fails to apply and would be retired
         // as superseded - silent, unrecoverable data loss on a rejoiner.
+        let replay_signed_at = std::mem::take(&mut self.chain.replay_signed_at);
         let Ok((tree, _)) = self.wiki_base() else {
+            // kept for the walk that holds a base to judge against
+            self.chain.replay_signed_at = replay_signed_at;
             return;
         };
         // A4: the base moving is TWO different pieces of news. A patch it
@@ -3948,7 +3950,10 @@ impl State {
             if Self::wiki_patch_applies(&tree, pending) {
                 // only a REAL move re-bases: a full re-check (registration,
                 // rebuild) names no moved paths and decides nothing
-                if moved.is_some() {
+                let replayed_move = replay_signed_at
+                    .get(id)
+                    .is_some_and(|at| Self::chain_moved_since(&self.chain.blocks, *at, &pending.paths));
+                if moved.is_some() || replayed_move {
                     rebased.push(*id);
                 }
             } else {
@@ -3970,6 +3975,27 @@ impl State {
             self.stash_voted(id);
             self.wiki_pending.remove(&id);
         }
+    }
+
+    /// Did a block at `height` or above touch any of `paths`? A cut
+    /// touches every path. The reopen's stand-in for the per-block walk a
+    /// live seat ran (`supersede_verdict_survives_apply.md` §3).
+    fn chain_moved_since(
+        blocks: &[molt_core::ChainBlock],
+        height: u64,
+        paths: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        blocks.iter().filter(|b| b.height >= height).any(|b| match &b.change {
+            molt_core::ChainChange::Applied {
+                surface: Surface::Memory,
+                payload,
+                ..
+            } => Self::wiki_payload_paths(payload).is_some_and(|m| !m.is_disjoint(paths)),
+            molt_core::ChainChange::Checkpoint { .. }
+            | molt_core::ChainChange::CheckpointFolded { .. }
+            | molt_core::ChainChange::CheckpointVault { .. } => true,
+            _ => false,
+        })
     }
 
     /// A4: a cut moved the base under every open wiki patch. None of them

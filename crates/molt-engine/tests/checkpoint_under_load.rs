@@ -497,6 +497,72 @@ async fn reopen_keeps_the_cards(hard_kill_it: bool, with_cut: bool) {
     wait_for_memory(&a, "walter", "revision 3", |_, rev| rev == 3).await;
 }
 
+/// The proposal card `id` as `w` lists it.
+async fn card(w: &WalletHandle, id: molt_core::ProposalId) -> molt_core::ProposalView {
+    match w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list") {
+        Reply::Proposals { proposals, .. } => proposals
+            .into_iter()
+            .find(|p| p.id == id)
+            .expect("the card is listed"),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Propose-then-ratify: an open edit of line 1 sits on the table while a
+/// ratified edit of line 3 of the same page moves the base under it. The
+/// live seat reads `rebase`; a hard kill before the next snapshot replays
+/// both from the tail, and the reopened seat must read the same.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hard_kill_reopen_keeps_the_rebase_of_an_open_edit() {
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("workspaces");
+    let (a, b, _v) = found_three(&root, &url).await;
+
+    ratify(
+        &a,
+        &b,
+        "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,3 @@\n+one\n+mid\n+three\n",
+    )
+    .await;
+    let open = propose_patch(&a, &edit("a.md", "one", "ONE")).await;
+    ratify(
+        &a,
+        &b,
+        "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -3,1 +3,1 @@\n-three\n+THREE\n",
+    )
+    .await;
+    let live = card(&a, open).await;
+    assert_eq!(live.state, molt_core::ProposalState::Proposed, "live: still open");
+    assert_eq!(
+        live.superseded_kind,
+        Some(molt_core::SupersededKind::Rebase),
+        "live: the ratified edit re-based it"
+    );
+
+    let a_ws = workspace_id(&a).await;
+    hard_kill(a, &root.join("walter"), &a_ws).await;
+    let a = engine(&root.join("walter"));
+    adopt_relay(&a, &url).await;
+    a.execute(Command::OpenWorkspace { id: a_ws })
+        .await
+        .expect("walter reopens");
+
+    let reopened = card(&a, open).await;
+    assert_eq!(reopened.state, molt_core::ProposalState::Proposed, "reopen: still open");
+    assert!(!reopened.superseded, "reopen: not dead");
+    assert_eq!(
+        reopened.superseded_kind,
+        Some(molt_core::SupersededKind::Rebase),
+        "reopen: the rebase a live seat showed"
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    approve_once_it_arrived(&b, open, deadline).await;
+    wait_for_memory(&a, "walter", "revision 3", |_, rev| rev == 3).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_clean_reopen_keeps_a_ratified_edit_clean_and_an_open_edit_open() {
     reopen_keeps_the_cards(false, false).await;

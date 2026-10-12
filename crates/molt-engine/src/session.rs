@@ -1408,6 +1408,7 @@ impl State {
             self.next_id = self.next_id.max(top.saturating_add(1));
         }
         self.chain.adoption_pending = !chain.is_empty();
+        self.chain.replay_signed_at.clear();
         for env in tail {
             self.apply(env);
         }
