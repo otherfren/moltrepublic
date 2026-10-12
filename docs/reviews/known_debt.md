@@ -185,13 +185,3 @@ INTERPRETED window, never the shipped one. Fix direction:
 gates; unmeasured cost on a window build that has no RSS headroom left
 (CLAUDE.md, build section) - measure once, alone, before adopting.
 
-## Flaky: `a_broadcast_ack_moves_the_senders_proven_floor` (2026-09-05)
-
-Failed once on `cursor.ack_seen` during a fully parallel `cargo test
---workspace`, and passed 6/6 alone plus once under two concurrent test
-binaries. Load-dependent: the debounced `MESH_ACK_TAG` frame has to land
-and be consumed before the close seals the sheet, and a starved runtime
-misses that window. Fix direction: the test should wait on the sheet
-(poll `read_transport_state` until `ack_seen`, with a deadline) instead of
-on the close - the guarantee is eventual, so a one-shot read of it is the
-test's bug, not the engine's.

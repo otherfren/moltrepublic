@@ -312,30 +312,35 @@ async fn a_broadcast_ack_moves_the_senders_proven_floor() {
     }
 
     // …and walter's own bookkeeping records it. The ack is debounced
-    // (ACK_DEBOUNCE_SECS) and flushed on the 1 s delivery beat, so give the
-    // round trip room, then close ONCE — closing repeatedly would mostly keep
-    // walter shut while petra's sheet was arriving.
-    tokio::time::sleep(Duration::from_secs(8)).await;
-    a.execute(Command::CloseWorkspace).await.expect("close a");
-    b.execute(Command::CloseWorkspace).await.expect("close b");
-
+    // (ACK_DEBOUNCE_SECS) and the guarantee is eventual: watch the live
+    // file rather than guess a delay before the close (a starved runtime
+    // outlasts any guess).
     let root_a = tmp.path().join("founder");
     let dir = molt_storage::find_workspace_dir(&root_a, &ws_a).expect("walter's dir");
+    let proven = |ts: &molt_core::TransportState| {
+        ts.outbound.get("petra").is_some_and(|c| c.ack_seen && c.acked_floor > 0)
+    };
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let ts = molt_storage::peek_transport_state(&dir).unwrap_or_default();
+        if proven(&ts) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "petra's sheet must latch ack_seen and lift the floor above zero - without it \
+             group_floor stays None and nothing is ever proven; outbound = {:?}",
+            ts.outbound
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    // the close keeps what was proven
+    a.execute(Command::CloseWorkspace).await.expect("close a");
+    b.execute(Command::CloseWorkspace).await.expect("close b");
     let (ws, _) = molt_storage::open_workspace(&dir).expect("open walter");
     let ts = ws.read_transport_state();
-    let cursor = ts
-        .outbound
-        .get("petra")
-        .unwrap_or_else(|| panic!("no floor for petra; outbound = {:?}", ts.outbound));
-    assert!(
-        cursor.ack_seen,
-        "petra's sheet must latch ack_seen — without it group_floor stays None and nothing is ever proven"
-    );
-    assert!(
-        cursor.acked_floor > 0,
-        "…and lift the floor above zero, got {}",
-        cursor.acked_floor
-    );
+    assert!(proven(&ts), "the close lost petra's floor: {:?}", ts.outbound);
 }
 
 /// B4 at the engine seam: an UNREACHABLE relay (down right now — or onion

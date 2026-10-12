@@ -640,6 +640,16 @@ pub fn peek_genesis(root: &Path, ws_dir: &Path, id_hex: &str) -> Option<EventEnv
     genesis_from_snapshot(ws_dir, &manifest, &key, &id)
 }
 
+/// Decrypt a workspace directory's `transport.state` without its LOCK, so
+/// an observer can watch a live node's delivery bookkeeping (the file is
+/// replaced atomically). `None` = absent or unreadable; never writes the
+/// workspace.
+pub fn peek_transport_state(ws_dir: &Path) -> Option<TransportState> {
+    let manifest = read_manifest(ws_dir).ok()?;
+    let (key, id) = open_key_material(ws_dir, &manifest).ok()?;
+    read_transport_state_raw(ws_dir, &key, &id).ok()
+}
+
 /// Why the genesis frame (segment 1, seq 1) did not open. The three
 /// readers (the Open screen's peek, the phrase check of a seal/unseal, the
 /// import's blob check) map it to their own wording.
@@ -6153,6 +6163,32 @@ mod tests {
         // a foreign device key cannot peek
         fs::write(device_key_path(&root), [9u8; 32]).expect("swap device key");
         assert!(peek_genesis(&root, &dir, &id_hex).is_none());
+    }
+
+    #[test]
+    fn peek_transport_state_reads_a_live_workspace_without_its_lock() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(&root, &seed, &founded(42)).expect("create");
+        let dir = ws.dir().to_path_buf();
+        assert!(peek_transport_state(&dir).is_none(), "no file yet is not a state");
+
+        let mut ts = TransportState::default();
+        ts.outbound.insert(
+            "petra".to_string(),
+            molt_core::OutboundCursor { acked_floor: 3, ack_seen: true, ..Default::default() },
+        );
+        ws.write_transport_state(&ts).expect("write");
+        // `ws` still holds the LOCK: the peek must not need it
+        let seen = peek_transport_state(&dir).expect("peek");
+        let cursor = seen.outbound.get("petra").expect("petra's cursor");
+        assert!(cursor.ack_seen);
+        assert_eq!(cursor.acked_floor, 3);
+
+        fs::write(device_key_path(&root), [9u8; 32]).expect("swap device key");
+        assert!(peek_transport_state(&dir).is_none(), "a foreign device key cannot peek");
+        drop(ws);
     }
 
     #[test]
