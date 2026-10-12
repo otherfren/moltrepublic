@@ -41,14 +41,6 @@ rewriting its relays). No node auto-signs one any more, the coordinator
 included. Closing it needs a v1 cutoff height, which an existing chain
 cannot be given.
 
-## A swept restore card stays in flight on the coordinator
-
-`recovery_auto_approval.md` §7e: a dead v2 card the sweep drops leaves
-its `recovery.pending` entry, so `readmission_in_flight` still reports
-the seat until a new request replaces it. After a reorg that lowers the
-head, a card swept as spent comes back only through re-served open
-governance. Fix direction: drop the pending entry with the card.
-
 ## Security audit 2026-10-10 - other open items
 
 From `docs_archive/reviews/security_audit_2026-10-10.md` (its accepted

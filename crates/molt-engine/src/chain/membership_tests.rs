@@ -599,6 +599,68 @@ fn a_stale_v2_card_is_swept_from_the_registry() {
     assert!(!walter.chain.proposal_changes.contains_key(&7), "a stale card is swept");
 }
 
+/// The coordinator's swept card takes its recovery with it: the seat is no
+/// longer in flight (R3), and no progress is reported for it.
+#[test]
+fn a_swept_v2_card_drops_the_coordinators_pending_recovery() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let w = molt_core::chain::RESTORE_CONSENT_WINDOW;
+    let mut b = Builder::new(&["petra", "walter", "dora"], 3);
+    for id in 0..w - 1 {
+        b.commit_applied(100 + id, &["petra", "walter", "dora"]);
+    }
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    let rid = b.republic_id.clone();
+    let kp_hex = &kp_hex_for(&b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(&b, "dora", "", &[], 0, &"cc".repeat(32));
+    let id = coord
+        .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
+        .expect("the last fresh height proposes");
+    assert!(coord.readmission_in_flight("dora"), "in flight while the card can seal");
+    b.commit_applied(100 + w, &["petra", "walter", "dora"]);
+    let block = b.blocks.last().cloned().expect("block");
+    assert!(coord.append_committed_block(block.clone()));
+    coord.after_block_applied(&block);
+    assert!(!coord.chain.proposal_changes.contains_key(&id), "the stale card is swept");
+    assert!(!coord.recovery.pending.contains_key("dora"), "its recovery goes with it");
+    assert!(!coord.readmission_in_flight("dora"), "the seat is no longer in flight");
+}
+
+/// A swept card leaves a live sibling's recovery alone: the pending entry
+/// is per seat, and the other card can still seal.
+#[test]
+fn a_swept_v2_card_keeps_a_live_siblings_pending_recovery() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let w = molt_core::chain::RESTORE_CONSENT_WINDOW;
+    let mut b = Builder::new(&["petra", "walter", "dora"], 3);
+    for id in 0..w - 1 {
+        b.commit_applied(100 + id, &["petra", "walter", "dora"]);
+    }
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    let rid = b.republic_id.clone();
+    let kp_hex = &kp_hex_for(&b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(&b, "dora", "", &[], 0, &"cc".repeat(32));
+    let stale = coord
+        .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
+        .expect("the last fresh height proposes");
+    let fresh = consent_v2_for(&b, "dora", "", &[], w - 1, &"cc".repeat(32));
+    let proof = crate::make_seat_proof(b.key("dora"), "u", kp_hex, &rid, "", &[]);
+    let live = coord
+        .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, "u", &proof, "", &[], &fresh, "")
+        .expect("a fresh sibling proposes");
+    b.commit_applied(100 + w, &["petra", "walter", "dora"]);
+    let block = b.blocks.last().cloned().expect("block");
+    assert!(coord.append_committed_block(block.clone()));
+    coord.after_block_applied(&block);
+    assert!(!coord.chain.proposal_changes.contains_key(&stale), "the stale card is swept");
+    assert!(coord.chain.proposal_changes.contains_key(&live), "the sibling stays");
+    assert!(coord.recovery.pending.contains_key("dora"), "and keeps the recovery");
+}
+
 /// A survivor one block behind the minter registers the card instead of
 /// calling it stale, and auto-signs once it reaches the anchor.
 #[test]

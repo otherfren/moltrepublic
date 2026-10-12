@@ -22,6 +22,8 @@ a_spent_or_stale_v2_consent_is_refused_at_the_coordinator,
 a_v1_consent_is_not_cosigned_by_the_coordinator,
 a_spent_v2_card_is_swept_from_the_registry,
 a_stale_v2_card_is_swept_from_the_registry,
+a_swept_v2_card_drops_the_coordinators_pending_recovery,
+a_swept_v2_card_keeps_a_live_siblings_pending_recovery,
 a_lagging_survivor_registers_and_signs_a_v2_card_on_arrival,
 a_seat_without_the_v2_capability_keeps_the_consent_at_v1,
 every_seat_announcing_the_v2_capability_mints_a_v2_consent,
@@ -290,7 +292,11 @@ check); rule 3 needs the walk state.
 **Registry.** A registered v2 card that can no longer seal - spent, or
 past its window - is dropped from the registry after every head move
 (`State::sweep_consented_restores`), so it never holds the seat's
-pending cap or R3; its card record is left as it is. A v2 consent
+pending cap or R3; its card record is left as it is. With the seat's last
+card goes the coordinator's `recovery.pending` entry, so the seat stops
+counting as in flight. A card swept as spent returns after a reorg only
+through re-served open governance; if it then seals, this coordinator
+sends no Welcome and the seat reattaches on its own. A v2 consent
 anchored at or above the receiver's head (the receiver lags the minter)
 is not yet reachable rather than stale: it registers if its signature
 verifies at `anchor_height + 1` (rule 3 waits for the sealer), and the

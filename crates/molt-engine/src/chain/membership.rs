@@ -479,9 +479,23 @@ impl State {
                 reachable.push(*id);
             }
         }
+        let mut seats = BTreeSet::new();
         for (id, why) in dead {
             tracing::info!(%id, reason = why, "consented restore can no longer seal - dropped");
+            if let Some(ChainChange::Membership { member, .. }) = self.chain.proposal_changes.get(&id) {
+                seats.insert(member.clone());
+            }
             self.forget_vote(id);
+        }
+        // the coordinator's recovery is per seat: it ends with the seat's
+        // last card (a re-served card that seals later gets no Welcome here)
+        for seat in seats {
+            let carded = self.chain.proposal_changes.values().any(|c| {
+                matches!(c, ChainChange::Membership { op: MembershipOp::Restored, member, .. } if *member == seat)
+            });
+            if !carded && self.recovery.pending.remove(&seat).is_some() {
+                tracing::info!(member = %seat, "recovery dropped with its card");
+            }
         }
         for id in reachable {
             self.auto_approve_restore(id);
