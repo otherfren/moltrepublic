@@ -1401,14 +1401,25 @@ impl State {
         tail: &[molt_core::EventEnvelope],
         chain: &[molt_core::ChainBlock],
     ) {
+        self.chain.replay_held_at.clear();
         if let Some(snap) = snapshot {
             self.restore_dump(snap.state);
+            if let Some(head) = snap.chain_height {
+                let open: Vec<u64> = self
+                    .proposals
+                    .iter()
+                    .filter(|(_, p)| p.state == molt_core::ProposalState::Proposed)
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in open {
+                    self.note_replay_held(id, head.saturating_add(1));
+                }
+            }
         }
         if let Some(top) = Self::max_applied_proposal_id(chain) {
             self.next_id = self.next_id.max(top.saturating_add(1));
         }
         self.chain.adoption_pending = !chain.is_empty();
-        self.chain.replay_signed_at.clear();
         for env in tail {
             self.apply(env);
         }

@@ -201,6 +201,7 @@ impl State {
             version: molt_core::STORAGE_VERSION,
             at_seq: self.next_seq.saturating_sub(1),
             state: dump,
+            chain_height: self.chain.head.as_ref().map(|h| h.height),
         };
         let Some(active) = self.active.as_ref() else {
             return;

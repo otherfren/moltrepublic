@@ -1790,3 +1790,105 @@ fn read_chain_lists_blocks_newest_first_and_survives_the_prune() {
         "the genesis view rebuilds from the blob's founding table"
     );
 }
+
+/// A three-line page `a.md` at height 1, and the edit of its line 3 that a
+/// later block seals - the move that re-bases an open edit of line 1.
+fn page_and_line3_edit() -> (Builder, ChainChange) {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "one\nmid\nthree", &["petra", "walter"]);
+    let edit3 = ChainChange::Applied {
+        proposal_id: 50,
+        surface: Surface::Memory,
+        payload: json!({ "op": "wiki_patch", "value":
+            "diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md\n@@ -3,1 +3,1 @@\n-three\n+THREE\n" }),
+    };
+    (b, edit3)
+}
+
+fn edit_line1() -> serde_json::Value {
+    json!({ "op": "wiki_patch", "summary": "x", "value": wiki_edit_line("a.md", "one", "ONE") })
+}
+
+fn tail_env(seq: u64, by: &str, body: molt_core::WorkspaceEvent) -> molt_core::EventEnvelope {
+    molt_core::EventEnvelope {
+        prev_seq: seq - 1,
+        seq,
+        ts: 100 + seq,
+        by: by.to_string(),
+        body,
+    }
+}
+
+/// A reopen in `open_stored_workspace`'s order.
+fn reopened(
+    snap: molt_core::WorkspaceSnapshot,
+    tail: &[molt_core::EventEnvelope],
+    b: &Builder,
+) -> crate::State {
+    let mut back = crate::tests::plain_state();
+    back.replay_loaded(Some(snap), tail, &b.blocks);
+    back.adopt_chain(b.blocks.clone());
+    back.reverify_all_pending();
+    back
+}
+
+/// The card's signatures sit in the snapshot, the block that moved its
+/// base in the chain after it: the reopen still reads the live `rebase`.
+#[test]
+fn a_reopen_rebases_a_card_the_snapshot_held_before_the_block() {
+    let (mut b, edit3) = page_and_line3_edit();
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let open = propose(&mut walter, Surface::Memory, edit_line1());
+    let snap = walter.snapshot_now();
+    let block = b.commit(edit3, &["petra", "walter"]);
+    walter.receive_block(block);
+    assert_eq!(
+        walter.proposals.get(&open).and_then(|p| p.superseded_kind),
+        Some(molt_core::SupersededKind::Rebase),
+        "live: the block re-based it"
+    );
+
+    let back = reopened(snap, &[], &b);
+    let p = back.proposals.get(&open).expect("the card");
+    assert_eq!(p.state, ProposalState::Proposed);
+    assert_eq!(p.superseded_kind, Some(molt_core::SupersededKind::Rebase), "reopen: as live");
+}
+
+/// A peer's signature at or below the move proves nothing about when THIS
+/// seat registered the card: one that arrived after the block reads no
+/// verdict after the reopen either, as it read none live.
+#[test]
+fn a_peer_signature_below_the_move_marks_no_rebase_on_reopen() {
+    for peer_height in [1u64, 2] {
+        let (mut b, edit3) = page_and_line3_edit();
+        b.commit(edit3, &["petra", "walter"]);
+        let walter = chain_signer("walter", &b, b.blocks.clone());
+        let snap = walter.snapshot_now();
+        let id = 60u64;
+        let tail = [
+            tail_env(
+                snap.at_seq + 1,
+                "petra",
+                molt_core::WorkspaceEvent::Proposed {
+                    id: molt_core::ProposalId(id),
+                    surface: Surface::Memory,
+                    payload: edit_line1(),
+                },
+            ),
+            tail_env(
+                snap.at_seq + 2,
+                "petra",
+                molt_core::WorkspaceEvent::Approved {
+                    id: molt_core::ProposalId(id),
+                    by: "petra".to_string(),
+                    height: peer_height,
+                    sig: "00".to_string(),
+                },
+            ),
+        ];
+        let back = reopened(snap, &tail, &b);
+        let p = back.proposals.get(&id).expect("the card");
+        assert_eq!(p.state, ProposalState::Proposed);
+        assert_eq!(p.superseded_kind, None, "peer sig at {peer_height}: no verdict, as live");
+    }
+}

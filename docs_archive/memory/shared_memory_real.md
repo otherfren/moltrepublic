@@ -263,8 +263,9 @@ with the user, 2026-08-15):
   reopen's tail replay walks nothing until the chain is adopted
   (`ChainProjection::adoption_pending`) — the legacy fold of a chain
   republic is an empty tree, which killed every open edit at a hard-kill
-  restart. The replay keeps each card's lowest signed height
-  (`replay_signed_at`); the first walk that judges marks `rebase` where a
+  restart. The replay keeps the lowest height each card was provably
+  held below (an own signature, or the snapshot's chain head + 1,
+  `replay_held_at`); the first walk that judges marks `rebase` where a
   block at or above it touched the card's paths, as a live seat did.
 - **Display.** Superseded patches list in the DENIED view next to human
   declines, visibly distinct: "superseded - base moved (#<id>)" naming

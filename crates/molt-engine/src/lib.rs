@@ -815,10 +815,11 @@ pub(crate) struct ChainProjection {
     /// then the folded tree is the legacy log's, not the republic's, and
     /// the supersede walk must not judge a card against it.
     pub(crate) adoption_pending: bool,
-    /// Proposal id -> the lowest height a tail `Approved` signed it at:
-    /// a block at or above it sealed after the card was on the table, so
-    /// the first walk that judges marks the `rebase` a live seat showed.
-    pub(crate) replay_signed_at: HashMap<u64, u64>,
+    /// Proposal id -> the lowest height this seat provably held the card
+    /// below (an own tail signature, or the snapshot's chain head + 1): a
+    /// block at or above it sealed after the card was on the table, so the
+    /// first walk that judges marks the `rebase` a live seat showed.
+    pub(crate) replay_held_at: HashMap<u64, u64>,
     /// DISPLAY stamps: block height → the unix seconds its `Committed`
     /// envelope carried in this node's log (refilled by the replay, empty
     /// for history the log no longer holds). Never consensus input - the
@@ -1583,7 +1584,7 @@ impl State {
                 split_noted: std::collections::HashSet::new(),
                 pending_sigs: HashMap::new(),
                 adoption_pending: false,
-                replay_signed_at: HashMap::new(),
+                replay_held_at: HashMap::new(),
                 own_approvals: std::collections::BTreeSet::new(),
                 served_at: HashMap::new(),
                 refused_at: HashMap::new(),

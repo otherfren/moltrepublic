@@ -240,13 +240,16 @@ aad       := workspace_id | segment_no:u64le | seq:u64le
 
 ### 3.4 Snapshots
 
-`WorkspaceSnapshot { version, at_seq, state: EngineStateDump }` where
+`WorkspaceSnapshot { version, at_seq, state: EngineStateDump, chain_height }` where
 `EngineStateDump` is exactly what the actor holds today: `chat:
 Vec<ChatMessage>`, per-surface applied logs, proposals map, roster. Written
 by a background task (see §6) every N events (default 1 000) or on clean
 close; loading = newest valid snapshot + replay of frames `> at_seq`.
 Snapshots are an *optimization* — deleting them must always be safe, and the
 test suite proves replay-from-zero equals snapshot-plus-tail.
+`chain_height` (optional, 2026-10-12) is the chain head at `at_seq`, outside
+the dump: a reopen dates the snapshot's open cards by it
+(`supersede_verdict_survives_apply.md` §3).
 
 Compaction (optional, later): rewrite old segments dropping events whose
 effect is fully captured by a snapshot floor — only once a retention story

@@ -3904,7 +3904,7 @@ impl State {
             .collect();
         if cands.is_empty() {
             self.wiki_pending.clear();
-            self.chain.replay_signed_at.clear();
+            self.chain.replay_held_at.clear();
             return;
         }
         for id in &cands {
@@ -3926,10 +3926,10 @@ impl State {
         // important line of K6 (§4.9.6): run against a base this node does
         // not hold, every pending patch fails to apply and would be retired
         // as superseded - silent, unrecoverable data loss on a rejoiner.
-        let replay_signed_at = std::mem::take(&mut self.chain.replay_signed_at);
+        let replay_held_at = std::mem::take(&mut self.chain.replay_held_at);
         let Ok((tree, _)) = self.wiki_base() else {
             // kept for the walk that holds a base to judge against
-            self.chain.replay_signed_at = replay_signed_at;
+            self.chain.replay_held_at = replay_held_at;
             return;
         };
         // A4: the base moving is TWO different pieces of news. A patch it
@@ -3950,7 +3950,7 @@ impl State {
             if Self::wiki_patch_applies(&tree, pending) {
                 // only a REAL move re-bases: a full re-check (registration,
                 // rebuild) names no moved paths and decides nothing
-                let replayed_move = replay_signed_at
+                let replayed_move = replay_held_at
                     .get(id)
                     .is_some_and(|at| Self::chain_moved_since(&self.chain.blocks, *at, &pending.paths));
                 if moved.is_some() || replayed_move {
@@ -3975,6 +3975,12 @@ impl State {
             self.stash_voted(id);
             self.wiki_pending.remove(&id);
         }
+    }
+
+    /// Keep the lowest height `id` was provably held below.
+    pub(crate) fn note_replay_held(&mut self, id: u64, height: u64) {
+        let at = self.chain.replay_held_at.entry(id).or_insert(height);
+        *at = (*at).min(height);
     }
 
     /// Did a block at `height` or above touch any of `paths`? A cut

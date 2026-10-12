@@ -5201,6 +5201,7 @@ mod tests {
             version: molt_core::STORAGE_VERSION,
             at_seq: ws.next_seq - 1,
             state,
+            chain_height: None,
         };
         ws.write_snapshot(&snap).expect("snapshot");
     }
@@ -5374,6 +5375,7 @@ mod tests {
             version: molt_core::STORAGE_VERSION,
             at_seq,
             state: molt_core::EngineStateDump::default(),
+            chain_height: None,
         };
         let out = handle.compact_blocking(snap, vec!["slowpoke".to_string()], ack_clock(0));
         assert_eq!(out.floor, 4, "the floor stops at the slow peer's covered segment");
@@ -5425,6 +5427,7 @@ mod tests {
             version: molt_core::STORAGE_VERSION,
             at_seq,
             state: molt_core::EngineStateDump::default(),
+            chain_height: None,
         };
         let out = handle.compact_blocking(snap, vec!["acker".to_string()], ack_clock(0));
         assert_eq!(
@@ -5449,6 +5452,7 @@ mod tests {
             version: molt_core::STORAGE_VERSION,
             at_seq,
             state: molt_core::EngineStateDump::default(),
+            chain_height: None,
         }
     }
 
@@ -5569,6 +5573,7 @@ mod tests {
             version: molt_core::STORAGE_VERSION,
             at_seq,
             state: molt_core::EngineStateDump::default(),
+            chain_height: None,
         };
         let out = handle.compact_blocking(snap, vec!["fresh-peer".to_string()], ack_clock(0));
         assert_eq!(out, CompactionOutcome::default(), "nothing dropped, no floor");
@@ -5640,6 +5645,7 @@ mod tests {
             version: molt_core::STORAGE_VERSION,
             at_seq,
             state: molt_core::EngineStateDump::default(),
+            chain_height: None,
         };
         let out = handle.compact_blocking(
             snap,
@@ -6442,6 +6448,7 @@ mod tests {
                 member: "mithra".to_string(),
                 ..Default::default()
             },
+            chain_height: None,
         };
         ws.write_snapshot(&snap).expect("snapshot");
         drop(ws);
@@ -6471,6 +6478,7 @@ mod tests {
                 version: STORAGE_VERSION,
                 at_seq: at,
                 state: molt_core::EngineStateDump::default(),
+                chain_height: None,
             };
             // at_seq beyond the log is fine for this pruning-only test
             ws.write_snapshot(&snap).expect("snapshot");
@@ -6626,6 +6634,7 @@ mod tests {
                 member: by,
                 ..Default::default()
             },
+            chain_height: None,
         }));
 
         let (ws, loaded) = open_workspace(&dir).expect("reopen");
@@ -6964,6 +6973,7 @@ mod tests {
             version: STORAGE_VERSION,
             at_seq: 999, // claims history the log does not hold
             state: molt_core::EngineStateDump::default(),
+            chain_height: None,
         })
         .expect("snapshot");
         let dir = ws.dir().to_path_buf();

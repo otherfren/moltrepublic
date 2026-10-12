@@ -355,9 +355,9 @@ impl State {
                 // one into this log); every other one waits for
                 // `reverify_all_pending`, run once the chain is adopted.
                 if !sig.is_empty() {
-                    if self.chain.adoption_pending {
-                        let at = self.chain.replay_signed_at.entry(id.0).or_insert(*height);
-                        *at = (*at).min(*height);
+                    // only an own signature dates the card on THIS seat
+                    if mine && self.chain.adoption_pending {
+                        self.note_replay_held(id.0, *height);
                     }
                     self.collect_sig(id.0, *height, by, sig, mine);
                     // `collect_sig` only CLEARS the old verdict — the
@@ -613,6 +613,7 @@ impl State {
             version: molt_core::STORAGE_VERSION,
             at_seq: self.next_seq.saturating_sub(1),
             state: self.dump(),
+            chain_height: self.chain.head.as_ref().map(|h| h.height),
         }
     }
 
@@ -815,7 +816,7 @@ impl State {
         self.chain.block_ts.clear();
         self.chain.head = None;
         self.chain.adoption_pending = false;
-        self.chain.replay_signed_at.clear();
+        self.chain.replay_held_at.clear();
         self.set_checkpoint_blob(None);
         self.chain.pending_served_blob = None;
         self.chain.applied.clear();

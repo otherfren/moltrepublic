@@ -61,6 +61,16 @@ the years read every earlier deposit. Fix direction: proactive refresh
 (each holder adds a share of a random zero-polynomial) under a refresh
 epoch in the deposit record; needs its own plan.
 
+## An unsigned card loses its `rebase` at a hard-kill reopen
+
+From `docs_archive/reviews/supersede_verdict_survives_apply.md` §3: the
+reopen dates a card by an own tail signature or by the snapshot's
+`chain_height`. A card registered after the last snapshot that this seat
+never signed has neither, so a `rebase` the live seat showed reads `null`
+after a hard kill (card intact and votable; also every card under a
+snapshot written before `chain_height` existed). Fix direction: record
+the head height a card registered at in its `Proposed` log frame.
+
 ## A wiki base near 512 MiB fails the whole backup
 
 `READ_CAP_WIKI_BASE` and the restore cap (`RESTORE_MAX_BYTES`) are both

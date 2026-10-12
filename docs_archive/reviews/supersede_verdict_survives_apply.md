@@ -88,16 +88,22 @@ the same directory with no closing snapshot).
   early while it is set. The tail's cards get their registration check
   from the walk after the settle (`projection.rs:577`) and, under a cut,
   from the R2 walk once the base is adopted. That walk carries no
-  `moved` paths, so the replay keeps each card's lowest signed height
-  from its tail `Approved` frames (`replay_signed_at`, 2026-10-12), and
-  the first walk that judges marks `rebase` on an open card that a chain
-  block at or above that height touched (a cut touches every path), as a
-  live seat did. Not the log order: a peer's block never enters the own
-  log. Residual: a card with no tail signature stays unmarked, and one
-  that reached this seat only after such a block (a catch-up re-serve)
-  reads `rebase` where the live seat showed none. Pinned by
+  `moved` paths, so the replay keeps the lowest height each card was
+  provably held below on THIS seat (`replay_held_at`, 2026-10-12): an
+  own tail `Approved` (signed at head + 1), and, for every open card of
+  the snapshot, `WorkspaceSnapshot::chain_height` + 1. The first walk
+  that judges marks `rebase` on an open card that a chain block at or
+  above that height touched (a cut touches every path), as a live seat
+  did. Not the log order: a peer's block never enters the own log. Not a
+  peer's signature: it dates the card on the peer, not here, and may be
+  stale, so it would mark a `rebase` this seat never showed. Residual: a
+  card registered after the last snapshot that this seat never signed
+  stays unmarked (`docs/reviews/known_debt.md`). Pinned by
   `a_hard_kill_reopen_keeps_the_rebase_of_an_open_edit`
-  (`checkpoint_under_load.rs`). Reordering the reopen (adopt before replay) was rejected:
+  (`checkpoint_under_load.rs`),
+  `a_reopen_rebases_a_card_the_snapshot_held_before_the_block` and
+  `a_peer_signature_below_the_move_marks_no_rebase_on_reopen`
+  (`chain/projection_tests.rs`). Reordering the reopen (adopt before replay) was rejected:
   the tail carries the collected signatures the adopt re-verifies (R12)
   and the consumed-id gate depends on the order (review E1 residual).
 - **The block outranks the walk.** `ProposalRecord::settle_applied`

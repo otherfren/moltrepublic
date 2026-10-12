@@ -3333,6 +3333,11 @@ pub struct WorkspaceSnapshot {
     pub at_seq: u64,
     /// The engine state at `at_seq`.
     pub state: EngineStateDump,
+    /// The chain head this node held at `at_seq`: a block above it sealed
+    /// after every open card in `state`. `None` = no chain, or an older
+    /// writer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_height: Option<u64>,
 }
 
 /// The display preview of an invite link, parsed for the GUI:
