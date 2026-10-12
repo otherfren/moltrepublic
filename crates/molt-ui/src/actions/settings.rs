@@ -151,7 +151,11 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             let next = if then == S3_THEN_TEST { Some(test_s3_command(&ui)) } else { None };
             let w = cx.wallet.clone();
             let weak = cx.weak.clone();
-            let save = (then == S3_THEN_SAVE).then(|| cx.clone());
+            // the draft as confirmed; the save rides the same task as the ack
+            let save = matches!(then, S3_THEN_SAVE | S3_THEN_SAVE_LEAVE).then(|| {
+                let leave = (then == S3_THEN_SAVE_LEAVE).then(|| to_screen(ui.get_settings_return()));
+                (draft(&ui, &cx), leave)
+            });
             cx.rt.spawn(async move {
                 if let Err(e) = w.execute(ack).await {
                     let _ = weak.upgrade_in_event_loop(move |ui| ui.invoke_show_toast_error(error_toast(&ui, &e)));
@@ -160,8 +164,8 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 if let Some(cmd) = next {
                     let _ = w.execute(cmd).await;
                 }
-                if let Some(cx) = save {
-                    let _ = weak.upgrade_in_event_loop(move |ui| save_now(&ui, &cx));
+                if let Some(((wake, settings), leave)) = save {
+                    save_then(&w, &weak, wake, settings, leave).await;
                 }
             });
         });
@@ -252,25 +256,10 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
-            let settings = read_settings_draft(&ui, &stored_settings(&cx.last_settings));
-            let wake = ui.get_cfg_poke_wake().to_string();
-            let screen = to_screen(ui.get_settings_return());
-            let w = cx.wallet.clone();
-            let weak = ui.as_weak();
-            cx.rt.spawn(async move {
-                match save_draft(&w, wake, settings).await {
-                    Ok(()) => {
-                        let _ = w.execute(Command::Navigate { screen }).await;
-                    }
-                    Err(e) => {
-                        let _ = slint::invoke_from_event_loop(move || {
-                            if let Some(ui) = weak.upgrade() {
-                                ui.invoke_show_toast_error(error_toast(&ui, &e));
-                            }
-                        });
-                    }
-                }
-            });
+            if ask_plaintext_s3(&ui, &cx, S3_THEN_SAVE_LEAVE) {
+                return;
+            }
+            save_and_leave_now(&ui, &cx);
         });
     }
 
@@ -381,6 +370,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
 
 const S3_THEN_SAVE: i32 = 1;
 const S3_THEN_TEST: i32 = 2;
+const S3_THEN_SAVE_LEAVE: i32 = 3;
 
 /// Open the plaintext acknowledgement for the draft's endpoint when it
 /// needs one; true = asked, the caller waits for the answer.
@@ -388,7 +378,7 @@ fn ask_plaintext_s3(ui: &AppWindow, cx: &Ctx, then: i32) -> bool {
     let stored = stored_settings(&cx.last_settings);
     let endpoint = ui.get_cfg_s3_endpoint();
     // Save gates only a new endpoint: an unchanged one is not used by saving
-    if then == S3_THEN_SAVE && endpoint.trim() == stored.s3_endpoint.trim() {
+    if then != S3_THEN_TEST && endpoint.trim() == stored.s3_endpoint.trim() {
         return false;
     }
     let Some(url) = s3_plaintext_ask(&endpoint, &stored.s3_plaintext_confirmed) else {
@@ -399,10 +389,42 @@ fn ask_plaintext_s3(ui: &AppWindow, cx: &Ctx, then: i32) -> bool {
     true
 }
 
-fn save_now(ui: &AppWindow, cx: &Ctx) {
+fn draft(ui: &AppWindow, cx: &Ctx) -> (String, molt_core::SessionSettings) {
     let settings = read_settings_draft(ui, &stored_settings(&cx.last_settings));
-    let wake = ui.get_cfg_poke_wake().to_string();
+    (ui.get_cfg_poke_wake().to_string(), settings)
+}
+
+fn save_now(ui: &AppWindow, cx: &Ctx) {
+    let (wake, settings) = draft(ui, cx);
     cx.issue_draft(wake, settings);
+}
+
+/// "Save & continue": leaves only once the save landed.
+fn save_and_leave_now(ui: &AppWindow, cx: &Ctx) {
+    let (wake, settings) = draft(ui, cx);
+    let leave = Some(to_screen(ui.get_settings_return()));
+    let w = cx.wallet.clone();
+    let weak = ui.as_weak();
+    cx.rt.spawn(async move { save_then(&w, &weak, wake, settings, leave).await });
+}
+
+async fn save_then(
+    w: &molt_engine::WalletHandle,
+    weak: &slint::Weak<AppWindow>,
+    wake: String,
+    settings: molt_core::SessionSettings,
+    leave: Option<molt_core::Screen>,
+) {
+    match save_draft(w, wake, settings).await {
+        Ok(()) => {
+            if let Some(screen) = leave {
+                let _ = w.execute(Command::Navigate { screen }).await;
+            }
+        }
+        Err(e) => {
+            let _ = weak.upgrade_in_event_loop(move |ui| ui.invoke_show_toast_error(error_toast(&ui, &e)));
+        }
+    }
 }
 
 /// The probe of the DRAFT, so an unsaved edit is what gets tested.

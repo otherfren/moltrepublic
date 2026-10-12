@@ -153,3 +153,81 @@ fn an_unchanged_plaintext_endpoint_does_not_hold_up_save() {
     settle();
     assert_eq!(ui.get_cfg_s3_pt_url(), plain, "using it still asks");
 }
+
+/// "Save & continue" in the unsaved-changes modal asks like Save: cancel
+/// stays with the draft, confirm acknowledges, saves, then leaves.
+#[test]
+fn save_and_continue_asks_before_a_new_plaintext_endpoint() {
+    backend();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (w, _) = node_with_chat(tmp.path());
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.window().set_size(slint::PhysicalSize::new(1100, 900));
+    let cx = Ctx {
+        rt: rt.handle().clone(),
+        wallet: w.clone(),
+        weak: ui.as_weak(),
+        last_settings: Arc::new(Mutex::new(None)),
+        chat_ui: Arc::new(Mutex::new(ChatUiState::default())),
+    };
+    crate::actions::settings::wire(&ui, &cx);
+    let _shown = show_headless(&ui);
+    let session = |w: &WalletHandle| match rt.block_on(w.execute(Command::ReadSession)) {
+        Ok(Reply::Session(s)) => s,
+        other => panic!("a session: {other:?}"),
+    };
+    rt.block_on(w.execute(Command::Navigate { screen: molt_core::Screen::Settings }))
+        .expect("on settings");
+    let stored = session(&w).settings;
+    crate::settings::apply_settings_fields(&ui, &stored);
+    *cx.last_settings.lock().expect("settings lock") = Some(stored);
+    ui.set_settings_return(AppScreen::Choice);
+    let s = ui.global::<Strings>();
+
+    let plain = "http://203.0.113.9:9000";
+    ui.set_cfg_s3_endpoint(plain.into());
+    let leave = |ui: &AppWindow| {
+        ui.set_confirm_leave_open(true);
+        settle();
+        click(ui, &one(ui, &s.get_unsaved_save()));
+        settle();
+    };
+
+    leave(&ui);
+    assert_eq!(ui.get_cfg_s3_pt_url(), plain, "the acknowledgement first");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let sv = session(&w);
+    assert_eq!(sv.settings.s3_endpoint, "", "no save before it");
+    assert_eq!(sv.screen, molt_core::Screen::Settings, "no leave before it");
+
+    click(&ui, &one(&ui, &s.get_close_ws_cancel()));
+    settle();
+    assert_eq!(ui.get_cfg_s3_pt_url(), "", "closed");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    let sv = session(&w);
+    assert_eq!(sv.screen, molt_core::Screen::Settings, "cancel stays");
+    assert_eq!(sv.settings.s3_endpoint, "", "cancel saves nothing");
+    assert_eq!(ui.get_cfg_s3_endpoint(), plain, "the draft survives");
+
+    leave(&ui);
+    click(&ui, &one(&ui, &s.get_s3_pt_ack()));
+    settle();
+    click(&ui, &one(&ui, &s.get_s3_pt_confirm()));
+    settle();
+    let mut left = false;
+    for _ in 0..200 {
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(10));
+        let sv = session(&w);
+        if sv.screen == molt_core::Screen::Choice {
+            assert_eq!(sv.settings.s3_plaintext_confirmed, plain, "acknowledged");
+            assert_eq!(sv.settings.s3_endpoint, plain, "saved before leaving");
+            left = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(left, "acknowledged, saved, then left");
+}
