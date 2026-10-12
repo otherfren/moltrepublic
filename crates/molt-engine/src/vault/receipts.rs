@@ -9,8 +9,8 @@
 //! re-collects them from the re-sends on start.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use molt_core::vault::{
     secret_id, SecretHex, SecretText, VaultComplaintStatus, VaultComplaintView, VaultDeposit,
@@ -18,7 +18,6 @@ use molt_core::vault::{
     VaultView,
 };
 use molt_core::{Command, MemberId, MoltError, ProposalState, Reply, SessionScope, Surface};
-use molt_net::supervisor::StateStore as _;
 use molt_net::vault_frames::{VaultFrame, VaultReceiptFrame, VaultVerdict, VAULT_V};
 
 #[path = "complaint.rs"]
@@ -91,9 +90,6 @@ pub(crate) struct ReceiptRuntime {
     pub(crate) early: complaint::EarlyReveals,
     /// The seam's bad shares, by `(secret_id, holder)`.
     pub(crate) bad_dealt: BTreeMap<(String, MemberId), zeroize::Zeroizing<[u8; 32]>>,
-    /// Persist order: the newest snapshot wins the store.
-    persist_seq: u64,
-    persisted: Arc<AtomicU64>,
     /// Tests: a control queue with `room` free slots instead of the group.
     #[cfg(test)]
     pub(crate) test_queue: Option<TestQueue>,
@@ -179,28 +175,12 @@ fn online(st: &crate::State) -> bool {
     st.group_net.is_some()
 }
 
-/// Write the store back off the actor; a later snapshot is never
-/// overwritten by an earlier one.
+/// Write the store back; the writer queue keeps the order, and its own
+/// message keeps a supervisor's stale clone from writing it over.
 pub(crate) fn persist(st: &mut crate::State) {
-    let Some(store) = st.file_store() else {
-        return;
-    };
-    st.vault_rx.persist_seq += 1;
-    let seq = st.vault_rx.persist_seq;
-    let persisted = st.vault_rx.persisted.clone();
-    let status = st.vault_rx.status.clone();
-    tokio::spawn(async move {
-        store
-            .update(move |s| {
-                if persisted.load(Ordering::SeqCst) > seq {
-                    return false;
-                }
-                persisted.store(seq, Ordering::SeqCst);
-                s.vault_status = status;
-                true
-            })
-            .await;
-    });
+    if let Some(active) = st.active.as_ref() {
+        active.handle.save_vault_status(st.vault_rx.status.clone());
+    }
 }
 
 fn send_receipt(st: &mut crate::State, sid: &str, verified: bool, rev: u64) -> bool {

@@ -61,14 +61,6 @@ residuals are listed there, not here):
   reopen within one retention window counts against the silent peer's
   ack progress (`log_compaction.md` F4b; predates the grace).
 
-## `SaveTransport` overwrites `vault_status` wholesale
-
-`molt-storage` writer, `WriterMsg::SaveTransport`: the supervisor's clone
-replaces `vault_status`, unlike `vault_seed` (kept unless set) and
-`vault_displaced` (union). A clone older than a receipt update writes the
-old receipts back. Fix direction: give the receipts their own writer
-message, as `SaveWalletSeat` does for `wallet_status`.
-
 ## Vault share refresh (V6)
 
 From `docs_archive/vault/vault_threshold_disclosure.md` §9.6 and §14 step

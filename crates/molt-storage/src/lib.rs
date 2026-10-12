@@ -3450,6 +3450,9 @@ enum WriterMsg {
     /// The engine's purse statuses and handed-over view key (wallet plan
     /// §7.8), its own message for the reason of `SaveAccepted`.
     SaveWalletSeat(WalletSeat),
+    /// The engine's vault receipts and reveal outcomes, its own message for
+    /// the reason of `SaveAccepted`.
+    SaveVaultStatus(Box<molt_core::vault::VaultStatusStore>),
     /// Rewrite `kanban_wakes.json` with these fired keys.
     SaveKanbanWakes(Vec<String>),
     /// Rewrite the sealed `kanban_draft.json` ("" removes it).
@@ -3727,6 +3730,18 @@ impl StorageHandle {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 tracing::warn!(dropped = "wallet seat save", "writer queue full");
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Persist the vault receipts into `transport.state`, touching nothing
+    /// else.
+    pub fn save_vault_status(&self, status: molt_core::vault::VaultStatusStore) {
+        match self.tx.try_send(WriterMsg::SaveVaultStatus(Box::new(status))) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(dropped = "vault status save", "writer queue full");
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {}
         }
@@ -4341,8 +4356,7 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             ts.mirror.rev = state.mirror.rev;
                             ts.mirror.decls = state.mirror.decls;
                             ts.mirror.status = state.mirror.status;
-                            // …and the vault receipts (vault plan S3c), same posture
-                            ts.vault_status = state.vault_status;
+                            // vault_status is the engine's (SaveVaultStatus)
                             // a re-derived seed lands; a clone without one never clears it
                             if state.vault_seed.is_some() {
                                 ts.vault_seed = state.vault_seed;
@@ -4382,6 +4396,17 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             ts.wallet_view = seat.view;
                             if let Err(e) = ws.write_transport_state(&ts) {
                                 fail(&failed_flag, "wallet seat write", &e);
+                            }
+                        }
+                    }
+                    Ok(WriterMsg::SaveVaultStatus(status)) => {
+                        if crypto_sealed {
+                            tracing::debug!("ignoring a post-merge vault status save");
+                        } else {
+                            let mut ts = ws.read_transport_state();
+                            ts.vault_status = *status;
+                            if let Err(e) = ws.write_transport_state(&ts) {
+                                fail(&failed_flag, "vault status write", &e);
                             }
                         }
                     }
@@ -6505,9 +6530,10 @@ mod tests {
         assert!(loaded.tail.is_empty()); // everything is under the snapshot floor
     }
 
-    /// Vault S3c: the receipts ride the transport save, as the mirror gossip does.
+    /// The receipts are the engine's; a supervisor's stale clone never
+    /// writes older ones back.
     #[test]
-    fn a_transport_save_carries_the_vault_status() {
+    fn a_stale_transport_save_keeps_the_vault_status() {
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().join("workspaces");
         let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
@@ -6520,7 +6546,8 @@ mod tests {
             .entry("ab".repeat(32))
             .or_default()
             .insert("b".to_string(), molt_core::vault::VaultReceipt { verified: true, rev: 3 });
-        handle.save_transport_state(TransportState { vault_status: status.clone(), ..TransportState::default() });
+        handle.save_vault_status(status.clone());
+        handle.save_transport_state(TransportState::default());
         handle.close(None);
         let (ws, _loaded) = open_workspace(&dir).expect("reopen");
         assert_eq!(ws.read_transport_state().vault_status, status);
