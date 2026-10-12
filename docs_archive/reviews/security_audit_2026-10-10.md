@@ -118,7 +118,12 @@ reviewed, landed on master:
 | Restore consent v2 (#5, #6): signs the block's relays, the consent anchor and the replaced working anchor; single use, 1024-block window; v1 verifies but is never auto-signed | `3a373694`, `f730d758`, `694a87aa` |
 | MLS concurrent commits (#9): order by `sha256(commit)` only, no carrier stamp; an evicted committer's commit loses in every arrival order; a bare removal is refused | `48831155`, `95d9f30d`, `7b2e0778` |
 | MCP auth (#11, #12, #35): no `[mcp].token` starts no TCP endpoint; an emptied seat key admits nobody; a line session re-checks its key per request and closes once revoked | `ecdce46e`, `ef3241fd` |
-| MCP live TCP: a seat key set at runtime binds the TCP endpoint(s) without a restart; cleared, it closes the port and every connection on it | `c261c52e` |
+| MCP live TCP: a seat key set at runtime binds the TCP endpoint(s) without a restart; cleared, it closes the port and every connection on it; a runtime bind failure retries, a bind failure at start still ends the endpoint | `c261c52e`, `94db83ef`, `e52312fa`, `375ee911` |
+| Compaction floor (#32): a peer in contact but never acking stops holding the floor after two retention windows (`log_compaction.md` F4b) | `94b446e7`, `02b61698`, `d43f8c33` |
+| Homoglyph handles (#20): a new handle is ASCII plus `ä ö ü Ä Ö Ü ß`; anchored names are never re-checked; a verified join outside the set is refused visibly | `3a885ae1`, `f4188027` |
+| Plaintext `http://` to a clearnet host: a purse node needs a confirmation and shows a warning; an S3 endpoint needs `s3_plaintext_confirmed` | `d2a08d7f`, `5a47dfaf` |
+| Purse dust: outputs below 0.0001 XMR are counted (count and total), never held, outside `MAX_OUTPUTS` and the balance | `618c9e0e`, `f6cb32ad` |
+| Restore consent v2 emission: minted only once every seat announced the `molt-restore-consent-v2` capability (mirror declaration `caps`, kept in `prefs.toml`) | `d37d68e2`, `b1a28c6c` |
 
 Accepted residuals (no work planned):
 
@@ -136,10 +141,14 @@ Accepted residuals (no work planned):
   timeout bounds only unauthenticated peers.
 
 Still open, in `docs/reviews/known_debt.md`: the v1 restore-consent
-residual, v2 emission before every seat is upgraded and homoglyph
-handles (#20).
+residual and ASCII look-alike handles (#20).
 
 Final gate: every crate's tests and per-crate clippy, molt-ui on the
 live-preview suite, `ring` absent from molt-net's graph, doc refs clean.
 It found one red: molt-treasury's graph guard pruned `iana-time-zone`,
 which left the graph with `c40e1452`; fixed in `0fc25826`.
+The gate over the second batch (2026-10-12, master `375ee911`) found
+no red: 2056 crate tests, molt-ui live-preview 507, clippy clean per
+crate, `ring` absent, doc refs clean. Package residuals in known debt:
+the S3 plaintext prompt skipped by "Save & continue", the compaction
+grace charging a clean close to the peer.

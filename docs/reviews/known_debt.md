@@ -57,6 +57,14 @@ residuals are listed there, not here):
 - **#20 homoglyph handles**: new handles are ASCII + ä ö ü ß since
   2026-10-11; ASCII look-alikes (`l`/`I`, `0`/`O`) and already anchored
   rosters remain.
+- **S3 plaintext prompt skipped by "Save & continue"**: the
+  unsaved-changes modal (`on_save_and_leave`) saves a new clearnet
+  `http://` endpoint without the acknowledgement; the backup row then
+  reads `not confirmed` and nothing is sent. Fix direction: route it
+  through `ask_plaintext_s3` like the Save button.
+- **Compaction grace charges a clean close to the peer**: a close and
+  reopen within one retention window counts against the silent peer's
+  ack progress (`log_compaction.md` F4b; predates the grace).
 
 ## `SaveTransport` overwrites `vault_status` wholesale
 
