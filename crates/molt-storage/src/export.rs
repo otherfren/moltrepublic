@@ -381,16 +381,26 @@ fn export_dir_impl(
     }
 
     let (mut files, mut skipped) = collect_entries(ws_dir)?;
+    #[cfg(test)]
+    tests::mid_export();
     if let Some(pin) = pin {
         files.retain(|(rel, _)| !crate::CUT_FILES.contains(&rel.as_str()));
         for (name, file) in pin.files {
-            if let Some(file) = file? {
-                let cap = match name {
-                    "wiki_base.bin" => crate::READ_CAP_WIKI_BASE,
-                    "vault_base.bin" => crate::READ_CAP_VAULT_BASE,
-                    _ => 512 * 1024 * 1024,
-                };
-                files.push((name.to_string(), ExportSource::Bytes(crate::read_capped_open(file, cap, name)?)));
+            let base = matches!(name, "wiki_base.bin" | "vault_base.bin");
+            let cap = match name {
+                "wiki_base.bin" => crate::READ_CAP_WIKI_BASE,
+                "vault_base.bin" => crate::READ_CAP_VAULT_BASE,
+                _ => 512 * 1024 * 1024,
+            };
+            match file.and_then(|f| f.map(|f| crate::read_capped_open(f, cap, name)).transpose()) {
+                Ok(Some(data)) => files.push((name.to_string(), ExportSource::Bytes(data))),
+                Ok(None) => {}
+                // a base costs only itself, like the checked loop below
+                Err(e) if base => {
+                    tracing::warn!(file = %name, error = %e, "export_skip reason=unreadable");
+                    skipped.push(name.to_string());
+                }
+                Err(e) => return Err(e.into()),
             }
         }
     }
@@ -447,8 +457,6 @@ fn export_dir_impl(
         }
     }
     files = kept;
-    #[cfg(test)]
-    tests::mid_export();
     files.sort_by(|a, b| a.0.cmp(&b.0));
     skipped.sort();
 
@@ -1241,7 +1249,8 @@ mod tests {
             std::cell::RefCell::new(None);
     }
 
-    /// Test seam: runs once between the export's first and last file read.
+    /// Test seam: runs once after the pin is taken, before any cut file is
+    /// read through it.
     pub(super) fn mid_export() {
         if let Some(f) = MID_EXPORT.with(|m| m.borrow_mut().take()) {
             f();
@@ -1292,6 +1301,41 @@ mod tests {
             entry(&a, "wiki_base.bin").expect("base travels").data.clone(),
         );
         assert!(shipped == pre, "the blob pairs a chain and a base from two sides of the cut");
+    }
+
+    /// A pinned base that cannot be read costs that base, never the backup.
+    #[test]
+    fn an_unreadable_pinned_base_is_skipped_and_the_rest_still_exports() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("root");
+        let seed =
+            crate::seed_entropy(&crate::generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = crate::create_workspace(&root, &seed, &founded()).expect("create");
+        let dir = ws.dir().to_path_buf();
+        let handle = crate::start_writer(ws);
+        assert!(handle.persist_chain_blocking(None, Vec::new()), "chain");
+        assert!(handle.persist_wiki_base_blocking(Some(b"tree".to_vec())), "base");
+        // sparse: over the cap without writing 64 MiB
+        fs::File::create(dir.join("vault_base.bin"))
+            .expect("vault base")
+            .set_len(crate::READ_CAP_VAULT_BASE + 1)
+            .expect("over cap");
+        let mut pin = handle.pin_for_export().recv().expect("pinned");
+        for (name, file) in &mut pin.files {
+            if *name == "wiki_base.bin" {
+                *file = Err(std::io::Error::other("injected open failure"));
+            }
+        }
+        let mut blob = Vec::new();
+        let outcome = export_dir_pinned(&root, &dir, &ExportKey::passphrase(PASS), pin, &mut blob)
+            .expect("export survives a bad base");
+        handle.close(None);
+        assert_eq!(outcome.skipped, ["vault_base.bin", "wiki_base.bin"]);
+        let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
+            .expect("decrypt");
+        assert!(entry(&a, "wiki_base.bin").is_none(), "the bad base does not travel");
+        assert!(entry(&a, "vault_base.bin").is_none(), "the over-cap base does not travel");
+        assert!(entry(&a, "chain.state").is_some(), "everything else still does");
     }
 
     fn sid(c: char) -> String {
