@@ -128,6 +128,52 @@ pub(crate) fn read_capped(path: &Path, cap: u64, what: &str) -> std::io::Result<
     fs::read(path) // READ_CAPPED_HELPER
 }
 
+/// [`read_capped`] through a handle already open (an [`ExportPin`]).
+pub(crate) fn read_capped_open(file: File, cap: u64, what: &str) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let len = file.metadata()?.len();
+    if len > cap {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{what} is {len} bytes - beyond the {cap}-byte cap"),
+        ));
+    }
+    let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
+    file.take(cap).read_to_end(&mut out)?;
+    Ok(out)
+}
+
+/// The files one folded cut rewrites in a single actor step (the bases
+/// first, `chain.state` last).
+pub(crate) const CUT_FILES: [&str; 3] = ["chain.state", "wiki_base.bin", "vault_base.bin"];
+
+/// [`CUT_FILES`] opened together on the writer thread. Every rewrite is a
+/// rename, so an open handle keeps its instant's bytes: an export reading
+/// through these cannot pair two sides of a cut.
+pub struct ExportPin {
+    /// `None` = absent at the pin.
+    pub(crate) files: Vec<(&'static str, std::io::Result<Option<File>>)>,
+    /// Whether the flush ahead of the pin reached the disk.
+    pub flushed: bool,
+}
+
+impl ExportPin {
+    fn open(dir: &Path, flushed: bool) -> Self {
+        let files = CUT_FILES
+            .iter()
+            .map(|name| {
+                let f = match File::open(dir.join(name)) {
+                    Ok(f) => Ok(Some(f)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(e),
+                };
+                (*name, f)
+            })
+            .collect();
+        ExportPin { files, flushed }
+    }
+}
+
 /// [`read_capped`] for the two small TOML/text files.
 pub(crate) fn read_string_capped(path: &Path, cap: u64, what: &str) -> std::io::Result<String> {
     let len = fs::metadata(path)?.len();
@@ -3514,6 +3560,8 @@ enum WriterMsg {
     /// anything that COPIES the directory (backup, export) has to force it
     /// out first or the copy silently misses the newest frames.
     Flush(mpsc::SyncSender<bool>),
+    /// [`WriterMsg::Flush`], then open the [`ExportPin`].
+    PinForExport(mpsc::SyncSender<ExportPin>),
     /// Persist the whole persistent commit-block chain (`chain.state`), acking
     /// when durable — a governance commit must not be lost, so it uses the same
     /// blocking-ack shape as `MergeCrypto`.
@@ -3657,6 +3705,16 @@ impl StorageHandle {
             return false; // the writer is gone: nothing reached the disk
         }
         ack_rx.recv().unwrap_or(false)
+    }
+
+    /// Flush, then pin the cut's files for an export. Call it ON THE
+    /// ACTOR: a cut is written within one handler, so a request enqueued
+    /// from another lands wholly before or after it. The receiver is
+    /// waited on off-actor; it errors when the writer is gone.
+    pub fn pin_for_export(&self) -> mpsc::Receiver<ExportPin> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let _ = self.tx.send(WriterMsg::PinForExport(tx));
+        rx
     }
 
     /// Enqueue a snapshot write.
@@ -4518,6 +4576,16 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             }
                         };
                         let _ = ack.send(ok);
+                    }
+                    Ok(WriterMsg::PinForExport(reply)) => {
+                        let flushed = match ws.sync() {
+                            Ok(()) => true,
+                            Err(e) => {
+                                fail(&failed_flag, "flush", &e);
+                                false
+                            }
+                        };
+                        let _ = reply.send(ExportPin::open(ws.dir(), flushed));
                     }
                     Ok(WriterMsg::Compact { snapshot, holding_peers, clock, ack }) => {
                         let outcome = match compact_once(&mut ws, &snapshot, &holding_peers, clock) {

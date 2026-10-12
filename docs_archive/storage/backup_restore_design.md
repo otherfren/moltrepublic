@@ -118,6 +118,22 @@ download + the same import path.
 Unknown extra files in the dir are skipped and named in the export result
 (honesty: the user sees what the blob does not contain).
 
+### 3.2a A cut never splits across the blob (2026-10-12)
+
+A folded cut rewrites `wiki_base.bin`, `vault_base.bin` and then
+`chain.state`, all inside one actor handler. An export of an open
+workspace therefore never reads those three by path: the actor enqueues
+`StorageHandle::pin_for_export`, and the writer thread flushes and opens
+all three at once. Every rewrite is a rename, so the open handles keep
+that instant's bytes, and a request enqueued from another handler lands
+wholly before or after a cut. `export_dir_pinned` ships the pinned bytes;
+a file absent at the pin does not travel even if a later cut wrote it.
+Chosen over keeping a non-matching base aside at the open
+(`adopt_wiki_base`): the pin makes every blob consistent at the source,
+which one test proves (`a_cut_landing_mid_export_ships_a_consistent_pair`),
+instead of teaching the catch-up path to find a parked file. A closed
+workspace has no writer and no cut, and exports by path.
+
 ### 3.3 Security decision: MLS ratchet state and SMP queue credentials are NOT exported
 
 The task is explicit about asking this question; the answer is a firm **no**,

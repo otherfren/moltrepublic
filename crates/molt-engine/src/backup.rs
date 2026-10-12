@@ -402,14 +402,14 @@ impl State {
         // writer group-commits (fsync at most every 50 ms), so a just-sent
         // chat message can still be in its buffer and would silently be
         // missing from the backup (an intermittent, load-dependent hole in
-        // the one copy that exists for disaster recovery). The flush itself
-        // waits on an fsync, so it belongs in the task, NOT on the actor —
-        // a slow disk must never stall command handling.
-        let flush = self
+        // the one copy that exists for disaster recovery). Requested HERE on
+        // the actor so no cut lands between the chain and its bases
+        // (backup_restore_design.md §3.2a); the fsync is awaited in the task.
+        let pin = self
             .active
             .as_ref()
             .filter(|a| a.id == id)
-            .map(|a| a.handle.clone());
+            .map(|a| a.handle.pin_for_export());
         self.backup_inflight.insert(id.clone());
         let root = self.workspace_root();
         let keep = usize::from(self.session.settings.s3_keep_copies.max(1));
@@ -437,20 +437,12 @@ impl State {
                         Some((id, at))
                     })
                     .collect();
-                if let Some(handle) = flush {
-                    if !handle.flush_blocking() {
-                        // the backup would capture a log the disk does not
-                        // hold yet — say so rather than shipping it quietly
-                        tracing::error!("flush before backup failed - the copy may lag the log");
-                    }
-                }
                 let mut blob = Vec::new();
-                molt_storage::export::export_dir(
-                    &root,
-                    &build_dir,
-                    &molt_storage::export::ExportKey::Workspace,
-                    &mut blob,
-                )
+                let key = molt_storage::export::ExportKey::Workspace;
+                match pin.and_then(await_export_pin) {
+                    Some(pin) => molt_storage::export::export_dir_pinned(&root, &build_dir, &key, pin, &mut blob),
+                    None => molt_storage::export::export_dir(&root, &build_dir, &key, &mut blob),
+                }
                 .map(|_outcome| (blob, pins))
             })
             .await;
@@ -675,6 +667,18 @@ async fn prune_old_copies(
         }
     }
     first_error
+}
+
+/// Wait (off-actor) for a pin requested on the actor. A failed flush still
+/// exports - a lagging copy beats none - but says so.
+pub(crate) fn await_export_pin(
+    rx: std::sync::mpsc::Receiver<molt_storage::ExportPin>,
+) -> Option<molt_storage::ExportPin> {
+    let pin = rx.recv().ok();
+    if !pin.as_ref().is_some_and(|p| p.flushed) {
+        tracing::error!("flush before export failed - the copy may lag the log");
+    }
+    pin
 }
 
 /// Pure retention decision: from a workspace's backup object keys, the

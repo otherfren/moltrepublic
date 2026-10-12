@@ -2135,13 +2135,14 @@ impl State {
         // same rule as the S3 backup: the blob COPIES the directory, so the
         // writer's group-commit has to be forced out first — otherwise a
         // just-sent message can still be in its buffer and silently miss the
-        // export. It waits on an fsync, so it runs in the blocking task
-        // below, never on the actor.
-        let flush = self
+        // export. Requested on the actor so no cut lands between the chain
+        // and its bases (backup_restore_design.md §3.2a); the fsync is
+        // awaited in the blocking task below.
+        let pin = self
             .active
             .as_ref()
             .filter(|a| a.id == id)
-            .map(|a| a.handle.clone());
+            .map(|a| a.handle.pin_for_export());
         let dest_path = molt_storage::expand_tilde(&self.host_path(&dest)?);
         let dest_str = dest_path.display().to_string();
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
@@ -2159,15 +2160,8 @@ impl State {
         self.emit_session(SessionScope::Full);
         tokio::spawn(async move {
             let res = tokio::task::spawn_blocking(move || {
-                if let Some(handle) = flush {
-                    if !handle.flush_blocking() {
-                        // the export would capture a log the disk does not
-                        // hold yet; the copy is still made (it is better
-                        // than none) but the miss is not swallowed
-                        tracing::error!("flush before export failed - the copy may lag the log");
-                    }
-                }
-                export_to_file(&root, &dir, &dest_path, zeroize::Zeroizing::new(passphrase))
+                let pin = pin.and_then(crate::backup::await_export_pin);
+                export_to_file(&root, &dir, &dest_path, zeroize::Zeroizing::new(passphrase), pin)
             })
             .await;
             let cmd = match res {
@@ -2466,6 +2460,7 @@ fn export_to_file(
     ws_dir: &std::path::Path,
     dest: &std::path::Path,
     passphrase: zeroize::Zeroizing<String>,
+    pin: Option<molt_storage::ExportPin>,
 ) -> Result<molt_storage::export::ExportOutcome, molt_storage::StorageError> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -2481,7 +2476,10 @@ fn export_to_file(
         let file = std::fs::File::create(&part)?;
         let mut out = std::io::BufWriter::new(file);
         let key = molt_storage::export::ExportKey::Passphrase(passphrase);
-        let outcome = molt_storage::export::export_dir(root, ws_dir, &key, &mut out)?;
+        let outcome = match pin {
+            Some(pin) => molt_storage::export::export_dir_pinned(root, ws_dir, &key, pin, &mut out)?,
+            None => molt_storage::export::export_dir(root, ws_dir, &key, &mut out)?,
+        };
         use std::io::Write as _;
         out.flush()?;
         let file = out

@@ -308,6 +308,19 @@ pub fn export_dir(
     export_dir_chunked(root, ws_dir, key, EXPORT_CHUNK_BYTES, out)
 }
 
+/// [`export_dir`] of a workspace whose writer runs: the cut's files come
+/// from `pin` ([`crate::StorageHandle::pin_for_export`]), so a cut landing
+/// mid-export cannot split the chain from its bases.
+pub fn export_dir_pinned(
+    root: &Path,
+    ws_dir: &Path,
+    key: &ExportKey,
+    pin: crate::ExportPin,
+    out: &mut dyn Write,
+) -> Result<ExportOutcome, StorageError> {
+    export_dir_impl(root, ws_dir, key, EXPORT_CHUNK_BYTES, Some(pin), out)
+}
+
 /// [`export_dir`] with an explicit chunk size (tests exercise the chunking
 /// edge cases with tiny chunks; production always uses the default).
 pub(crate) fn export_dir_chunked(
@@ -317,7 +330,7 @@ pub(crate) fn export_dir_chunked(
     chunk_bytes: u32,
     out: &mut dyn Write,
 ) -> Result<ExportOutcome, StorageError> {
-    export_dir_impl(root, ws_dir, key, chunk_bytes, out)
+    export_dir_impl(root, ws_dir, key, chunk_bytes, None, out)
 }
 
 fn export_dir_impl(
@@ -325,6 +338,7 @@ fn export_dir_impl(
     ws_dir: &Path,
     key: &ExportKey,
     chunk_bytes: u32,
+    pin: Option<crate::ExportPin>,
     out: &mut dyn Write,
 ) -> Result<ExportOutcome, StorageError> {
     if chunk_bytes == 0 {
@@ -367,6 +381,19 @@ fn export_dir_impl(
     }
 
     let (mut files, mut skipped) = collect_entries(ws_dir)?;
+    if let Some(pin) = pin {
+        files.retain(|(rel, _)| !crate::CUT_FILES.contains(&rel.as_str()));
+        for (name, file) in pin.files {
+            if let Some(file) = file? {
+                let cap = match name {
+                    "wiki_base.bin" => crate::READ_CAP_WIKI_BASE,
+                    "vault_base.bin" => crate::READ_CAP_VAULT_BASE,
+                    _ => 512 * 1024 * 1024,
+                };
+                files.push((name.to_string(), ExportSource::Bytes(crate::read_capped_open(file, cap, name)?)));
+            }
+        }
+    }
     // the folded bases and the vault payloads ride only when they
     // authenticate: a rotted copy must cost that file (re-fetchable while a
     // holder lives), never the whole backup - an import that met it would
@@ -420,6 +447,8 @@ fn export_dir_impl(
         }
     }
     files = kept;
+    #[cfg(test)]
+    tests::mid_export();
     files.sort_by(|a, b| a.0.cmp(&b.0));
     skipped.sort();
 
@@ -1205,6 +1234,64 @@ mod tests {
             .expect("decrypt");
         assert!(entry(&a, "wiki_base.bin").is_none(), "the rotted base does not travel");
         assert!(entry(&a, "chain.state").is_some(), "everything else still does");
+    }
+
+    thread_local! {
+        static MID_EXPORT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            std::cell::RefCell::new(None);
+    }
+
+    /// Test seam: runs once between the export's first and last file read.
+    pub(super) fn mid_export() {
+        if let Some(f) = MID_EXPORT.with(|m| m.borrow_mut().take()) {
+            f();
+        }
+    }
+
+    /// **A cut landing mid-export still yields a restorable pair.** A
+    /// folded cut writes `wiki_base.bin` and then `chain.state`; the blob
+    /// must carry both from one side of it, or the restored base answers
+    /// no commitment its chain carries.
+    #[test]
+    fn a_cut_landing_mid_export_ships_a_consistent_pair() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("root");
+        let seed =
+            crate::seed_entropy(&crate::generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = crate::create_workspace(&root, &seed, &founded()).expect("create");
+        let dir = ws.dir().to_path_buf();
+        let handle = crate::start_writer(ws);
+        assert!(handle.persist_chain_blocking(None, Vec::new()), "chain before the cut");
+        assert!(handle.persist_wiki_base_blocking(Some(b"tree before".to_vec())), "base before");
+        let pre = (
+            fs::read(dir.join("chain.state")).expect("chain"),
+            fs::read(dir.join("wiki_base.bin")).expect("base"),
+        );
+        let cut = handle.clone();
+        MID_EXPORT.with(|m| {
+            *m.borrow_mut() = Some(Box::new(move || {
+                // the governance order: the new base first, the new chain second
+                assert!(cut.persist_wiki_base_blocking(Some(b"tree after".to_vec())), "base after");
+                assert!(cut.persist_chain_blocking(None, Vec::new()), "chain after");
+            }));
+        });
+        let pin = handle.pin_for_export().recv().expect("pinned");
+        assert!(pin.flushed, "flushed");
+        let mut blob = Vec::new();
+        export_dir_pinned(&root, &dir, &ExportKey::passphrase(PASS), pin, &mut blob).expect("export");
+        let post = (
+            fs::read(dir.join("chain.state")).expect("chain"),
+            fs::read(dir.join("wiki_base.bin")).expect("base"),
+        );
+        handle.close(None);
+        assert_ne!(pre, post, "the cut landed");
+        let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
+            .expect("decrypt");
+        let shipped = (
+            entry(&a, "chain.state").expect("chain travels").data.clone(),
+            entry(&a, "wiki_base.bin").expect("base travels").data.clone(),
+        );
+        assert!(shipped == pre, "the blob pairs a chain and a base from two sides of the cut");
     }
 
     fn sid(c: char) -> String {
