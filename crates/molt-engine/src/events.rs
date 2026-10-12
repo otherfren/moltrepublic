@@ -857,6 +857,7 @@ impl State {
         self.chain.pending_blocks.clear();
         self.chain.catchup_from = None;
         self.recovery.pending.clear();
+        self.recovery.swept.clear();
         self.chat.clear();
         self.chat_pos.clear();
         // the compaction state belongs to the workspace we are leaving:

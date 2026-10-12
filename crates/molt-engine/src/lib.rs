@@ -993,6 +993,9 @@ pub(crate) struct RecoveryState {
     /// receives it): the fresh KeyPackage + reply queue, kept until the Restored
     /// block commits and the coordinator re-keys the group + sends the Welcome.
     pub(crate) pending: HashMap<String, chain::PendingRecovery>,
+    /// Recoveries whose card the sweep dropped as dead, one per seat: not
+    /// in flight (R3), but a reorg can still seal the card.
+    pub(crate) swept: HashMap<String, chain::PendingRecovery>,
     /// Recovery tickets this node has minted and is still listening for — the
     /// spend-once guard. A ticket is inserted when a recovery link is minted and
     /// removed the moment a valid request spends it, so a replayed request on a
@@ -1549,6 +1552,7 @@ impl State {
                 last_reattach: None,
                 unsolicited_cooldown: std::collections::HashMap::new(),
                 pending: HashMap::new(),
+                swept: HashMap::new(),
                 tickets: HashMap::new(),
                 mesh_window: std::collections::HashSet::new(),
                 mesh_extension_at: std::collections::HashMap::new(),

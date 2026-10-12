@@ -725,7 +725,7 @@ impl State {
                 // pattern (the committer also cleans by id upstream).
                 self.settle_membership_records(&block.change);
                 self.recovery.mesh_extension_at.remove(member);
-                if self.recovery.pending.contains_key(member) {
+                if self.coordinates_restore(member, &block.change) {
                     // the completed checklist, BEFORE the re-key consumes the
                     // pending entry: the live per-approval frames stop at the
                     // seal (`push_recover_progress` reports only while the

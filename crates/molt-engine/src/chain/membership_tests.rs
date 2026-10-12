@@ -661,6 +661,92 @@ fn a_swept_v2_card_keeps_a_live_siblings_pending_recovery() {
     assert!(coord.recovery.pending.contains_key("dora"), "and keeps the recovery");
 }
 
+/// Petra coordinates dora's v2 restore one height before its window closes;
+/// `foreign` is a consent-less card for dora some other node planted.
+fn coordinator_with_a_foreign_card() -> (Builder, crate::State, u64, ChainChange) {
+    let w = molt_core::chain::RESTORE_CONSENT_WINDOW;
+    let mut b = Builder::new(&["petra", "walter", "dora"], 3);
+    for id in 0..w - 1 {
+        b.commit_applied(100 + id, &["petra", "walter", "dora"]);
+    }
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    let rid = b.republic_id.clone();
+    let kp_hex = &kp_hex_for(&b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(&b, "dora", "", &[], 0, &"cc".repeat(32));
+    let own = coord
+        .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
+        .expect("the last fresh height proposes");
+    let foreign = ChainChange::Membership {
+        op: MembershipOp::Restored,
+        member: "dora".to_string(),
+        identity_pk: b.pk("dora"),
+        nostr_pk: None,
+        relays: Vec::new(),
+        consent: None,
+    };
+    coord.chain.proposal_changes.insert(own + 1_000, foreign.clone());
+    (b, coord, own, foreign)
+}
+
+/// Only this node's own card carries its recovery: a card someone else
+/// registered for the seat neither keeps a swept recovery in flight (R3)
+/// nor, once it seals, re-keys with the dead request's KeyPackage.
+#[test]
+fn a_foreign_card_neither_keeps_nor_consumes_the_coordinators_recovery() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let w = molt_core::chain::RESTORE_CONSENT_WINDOW;
+    let (mut b, mut coord, own, foreign) = coordinator_with_a_foreign_card();
+    b.commit_applied(100 + w, &["petra", "walter", "dora"]);
+    let block = b.blocks.last().cloned().expect("block");
+    assert!(coord.append_committed_block(block.clone()));
+    coord.after_block_applied(&block);
+    assert!(!coord.chain.proposal_changes.contains_key(&own), "the own card is swept");
+    assert!(!coord.recovery.pending.contains_key("dora"), "its recovery goes with it");
+    assert!(!coord.readmission_in_flight("dora"), "a foreign card keeps nothing in flight");
+
+    let height = u64::try_from(b.blocks.len()).expect("height");
+    coord.after_block_applied(&b.seal(height, foreign, &["petra", "walter", "dora"]));
+    assert!(coord.recovery.swept.contains_key("dora"), "no re-key with the dead request");
+}
+
+/// Another card for the seat sealing re-keys nothing here (that is its
+/// coordinator's job) and sets this node's recovery aside: kept for its own
+/// card, no longer holding the seat in flight.
+#[test]
+fn a_foreign_restore_block_sets_the_coordinators_recovery_aside() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let (b, mut coord, _, foreign) = coordinator_with_a_foreign_card();
+    let height = u64::try_from(b.blocks.len()).expect("height");
+    coord.after_block_applied(&b.seal(height, foreign, &["petra", "walter", "dora"]));
+    assert!(!coord.recovery.pending.contains_key("dora"), "no longer pending");
+    assert!(coord.recovery.swept.contains_key("dora"), "not consumed by another card's seal");
+}
+
+/// A card swept as dead that seals after all (a reorg re-served it) still
+/// gets this coordinator's Welcome: the swept recovery is kept aside.
+#[test]
+fn a_swept_card_that_seals_after_all_still_rekeys() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let w = molt_core::chain::RESTORE_CONSENT_WINDOW;
+    let (mut b, mut coord, own, _) = coordinator_with_a_foreign_card();
+    let card = coord.chain.proposal_changes.get(&own).cloned().expect("own card");
+    b.commit_applied(100 + w, &["petra", "walter", "dora"]);
+    let block = b.blocks.last().cloned().expect("block");
+    assert!(coord.append_committed_block(block.clone()));
+    coord.after_block_applied(&block);
+    assert!(!coord.recovery.pending.contains_key("dora"), "swept");
+    assert!(coord.recovery.swept.contains_key("dora"), "kept aside");
+
+    let height = u64::try_from(b.blocks.len()).expect("height");
+    coord.after_block_applied(&b.seal(height, card, &["petra", "walter", "dora"]));
+    assert!(!coord.recovery.swept.contains_key("dora"), "the re-key consumed the swept recovery");
+    assert!(!coord.recovery.pending.contains_key("dora"), "and left nothing in flight");
+}
+
 /// A survivor one block behind the minter registers the card instead of
 /// calling it stale, and auto-signs once it reaches the anchor.
 #[test]
@@ -899,15 +985,6 @@ fn a_restored_commit_triggers_the_coordinators_rekey() {
     let b = Builder::new(&["petra", "walter", "dora"], 2);
     let walter_pk = b.pk("walter");
     let mut coord = chain_signer("petra", &b, b.blocks.clone());
-    coord.recovery.pending.insert(
-        "walter".to_string(),
-        PendingRecovery {
-            ticketed: true,
-            key_package: "beef".to_string(),
-            reply: String::new(),
-        },
-    );
-
     // build a Restored block for walter and hand it to the coordinator
     let change = ChainChange::Membership {
         op: MembershipOp::Restored,
@@ -917,6 +994,15 @@ fn a_restored_commit_triggers_the_coordinators_rekey() {
         relays: Vec::new(),
         consent: None,
     };
+    coord.recovery.pending.insert(
+        "walter".to_string(),
+        PendingRecovery {
+            ticketed: true,
+            key_package: "beef".to_string(),
+            reply: String::new(),
+            card: change.clone(),
+        },
+    );
     let block = b.seal(1, change, &["petra", "walter"]);
     coord.receive_block(block);
 
@@ -1062,6 +1148,14 @@ fn a_restored_commit_without_a_pending_recovery_is_inert() {
             ticketed: true,
             key_package: "beef".to_string(),
             reply: String::new(),
+            card: ChainChange::Membership {
+                op: MembershipOp::Restored,
+                member: "dora".to_string(),
+                identity_pk: b.pk("dora"),
+                nostr_pk: None,
+                relays: Vec::new(),
+                consent: None,
+            },
         },
     );
     let seq_before = node.next_seq;

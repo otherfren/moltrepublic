@@ -56,6 +56,8 @@ pub(crate) struct PendingRecovery {
     pub key_package: String,
     /// The reply queue the Welcome goes back to (mesh arm).
     pub reply: String,
+    /// The card this request proposed: only its block re-keys with it.
+    pub card: ChainChange,
 }
 
 /// What a Nostr re-key produced — everything the wire needs, keyed at the
@@ -392,6 +394,29 @@ impl State {
         Ok(kind)
     }
 
+    /// Whether `block` seals the card of a recovery this node coordinates;
+    /// a swept one (a reorg re-served it) comes back into `pending` for the
+    /// re-key. Another card for the seat sealing sets the pending one aside:
+    /// a v1 card is never swept and would hold the seat in flight for good.
+    pub(super) fn coordinates_restore(&mut self, member: &str, block: &ChainChange) -> bool {
+        if self.recovery.pending.get(member).is_some_and(|p| p.card == *block) {
+            return true;
+        }
+        if !self.recovery.swept.get(member).is_some_and(|p| p.card == *block) {
+            if let Some(p) = self.recovery.pending.remove(member) {
+                tracing::info!(%member, "recovery set aside: another card sealed");
+                self.recovery.swept.insert(member.to_string(), p);
+            }
+            return false;
+        }
+        if let Some(p) = self.recovery.swept.remove(member) {
+            if let Some(live) = self.recovery.pending.insert(member.to_string(), p) {
+                self.recovery.swept.insert(member.to_string(), live);
+            }
+        }
+        true
+    }
+
     /// A re-admission of `member` is in flight (R3): one this node
     /// coordinates, or a pending consented restore that can still seal.
     /// A consent-less card does not count - any member could plant one.
@@ -479,23 +504,18 @@ impl State {
                 reachable.push(*id);
             }
         }
-        let mut seats = BTreeSet::new();
         for (id, why) in dead {
             tracing::info!(%id, reason = why, "consented restore can no longer seal - dropped");
-            if let Some(ChainChange::Membership { member, .. }) = self.chain.proposal_changes.get(&id) {
-                seats.insert(member.clone());
+            if let Some(card @ ChainChange::Membership { member, .. }) = self.chain.proposal_changes.get(&id) {
+                if self.recovery.pending.get(member).is_some_and(|p| p.card == *card) {
+                    let member = member.clone();
+                    if let Some(p) = self.recovery.pending.remove(&member) {
+                        tracing::info!(%member, "recovery set aside with its card");
+                        self.recovery.swept.insert(member, p);
+                    }
+                }
             }
             self.forget_vote(id);
-        }
-        // the coordinator's recovery is per seat: it ends with the seat's
-        // last card (a re-served card that seals later gets no Welcome here)
-        for seat in seats {
-            let carded = self.chain.proposal_changes.values().any(|c| {
-                matches!(c, ChainChange::Membership { op: MembershipOp::Restored, member, .. } if *member == seat)
-            });
-            if !carded && self.recovery.pending.remove(&seat).is_some() {
-                tracing::info!(member = %seat, "recovery dropped with its card");
-            }
         }
         for id in reachable {
             self.auto_approve_restore(id);
@@ -717,6 +737,7 @@ impl State {
                 ticketed,
                 key_package: key_package_hex.to_string(),
                 reply: reply.to_string(),
+                card: change,
             },
         );
         // §7e: a v1 consent binds neither relays nor position - the human card
@@ -742,7 +763,8 @@ impl State {
         else {
             return None;
         };
-        if !self.recovery.pending.contains_key(member) {
+        let card = self.chain.proposal_changes.get(&id)?;
+        if !self.recovery.pending.get(member).is_some_and(|p| p.card == *card) {
             return None;
         }
         let head = self.chain.head.as_ref()?;
@@ -779,7 +801,7 @@ impl State {
         else {
             return None;
         };
-        if !self.recovery.pending.contains_key(member) {
+        if !self.recovery.pending.get(member).is_some_and(|p| p.card == block.change) {
             return None;
         }
         let head = self.chain.head.as_ref()?;
