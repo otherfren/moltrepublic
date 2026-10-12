@@ -745,6 +745,7 @@ impl State {
         self.presence.poke_at.clear();
         self.wake.reset_workspace();
         self.kanban_draft.clear();
+        self.wiki_draft.clear();
         // the accept windows belong to the OLD workspace's senders — leaking
         // them would dedup-drop the NEXT workspace's fresh envelopes
         self.delivery.accepted.clear();

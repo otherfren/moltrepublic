@@ -814,7 +814,7 @@ them.
 
 The plan basket: acts are staged locally, shown with a live impact
 preview, and proposed as one changeset. Persisted as `kanban_draft.json`
-beside the wiki draft (`write_wiki_draft`, `molt-storage/src/lib.rs:1089`),
+beside the wiki draft (`Workspace::write_wiki_draft`),
 sealed at rest, outside the backup allowlist. A declined changeset can be
 rescued into the basket (`Wiki::rescue_patch` idiom).
 

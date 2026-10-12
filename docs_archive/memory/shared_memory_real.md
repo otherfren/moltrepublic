@@ -336,7 +336,11 @@ cross-doc link integrity enforcement (links stay best-effort navigation).
    verdict NEVER reads it — consensus stays context-exact apply.
 2. **Drafts persist locally, sealed at rest — and stay OUT of the backup
    export.** Backups keep carrying republic state only; drafts are
-   personal scratch. The export contract is unchanged.
+   personal scratch. The export contract is unchanged. Built like the
+   kanban basket (2026-10-12): `wiki_draft.json` is one frame under its own
+   sub-key and segment marker (`Workspace::write_wiki_draft`), held by the
+   engine actor; a pre-seal plaintext file reads as no draft and is
+   removed.
 3. **Archive view is REMOVED** from `Surface::Memory.views()` until a
    real design exists; `MockNote` is deleted. The Accepted table is the
    decision history.

@@ -1256,20 +1256,18 @@ impl State {
         ))
     }
 
-    /// Persist the operator's LOCAL wiki draft for the open workspace
-    /// (`shared_memory_real.md` WP-D): an opaque frontend blob beside the
-    /// prefs — sealed at rest with the directory, excluded from the
-    /// backup export by its allowlist. No open workspace = a quiet Ack
-    /// (the debounced auto-save races closes; nothing to persist is not
-    /// an error).
-    pub(crate) fn cmd_wiki_draft_save(&mut self, draft: &str) -> Result<Reply, MoltError> {
-        // session-only workspace or none open: nothing to hold it
-        let Some(dir) = self.active_workspace_dir() else {
+    /// [`Command::WikiDraftSave`] (`shared_memory_real.md` §9.2): an opaque
+    /// frontend blob, held by the actor, sealed by the store, outside the
+    /// export allowlist. No open workspace = a quiet Ack (the debounced
+    /// auto-save races closes).
+    pub(crate) fn cmd_wiki_draft_save(&mut self, draft: String) -> Result<Reply, MoltError> {
+        if self.session.active_workspace.is_empty() {
             return Ok(Reply::Ack);
-        };
-        if let Err(e) = molt_storage::write_wiki_draft(&dir, draft) {
-            tracing::warn!(error = %e, "wiki draft not persisted");
         }
+        if let Some(active) = self.active.as_ref() {
+            active.handle.save_wiki_draft(draft.clone());
+        }
+        self.wiki_draft = draft;
         Ok(Reply::Ack)
     }
 
@@ -1290,21 +1288,9 @@ impl State {
         Ok(Reply::KanbanDraft { draft: self.kanban_draft.clone() })
     }
 
-    fn active_workspace_dir(&self) -> Option<std::path::PathBuf> {
-        let id = &self.session.active_workspace;
-        if id.is_empty() {
-            return None;
-        }
-        molt_storage::find_workspace_dir(&self.workspace_root(), id)
-    }
-
-    /// Read the open workspace's stored wiki draft ("" = none).
+    /// [`Command::WikiDraftLoad`] ("" = none).
     pub(crate) fn cmd_wiki_draft_load(&mut self) -> Result<Reply, MoltError> {
-        let draft = self
-            .active_workspace_dir()
-            .map(|dir| molt_storage::read_wiki_draft(&dir))
-            .unwrap_or_default();
-        Ok(Reply::WikiDraft { draft })
+        Ok(Reply::WikiDraft { draft: self.wiki_draft.clone() })
     }
 
     pub(crate) fn cmd_create_finish(&mut self) -> Result<Reply, MoltError> {

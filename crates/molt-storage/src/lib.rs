@@ -169,9 +169,11 @@ const WALLET_KEYS_SEGMENT: u64 = u64::MAX - 9;
 const WALLET_SCAN_SEGMENT: u64 = u64::MAX - 10;
 /// AAD segment marker for [`PREFS_SEALED_FILE`].
 const PREFS_SEALED_SEGMENT: u64 = u64::MAX - 11;
+/// AAD segment marker for `wiki_draft.json`.
+const WIKI_DRAFT_SEGMENT: u64 = u64::MAX - 12;
 /// The lowest reserved marker — a log file numbered at or above it is
 /// ignored (see [`list_sorted`]).
-const RESERVED_SEGMENT_FLOOR: u64 = PREFS_SEALED_SEGMENT;
+const RESERVED_SEGMENT_FLOOR: u64 = WIKI_DRAFT_SEGMENT;
 /// The content-bearing prefs of a phrase-sealed dir, sealed under the
 /// workspace key while `prefs.toml` keeps only the local switches.
 pub const PREFS_SEALED_FILE: &str = "prefs.sealed";
@@ -1119,28 +1121,15 @@ pub fn write_prefs(ws_dir: &Path, p: &WorkspacePrefs) -> Result<(), StorageError
     write_atomic(ws_dir, "prefs.toml", text.as_bytes(), false)
 }
 
-/// Read a workspace's local wiki DRAFT ("" = none): the member's unvoted
-/// working copy (`shared_memory_real.md` WP-D). Local convenience like
-/// prefs — never history, never exported (the export allowlist does not
-/// carry it), sealed at rest with the directory.
-pub fn read_wiki_draft(ws_dir: &Path) -> String {
-    read_string_capped(&ws_dir.join("wiki_draft.json"), READ_CAP_CONTENT, "wiki draft").unwrap_or_default()
-}
+const WIKI_DRAFT_FILE: &str = "wiki_draft.json";
 
-/// Rewrite the local wiki draft (atomic via `tmp/`); an empty draft
-/// removes the file.
-pub fn write_wiki_draft(ws_dir: &Path, draft: &str) -> Result<(), StorageError> {
-    if draft.is_empty() {
-        match fs::remove_file(ws_dir.join("wiki_draft.json")) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e.into()),
-        }
-    } else {
-        write_atomic(ws_dir, "wiki_draft.json", draft.as_bytes(), false)
+fn remove_if_present(path: &Path) -> Result<(), StorageError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
     }
 }
-
 const KANBAN_DRAFT_FILE: &str = "kanban_draft.json";
 
 // ---------------------------------------------------------------------------
@@ -1741,6 +1730,44 @@ impl OpenedWorkspace {
             .map_err(|e| StorageError::Corrupt(format!("decoding {KANBAN_DRAFT_FILE}: {e}")))
     }
 
+    /// The local wiki draft (`shared_memory_real.md` §9.2): the member's
+    /// unvoted working copy, sealed, never exported. Absent = "". A file
+    /// that is not one frame (a pre-seal plaintext draft) reads as none and
+    /// is removed.
+    ///
+    /// # Errors
+    /// Unreadable, over the cap, or a frame that does not authenticate.
+    pub fn read_wiki_draft(&self) -> Result<String, StorageError> {
+        let path = self.dir.join(WIKI_DRAFT_FILE);
+        let data = match read_capped(&path, READ_CAP_CONTENT, WIKI_DRAFT_FILE) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(String::new()),
+            Err(e) => return Err(StorageError::Corrupt(format!("reading {WIKI_DRAFT_FILE}: {e}"))),
+        };
+        if single_frame(&data).is_none() {
+            tracing::warn!(file = WIKI_DRAFT_FILE, action = "dropped", "unsealed draft");
+            remove_if_present(&path)?;
+            return Ok(String::new());
+        }
+        let plain = decrypt_state_file(&wiki_draft_key(&self.key, &self.id), &self.id, WIKI_DRAFT_SEGMENT, &data)?;
+        String::from_utf8(plain).map_err(|e| StorageError::Corrupt(format!("decoding {WIKI_DRAFT_FILE}: {e}")))
+    }
+
+    /// Rewrite the wiki draft (atomic, sealed); empty removes the file.
+    pub fn write_wiki_draft(&self, draft: &str) -> Result<(), StorageError> {
+        if draft.is_empty() {
+            return remove_if_present(&self.dir.join(WIKI_DRAFT_FILE));
+        }
+        let frame = encode_frame(
+            &wiki_draft_key(&self.key, &self.id),
+            &self.id,
+            WIKI_DRAFT_SEGMENT,
+            0,
+            draft.as_bytes(),
+        )?;
+        write_atomic(&self.dir, WIKI_DRAFT_FILE, &frame, true)
+    }
+
     /// Rewrite the basket (atomic, sealed); empty removes the file.
     pub fn write_kanban_draft(&self, draft: &str) -> Result<(), StorageError> {
         if draft.is_empty() {
@@ -2146,6 +2173,11 @@ fn kanban_wakes_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
 /// The `kanban_draft.json` sub-key.
 fn kanban_draft_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(hkdf32(ws_key, "molt-kanban-draft", id))
+}
+
+/// The `wiki_draft.json` sub-key.
+fn wiki_draft_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hkdf32(ws_key, "molt-wiki-draft", id))
 }
 
 /// The `wallet_keys.state` sub-key.
@@ -3422,6 +3454,8 @@ enum WriterMsg {
     SaveKanbanWakes(Vec<String>),
     /// Rewrite the sealed `kanban_draft.json` ("" removes it).
     SaveKanbanDraft(String),
+    /// Rewrite the sealed `wiki_draft.json` ("" removes it).
+    SaveWikiDraft(String),
     /// A piece fetch's bookkeeping (mirroring §3.2): upsert by series.
     SaveFetchJob(Box<molt_core::FetchJob>),
     /// The fetch of this series ended.
@@ -3716,6 +3750,17 @@ impl StorageHandle {
             Ok(()) => {}
             Err(mpsc::TrySendError::Full(_)) => {
                 tracing::warn!(dropped = "kanban draft save", "writer queue full");
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Persist the wiki draft (fire-and-forget like the basket).
+    pub fn save_wiki_draft(&self, draft: String) {
+        match self.tx.try_send(WriterMsg::SaveWikiDraft(draft)) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(dropped = "wiki draft save", "writer queue full");
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {}
         }
@@ -4348,6 +4393,11 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                     Ok(WriterMsg::SaveKanbanDraft(draft)) => {
                         if let Err(e) = ws.write_kanban_draft(&draft) {
                             tracing::warn!(error = %e, "kanban_draft=unwritten");
+                        }
+                    }
+                    Ok(WriterMsg::SaveWikiDraft(draft)) => {
+                        if let Err(e) = ws.write_wiki_draft(&draft) {
+                            tracing::warn!(error = %e, "wiki_draft=unwritten");
                         }
                     }
                     Ok(WriterMsg::SaveFetchJob(job)) => {
@@ -5648,6 +5698,42 @@ mod tests {
         ws.write_kanban_draft("").expect("clearing nothing is fine");
     }
 
+    /// `shared_memory_real.md` §9.2: the wiki draft round-trips sealed at
+    /// rest; empty removes it.
+    #[test]
+    fn the_wiki_draft_round_trips_sealed_and_clears() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        assert_eq!(ws.read_wiki_draft().expect("read"), "");
+        let draft = "{\"stack\":[{\"text\":\"marker-title\"}]}";
+        ws.write_wiki_draft(draft).expect("write");
+        assert_eq!(ws.read_wiki_draft().expect("read"), draft);
+        let raw = fs::read(ws.dir().join("wiki_draft.json")).expect("raw");
+        assert!(!raw.windows(12).any(|w| w == b"marker-title"), "sealed at rest");
+        // its own sub-key: the basket's key does not open it
+        assert!(decrypt_state_file(&kanban_draft_key(&ws.key, &ws.id), &ws.id, WIKI_DRAFT_SEGMENT, &raw).is_err());
+        ws.write_wiki_draft("").expect("clear");
+        assert!(!ws.dir().join("wiki_draft.json").exists());
+        ws.write_wiki_draft("").expect("clearing nothing is fine");
+    }
+
+    /// A pre-seal plaintext draft reads as none and is removed; a frame that
+    /// does not authenticate is an error.
+    #[test]
+    fn a_legacy_plaintext_wiki_draft_reads_as_none() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        let path = ws.dir().join("wiki_draft.json");
+        fs::write(&path, b"{\"stack\":[\"legacy\"]}").expect("plant");
+        assert_eq!(ws.read_wiki_draft().expect("legacy"), "");
+        assert!(!path.exists(), "the plaintext is dropped");
+        let foreign = encode_frame(&kanban_draft_key(&ws.key, &ws.id), &ws.id, WIKI_DRAFT_SEGMENT, 0, b"x").expect("frame");
+        fs::write(&path, &foreign).expect("plant");
+        assert!(ws.read_wiki_draft().is_err(), "a frame that does not open is not silently empty");
+    }
+
     /// §6.1: the fired `task_start` keys live sealed beside the state,
     /// local to this node; absent reads as none fired.
     #[test]
@@ -5879,10 +5965,11 @@ mod tests {
     /// number is ignored, never the active segment.
     #[test]
     fn segment_floor_ignores_the_reserved_markers() {
-        assert_eq!(RESERVED_SEGMENT_FLOOR, PREFS_SEALED_SEGMENT);
+        assert_eq!(RESERVED_SEGMENT_FLOOR, WIKI_DRAFT_SEGMENT);
         const {
             assert!(
-                PREFS_SEALED_SEGMENT < WALLET_SCAN_SEGMENT
+                WIKI_DRAFT_SEGMENT < PREFS_SEALED_SEGMENT
+                    && PREFS_SEALED_SEGMENT < WALLET_SCAN_SEGMENT
                     && WALLET_SCAN_SEGMENT < WALLET_KEYS_SEGMENT
                     && WALLET_KEYS_SEGMENT < KANBAN_DRAFT_SEGMENT
                     && KANBAN_DRAFT_SEGMENT < KANBAN_WAKES_SEGMENT
@@ -5894,6 +5981,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = make_ws(tmp.path(), 2);
         for no in [
+            WIKI_DRAFT_SEGMENT,
             PREFS_SEALED_SEGMENT,
             WALLET_SCAN_SEGMENT,
             WALLET_KEYS_SEGMENT,
@@ -5906,7 +5994,7 @@ mod tests {
         }
         let (ws, loaded) = open_workspace(&dir).expect("opens despite the planted files");
         assert_eq!(loaded.tail.len(), 3);
-        assert!(ws.seg_no < PREFS_SEALED_SEGMENT);
+        assert!(ws.seg_no < WIKI_DRAFT_SEGMENT);
     }
 
     /// WP4b stage 5: the FIRST pruned chain persist raises the manifest
