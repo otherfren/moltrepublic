@@ -662,18 +662,17 @@ component RelayPoolGroup inherits DetailGroup {
         preferred-width: 0px;
     }
     // the per-session clearnet activation, set apart from the pool itself:
-    // shown only when there is something to activate, calm (not alarming)
-    // while it is on
+    // shown only when there is something to activate; green means Tor only
     if root.clearnet-confirmed: Rectangle {
         background: Theme.panel;
         border-radius: Theme.win95 ? 0px : 6px;
         border-width: Theme.border-w;
-        border-color: root.clearnet-session ? Theme.good : Theme.line;
+        border-color: root.clearnet-session ? Theme.warn : Theme.line;
         VerticalLayout {
             padding: 10px;
             spacing: 6px;
             DotLabel {
-                tone: root.clearnet-session ? Theme.good : Theme.faint;
+                tone: root.clearnet-session ? Theme.warn : Theme.good;
                 label: Strings.rp-cn-session-title;
                 label-color: Theme.text;
                 label-size: Theme.fs-cap;
