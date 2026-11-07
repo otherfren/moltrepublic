@@ -82,7 +82,7 @@ export struct RelayItem {
     url: string,
     kind: int, // 0 = onion · 1 = clearnet · 2 = local — derived from the URL, never stored
     confirmed: bool, // the user's persisted "yes, use this relay"
-    blocked: int, // 0 = in use right now · 1 = unconfirmed · 2 = outside Tor, not activated this session
+    blocked: int, // 0 = in use right now · 1 = unconfirmed · 2 = clearnet/local, switched off
     pos: int, // 1-based priority position (the list ORDER is the priority)
     first: bool, // at the top — the "higher priority" control is dead
     last: bool, // at the bottom — the "lower priority" control is dead

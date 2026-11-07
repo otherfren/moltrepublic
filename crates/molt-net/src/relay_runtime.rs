@@ -573,11 +573,8 @@ impl RelayRuntime {
             let via = crate::relay_ws::dialer_for(&self.dialer, url).route();
             async move {
                 let began = tokio::time::Instant::now();
-                // This is the connect an operator actually watches — the one
-                // at startup. It used to end in `.ok().and_then(Result::ok)`,
-                // throwing away BOTH the timeout and the reason, so a node
-                // that reached no relay said nothing about why. Report every
-                // outcome; the Option is what the caller still needs.
+                // every outcome is reported: a node that reached no relay must
+                // say why, in the log and in the error
                 match tokio::time::timeout(CONNECT_TIMEOUT, connect_and_req(&shared, url)).await {
                     Ok(Ok(ws)) => {
                         tracing::info!(
@@ -585,11 +582,11 @@ impl RelayRuntime {
                             ms = began.elapsed().as_millis(),
                             "relay connected"
                         );
-                        Some(ws)
+                        Ok(ws)
                     }
                     Ok(Err(e)) => {
                         tracing::warn!(relay = %url, via = %via, error = %e, "relay connect failed");
-                        None
+                        Err(format!("{url} via {via}: {}", relay_reason(&e.to_string())))
                     }
                     Err(_) => {
                         tracing::warn!(
@@ -597,7 +594,7 @@ impl RelayRuntime {
                             after_s = CONNECT_TIMEOUT.as_secs(),
                             "relay connect timed out"
                         );
-                        None
+                        Err(format!("{url} via {via}: timed out"))
                     }
                 }
             }
@@ -610,7 +607,9 @@ impl RelayRuntime {
         // it, or a late-arriving relay's EOSE would satisfy a gate it was
         // never part of and synced() would lie (review finding, HIGH)
         let mut gated: Vec<String> = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
         for (url, first) in self.urls.iter().zip(firsts) {
+            let first = first.map_err(|why| failures.push(why)).ok();
             let up = first.is_some();
             if up {
                 gated.push(url.clone());
@@ -641,9 +640,11 @@ impl RelayRuntime {
                 via = %self.dialer.route(),
                 "no relay accepted the subscription"
             );
-            return Err(NetError::Unreachable(
-                "no relay accepted the subscription".into(),
-            ));
+            // ", " not "; ": the net-health reason splits its parts on "; "
+            return Err(NetError::Unreachable(format!(
+                "no relay accepted the subscription: {}",
+                failures.join(", ")
+            )));
         }
         Ok(Subscription {
             rx,
@@ -1546,6 +1547,34 @@ mod tests {
         );
         assert_eq!(second.accepted, vec![live]);
         assert!(second.failed.iter().any(|(u, e)| *u == hole && e.contains("backing off")));
+    }
+
+    /// A failed subscribe names each relay, its route and its reason: a
+    /// clearnet relay that refuses Tor exits otherwise reads as plain
+    /// "unreachable".
+    #[tokio::test]
+    async fn a_failed_subscribe_names_relay_route_and_reason() {
+        let dead = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            l.local_addr().expect("addr").port()
+        };
+        let url = "wss://relay.invalid".to_string();
+        for (dialer, via) in [
+            (crate::dial::Dialer::Direct, "via direct"),
+            (
+                crate::dial::Dialer::resolve("tor", "local", dead).expect("socks"),
+                "via socks5://127.0.0.1:",
+            ),
+        ] {
+            let rt = super::RelayRuntime::new(dialer, vec![url.clone()]);
+            let Err(e) = rt.subscribe(nostr::Filter::new()).await else {
+                panic!("nothing is reachable");
+            };
+            let e = e.to_string();
+            assert!(e.contains("no relay accepted the subscription: wss://relay.invalid "), "{e}");
+            assert!(e.contains(via), "{e}");
+            assert!(!e.contains('\n') && !e.contains("; "), "{e}");
+        }
     }
 
     /// A file subscription runs without a stored-event cut-off and with a

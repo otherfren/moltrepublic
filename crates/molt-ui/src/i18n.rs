@@ -296,6 +296,9 @@ fn net_phrase_de(p: &str) -> String {
                 erreicht die Peers"
             .into();
     }
+    if let Some(tail) = p.strip_prefix("no relay accepted the subscription") {
+        return format!("kein Relay nahm die Subscription an{tail}");
+    }
     match p {
         "connecting" => "verbinde".into(),
         "inbound subscription ended - resubscribing" => {
@@ -308,7 +311,6 @@ fn net_phrase_de(p: &str) -> String {
             "bestätigt keine Zustellungen - sende weiter".into()
         }
         "no relay accepted the frame" => "kein Relay nahm den Frame an".into(),
-        "no relay accepted the subscription" => "kein Relay nahm die Subscription an".into(),
         "no 445 subscription" => "keine 445-Subscription".into(),
         other => other.to_string(),
     }
@@ -1287,7 +1289,7 @@ lexicon! {
     tor_v_no_target: "Nothing could be established: this Tor mode has no SOCKS address to probe, and there was no relay to dial through it.", "Es konnte nichts festgestellt werden: Dieser Tor-Modus hat keine SOCKS-Adresse zum Prüfen, und es gab kein Relay, das hindurch gewählt werden konnte.";
     tor_v_circuit_failed: "No connection to the relay through Tor. Either Tor is not working, or that relay is unreachable - the line below says which step failed.", "Keine Verbindung zum Relay durch Tor. Entweder funktioniert Tor nicht, oder das Relay ist nicht erreichbar - die Zeile darunter sagt, welcher Schritt scheiterte.";
     tor_v_timeout: "No answer within the time limit. A first embedded-Tor start can take minutes - try again once it has bootstrapped.", "Keine Antwort innerhalb des Zeitlimits. Ein erster embedded-Tor-Start kann Minuten dauern - nach dem Bootstrap erneut versuchen.";
-    tor_v_proxy_only_locked: "A Tor SOCKS port answers - but nothing was routed through it, so no circuit is proven. Your confirmed relays are not dialed: connections outside Tor are switched off.", "Ein Tor-SOCKS-Port antwortet - aber es wurde nichts hindurchgeleitet, ein Circuit ist damit nicht bewiesen. Deine bestätigten Relays werden nicht angewählt: Verbindungen außerhalb Tor sind ausgeschaltet.";
+    tor_v_proxy_only_locked: "A Tor SOCKS port answers - but nothing was routed through it, so no circuit is proven. Your confirmed relays are not dialed: clearnet and local relays are switched off.", "Ein Tor-SOCKS-Port antwortet - aber es wurde nichts hindurchgeleitet, ein Circuit ist damit nicht bewiesen. Deine bestätigten Relays werden nicht angewählt: Clearnet- und lokale Relays sind ausgeschaltet.";
     tor_v_circuit: "Tor works: a relay from your own pool was reached end to end through Tor ✓", "Tor funktioniert: Ein Relay aus deinem eigenen Pool wurde Ende-zu-Ende durch Tor erreicht ✓";
     // settings → Nostr relays: the relay pool (docs_archive/transport/relay_pool.md §6).
     // The copy never promises a connection the policy does not make: an
@@ -1331,8 +1333,8 @@ lexicon! {
     rp_cn_body_local: "This relay is on your machine or local network - reached directly, Tor is not involved. Whoever runs it still sees what this node subscribes to and when it is online, and a ws:// address is readable along the local path.", "Dieses Relay liegt auf deinem Rechner oder lokalen Netz - es wird direkt erreicht, ohne Tor. Wer es betreibt, sieht trotzdem, was dieser Knoten abonniert und wann er online ist, und eine ws://-Adresse ist auf dem lokalen Weg mitlesbar.";
     rp_cn_ack: "I understand this and want to use the relay.", "Ich habe das verstanden und will das Relay benutzen.";
     rp_cn_confirm: "Confirm relay", "Relay bestätigen";
-    rp_cn_note: "Confirming also switches connections outside Tor on and remembers that. You can switch them off again below at any time.", "Das Bestätigen schaltet Verbindungen außerhalb Tor zugleich ein und merkt sich das. Du kannst sie unten jederzeit wieder ausschalten.";
-    rp_cn_session_title: "Relays outside Tor", "Relays außerhalb Tor";
+    rp_cn_note: "Confirming also switches clearnet and local relays on and remembers that. You can switch them off again below at any time.", "Das Bestätigen schaltet Clearnet- und lokale Relays zugleich ein und merkt sich das. Du kannst sie unten jederzeit wieder ausschalten.";
+    rp_cn_session_title: "Clearnet and local relays", "Clearnet- und lokale Relays";
     rp_cn_session_off: "Switched off: confirmed clearnet and local relays are not dialed at all - founding and joining over one is refused. Switching it on is remembered.", "Ausgeschaltet: Bestätigte Clearnet- und lokale Relays werden gar nicht angewählt - Gründen und Beitreten über so eines wird abgelehnt. Das Einschalten wird gemerkt.";
     rp_cn_session_on: "On: confirmed clearnet and local relays are in use. This stays on until you switch it off.", "An: Bestätigte Clearnet- und lokale Relays werden benutzt. Das bleibt so, bis du es ausschaltest.";
     rp_cn_activate: "Switch on", "Einschalten";

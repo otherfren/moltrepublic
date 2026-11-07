@@ -72,6 +72,10 @@ fn e6_maps_render_german_and_keep_tails() {
     );
     assert_eq!(localize_net_reason(0, r), r);
     assert_eq!(
+        localize_net_reason(1, "no relay accepted the subscription: wss://a via direct: timed out"),
+        "kein Relay nahm die Subscription an: wss://a via direct: timed out"
+    );
+    assert_eq!(
         localize_net_reason(1, "no live relay connection (0 of 3 up, reconnecting)"),
         "keine lebende Relay-Verbindung (0 von 3 erreichbar, verbinde neu)"
     );
