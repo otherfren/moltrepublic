@@ -14,8 +14,8 @@ type Handle = i_slint_backend_testing::ElementHandle;
 fn founder_lobby(n: usize, joined: usize) -> (AppWindow, Shown) {
     i_slint_backend_testing::init_no_event_loop();
     let ui = AppWindow::new().expect("headless window");
-    // the purse's three consent lines sit in the charter form (W9)
-    ui.window().set_size(slint::PhysicalSize::new(1200, 1000));
+    // the charter form's feature table sits above the folds
+    ui.window().set_size(slint::PhysicalSize::new(1200, 1400));
     ui.set_screen(AppScreen::Create);
     ui.set_cw_name("aurora".into());
     ui.set_cw_member("walter".into());
