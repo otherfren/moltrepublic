@@ -1005,6 +1005,39 @@ fn the_mcp_tab_carries_its_own_read_only_key() {
     assert_eq!(rotated.get(), 0, "…and left the seat key alone");
 }
 
+/// The clearnet card says what its button does and, once in use, how
+/// the relay is reached: "Switch on/off" told a newcomer nothing.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_clearnet_card_names_its_action_and_route() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.set_screen(AppScreen::Settings);
+    apply_strings(&ui, 0);
+    ui.window().set_size(slint::PhysicalSize::new(1600, 900));
+    ui.set_set_tab(5);
+    ui.set_relay_clearnet_confirmed(true);
+    ui.set_cfg_clearnet_session(false);
+    let _shown = show_headless(&ui);
+    let shown = |label: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label)
+            .next()
+            .is_some()
+    };
+    let s = ui.global::<Strings>();
+
+    assert!(shown("Use clearnet relays"));
+    assert!(shown(&s.get_rp_cn_session_off()));
+
+    ui.set_cfg_clearnet_session(true);
+    ui.set_cfg_network_index(0); // tor
+    assert!(shown("Stop using clearnet relays"));
+    assert!(shown(&s.get_rp_cn_session_on()));
+    ui.set_cfg_network_index(1); // none
+    assert!(shown(&s.get_rp_cn_session_on_direct()));
+    assert!(!shown(&s.get_rp_cn_session_on()));
+}
+
 /// **The settings tab bar keeps its distance from the panel, wrapped or
 /// not.** The bar used to state a FIXED 30/66px height while a tab scales
 /// with `Theme.ui-scale`: at a larger font the second row grew out of the

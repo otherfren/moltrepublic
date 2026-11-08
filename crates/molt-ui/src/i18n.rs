@@ -1333,12 +1333,13 @@ lexicon! {
     rp_cn_body_local: "This relay is on your machine or local network - reached directly, Tor is not involved. Whoever runs it still sees what this node subscribes to and when it is online, and a ws:// address is readable along the local path.", "Dieses Relay liegt auf deinem Rechner oder lokalen Netz - es wird direkt erreicht, ohne Tor. Wer es betreibt, sieht trotzdem, was dieser Knoten abonniert und wann er online ist, und eine ws://-Adresse ist auf dem lokalen Weg mitlesbar.";
     rp_cn_ack: "I understand this and want to use the relay.", "Ich habe das verstanden und will das Relay benutzen.";
     rp_cn_confirm: "Confirm relay", "Relay bestätigen";
-    rp_cn_note: "Confirming also switches clearnet and local relays on and remembers that. You can switch them off again below at any time.", "Das Bestätigen schaltet Clearnet- und lokale Relays zugleich ein und merkt sich das. Du kannst sie unten jederzeit wieder ausschalten.";
+    rp_cn_note: "Confirming also puts clearnet and local relays in use. You can stop that below at any time.", "Das Bestätigen nimmt Clearnet- und lokale Relays zugleich in Benutzung. Das kannst du unten jederzeit beenden.";
     rp_cn_session_title: "Clearnet and local relays", "Clearnet- und lokale Relays";
-    rp_cn_session_off: "Switched off: confirmed clearnet and local relays are not dialed at all - founding and joining over one is refused. Switching it on is remembered.", "Ausgeschaltet: Bestätigte Clearnet- und lokale Relays werden gar nicht angewählt - Gründen und Beitreten über so eines wird abgelehnt. Das Einschalten wird gemerkt.";
-    rp_cn_session_on: "On: confirmed clearnet and local relays are in use. This stays on until you switch it off.", "An: Bestätigte Clearnet- und lokale Relays werden benutzt. Das bleibt so, bis du es ausschaltest.";
-    rp_cn_activate: "Switch on", "Einschalten";
-    rp_cn_deactivate: "Switch off", "Ausschalten";
+    rp_cn_session_off: "Not in use: this node connects to no clearnet or local relay.", "Nicht benutzt: Dieser Node verbindet sich mit keinem Clearnet- oder lokalen Relay.";
+    rp_cn_session_on: "In use - clearnet relays through Tor, local ones directly.", "In Benutzung - Clearnet-Relays über Tor, lokale direkt.";
+    rp_cn_session_on_direct: "In use, reached directly - the relay sees your IP address.", "In Benutzung, direkt erreicht - das Relay sieht deine IP-Adresse.";
+    rp_cn_activate: "Use clearnet relays", "Clearnet-Relays benutzen";
+    rp_cn_deactivate: "Stop using clearnet relays", "Clearnet-Relays nicht mehr benutzen";
     unsaved_title: "Unsaved changes", "Ungespeicherte Änderungen";
     unsaved_body: "You changed settings without saving them. Save them to config.toml, or discard the edits?", "Du hast Einstellungen geändert, aber nicht gespeichert. In die config.toml speichern oder die Änderungen verwerfen?";
     unsaved_save: "Save & continue", "Speichern & weiter";

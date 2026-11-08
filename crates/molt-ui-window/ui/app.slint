@@ -534,6 +534,7 @@ component RelayPoolGroup inherits DetailGroup {
     in property <int> dialable; // relays in use right now (engine-derived)
     in property <bool> clearnet-confirmed; // at least one confirmed clearnet relay
     in property <bool> clearnet-session; // activated for THIS session only
+    in property <bool> via-tor;
     in-out property <string> draft; // the add field
     in property <string> error; // inline validation message under the field
     callback add(string);
@@ -679,7 +680,8 @@ component RelayPoolGroup inherits DetailGroup {
                 label-weight: 700;
             }
             Text {
-                text: root.clearnet-session ? Strings.rp-cn-session-on : Strings.rp-cn-session-off;
+                text: !root.clearnet-session ? Strings.rp-cn-session-off
+                    : root.via-tor ? Strings.rp-cn-session-on : Strings.rp-cn-session-on-direct;
                 color: Theme.dim;
                 font-size: Theme.fs-cap;
                 wrap: word-wrap;
@@ -8724,6 +8726,7 @@ export component AppWindow inherits Window {
                                 dialable: root.relay-dialable;
                                 clearnet-confirmed: root.relay-clearnet-confirmed;
                                 clearnet-session: root.cfg-clearnet-session;
+                                via-tor: root.cfg-network-index == 0;
                                 draft <=> root.relay-draft;
                                 error: root.relay-error;
                                 add(url) => {
