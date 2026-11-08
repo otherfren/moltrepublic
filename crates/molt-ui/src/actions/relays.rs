@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Relay-pool callbacks: the Settings pool (add / remove / move / confirm /
-//! revoke / session clearnet unlock), adopting an invite's relays, and the
+//! revoke / session clearnet unlock), adopting a link's relays, and the
 //! R6 pool-edit modal's draft rows. URLs validate through molt-core's own
 //! parser so the field message and the engine gate never disagree.
 
@@ -11,6 +11,7 @@ use slint::{ComponentHandle, Model};
 use crate::i18n::Lexicon;
 use crate::models::sync_strings;
 use crate::app::Ctx;
+use crate::surfaces::AdoptPlan;
 use crate::{AppWindow};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
@@ -95,6 +96,13 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                     accept_clearnet,
                 },
             );
+        });
+        // the exposure warning's confirm: every relay it named
+        let cx = ctx.clone();
+        ui.on_relay_confirm_clearnet(move |urls| {
+            for url in urls.iter() {
+                cx.issue(Command::RelayConfirm { url: url.to_string(), accept_clearnet: true });
+            }
         });
     }
 
@@ -205,4 +213,50 @@ pub(crate) fn relay_add_check(lang: i32, raw: &str, pool: &[String]) -> Result<S
         Ok(url) if pool.contains(&url) => Err(l.rp_err_dup),
         Ok(url) => Ok(url),
     }
+}
+
+/// Add every relay of `plan` to this node's pool and confirm the onion
+/// ones; the clearnet and local ones wait for one exposure warning.
+pub(crate) fn adopt_relays(cx: &Ctx, plan: AdoptPlan) {
+    if let (false, Some(ui)) = (plan.exposed.is_empty(), cx.weak.upgrade()) {
+        let urls: Vec<slint::SharedString> = plan.exposed.iter().map(Into::into).collect();
+        ui.invoke_open_clearnet_warnings(
+            slint::ModelRc::new(slint::VecModel::from(urls)),
+            plan.clearnet,
+            plan.local,
+        );
+    }
+    let w = cx.wallet.clone();
+    let weak = cx.weak.clone();
+    cx.rt.spawn(async move {
+        let mut res = Ok(());
+        for url in plan.onion.iter().chain(&plan.exposed) {
+            // the mirrored pool can lag: a relay already there is adopted
+            res = match w.execute(Command::RelayAdd { url: url.clone() }).await {
+                Err(e) if e.to_string().contains("already in the relay pool") => Ok(()),
+                r => r.map(|_| ()),
+            };
+            if res.is_err() {
+                break;
+            }
+        }
+        if res.is_ok() {
+            for url in plan.onion {
+                res = w
+                    .execute(Command::RelayConfirm { url, accept_clearnet: false })
+                    .await
+                    .map(|_| ());
+                if res.is_err() {
+                    break;
+                }
+            }
+        }
+        if let Err(e) = res {
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.invoke_show_toast_error(crate::i18n::error_toast(&ui, &e));
+                }
+            });
+        }
+    });
 }

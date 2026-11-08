@@ -941,3 +941,30 @@ fn the_link_relay_panel_picks_among_the_links_own_relays() {
     st.set_link("molt://b", vec![onion.clone()]);
     assert_eq!(rows(&st), vec![(onion, true, 0, 0)]);
 }
+
+/// Adopting blocked relays: an onion one confirms outright, a clearnet or
+/// local one waits for ONE exposure warning naming all of them; a usable
+/// row is left alone.
+#[test]
+fn an_adopt_plan_confirms_onion_and_gathers_the_rest_for_one_warning() {
+    use crate::surfaces::{AdoptPlan, LinkRelayRow};
+    let row = |url: &str, block, kind| LinkRelayRow { url: url.into(), picked: block == 0, block, kind };
+    let rows = [
+        row("ws://a.onion", 1, 0),
+        row("wss://b.example", 1, 1),
+        row("wss://c.example", 0, 1),
+        row("ws://192.168.1.2:7777", 2, 2),
+        row("wss://d.example", 3, 1),
+    ];
+    assert_eq!(
+        AdoptPlan::of(&rows),
+        AdoptPlan {
+            onion: vec!["ws://a.onion".into()],
+            exposed: vec!["wss://b.example".into(), "ws://192.168.1.2:7777".into(), "wss://d.example".into()],
+            clearnet: true,
+            local: true,
+        }
+    );
+    let onion_only = AdoptPlan::of(&rows[..1]);
+    assert!(onion_only.exposed.is_empty() && !onion_only.clearnet && !onion_only.local);
+}

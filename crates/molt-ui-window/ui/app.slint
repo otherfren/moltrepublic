@@ -2185,6 +2185,8 @@ export component AppWindow inherits Window {
     // the link's relays and this node's verdict on each (Rust-owned)
     in property <[LinkRelay]> rw-relays;
     in property <int> rw-relay-picked;
+    in property <int> rw-relay-blocked;
+    callback rw-relay-adopt-all();
     callback rw-relay-toggle(int);
     callback rw-relay-adopt(string);
     callback rw-link-changed(string);
@@ -2443,20 +2445,27 @@ export component AppWindow inherits Window {
     callback relay-remove(string);
     callback relay-move(string /* url */, bool /* up */);
     callback relay-confirm(string /* url */, bool /* accept-clearnet */);
+    callback relay-confirm-clearnet([string]);
     callback relay-revoke(string);
     callback relay-clearnet-session(bool /* unlock */);
     // the outside-Tor warning: the ONLY path from the GUI to a confirmed
     // clearnet or local relay. The acknowledgement starts unchecked on EVERY
     // open; the body names the CONCRETE exposure of the relay's kind.
     property <bool> relay-clearnet-modal-open: false;
-    property <string> relay-clearnet-url;
-    property <int> relay-clearnet-kind: 1; // 1 clearnet · 2 local
+    property <[string]> relay-clearnet-urls;
+    property <bool> relay-clearnet-net: true;
+    property <bool> relay-clearnet-local: false;
     property <bool> relay-clearnet-ack: false;
     // the node's twin of the acknowledgement, unchecked on every open
     property <bool> wl-node-ack: false;
     function open-clearnet-warning(url: string, kind: int) {
-        root.relay-clearnet-url = url;
-        root.relay-clearnet-kind = kind;
+        root.open-clearnet-warnings([url], kind == 1, kind == 2);
+    }
+    // one warning for every relay it confirms (`net` clearnet, `local` LAN)
+    public function open-clearnet-warnings(urls: [string], net: bool, local: bool) {
+        root.relay-clearnet-urls = urls;
+        root.relay-clearnet-net = net;
+        root.relay-clearnet-local = local;
         root.relay-clearnet-ack = false;
         root.relay-clearnet-modal-open = true;
     }
@@ -5076,6 +5085,17 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                    if root.rv-link != "" && root.rv-kind.kind != 0 && root.rw-relay-blocked >= 2: HorizontalLayout {
+                        alignment: start;
+                        AppButton {
+                            height: 30px * Theme.ui-scale;
+                            emoji: "➕";
+                            label: "\{Strings.rw-rl-adopt-all} (\{root.rw-relay-blocked})";
+                            clicked => {
+                                root.rw-relay-adopt-all();
+                            }
+                        }
+                    }
                     // the link's relays: tick which to dial; a blocked one
                     // is adopted into this node's pool on click
                     if root.rv-link != "" && root.rv-kind.kind != 0 && root.rw-relays.length > 0: Rectangle {
@@ -5108,9 +5128,6 @@ export component AppWindow inherits Window {
                                                 root.rw-relay-toggle(i);
                                             } else {
                                                 root.rw-relay-adopt(r.url);
-                                                if (r.kind != 0) {
-                                                    root.open-clearnet-warning(r.url, r.kind);
-                                                }
                                             }
                                         }
                                     }
@@ -9076,10 +9093,13 @@ export component AppWindow inherits Window {
     // cancelling does nothing at all.
     if root.relay-clearnet-modal-open: ConfirmModal {
         dialog-width: 520px;
-        title: root.relay-clearnet-kind == 2 ? Strings.rp-cn-title-local : Strings.rp-cn-title;
-        body: root.relay-clearnet-kind == 2 ? Strings.rp-cn-body-local
-            : (root.net-tor-active ? Strings.rp-cn-body-tor : Strings.rp-cn-body-plain);
-        confirm-label: Strings.rp-cn-confirm;
+        property <bool> many: root.relay-clearnet-urls.length > 1;
+        title: self.many ? Strings.rp-cn-title-many
+            : (root.relay-clearnet-net ? Strings.rp-cn-title : Strings.rp-cn-title-local);
+        body: !root.relay-clearnet-net ? Strings.rp-cn-body-local
+            : (root.net-tor-active ? Strings.rp-cn-body-tor : Strings.rp-cn-body-plain)
+                + (root.relay-clearnet-local ? "\n\n\{Strings.rp-cn-body-local}" : "");
+        confirm-label: self.many ? Strings.rp-cn-confirm-many : Strings.rp-cn-confirm;
         confirm-enabled: root.relay-clearnet-ack;
         dismissed => {
             root.close-clearnet-warning();
@@ -9087,17 +9107,17 @@ export component AppWindow inherits Window {
         confirmed => {
             root.relay-clearnet-modal-open = false;
             root.relay-clearnet-ack = false;
-            root.relay-confirm(root.relay-clearnet-url, true);
+            root.relay-confirm-clearnet(root.relay-clearnet-urls);
         }
-        Text {
-            text: root.relay-clearnet-url;
+        for u in root.relay-clearnet-urls: Text {
+            text: u;
             color: Theme.text;
             font-size: Theme.fs-body;
             font-weight: 700;
             wrap: word-wrap;
         }
         AppCheck {
-            label: Strings.rp-cn-ack;
+            label: root.relay-clearnet-urls.length > 1 ? Strings.rp-cn-ack-many : Strings.rp-cn-ack;
             checked <=> root.relay-clearnet-ack;
         }
         Text {

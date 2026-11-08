@@ -1148,6 +1148,7 @@ lexicon! {
     rw_rl_unconfirmed: "not confirmed", "nicht bestätigt";
     rw_rl_clearnet_off: "clearnet relays off", "Clearnet-Relays aus";
     rw_rl_adopt: "Add to your relays", "Zu deinen Relays hinzufügen";
+    rw_rl_adopt_all: "Add all", "Alle hinzufügen";
     rw_rl_none: "no relay picked", "kein Relay gewählt";
     rw_link_name_ph: "Your name…", "Dein Name…";
     rw_via_s3: "Online-restore via S3", "Online-Restore via S3";
@@ -1342,6 +1343,9 @@ lexicon! {
     rp_cn_body_plain: "Not a .onion service: its operator sees your IP address, what this node subscribes to and when it is online. Tor is off, so nothing hides where you connect from.", "Kein .onion-Dienst: Sein Betreiber sieht deine IP-Adresse, was dieser Knoten abonniert und wann er online ist. Tor ist aus, nichts verbirgt, von wo du dich verbindest.";
     rp_cn_body_local: "This relay is on your machine or local network - reached directly, Tor is not involved. Whoever runs it still sees what this node subscribes to and when it is online, and a ws:// address is readable along the local path.", "Dieses Relay liegt auf deinem Rechner oder lokalen Netz - es wird direkt erreicht, ohne Tor. Wer es betreibt, sieht trotzdem, was dieser Knoten abonniert und wann er online ist, und eine ws://-Adresse ist auf dem lokalen Weg mitlesbar.";
     rp_cn_ack: "I understand this and want to use the relay.", "Ich habe das verstanden und will das Relay benutzen.";
+    rp_cn_title_many: "Use these relays outside Tor?", "Diese Relays außerhalb von Tor benutzen?";
+    rp_cn_ack_many: "I understand this and want to use these relays.", "Ich habe das verstanden und will diese Relays benutzen.";
+    rp_cn_confirm_many: "Confirm relays", "Relays bestätigen";
     rp_cn_confirm: "Confirm relay", "Relay bestätigen";
     rp_cn_note: "Confirming also puts clearnet and local relays in use. You can stop that below at any time.", "Das Bestätigen nimmt Clearnet- und lokale Relays zugleich in Benutzung. Das kannst du unten jederzeit beenden.";
     rp_cn_session_title: "Clearnet and local relays", "Clearnet- und lokale Relays";

@@ -75,44 +75,10 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 push_link_rows(&ui, &st);
             }
         });
-        // a clearnet/local relay's confirmation goes through the exposure
-        // warning the panel opens; an onion one confirms outright
         let cx = ctx.clone();
-        ui.on_rw_relay_adopt(move |url| {
-            let url = url.to_string();
-            let in_pool = cx
-                .chat_ui
-                .lock()
-                .map(|st| st.link_pool.iter().any(|e| e.url == url))
-                .unwrap_or(false);
-            let w = cx.wallet.clone();
-            let weak = cx.weak.clone();
-            cx.rt.spawn(async move {
-                let mut res = Ok(());
-                if !in_pool {
-                    // the mirrored pool can lag: a relay already there is adopted
-                    res = match w.execute(Command::RelayAdd { url: url.clone() }).await {
-                        Err(e) if e.to_string().contains("already in the relay pool") => Ok(()),
-                        r => r.map(|_| ()),
-                    };
-                }
-                if res.is_ok()
-                    && molt_core::relay::relay_kind(&url) == molt_core::relay::RelayKind::Onion
-                {
-                    res = w
-                        .execute(Command::RelayConfirm { url, accept_clearnet: false })
-                        .await
-                        .map(|_| ());
-                }
-                if let Err(e) = res {
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.invoke_show_toast_error(error_toast(&ui, &e));
-                        }
-                    });
-                }
-            });
-        });
+        ui.on_rw_relay_adopt(move |url| adopt_link_rows(&cx, |r| r.url == url.as_str()));
+        let cx = ctx.clone();
+        ui.on_rw_relay_adopt_all(move || adopt_link_rows(&cx, |_| true));
     }
 
     {
@@ -455,6 +421,12 @@ fn link_relays(link: &str) -> Vec<String> {
 }
 
 /// Push the (re)join relay panel's rows and pick count.
+fn adopt_link_rows(cx: &Ctx, keep: impl Fn(&crate::surfaces::LinkRelayRow) -> bool) {
+    let Ok(rows) = cx.chat_ui.lock().map(|st| st.link_rows()) else { return };
+    let rows: Vec<_> = rows.into_iter().filter(|r| keep(r)).collect();
+    crate::actions::relays::adopt_relays(cx, crate::surfaces::AdoptPlan::of(&rows));
+}
+
 pub(crate) fn push_link_rows(ui: &AppWindow, st: &crate::surfaces::ChatUiState) {
     let rows: Vec<LinkRelay> = st
         .link_rows()
@@ -462,5 +434,6 @@ pub(crate) fn push_link_rows(ui: &AppWindow, st: &crate::surfaces::ChatUiState) 
         .map(|r| LinkRelay { url: r.url.into(), picked: r.picked, block: r.block, kind: r.kind })
         .collect();
     ui.set_rw_relay_picked(i32::try_from(rows.iter().filter(|r| r.picked).count()).unwrap_or(0));
+    ui.set_rw_relay_blocked(i32::try_from(rows.iter().filter(|r| r.block != 0).count()).unwrap_or(0));
     crate::models::sync_rows(&ui.get_rw_relays(), rows, |m| ui.set_rw_relays(m));
 }

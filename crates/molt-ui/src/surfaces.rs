@@ -339,6 +339,33 @@ pub(crate) struct LinkRelayRow {
     pub(crate) kind: i32,
 }
 
+/// What adopting blocked relay rows takes: onion ones are added and
+/// confirmed outright; the rest wait for one exposure warning.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct AdoptPlan {
+    pub(crate) onion: Vec<String>,
+    pub(crate) exposed: Vec<String>,
+    pub(crate) clearnet: bool,
+    pub(crate) local: bool,
+}
+
+impl AdoptPlan {
+    pub(crate) fn of(rows: &[LinkRelayRow]) -> Self {
+        let mut plan = Self::default();
+        for r in rows.iter().filter(|r| r.block != 0) {
+            match r.kind {
+                0 => plan.onion.push(r.url.clone()),
+                kind => {
+                    plan.clearnet |= kind == 1;
+                    plan.local |= kind == 2;
+                    plan.exposed.push(r.url.clone());
+                }
+            }
+        }
+        plan
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct ChatUiState {
     /// The relays the create wizard offers — this node's dialable set, as

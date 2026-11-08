@@ -49,5 +49,51 @@ fn the_link_panel_lists_the_links_relays_and_acts_per_row() {
     assert_eq!(toggled.get(), 0);
     click(&ui, &checks[1]);
     assert_eq!(adopted.borrow().as_str(), "wss://b.example");
-    assert!(shown("Use a clearnet relay?"), "a clearnet relay goes through the warning");
+}
+
+/// Two or more blocked relays get one adopt-all button, and the exposure
+/// warning names every clearnet and local relay it confirms at once.
+#[test]
+fn adopt_all_goes_through_one_warning_for_every_exposed_relay() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.set_screen(AppScreen::Restore);
+    apply_strings(&ui, 0);
+    ui.on_classify_link(|_| LinkPreview { kind: 1, republic: "R".into(), who: "w".into() });
+    let row = |url: &str, block, kind| LinkRelay { url: url.into(), picked: block == 0, block, kind };
+    ui.set_rw_relays(ModelRc::new(VecModel::from(vec![
+        row("wss://b.example", 1, 1),
+        row("ws://192.168.1.2:7777", 1, 2),
+    ])));
+    ui.set_rw_relay_blocked(2);
+    ui.set_rv_link("molt://invite/x".into());
+    let all = std::rc::Rc::new(std::cell::Cell::new(false));
+    let a = all.clone();
+    ui.on_rw_relay_adopt_all(move || a.set(true));
+    let confirmed = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+    let c = confirmed.clone();
+    ui.on_relay_confirm_clearnet(move |urls| {
+        *c.borrow_mut() = urls.iter().map(|u| u.to_string()).collect();
+    });
+    let _shown = show_headless(&ui);
+    let by_label = |label: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label).next()
+    };
+    let strings = ui.global::<Strings>();
+
+    let button = by_label(&format!("{} (2)", strings.get_rw_rl_adopt_all())).expect("adopt-all button");
+    click(&ui, &button);
+    assert!(all.get());
+
+    let urls: Vec<slint::SharedString> = vec!["wss://b.example".into(), "ws://192.168.1.2:7777".into()];
+    ui.invoke_open_clearnet_warnings(ModelRc::new(VecModel::from(urls)), true, true);
+    // once in the panel, once in the warning
+    let twice = |label: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label).count() >= 2
+    };
+    assert!(twice("wss://b.example") && twice("ws://192.168.1.2:7777"));
+    click(&ui, &by_label(&strings.get_rp_cn_ack_many()).expect("ack"));
+    click(&ui, &by_label(&strings.get_rp_cn_confirm_many()).expect("confirm"));
+    assert_eq!(*confirmed.borrow(), vec!["wss://b.example", "ws://192.168.1.2:7777"]);
 }
