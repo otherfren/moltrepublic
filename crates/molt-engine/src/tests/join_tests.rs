@@ -386,3 +386,30 @@ fn join_sealed_validates_the_persisted_nostr_secret() {
         "…and it IS the private half of the anchored third anchor"
     );
 }
+
+/// The join form is gone: every join starts at the link entry, so a
+/// navigate to `join` with no run lands there. A run keeps its screen.
+#[test]
+fn navigating_to_join_without_a_join_lands_on_the_link_entry() {
+    rt().block_on(async {
+        let w = spawn(GroupConfig::demo(), SessionView::default());
+        w.execute(Command::Navigate { screen: Screen::Join }).await.expect("navigate");
+        match w.execute(Command::ReadSession).await.expect("read") {
+            Reply::Session(s) => assert_eq!(s.screen, Screen::Restore),
+            other => panic!("unexpected: {other:?}"),
+        }
+        w.execute(Command::JoinStart {
+            invite: joinable_link(),
+            member: "petra".to_string(),
+            relays: Vec::new(),
+        })
+        .await
+        .expect("join start");
+        w.execute(Command::Navigate { screen: Screen::Choice }).await.expect("away");
+        w.execute(Command::Navigate { screen: Screen::Join }).await.expect("back");
+        match w.execute(Command::ReadSession).await.expect("read") {
+            Reply::Session(s) => assert_eq!(s.screen, Screen::Join),
+            other => panic!("unexpected: {other:?}"),
+        }
+    });
+}

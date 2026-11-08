@@ -321,19 +321,6 @@ export struct BackupRow {
     last-min: int, // machine sort key for the last-backup column (max = never)
 }
 
-// The parsed preview of an invite link on the Join screen. Filled by Rust via
-// the pure `parse-invite` callback (the same molt-engine parser the join run
-// uses, so the preview and the run can never disagree).
-export struct InvitePreview {
-    valid: bool,
-    republic: string,
-    rule: string, // "m-of-n"
-    inviter: string,
-    // the republic's relays, as the invite names them, and how many of them
-    // this node is still missing — the join gate refuses on exactly that
-    missing-relays: int,
-}
-
 // What the Restore wizard's ONE link field is holding. Filled by Rust via
 // the pure `classify-link` callback (`molt_ui::link_kind`), which asks the
 // engine's own two parsers - so the panel and the flow it starts can never
@@ -1591,15 +1578,7 @@ export global Strings {
     in property <string> field-s3-backup;
     in property <string> field-s3-endpoint;
     in property <string> jw-title;
-    in property <string> jw-grp-invite;
-    in property <string> jw-invite-hint;
-    in property <string> jw-ok;
-    in property <string> jw-grp-preview;
-    in property <string> jw-preview-hint;
     in property <string> jw-invited-by;
-    in property <string> jw-join;
-    in property <string> jw-adopt-relays;
-    in property <string> jw-adopt-done;
     in property <string> jw-busy-title;
     in property <string> jw-busy-cancel;
     in property <string> jw-ph1;

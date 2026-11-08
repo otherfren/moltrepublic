@@ -56,7 +56,12 @@ impl State {
             self.ritual_attestations.clear();
             self.session.create = molt_core::CreateState::default();
         }
-        self.session.screen = screen;
+        // a join starts at the link entry; `Join` only shows a run
+        self.session.screen = if screen == Screen::Join && self.session.join.run.step == 0 {
+            Screen::Restore
+        } else {
+            screen
+        };
         self.session.notice = String::new();
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)

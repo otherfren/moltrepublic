@@ -1100,17 +1100,9 @@ lexicon! {
     field_s3_backup: "Automatic S3 backup", "Automatisches S3-Backup";
     field_s3_endpoint: "S3 endpoint", "S3-Endpunkt";
     jw_title: "Join by invite", "Per Einladung beitreten";
-    jw_grp_invite: "Invite link", "Einladungslink";
-    jw_invite_hint: "Paste the one-time molt:// invite another member created for you.", "Füge die einmalige molt://-Einladung ein, die ein Mitglied für dich erstellt hat.";
-    jw_ok: "Invite looks OK.", "Einladung sieht OK aus.";
-    jw_grp_preview: "You are joining …", "Du trittst bei …";
-    jw_preview_hint: "Details are exchanged during the handshake.", "Details werden beim Handshake ausgetauscht.";
     jw_invited_by: "invited by", "eingeladen von";
-    jw_adopt_relays: "Add the republic's relays", "Relays der Republik hinzufügen";
     // onion relays need no exposure decision, so they are confirmed outright;
     // a clearnet one still waits for the acknowledgement in Settings
-    jw_adopt_done: "Added. Clearnet relays still need confirming in Settings.", "Hinzugefügt. Clearnet-Relays müssen noch in den Einstellungen bestätigt werden.";
-    jw_join: "Join republic", "Republik beitreten";
     jw_busy_title: "Joining the republic", "Beitritt zur Republik";
     jw_busy_cancel: "Cancel", "Abbrechen";
     jw_ph1: "Contacting the inviter…", "Kontaktiere den Einlader…";

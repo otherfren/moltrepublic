@@ -6,11 +6,11 @@
 //! with MCP.
 
 use molt_core::Command;
-use slint::{ComponentHandle, Model};
+use slint::ComponentHandle;
 
 use crate::i18n::error_toast;
 use crate::app::Ctx;
-use crate::{AppWindow, InvitePreview, LinkPreview, LinkRelay, RelayPick, SeedRow, SeedWord, Strings};
+use crate::{AppWindow, LinkPreview, LinkRelay, RelayPick, SeedRow, SeedWord, Strings};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     // The join preview: the same molt-core invite parser the engine's join
@@ -32,31 +32,8 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     });
 
     {
-        let weak = ui.as_weak();
-        // the FULL parser, not the preview one: since the neutral link shape
-        // (2026-08-08) the preview data rides inside the handover segment,
-        // and only a JOINABLE link should ever preview as valid
-        ui.on_parse_invite(move |s| match molt_engine::FoundingInvite::parse(&s).map(|i| i.info) {
-            Ok(i) => {
-                // how many of the republic's relays this node does not have.
-                // The invite carries them, so a refused joiner never has to
-                // copy them out of a chat message by hand.
-                let missing = weak
-                    .upgrade()
-                    .map(|ui| invite_relays_missing(&ui, &s))
-                    .unwrap_or(0);
-                InvitePreview {
-                    valid: true,
-                    republic: i.republic.as_str().into(),
-                    rule: format!("{}-of-{}", i.threshold, i.members).into(),
-                    inviter: i.inviter.as_str().into(),
-                    missing_relays: missing,
-                }
-            }
-            Err(_) => InvitePreview::default(),
-        });
         // the Restore wizard's one link field: which of the two flows is
-        // this link for? Pure, like parse_invite, so the panel re-reads it
+        // this link for? Pure, so the panel re-reads it
         // on every keystroke without any state to keep in sync. The link's
         // relays are the relay panel's business (`rw-link-changed`).
         ui.on_classify_link(move |s| {
@@ -424,22 +401,6 @@ pub fn link_kind(link: &str) -> LinkKind {
         };
     }
     LinkKind::Unrecognized
-}
-
-/// The invite's relays this node does not hold yet.
-fn invite_relays_missing(ui: &AppWindow, link: &str) -> i32 {
-    let Ok(inv) = molt_engine::FoundingInvite::parse(link) else {
-        return 0;
-    };
-    let have: Vec<String> = ui.get_relay_rows().iter().map(|r| r.url.to_string()).collect();
-    i32::try_from(
-        inv.handover
-            .relays
-            .iter()
-            .filter(|u| !have.contains(u))
-            .count(),
-    )
-    .unwrap_or(0)
 }
 
 /// The rejoin phrase area's chips: each typed word numbered and toned by the

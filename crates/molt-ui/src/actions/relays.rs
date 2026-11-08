@@ -118,27 +118,6 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
         });
     }
 
-    {
-        let cx = ctx.clone();
-        ui.on_adopt_invite_relays(move |link| {
-            let Ok(inv) = molt_engine::FoundingInvite::parse(&link) else {
-                return;
-            };
-            for url in inv.handover.relays {
-                cx.issue(Command::RelayAdd { url: url.clone() });
-                // an ONION relay needs no exposure decision — confirm it
-                // outright. A clearnet one keeps its acknowledgement: making
-                // the convenient path the less private one is exactly what
-                // this button must not do.
-                if molt_core::relay::relay_kind(&url) == molt_core::relay::RelayKind::Onion {
-                    cx.issue(
-                        Command::RelayConfirm { url, accept_clearnet: false },
-                    );
-                }
-            }
-        });
-    }
-
     // R6 pool-edit modal: the draft is a row table. Seed copies the
     // effective pool, add validates through molt-core's own parser (the
     // same gate the engine applies — and against the DRAFT, so a queued

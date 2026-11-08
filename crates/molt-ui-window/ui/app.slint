@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
@@ -1631,7 +1631,6 @@ export component AppWindow inherits Window {
     // join verbs (engine-backed; the real join runs off the actor and
     // enters the republic on its own once the founder seals)
     callback join-start(string, string);
-    callback adopt-invite-relays(string);
     callback join-cancel();
     // the joiner ratifies the founder's proposed charter (releases its seal
     // signature; the workspace opens only after this)
@@ -1648,7 +1647,6 @@ export component AppWindow inherits Window {
     pure callback paste-clipboard() -> string;
     // parse an invite link for the join preview — the same molt-core parser
     // the engine uses, so preview and run can never disagree
-    pure callback parse-invite(string) -> InvitePreview;
     // the Restore wizard's one link field: is this an invite or a recovery
     // link? The answer decides which FIELD is required and which command the
     // continue button issues (`docs_archive/ui/welcome_rework.md`).
@@ -2025,7 +2023,6 @@ export component AppWindow inherits Window {
     // Rust when the round-trip refuses (retry stays possible) or the join is
     // cancelled - never by a timer.
     in-out property <bool> jw-starting: false;
-    property <InvitePreview> jw-preview: root.parse-invite(root.jw-invite);
     // … and the join lifecycle, mirrored from the engine session:
     // step 0 = invite form, 1 = run view
     in property <int> jw-step: 0;
@@ -4679,8 +4676,7 @@ export component AppWindow inherits Window {
                 // charter & features (the proposal arrived; ratify + phrase
                 // proof) · enter — so both sides' headers read the same
                 property <int> cur: root.jw-sealed ? (Purse.founding ? 4 : 3)
-                    : (root.jw-step == 0 ? 0
-                    : (root.jw-proposed-name != "" ? 2 : 1));
+                    : (root.jw-proposed-name != "" ? 2 : 1);
                 title: Strings.jw-title;
                 steps: Purse.founding || root.jw-feat-wallet ? 5 : 4;
                 step: self.cur;
@@ -4711,25 +4707,19 @@ export component AppWindow inherits Window {
                 // the one advancing action of the current phase: join ·
                 // ratify · confirm backup · enter. A FAILED run beats every
                 // pending phase flag - the only way left is back out.
-                primary-label: root.jw-step == 0 ? Strings.jw-join
-                    : (root.jw-outcome == 2 ? Strings.jw-back-to-start
+                primary-label: root.jw-outcome == 2 ? Strings.jw-back-to-start
                     : (root.jw-sealed ? Strings.enter-republic
                     : (root.jw-awaiting-ratify ? Strings.jw-ratify-confirm
                     : (root.jw-awaiting-backup ? Strings.cw-backup-confirm
-                    : ""))));
-                primary-enabled: root.jw-step == 0
-                    ? (root.jw-invite != "" && root.jw-member != "" && !root.jw-starting)
-                    : (root.jw-outcome != 2 && !root.jw-sealed
-                        && !root.jw-awaiting-ratify && root.jw-awaiting-backup
-                        ? root.seed-matches(root.jw-seed-check, root.jw-seed)
-                        : true);
+                    : "")));
+                primary-enabled: root.jw-outcome != 2 && !root.jw-sealed
+                    && !root.jw-awaiting-ratify && root.jw-awaiting-backup
+                    ? root.seed-matches(root.jw-seed-check, root.jw-seed)
+                    : true;
                 primary-icon: @image-url("assets/join.svg");
                 primary-icon-set: root.jw-sealed;
                 primary => {
-                    if (root.jw-step == 0) {
-                        root.jw-starting = true;
-                        root.join-start(root.jw-invite, root.jw-member);
-                    } else if (root.jw-outcome == 2) {
+                    if (root.jw-outcome == 2) {
                         root.join-cancel();
                     } else if (root.jw-sealed) {
                         root.join-finish();
@@ -4739,89 +4729,6 @@ export component AppWindow inherits Window {
                         root.confirm-seed-backup(root.jw-seed-check);
                         root.jw-seed-check = "";
                     }
-                }
-
-                if root.jw-step == 0: VerticalLayout {
-                    spacing: 12px;
-
-                    // the invite link feeds everything below
-                    RestoreWay {
-                        title: Strings.jw-grp-invite;
-                        hint: Strings.jw-invite-hint;
-                        icon: @image-url("assets/join.svg");
-                        HorizontalLayout {
-                            spacing: 8px;
-                            AppField {
-                                text <=> root.jw-invite;
-                                placeholder: "molt://invite/…";
-                                horizontal-stretch: 1;
-                            }
-                            AppButton {
-                                height: 38px * Theme.ui-scale;
-                                pad: 10px;
-                                icon: @image-url("assets/paste.svg");
-                                icon-set: true;
-                                label: Strings.rw-paste;
-                                clicked => {
-                                    root.jw-invite = root.paste-clipboard();
-                                }
-                            }
-                        }
-                        // any non-empty invite is accepted for now (the real
-                        // check comes with the network implementation)
-                        if root.jw-invite != "": DotLabel {
-                            tone: Theme.good;
-                            label: Strings.jw-ok;
-                            label-color: Theme.good;
-                            label-size: Theme.fs-cap;
-                        }
-                    }
-
-                    // what you are joining — the parsed republic details when
-                    // the invite carries them; dimmed until something is pasted
-                    WayBranch {
-                        armed: root.jw-invite != "";
-                        last: true;
-                        RestoreWay {
-                            horizontal-stretch: 1;
-                            title: root.jw-preview.valid ? root.jw-preview.republic : Strings.jw-grp-preview;
-                            hint: root.jw-preview.valid
-                                ? "\{root.jw-preview.rule} · \{Strings.jw-invited-by} \{root.jw-preview.inviter}"
-                                : Strings.jw-preview-hint;
-                            icon: @image-url("assets/republic.svg");
-                            HorizontalLayout {
-                                spacing: 12px;
-                                AppField {
-                                    horizontal-stretch: 1;
-                                    text <=> root.jw-member;
-                                    placeholder: Strings.ph-member;
-                                    // Enter confirms, exactly like the button
-                                    // beside it — and behind the SAME gate, so
-                                    // a keystroke can never start a join the
-                                    // button would have refused
-                                    accepted => {
-                                        if (root.jw-invite != "" && root.jw-member != "" && !root.jw-starting) {
-                                            root.jw-starting = true;
-                                            root.join-start(root.jw-invite, root.jw-member);
-                                        }
-                                    }
-                                }
-                                // the invite already NAMES the republic's
-                                // relays, so a joiner refused for not having
-                                // them should not have to copy them out of a
-                                // chat message by hand
-                                if root.jw-preview.missing-relays > 0: AppButton {
-                                    height: 38px * Theme.ui-scale;
-                                    label: "\{Strings.jw-adopt-relays} (\{root.jw-preview.missing-relays})";
-                                    clicked => {
-                                        root.adopt-invite-relays(root.jw-invite);
-                                        root.show-toast(Strings.jw-adopt-done);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
                 }
 
                 // step 2: the real join run. Stack principle: the phase's
