@@ -2133,8 +2133,11 @@ export component FeatureTable inherits Rectangle {
                 Text { text: Strings.feat-d-quests; color: Theme.dim; font-size: Theme.fs-cap; vertical-alignment: center; }
             }
             Row {
-                if root.vault-ok: AppCheck { label: Strings.feat-vault; checked <=> root.vault; enabled: root.editable; }
-                if !root.vault-ok: AppCheck { label: Strings.feat-vault; checked: false; enabled: false; }
+                // a grid cell must not be an `if`: it loses its column
+                HorizontalLayout {
+                    if root.vault-ok: AppCheck { label: Strings.feat-vault; checked <=> root.vault; enabled: root.editable; }
+                    if !root.vault-ok: AppCheck { label: Strings.feat-vault; checked: false; enabled: false; }
+                }
                 DotLabel {
                     tone: root.vault-ok ? Theme.warn : Theme.faint;
                     label: root.vault-ok ? Strings.feat-st-wip : Strings.feat-st-off;
@@ -2148,8 +2151,11 @@ export component FeatureTable inherits Rectangle {
                 }
             }
             Row {
-                if root.wallet-ok: AppCheck { label: Strings.feat-wallet; checked <=> root.wallet; enabled: root.editable; }
-                if !root.wallet-ok: AppCheck { label: Strings.feat-wallet; checked: false; enabled: false; }
+                // a grid cell must not be an `if`: it loses its column
+                HorizontalLayout {
+                    if root.wallet-ok: AppCheck { label: Strings.feat-wallet; checked <=> root.wallet; enabled: root.editable; }
+                    if !root.wallet-ok: AppCheck { label: Strings.feat-wallet; checked: false; enabled: false; }
+                }
                 DotLabel {
                     tone: root.wallet-ok ? Theme.warn : Theme.faint;
                     label: root.wallet-ok ? Strings.feat-st-wip : Strings.feat-st-off;

@@ -306,8 +306,28 @@ fn the_feature_table_states_each_rows_status() {
     }
     drop(_shown);
     // 1-of-3: neither the vault nor the purse is possible
-    let (ui, _shown) = charter_step(1, 3);
-    assert_eq!(count(&ui, &ui.global::<Strings>().get_feat_st_off()), 2);
+    for (m, n) in [(2, 4), (1, 3)] {
+        let (ui, _shown) = charter_step(m, n);
+        let s = ui.global::<Strings>();
+        if m == 1 {
+            assert_eq!(count(&ui, &s.get_feat_st_off()), 2);
+        }
+        // the conditional vault/wallet rows keep their columns
+        let xs = |t: &str| -> Vec<f32> {
+            Handle::find_by_accessible_label(&ui, t).map(|e| e.absolute_position().x).collect()
+        };
+        let col = |label: slint::SharedString| checks_in(&window_root(&ui), &label)[0].absolute_position().x;
+        let x0 = col(s.get_feat_memory());
+        for name in [s.get_feat_vault(), s.get_feat_wallet()] {
+            assert!((col(name.clone()) - x0).abs() < 1.0, "{m}-of-{n}: {name} box in column 1");
+        }
+        let status: Vec<f32> = [s.get_feat_st_active(), s.get_feat_st_wip(), s.get_feat_st_off()]
+            .iter()
+            .flat_map(|t| xs(t))
+            .collect();
+        assert_eq!(status.len(), 6, "{m}-of-{n}: one status per row");
+        assert!(status.iter().all(|x| (x - status[0]).abs() < 1.0), "{m}-of-{n}: status in one column: {status:?}");
+    }
 }
 
 /// S4: the Organization modal votes the Kanban in.
