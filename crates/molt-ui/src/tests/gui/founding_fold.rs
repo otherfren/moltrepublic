@@ -211,3 +211,28 @@ fn the_joiner_folds_the_ratified_charter_and_the_join_facts() {
         "newest above oldest"
     );
 }
+
+/// The folded pile reads as history: a title heads it, above its first
+/// fold, for the founder and the joiner alike.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_history_title_heads_the_folded_pile() {
+    let (ui, _shown) = founder_lobby(3, 3);
+    let title = ui.global::<Strings>().get_wiz_history_found().to_string();
+    let head = Handle::find_by_accessible_label(&ui, &title).next().expect("the founding history title");
+    let top = folds(&ui).first().expect("a fold").absolute_position().y;
+    assert!(head.absolute_position().y < top, "the title sits above the pile");
+    drop(_shown);
+
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1200, 900));
+    ui.set_screen(AppScreen::Join);
+    ui.set_jw_step(1);
+    ui.set_jw_proposed_name("aurora".into());
+    ui.set_jw_awaiting_ratify(true);
+    apply_strings(&ui, 0);
+    let _shown = show_headless(&ui);
+    let title = ui.global::<Strings>().get_wiz_history_join().to_string();
+    let head = Handle::find_by_accessible_label(&ui, &title).next().expect("the join history title");
+    assert!(head.absolute_position().y < folds(&ui)[0].absolute_position().y);
+}

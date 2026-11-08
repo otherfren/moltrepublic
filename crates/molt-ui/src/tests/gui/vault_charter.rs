@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The vault (vault spec §3, D11): the wizard box is off by default and
-//! obeys `2 <= m <= n-2`, the charter echo shows the signed selection,
+//! The vault (vault spec §3, D11): the wizard box is on by default where
+//! `2 <= m <= n-2` allows it, disabled elsewhere, the charter echo shows the signed selection,
 //! and the Organization modal offers it only where a vote can enable it.
 
 use super::*;
@@ -63,7 +63,7 @@ fn charter_step(m: i32, n: i32) -> (AppWindow, Shown) {
 }
 
 fn wizard_vault_box(ui: &AppWindow) -> Handle {
-    let label = format!("{}{}", ui.global::<Strings>().get_feat_vault(), ui.global::<Strings>().get_feat_wip());
+    let label = ui.global::<Strings>().get_feat_vault().to_string();
     let mut found = checks_in(&window_root(ui), &label);
     assert_eq!(found.len(), 1, "one vault box on the charter step");
     found.remove(0)
@@ -77,8 +77,11 @@ fn the_vault_box_is_disabled_outside_2_to_n_minus_2() {
         let s = ui.global::<Strings>();
         let low = s.get_feat_vault_low().to_string();
         let high = s.get_feat_vault_high().to_string();
+        let before = crate::actions::ritual::charter_features(&ui).contains(&"vault".to_string());
+        assert_eq!(before, allowed, "{m}-of-{n}: ticked by default iff allowed");
         click(&ui, &wizard_vault_box(&ui));
-        assert_eq!(ui.get_cw_feat_vault(), allowed, "{m}-of-{n}: a click ticks the box iff allowed");
+        let after = crate::actions::ritual::charter_features(&ui).contains(&"vault".to_string());
+        assert!(!after, "{m}-of-{n}: a click unticks an allowed box, a disabled one stays off");
         let shown = |t: &str| Handle::find_by_accessible_label(&ui, t).next().is_some();
         assert_eq!(shown(&low), !allowed && m < 2, "{m}-of-{n}: the low line");
         assert_eq!(shown(&high), !allowed && m >= 2, "{m}-of-{n}: the high line");
@@ -100,25 +103,24 @@ fn the_vault_reason_sits_beside_the_box() {
     assert!(reason.absolute_position().x > check.absolute_position().x, "right of the box");
 }
 
-/// E1: every founding prepares the vault; ticking it is opt-in.
+/// Where the bounds allow it the vault is ticked; elsewhere it never
+/// reaches the charter, whatever the form holds.
 #[test]
-fn the_vault_box_is_off_by_default() {
+fn the_vault_box_is_on_by_default_where_allowed() {
     i_slint_backend_testing::init_no_event_loop();
     let (ui, _shown) = charter_step(2, 4);
-    assert!(!ui.get_cw_feat_vault(), "unticked");
-    assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string(), "wallet".to_string()]);
+    assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string(), "vault".to_string()]);
+    drop(_shown);
+    let (ui, _shown) = charter_step(2, 3);
+    assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string()]);
 }
 
 #[test]
-fn a_ticked_vault_reaches_create_propose() {
+fn an_unticked_vault_leaves_create_propose() {
     i_slint_backend_testing::init_no_event_loop();
     let (ui, _shown) = charter_step(2, 4);
-    assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string(), "wallet".to_string()]);
     click(&ui, &wizard_vault_box(&ui));
-    assert_eq!(
-        crate::actions::ritual::charter_features(&ui),
-        vec!["memory".to_string(), "vault".to_string(), "wallet".to_string()]
-    );
+    assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string()]);
 }
 
 #[test]
@@ -146,9 +148,8 @@ fn the_charter_echo_shows_the_vault() {
     };
     apply_session(&ui, &sv, true, &chat_ui);
     assert!(ui.get_jw_feat_vault(), "the joiner echo reads the proposed list");
-    // the local box stays unticked: the founder echo must read the
-    // proposed list, not the form
-    assert!(!ui.get_cw_feat_vault());
+    // the echo reads the proposed list, not the form
+    ui.set_cw_feat_vault(false);
     let _shown = show_headless(&ui);
     ui.set_cw_proposed(true);
     settle();
@@ -157,7 +158,7 @@ fn the_charter_echo_shows_the_vault() {
     let view = Handle::find_by_element_type_name(&ui, "CharterView")
         .next()
         .expect("the charter fold renders its CharterView");
-    let label = format!("{}{}", ui.global::<Strings>().get_feat_vault(), ui.global::<Strings>().get_feat_wip());
+    let label = ui.global::<Strings>().get_feat_vault().to_string();
     let vault = checks_in(&view, &label);
     assert_eq!(vault.len(), 1, "the echo has one vault row");
     assert!(has_text(&vault[0], "✓"), "the founder echo shows the proposed vault");
@@ -272,30 +273,41 @@ fn an_org_proposal_in_a_vault_republic_carries_no_vault() {
 fn a_ticked_kanban_reaches_create_propose() {
     i_slint_backend_testing::init_no_event_loop();
     let (ui, _shown) = charter_step(2, 4);
-    let label = format!("{}{}", ui.global::<Strings>().get_feat_quests(), ui.global::<Strings>().get_feat_wip());
+    let label = ui.global::<Strings>().get_feat_quests().to_string();
     let mut found = checks_in(&window_root(&ui), &label);
     assert_eq!(found.len(), 1, "one kanban box on the charter step");
     assert!(!ui.get_cw_feat_quests(), "off by default");
     click(&ui, &found.remove(0));
     assert_eq!(
         crate::actions::ritual::charter_features(&ui),
-        vec!["memory".to_string(), "quests".to_string(), "wallet".to_string()]
+        vec!["memory".to_string(), "quests".to_string(), "vault".to_string()]
     );
 }
 
-/// The unfinished features say so wherever they are chosen.
+/// The charter step's features are a table: chat and file sharing locked
+/// on, every row with a status - active for the finished ones, in
+/// progress for the unfinished, inactive where the bounds rule it out.
 #[test]
-fn the_unfinished_features_say_work_in_progress() {
+fn the_feature_table_states_each_rows_status() {
     i_slint_backend_testing::init_no_event_loop();
+    let count = |ui: &AppWindow, t: &str| Handle::find_by_accessible_label(ui, t).count();
     let (ui, _shown) = charter_step(2, 4);
     let s = ui.global::<Strings>();
-    assert_eq!(s.get_feat_wip(), " (Work in Progress)");
-    for label in [s.get_feat_quests(), s.get_feat_vault(), s.get_feat_wallet()] {
-        let found = checks_in(&window_root(&ui), &format!("{label}{}", s.get_feat_wip()));
-        assert_eq!(found.len(), 1, "{label} carries the suffix on the charter step");
+    for locked in [s.get_feat_chat(), s.get_feat_files()] {
+        let row = checks_in(&window_root(&ui), &locked);
+        assert_eq!(row.len(), 1, "{locked}: one row");
+        assert!(has_text(&row[0], "✓"), "{locked}: always on");
     }
-    let memory = checks_in(&window_root(&ui), &format!("{}{}", s.get_feat_memory(), s.get_feat_wip()));
-    assert!(memory.is_empty(), "a finished feature has no suffix");
+    assert_eq!(count(&ui, &s.get_feat_st_active()), 3, "chat, file sharing, shared memory");
+    assert_eq!(count(&ui, &s.get_feat_st_wip()), 3, "kanban, vault, wallet");
+    assert_eq!(count(&ui, &s.get_feat_st_off()), 0);
+    for name in [s.get_feat_quests(), s.get_feat_vault(), s.get_feat_wallet()] {
+        assert!(checks_in(&window_root(&ui), &format!("{name}{}", s.get_feat_wip())).is_empty(), "{name}: no suffix");
+    }
+    drop(_shown);
+    // 1-of-3: neither the vault nor the purse is possible
+    let (ui, _shown) = charter_step(1, 3);
+    assert_eq!(count(&ui, &ui.global::<Strings>().get_feat_st_off()), 2);
 }
 
 /// S4: the Organization modal votes the Kanban in.

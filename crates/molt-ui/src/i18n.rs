@@ -827,6 +827,8 @@ lexicon! {
     choice_restore_sub: "Join with an invite, or come back to a seat you hold", "Mit einer Einladung beitreten, oder auf deinen Sitz zurück";
     nav_back: "Back", "Zurück";
     wiz_step_setup: "Setup", "Einrichtung";
+    wiz_history_found: "Founding History", "Gründungsverlauf";
+    wiz_history_join: "Join History", "Beitrittsverlauf";
     wiz_step_invites: "Invites", "Einladungen";
     wiz_step_charter: "Charter & Features", "Charta & Features";
     wiz_step_enter: "Enter", "Eintreten";
@@ -927,6 +929,18 @@ lexicon! {
     cw_propose: "Propose & seal", "Vorschlagen & versiegeln";
     cw_features: "Features", "Features";
     feat_chat: "Chat", "Chat";
+    feat_files: "File Sharing", "Dateien teilen";
+    feat_col_name: "Feature", "Feature";
+    feat_col_status: "Status", "Status";
+    feat_col_about: "Description", "Beschreibung";
+    feat_st_active: "active", "aktiv";
+    feat_st_wip: "in progress", "in Arbeit";
+    feat_st_off: "inactive", "inaktiv";
+    feat_d_always: "always on", "immer an";
+    feat_d_memory: "shared wiki", "gemeinsames Wiki";
+    feat_d_quests: "task board with deadlines", "Aufgaben-Board mit Fristen";
+    feat_d_vault: "majority escrow with an elected reader", "Mehrheits-Treuhand mit gewähltem Leser";
+    feat_d_wallet: "shared Monero purse, receive and watch only", "gemeinsame Monero-Kasse, nur empfangen und beobachten";
     feat_memory: "Shared Memory", "Shared Memory";
     feat_quests: "Kanban", "Kanban";
     feat_vault: "Vault", "Vault";
@@ -1142,6 +1156,7 @@ lexicon! {
     rw_rl_unconfirmed: "not confirmed", "nicht bestätigt";
     rw_rl_clearnet_off: "clearnet relays off", "Clearnet-Relays aus";
     rw_rl_adopt: "Add to your relays", "Zu deinen Relays hinzufügen";
+    rw_rl_none: "no relay picked", "kein Relay gewählt";
     rw_link_name_ph: "Your name…", "Dein Name…";
     rw_via_s3: "Online-restore via S3", "Online-Restore via S3";
     rw_s3_hint: "Pulls the encrypted backup from the S3 bucket in the storage settings; the chain is verified before anything materializes.", "Holt das verschlüsselte Backup aus dem S3-Bucket der Speicher-Einstellungen; die Chain wird vor dem Anlegen verifiziert.";

@@ -914,7 +914,7 @@ fn the_link_relay_panel_picks_among_the_links_own_relays() {
         rows(&st),
         vec![(onion.clone(), true, 0, 0), (clear.clone(), false, 3, 1), (gone.clone(), false, 1, 1)]
     );
-    assert!(st.link_pick("molt://a").is_empty(), "nothing deselected = no explicit pick");
+    assert_eq!(st.link_pick("molt://a"), Some(vec![]), "nothing deselected = no explicit pick");
 
     // clearnet goes on: the clearnet relay becomes usable AND picked
     st.set_link_pool(
@@ -923,12 +923,21 @@ fn the_link_relay_panel_picks_among_the_links_own_relays() {
     );
     st.toggle_link_relay(&onion);
     assert_eq!(rows(&st)[1], (clear.clone(), true, 0, 1));
-    assert_eq!(st.link_pick("molt://a"), vec![clear.clone()]);
+    assert_eq!(st.link_pick("molt://a"), Some(vec![clear.clone()]));
     // a blocked relay cannot be picked by a toggle
     st.toggle_link_relay(&gone);
-    assert_eq!(st.link_pick("molt://a"), vec![clear.clone()]);
+    assert_eq!(st.link_pick("molt://a"), Some(vec![clear.clone()]));
+    // the remaining pick goes dark: nothing to send, never "dial all"
+    st.set_link_pool(
+        vec![RelayEntry { url: onion.clone(), confirmed: true }, RelayEntry { url: clear.clone(), confirmed: true }],
+        false,
+    );
+    assert_eq!(st.link_pick("molt://a"), None);
+    // a workspace switch keeps the restore screen's panel
+    st.enter_workspace("w");
+    assert_eq!(st.link_pick("molt://a"), None);
     // another link (the join wizard's own field) never inherits this pick
-    assert!(st.link_pick("molt://b").is_empty());
+    assert_eq!(st.link_pick("molt://b"), Some(vec![]));
     st.set_link("molt://b", vec![onion.clone()]);
     assert_eq!(rows(&st), vec![(onion, true, 0, 0)]);
 }

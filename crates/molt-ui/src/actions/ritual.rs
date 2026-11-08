@@ -10,7 +10,7 @@ use slint::{ComponentHandle, Model};
 
 use crate::i18n::error_toast;
 use crate::app::Ctx;
-use crate::{AppWindow, InvitePreview, LinkPreview, LinkRelay, RelayPick, SeedRow, SeedWord};
+use crate::{AppWindow, InvitePreview, LinkPreview, LinkRelay, RelayPick, SeedRow, SeedWord, Strings};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     // The join preview: the same molt-core invite parser the engine's join
@@ -113,7 +113,11 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             cx.rt.spawn(async move {
                 let mut res = Ok(());
                 if !in_pool {
-                    res = w.execute(Command::RelayAdd { url: url.clone() }).await.map(|_| ());
+                    // the mirrored pool can lag: a relay already there is adopted
+                    res = match w.execute(Command::RelayAdd { url: url.clone() }).await {
+                        Err(e) if e.to_string().contains("already in the relay pool") => Ok(()),
+                        r => r.map(|_| ()),
+                    };
                 }
                 if res.is_ok()
                     && molt_core::relay::relay_kind(&url) == molt_core::relay::RelayKind::Onion
@@ -262,7 +266,13 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             // and the form is gone.
             let w = cx.wallet.clone();
             let weak = cx.weak.clone();
-            let relays = cx.chat_ui.lock().map(|st| st.link_pick(invite.trim())).unwrap_or_default();
+            let Some(relays) = cx.chat_ui.lock().ok().and_then(|st| st.link_pick(invite.trim())) else {
+                if let Some(ui) = cx.weak.upgrade() {
+                    ui.set_jw_starting(false);
+                    ui.invoke_show_toast_error(ui.global::<Strings>().get_rw_rl_none());
+                }
+                return;
+            };
             let cmd = Command::JoinStart {
                 invite: invite.to_string(),
                 member: member.to_string(),
@@ -310,7 +320,12 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {
         let cx = ctx.clone();
         ui.on_recover_start(move |link, phrase| {
-            let relays = cx.chat_ui.lock().map(|st| st.link_pick(link.trim())).unwrap_or_default();
+            let Some(relays) = cx.chat_ui.lock().ok().and_then(|st| st.link_pick(link.trim())) else {
+                if let Some(ui) = cx.weak.upgrade() {
+                    ui.invoke_show_toast_error(ui.global::<Strings>().get_rw_rl_none());
+                }
+                return;
+            };
             cx.issue(
                 Command::RecoverStart {
                     link: link.to_string(),
@@ -458,7 +473,7 @@ pub(crate) fn charter_features(ui: &AppWindow) -> Vec<String> {
     [
         (ui.get_cw_feat_memory(), "memory"),
         (ui.get_cw_feat_quests(), "quests"),
-        (ui.get_cw_feat_vault(), "vault"),
+        (ui.get_cw_feat_vault() && ui.get_cw_vault_allowed(), "vault"),
         (wallet, "wallet"),
     ]
         .into_iter()

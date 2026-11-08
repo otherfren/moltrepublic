@@ -192,6 +192,15 @@ surface lands (the established stepwise-UI modus; never fake, always badged).
   prepared republic within `2 <= m <= n-2` enables it later by a
   `set_features` vote (the modal offers the box only then and otherwise
   names why: `needs a newer republic` / `needs 2 <= m <= n-2`).*
+  *Amended 2026-11-08 (user decision): the wizard's features are a TABLE
+  (checkbox + name, status, description) shared by the founder's form and
+  the read-only charter echo (founder and joiner): status `active` (chat,
+  file sharing, shared memory), `in progress` (kanban, vault, wallet) or
+  `inactive` where the m/n bounds rule a row out, the description column
+  then saying why. File Sharing is shown locked on under Chat (the `files`
+  surface is core). Defaults: memory ✓, kanban ☐, vault ✓ where
+  `2 <= m <= n-2` holds, wallet ☐. The folded steps below sit under a
+  `Founding History` / `Join History` title.*
 - **Ratification card:** between agenda and the confirm/decline buttons, the
   five rows with their on/off state — the member sees the whole selection it
   signs, not only the enabled part. Read-only.

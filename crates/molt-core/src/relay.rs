@@ -725,6 +725,10 @@ pub fn pick_dial_relays(
     if pick.is_empty() {
         return Ok(dialable.cloned().collect());
     }
+    let pick: Vec<String> = pick
+        .iter()
+        .map(|p| normalize_relay_url(p).unwrap_or_else(|_| p.clone()))
+        .collect();
     if let Some(bad) = pick.iter().find(|p| !dialable.clone().any(|u| u == *p)) {
         return Err(bad.clone());
     }
@@ -754,6 +758,10 @@ mod tests {
         assert_eq!(pick_dial_relays(&verdicts, &s(&["wss://c"])), Ok(s(&["wss://c"])));
         assert_eq!(pick_dial_relays(&verdicts, &s(&["wss://b"])), Err("wss://b".into()));
         assert_eq!(pick_dial_relays(&verdicts, &s(&["wss://x"])), Err("wss://x".into()));
+        // an MCP-typed spelling of the same relay is the same relay
+        let canon = normalize_relay_url("wss://a.example").expect("valid");
+        let verdicts = [v(&canon, None)];
+        assert_eq!(pick_dial_relays(&verdicts, &s(&["WSS://A.Example"])), Ok(vec![canon]));
     }
 
     fn entry(url: &str, confirmed: bool) -> RelayEntry {

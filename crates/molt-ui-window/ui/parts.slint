@@ -2076,6 +2076,106 @@ export component SeedConfirmStep inherits VerticalLayout {
     }
 }
 
+// The charter's feature selection as a table: checkbox + name, status
+// (active · in progress · inactive) and a description, or why a row is
+// inactive. `editable` is the founder's form; the echo is read-only.
+export component FeatureTable inherits Rectangle {
+    in property <bool> editable: false;
+    in-out property <bool> memory;
+    in-out property <bool> quests;
+    in-out property <bool> vault;
+    in-out property <bool> wallet;
+    in property <bool> vault-ok: true;
+    in property <bool> wallet-ok: true;
+    // m < 2: the shared reason both bounded rows give
+    in property <bool> low: false;
+    background: Theme.panel-2;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    VerticalLayout {
+        padding: 14px;
+        padding-left: 18px;
+        padding-right: 22px;
+        spacing: 10px;
+        Text {
+            text: Strings.cw-features;
+            color: Theme.text;
+            font-size: Theme.fs-h2;
+            font-weight: 700;
+        }
+        GridLayout {
+            spacing-horizontal: 18px;
+            spacing-vertical: 4px;
+            Row {
+                Text { text: Strings.feat-col-name; color: Theme.faint; font-size: Theme.fs-cap; }
+                Text { text: Strings.feat-col-status; color: Theme.faint; font-size: Theme.fs-cap; }
+                Text { text: Strings.feat-col-about; color: Theme.faint; font-size: Theme.fs-cap; }
+            }
+            Row {
+                AppCheck { label: Strings.feat-chat; checked: true; enabled: false; }
+                DotLabel { tone: Theme.good; label: Strings.feat-st-active; label-size: Theme.fs-cap; }
+                Text { text: Strings.feat-d-always; color: Theme.dim; font-size: Theme.fs-cap; vertical-alignment: center; }
+            }
+            Row {
+                AppCheck { label: Strings.feat-files; checked: true; enabled: false; }
+                DotLabel { tone: Theme.good; label: Strings.feat-st-active; label-size: Theme.fs-cap; }
+                Text { text: Strings.feat-d-always; color: Theme.dim; font-size: Theme.fs-cap; vertical-alignment: center; }
+            }
+            Row {
+                AppCheck { label: Strings.feat-memory; checked <=> root.memory; enabled: root.editable; }
+                DotLabel { tone: Theme.good; label: Strings.feat-st-active; label-size: Theme.fs-cap; }
+                Text { text: Strings.feat-d-memory; color: Theme.dim; font-size: Theme.fs-cap; vertical-alignment: center; }
+            }
+            Row {
+                AppCheck { label: Strings.feat-quests; checked <=> root.quests; enabled: root.editable; }
+                DotLabel { tone: Theme.warn; label: Strings.feat-st-wip; label-size: Theme.fs-cap; }
+                Text { text: Strings.feat-d-quests; color: Theme.dim; font-size: Theme.fs-cap; vertical-alignment: center; }
+            }
+            Row {
+                if root.vault-ok: AppCheck { label: Strings.feat-vault; checked <=> root.vault; enabled: root.editable; }
+                if !root.vault-ok: AppCheck { label: Strings.feat-vault; checked: false; enabled: false; }
+                DotLabel {
+                    tone: root.vault-ok ? Theme.warn : Theme.faint;
+                    label: root.vault-ok ? Strings.feat-st-wip : Strings.feat-st-off;
+                    label-size: Theme.fs-cap;
+                }
+                Text {
+                    text: root.vault-ok ? Strings.feat-d-vault : (root.low ? Strings.feat-vault-low : Strings.feat-vault-high);
+                    color: root.vault-ok ? Theme.dim : Theme.faint;
+                    font-size: Theme.fs-cap;
+                    vertical-alignment: center;
+                }
+            }
+            Row {
+                if root.wallet-ok: AppCheck { label: Strings.feat-wallet; checked <=> root.wallet; enabled: root.editable; }
+                if !root.wallet-ok: AppCheck { label: Strings.feat-wallet; checked: false; enabled: false; }
+                DotLabel {
+                    tone: root.wallet-ok ? Theme.warn : Theme.faint;
+                    label: root.wallet-ok ? Strings.feat-st-wip : Strings.feat-st-off;
+                    label-size: Theme.fs-cap;
+                }
+                Text {
+                    text: root.wallet-ok ? Strings.feat-d-wallet : (root.low ? Strings.wl-bounds-low : Strings.wl-bounds-high);
+                    color: root.wallet-ok ? Theme.dim : Theme.faint;
+                    font-size: Theme.fs-cap;
+                    vertical-alignment: center;
+                }
+            }
+        }
+        // what ticking the purse consents to (design §3.3)
+        if root.wallet-ok && root.wallet: VerticalLayout {
+            spacing: 2px;
+            for line in [Strings.wl-note-sees, Strings.wl-note-lost, Strings.wl-note-spend]: Text {
+                text: line;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+            }
+        }
+    }
+}
+
+
 // The proposed charter + feature selection, read-only — exactly what the
 // ratify signature covers (sign-what-you-see). The joiner's ratify step
 // (accent-framed: a decision is pending, taken in the wizard footer) and
@@ -2088,6 +2188,9 @@ export component CharterView inherits Rectangle {
     in property <bool> feat-quests;
     in property <bool> feat-vault;
     in property <bool> feat-wallet;
+    in property <bool> vault-ok: true;
+    in property <bool> wallet-ok: true;
+    in property <bool> low: false;
     in property <bool> accent: false;
     border-radius: Theme.win95 ? 0px : 8px;
     background: Theme.panel;
@@ -2145,46 +2248,15 @@ export component CharterView inherits Rectangle {
         // the feature selection as it will be (or was) signed - read-only
         HorizontalLayout {
             alignment: start;
-            Rectangle {
-                background: Theme.panel-2;
-                border-radius: Theme.win95 ? 0px : 8px;
-                border-width: Theme.border-w;
-                border-color: Theme.line;
-                VerticalLayout {
-                    padding: 14px;
-                    padding-left: 18px;
-                    padding-right: 22px;
-                    spacing: 10px;
-                    Text {
-                        text: Strings.cw-features;
-                        color: Theme.text;
-                        font-size: Theme.fs-h2;
-                        font-weight: 700;
-                    }
-                    GridLayout {
-                        spacing: 10px;
-                        Row {
-                            AppCheck { width: 250px; label: Strings.feat-chat; checked: true; enabled: false; }
-                            AppCheck { width: 250px; label: Strings.feat-memory; checked: root.feat-memory; enabled: false; }
-                        }
-                        Row {
-                            AppCheck { width: 250px; label: Strings.feat-quests + Strings.feat-wip; checked: root.feat-quests; enabled: false; }
-                            AppCheck { width: 250px; label: Strings.feat-vault + Strings.feat-wip; checked: root.feat-vault; enabled: false; }
-                        }
-                        Row {
-                            AppCheck { width: 250px; label: Strings.feat-wallet + Strings.feat-wip; checked: root.feat-wallet; enabled: false; }
-                        }
-                    }
-                    // ratifying the purse is consenting to these (design §3.3)
-                    if root.feat-wallet: VerticalLayout {
-                        spacing: 2px;
-                        for line in [Strings.wl-note-sees, Strings.wl-note-lost, Strings.wl-note-spend]: Text {
-                            text: line;
-                            color: Theme.dim;
-                            font-size: Theme.fs-cap;
-                        }
-                    }
-                }
+            FeatureTable {
+                memory: root.feat-memory;
+                quests: root.feat-quests;
+                vault: root.feat-vault;
+                wallet: root.feat-wallet;
+                // a signed selection is a fact, whatever the bounds say
+                vault-ok: root.vault-ok || root.feat-vault;
+                wallet-ok: root.wallet-ok || root.feat-wallet;
+                low: root.low;
             }
         }
     }

@@ -414,11 +414,17 @@ impl ChatUiState {
     /// proposals. Same id → no-op.
     pub(crate) fn enter_workspace(&mut self, active: &str) {
         if self.workspace != active {
+            // the link panel belongs to the restore screen, not the workspace
             *self = ChatUiState {
                 workspace: active.to_string(),
                 // the epoch MOVES with the switch: a push read against the
                 // previous workspace's log must not land on this one
                 generation: self.generation + 1,
+                link: std::mem::take(&mut self.link),
+                link_relays: std::mem::take(&mut self.link_relays),
+                link_relays_off: std::mem::take(&mut self.link_relays_off),
+                link_pool: std::mem::take(&mut self.link_pool),
+                link_clearnet: self.link_clearnet,
                 ..ChatUiState::default()
             };
         }
@@ -545,12 +551,15 @@ impl ChatUiState {
 
     /// The pick to send with a join/recovery from `link`. Empty = no
     /// explicit choice: nothing deselected, or a link other than the one
-    /// the panel describes.
-    pub(crate) fn link_pick(&self, link: &str) -> Vec<String> {
+    /// the panel describes. `None` = deselections left nothing to dial;
+    /// sending empty then would dial what the user turned off.
+    pub(crate) fn link_pick(&self, link: &str) -> Option<Vec<String>> {
         if link != self.link || self.link_relays_off.is_empty() {
-            return Vec::new();
+            return Some(Vec::new());
         }
-        self.link_rows().into_iter().filter(|r| r.picked).map(|r| r.url).collect()
+        let pick: Vec<String> =
+            self.link_rows().into_iter().filter(|r| r.picked).map(|r| r.url).collect();
+        (!pick.is_empty()).then_some(pick)
     }
 
     /// The picker's rows: every dialable relay, with whether it is chosen.

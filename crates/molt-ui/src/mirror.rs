@@ -765,7 +765,7 @@ pub(crate) fn apply_session(
             ui.set_cw_relay_picked(picked_count(&rows));
             sync_rows(&ui.get_cw_relay_picks(), rows, |m| ui.set_cw_relay_picks(m));
             st.set_link_pool(sv.settings.relays.clone(), sv.clearnet_session);
-            crate::actions::ritual::push_link_rows(&ui, &st);
+            crate::actions::ritual::push_link_rows(ui, &st);
         }
     }
     let session_locked = molt_core::relay::pool_gap(&sv.settings.relays, sv.clearnet_session)
@@ -995,6 +995,8 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_jw_outcome(i32::from(sv.join.run.outcome));
     ui.set_jw_republic(sv.join.republic.clone().into());
     ui.set_jw_rule(format!("{}-of-{}", sv.join.rule_m, sv.join.rule_n).into());
+    ui.set_jw_rule_m(i32::from(sv.join.rule_m));
+    ui.set_jw_rule_n(i32::from(sv.join.rule_n));
     ui.set_jw_inviter(sv.join.inviter.clone().into());
     // the joiner's own recovery phrase, generated + shown once (like the
     // founder's on the create screen)

@@ -337,15 +337,30 @@ fn charter_step(m: i32, n: i32) -> (AppWindow, Shown) {
     (ui, shown)
 }
 
-/// W9: checked by default where 2 <= m <= n-1, else locked off with one
-/// line of reason; ticked, the three consent lines sit below.
+/// W9: unchecked by default; tickable where 2 <= m <= n-1, else locked
+/// off with one line of reason; ticked, the three consent lines sit below.
 #[test]
-fn the_wallet_checkbox_defaults_on_within_bounds() {
+fn the_wallet_checkbox_is_opt_in_within_bounds() {
     for (m, n, allowed) in [(2, 3, true), (3, 4, true), (1, 3, false), (3, 3, false)] {
         let (ui, _shown) = charter_step(m, n);
         let s = ui.global::<Strings>();
-        let wallet = crate::actions::ritual::charter_features(&ui).contains(&"wallet".to_string());
-        assert_eq!(wallet, allowed, "{m}-of-{n}: wallet in the charter");
+        let wallet = || crate::actions::ritual::charter_features(&ui).contains(&"wallet".to_string());
+        assert!(!wallet(), "{m}-of-{n}: off by default");
+        assert!(!shown(&ui, &s.get_wl_note_lost()), "{m}-of-{n}: no consent lines yet");
+        let label = s.get_feat_wallet().to_string();
+        let row = i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "AppCheck")
+            .find(|c| {
+                c.query_descendants()
+                    .match_predicate({
+                        let label = label.clone();
+                        move |d| d.accessible_label().is_some_and(|l| l.as_str() == label)
+                    })
+                    .find_first()
+                    .is_some()
+            })
+            .expect("the wallet row");
+        click(&ui, &row);
+        assert_eq!(wallet(), allowed, "{m}-of-{n}: a click ticks it iff allowed");
         assert_eq!(shown(&ui, &s.get_wl_note_lost()), allowed, "{m}-of-{n}: the consent lines");
         assert_eq!(shown(&ui, &s.get_wl_bounds_low()), !allowed && m < 2, "{m}-of-{n}: low");
         assert_eq!(shown(&ui, &s.get_wl_bounds_high()), !allowed && m >= 2, "{m}-of-{n}: high");

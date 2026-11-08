@@ -61,7 +61,8 @@ deposit time, in one line:
   (rewritten 2026-10-06). Every new founding prepares the vault in the
   background: every seat's vault key is part of the founding (§6), the
   vault ticked or not, so no seat can lack one and no step needs a user
-  action. The wizard box is off by default. A prepared republic enables
+  action. The wizard box is on by default where §3's bounds hold
+  (2026-11-08, user decision; off before). A prepared republic enables
   the vault at founding or later by an ordinary `set_features` vote
   (enable-only, like every feature), within the bounds of §3. Until it
   is enabled the vault is invisible: no pane, no `vault` read model, every

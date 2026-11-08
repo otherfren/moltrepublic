@@ -26,7 +26,7 @@ import {
     ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
 } from "components.slint";
 import {
-    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, SealedPanel, FoldedStep, ProposalCard, DecisionTable, Spinner, DiffViewer
+    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, FeatureTable, SealedPanel, FoldedStep, ProposalCard, DecisionTable, Spinner, DiffViewer
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
@@ -1992,9 +1992,10 @@ export component AppWindow inherits Window {
     // create-propose handler, reset with the form.
     in-out property <bool> cw-feat-memory: true;
     in-out property <bool> cw-feat-quests: false;
-    in-out property <bool> cw-feat-vault: false;
-    // the purse (W9): on by default where W1 (2 <= m <= n-1) holds
-    in-out property <bool> cw-feat-wallet: true;
+    // the vault: on by default, effective only where its bounds hold
+    in-out property <bool> cw-feat-vault: true;
+    // the purse (W9): opt-in, only where W1 (2 <= m <= n-1) holds
+    in-out property <bool> cw-feat-wallet: false;
     out property <bool> cw-wallet-allowed: root.cw-threshold >= 2
         && root.cw-threshold <= root.cw-members - 1;
     // vault spec §3: m >= 2 and m <= n-2; m and n are fixed at setup
@@ -2034,6 +2035,8 @@ export component AppWindow inherits Window {
     in property <int> jw-outcome: 0;
     in property <string> jw-republic;
     in property <string> jw-rule;
+    in property <int> jw-rule-m;
+    in property <int> jw-rule-n;
     in property <string> jw-inviter;
     // the joiner's own recovery phrase, generated + shown once during the join
     in property <string> jw-seed;
@@ -2841,8 +2844,8 @@ export component AppWindow inherits Window {
         root.cw-members = 3;
         root.cw-feat-memory = true;
         root.cw-feat-quests = false;
-        root.cw-feat-vault = false;
-        root.cw-feat-wallet = true;
+        root.cw-feat-vault = true;
+        root.cw-feat-wallet = false;
         root.cw-fold = -1;
     }
 
@@ -3977,85 +3980,18 @@ export component AppWindow inherits Window {
                                 horizontal-alignment: right;
                             }
                             // the feature selection, ratified with the
-                            // charter: chat is core (locked on); the
-                            // vault and the purse are bounded by m and n
-                            // content-sized, anchored left - the panel must
-                            // not stretch across the step's width
+                            // charter; content-sized, anchored left
                             HorizontalLayout {
                                 alignment: start;
-                                Rectangle {
-                                    background: Theme.panel-2;
-                                    border-radius: Theme.win95 ? 0px : 8px;
-                                    border-width: Theme.border-w;
-                                    border-color: Theme.line;
-                                    VerticalLayout {
-                                        padding: 14px;
-                                        padding-left: 18px;
-                                        padding-right: 22px;
-                                        spacing: 10px;
-                                        Text {
-                                            text: Strings.cw-features;
-                                            color: Theme.text;
-                                            font-size: Theme.fs-h2;
-                                            font-weight: 700;
-                                        }
-                                        GridLayout {
-                                            spacing: 10px;
-                                            Row {
-                                                AppCheck { width: 250px; label: Strings.feat-chat; checked: true; enabled: false; }
-                                                AppCheck { width: 250px; label: Strings.feat-memory; checked <=> root.cw-feat-memory; }
-                                            }
-                                            Row {
-                                                AppCheck { width: 250px; label: Strings.feat-quests + Strings.feat-wip; checked <=> root.cw-feat-quests; }
-                                                HorizontalLayout {
-                                                    spacing: 10px;
-                                                    AppCheck {
-                                                        width: 250px;
-                                                        label: Strings.feat-vault + Strings.feat-wip;
-                                                        checked <=> root.cw-feat-vault;
-                                                        enabled: root.cw-vault-allowed;
-                                                    }
-                                                    if !root.cw-vault-allowed: Text {
-                                                        text: root.cw-threshold < 2 ? Strings.feat-vault-low : Strings.feat-vault-high;
-                                                        color: Theme.faint;
-                                                        font-size: Theme.fs-cap;
-                                                        vertical-alignment: center;
-                                                    }
-                                                }
-                                            }
-                                            Row {
-                                                HorizontalLayout {
-                                                    spacing: 10px;
-                                                    if root.cw-wallet-allowed: AppCheck {
-                                                        width: 250px;
-                                                        label: Strings.feat-wallet + Strings.feat-wip;
-                                                        checked <=> root.cw-feat-wallet;
-                                                    }
-                                                    if !root.cw-wallet-allowed: AppCheck {
-                                                        width: 250px;
-                                                        label: Strings.feat-wallet + Strings.feat-wip;
-                                                        checked: false;
-                                                        enabled: false;
-                                                    }
-                                                    if !root.cw-wallet-allowed: Text {
-                                                        text: root.cw-threshold < 2 ? Strings.wl-bounds-low : Strings.wl-bounds-high;
-                                                        color: Theme.faint;
-                                                        font-size: Theme.fs-cap;
-                                                        vertical-alignment: center;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        // what ticking the purse consents to (design §3.3)
-                                        if root.cw-wallet-allowed && root.cw-feat-wallet: VerticalLayout {
-                                            spacing: 2px;
-                                            for line in [Strings.wl-note-sees, Strings.wl-note-lost, Strings.wl-note-spend]: Text {
-                                                text: line;
-                                                color: Theme.dim;
-                                                font-size: Theme.fs-cap;
-                                            }
-                                        }
-                                    }
+                                FeatureTable {
+                                    editable: true;
+                                    memory <=> root.cw-feat-memory;
+                                    quests <=> root.cw-feat-quests;
+                                    vault <=> root.cw-feat-vault;
+                                    wallet <=> root.cw-feat-wallet;
+                                    vault-ok: root.cw-vault-allowed;
+                                    wallet-ok: root.cw-wallet-allowed;
+                                    low: root.cw-threshold < 2;
                                 }
                             }
                         }
@@ -4075,6 +4011,12 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    Text {
+                        text: Strings.wiz-history-found;
+                        color: Theme.dim;
+                        font-size: Theme.fs-h2;
+                        font-weight: 700;
+                    }
                     // ---- the folded pile, newest first: every finished step
                     // one header line with a live summary, at most one open
                     // (docs_archive/ui/founding_stack_fold.md) ----
@@ -4093,6 +4035,9 @@ export component AppWindow inherits Window {
                             feat-quests: root.cw-prop-quests;
                             feat-vault: root.cw-prop-vault;
                             feat-wallet: root.cw-prop-wallet;
+                            vault-ok: root.cw-vault-allowed;
+                            wallet-ok: root.cw-wallet-allowed;
+                            low: root.cw-threshold < 2;
                         }
                     }
                     if phase != 1: FoldedStep {
@@ -4930,6 +4875,9 @@ export component AppWindow inherits Window {
                         feat-quests: root.jw-feat-quests;
                         feat-vault: root.jw-feat-vault;
                         feat-wallet: root.jw-feat-wallet;
+                        vault-ok: root.jw-rule-m >= 2 && root.jw-rule-m <= root.jw-rule-n - 2;
+                        wallet-ok: root.jw-rule-m >= 2 && root.jw-rule-m <= root.jw-rule-n - 1;
+                        low: root.jw-rule-m < 2;
                     }
                     // the join SEALED — the shared last step, pixel-identical
                     // to the founder's; Enter republic sits in the footer
@@ -4958,6 +4906,12 @@ export component AppWindow inherits Window {
                         headline: root.jw-headline;
                     }
 
+                    Text {
+                        text: Strings.wiz-history-join;
+                        color: Theme.dim;
+                        font-size: Theme.fs-h2;
+                        font-weight: 700;
+                    }
                     // ---- the folded pile, newest first ----
                     if root.jw-proposed-name != "" && !root.jw-awaiting-ratify: FoldedStep {
                         title: Strings.wiz-step-charter;
@@ -4975,6 +4929,9 @@ export component AppWindow inherits Window {
                             feat-quests: root.jw-feat-quests;
                             feat-vault: root.jw-feat-vault;
                             feat-wallet: root.jw-feat-wallet;
+                            vault-ok: root.jw-rule-m >= 2 && root.jw-rule-m <= root.jw-rule-n - 2;
+                            wallet-ok: root.jw-rule-m >= 2 && root.jw-rule-m <= root.jw-rule-n - 1;
+                            low: root.jw-rule-m < 2;
                         }
                     }
                     // the join facts - never the invite link itself

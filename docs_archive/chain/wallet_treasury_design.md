@@ -38,8 +38,9 @@ the user; rev 1 and rev 2 are superseded, §13 lists what changed.
 - **W8 The purse record proves itself.** `wallet_created` carries all n
   seats' identity signatures over the result; the projection checks them
   from the payload alone, so the check survives every checkpoint cut (§3.5).
-- **W9 A purse by default.** The founding wizard's wallet option is on by
-  default (locked off, with the reason, when W1 fails). The purse stage
+- **W9 A purse at founding.** The founding wizard offers the wallet
+  (locked off, with the reason, when W1 fails); *amended 2026-11-08
+  (user decision): unchecked by default, opt-in.* The purse stage
   with its progress bar is the wizard's automatic last step, for every
   participant (§3.2).
 - **W10 Enabling later shows the same stage.** Every seat sees the progress
@@ -166,7 +167,7 @@ later one; the closed op set (§3.6) keeps a second from being proposed.
 ### 3.2 When the init is proposed
 
 - **At founding (W9).** The wizard's feature step offers the wallet,
-  **checked by default** when W1 holds; otherwise locked off with the
+  **unchecked by default** (2026-11-08; checked before) when W1 holds; otherwise locked off with the
   reason. The checkbox puts `wallet` into the ratified charter features
   (roster-v5, unchanged bytes), next to the one-line statements of §3.3.
   **The purse stage is the wizard's last step**, for the founder and
@@ -642,7 +643,7 @@ Fixed now, whatever the algorithm:
   commits; it carries everything a restart needs to re-attest.
 - Daemon first in the purse stage; no daemon = abstain; birthday margin
   and slack; mainnet by default.
-- Founding wizard: wallet checked by default when W1 holds; the purse
+- Founding wizard: wallet offered (unchecked by default) when W1 holds; the purse
   stage with its progress bar is the automatic last step; the same stage
   as a panel for a later enable.
 - No public blame; reasons only.
