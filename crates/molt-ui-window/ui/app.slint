@@ -2195,6 +2195,8 @@ export component AppWindow inherits Window {
     callback rw-relay-adopt(string);
     callback rw-link-changed(string);
     changed rv-link => {
+        // the relay rows may unmount under the pointer, never seeing a leave
+        HintTip.label = "";
         root.rw-link-changed(root.rv-link);
     }
     // … and its lifecycle, driven by the engine notices (pushed from Rust):
@@ -5127,6 +5129,7 @@ export component AppWindow inherits Window {
                                         pad: 0px;
                                         emoji: r.block != 0 ? "➕" : (r.picked ? "✅" : "⬜");
                                         tooltip: r.block != 0 ? Strings.rw-rl-adopt : Strings.cw-relays-toggle;
+                                        tooltip-overlay: true;
                                         clicked => {
                                             if (r.block == 0) {
                                                 root.rw-relay-toggle(i);
@@ -8701,6 +8704,7 @@ export component AppWindow inherits Window {
                                         pad: 0px;
                                         emoji: "➕";
                                         tooltip: Strings.rw-rl-adopt;
+                                        tooltip-overlay: true;
                                         clicked => {
                                             root.rp-missing-adopt(r.url);
                                         }

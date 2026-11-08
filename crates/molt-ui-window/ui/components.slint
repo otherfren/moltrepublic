@@ -5,7 +5,7 @@
 // three runtime palettes (Monero light / dark.fi dark / Win95 Brutalism). Every
 // control reads Theme.active, so switching themes restyles them live.
 
-import { Theme, Strings } from "theme.slint";
+import { Theme, Strings, HintTip } from "theme.slint";
 
 // A small hover bubble. The caller positions it (x/y) and toggles `shown`;
 // it sizes itself to its text. Used for icon-button hover hints.
@@ -38,6 +38,9 @@ export component AppButton inherits Rectangle {
     in property <string> tooltip;
     in property <bool> tooltip-below: false;
     in property <bool> tooltip-left: false;
+    // the hint goes through the window-topmost HintTip overlay, right of the
+    // button: for buttons inside a clipping list, which cuts a local bubble
+    in property <bool> tooltip-overlay: false;
     // horizontal label padding; lower it for compact in-group buttons
     in property <length> pad: 14px * Theme.ui-scale;
     // optional leading icon (colorized to the label colour); pick a size
@@ -127,7 +130,27 @@ export component AppButton inherits Rectangle {
         }
     }
 
-    if root.tooltip != "": HoverTip {
+    property <bool> tip-on: root.tooltip-overlay && root.tooltip != "" && ta.has-hover;
+    property <int> tip-gen;
+    function show-tip() {
+        root.tip-gen = HintTip.show(root.tooltip,
+            root.absolute-position.x + root.width + 8px,
+            root.absolute-position.y + (root.height - 23px) / 2);
+    }
+    changed tip-on => {
+        if (root.tip-on) {
+            root.show-tip();
+        } else {
+            HintTip.hide(root.tip-gen);
+        }
+    }
+    // a row whose action flips under the pointer re-labels the bubble
+    changed tooltip => {
+        if (root.tip-on) {
+            root.show-tip();
+        }
+    }
+    if root.tooltip != "" && !root.tooltip-overlay: HoverTip {
         label: root.tooltip;
         shown: ta.has-hover;
         x: root.tooltip-left ? -(self.width + 6px) : (parent.width - self.width) / 2;

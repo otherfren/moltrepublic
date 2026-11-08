@@ -136,3 +136,39 @@ fn the_relays_tab_offers_the_republics_missing_relays() {
     click(&ui, &rows[1]);
     assert_eq!(adopted.borrow().as_str(), "ws://a.onion");
 }
+
+/// The row button's hint sits in the clipped relay list, so it goes through
+/// the window-topmost overlay, right of the button, and leaves with the
+/// pointer.
+#[test]
+fn the_relay_row_hint_is_not_clipped_by_the_list() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.set_screen(AppScreen::Restore);
+    apply_strings(&ui, 0);
+    ui.on_classify_link(|_| LinkPreview { kind: 1, republic: "R".into(), who: "w".into() });
+    ui.set_rw_relays(ModelRc::new(VecModel::from(vec![LinkRelay {
+        url: "wss://b.example".into(),
+        picked: false,
+        block: 1,
+        kind: 1,
+    }])));
+    ui.set_rv_link("molt://invite/x".into());
+    let _shown = show_headless(&ui);
+    let button = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "AppWindow::rw-relay-check")
+        .next()
+        .expect("row button");
+    let at = |x: f32, y: f32| {
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerMoved { position: slint::LogicalPosition::new(x, y) });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    };
+    let (p, s) = (button.absolute_position(), button.size());
+    at(p.x + s.width / 2.0, p.y + s.height / 2.0);
+    let tip = ui.global::<HintTip>();
+    assert_eq!(tip.get_label(), ui.global::<Strings>().get_rw_rl_adopt());
+    assert!(tip.get_ax() >= p.x + s.width, "the hint starts right of the button");
+    at(1.0, 1.0);
+    assert_eq!(tip.get_label(), "");
+}
