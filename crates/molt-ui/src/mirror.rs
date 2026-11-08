@@ -1485,6 +1485,13 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     });
     ui.set_org_feat_wallet(feat_on("wallet"));
     sync_strings(&ui.get_org_relays(), &b.org_stats.relays, |m| ui.set_org_relays(m));
+    let missing: Vec<crate::LinkRelay> = b
+        .org_stats
+        .missing_relays
+        .iter()
+        .map(|r| crate::LinkRelay { url: r.url.as_str().into(), picked: false, block: r.block, kind: r.kind })
+        .collect();
+    crate::models::sync_rows(&ui.get_rp_missing(), missing, |m| ui.set_rp_missing(m));
     // the R6 pencil's draft prefill: the same pool, space-joined
     ui.set_org_relays_joined(b.org_stats.relays.join(" ").into());
     // mirroring §3.6: the switch, the quota in GB, the usage line, the folder

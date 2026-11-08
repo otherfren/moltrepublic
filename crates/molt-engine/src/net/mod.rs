@@ -672,6 +672,21 @@ impl State {
         .collect()
     }
 
+    /// The group relays this node cannot dial, with the reason.
+    pub(crate) fn missing_group_relays(&self) -> Vec<molt_core::relay::InviteRelayVerdict> {
+        let Some(nostr) = self.nostr.as_ref() else {
+            return Vec::new();
+        };
+        molt_core::relay::diagnose_invite_relays(
+            &nostr.relays,
+            &self.session.settings.relays,
+            self.clearnet_session,
+        )
+        .into_iter()
+        .filter(|v| v.blocked.is_some())
+        .collect()
+    }
+
     /// The dialable set moved (a pool vote, or this node's consent given or
     /// withdrawn): every long-lived relay task restarts on the new set, so a
     /// withdrawn relay is never redialed (`relay_pool.md` §3 rule 3). The

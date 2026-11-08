@@ -420,13 +420,13 @@ fn link_relays(link: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Push the (re)join relay panel's rows and pick count.
 fn adopt_link_rows(cx: &Ctx, keep: impl Fn(&crate::surfaces::LinkRelayRow) -> bool) {
     let Ok(rows) = cx.chat_ui.lock().map(|st| st.link_rows()) else { return };
     let rows: Vec<_> = rows.into_iter().filter(|r| keep(r)).collect();
     crate::actions::relays::adopt_relays(cx, crate::surfaces::AdoptPlan::of(&rows));
 }
 
+/// Push the (re)join relay panel's rows and pick count.
 pub(crate) fn push_link_rows(ui: &AppWindow, st: &crate::surfaces::ChatUiState) {
     let rows: Vec<LinkRelay> = st
         .link_rows()

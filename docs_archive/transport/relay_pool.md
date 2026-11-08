@@ -281,6 +281,17 @@ their format-preserving guarantee.
   node can dial, and a picked relay the link does not name or this node
   cannot dial is refused, never dropped (`molt_core::relay::pick_dial_relays`,
   the founding pick's rule).
+- Several blocked relays adopt with one `Add all (n)`: onion confirmed,
+  every clearnet and local one named in ONE exposure warning with one
+  acknowledgement (2026-11-08).
+- **Amendment to §0 (user decision 2026-11-08):** a relay a ratified pool
+  edit ADDS is written into every member's pool when the block is
+  appended live (once per batch, against the pool the batch ends on) -
+  onion confirmed, clearnet/local unconfirmed until the
+  warning. A rebuild (open, reorg, restore) adopts nothing, so a removed
+  relay stays removed. What a node still cannot dial is listed under
+  Settings › Nostr relays (`StatusView.missing_relays`).
+  Plan: `relay_adoption_followups.md`.
 
 ## 7. Keystones
 

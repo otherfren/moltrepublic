@@ -893,6 +893,9 @@ pub(crate) struct ChainProjection {
     /// R4: split pairs already warned about (runtime-only) — the log line
     /// fires once per pair, the members-surface marker stays live.
     pub(crate) split_noted: std::collections::HashSet<(MemberId, MemberId)>,
+    /// The group pool before the first pool edit of the batch being
+    /// appended (runtime-only); the batch's persist adopts against it.
+    pub(crate) pool_adopt_base: Option<Vec<String>>,
     /// Ephemeral per-proposal signature collection for chain governance
     /// (keyed by proposal id; never persisted, rebuilt from gossip). Once a
     /// proposal gathers m distinct signatures the committer seals a block.
@@ -1582,6 +1585,7 @@ impl State {
                 anchors: HashMap::new(),
                 member_relays: HashMap::new(),
                 split_noted: std::collections::HashSet::new(),
+                pool_adopt_base: None,
                 pending_sigs: HashMap::new(),
                 adoption_pending: false,
                 replay_held_at: HashMap::new(),

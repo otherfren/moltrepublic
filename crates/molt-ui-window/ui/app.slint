@@ -2024,7 +2024,7 @@ export component AppWindow inherits Window {
     // cancelled - never by a timer.
     in-out property <bool> jw-starting: false;
     // … and the join lifecycle, mirrored from the engine session:
-    // step 0 = invite form, 1 = run view
+    // step 0 = no run (the link entry starts one), 1 = run view
     in property <int> jw-step: 0;
     // the joiner's folded pile: -1 none · 0 invite facts · 1 charter
     in-out property <int> jw-fold: -1;
@@ -2186,6 +2186,10 @@ export component AppWindow inherits Window {
     in property <[LinkRelay]> rw-relays;
     in property <int> rw-relay-picked;
     in property <int> rw-relay-blocked;
+    // the republic's relays this node cannot dial (Settings › Nostr relays)
+    in property <[LinkRelay]> rp-missing;
+    callback rp-missing-adopt(string);
+    callback rp-missing-adopt-all();
     callback rw-relay-adopt-all();
     callback rw-relay-toggle(int);
     callback rw-relay-adopt(string);
@@ -8666,6 +8670,58 @@ export component AppWindow inherits Window {
                             // first-run message. So the empty pool hugs the top
                             // and the shared spacer below pushes it up.
                             vertical-stretch: root.relay-rows.length == 0 ? 0 : 1;
+                            if root.rp-missing.length > 0: VerticalLayout {
+                                vertical-stretch: 0;
+                                spacing: 6px;
+                                HorizontalLayout {
+                                    spacing: 12px;
+                                    Text {
+                                        text: Strings.rp-missing-title;
+                                        color: Theme.warn;
+                                        font-size: Theme.fs-body;
+                                        font-weight: 700;
+                                        vertical-alignment: center;
+                                    }
+                                    if root.rp-missing.length >= 2: AppButton {
+                                        height: 30px * Theme.ui-scale;
+                                        emoji: "➕";
+                                        label: "\{Strings.rw-rl-adopt-all} (\{root.rp-missing.length})";
+                                        clicked => {
+                                            root.rp-missing-adopt-all();
+                                        }
+                                    }
+                                    Rectangle {}
+                                }
+                                for r in root.rp-missing: HorizontalLayout {
+                                    height: 24px * Theme.ui-scale;
+                                    spacing: 8px;
+                                    rp-missing-adopt := AppButton {
+                                        width: 26px * Theme.ui-scale;
+                                        height: 22px * Theme.ui-scale;
+                                        pad: 0px;
+                                        emoji: "➕";
+                                        tooltip: Strings.rw-rl-adopt;
+                                        clicked => {
+                                            root.rp-missing-adopt(r.url);
+                                        }
+                                    }
+                                    Text {
+                                        text: r.url;
+                                        color: Theme.text;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    Text {
+                                        text: r.block == 1 ? Strings.rw-rl-not-in-pool
+                                            : (r.block == 2 ? Strings.rw-rl-unconfirmed : Strings.rw-rl-clearnet-off);
+                                        color: Theme.warn;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
                             RelayPoolGroup {
                                 vertical-stretch: root.relay-rows.length == 0 ? 0 : 1;
                                 rows: root.relay-rows;

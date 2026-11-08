@@ -220,6 +220,9 @@ pub(crate) struct OrgStats {
     /// shown beside the name and the retention window. Empty on a legacy
     /// queue-shaped republic, which has no relays.
     pub(crate) relays: Vec<String>,
+    /// The group relays this node cannot dial (engine
+    /// `StatusView.missing_relays`).
+    pub(crate) missing_relays: Vec<LinkRelayRow>,
     /// The charter's EFFECTIVE feature set (engine `StatusView.features`):
     /// which optional surfaces get a nav row and read as active under
     /// Organization › charter.
@@ -337,6 +340,27 @@ pub(crate) struct LinkRelayRow {
     pub(crate) picked: bool,
     pub(crate) block: i32,
     pub(crate) kind: i32,
+}
+
+impl LinkRelayRow {
+    pub(crate) fn of(v: molt_core::relay::InviteRelayVerdict, picked: bool) -> Self {
+        use molt_core::relay::{InviteRelayBlock as B, RelayKind as K};
+        Self {
+            picked,
+            block: match v.blocked {
+                None => 0,
+                Some(B::NotInPool) => 1,
+                Some(B::Unconfirmed) => 2,
+                Some(B::ClearnetOff) => 3,
+            },
+            kind: match molt_core::relay::relay_kind(&v.url) {
+                K::Onion => 0,
+                K::Clearnet => 1,
+                K::Local => 2,
+            },
+            url: v.url,
+        }
+    }
 }
 
 /// What adopting blocked relay rows takes: onion ones are added and
@@ -545,23 +569,11 @@ impl ChatUiState {
     /// 1 not in pool · 2 unconfirmed · 3 clearnet off; `kind` 0 onion ·
     /// 1 clearnet · 2 local.
     pub(crate) fn link_rows(&self) -> Vec<LinkRelayRow> {
-        use molt_core::relay::{InviteRelayBlock as B, RelayKind as K};
         molt_core::relay::diagnose_invite_relays(&self.link_relays, &self.link_pool, self.link_clearnet)
             .into_iter()
-            .map(|v| LinkRelayRow {
-                picked: v.blocked.is_none() && !self.link_relays_off.contains(&v.url),
-                block: match v.blocked {
-                    None => 0,
-                    Some(B::NotInPool) => 1,
-                    Some(B::Unconfirmed) => 2,
-                    Some(B::ClearnetOff) => 3,
-                },
-                kind: match molt_core::relay::relay_kind(&v.url) {
-                    K::Onion => 0,
-                    K::Clearnet => 1,
-                    K::Local => 2,
-                },
-                url: v.url,
+            .map(|v| {
+                let picked = v.blocked.is_none() && !self.link_relays_off.contains(&v.url);
+                LinkRelayRow::of(v, picked)
             })
             .collect()
     }
@@ -886,6 +898,11 @@ pub(crate) async fn gather_surfaces(
                 retention_days: i32::try_from(s.chat_retention_days).unwrap_or(7),
                 chain_governed: s.chain_governed,
                 relays: s.relays,
+                missing_relays: s
+                    .missing_relays
+                    .into_iter()
+                    .map(|v| LinkRelayRow::of(v, false))
+                    .collect(),
                 features: s.features,
                 vault_enable: s.vault_enable,
                 image_budget: s.image_budget,

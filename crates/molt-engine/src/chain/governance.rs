@@ -597,7 +597,10 @@ impl State {
     /// whole-chain writes inside one uninterruptible actor turn. Losing a
     /// batch to a crash costs a re-fetch and nothing else: any survivor
     /// re-serves the blocks on the next catch-up.
-    pub(super) fn persist_chain_now(&self) -> bool {
+    pub(super) fn persist_chain_now(&mut self) -> bool {
+        if let Some(base) = self.chain.pool_adopt_base.take() {
+            self.adopt_ratified_relays(&base);
+        }
         #[cfg(test)]
         CHAIN_PERSISTS.with(|c| c.set(c.get() + 1));
         let Some(active) = &self.active else {

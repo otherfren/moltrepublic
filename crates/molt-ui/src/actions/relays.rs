@@ -97,6 +97,10 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 },
             );
         });
+        let cx = ctx.clone();
+        ui.on_rp_missing_adopt(move |url| adopt_missing(&cx, |r| r.url == url.as_str()));
+        let cx = ctx.clone();
+        ui.on_rp_missing_adopt_all(move || adopt_missing(&cx, |_| true));
         // the exposure warning's confirm: every relay it named
         let cx = ctx.clone();
         ui.on_relay_confirm_clearnet(move |urls| {
@@ -215,17 +219,26 @@ pub(crate) fn relay_add_check(lang: i32, raw: &str, pool: &[String]) -> Result<S
     }
 }
 
+fn adopt_missing(cx: &Ctx, keep: impl Fn(&crate::surfaces::LinkRelayRow) -> bool) {
+    let Some(ui) = cx.weak.upgrade() else { return };
+    let rows: Vec<crate::surfaces::LinkRelayRow> = ui
+        .get_rp_missing()
+        .iter()
+        .map(|r| crate::surfaces::LinkRelayRow {
+            url: r.url.to_string(),
+            picked: false,
+            block: r.block,
+            kind: r.kind,
+        })
+        .filter(|r| keep(r))
+        .collect();
+    adopt_relays(cx, AdoptPlan::of(&rows));
+}
+
 /// Add every relay of `plan` to this node's pool and confirm the onion
-/// ones; the clearnet and local ones wait for one exposure warning.
+/// ones; the clearnet and local ones then wait for one exposure warning
+/// (opened only once they are in the pool, or its confirm is refused).
 pub(crate) fn adopt_relays(cx: &Ctx, plan: AdoptPlan) {
-    if let (false, Some(ui)) = (plan.exposed.is_empty(), cx.weak.upgrade()) {
-        let urls: Vec<slint::SharedString> = plan.exposed.iter().map(Into::into).collect();
-        ui.invoke_open_clearnet_warnings(
-            slint::ModelRc::new(slint::VecModel::from(urls)),
-            plan.clearnet,
-            plan.local,
-        );
-    }
     let w = cx.wallet.clone();
     let weak = cx.weak.clone();
     cx.rt.spawn(async move {
@@ -239,6 +252,20 @@ pub(crate) fn adopt_relays(cx: &Ctx, plan: AdoptPlan) {
             if res.is_err() {
                 break;
             }
+        }
+        if res.is_ok() && !plan.exposed.is_empty() {
+            let (exposed, clearnet, local) = (plan.exposed.clone(), plan.clearnet, plan.local);
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    let urls: Vec<slint::SharedString> = exposed.iter().map(Into::into).collect();
+                    ui.invoke_open_clearnet_warnings(
+                        slint::ModelRc::new(slint::VecModel::from(urls)),
+                        clearnet,
+                        local,
+                    );
+                }
+            });
         }
         if res.is_ok() {
             for url in plan.onion {

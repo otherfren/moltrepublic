@@ -1073,7 +1073,7 @@ impl State {
 
     /// Queue the current session settings for persistence (no-op without a
     /// config store). `notify` puts the outcome into the session notice.
-    fn persist_settings(&mut self, notify: bool) {
+    pub(crate) fn persist_settings(&mut self, notify: bool) {
         if let Some(store) = &self.store {
             store.persist(
                 crate::configstore::file_settings(

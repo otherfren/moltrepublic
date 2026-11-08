@@ -1101,8 +1101,6 @@ lexicon! {
     field_s3_endpoint: "S3 endpoint", "S3-Endpunkt";
     jw_title: "Join by invite", "Per Einladung beitreten";
     jw_invited_by: "invited by", "eingeladen von";
-    // onion relays need no exposure decision, so they are confirmed outright;
-    // a clearnet one still waits for the acknowledgement in Settings
     jw_busy_title: "Joining the republic", "Beitritt zur Republik";
     jw_busy_cancel: "Cancel", "Abbrechen";
     jw_ph1: "Contacting the inviter…", "Kontaktiere den Einlader…";
@@ -1149,6 +1147,7 @@ lexicon! {
     rw_rl_clearnet_off: "clearnet relays off", "Clearnet-Relays aus";
     rw_rl_adopt: "Add to your relays", "Zu deinen Relays hinzufügen";
     rw_rl_adopt_all: "Add all", "Alle hinzufügen";
+    rp_missing_title: "Republic relays you don't use", "Relays der Republik, die du nicht nutzt";
     rw_rl_none: "no relay picked", "kein Relay gewählt";
     rw_link_name_ph: "Your name…", "Dein Name…";
     rw_via_s3: "Online-restore via S3", "Online-Restore via S3";

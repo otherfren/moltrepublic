@@ -399,6 +399,58 @@ async fn a_sealed_pool_edit_survives_the_reopen() {
     );
 }
 
+/// A relay a ratified pool change adds lands in every member's own pool:
+/// an onion one confirmed, a local one unconfirmed and reported missing
+/// until its warning is acknowledged. Only the live append adopts, so a
+/// relay the member removes stays removed across a reopen.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_ratified_relay_lands_in_every_members_pool() {
+    let relay1 = MockRelay::run().await.expect("relay 1");
+    let relay2 = MockRelay::run().await.expect("relay 2");
+    let url1 = relay1.url().await.to_string();
+    let url2 = relay2.url().await.to_string();
+    let onion = "ws://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion".to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("workspaces");
+    let (a, b) = found_pair(&root, &[&url1], "Pool Gilde").await;
+    let trim = |u: &str| u.trim_end_matches('/').to_string();
+
+    a.execute(Command::Propose {
+        surface: Surface::Organization,
+        payload: serde_json::json!({
+            "op": "set_relays",
+            "title": "Pool erweitern",
+            "value": format!("{url1} {url2} {onion}"),
+        }),
+    })
+    .await
+    .expect("propose set_relays");
+    approve_op(&b, "set_relays").await;
+
+    let entry = |s: &SessionView, url: &str| {
+        s.settings.relays.iter().find(|r| trim(&r.url) == trim(url)).map(|r| r.confirmed)
+    };
+    for w in [&a, &b] {
+        wait_for(w, "the ratified relays in the local pool", |s| {
+            entry(s, &onion) == Some(true) && entry(s, &url2) == Some(false)
+        })
+        .await;
+    }
+    match b.execute(Command::Status).await.expect("status") {
+        Reply::Status(st) => assert_eq!(
+            st.missing_relays.iter().map(|v| (trim(&v.url), v.blocked)).collect::<Vec<_>>(),
+            vec![(trim(&url2), Some(molt_core::relay::InviteRelayBlock::Unconfirmed))]
+        ),
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    b.execute(Command::RelayRemove { url: onion.clone() }).await.expect("remove");
+    let id = read_session(&b).await.active_workspace.clone();
+    b.execute(Command::CloseWorkspace).await.expect("close");
+    b.execute(Command::OpenWorkspace { id }).await.expect("reopen");
+    assert_eq!(entry(&*read_session(&b).await, &onion), None, "a removed relay stays removed");
+}
+
 /// The state a node's card for `op` currently shows, if it has one.
 async fn card_state(w: &WalletHandle, op: &str) -> Option<molt_core::ProposalState> {
     match w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list proposals") {

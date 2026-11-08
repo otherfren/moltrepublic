@@ -1,6 +1,6 @@
 # Plan: one-click relay adoption - bulk, cleanup, republic relays
 
-Status: **PLAN (2026-11-08), Q1-Q4 decided the same day (§4); in build.** Follows
+Status: **EXECUTED (2026-11-08).** Q1-Q4 decided the same day (§4). Follows
 `988c5cde` (link panel under the link field, `relay_pool.md` §6).
 
 ## 0. Where we stand
@@ -56,14 +56,9 @@ co-equality needs no new `Command`):
   (current `link_rows` behaviour), so Continue arms without another
   click.
 
-Tests (red first):
-
-- `tests/gui/link_relays.rs`: `the_bulk_adopt_confirms_onion_outright_and_clearnet_through_one_warning`
-  - two clearnet + one onion blocked row: one click fires the onion adopt,
-  opens ONE modal naming both clearnet URLs, confirm fires both.
-- same file: `no_bulk_button_below_two_blocked_rows`.
-- `tests/surfaces.rs`: the action layer issues the per-URL command
-  sequence and treats "already in the relay pool" as success.
+Tests: `an_adopt_plan_confirms_onion_and_gathers_the_rest_for_one_warning`
+(`tests/surfaces.rs`), `adopt_all_goes_through_one_warning_for_every_exposed_relay`
+(`tests/gui/link_relays.rs`).
 
 ## 2. Remove the old join-step-0 adopt path
 
@@ -87,57 +82,39 @@ Decided (Q3): a relay a ratified pool change ADDS is written into the
 local pool automatically. Bounds that keep §0 of `relay_pool.md` and the
 join pick intact:
 
-- Only on the LIVE append of a `set_relays` block
-  (`append_committed_block` -> `project_one`: own seal, peer commit,
-  sync extend). A full rebuild (open, reorg, restore) adopts nothing:
-  the persisted workspace copy of the pool is never rewritten, so a
-  replay would re-add a relay the operator removed on every start.
-- Only the relays the block adds (`effective after \ effective
-  before`); the genesis pool, and so a relay deselected at join, is
-  not touched.
+- Only on a LIVE append (`append_committed_block` -> `project_one`: own
+  seal, peer commit, sync extend), diffed once per batch: the pool before
+  the batch's first pool edit against the pool it ends on, at the batch's
+  `persist_chain_now`. A relay a later edit of the same catch-up dropped
+  never lands. A full rebuild (open, reorg, restore) adopts nothing: the
+  persisted workspace copy of the pool is never rewritten, so a replay
+  would re-add a relay the operator removed on every start.
+- The genesis pool, and so a relay deselected at join, is not touched.
 - An onion relay is added confirmed; a clearnet or local one is added
   unconfirmed (it needs the exposure warning, §0) and shows up in the
   offer below. An entry already in the pool keeps its state.
-- Run log per relay: `relay=… confirmed=… adopted from ratified pool`.
+- Run log per relay: `relay=… confirmed=… relay adopted from the ratified pool`.
 
 Everything the automatic path does not cover (a rebuild, an unconfirmed
 or removed entry, clearnet off) is offered:
 
-Engine (`molt-engine`, read surface beside `org_stats.relays`):
+- Engine: `StatusView.missing_relays` = the group pool's relays this node
+  cannot dial, with the `InviteRelayVerdict` reason
+  (`missing_group_relays`, the classifier the join gate uses). MCP reads
+  it on `status`; adoption stays `relay_add` + `relay_confirm`.
+- GUI: Settings › Nostr relays lists them above the pool, per-row adopt
+  and `Add all (n)`, through §1's `AdoptPlan` / `adopt_relays`. The
+  "no relay channel - check this republic's relays in Settings" notice
+  already points there.
+- Q4: the ledger (`member_relays`) moves only by a `Membership` block, so
+  a split this node already dials across reads `re-join to declare
+  <relay>` on its own row.
 
-- `missing_relays: Vec<InviteRelayVerdict>` =
-  `diagnose_invite_relays(effective_relays, settings.relays,
-  clearnet_session)` filtered to `blocked.is_some()`. It reuses the same
-  classifier, so GUI, MCP and run log agree.
-- Recomputed on `adopt_pool_change`, open, and every `Relay*` command
-  (they already `emit_session`).
-- Run log, once per (workspace, relay): `relay=… block=… missing from
-  local pool`.
-
-GUI:
-
-- Settings › Nostr relays: a section "Relays of this republic you don't
-  use", rows + per-row adopt + `Add all (n)`, the same component as §1
-  (extract it from the link panel rather than copying it).
-- The "No shared relay" status and the members-list split marker link to
-  that section.
-
-MCP: the field rides the existing read (`read_session` / the org stats
-surface); adoption stays `relay_add` + `relay_confirm`.
-
-Ledger limit (stated, not fixed here): adopting Z locally makes Z
-dialable at once (`RelayConfirm` calls `dialable_relays_changed`), but
-the seat's ledger entry (`member_relays`) changes only through a
-`Membership` block (join/restore). Split detection can therefore keep
-reporting a split that the adoption already healed. See Q4.
-
-Tests (red first):
-
-- engine: `a_ratified_relay_the_seat_lacks_is_reported_missing` - two
-  seats, pool vote adds Z, the seat without Z gets `missing_relays = [Z:
-  NotInPool]`; after `RelayAdd` + `RelayConfirm`, `[]` and Z is dialed.
-- engine: clearnet Z with `clearnet_enabled` off reports `ClearnetOff`.
-- GUI: the settings section lists the field and adopts through §1's path.
+Tests: `a_ratified_relay_lands_in_every_members_pool` (`org_effective.rs`,
+two nodes over real relays, incl. the reopen guard),
+`a_catch_up_adopts_only_the_relays_its_last_pool_keeps`,
+`a_split_this_node_already_bridges_asks_for_the_re_join`,
+`the_relays_tab_offers_the_republics_missing_relays`.
 
 ## 4. Decisions (user, 2026-11-08)
 
@@ -147,12 +124,7 @@ Tests (red first):
 - **Q4** Ledger staleness accepted; the split marker says when the
   local pool already dials the bridge relay: re-join to declare it.
 
-## 5. Order
+## 5. Not done
 
-§2 first (it removes the path §1 would otherwise have to keep in step),
-then §1, then §3 (it reuses §1's component). Each step is its own commit:
-live-preview checks (`scripts/dev-ui.sh build`, the molt-ui live-preview
-suite), per-crate clippy, review, push. No full window build (user
-decision 2026-09-08).
-
-Archive this doc with the last step's commit; update `relay_pool.md` §6.
+- The split marker is an engine string and was never localized; the new
+  `re-join to declare` form follows it (both English in the German GUI).

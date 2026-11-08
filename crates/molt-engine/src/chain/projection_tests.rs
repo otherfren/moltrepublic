@@ -307,6 +307,67 @@ fn disjoint_relay_sets_produce_a_split_verdict_naming_the_bridge() {
     );
 }
 
+/// Q4: both seats declared disjoint relays; once this node already dials
+/// the counterpart's, its own marker asks for the re-join that declares it
+/// (the ledger moves only by a membership block).
+#[test]
+fn a_split_this_node_already_bridges_asks_for_the_re_join() {
+    let (one, two) = ("wss://relay.one".to_string(), "wss://relay.two.example".to_string());
+    let mut b = Builder::new_on_relays(&["petra", "walter"], 2, vec![one.clone(), two.clone()]);
+    let mut st = crate::tests::plain_state();
+    st.replica = Some(crate::ReplicaState {
+        name: "Chess Club".to_string(),
+        member: "walter".to_string(),
+        roster: vec!["petra".to_string(), "walter".to_string()],
+        rule_m: 2,
+        identities: Vec::new(),
+        agenda: "play chess".to_string(),
+        features: None,
+        republic_id: b.republic_id.clone(),
+        founded_ts: 0,
+    });
+    let restored = b.seal(
+        1,
+        ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "petra".to_string(),
+            identity_pk: b.pk("petra"),
+            nostr_pk: Some(molt_net::nostr_identity(b"petra-recovered", "new-ticket").1),
+            relays: vec![two.clone()],
+            consent: None,
+        },
+        &["petra", "walter"],
+    );
+    b.push(restored);
+    let declared = b.seal(
+        2,
+        ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "walter".to_string(),
+            identity_pk: b.pk("walter"),
+            nostr_pk: Some(molt_net::nostr_identity(b"walter-recovered", "new-ticket").1),
+            relays: vec![one.clone()],
+            consent: None,
+        },
+        &["petra", "walter"],
+    );
+    b.push(declared);
+    st.adopt_chain(b.blocks.clone());
+    assert_eq!(st.relay_splits().len(), 1, "the declarations are disjoint");
+    st.nostr = Some(crate::NostrTransport {
+        sk: zeroize::Zeroizing::new(vec![1; 32]),
+        relays: vec![one.clone(), two.clone()],
+        rotation_seed: [0; 32],
+    });
+    st.session.settings.relays = vec![molt_core::relay::RelayEntry { url: two.clone(), confirmed: true }];
+    st.clearnet_session = true;
+
+    let view = st.members_view();
+    let row = |m: &str| view.iter().find(|v| v.member == m).map(|v| v.split.clone());
+    assert_eq!(row("walter"), Some(format!("re-join to declare {two}")));
+    assert!(row("petra").is_some_and(|s| s.contains("walter")));
+}
+
 #[test]
 fn chain_applied_entries_carry_their_proposal_id() {
     let mut b = Builder::new(&["petra", "walter", "dora"], 2);

@@ -52,6 +52,8 @@ impl State {
     /// state — `docs_archive/chain/persistent_chain.md`).
     pub(crate) fn adopt_chain(&mut self, chain: Vec<ChainBlock>) {
         self.chain.adoption_pending = false;
+        // a rebuild adopts no relays (a removed one would come back)
+        self.chain.pool_adopt_base = None;
         // a chain from OUTSIDE this holder's own verified prefix: always the
         // full walk, never the cache. The walk it produces is then kept, so
         // the adoption pays for the next append too.
@@ -310,6 +312,33 @@ impl State {
         self.dialable_relays_changed(&before);
     }
 
+    /// A relay the appended pool edits add joins this node's own pool: onion
+    /// confirmed, the rest unconfirmed until the exposure warning. Diffed
+    /// once per batch (`persist_chain_now`), so a relay a later edit of the
+    /// same catch-up dropped never lands.
+    pub(crate) fn adopt_ratified_relays(&mut self, before: &[String]) {
+        let added: Vec<String> = self
+            .effective_relays()
+            .iter()
+            .filter(|u| !before.contains(u))
+            .filter_map(|u| molt_core::relay::normalize_relay_url(u).ok())
+            .filter(|u| !self.session.settings.relays.iter().any(|r| &r.url == u))
+            .collect();
+        if added.is_empty() {
+            return;
+        }
+        let dial_before = self.dialable_group_relays();
+        for url in added {
+            let confirmed =
+                molt_core::relay::relay_kind(&url) == molt_core::relay::RelayKind::Onion;
+            tracing::info!(relay = %url, confirmed, "relay adopted from the ratified pool");
+            self.session.settings.relays.push(molt_core::relay::RelayEntry { url, confirmed });
+        }
+        self.dialable_relays_changed(&dial_before);
+        self.persist_settings(false);
+        self.emit_session(crate::SessionScope::Full);
+    }
+
     /// The ratified GROUP pool: the checkpoint summary's if this holder
     /// pruned, else the genesis block's. Empty on a non-Nostr chain.
     pub(crate) fn ratified_relays(&self) -> Vec<String> {
@@ -341,6 +370,9 @@ impl State {
                 surface,
                 payload,
             } => {
+                let pool_edit =
+                    payload.get("op").and_then(serde_json::Value::as_str) == Some("set_relays");
+                let before = if pool_edit { self.effective_relays() } else { Vec::new() };
                 self.chain.applied
                     .entry(*surface)
                     .or_default()
@@ -348,7 +380,8 @@ impl State {
                 self.chain.applied_sigs
                     .insert(*proposal_id, block.sigs.clone());
                 // R6: a committed pool edit reaches the live transport
-                if payload.get("op").and_then(serde_json::Value::as_str) == Some("set_relays") {
+                if pool_edit {
+                    self.chain.pool_adopt_base.get_or_insert(before);
                     self.adopt_pool_change();
                 }
                 // the supersede walk over the moved paths runs in

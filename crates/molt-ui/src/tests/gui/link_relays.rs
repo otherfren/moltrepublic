@@ -97,3 +97,42 @@ fn adopt_all_goes_through_one_warning_for_every_exposed_relay() {
     click(&ui, &by_label(&strings.get_rp_cn_confirm_many()).expect("confirm"));
     assert_eq!(*confirmed.borrow(), vec!["wss://b.example", "ws://192.168.1.2:7777"]);
 }
+
+/// Settings › Nostr relays lists the republic's relays this node cannot
+/// dial, with a per-row adopt and an adopt-all.
+#[test]
+fn the_relays_tab_offers_the_republics_missing_relays() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.set_screen(AppScreen::Settings);
+    ui.set_set_tab(5);
+    apply_strings(&ui, 0);
+    let row = |url: &str, block, kind| LinkRelay { url: url.into(), picked: false, block, kind };
+    ui.set_rp_missing(ModelRc::new(VecModel::from(vec![
+        row("wss://b.example", 1, 1),
+        row("ws://a.onion", 2, 0),
+    ])));
+    let adopted = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+    let a = adopted.clone();
+    ui.on_rp_missing_adopt(move |u| *a.borrow_mut() = u.to_string());
+    let all = std::rc::Rc::new(std::cell::Cell::new(false));
+    let l = all.clone();
+    ui.on_rp_missing_adopt_all(move || l.set(true));
+    let _shown = show_headless(&ui);
+    let strings = ui.global::<Strings>();
+    let by_label = |label: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, label).next()
+    };
+
+    assert!(by_label(&strings.get_rp_missing_title()).is_some());
+    assert!(by_label(&strings.get_rw_rl_unconfirmed()).is_some());
+    click(&ui, &by_label(&format!("{} (2)", strings.get_rw_rl_adopt_all())).expect("adopt all"));
+    assert!(all.get());
+    let rows: Vec<_> =
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "AppWindow::rp-missing-adopt")
+            .collect();
+    assert_eq!(rows.len(), 2);
+    click(&ui, &rows[1]);
+    assert_eq!(adopted.borrow().as_str(), "ws://a.onion");
+}

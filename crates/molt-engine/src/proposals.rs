@@ -4254,6 +4254,8 @@ impl State {
             .iter()
             .find(|w| w.id == self.session.active_workspace);
         let splits = self.relay_splits();
+        let dialable = self.dialable_group_relays();
+        let me = self.member();
         let profiles = self.member_profiles();
         self.roster()
             .into_iter()
@@ -4282,8 +4284,20 @@ impl State {
                         _ => None,
                     })
                     .collect();
+                // Q4: the ledger moves only by a membership block, so a
+                // split this node already dials across needs a re-join
+                let bridged = (member == me)
+                    .then(|| {
+                        others
+                            .iter()
+                            .flat_map(|o| self.member_relays(o))
+                            .find(|r| dialable.contains(r))
+                    })
+                    .flatten();
                 let split = if others.is_empty() {
                     String::new()
+                } else if let Some(relay) = bridged {
+                    format!("re-join to declare {relay}")
                 } else {
                     let own = self.member_relays(&member).first().cloned().unwrap_or_default();
                     format!("no shared relay with {} ({own})", others.join(", "))
@@ -4519,6 +4533,7 @@ impl State {
                 .as_ref()
                 .map(|n| n.relays.clone())
                 .unwrap_or_default(),
+            missing_relays: self.missing_group_relays(),
             // recovery exists exactly here — the frontends key the per-member
             // "recovery link" action on this (never on the member's presence:
             // a recovery link is FOR an unreachable member)

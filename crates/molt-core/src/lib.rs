@@ -7718,6 +7718,9 @@ pub struct StatusView {
     /// when that happens.
     #[serde(default)]
     pub relays: Vec<String>,
+    /// The group relays this node cannot dial, and why.
+    #[serde(default)]
+    pub missing_relays: Vec<crate::relay::InviteRelayVerdict>,
     /// Whether the open workspace is a chain-governed republic. Recovery
     /// (link mint + rejoin) exists only here — a frontend offers the
     /// per-member "recovery link" action exactly when this is true (demo

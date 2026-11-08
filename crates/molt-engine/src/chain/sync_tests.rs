@@ -947,3 +947,28 @@ fn a_signer_set_variant_relinks_instead_of_rolling_back() {
     }
     assert_eq!(petra.chain.blocks, relinked, "both holders converge");
 }
+
+/// Q3 over a catch-up: the pool edits of one batch adopt against the pool
+/// the batch ends on, so a relay a later edit dropped again never lands.
+#[test]
+fn a_catch_up_adopts_only_the_relays_its_last_pool_keeps() {
+    let one = "wss://relay.one".to_string();
+    let onion = |c: char| format!("ws://{}.onion", c.to_string().repeat(56));
+    let (kept, dropped) = (onion('a'), onion('b'));
+    let mut b = Builder::new_on_relays(&["petra", "walter"], 2, vec![one.clone()]);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    let edit = |proposal_id: u64, value: String| ChainChange::Applied {
+        proposal_id,
+        surface: Surface::Organization,
+        payload: serde_json::json!({ "op": "set_relays", "value": value }),
+    };
+    b.commit(edit(1, format!("{one} {dropped}")), &["petra", "walter"]);
+    b.commit(edit(2, format!("{one} {kept}")), &["petra", "walter"]);
+
+    walter.receive_block_from("petra", b.blocks[2].clone());
+    walter.receive_block_from("petra", b.blocks[1].clone());
+    assert_eq!(walter.chain.blocks.len(), 3);
+    let pool: Vec<(String, bool)> =
+        walter.session.settings.relays.iter().map(|r| (r.url.clone(), r.confirmed)).collect();
+    assert_eq!(pool, vec![(kept, true)]);
+}
