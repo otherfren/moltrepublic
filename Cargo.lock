@@ -5080,7 +5080,7 @@ dependencies = [
 
 [[package]]
 name = "molt-app"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -5102,7 +5102,7 @@ dependencies = [
 
 [[package]]
 name = "molt-config"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "getrandom 0.2.17",
  "molt-core",
@@ -5114,7 +5114,7 @@ dependencies = [
 
 [[package]]
 name = "molt-core"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "chrono",
  "hex",
@@ -5132,7 +5132,7 @@ dependencies = [
 
 [[package]]
 name = "molt-engine"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -5163,7 +5163,7 @@ dependencies = [
 
 [[package]]
 name = "molt-mcp"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "bytes",
  "http",
@@ -5184,7 +5184,7 @@ dependencies = [
 
 [[package]]
 name = "molt-net"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "arti-client",
  "base64 0.22.1",
@@ -5231,7 +5231,7 @@ dependencies = [
 
 [[package]]
 name = "molt-storage"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "argon2",
  "bip39",
@@ -5257,7 +5257,7 @@ dependencies = [
 
 [[package]]
 name = "molt-treasury"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "ciphersuite",
  "dalek-ff-group 0.5.0",
@@ -5277,7 +5277,7 @@ dependencies = [
 
 [[package]]
 name = "molt-ui"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -5307,7 +5307,7 @@ dependencies = [
 
 [[package]]
 name = "molt-ui-window"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "slint",
  "slint-build",
@@ -5315,7 +5315,7 @@ dependencies = [
 
 [[package]]
 name = "molt-vault"
-version = "0.0.8"
+version = "0.0.9"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
