@@ -330,6 +330,15 @@ pub(crate) struct ChannelRowData {
 /// itself runs engine-side (`ReadState { channel }`), so GUI and MCP stay
 /// co-equal — each operator passes its own filter, and which channel this
 /// window looks at is presentation, not shared state.
+/// One row of the (re)join relay panel ([`ChatUiState::link_rows`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LinkRelayRow {
+    pub(crate) url: String,
+    pub(crate) picked: bool,
+    pub(crate) block: i32,
+    pub(crate) kind: i32,
+}
+
 #[derive(Default)]
 pub(crate) struct ChatUiState {
     /// The relays the create wizard offers — this node's dialable set, as
@@ -339,6 +348,14 @@ pub(crate) struct ChatUiState {
     /// the selection, so a relay confirmed after the wizard opened is
     /// included by default — the picker narrows a set, it does not freeze one.
     pub(crate) create_relays_off: std::collections::BTreeSet<String>,
+    /// The (re)join link the relay panel describes, its relays, and the
+    /// ones deselected there (an exclusion set, like the create picker).
+    pub(crate) link: String,
+    pub(crate) link_relays: Vec<String>,
+    pub(crate) link_relays_off: std::collections::BTreeSet<String>,
+    /// This node's pool and clearnet switch, as last mirrored.
+    pub(crate) link_pool: Vec<molt_core::relay::RelayEntry>,
+    pub(crate) link_clearnet: bool,
 
     /// The workspace id this state belongs to — a switch resets everything
     /// (see [`ChatUiState::enter_workspace`]).
@@ -475,6 +492,65 @@ impl ChatUiState {
             .filter(|u| !self.create_relays_off.contains(*u))
             .cloned()
             .collect()
+    }
+
+    /// A new link starts the relay panel over; the same link keeps its picks.
+    pub(crate) fn set_link(&mut self, link: &str, relays: Vec<String>) {
+        if self.link != link {
+            self.link = link.to_string();
+            self.link_relays_off.clear();
+        }
+        self.link_relays = relays;
+    }
+
+    pub(crate) fn set_link_pool(&mut self, pool: Vec<molt_core::relay::RelayEntry>, clearnet: bool) {
+        self.link_pool = pool;
+        self.link_clearnet = clearnet;
+    }
+
+    /// The link's relays with this node's verdict: `block` 0 usable ·
+    /// 1 not in pool · 2 unconfirmed · 3 clearnet off; `kind` 0 onion ·
+    /// 1 clearnet · 2 local.
+    pub(crate) fn link_rows(&self) -> Vec<LinkRelayRow> {
+        use molt_core::relay::{InviteRelayBlock as B, RelayKind as K};
+        molt_core::relay::diagnose_invite_relays(&self.link_relays, &self.link_pool, self.link_clearnet)
+            .into_iter()
+            .map(|v| LinkRelayRow {
+                picked: v.blocked.is_none() && !self.link_relays_off.contains(&v.url),
+                block: match v.blocked {
+                    None => 0,
+                    Some(B::NotInPool) => 1,
+                    Some(B::Unconfirmed) => 2,
+                    Some(B::ClearnetOff) => 3,
+                },
+                kind: match molt_core::relay::relay_kind(&v.url) {
+                    K::Onion => 0,
+                    K::Clearnet => 1,
+                    K::Local => 2,
+                },
+                url: v.url,
+            })
+            .collect()
+    }
+
+    /// Flip a usable relay's pick; a blocked one has nothing to flip.
+    pub(crate) fn toggle_link_relay(&mut self, url: &str) {
+        if !self.link_rows().iter().any(|r| r.url == url && r.block == 0) {
+            return;
+        }
+        if !self.link_relays_off.remove(url) {
+            self.link_relays_off.insert(url.to_string());
+        }
+    }
+
+    /// The pick to send with a join/recovery from `link`. Empty = no
+    /// explicit choice: nothing deselected, or a link other than the one
+    /// the panel describes.
+    pub(crate) fn link_pick(&self, link: &str) -> Vec<String> {
+        if link != self.link || self.link_relays_off.is_empty() {
+            return Vec::new();
+        }
+        self.link_rows().into_iter().filter(|r| r.picked).map(|r| r.url).collect()
     }
 
     /// The picker's rows: every dialable relay, with whether it is chosen.

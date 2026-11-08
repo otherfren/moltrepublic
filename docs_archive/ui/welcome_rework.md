@@ -70,8 +70,8 @@ The two link shapes are already unambiguous and already parsed in `molt-engine`:
 
 | prefix | parser | needs | runs |
 |---|---|---|---|
-| `molt://invite/…` | `molt_engine::FoundingInvite::parse` | a NAME | `Command::JoinStart { invite, member }` |
-| `molt://recover/…` | `molt_engine::RecoveryInvite::parse` | the PHRASE | `Command::RecoverStart { link, phrase }` |
+| `molt://invite/…` | `molt_engine::FoundingInvite::parse` | a NAME | `Command::JoinStart { invite, member, relays }` |
+| `molt://recover/…` | `molt_engine::RecoveryInvite::parse` | the PHRASE | `Command::RecoverStart { link, phrase, relays }` |
 
 So the panel is dynamic in exactly one way: **what the link is decides which
 field is required.**

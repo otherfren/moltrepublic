@@ -113,7 +113,7 @@ async fn recover_c(all: &mut Vec<WalletHandle>, url: &str, tmp: &std::path::Path
     let c = engine(&tmp.join("c-new"));
     adopt_relay(&c, url).await;
     c.__wallet_deadline(DEADLINE);
-    c.execute(Command::RecoverStart { link, phrase }).await.expect("recover start");
+    c.execute(Command::RecoverStart { link, phrase, relays: Vec::new() }).await.expect("recover start");
     let s = wait_for(&c, "the recovery to open", |s| {
         (s.screen == molt_core::Screen::Main && s.notice.starts_with("recovered:")) || s.notice.starts_with("recover-failed:")
     })

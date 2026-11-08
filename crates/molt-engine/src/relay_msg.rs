@@ -37,6 +37,11 @@ pub(crate) fn pool_verifying_reason() -> &'static str {
     "a relay confirmation is still verifying - retry in a moment"
 }
 
+/// A picked relay the link does not name or this node cannot dial.
+pub(crate) fn pick_refusal(url: &str) -> String {
+    format!("picked relay {url} is not dialable here")
+}
+
 /// Why this node has nothing to dial at all — for the founding/recovery
 /// prerequisites, which fail before any invite is involved.
 pub(crate) fn pool_gap_reason(gap: PoolGap) -> String {

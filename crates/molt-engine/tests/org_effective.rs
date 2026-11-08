@@ -115,6 +115,7 @@ async fn found_pair(
     b.execute(Command::JoinStart {
         invite: link,
         member: "walter".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");

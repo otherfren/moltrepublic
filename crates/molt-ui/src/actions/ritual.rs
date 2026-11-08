@@ -10,7 +10,7 @@ use slint::{ComponentHandle, Model};
 
 use crate::i18n::error_toast;
 use crate::app::Ctx;
-use crate::{AppWindow, InvitePreview, LinkPreview, RelayPick, SeedRow, SeedWord};
+use crate::{AppWindow, InvitePreview, LinkPreview, LinkRelay, RelayPick, SeedRow, SeedWord};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     // The join preview: the same molt-core invite parser the engine's join
@@ -57,50 +57,80 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
         });
         // the Restore wizard's one link field: which of the two flows is
         // this link for? Pure, like parse_invite, so the panel re-reads it
-        // on every keystroke without any state to keep in sync. The relay
-        // deviation rides along: relays do not federate, so a link whose
-        // pool this node does not share is a hard blocker worth showing
-        // BEFORE the run can fail on it.
-        let weak_cl = ui.as_weak();
+        // on every keystroke without any state to keep in sync. The link's
+        // relays are the relay panel's business (`rw-link-changed`).
         ui.on_classify_link(move |s| {
-            let missing = |relays: &[String]| -> (i32, slint::SharedString) {
-                let Some(ui) = weak_cl.upgrade() else { return (0, "".into()) };
-                let have: Vec<String> =
-                    ui.get_relay_rows().iter().map(|r| r.url.to_string()).collect();
-                let miss: Vec<&String> =
-                    relays.iter().filter(|u| !have.contains(u)).collect();
-                (
-                    i32::try_from(miss.len()).unwrap_or(0),
-                    miss.first().map(|u| u.as_str()).unwrap_or("").into(),
-                )
-            };
             match link_kind(&s) {
-                LinkKind::Invite { republic, inviter } => {
-                    let (n, first) = molt_engine::FoundingInvite::parse(s.trim())
-                        .map(|inv| missing(&inv.handover.relays))
-                        .unwrap_or((0, "".into()));
-                    LinkPreview {
-                        kind: 1,
-                        republic: republic.into(),
-                        who: inviter.into(),
-                        missing: n,
-                        missing_first: first,
-                    }
-                }
-                LinkKind::Recovery { republic, member } => {
-                    let (n, first) = molt_engine::RecoveryInvite::parse(s.trim())
-                        .and_then(|inv| inv.handover.map(|h| missing(&h.relays)))
-                        .unwrap_or((0, "".into()));
-                    LinkPreview {
-                        kind: 2,
-                        republic: republic.into(),
-                        who: member.into(),
-                        missing: n,
-                        missing_first: first,
-                    }
-                }
+                LinkKind::Invite { republic, inviter } => LinkPreview {
+                    kind: 1,
+                    republic: republic.into(),
+                    who: inviter.into(),
+                },
+                LinkKind::Recovery { republic, member } => LinkPreview {
+                    kind: 2,
+                    republic: republic.into(),
+                    who: member.into(),
+                },
                 LinkKind::Unrecognized => LinkPreview::default(),
             }
+        });
+    }
+
+    {
+        let cx = ctx.clone();
+        ui.on_rw_link_changed(move |link| {
+            let relays = link_relays(&link);
+            let Ok(mut st) = cx.chat_ui.lock() else { return };
+            st.set_link(link.trim(), relays);
+            if let Some(ui) = cx.weak.upgrade() {
+                push_link_rows(&ui, &st);
+            }
+        });
+        let cx = ctx.clone();
+        ui.on_rw_relay_toggle(move |idx| {
+            let Ok(mut st) = cx.chat_ui.lock() else { return };
+            let Some(url) = usize::try_from(idx).ok().and_then(|i| st.link_rows().get(i).map(|r| r.url.clone()))
+            else {
+                return;
+            };
+            st.toggle_link_relay(&url);
+            if let Some(ui) = cx.weak.upgrade() {
+                push_link_rows(&ui, &st);
+            }
+        });
+        // a clearnet/local relay's confirmation goes through the exposure
+        // warning the panel opens; an onion one confirms outright
+        let cx = ctx.clone();
+        ui.on_rw_relay_adopt(move |url| {
+            let url = url.to_string();
+            let in_pool = cx
+                .chat_ui
+                .lock()
+                .map(|st| st.link_pool.iter().any(|e| e.url == url))
+                .unwrap_or(false);
+            let w = cx.wallet.clone();
+            let weak = cx.weak.clone();
+            cx.rt.spawn(async move {
+                let mut res = Ok(());
+                if !in_pool {
+                    res = w.execute(Command::RelayAdd { url: url.clone() }).await.map(|_| ());
+                }
+                if res.is_ok()
+                    && molt_core::relay::relay_kind(&url) == molt_core::relay::RelayKind::Onion
+                {
+                    res = w
+                        .execute(Command::RelayConfirm { url, accept_clearnet: false })
+                        .await
+                        .map(|_| ());
+                }
+                if let Err(e) = res {
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = weak.upgrade() {
+                            ui.invoke_show_toast_error(error_toast(&ui, &e));
+                        }
+                    });
+                }
+            });
         });
     }
 
@@ -232,9 +262,11 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             // and the form is gone.
             let w = cx.wallet.clone();
             let weak = cx.weak.clone();
+            let relays = cx.chat_ui.lock().map(|st| st.link_pick(invite.trim())).unwrap_or_default();
             let cmd = Command::JoinStart {
                 invite: invite.to_string(),
                 member: member.to_string(),
+                relays,
             };
             cx.rt.spawn(async move {
                 if let Err(e) = w.execute(cmd).await {
@@ -278,10 +310,12 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {
         let cx = ctx.clone();
         ui.on_recover_start(move |link, phrase| {
+            let relays = cx.chat_ui.lock().map(|st| st.link_pick(link.trim())).unwrap_or_default();
             cx.issue(
                 Command::RecoverStart {
                     link: link.to_string(),
                     phrase: phrase.to_string(),
+                    relays,
                 },
             );
         });
@@ -431,4 +465,26 @@ pub(crate) fn charter_features(ui: &AppWindow) -> Vec<String> {
         .filter(|(on, _)| *on)
         .map(|(_, key)| key.to_string())
         .collect()
+}
+
+/// The relays a join or recovery link names; empty for anything else.
+fn link_relays(link: &str) -> Vec<String> {
+    let link = link.trim();
+    if let Ok(inv) = molt_engine::FoundingInvite::parse(link) {
+        return inv.handover.relays;
+    }
+    molt_engine::RecoveryInvite::parse(link)
+        .and_then(|inv| inv.handover.map(|h| h.relays))
+        .unwrap_or_default()
+}
+
+/// Push the (re)join relay panel's rows and pick count.
+pub(crate) fn push_link_rows(ui: &AppWindow, st: &crate::surfaces::ChatUiState) {
+    let rows: Vec<LinkRelay> = st
+        .link_rows()
+        .into_iter()
+        .map(|r| LinkRelay { url: r.url.into(), picked: r.picked, block: r.block, kind: r.kind })
+        .collect();
+    ui.set_rw_relay_picked(i32::try_from(rows.iter().filter(|r| r.picked).count()).unwrap_or(0));
+    crate::models::sync_rows(&ui.get_rw_relays(), rows, |m| ui.set_rw_relays(m));
 }

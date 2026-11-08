@@ -16,6 +16,8 @@ mod files;
 mod founding_fold;
 mod kanban;
 mod layout;
+#[cfg(feature = "live-preview")]
+mod link_relays;
 mod mirror;
 #[cfg(feature = "live-preview")]
 mod modals;

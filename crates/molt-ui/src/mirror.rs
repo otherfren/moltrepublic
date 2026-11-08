@@ -764,6 +764,8 @@ pub(crate) fn apply_session(
                 .collect();
             ui.set_cw_relay_picked(picked_count(&rows));
             sync_rows(&ui.get_cw_relay_picks(), rows, |m| ui.set_cw_relay_picks(m));
+            st.set_link_pool(sv.settings.relays.clone(), sv.clearnet_session);
+            crate::actions::ritual::push_link_rows(&ui, &st);
         }
     }
     let session_locked = molt_core::relay::pool_gap(&sv.settings.relays, sv.clearnet_session)

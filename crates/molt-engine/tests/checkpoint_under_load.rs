@@ -111,6 +111,7 @@ async fn found_three(
     b.execute(Command::JoinStart {
         invite: links[0].clone(),
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("petra joins");
@@ -120,6 +121,7 @@ async fn found_three(
     v.execute(Command::JoinStart {
         invite: links[1].clone(),
         member: "vera".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("vera joins");

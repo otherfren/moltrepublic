@@ -321,6 +321,7 @@ async fn a_1059_frame_from_anyone_but_the_link_founder_cannot_kill_a_join() {
     b.execute(Command::JoinStart {
         invite: link,
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");

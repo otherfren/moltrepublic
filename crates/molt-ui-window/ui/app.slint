@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, InvitePreview, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
@@ -2091,7 +2091,8 @@ export component AppWindow inherits Window {
         // jw-starting covers the click-to-round-trip window run-active
         // cannot see yet (the engine mirror lags the first click).
         return !root.run-active && !root.rv-running && !root.jw-starting
-            && (root.rv-kind.kind == 1 ? root.jw-member != "" : root.rv-kind.kind == 2);
+            && (root.rv-kind.kind == 1 ? root.jw-member != "" : root.rv-kind.kind == 2)
+            && (root.rw-relays.length == 0 || root.rw-relay-picked > 0);
     }
     function link-continue() {
         if (!root.link-armed()) {
@@ -2180,7 +2181,16 @@ export component AppWindow inherits Window {
     in-out property <string> recover-link-member;
     // the rejoiner's recovery link (the peer way on the Restore screen; the
     // phrase is the shared rw-seed) …
-    property <string> rv-link;
+    in-out property <string> rv-link;
+    // the link's relays and this node's verdict on each (Rust-owned)
+    in property <[LinkRelay]> rw-relays;
+    in property <int> rw-relay-picked;
+    callback rw-relay-toggle(int);
+    callback rw-relay-adopt(string);
+    callback rw-link-changed(string);
+    changed rv-link => {
+        root.rw-link-changed(root.rv-link);
+    }
     // … and its lifecycle, driven by the engine notices (pushed from Rust):
     // running from "recover-started:", error from "recover-failed:"; on
     // success the engine flips to Main by itself
@@ -5202,6 +5212,69 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                    // the link's relays: tick which to dial; a blocked one
+                    // is adopted into this node's pool on click
+                    if root.rv-link != "" && root.rv-kind.kind != 0 && root.rw-relays.length > 0: Rectangle {
+                        height: min(130px, root.rw-relays.length * 26px) * Theme.ui-scale;
+                        background: Theme.panel;
+                        border-radius: Theme.win95 ? 0px : 6px;
+                        border-width: Theme.border-w;
+                        border-color: Theme.line;
+                        clip: true;
+                        rwrl := Flickable {
+                            width: 100%;
+                            height: 100%;
+                            viewport-width: self.width;
+                            viewport-height: rwrl-list.preferred-height;
+                            rwrl-list := VerticalLayout {
+                                padding: 2px;
+                                padding-right: 10px;
+                                alignment: start;
+                                for r[i] in root.rw-relays: HorizontalLayout {
+                                    height: 24px * Theme.ui-scale;
+                                    spacing: 8px;
+                                    rw-relay-check := AppButton {
+                                        width: 26px * Theme.ui-scale;
+                                        height: 22px * Theme.ui-scale;
+                                        pad: 0px;
+                                        emoji: r.block != 0 ? "➕" : (r.picked ? "✅" : "⬜");
+                                        tooltip: r.block != 0 ? Strings.rw-rl-adopt : Strings.cw-relays-toggle;
+                                        clicked => {
+                                            if (r.block == 0) {
+                                                root.rw-relay-toggle(i);
+                                            } else {
+                                                root.rw-relay-adopt(r.url);
+                                                if (r.kind != 0) {
+                                                    root.open-clearnet-warning(r.url, r.kind);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        text: r.url;
+                                        color: r.picked ? Theme.text : Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    if r.block != 0: Text {
+                                        text: r.block == 1 ? Strings.rw-rl-not-in-pool
+                                            : (r.block == 2 ? Strings.rw-rl-unconfirmed : Strings.rw-rl-clearnet-off);
+                                        color: Theme.warn;
+                                        font-size: Theme.fs-cap;
+                                        vertical-alignment: center;
+                                    }
+                                }
+                            }
+                        }
+                        ScrollHint {
+                            x: parent.width - 7px;
+                            view-h: rwrl.height;
+                            content-h: rwrl.viewport-height;
+                            scroll-y: rwrl.viewport-y;
+                        }
+                    }
                     // what the link turned out to be, and what it still
                     // wants. One line, and only once there is a link to
                     // say anything about.
@@ -5213,14 +5286,6 @@ export component AppWindow inherits Window {
                                 ? "\{Strings.rw-link-recover} \{root.rv-kind.republic} · \{root.rv-kind.who}"
                                 : Strings.rw-link-unknown);
                         label-color: root.rv-kind.kind == 0 ? Theme.bad : Theme.text;
-                    }
-                    // the link's relay pool deviates from this node's — a
-                    // hard blocker (relays do not federate), said loudly
-                    // BEFORE the run fails on it
-                    if root.rv-link != "" && root.rv-kind.kind != 0 && root.rv-kind.missing > 0: DotLabel {
-                        tone: Theme.warn;
-                        label: "\{root.rv-kind.missing} \{Strings.rw-link-missing-relays} · \{root.rv-kind.missing-first}";
-                        label-color: Theme.warn;
                     }
                     // an INVITE needs a name (nobody knows who is joining);
                     // a recovery link brought its seat with it

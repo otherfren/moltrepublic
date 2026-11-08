@@ -143,7 +143,7 @@ pub async fn found_n_prepared(
     let mut all = vec![a];
     for (i, link) in links.into_iter().enumerate() {
         let w = prepare(engine(&root.join(NAMES[i + 1])), i + 1).await;
-        w.execute(Command::JoinStart { invite: link, member: NAMES[i + 1].to_string() })
+        w.execute(Command::JoinStart { invite: link, member: NAMES[i + 1].to_string(), relays: Vec::new() })
             .await
             .expect("join starts");
         all.push(w);

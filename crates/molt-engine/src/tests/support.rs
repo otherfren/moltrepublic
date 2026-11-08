@@ -345,7 +345,7 @@ pub(super) fn recovering_state(
     );
     // the production path: it arms the context, then fails honestly
     // because this build has no rejoin transport
-    st.cmd_recover_start(recover_link(member, republic_id), phrase.to_string())
+    st.cmd_recover_start(recover_link(member, republic_id), phrase.to_string(), Vec::new())
         .expect("recover start arms the context");
     st
 }

@@ -1138,7 +1138,10 @@ lexicon! {
     rw_link_join: "Invite to", "Einladung zu";
     rw_link_recover: "Recovery for", "Wiederherstellung für";
     rw_link_unknown: "Not a usable molt:// link.", "Kein brauchbarer molt://-Link.";
-    rw_link_missing_relays: "of the link's relays are not in your pool", "der Link-Relays fehlen in deinem Pool";
+    rw_rl_not_in_pool: "not in your pool", "nicht in deinem Pool";
+    rw_rl_unconfirmed: "not confirmed", "nicht bestätigt";
+    rw_rl_clearnet_off: "clearnet relays off", "Clearnet-Relays aus";
+    rw_rl_adopt: "Add to your relays", "Zu deinen Relays hinzufügen";
     rw_link_name_ph: "Your name…", "Dein Name…";
     rw_via_s3: "Online-restore via S3", "Online-Restore via S3";
     rw_s3_hint: "Pulls the encrypted backup from the S3 bucket in the storage settings; the chain is verified before anything materializes.", "Holt das verschlüsselte Backup aus dem S3-Bucket der Speicher-Einstellungen; die Chain wird vor dem Anlegen verifiziert.";

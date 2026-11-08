@@ -102,6 +102,7 @@ async fn found_pair(root: &std::path::Path, url: &str) -> (WalletHandle, WalletH
     b.execute(Command::JoinStart {
         invite: link,
         member: "walter".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join start");

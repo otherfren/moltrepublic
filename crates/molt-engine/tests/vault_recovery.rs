@@ -165,7 +165,7 @@ async fn deposit_cut_recover_grant_to_the_recovered_seat_reads() {
         .to_string();
     let d = engine(&tmp.path().join("d-new"));
     vault_support::adopt_relay(&d, &url).await;
-    d.execute(Command::RecoverStart { link, phrase }).await.expect("recover start");
+    d.execute(Command::RecoverStart { link, phrase, relays: Vec::new() }).await.expect("recover start");
     let s = wait_for(&d, "the recovery to open", |s| {
         (s.screen == molt_core::Screen::Main && s.notice.starts_with("recovered:"))
             || s.notice.starts_with("recover-failed:")

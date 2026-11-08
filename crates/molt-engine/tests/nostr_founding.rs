@@ -175,6 +175,7 @@ async fn a_republic_founds_and_a_member_joins_over_one_relay() {
     b.execute(Command::JoinStart {
         invite: link,
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");
@@ -448,6 +449,7 @@ async fn a_join_needs_only_one_relay_in_common_with_the_invite() {
     b.execute(Command::JoinStart {
         invite: link,
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");
@@ -540,6 +542,7 @@ async fn a_join_with_no_relay_in_common_is_refused_with_an_actionable_message() 
     b.execute(Command::JoinStart {
         invite: link,
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("the wizard arms");
@@ -623,6 +626,7 @@ async fn the_relay_refusal_diagnoses_every_invite_relay_individually() {
     b.execute(Command::JoinStart {
         invite: link_naming(&[absent.clone(), unconfirmed.clone(), dark.clone()]),
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("the wizard arms");
@@ -646,6 +650,30 @@ async fn the_relay_refusal_diagnoses_every_invite_relay_individually() {
         log.iter().filter(|l| l.contains("clearnet_enabled")).count() == 1,
         "the remedy is stated exactly once, not per relay: {log:?}"
     );
+}
+
+/// A join's relay pick is a constraint, not a wish: a picked relay this
+/// node cannot dial is refused by name, even when another relay of the
+/// same invite would have worked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_join_refuses_a_picked_relay_it_cannot_dial() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let absent = "wss://never-added.example".to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay(&b, &url).await;
+
+    b.execute(Command::JoinStart {
+        invite: link_naming(&[url.clone(), absent.clone()]),
+        member: "petra".to_string(),
+        relays: vec![absent.clone()],
+    })
+    .await
+    .expect("the wizard arms");
+    let s = wait_for(&b, "the join to refuse", |s| s.join.run.outcome == 2).await;
+    let terminal = s.join.run.log.iter().find(|l| l.starts_with('✗')).expect("a ✗ line");
+    assert!(terminal.contains(&absent) && terminal.contains("not dialable"), "{terminal}");
 }
 
 /// NEGATIVE — the single-use ticket over the relay: a SECOND person
@@ -681,6 +709,7 @@ async fn a_second_activation_of_the_same_link_fails_as_spent() {
     b.execute(Command::JoinStart {
         invite: link.clone(),
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("b joins");
@@ -692,6 +721,7 @@ async fn a_second_activation_of_the_same_link_fails_as_spent() {
     c.execute(Command::JoinStart {
         invite: link,
         member: "carol".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("c's wizard arms");
@@ -749,6 +779,7 @@ async fn a_declined_charter_aborts_both_sides() {
     b.execute(Command::JoinStart {
         invite: link,
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");
@@ -820,6 +851,7 @@ async fn a_decline_ends_the_founding_for_the_waiting_co_member_too() {
     b.execute(Command::JoinStart {
         invite: link_b,
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("petra joins");
@@ -828,6 +860,7 @@ async fn a_decline_ends_the_founding_for_the_waiting_co_member_too() {
     c.execute(Command::JoinStart {
         invite: link_c,
         member: "dora".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("dora joins");
@@ -954,7 +987,7 @@ async fn a_founder_pool_over_the_link_cap_still_founds_over_its_first_eight() {
     // Welcome-set equality check
     let b = engine(&tmp.path().join("joiner"));
     adopt_relay(&b, &url).await;
-    b.execute(Command::JoinStart { invite: link, member: "petra".to_string() })
+    b.execute(Command::JoinStart { invite: link, member: "petra".to_string(), relays: Vec::new() })
         .await
         .expect("join starts");
     wait_for(&a, "the founder to accept the join", |s| s.create.can_propose).await;
@@ -1081,6 +1114,7 @@ async fn founding_invalidates_an_in_flight_join() {
     b.execute(Command::JoinStart {
         invite: s.create.seats[0].link.clone(),
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");
@@ -1155,6 +1189,7 @@ async fn recovery_invalidates_an_in_flight_join() {
     b.execute(Command::JoinStart {
         invite: s.create.seats[0].link.clone(),
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");
@@ -1178,6 +1213,7 @@ async fn recovery_invalidates_an_in_flight_join() {
             }
             .render(),
             phrase: "abandon abandon abandon".to_string(),
+            relays: Vec::new(),
         })
         .await;
 
@@ -1288,6 +1324,7 @@ async fn a_seal_that_no_relay_accepts_fails_the_founding_instead_of_hanging() {
     b.execute(Command::JoinStart {
         invite: s.create.seats[0].link.clone(),
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");
@@ -1357,6 +1394,7 @@ async fn a_founder_cancel_reaches_the_members_inside_the_born_group() {
     b.execute(Command::JoinStart {
         invite: s.create.seats[0].link.clone(),
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");
@@ -1419,7 +1457,7 @@ async fn a_retry_of_the_same_link_by_the_same_joiner_keeps_the_seat() {
 
     let b = engine(&tmp.path().join("joiner"));
     adopt_relay(&b, &url).await;
-    b.execute(Command::JoinStart { invite: link0.clone(), member: "petra".to_string() })
+    b.execute(Command::JoinStart { invite: link0.clone(), member: "petra".to_string(), relays: Vec::new() })
         .await
         .expect("first attempt");
     wait_for(&a, "petra's seat to anchor", |s| s.create.seats[0].member == "petra").await;
@@ -1429,7 +1467,7 @@ async fn a_retry_of_the_same_link_by_the_same_joiner_keeps_the_seat() {
     // engine refuses a second JoinStart while one is running), and the retry
     // mints a FRESH phrase, so the founder sees a different identity_pk.
     b.execute(Command::JoinCancel).await.expect("she gives up on the stuck attempt");
-    b.execute(Command::JoinStart { invite: link0, member: "petra".to_string() })
+    b.execute(Command::JoinStart { invite: link0, member: "petra".to_string(), relays: Vec::new() })
         .await
         .expect("the retry arms");
     let s = wait_for(&a, "the founder to accept the re-activation", |s| {
@@ -1446,7 +1484,7 @@ async fn a_retry_of_the_same_link_by_the_same_joiner_keeps_the_seat() {
     // and the founding still completes with her SECOND identity
     let c = engine(&tmp.path().join("third"));
     adopt_relay(&c, &url).await;
-    c.execute(Command::JoinStart { invite: link1, member: "carol".to_string() })
+    c.execute(Command::JoinStart { invite: link1, member: "carol".to_string(), relays: Vec::new() })
         .await
         .expect("carol joins");
     wait_for(&a, "all seats", |s| s.create.can_propose).await;
@@ -1589,6 +1627,7 @@ async fn a_joiner_may_not_claim_the_founders_handle() {
     b.execute(Command::JoinStart {
         invite: s.create.seats[0].link.clone(),
         member: "walter".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("the wizard arms");
@@ -1643,7 +1682,7 @@ async fn a_failed_re_activation_leaves_the_honest_seat_intact() {
 
     let b = engine(&tmp.path().join("joiner"));
     adopt_relay(&b, &url).await;
-    b.execute(Command::JoinStart { invite: link0, member: "petra".to_string() })
+    b.execute(Command::JoinStart { invite: link0, member: "petra".to_string(), relays: Vec::new() })
         .await
         .expect("petra joins");
     let s = wait_for(&a, "petra's seat to anchor", |s| s.create.seats[0].member == "petra").await;
@@ -1693,6 +1732,7 @@ async fn a_failed_re_activation_leaves_the_honest_seat_intact() {
     c.execute(Command::JoinStart {
         invite: s.create.seats[1].link.clone(),
         member: "carol".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("carol joins");
@@ -1782,6 +1822,7 @@ async fn a_refused_join_gets_a_short_headline_not_only_a_log_line() {
     b.execute(Command::JoinStart {
         invite: link_naming(&["wss://never-added.example".to_string()]),
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("the wizard arms");
@@ -1900,6 +1941,7 @@ async fn the_relay_pool_is_bound_into_what_every_member_signs() {
     b.execute(Command::JoinStart {
         invite: link,
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");
@@ -2011,6 +2053,7 @@ async fn the_feature_set_is_bound_into_what_every_member_signs() {
     b.execute(Command::JoinStart {
         invite: link,
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");
@@ -2152,6 +2195,7 @@ async fn a_join_over_a_slowly_replaying_relay_still_reaches_the_charter() {
     b.execute(Command::JoinStart {
         invite: link,
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");

@@ -272,6 +272,15 @@ their format-preserving guarantee.
   as exactly that, with the switch next to them — and a join refused over such
   a relay says so per relay, naming the switch and the `clearnet_enabled`
   config key rather than a flat "no relay in common" (§7).
+- A pasted join or recovery link lists ITS relays under the link field
+  (2026-11-08), each with this node's verdict. A usable relay can be
+  deselected; a blocked one is adopted on click (onion: added and
+  confirmed; clearnet/local: through the same warning). The pick rides
+  `JoinStart.relays` / `RecoverStart.relays` (MCP: `relays` on
+  `join_start` / `recover_start`): empty = every relay of the link this
+  node can dial, and a picked relay the link does not name or this node
+  cannot dial is refused, never dropped (`molt_core::relay::pick_dial_relays`,
+  the founding pick's rule).
 
 ## 7. Keystones
 

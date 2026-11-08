@@ -5217,6 +5217,11 @@ pub enum Command {
         link: String,
         /// The seat's recovery phrase (the identity re-derives from it).
         phrase: String,
+        /// The relays to dial among the link's own, in any order; empty =
+        /// every one this node can dial. A relay the link does not name, or
+        /// this node cannot dial, is refused rather than dropped.
+        #[serde(default)]
+        relays: Vec<String>,
     },
     /// A returning member's **recovery request** arrived on the coordinator's
     /// recovery queue (engine-internal — the recovery-ritual transport speaks to
@@ -5751,6 +5756,11 @@ pub enum Command {
         invite: String,
         /// The joiner's handle.
         member: String,
+        /// The relays to dial among the link's own, in any order; empty =
+        /// every one this node can dial. A relay the link does not name, or
+        /// this node cannot dial, is refused rather than dropped.
+        #[serde(default)]
+        relays: Vec<String>,
     },
     /// Ratify the founder's proposed charter (name + agenda), surfaced when the
     /// join reaches the ratification step (`join.awaiting_ratify`). This is the

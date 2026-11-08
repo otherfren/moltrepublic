@@ -25,6 +25,7 @@ fn join_requires_a_joinable_link() {
                     w.execute(Command::JoinStart {
                         invite: bad.to_string(),
                         member: "petra".to_string(),
+                        relays: Vec::new(),
                     })
                     .await,
                     Err(MoltError::Join(_))
@@ -62,6 +63,7 @@ fn join_requires_a_joinable_link() {
         w.execute(Command::JoinStart {
             invite: link,
             member: "petra".to_string(),
+            relays: Vec::new(),
         })
         .await
         .expect("a joinable link arms the wizard");
@@ -162,7 +164,7 @@ fn valid_sealed_roster() -> molt_core::SealedRoster {
 fn join_fails_honestly_and_late_reports_stay_dropped() {
     rt().block_on(async {
         let w = spawn(GroupConfig::demo(), SessionView::default());
-        w.execute(Command::JoinStart { invite: joinable_link(), member: "petra".to_string() })
+        w.execute(Command::JoinStart { invite: joinable_link(), member: "petra".to_string(), relays: Vec::new() })
             .await
             .expect("start");
         match w.execute(Command::ReadSession).await.expect("read") {

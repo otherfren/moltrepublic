@@ -711,9 +711,50 @@ pub fn diagnose_invite_relays(
         .collect()
 }
 
+/// The relays a join or recovery dials: the operator's `pick` among the
+/// link's dialable relays, or all of them when `pick` is empty.
+///
+/// A picked relay the link does not name, or this node cannot dial, is
+/// refused (`Err` carries its URL) rather than dropped - the founding
+/// pick's rule, so a pick never shrinks silently.
+pub fn pick_dial_relays(
+    verdicts: &[InviteRelayVerdict],
+    pick: &[String],
+) -> Result<Vec<String>, String> {
+    let dialable = verdicts.iter().filter(|v| v.blocked.is_none()).map(|v| &v.url);
+    if pick.is_empty() {
+        return Ok(dialable.cloned().collect());
+    }
+    if let Some(bad) = pick.iter().find(|p| !dialable.clone().any(|u| u == *p)) {
+        return Err(bad.clone());
+    }
+    Ok(verdicts
+        .iter()
+        .filter(|v| pick.contains(&v.url))
+        .map(|v| v.url.clone())
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pick_narrows_the_dial_set_and_refuses_what_cannot_be_dialed() {
+        let v = |url: &str, blocked| InviteRelayVerdict { url: url.into(), blocked };
+        let verdicts = [
+            v("wss://a", None),
+            v("wss://b", Some(InviteRelayBlock::NotInPool)),
+            v("wss://c", None),
+        ];
+        let s = |u: &[&str]| u.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(pick_dial_relays(&verdicts, &[]), Ok(s(&["wss://a", "wss://c"])));
+        // invite order, not pick order
+        assert_eq!(pick_dial_relays(&verdicts, &s(&["wss://c", "wss://a"])), Ok(s(&["wss://a", "wss://c"])));
+        assert_eq!(pick_dial_relays(&verdicts, &s(&["wss://c"])), Ok(s(&["wss://c"])));
+        assert_eq!(pick_dial_relays(&verdicts, &s(&["wss://b"])), Err("wss://b".into()));
+        assert_eq!(pick_dial_relays(&verdicts, &s(&["wss://x"])), Err("wss://x".into()));
+    }
 
     fn entry(url: &str, confirmed: bool) -> RelayEntry {
         RelayEntry { url: url.to_string(), confirmed }

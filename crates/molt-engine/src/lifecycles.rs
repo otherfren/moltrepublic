@@ -1316,6 +1316,7 @@ impl State {
         &mut self,
         invite: String,
         member: String,
+        pick: Vec<String>,
     ) -> Result<Reply, MoltError> {
         guard_idle(&self.session.join.run, MoltError::Join)?;
         let member = member.trim().to_string();
@@ -1397,11 +1398,15 @@ impl State {
             &self.session.settings.relays,
             self.clearnet_session,
         );
-        let dial_relays: Vec<String> = verdicts
-            .iter()
-            .filter(|v| v.blocked.is_none())
-            .map(|v| v.url.clone())
-            .collect();
+        let dial_relays = match molt_core::relay::pick_dial_relays(&verdicts, &pick) {
+            Ok(d) => d,
+            Err(bad) => {
+                return self.cmd_net_join_failed(
+                    crate::relay_msg::pick_refusal(&bad),
+                    Some(generation),
+                )
+            }
+        };
         if dial_relays.is_empty() {
             // Diagnose EVERY relay the invite names, individually. A flat "no
             // relay in common" was actively misleading whenever the relay was
@@ -1855,6 +1860,7 @@ impl State {
         &mut self,
         link: String,
         phrase: String,
+        pick: Vec<String>,
     ) -> Result<Reply, MoltError> {
         let link = link.trim().to_string();
         // an actionable recovery link carries the coordinator's transport
@@ -1933,11 +1939,15 @@ impl State {
             &self.session.settings.relays,
             self.clearnet_session,
         );
-        let dial_relays: Vec<String> = verdicts
-            .iter()
-            .filter(|v| v.blocked.is_none())
-            .map(|v| v.url.clone())
-            .collect();
+        let dial_relays = match molt_core::relay::pick_dial_relays(&verdicts, &pick) {
+            Ok(d) => d,
+            Err(bad) => {
+                return self.cmd_net_recover_failed(
+                    crate::relay_msg::pick_refusal(&bad),
+                    Some(generation),
+                )
+            }
+        };
         if dial_relays.is_empty() {
             let refusal = crate::relay_msg::join_relay_refusal(
                 &verdicts,

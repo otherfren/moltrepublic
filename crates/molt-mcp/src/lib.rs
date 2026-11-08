@@ -3003,13 +3003,15 @@ pub fn tools() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "link": { "type": "string", "description": "the molt://recover/… link (must carry the transport handover)" },
-                    "phrase": { "type": "string", "description": "the seat's recovery phrase" }
+                    "phrase": { "type": "string", "description": "the seat's recovery phrase" },
+                    "relays": { "type": "array", "items": { "type": "string" }, "description": "the relays to dial among the link's own; omitted = every one this node can dial" }
                 },
                 "required": ["link", "phrase"]
             }),
             build: |args| Ok(Command::RecoverStart {
                 link: str_arg(args, "link")?,
                 phrase: str_arg(args, "phrase")?,
+                relays: str_list_arg(args, "relays")?,
             }),
         },
         ToolDef {
@@ -3130,13 +3132,15 @@ pub fn tools() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "invite": { "type": "string", "description": "the molt://invite/… link (one opaque segment; older path-shaped links still parse)" },
-                    "member": { "type": "string", "description": "the joiner's handle (ASCII + ä ö ü ß)" }
+                    "member": { "type": "string", "description": "the joiner's handle (ASCII + ä ö ü ß)" },
+                    "relays": { "type": "array", "items": { "type": "string" }, "description": "the relays to dial among the link's own; omitted = every one this node can dial" }
                 },
                 "required": ["invite", "member"]
             }),
             build: |args| Ok(Command::JoinStart {
                 invite: str_arg(args, "invite")?,
                 member: str_arg(args, "member")?,
+                relays: str_list_arg(args, "relays")?,
             }),
         },
         ToolDef {

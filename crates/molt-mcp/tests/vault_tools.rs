@@ -72,7 +72,7 @@ async fn found(root: &std::path::Path, url: &str, features: &[&str]) -> Vec<Wall
     for (i, link) in links.into_iter().enumerate() {
         let w = engine(&root.join(NAMES[i + 1]));
         adopt_relay(&w, url).await;
-        w.execute(Command::JoinStart { invite: link, member: NAMES[i + 1].into() }).await.expect("join");
+        w.execute(Command::JoinStart { invite: link, member: NAMES[i + 1].into(), relays: Vec::new() }).await.expect("join");
         all.push(w);
     }
     let a = &all[0];

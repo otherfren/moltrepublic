@@ -161,6 +161,7 @@ async fn found_republic(
     b.execute(Command::JoinStart {
         invite: link,
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");
@@ -312,6 +313,7 @@ async fn a_recovery_still_verifies_after_a_sealed_pool_edit() {
     c.execute(Command::RecoverStart {
         link,
         phrase: petra_phrase,
+        relays: Vec::new(),
     })
     .await
     .expect("recover start");
@@ -370,6 +372,7 @@ async fn found_three_at(
     b.execute(Command::JoinStart {
         invite: links[0].clone(),
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("petra joins");
@@ -384,6 +387,7 @@ async fn found_three_at(
     v.execute(Command::JoinStart {
         invite: links[1].clone(),
         member: "vera".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("vera joins");
@@ -505,6 +509,7 @@ async fn a_bystander_that_slept_through_a_recovery_still_hears_the_rejoiner() {
     c.execute(Command::RecoverStart {
         link,
         phrase: petra_phrase,
+        relays: Vec::new(),
     })
     .await
     .expect("recover start");
@@ -822,6 +827,7 @@ async fn a_lost_seat_rejoins_the_republic_over_relays() {
     c.execute(Command::RecoverStart {
         link,
         phrase: petra_phrase,
+        relays: Vec::new(),
     })
     .await
     .expect("recover start");
@@ -914,6 +920,7 @@ async fn a_double_recovery_of_the_same_seat_still_converges_both_ways() {
     c1.execute(Command::RecoverStart {
         link: link1,
         phrase: petra_phrase.clone(),
+        relays: Vec::new(),
     })
     .await
     .expect("recover 1 start");
@@ -951,6 +958,7 @@ async fn a_double_recovery_of_the_same_seat_still_converges_both_ways() {
     c2.execute(Command::RecoverStart {
         link: link2,
         phrase: petra_phrase,
+        relays: Vec::new(),
     })
     .await
     .expect("recover 2 start");
@@ -1114,6 +1122,7 @@ async fn a_request_wrapped_by_another_key_is_refused_and_leaves_the_ticket_unspe
     c.execute(Command::RecoverStart {
         link,
         phrase: petra_phrase,
+        relays: Vec::new(),
     })
     .await
     .expect("recover start");
@@ -1172,6 +1181,7 @@ async fn a_recovery_needs_no_human_approval_when_survivors_are_online() {
     c.execute(Command::RecoverStart {
         link,
         phrase: petra_phrase,
+        relays: Vec::new(),
     })
     .await
     .expect("recover start");
@@ -1245,7 +1255,7 @@ async fn a_wrong_phrase_fails_the_rejoiner_fast_with_the_reason() {
     let c = engine(&tmp.path().join("rejoiner"));
     adopt_relay(&c, &url).await;
     let wrong = molt_storage::generate_seed_phrase().expect("a valid but foreign phrase");
-    c.execute(Command::RecoverStart { link, phrase: wrong }).await.expect("recover start");
+    c.execute(Command::RecoverStart { link, phrase: wrong, relays: Vec::new() }).await.expect("recover start");
 
     // the refusal must arrive as an honest failure within the ordinary wait —
     // never as a silent quarter-hour timeout
@@ -1306,6 +1316,7 @@ async fn the_founders_own_seat_recovers_over_relays() {
     c.execute(Command::RecoverStart {
         link,
         phrase: walter_phrase,
+        relays: Vec::new(),
     })
     .await
     .expect("recover start");
@@ -1368,6 +1379,7 @@ async fn a_recovery_replaces_a_local_copy_of_the_seat() {
         c.execute(Command::RecoverStart {
             link,
             phrase: petra_phrase.clone(),
+            relays: Vec::new(),
         })
         .await
         .expect("recover start");
@@ -1422,6 +1434,7 @@ async fn a_recovery_keeps_the_key_parts_of_the_local_copy() {
         c.execute(Command::RecoverStart {
             link,
             phrase: petra_phrase.clone(),
+            relays: Vec::new(),
         })
         .await
         .expect("recover start");
@@ -1644,6 +1657,7 @@ async fn a_rejoin_over_a_slowly_replaying_relay_still_comes_back() {
     c.execute(Command::RecoverStart {
         link,
         phrase: petra_phrase,
+        relays: Vec::new(),
     })
     .await
     .expect("recover start");

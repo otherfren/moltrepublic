@@ -69,6 +69,14 @@ export struct ChainRow {
 // and whether the founder chose it for the republic. The pick becomes the
 // invites' list and (R3) the pool every member signs into the genesis, so it
 // must be a deliberate set — not whatever the settings page held.
+// One relay a (re)join link names, judged against this node's pool.
+export struct LinkRelay {
+    url: string,
+    picked: bool,
+    block: int, // 0 usable · 1 not in pool · 2 unconfirmed · 3 clearnet off
+    kind: int, // 0 onion · 1 clearnet · 2 local
+}
+
 export struct RelayPick {
     url: string,
     picked: bool,
@@ -337,11 +345,6 @@ export struct LinkPreview {
     republic: string,
     // invite: who minted it · recovery: the seat coming back
     who: string,
-    // how many of the link's relays this node does NOT have, and the first
-    // such URL — a pool deviation is a hard blocker (relays do not
-    // federate), so the panel shows it loudly before the run can fail
-    missing: int,
-    missing-first: string,
 }
 
 // One sub-view of a surface (nav entry), from molt-core's shared view list.
@@ -1638,7 +1641,6 @@ export global Strings {
     in property <string> rw-link-join;
     in property <string> rw-link-recover;
     in property <string> rw-link-unknown;
-    in property <string> rw-link-missing-relays;
     in property <string> rw-link-name-ph;
     in property <string> rw-via-s3;
     in property <string> rw-s3-hint;
@@ -1812,6 +1814,10 @@ export global Strings {
     in property <string> rp-cn-session-off;
     in property <string> rp-cn-session-on;
     in property <string> rp-cn-session-on-direct;
+    in property <string> rw-rl-not-in-pool;
+    in property <string> rw-rl-unconfirmed;
+    in property <string> rw-rl-clearnet-off;
+    in property <string> rw-rl-adopt;
     in property <string> rp-cn-activate;
     in property <string> rp-cn-deactivate;
     in property <string> set-panel-appearance;

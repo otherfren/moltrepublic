@@ -145,6 +145,7 @@ async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, W
     b.execute(Command::JoinStart {
         invite: link,
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");

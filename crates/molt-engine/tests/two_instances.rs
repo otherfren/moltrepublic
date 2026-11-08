@@ -2635,6 +2635,7 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
     c.execute(Command::RecoverStart {
         link: material.link.clone(),
         phrase: b_phrase.clone(),
+        relays: Vec::new(),
     })
     .await
     .expect("recover start");
@@ -2697,6 +2698,7 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
     d.execute(Command::RecoverStart {
         link: material.link.clone(),
         phrase: b_phrase.clone(),
+        relays: Vec::new(),
     })
     .await
     .expect("recover start (option A)");
@@ -2998,6 +3000,7 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
     c.execute(Command::RecoverStart {
         link: material2.link.clone(),
         phrase: b_phrase.clone(),
+        relays: Vec::new(),
     })
     .await
     .expect("recover start");

@@ -468,6 +468,7 @@ fn joining_refuses_while_a_confirmation_is_still_verifying() {
             .execute(Command::JoinStart {
                 invite: "molt://invite/x".to_string(),
                 member: "m".to_string(),
+                relays: Vec::new(),
             })
             .await;
         let err = format!("{:?}", refused.expect_err("the race must be refused"));

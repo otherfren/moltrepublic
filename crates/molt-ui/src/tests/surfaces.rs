@@ -887,3 +887,48 @@ fn a_decided_row_carries_its_decision_date() {
     let unknown = proposal_row(0, &view(ProposalState::Applied, 0, 0));
     assert_eq!(unknown.decided_when, "-", "an unknown stamp says so");
 }
+
+/// The (re)join relay panel: the LINK's relays with this node's verdict on
+/// each; only a usable one can be picked, a deselection survives a pool
+/// refresh, a relay that becomes usable comes in picked, and a new link
+/// starts over.
+#[test]
+fn the_link_relay_panel_picks_among_the_links_own_relays() {
+    use molt_core::relay::RelayEntry;
+    let s = |u: &str| u.to_string();
+    let (onion, clear, gone) = (
+        s("ws://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstuvwx.onion"),
+        s("wss://clear.example"),
+        s("wss://gone.example"),
+    );
+    let mut st = crate::surfaces::ChatUiState::default();
+    st.set_link("molt://a", vec![onion.clone(), clear.clone(), gone.clone()]);
+    st.set_link_pool(
+        vec![RelayEntry { url: onion.clone(), confirmed: true }, RelayEntry { url: clear.clone(), confirmed: true }],
+        false,
+    );
+    let rows = |st: &crate::surfaces::ChatUiState| {
+        st.link_rows().into_iter().map(|r| (r.url, r.picked, r.block, r.kind)).collect::<Vec<_>>()
+    };
+    assert_eq!(
+        rows(&st),
+        vec![(onion.clone(), true, 0, 0), (clear.clone(), false, 3, 1), (gone.clone(), false, 1, 1)]
+    );
+    assert!(st.link_pick("molt://a").is_empty(), "nothing deselected = no explicit pick");
+
+    // clearnet goes on: the clearnet relay becomes usable AND picked
+    st.set_link_pool(
+        vec![RelayEntry { url: onion.clone(), confirmed: true }, RelayEntry { url: clear.clone(), confirmed: true }],
+        true,
+    );
+    st.toggle_link_relay(&onion);
+    assert_eq!(rows(&st)[1], (clear.clone(), true, 0, 1));
+    assert_eq!(st.link_pick("molt://a"), vec![clear.clone()]);
+    // a blocked relay cannot be picked by a toggle
+    st.toggle_link_relay(&gone);
+    assert_eq!(st.link_pick("molt://a"), vec![clear.clone()]);
+    // another link (the join wizard's own field) never inherits this pick
+    assert!(st.link_pick("molt://b").is_empty());
+    st.set_link("molt://b", vec![onion.clone()]);
+    assert_eq!(rows(&st), vec![(onion, true, 0, 0)]);
+}

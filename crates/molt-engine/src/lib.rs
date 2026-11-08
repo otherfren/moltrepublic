@@ -2317,7 +2317,9 @@ impl State {
                 })
             }
             Command::RecoverInviteStart { member } => self.cmd_recover_invite_start(member),
-            Command::RecoverStart { link, phrase } => self.cmd_recover_start(link, phrase),
+            Command::RecoverStart { link, phrase, relays } => {
+                self.cmd_recover_start(link, phrase, relays)
+            }
             Command::NetRecoverSealed {
                 member,
                 chain,
@@ -2411,7 +2413,9 @@ impl State {
                 link,
                 generation,
             } => self.cmd_net_ritual_link_ready(seat, link, generation),
-            Command::JoinStart { invite, member } => self.cmd_join_start(invite, member),
+            Command::JoinStart { invite, member, relays } => {
+                self.cmd_join_start(invite, member, relays)
+            }
             Command::JoinConfirmCharter => self.cmd_join_confirm_charter(),
             Command::JoinDeclineCharter => self.cmd_join_decline_charter(),
             Command::JoinFinish => self.cmd_join_finish(),

@@ -58,7 +58,7 @@ fn a_recover_refusal_names_the_relays_it_diagnosed() {
         }),
     }
     .render();
-    st.cmd_recover_start(link, "brave mountain".to_string()).expect("acked");
+    st.cmd_recover_start(link, "brave mountain".to_string(), Vec::new()).expect("acked");
     let notice = st.session.notice.clone();
     assert!(notice.starts_with("recover-failed:"), "{notice}");
     assert!(
@@ -77,6 +77,7 @@ fn recover_start_guards_the_link_and_the_storage() {
             .execute(Command::RecoverStart {
                 link: "molt://recover/Guild/bob/abcdef".to_string(),
                 phrase: "some phrase".to_string(),
+                relays: Vec::new(),
             })
             .await
             .expect_err("a preview link cannot start a recovery");
@@ -88,6 +89,7 @@ fn recover_start_guards_the_link_and_the_storage() {
             .execute(Command::RecoverStart {
                 link: recover_link("bob", "f00d"),
                 phrase: "some phrase".to_string(),
+                relays: Vec::new(),
             })
             .await
             .expect_err("a storage-less node cannot recover");
@@ -109,6 +111,7 @@ fn recovery_materializes_the_workspace_from_the_full_verified_chain() {
         w.execute(Command::RecoverStart {
             link: recover_link("bob", &republic_id),
             phrase: phrase.clone(),
+            relays: Vec::new(),
         })
         .await
         .expect("recover start");
@@ -479,6 +482,7 @@ fn recovery_hard_rejects_a_chain_that_does_not_anchor_the_phrase() {
         w.execute(Command::RecoverStart {
             link: recover_link("bob", &republic_id),
             phrase,
+            relays: Vec::new(),
         })
         .await
         .expect("recover start");

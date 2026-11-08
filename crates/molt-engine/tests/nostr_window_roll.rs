@@ -163,6 +163,7 @@ async fn a_deaf_group_channel_is_surfaced_to_both_wizards_and_heals() {
     b.execute(Command::JoinStart {
         invite: s.create.seats[0].link.clone(),
         member: "petra".to_string(),
+        relays: Vec::new(),
     })
     .await
     .expect("join starts");
