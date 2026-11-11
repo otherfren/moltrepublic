@@ -26,7 +26,7 @@ import {
     ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
 } from "components.slint";
 import {
-    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, FeatureTable, SealedPanel, FoldedStep, ProposalCard, DecisionTable, Spinner, DiffViewer
+    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, FeatureTable, SealedPanel, FoldedStep, ProposalCard, DecisionTable, Spinner, DiffViewer, OrgBanner, LogoBox
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
@@ -3044,6 +3044,8 @@ export component AppWindow inherits Window {
                         SurfaceRow {
                             s: s;
                             selected: s.key == root.nav-expanded;
+                            logo: root.org-img;
+                            logo-set: root.org-img-set;
                             compact: root.nav-collapsed;
                             // every row the model delivers is selectable: the
                             // charter's feature gating hides disabled surfaces
@@ -6122,115 +6124,17 @@ export component AppWindow inherits Window {
                                 padding: Theme.pane-gap;
                                 spacing: Theme.pane-gap;
                                 alignment: start;
-                                Rectangle {
-                                    background: Theme.panel;
-                                    border-radius: Theme.win95 ? 0px : 8px;
-                                    border-width: Theme.border-w;
-                                    border-color: Theme.line;
-                                    HorizontalLayout {
-                                        padding: 14px;
-                                        // the banner keeps its roomy inset,
-                                        // but its edit pencil must land on
-                                        // the SAME column as the pencils of
-                                        // the groups below it (DetailGroup
-                                        // insets its content by 10px) - 4px
-                                        // of stagger reads as a mistake
-                                        padding-right: 10px;
-                                        spacing: 12px;
-                                        // the republic's image stretches to
-                                        // ALL surplus width (a banner) once
-                                        // one is set — the name keeps its
-                                        // preferred width first (a layout
-                                        // hands non-stretch children their
-                                        // preferred size before surplus, so
-                                        // the name always has room)
-                                        Rectangle {
-                                            min-width: 56px;
-                                            preferred-width: 56px;
-                                            horizontal-stretch: root.org-img-set ? 1 : 0;
-                                            height: 56px * Theme.ui-scale;
-                                            y: (parent.height - self.height) / 2;
-                                            border-radius: Theme.win95 ? 0px : 8px;
-                                            background: Theme.accent-soft;
-                                            border-width: 1px;
-                                            border-color: Theme.accent;
-                                            // the clip lives on an INNER rect
-                                            // so the corner-edit button's
-                                            // hover tooltip can spill past
-                                            // the image bounds
-                                            Rectangle {
-                                                width: 100%;
-                                                height: 100%;
-                                                border-radius: parent.border-radius;
-                                                clip: true;
-                                                // the ratified image once one is
-                                                // set (and locally loadable) —
-                                                // the placeholder mark otherwise
-                                                if !root.org-img-set: Image {
-                                                    source: @image-url("assets/republic.svg");
-                                                    colorize: Theme.accent;
-                                                    width: 30px;
-                                                    height: 30px;
-                                                    x: (parent.width - self.width) / 2;
-                                                    y: (parent.height - self.height) / 2;
-                                                }
-                                                if root.org-img-set: Image {
-                                                    source: root.org-img;
-                                                    width: 100%;
-                                                    height: 100%;
-                                                    image-fit: cover;
-                                                }
-                                            }
-                                            // avatar-style corner edit: opens
-                                            // the image picker modal
-                                            AppButton {
-                                                width: 22px * Theme.ui-scale;
-                                                height: 22px * Theme.ui-scale;
-                                                pad: 0px;
-                                                x: parent.width - self.width + 6px;
-                                                y: parent.height - self.height + 6px;
-                                                label: "✎";
-                                                tooltip: Strings.org-edit;
-                                                clicked => {
-                                                    root.org-logo-draft = "";
-                                                    root.org-logo-modal-open = true;
-                                                }
-                                            }
-                                        }
-                                        VerticalLayout {
-                                            spacing: 6px;
-                                            alignment: center;
-                                            Text {
-                                                text: root.active-workspace == "" ? "Republic" : root.active-workspace;
-                                                color: Theme.text;
-                                                font-size: Theme.fs-h1;
-                                                font-weight: 700;
-                                                wrap: word-wrap;
-                                            }
-                                        }
-                                        // without an image the spacer pushes
-                                        // the rename control to the right
-                                        // edge; with the stretching banner
-                                        // the image itself is the filler
-                                        if !root.org-img-set: Rectangle { horizontal-stretch: 1; }
-                                        // renaming the republic is a gated
-                                        // change — the edit opens a proposal
-                                        // draft, top-right like an app bar
-                                        VerticalLayout {
-                                            alignment: start;
-                                            AppButton {
-                                                width: 26px * Theme.ui-scale;
-                                                height: 26px * Theme.ui-scale;
-                                                pad: 0px;
-                                                label: "✎";
-                                                tooltip: Strings.org-edit;
-                                                tooltip-left: true;
-                                                clicked => {
-                                                    root.org-name-draft = root.active-workspace;
-                                                    root.org-name-modal-open = true;
-                                                }
-                                            }
-                                        }
+                                OrgBanner {
+                                    title: root.active-workspace == "" ? "Republic" : root.active-workspace;
+                                    logo: root.org-img;
+                                    logo-set: root.org-img-set;
+                                    edit-logo => {
+                                        root.org-logo-draft = "";
+                                        root.org-logo-modal-open = true;
+                                    }
+                                    edit-name => {
+                                        root.org-name-draft = root.active-workspace;
+                                        root.org-name-modal-open = true;
                                     }
                                 }
                                 // untitled info strip: founding date, the
@@ -9496,28 +9400,10 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 spacing: 10px;
                 alignment: start;
-                Rectangle {
-                    width: 64px;
-                    height: 64px;
-                    border-radius: Theme.win95 ? 0px : 8px;
-                    background: Theme.accent-soft;
-                    border-width: 1px;
-                    border-color: Theme.accent;
-                    clip: true;
-                    if !root.org-img-set: Image {
-                        source: @image-url("assets/republic.svg");
-                        colorize: Theme.accent;
-                        width: 32px;
-                        height: 32px;
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                    }
-                    if root.org-img-set: Image {
-                        source: root.org-img;
-                        width: 100%;
-                        height: 100%;
-                        image-fit: cover;
-                    }
+                ol-logo := LogoBox {
+                    source: root.org-img;
+                    set: root.org-img-set;
+                    edge: 64px;
                 }
                 VerticalLayout {
                     spacing: 3px;

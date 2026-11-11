@@ -721,6 +721,8 @@ pub(crate) fn apply_session(
         } else if let Some(rest) = sv.notice.strip_prefix("chain-diverged:") {
             // A2.1: Rust-side copy like genesis-undelivered - no window rebuild
             ui.invoke_show_toast_error(chain_diverged_copy(lang, rest).into());
+        } else if let Some(rest) = sv.notice.strip_prefix("proposal-dropped:") {
+            ui.invoke_show_toast_error(crate::labels::proposal_dropped_copy(lang, rest).into());
         } else if let Some(err) = sv.notice.strip_prefix("genesis-undelivered:") {
             // The republic EXISTS here but its members were never told: the
             // genesis 445 reached no relay. Copy lives Rust-side (the

@@ -122,6 +122,128 @@ export component PendingBadge inherits Rectangle {
     }
 }
 
+// The display shape of the republic's picture: w/h up to 1.25 (every
+// portrait included) is the square class, anything wider a 3:1 banner.
+global LogoFit {
+    pure public function square(img: image) -> bool {
+        return img.width * 4 <= img.height * 5;
+    }
+}
+
+// The republic's picture in its display shape, centre-cropped (`cover`
+// never distorts); the placeholder mark while none is set.
+export component LogoBox inherits Rectangle {
+    in property <image> source;
+    in property <bool> set: true;
+    in property <length> edge;
+    // the width a banner may take; it shrinks to fit, still 3:1
+    in property <length> room: 100000px;
+    out property <bool> square: !root.set || LogoFit.square(root.source);
+    width: root.square ? root.edge : min(root.edge * 3, root.room);
+    height: root.square ? root.edge : self.width / 3;
+    border-radius: Theme.win95 ? 0px : 8px;
+    background: Theme.accent-soft;
+    border-width: 1px;
+    border-color: Theme.accent;
+    // the clip lives on an INNER rect so a child's hover tooltip can spill
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: parent.border-radius;
+        clip: true;
+        if !root.set: Image {
+            source: @image-url("assets/republic.svg");
+            colorize: Theme.accent;
+            width: min(root.edge, parent.height) * 0.54;
+            height: self.width;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+        }
+        if root.set: Image {
+            source: root.source;
+            width: 100%;
+            height: 100%;
+            image-fit: cover;
+        }
+    }
+    @children
+}
+
+// The Organization status header: the title is centred; a square logo
+// sits left of a title that fits one line beside it, otherwise the logo
+// goes below the title.
+export component OrgBanner inherits Rectangle {
+    in property <string> title;
+    in property <image> logo;
+    in property <bool> logo-set;
+    callback edit-logo();
+    callback edit-name();
+    property <length> edge: 56px * Theme.ui-scale;
+    property <length> pad: 14px;
+    property <length> gap: 12px;
+    // BOTH sides reserve the rename pencil, so the centre is the panel's
+    property <length> side: 10px + 26px * Theme.ui-scale + root.gap;
+    property <length> room: max(0px, root.width - 2 * root.side);
+    out property <bool> beside: ob-logo.square && root.edge + root.gap + ob-measure.preferred-width + 1px <= root.room;
+    background: Theme.panel;
+    border-radius: Theme.win95 ? 0px : 8px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    height: 2 * root.pad + (root.beside ? max(root.edge, ob-title.height) : ob-title.height + root.gap + ob-logo.height);
+    ob-measure := Text {
+        visible: false;
+        text: root.title;
+        font-size: Theme.fs-h1;
+        font-weight: 700;
+    }
+    ob-logo := LogoBox {
+        source: root.logo;
+        set: root.logo-set;
+        edge: root.edge;
+        room: root.room;
+        x: root.beside ? (root.width - self.width - root.gap - ob-title.width) / 2 : (root.width - self.width) / 2;
+        y: root.beside ? (root.height - self.height) / 2 : root.pad + ob-title.height + root.gap;
+        AppButton {
+            width: 22px * Theme.ui-scale;
+            height: 22px * Theme.ui-scale;
+            pad: 0px;
+            x: parent.width - self.width + 6px;
+            y: parent.height - self.height + 6px;
+            label: "✎";
+            tooltip: Strings.org-edit;
+            clicked => {
+                root.edit-logo();
+            }
+        }
+    }
+    ob-title := Text {
+        text: root.title;
+        color: Theme.text;
+        font-size: Theme.fs-h1;
+        font-weight: 700;
+        wrap: word-wrap;
+        horizontal-alignment: center;
+        width: root.beside ? ob-measure.preferred-width + 1px : root.room;
+        height: self.preferred-height;
+        x: root.beside ? ob-logo.x + ob-logo.width + root.gap : root.side;
+        y: root.beside ? (root.height - self.height) / 2 : root.pad;
+    }
+    // renaming is a gated change - the pencil opens a proposal draft
+    AppButton {
+        width: 26px * Theme.ui-scale;
+        height: 26px * Theme.ui-scale;
+        pad: 0px;
+        x: root.width - 10px - self.width;
+        y: root.pad;
+        label: "✎";
+        tooltip: Strings.org-edit;
+        tooltip-left: true;
+        clicked => {
+            root.edit-name();
+        }
+    }
+}
+
 // One top-level surface entry in the sidebar: icon + name, a pending-
 // proposals badge when decisions await, and a chevron (the selected
 // surface's group is the expanded one). In compact mode (collapsed icon
@@ -133,6 +255,10 @@ export component SurfaceRow inherits Rectangle {
     in property <bool> compact: false;
     // staged-out surfaces render greyed and ignore clicks
     in property <bool> enabled: true;
+    // the republic's picture: the Organization row shows a square one
+    in property <image> logo;
+    in property <bool> logo-set: false;
+    out property <bool> shows-logo: root.s.key == "organization" && root.logo-set && LogoFit.square(root.logo);
     callback chosen();
     height: 46px * Theme.ui-scale;
     border-radius: Theme.win95 ? 0px : 8px;
@@ -155,7 +281,21 @@ export component SurfaceRow inherits Rectangle {
         // no chrome around the icon in light/dark; brutalism keeps its frame
         border-width: Theme.win95 ? 1px : 0px;
         border-color: Theme.line;
-        Image {
+        if root.shows-logo: sr-logo := Rectangle {
+            width: 30px;
+            height: 30px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: Theme.win95 ? 0px : 6px;
+            clip: true;
+            Image {
+                source: root.logo;
+                width: 100%;
+                height: 100%;
+                image-fit: cover;
+            }
+        }
+        if !root.shows-logo: sr-icon := Image {
             source: root.s.key == "organization" ? @image-url("assets/republic.svg")
                 : root.s.key == "chat" ? @image-url("assets/chat.svg")
                 : root.s.key == "memory" ? @image-url("assets/memory.svg")
@@ -1638,19 +1778,13 @@ export component ProposalCard inherits Rectangle {
             VerticalLayout {
                 spacing: 4px;
                 alignment: start;
-                if root.org-img-set: Rectangle {
-                    width: 72px;
-                    height: 72px;
+                if root.org-img-set: LogoBox {
+                    source: root.org-img;
+                    edge: 72px;
                     border-radius: Theme.win95 ? 0px : 6px;
                     border-width: Theme.border-w;
                     border-color: Theme.line;
-                    clip: true;
-                    Image {
-                        source: root.org-img;
-                        width: 100%;
-                        height: 100%;
-                        image-fit: cover;
-                    }
+                    background: transparent;
                 }
                 Text {
                     text: root.p.current;
@@ -1660,7 +1794,8 @@ export component ProposalCard inherits Rectangle {
                 }
             }
         }
-        if root.p.image-op && root.p.proposed != "": VerticalLayout {
+        // keyed on the BYTES: a card without a display name still previews and saves
+        if root.p.image-op && root.p.img-b64 != "": VerticalLayout {
             spacing: 8px;
             pi-line := HorizontalLayout {
                 // NO alignment:start here: it would size the card to its
@@ -1739,13 +1874,15 @@ export component ProposalCard inherits Rectangle {
                 border-color: Theme.line;
                 background: Theme.zebra;
                 clip: true;
-                Image {
-                    width: parent.width - 12px;
-                    height: parent.height - 12px;
-                    x: 6px;
-                    y: 6px;
+                // the shape the header will show it in
+                pi-view := LogoBox {
                     source: root.inline-img;
-                    image-fit: contain;
+                    edge: parent.height - 12px;
+                    room: parent.width - 12px;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    border-width: 0px;
+                    background: transparent;
                 }
                 TouchArea {
                     mouse-cursor: MouseCursor.pointer;

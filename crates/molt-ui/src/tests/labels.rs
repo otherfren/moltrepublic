@@ -155,3 +155,23 @@ fn the_vault_and_the_board_have_no_generic_proposal_op() {
     assert_eq!(default_op(Surface::Wallet), None);
     assert_eq!(default_op(Surface::Memory), Some("add_note"));
 }
+
+#[test]
+fn a_dropped_proposal_names_the_sender_and_the_one_reason() {
+    assert_eq!(
+        proposal_dropped_copy(0, "petra:too-large"),
+        "Proposal from petra dropped - too large for the relays."
+    );
+    assert_eq!(
+        proposal_dropped_copy(0, "petra:image"),
+        "Proposal from petra dropped - its image cannot be decoded."
+    );
+    assert_eq!(
+        proposal_dropped_copy(1, "petra:too-large"),
+        "Vorschlag von petra verworfen - zu groß für die Relays."
+    );
+    assert_eq!(
+        proposal_dropped_copy(1, "petra:image"),
+        "Vorschlag von petra verworfen - Bild nicht lesbar."
+    );
+}
