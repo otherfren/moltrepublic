@@ -29,19 +29,18 @@ use tokio::sync::mpsc;
 
 use crate::founding::verify_seal_proposal;
 
-/// How long the joiner waits for the founder's `JoinAccepted` (a spent link
-/// against a finished ritual, or an offline founder, answers nothing —
-/// without the deadline the joiner hangs in "Contacting the inviter…"
-/// forever). After the ack every wait is unbounded: the charter deliberation
-/// is a human step and takes as long as it takes.
-pub(crate) const ACCEPT_TIMEOUT: Duration = Duration::from_secs(90);
+/// The accept wait has no deadline (a founder may be unreachable for
+/// hours): the joiner re-announces itself on this backoff until the founder
+/// answers or the human cancels.
+pub(crate) const JOIN_RESEND_INITIAL: Duration = Duration::from_secs(30);
+pub(crate) const JOIN_RESEND_CAP: Duration = Duration::from_secs(600);
 
 /// Which rung of the ladder a [`RitualLeg::next_msg`] call serves — a leg
 /// may shape its idle/deaf notes by it (the Nostr leg's elapsed line in the
 /// genesis wait); the verification never depends on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
-    /// Before the founder acknowledged the activation (bounded wait).
+    /// Before the founder acknowledged the activation.
     Accept,
     /// Acknowledged; waiting for the charter proposal.
     Seal,
@@ -125,16 +124,16 @@ pub struct JoinOutcome {
 /// queue authenticates on loopback, the NIP-59 wrap sealer / the MLS frame
 /// author on Nostr — so the ladder never sees a co-member's frame.
 pub(crate) trait RitualLeg {
-    /// The next ritual message from the founder. `deadline` bounds the wait
-    /// (the accept wait); the leg words its own timeout. Must be
-    /// cancel-safe: in the backup gate the ladder selects on it against the
-    /// human's answer, so a message pulled off the wire must be returned
-    /// without a further await.
+    /// The next ritual message from the founder; `Ok(None)` = `deadline`
+    /// passed with nothing to hand over (never an error: the ladder decides
+    /// what silence means). Must be cancel-safe: in the backup gate the
+    /// ladder selects on it against the human's answer, so a message pulled
+    /// off the wire must be returned without a further await.
     fn next_msg(
         &mut self,
         phase: Phase,
         deadline: Option<tokio::time::Instant>,
-    ) -> impl Future<Output = Result<RitualMsg, String>> + Send;
+    ) -> impl Future<Output = Result<Option<RitualMsg>, String>> + Send;
 
     /// Send one message to the founder.
     fn send(&mut self, msg: &RitualMsg) -> impl Future<Output = Result<(), String>> + Send;
@@ -314,21 +313,33 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
         relays: leg.declared_relays(),
         vault_pk: vault_pk.clone(),
     });
-    leg.send(&join)
-        .await
-        .map_err(|e| format!("join request: {e}"))?;
+    // a failed announce is not fatal: the resend below is the retry
+    if let Err(e) = leg.send(&join).await {
+        tracing::warn!(error = %e, "join request did not publish");
+    }
 
-    // ❸/❹ the accept wait is bounded UNTIL the founder acknowledges; the
-    // wait for the charter proposal after that is not (human deliberation)
-    let accept_deadline = tokio::time::Instant::now() + ACCEPT_TIMEOUT;
+    // ❸/❹ no wait here is bounded: until the founder acknowledges, the
+    // request is re-announced on a backoff (its handler is idempotent)
+    let mut resend = JOIN_RESEND_INITIAL;
+    let mut resend_at = tokio::time::Instant::now() + resend;
     let mut accepted = false;
     let proposal_json = loop {
         let (phase, deadline) = if accepted {
             (Phase::Seal, None)
         } else {
-            (Phase::Accept, Some(accept_deadline))
+            (Phase::Accept, Some(resend_at))
         };
-        match leg.next_msg(phase, deadline).await? {
+        let Some(msg) = leg.next_msg(phase, deadline).await? else {
+            if !accepted {
+                if let Err(e) = leg.send(&join).await {
+                    tracing::warn!(error = %e, "join request did not publish");
+                }
+                resend = (resend * 2).min(JOIN_RESEND_CAP);
+                resend_at = tokio::time::Instant::now() + resend;
+            }
+            continue;
+        };
+        match msg {
             // idempotent: a redelivered ack (or the Nostr Welcome after the
             // ack) must not stack "accepted" lines
             RitualMsg::JoinAccepted { .. } if !accepted => {
@@ -400,19 +411,20 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
                     }
                 },
                 msg = leg.next_msg(Phase::Backup, None) => match msg? {
-                    RitualMsg::Genesis { .. } => {
+                    None => {}
+                    Some(RitualMsg::Genesis { .. }) => {
                         return Err(
                             "the founder sealed before our backup confirmation - protocol violation"
                                 .to_string(),
                         );
                     }
-                    RitualMsg::Aborted { reason } => return Err(aborted_error(&reason)),
-                    RitualMsg::MeshAnnounce { ct } => {
+                    Some(RitualMsg::Aborted { reason }) => return Err(aborted_error(&reason)),
+                    Some(RitualMsg::MeshAnnounce { ct }) => {
                         if let Ok(b) = hex::decode(&ct) {
                             early_mesh.push(b);
                         }
                     }
-                    _ => {}
+                    Some(_) => {}
                 },
             }
         }
@@ -443,13 +455,13 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
     // right after distributing) is buffered, not dropped.
     let (sealed_json, welcome) = loop {
         match leg.next_msg(Phase::Genesis, None).await? {
-            RitualMsg::MeshAnnounce { ct } => {
+            Some(RitualMsg::MeshAnnounce { ct }) => {
                 if let Ok(b) = hex::decode(&ct) {
                     early_mesh.push(b);
                 }
             }
-            RitualMsg::Aborted { reason } => return Err(aborted_error(&reason)),
-            RitualMsg::Genesis { sealed, welcome } => break (sealed, welcome),
+            Some(RitualMsg::Aborted { reason }) => return Err(aborted_error(&reason)),
+            Some(RitualMsg::Genesis { sealed, welcome }) => break (sealed, welcome),
             _ => {}
         }
     };
@@ -535,7 +547,7 @@ mod tests {
     /// on every `next_msg` (and waits forever once the script is out),
     /// records everything sent.
     struct ScriptedLeg {
-        script: VecDeque<RitualMsg>,
+        script: VecDeque<Option<RitualMsg>>,
         sent: Vec<RitualMsg>,
     }
 
@@ -544,16 +556,15 @@ mod tests {
             &mut self,
             _phase: Phase,
             deadline: Option<tokio::time::Instant>,
-        ) -> Result<RitualMsg, String> {
-            match self.script.pop_front() {
-                Some(m) => Ok(m),
-                None => match deadline {
-                    Some(d) => {
-                        tokio::time::sleep_until(d).await;
-                        Err("scripted founder went silent".to_string())
-                    }
-                    None => std::future::pending().await,
-                },
+        ) -> Result<Option<RitualMsg>, String> {
+            // `None` in the script = the founder stays silent for one wait
+            match (self.script.pop_front(), deadline) {
+                (Some(Some(m)), _) => Ok(Some(m)),
+                (_, Some(d)) => {
+                    tokio::time::sleep_until(d).await;
+                    Ok(None)
+                }
+                (_, None) => std::future::pending().await,
             }
         }
 
@@ -583,6 +594,10 @@ mod tests {
         ) -> Option<Vec<molt_core::MeshLink>> {
             None
         }
+    }
+
+    fn script(msgs: Vec<RitualMsg>) -> VecDeque<Option<RitualMsg>> {
+        msgs.into_iter().map(Some).collect()
     }
 
     /// The honest 2-of-2 proposal seating the founder and `seat` (bob).
@@ -685,7 +700,7 @@ mod tests {
         let table = verify_seal_proposal(&p, "bob", &seat.pk, &seat.nostr_pk, "").expect("table");
         let pk = seat.pk.clone();
         let mut leg = ScriptedLeg {
-            script: VecDeque::from(vec![
+            script: script(vec![
                 RitualMsg::JoinAccepted { seat: 0 },
                 seal(&p),
                 genesis(&p),
@@ -727,7 +742,7 @@ mod tests {
         let p = proposal_for(&seat, "the ratified charter");
         let swapped = proposal_for(&seat, "a charter nobody ratified");
         let mut leg = ScriptedLeg {
-            script: VecDeque::from(vec![
+            script: script(vec![
                 RitualMsg::JoinAccepted { seat: 0 },
                 seal(&p),
                 genesis(&swapped),
@@ -736,6 +751,25 @@ mod tests {
         };
         let err = failure(run_member_ladder(&mut leg, "bob", seat, None::<Ratifier>, true).await);
         assert!(err.contains("not the table we ratified"), "{err}");
+    }
+
+    /// A founder that stays silent for hours is waited for, and the join
+    /// request is re-announced meanwhile - no deadline ends the join.
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_founder_is_waited_for_and_the_request_is_resent() {
+        let seat = bob();
+        let p = proposal_for(&seat, "the pact");
+        // 40 silent waits on the 30 s..600 s backoff are several hours
+        let mut silent: VecDeque<Option<RitualMsg>> = (0..40).map(|_| None).collect();
+        silent.extend(script(vec![RitualMsg::JoinAccepted { seat: 0 }, seal(&p), genesis(&p)]));
+        let mut leg = ScriptedLeg { script: silent, sent: Vec::new() };
+        let started = tokio::time::Instant::now();
+        run_member_ladder(&mut leg, "bob", seat, None::<Ratifier>, true)
+            .await
+            .expect("the founder answered in the end");
+        assert!(started.elapsed() > Duration::from_secs(3 * 3600), "{:?}", started.elapsed());
+        let joins = leg.sent.iter().filter(|m| matches!(m, RitualMsg::Join(_))).count();
+        assert_eq!(joins, 41, "one announce plus one per silent wait");
     }
 
     /// A scripted founder whose Genesis carries a real Welcome over the
@@ -751,9 +785,9 @@ mod tests {
             &mut self,
             phase: Phase,
             deadline: Option<tokio::time::Instant>,
-        ) -> Result<RitualMsg, String> {
+        ) -> Result<Option<RitualMsg>, String> {
             let msg = self.inner.next_msg(phase, deadline).await?;
-            let RitualMsg::Genesis { sealed, .. } = msg else {
+            let Some(RitualMsg::Genesis { sealed, .. }) = msg else {
                 return Ok(msg);
             };
             let kp = self
@@ -775,10 +809,10 @@ mod tests {
                 kps.push(rogue.key_package().expect("rogue kp"));
             }
             let welcome = founder.add_members(&kps).expect("add").expect("welcome");
-            Ok(RitualMsg::Genesis {
+            Ok(Some(RitualMsg::Genesis {
                 sealed,
                 welcome: hex::encode(welcome),
-            })
+            }))
         }
 
         async fn send(&mut self, msg: &RitualMsg) -> Result<(), String> {
@@ -818,7 +852,7 @@ mod tests {
             let p = proposal_for(&seat, "the pact");
             let mut leg = WelcomingLeg {
                 inner: ScriptedLeg {
-                    script: VecDeque::from(vec![
+                    script: script(vec![
                         RitualMsg::JoinAccepted { seat: 0 },
                         seal(&p),
                         genesis(&p),
@@ -847,7 +881,7 @@ mod tests {
         let p = proposal_for(&seat, "the pact");
         let (ratifier, mut human) = ratifier();
         let mut leg = ScriptedLeg {
-            script: VecDeque::from(vec![
+            script: script(vec![
                 RitualMsg::JoinAccepted { seat: 0 },
                 seal(&p),
                 genesis(&p),
@@ -880,7 +914,7 @@ mod tests {
         let p = proposal_for(&seat, "the pact");
         let (ratifier, mut human) = ratifier();
         let mut leg = ScriptedLeg {
-            script: VecDeque::from(vec![
+            script: script(vec![
                 RitualMsg::JoinAccepted { seat: 0 },
                 seal(&p),
                 RitualMsg::Aborted {
@@ -910,7 +944,7 @@ mod tests {
             let p = proposal_for(&seat, "the pact");
             let (ratifier, mut human) = ratifier();
             let mut leg = ScriptedLeg {
-                script: VecDeque::from(vec![RitualMsg::JoinAccepted { seat: 0 }, seal(&p)]),
+                script: script(vec![RitualMsg::JoinAccepted { seat: 0 }, seal(&p)]),
                 sent: Vec::new(),
             };
             let run = tokio::spawn(async move {
@@ -944,7 +978,7 @@ mod tests {
         ] {
             let seat = bob();
             let mut leg = ScriptedLeg {
-                script: VecDeque::from(vec![RitualMsg::LinkSpent {
+                script: script(vec![RitualMsg::LinkSpent {
                     seat: 0,
                     reason: reason.to_string(),
                 }]),

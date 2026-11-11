@@ -26,6 +26,9 @@ fn dialer() -> Dialer {
     Dialer::resolve("none", "local", 0).expect("direct dialer")
 }
 
+// the window clock is process-global: one test at a time
+static CLOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 const SEED: [u8; 32] = [7u8; 32];
 const EXPORTER: [u8; 32] = [9u8; 32];
 
@@ -33,6 +36,7 @@ const EXPORTER: [u8; 32] = [9u8; 32];
 /// visible to a catch-up one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_catch_up_subscription_sees_what_the_live_one_never_asks_for() {
+    let _clock = CLOCK.lock().await;
     let relay = MockRelay::run().await.expect("in-process relay");
     let url = relay.url().await.to_string();
     let chan = GroupChannel::new(dialer(), vec![url], SEED);
@@ -82,3 +86,38 @@ async fn a_catch_up_subscription_sees_what_the_live_one_never_asks_for() {
     );
 }
 
+
+/// A ritual subscription keeps the windows since its start across a roll:
+/// a frame published before midnight is still delivered after it, and a new
+/// one under the fresh window arrives too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_ritual_subscription_keeps_earlier_windows_across_a_roll() {
+    let _clock = CLOCK.lock().await;
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let chan = GroupChannel::new(dialer(), vec![url], [8u8; 32]);
+    let start = molt_net::ritual_net::unix_now();
+
+    // published on the ritual's first day, while nobody listened
+    chan.publish_frame(&EXPORTER, b"day one").await.expect("day-one frame");
+
+    // two days later a member finally subscribes
+    shift_window_clock_for_tests(2 * i64::try_from(H_WINDOW).expect("fits"));
+    let mut sub = chan.subscribe_from(start).await.expect("ritual subscribe");
+    sub.live(Duration::from_secs(3)).await;
+    let got = sub.recv(Duration::from_secs(3)).await;
+    assert!(matches!(got, GroupRecv::Frame { .. }), "day one is replayed, got {got:?}");
+
+    // the next roll re-places the subscription: the old range must survive
+    shift_window_clock_for_tests(3 * i64::try_from(H_WINDOW).expect("fits"));
+    chan.publish_frame(&EXPORTER, b"day four").await.expect("day-four frame");
+    let mut frames = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while frames < 2 && tokio::time::Instant::now() < deadline {
+        if let GroupRecv::Frame { .. } = sub.recv(Duration::from_secs(2)).await {
+            frames += 1;
+        }
+    }
+    shift_window_clock_for_tests(0);
+    assert_eq!(frames, 2, "the re-placed subscription replays day one and hears day four");
+}

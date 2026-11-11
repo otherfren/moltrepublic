@@ -59,6 +59,9 @@ struct SeatRuntime {
     /// like an outrun decline and verified when the seat seals; a seat
     /// that never ratifies never applies it (one bounded slot).
     parked_backup: Option<String>,
+    /// When this seat's repeated JoinRequest was last answered: a joiner
+    /// re-announces until it hears us, and one answer per window is enough.
+    last_reack: Option<tokio::time::Instant>,
 }
 
 /// The founder-side ritual runtime: the transport, the founder's own
@@ -132,9 +135,16 @@ pub(crate) struct NostrRitual {
     pub(crate) group: Option<std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>>,
     /// The 445 group channel (set with the group).
     pub(crate) chan: Option<molt_net::ritual_net::GroupChannel>,
-    /// INBOUND task handles (the 1059 inbox loop, the 445 recv loop) —
-    /// aborted when the ritual ends. Outbound legs are fire-and-forget tasks
-    /// that finish on their own (drain, don't abort).
+    /// The Welcome every seat got at group birth, kept to answer a seat
+    /// that re-announces because it never saw it.
+    pub(crate) welcome: Option<molt_net::welcome::WelcomePayload>,
+    /// When the ritual started (unix): the group subscription keeps every
+    /// window since.
+    pub(crate) started: u64,
+    /// Task handles aborted when the ritual ends: the inbound loops (1059
+    /// inbox, 445 recv) and the outbound legs that repeat until then (the
+    /// Welcome retries, the Seal re-publish). One-shot outbound legs are
+    /// fire-and-forget (drain, don't abort).
     pub(crate) tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
@@ -432,6 +442,7 @@ impl State {
                 sealed: false,
                 backup_confirmed: false,
                 parked_backup: None,
+                last_reack: None,
             });
         }
 
@@ -538,6 +549,8 @@ impl State {
                 rotation_seed: None,
                 group: None,
                 chan: None,
+                welcome: None,
+                started: molt_net::ritual_net::unix_now(),
                 tasks: vec![inbox_task],
             });
             transport = LoopbackHub::calm().transport();
@@ -649,7 +662,7 @@ impl State {
                         chan,
                         crate::nostr_ritual::FramePayload::Encrypt(group, Box::new(msg)),
                         "abort",
-                        crate::nostr_ritual::RetryPolicy::PRE_SEAL,
+                        crate::nostr_ritual::RetryPolicy::ABORT,
                         tx.downgrade(),
                         // its OWN generation, never None: `None` means
                         // "current in every incarnation", so a failed
@@ -1607,20 +1620,16 @@ impl<T: molt_net::Transport> RitualLeg for LoopbackLeg<T> {
         &mut self,
         _phase: Phase,
         deadline: Option<tokio::time::Instant>,
-    ) -> Result<invite::RitualMsg, String> {
+    ) -> Result<Option<invite::RitualMsg>, String> {
         let Some(rx) = self.rx.as_mut() else {
             return Err("queue closed".to_string());
         };
+        let next = next_ritual_msg(rx, &mut self.cancel, &self.reply_wrap, &mut self.reasm);
         match deadline {
-            None => next_ritual_msg(rx, &mut self.cancel, &self.reply_wrap, &mut self.reasm).await,
-            Some(d) => match tokio::time::timeout_at(
-                d,
-                next_ritual_msg(rx, &mut self.cancel, &self.reply_wrap, &mut self.reasm),
-            )
-            .await
-            {
-                Ok(msg) => msg,
-                Err(_) => Err("the inviter did not answer - ask the founder for a fresh link".to_string()),
+            None => next.await.map(Some),
+            Some(d) => match tokio::time::timeout_at(d, next).await {
+                Ok(msg) => msg.map(Some),
+                Err(_) => Ok(None),
             },
         }
     }
@@ -1791,13 +1800,19 @@ fn parse_reply_handover(reply: &str) -> Option<(SndQueueAddr, WrapKey)> {
     ))
 }
 
+/// Least time between two answers to one seat's repeated JoinRequest.
+const REACK_SPACING: std::time::Duration = std::time::Duration::from_secs(20);
+
 /// What the single-use ticket says about an activation of an already
 /// anchored seat (`State::spent_seat`).
 enum SpentSeat {
     /// The seat is not anchored — run the ladder.
     Open,
-    /// The anchored member's own request, redelivered — drop it silently.
+    /// Nothing to do and nothing to say.
     Silent,
+    /// The anchored member's own request again: it has not heard us yet —
+    /// answer it again.
+    Repeat,
     /// Told and logged — drop it.
     Refused,
     /// The same person re-activating before the group is born: run the
@@ -2029,49 +2044,44 @@ mod ritual_ops {
                 )
             };
             let chan = molt_net::ritual_net::GroupChannel::new(dialer, relays.clone(), seed);
-            // Welcome fan-out: outbound fire-and-forget tasks (they drain on
-            // their own — never aborted); a failed publish is fatal for the
-            // founding (that member could never deliberate) and reports
-            // through the designed NetRitualFailed seam
+            // Welcome fan-out: a member without its Welcome can never
+            // deliberate, so each leg retries until a relay takes it (loud,
+            // never fatal) and ends with the ritual
+            let payload = molt_net::welcome::WelcomePayload {
+                welcome: welcome_bytes,
+                rotation_seed: seed,
+                relays: relays.clone(),
+                // the founding roster carries the date; only a recovery Welcome does
+                founded_ts: 0,
+            };
+            let mut tasks = Vec::new();
             for npub in targets {
-                let net = net.clone();
-                let payload = molt_net::welcome::WelcomePayload {
-                    welcome: welcome_bytes.clone(),
-                    rotation_seed: seed,
-                    relays: relays.clone(),
-                    // the founding roster carries the date; only a recovery Welcome does
-                    founded_ts: 0,
-                };
-                let weak = weak.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = net.send_welcome(&npub, &payload).await {
-                        tracing::error!(error = %e, "welcome did not publish");
-                        let (reply, _rx) = tokio::sync::oneshot::channel();
-                        if let Some(tx) = weak.upgrade() {
-                            let _ = tx
-                                .send(crate::Envelope {
-                                    cmd: molt_core::Command::NetRitualFailed {
-                                        error: format!("welcome did not publish: {e}"),
-                                        generation: Some(generation),
-                                    },
-                                    reply,
-                                })
-                                .await;
-                        }
-                    }
-                });
+                tasks.push(crate::nostr_ritual::spawn_welcome(
+                    net.clone(),
+                    npub,
+                    payload.clone(),
+                    generation,
+                    weak.clone(),
+                ));
             }
-            let recv_task = crate::nostr_ritual::spawn_founder_group_recv(
+            let started = self
+                .net_ritual
+                .as_ref()
+                .and_then(|r| r.nostr.as_ref())
+                .map_or(0, |n| n.started);
+            tasks.push(crate::nostr_ritual::spawn_founder_group_recv(
                 chan.clone(),
                 group.clone(),
+                started,
                 generation,
                 weak,
-            );
+            ));
             if let Some(nostr) = self.net_ritual.as_mut().and_then(|r| r.nostr.as_mut()) {
                 nostr.rotation_seed = Some(seed);
                 nostr.group = Some(group);
                 nostr.chan = Some(chan);
-                nostr.tasks.push(recv_task);
+                nostr.welcome = Some(payload);
+                nostr.tasks.extend(tasks);
             }
             self.session
                 .create
@@ -2097,6 +2107,60 @@ mod ritual_ops {
                 self.emit_session(molt_core::SessionScope::Create);
             }
             Ok(molt_core::Reply::Ack)
+        }
+
+        /// Answer an anchored seat's repeated JoinRequest again: the ack,
+        /// and the Welcome once the group is born. The request must be the
+        /// anchored member's own (proven sealer + ticket MAC); one answer
+        /// per [`REACK_SPACING`]. Nostr only.
+        #[allow(clippy::too_many_arguments)] // one wire request's fields
+        fn reack_join(
+            &mut self,
+            idx: usize,
+            seat: u32,
+            member: &str,
+            identity_pk: &str,
+            nostr_pk: &str,
+            proof: &str,
+            sender_npub: &str,
+        ) {
+            let Some(ritual) = self.net_ritual.as_mut() else {
+                return;
+            };
+            let Some(nostr) = ritual.nostr.as_ref() else {
+                return;
+            };
+            let Some(s) = ritual.seats.get_mut(idx) else {
+                return;
+            };
+            let Some(anchored) = s.identity.as_ref().map(|i| i.nostr_pk.clone()) else {
+                return;
+            };
+            if sender_npub != anchored
+                || !invite::verify_join_mac(&s.ticket, member, identity_pk, nostr_pk, proof)
+            {
+                return;
+            }
+            let now = tokio::time::Instant::now();
+            if s.last_reack.is_some_and(|t| now.duration_since(t) < REACK_SPACING) {
+                return;
+            }
+            s.last_reack = Some(now);
+            let net = nostr.net.clone();
+            let welcome = nostr.welcome.clone();
+            tokio::spawn(async move {
+                if let Err(e) = net
+                    .send_ritual(&anchored, &invite::RitualMsg::JoinAccepted { seat })
+                    .await
+                {
+                    tracing::warn!(error = %e, "repeated join-accepted ack did not publish");
+                }
+                if let Some(payload) = welcome {
+                    if let Err(e) = net.send_welcome(&anchored, &payload).await {
+                        tracing::warn!(error = %e, "repeated welcome did not publish");
+                    }
+                }
+            });
         }
 
         /// The single-use ticket, decided BEFORE the ladder: is this seat
@@ -2147,7 +2211,7 @@ mod ritual_ops {
             };
             let same = anchored_member == member && anchored_pk == identity_pk;
             if same {
-                return SpentSeat::Silent;
+                return SpentSeat::Repeat;
             }
             let mac_ok = invite::verify_join_mac(&ticket, member, identity_pk, nostr_pk, proof);
             if !mac_ok {
@@ -2272,6 +2336,10 @@ mod ritual_ops {
             let displaced = match self.spent_seat(idx, seat, &member, &identity_pk, &nostr_pk, &proof, &reply) {
                 SpentSeat::Open => None,
                 SpentSeat::Silent => return Ok(molt_core::Reply::Ack),
+                SpentSeat::Repeat => {
+                    self.reack_join(idx, seat, &member, &identity_pk, &nostr_pk, &proof, &sender_npub);
+                    return Ok(molt_core::Reply::Ack);
+                }
                 SpentSeat::Refused => {
                     self.emit_session(molt_core::SessionScope::Create);
                     return Ok(molt_core::Reply::Ack);
@@ -2818,15 +2886,19 @@ mod ritual_ops {
                     let Some(tx) = self.cmd_tx.upgrade() else {
                         return;
                     };
-                    crate::nostr_ritual::spawn_publish_frame(
+                    let task = crate::nostr_ritual::spawn_publish_frame(
                         chan,
                         crate::nostr_ritual::FramePayload::Encrypt(group, Box::new(msg)),
                         "seal",
-                        crate::nostr_ritual::RetryPolicy::PRE_SEAL,
+                        crate::nostr_ritual::RetryPolicy::SEAL,
                         tx.downgrade(),
                         Some(generation),
                         String::new(),
                     );
+                    // re-published until the ritual ends
+                    if let Some(nostr) = self.net_ritual.as_mut().and_then(|r| r.nostr.as_mut()) {
+                        nostr.tasks.push(task);
+                    }
                 } else {
                     // group birth failed or has not happened — never silent
                     tracing::error!("seal proposed but the Nostr group is not born");
@@ -3745,6 +3817,7 @@ mod tests {
             sealed: false,
             backup_confirmed: false,
             parked_backup: None,
+            last_reack: None,
         }
     }
 

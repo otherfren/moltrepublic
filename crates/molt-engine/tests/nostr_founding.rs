@@ -1287,8 +1287,85 @@ async fn relay_rejecting_445_after(accept_first: usize) -> (LocalRelay, String) 
     (relay, url)
 }
 
-/// REGRESSION (cluster C) — a Seal that NO relay accepts must fail the
-/// founding, not hang it.
+/// Refuses exactly the n-th gift wrap (kind 1059), counted from 1.
+#[derive(Debug)]
+struct RejectNthWrap(std::sync::atomic::AtomicUsize, usize);
+
+impl WritePolicy for RejectNthWrap {
+    fn admit_event<'a>(
+        &'a self,
+        event: &'a Event,
+        _addr: &'a std::net::SocketAddr,
+    ) -> BoxedFuture<'a, PolicyResult> {
+        Box::pin(async move {
+            if event.kind != Kind::Custom(1059) {
+                return PolicyResult::Accept;
+            }
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if n == self.1 {
+                PolicyResult::Reject("test policy: this wrap is lost".to_string())
+            } else {
+                PolicyResult::Accept
+            }
+        })
+    }
+}
+
+/// A joiner whose founder's answer never arrived is not failed by a timer:
+/// it re-announces, and the founder answers the repeated request.
+///
+/// The relay loses the 2nd gift wrap of the founding - the founder's
+/// `JoinAccepted`. Before 2026-11 the join died after 90 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_acceptance_is_healed_by_the_repeated_join_request() {
+    let relay = LocalRelay::new(
+        RelayBuilder::default()
+            .write_policy(RejectNthWrap(std::sync::atomic::AtomicUsize::new(0), 2)),
+    );
+    relay.run().await.expect("policy relay runs");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+
+    // 3 seats: the group is not born, so no Welcome can stand in for the ack
+    let a = engine(&tmp.path().join("founder"));
+    adopt_relay_unprobed(&a, &url).await;
+    a.execute(Command::CreateStart {
+        name: "Patient".to_string(),
+        member: "walter".to_string(),
+        threshold: 2,
+        members: 3,
+        relays: Vec::new(),
+    })
+    .await
+    .expect("create starts");
+    let s = wait_for(&a, "a joinable link", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+
+    let b = engine(&tmp.path().join("joiner"));
+    adopt_relay_unprobed(&b, &url).await;
+    b.execute(Command::JoinStart {
+        invite: s.create.seats[0].link.clone(),
+        member: "petra".to_string(),
+        relays: Vec::new(),
+    })
+    .await
+    .expect("join starts");
+    wait_for(&a, "petra's seat to anchor", |s| s.create.seats[0].member == "petra").await;
+
+    // the ack was lost; the first re-announce goes out after 30 s
+    let s = wait_for_secs(&b, "the joiner to hear the repeated acceptance", 75, |s| {
+        s.join.run.outcome != 0 || s.join.run.log.iter().any(|l| l.contains("accepted"))
+    })
+    .await;
+    assert_eq!(s.join.run.outcome, 0, "the join is alive: {:?}", s.join.run.log);
+}
+
+/// REGRESSION (cluster C) — a Seal that NO relay accepts must be VISIBLE,
+/// not a silent hang. Since 2026-11 it is retried (a founding has no
+/// deadline) and the founder is told; it used to fail the founding.
 ///
 /// `spawn_publish_frame_with`'s failure sink had zero `Some(...)` callers, so
 /// the one path that reports a refused publish was dead code. The founder sat
@@ -1296,7 +1373,7 @@ async fn relay_rejecting_445_after(accept_first: usize) -> (LocalRelay, String) 
 /// never accepted, and `NetRitualFailed` — which exists for exactly this —
 /// was never reached. A seam that exists but is not wired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_seal_that_no_relay_accepts_fails_the_founding_instead_of_hanging() {
+async fn a_seal_that_no_relay_accepts_is_retried_loudly() {
     // accept the founder's Welcome/1059 traffic, refuse every 445 — the Seal
     // is the first 445 of the founding
     let (_relay, url) = relay_rejecting_445_after(0).await;
@@ -1345,17 +1422,13 @@ async fn a_seal_that_no_relay_accepts_fails_the_founding_instead_of_hanging() {
             .expect("founder backup confirm");
     }
 
-    // the Seal publish is refused by the only relay: the founding must FAIL,
-    // visibly, instead of sitting on "charter proposed" forever
-    let s = wait_for(&a, "the founding to fail on the refused seal", |s| {
-        s.create.run.outcome == 2
+    // the Seal publish is refused by the only relay: the founder is told
+    // which leg is stuck, and the founding stays alive for the retry
+    let s = wait_for(&a, "the stuck seal to be named", |s| {
+        s.create.run.log.iter().any(|l| l.contains("seal did not publish"))
     })
     .await;
-    assert!(
-        s.create.run.log.iter().any(|l| l.contains("seal") && l.contains("publish")),
-        "the log names the leg that could not be published: {:?}",
-        s.create.run.log
-    );
+    assert_eq!(s.create.run.outcome, 0, "a refused publish does not end the founding");
     assert!(s.workspaces.is_empty(), "nothing was founded");
 }
 
@@ -1537,8 +1610,9 @@ impl nostr_relay_builder::builder::QueryPolicy for RejectEveryReq {
     }
 }
 
-/// REGRESSION (cluster G) — a founding must REFUSE when its inbox is not
-/// readable, instead of publishing invite links over it.
+/// REGRESSION (cluster G) — a founding must not publish invite links over
+/// an inbox that is not readable. Since 2026-11 it keeps trying, loudly,
+/// instead of failing.
 ///
 /// `subscribe()` succeeds as soon as a relay accepts the REQ; it says nothing
 /// about whether the relay will ever REPLAY. The three `let _ = live(...)`
@@ -1546,7 +1620,7 @@ impl nostr_relay_builder::builder::QueryPolicy for RejectEveryReq {
 /// degraded to "advertise blind": links went out over an inbox nothing would
 /// ever answer on, and the founding then timed out with no error anywhere.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_founding_refuses_when_its_inbox_never_becomes_readable() {
+async fn a_founding_publishes_no_link_over_an_unreadable_inbox() {
     let relay = LocalRelay::new(RelayBuilder::default().query_policy(RejectEveryReq));
     relay.run().await.expect("silent relay runs");
     let url = relay.url().await.to_string();
@@ -1564,15 +1638,11 @@ async fn a_founding_refuses_when_its_inbox_never_becomes_readable() {
     .await
     .expect("create starts");
 
-    let s = wait_for(&a, "the founding to refuse the unreadable inbox", |s| {
-        s.create.run.outcome == 2
+    let s = wait_for_secs(&a, "the unreadable inbox to be named", 30, |s| {
+        s.create.run.log.iter().any(|l| l.contains("not readable"))
     })
     .await;
-    assert!(
-        s.create.run.log.iter().any(|l| l.contains("not readable")),
-        "the refusal names the unreadable subscription: {:?}",
-        s.create.run.log
-    );
+    assert_eq!(s.create.run.outcome, 0, "the founding keeps trying");
     // …and NO seat link was ever advertised over it
     assert!(
         s.create

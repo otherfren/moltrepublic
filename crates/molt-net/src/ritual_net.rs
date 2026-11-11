@@ -85,6 +85,32 @@ pub fn window_tags(rotation_seed: &[u8; 32], now_secs: u64) -> Vec<String> {
     tags
 }
 
+/// How many day windows a ritual subscription keeps at most.
+const RITUAL_MAX_WINDOWS: usize = 64;
+
+/// The tags of a ritual subscription: every window from `since_secs` through
+/// now (newest [`RITUAL_MAX_WINDOWS`]) plus [`window_tags`] at now.
+pub fn ritual_tags(rotation_seed: &[u8; 32], since_secs: u64, now_secs: u64) -> Vec<String> {
+    let mut tags = envelope::h_tags_for_catchup(
+        rotation_seed,
+        since_secs.min(now_secs),
+        now_secs,
+        RITUAL_MAX_WINDOWS,
+    );
+    for tag in window_tags(rotation_seed, now_secs) {
+        if !tags.contains(&tag) {
+            tags.push(tag);
+        }
+    }
+    tags
+}
+
+/// Unix seconds on the window clock.
+#[must_use]
+pub fn unix_now() -> u64 {
+    now_secs()
+}
+
 /// Map a wrap-side ritual error onto the transport error vocabulary: size
 /// violations are framing (a local bug or an over-fat founding, named
 /// loudly), everything else is crypto.
@@ -520,6 +546,24 @@ impl GroupChannel {
         Ok(GroupSub {
             sub,
             tags,
+            since: None,
+            channel: self.clone(),
+            deaf: None,
+            retry_at: tokio::time::Instant::now(),
+            retry_backoff: RETRY_INITIAL,
+        })
+    }
+
+    /// A live subscription that also KEEPS every window since `since_secs`
+    /// (unix): a founding may run for days, and a frame published under an
+    /// earlier day's tag must stay reachable across window rolls.
+    pub async fn subscribe_from(&self, since_secs: u64) -> Result<GroupSub, NetError> {
+        let tags = ritual_tags(&self.rotation_seed, since_secs, now_secs());
+        let sub = self.subscribe_tags(&tags).await?;
+        Ok(GroupSub {
+            sub,
+            tags,
+            since: Some(since_secs),
             channel: self.clone(),
             deaf: None,
             retry_at: tokio::time::Instant::now(),
@@ -741,6 +785,8 @@ pub struct GroupSub {
     /// The tags the LIVE subscription was opened with — the roll detector
     /// compares [`window_tags`] at now against exactly this.
     tags: Vec<String>,
+    /// Keep every window since this unix time ([`GroupChannel::subscribe_from`]).
+    since: Option<u64>,
     channel: GroupChannel,
     /// Why the last re-placement failed, while it is still failing. `None`
     /// once a retry succeeds.
@@ -789,7 +835,10 @@ impl GroupSub {
     pub async fn recv(&mut self, timeout: Duration) -> GroupRecv {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            let current = window_tags(&self.channel.rotation_seed, now_secs());
+            let current = match self.since {
+                Some(since) => ritual_tags(&self.channel.rotation_seed, since, now_secs()),
+                None => window_tags(&self.channel.rotation_seed, now_secs()),
+            };
             // A re-placement is only NEEDED when the live subscription does
             // not already cover the wanted tags. `window_tags` NARROWS as the
             // skew margin passes ([W, W-1] -> [W]), so a plain `!=` called a

@@ -34,6 +34,10 @@ const LIVE_WAIT: Duration = Duration::from_secs(10);
 /// A ritual's group-channel replay (founder and joiner): an onion relay over
 /// Tor replays a busy channel for longer than `LIVE_WAIT` (field 2026-09-12).
 const REPLAY_WAIT: Duration = Duration::from_secs(120);
+/// Backoff of a ritual publish or subscription that keeps failing: nothing
+/// on the ritual path gives up on its own.
+const PUBLISH_RETRY_INITIAL: Duration = Duration::from_secs(2);
+const PUBLISH_RETRY_CAP: Duration = Duration::from_secs(60);
 
 /// What the founder inbox task needs to render one seat's v2 link.
 pub(crate) struct SeatInvite {
@@ -85,46 +89,41 @@ pub(crate) fn spawn_founder_inbox(
     tx: mpsc::WeakSender<Envelope>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut inbox = match net.inbox().await {
-            Ok(i) => i,
-            Err(e) => {
-                let _ = send_cmd(
-                    &tx,
-                    Command::NetRitualFailed {
-                        error: format!("relay inbox subscribe: {e}"),
-                        generation: Some(generation),
-                    },
-                )
-                .await;
-                return;
-            }
-        };
         // subscribe-BEFORE-advertise only means something if the
         // subscription is proven READABLE. A relay that accepts the
         // connection and the REQ but never replays (auth required, rate
         // limited, CLOSED-then-refused) left us publishing seat links over an
-        // inbox nothing would ever answer on.
-        let st = inbox.live_state(LIVE_WAIT).await;
-        if !st.any() {
-            let _ = send_cmd(
-                &tx,
-                Command::NetRitualFailed {
-                    error: "the founding inbox is not readable on any relay - no invite \
-                            was published"
-                        .to_string(),
-                    generation: Some(generation),
-                },
-            )
-            .await;
-            return;
-        }
-        if !st.full() {
-            tracing::warn!(
-                synced = st.synced,
-                connected = st.connected,
-                "the founding inbox replayed on only some relays"
-            );
-        }
+        // inbox nothing would ever answer on. Not readable yet = keep
+        // trying, loudly; no link is published before it is.
+        let mut wait = PUBLISH_RETRY_INITIAL;
+        let mut inbox = loop {
+            let why = match net.inbox().await {
+                Ok(mut inbox) => {
+                    let st = inbox.live_state(LIVE_WAIT).await;
+                    if st.any() {
+                        if !st.full() {
+                            tracing::warn!(
+                                synced = st.synced,
+                                connected = st.connected,
+                                "the founding inbox replayed on only some relays"
+                            );
+                        }
+                        break inbox;
+                    }
+                    "not readable on any relay".to_string()
+                }
+                Err(e) => e.to_string(),
+            };
+            let note = Command::NetRitualNote {
+                note: format!("⚠ the founding inbox is not up - {why} · retrying"),
+                generation: Some(generation),
+            };
+            if !send_cmd(&tx, note).await {
+                return;
+            }
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+        };
         for s in &seats {
             let link = crate::founding::FoundingInvite {
                 info: s.info.clone(),
@@ -410,29 +409,17 @@ pub(crate) fn spawn_recovery_inbox(
     })
 }
 
-/// MLS-encrypt one RitualMsg and publish it as a 445 frame, synchronously.
-/// The lock is dropped BEFORE the publish await (never hold a std mutex
-/// across await). Returns the carrier `created_at`.
-///
-/// This is the MEMBER's send path (`Signed`, `Declined`): it propagates its
-/// error to the caller, which already fails the join loudly — unlike the
-/// founder's fire-and-forget legs, which needed the reporting task below.
-async fn publish_frame_now(
-    chan: &GroupChannel,
+/// MLS-encrypt one RitualMsg, ONCE: a retry republishes these bytes (see
+/// [`FramePayload`]). The lock is released before any await.
+fn seal_frame(
     group: &Arc<Mutex<molt_net::MlsMember>>,
     msg: &RitualMsg,
-) -> Result<u64, String> {
+) -> Result<(Vec<u8>, [u8; 32]), String> {
     let payload = serde_json::to_vec(msg).map_err(|e| e.to_string())?;
-    let (ct, exporter) = {
-        let mut g = group.lock().map_err(|_| "mls lock poisoned".to_string())?;
-        let ct = g.encrypt(&payload).map_err(|e| e.to_string())?;
-        let exporter = g.exporter_secret().map_err(|e| e.to_string())?;
-        (ct, exporter)
-    };
-    chan.publish_frame(&exporter, &ct)
-        .await
-        .map(|(stamp, _report)| stamp)
-        .map_err(|e| e.to_string())
+    let mut g = group.lock().map_err(|_| "mls lock poisoned".to_string())?;
+    let ct = g.encrypt(&payload).map_err(|e| e.to_string())?;
+    let exporter = g.exporter_secret().map_err(|e| e.to_string())?;
+    Ok((ct, exporter))
 }
 
 /// What a 445 publish task sends. Encrypted ONCE, before any retry.
@@ -451,28 +438,52 @@ pub(crate) enum FramePayload {
     Sealed { ct: Vec<u8>, exporter: [u8; 32] },
 }
 
-/// How hard a leg tries before it reports failure.
+/// How hard a leg tries, and whether it keeps re-publishing afterwards.
 #[derive(Clone, Copy)]
 pub(crate) struct RetryPolicy {
-    /// Total publish attempts (1 = no retry).
+    /// Publish attempts before failure is reported (`u32::MAX` = never
+    /// give up; failures are noted instead).
     pub(crate) attempts: u32,
-    /// Delay before the 2nd attempt; doubles each time.
+    /// Delay before the 2nd attempt; doubles up to [`PUBLISH_RETRY_CAP`].
     pub(crate) backoff: Duration,
+    /// Delays (seconds) of the re-publishes after the first success; the
+    /// last one repeats forever when `repeat_forever`.
+    pub(crate) repeat: &'static [u64],
+    pub(crate) repeat_forever: bool,
 }
 
 impl RetryPolicy {
-    /// Pre-seal legs: the founding is still live and a human is watching, so
-    /// fail fast enough to stay well inside a wizard's patience.
-    pub(crate) const PRE_SEAL: Self =
-        Self { attempts: 3, backoff: Duration::from_millis(700) };
+    /// The charter proposal: one-shot for the founder, so it never gives
+    /// up, and it is re-published until the ritual ends (the caller aborts
+    /// the task) - a member may read its Welcome days later.
+    pub(crate) const SEAL: Self = Self {
+        attempts: u32::MAX,
+        backoff: Duration::from_millis(700),
+        repeat: &[900],
+        repeat_forever: true,
+    };
+    /// The farewell of a ritual that is going away: bounded.
+    pub(crate) const ABORT: Self = Self {
+        attempts: 3,
+        backoff: Duration::from_millis(700),
+        repeat: &[],
+        repeat_forever: false,
+    };
     /// The genesis: the founder has already materialized, so this frame is
-    /// the members' ONLY path into the republic. Try harder before giving up.
-    pub(crate) const GENESIS: Self =
-        Self { attempts: 4, backoff: Duration::from_millis(900) };
+    /// the members' ONLY path into the republic. A first failure is
+    /// reported; either way it is re-published over a week for the member
+    /// that was away.
+    pub(crate) const GENESIS: Self = Self {
+        attempts: 4,
+        backoff: Duration::from_millis(900),
+        repeat: &[60, 300, 900, 3_600, 10_800, 21_600, 43_200, 86_400, 172_800, 259_200],
+        repeat_forever: false,
+    };
 }
 
 /// Publish one 445 frame, retrying the PUBLISH only, and ALWAYS report the
-/// per-relay outcome back to the actor.
+/// first per-relay outcome back to the actor; then re-publish the SAME
+/// bytes as the policy says.
 ///
 /// The sink is not optional. It used to be `Option<...>`, every caller passed
 /// `None`, and the reporting path was dead code — so a refused Seal hung both
@@ -489,89 +500,108 @@ pub(crate) fn spawn_publish_frame(
     // the ritual was taken (the genesis), so a late report cannot be
     // attributed to a founding that started meanwhile
     workspace: String,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // encrypt ONCE — see FramePayload
         let sealed: Result<(Vec<u8>, [u8; 32]), String> = match payload {
             FramePayload::Sealed { ct, exporter } => Ok((ct, exporter)),
-            FramePayload::Encrypt(group, msg) => (|| {
-                let bytes = serde_json::to_vec(&msg).map_err(|e| e.to_string())?;
-                let mut g = group.lock().map_err(|_| "mls lock poisoned".to_string())?;
-                let ct = g.encrypt(&bytes).map_err(|e| e.to_string())?;
-                let exporter = g.exporter_secret().map_err(|e| e.to_string())?;
-                Ok((ct, exporter))
-            })(),
+            FramePayload::Encrypt(group, msg) => seal_frame(&group, &msg),
+        };
+        let report = |accepted: Vec<String>, failed: Vec<String>| Command::NetRitualPublished {
+            what: what.to_string(),
+            accepted,
+            failed,
+            generation,
+            workspace: workspace.clone(),
         };
         let (ct, exporter) = match sealed {
             Ok(v) => v,
             Err(e) => {
                 // encryption failed: no publish will ever help
                 tracing::error!(what, error = %e, "ritual 445 frame could not be encrypted");
-                let _ = send_cmd(
-                    &tx,
-                    Command::NetRitualPublished {
-                        what: what.to_string(),
-                        accepted: Vec::new(),
-                        failed: vec![format!("encrypt: {e}")],
-                        generation,
-                        workspace,
-                    },
-                )
-                .await;
+                let _ = send_cmd(&tx, report(Vec::new(), vec![format!("encrypt: {e}")])).await;
                 return;
             }
         };
 
         let mut wait = retry.backoff;
-        let mut last: Vec<String> = Vec::new();
-        for attempt in 1..=retry.attempts {
+        let mut attempt = 0u32;
+        let published = loop {
+            attempt = attempt.saturating_add(1);
             match chan.publish_frame(&exporter, &ct).await {
-                Ok((_stamp, report)) => {
-                    let failed: Vec<String> = report
-                        .failed
-                        .iter()
-                        .map(|(url, why)| format!("{url}: {why}"))
-                        .collect();
-                    let _ = send_cmd(
-                        &tx,
-                        Command::NetRitualPublished {
-                            what: what.to_string(),
-                            accepted: report.accepted.clone(),
-                            failed,
-                            generation,
-                            workspace,
-                        },
-                    )
-                    .await;
-                    return;
-                }
+                Ok((_stamp, report)) => break Ok(report),
                 Err(e) => {
-                    last = vec![e.to_string()];
-                    tracing::warn!(
-                        what, attempt, of = retry.attempts, error = %e,
-                        "ritual 445 frame did not publish"
-                    );
-                    if attempt < retry.attempts {
-                        tokio::time::sleep(wait).await;
-                        wait = wait.saturating_mul(2);
+                    tracing::warn!(what, attempt, error = %e, "ritual 445 frame did not publish");
+                    if attempt >= retry.attempts {
+                        break Err(e.to_string());
                     }
+                    if attempt >= 3 {
+                        let note = Command::NetRitualNote {
+                            note: format!("⚠ {what} did not publish - {e} · retrying"),
+                            generation,
+                        };
+                        if !send_cmd(&tx, note).await {
+                            return;
+                        }
+                    }
+                    tokio::time::sleep(wait).await;
+                    wait = wait.saturating_mul(2).min(PUBLISH_RETRY_CAP);
                 }
             }
+        };
+        let first = match published {
+            Ok(r) => report(
+                r.accepted.clone(),
+                r.failed.iter().map(|(url, why)| format!("{url}: {why}")).collect(),
+            ),
+            // every attempt refused: accepted stays EMPTY, which is what the
+            // handler reads as "nobody has this frame"
+            Err(e) => report(Vec::new(), vec![e]),
+        };
+        if !send_cmd(&tx, first).await {
+            return;
         }
-        // every attempt refused: accepted stays EMPTY, which is what the
-        // handler reads as "nobody has this frame"
-        let _ = send_cmd(
-            &tx,
-            Command::NetRitualPublished {
-                what: what.to_string(),
-                accepted: Vec::new(),
-                failed: last,
-                generation,
-                workspace,
-            },
-        )
-        .await;
-    });
+        let mut delays = retry.repeat.iter().copied();
+        let mut last = None;
+        loop {
+            let Some(secs) = delays.next().or(last.filter(|_| retry.repeat_forever)) else {
+                return;
+            };
+            last = Some(secs);
+            tokio::time::sleep(Duration::from_secs(secs)).await;
+            if tx.upgrade().is_none() {
+                return;
+            }
+            if let Err(e) = chan.publish_frame(&exporter, &ct).await {
+                tracing::warn!(what, error = %e, "ritual 445 frame did not re-publish");
+            }
+        }
+    })
+}
+
+/// Deliver one seat's Welcome, retrying until a relay takes it.
+pub(crate) fn spawn_welcome(
+    net: RitualNet,
+    npub: String,
+    payload: molt_net::welcome::WelcomePayload,
+    generation: u64,
+    tx: mpsc::WeakSender<Envelope>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut wait = PUBLISH_RETRY_INITIAL;
+        while let Err(e) = net.send_welcome(&npub, &payload).await {
+            tracing::warn!(error = %e, "welcome did not publish");
+            let note = Command::NetRitualNote {
+                note: format!("⚠ a welcome did not publish - {e} · retrying"),
+                generation: Some(generation),
+            };
+            if !send_cmd(&tx, note).await {
+                return;
+            }
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+        }
+    })
 }
 
 /// Open one 445 frame against the group: strip the outer exporter layer
@@ -669,43 +699,54 @@ pub(crate) fn check_proposal_against_link(
     Ok(())
 }
 
+/// How far back a JOINER's group subscription reaches: it cannot know when
+/// the ritual started, and a Seal may be days old when its Welcome is read.
+const MEMBER_LOOKBACK_SECS: u64 = 30 * 86_400;
+
+/// A ritual group subscription covering every window since `since`, proven
+/// readable on at least one relay.
+async fn readable_group_sub(
+    chan: &GroupChannel,
+    since: u64,
+) -> Result<molt_net::ritual_net::GroupSub, String> {
+    let mut sub = chan.subscribe_from(since).await.map_err(|e| e.to_string())?;
+    if sub.live_state(REPLAY_WAIT).await.any() {
+        Ok(sub)
+    } else {
+        Err("not readable on any relay".to_string())
+    }
+}
+
 /// The founder's 445 recv: `Signed`/`Declined` come back over the freshly
 /// born group and land in the SAME actor handlers as the loopback path.
 pub(crate) fn spawn_founder_group_recv(
     chan: GroupChannel,
     group: Arc<Mutex<molt_net::MlsMember>>,
+    // the ritual's start (unix secs): frames from every window since then
+    since: u64,
     generation: u64,
     tx: mpsc::WeakSender<Envelope>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut sub = match chan.subscribe().await {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = send_cmd(
-                    &tx,
-                    Command::NetRitualFailed {
-                        error: format!("group subscribe: {e}"),
+        // a founder whose 445 subscription never replays would wait forever
+        // for Signed frames that cannot arrive: retry until it is readable
+        let mut wait = PUBLISH_RETRY_INITIAL;
+        let mut sub = loop {
+            match readable_group_sub(&chan, since).await {
+                Ok(sub) => break sub,
+                Err(why) => {
+                    let note = Command::NetRitualNote {
+                        note: format!("⚠ cannot hear the group channel - {why} · still retrying"),
                         generation: Some(generation),
-                    },
-                )
-                .await;
-                return;
+                    };
+                    if !send_cmd(&tx, note).await {
+                        return;
+                    }
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+                }
             }
         };
-        // this gate was MISSING entirely: a founder whose 445 subscription
-        // never replays waits forever for Signed frames that can never arrive
-        let st = sub.live_state(REPLAY_WAIT).await;
-        if !st.any() {
-            let _ = send_cmd(
-                &tx,
-                Command::NetRitualFailed {
-                    error: "the group channel is not readable on any relay".to_string(),
-                    generation: Some(generation),
-                },
-            )
-            .await;
-            return;
-        }
         let mut was_deaf = false;
         loop {
             let content = match sub.recv(RECV_SLICE).await {
@@ -1270,8 +1311,9 @@ struct NostrLeg {
     /// A note that must not be awaited while a frame is in hand (the
     /// ladder selects on `next_msg`): flushed at the next call.
     pending_note: Option<String>,
-    /// The genesis wait's clock: `(since, last noted rung)`.
-    genesis_wait: Option<(tokio::time::Instant, u64)>,
+    /// The clock of the current silent wait: `(phase, since, last noted
+    /// rung)`.
+    waiting: Option<(Phase, tokio::time::Instant, u64)>,
 }
 
 impl NostrLeg {
@@ -1284,6 +1326,26 @@ impl NostrLeg {
             },
         )
         .await;
+    }
+
+    /// The waits on the founder are unbounded - but silence and progress
+    /// must not look identical, so a quiet wait says how long it has lasted.
+    async fn wait_note(&mut self, phase: Phase) {
+        let what = match phase {
+            Phase::Accept => "the founder",
+            Phase::Genesis => "the genesis",
+            Phase::Seal | Phase::Backup => return,
+        };
+        if self.waiting.map(|w| w.0) != Some(phase) {
+            self.waiting = Some((phase, tokio::time::Instant::now(), 0));
+        }
+        let Some((_, since, noted)) = self.waiting.as_mut() else {
+            return;
+        };
+        if let Some(next) = genesis_wait_note(since.elapsed().as_secs(), *noted) {
+            *noted = next;
+            self.note(format!("⧗ waiting for {what} · {}", elapsed_label(next))).await;
+        }
     }
 
     /// The Welcome: relay honesty, join the group, stand the 445
@@ -1313,14 +1375,21 @@ impl NostrLeg {
             self.dial_relays.clone(),
             payload.rotation_seed,
         );
-        let mut sub = chan
-            .subscribe()
-            .await
-            .map_err(|e| format!("group subscribe: {e}"))?;
-        let st = sub.live_state(REPLAY_WAIT).await;
-        if !st.any() {
-            return Err("the group channel is not readable on any relay".to_string());
-        }
+        let since = molt_net::ritual_net::unix_now().saturating_sub(MEMBER_LOOKBACK_SECS);
+        let mut wait = PUBLISH_RETRY_INITIAL;
+        let sub = loop {
+            match readable_group_sub(&chan, since).await {
+                Ok(sub) => break sub,
+                Err(why) => {
+                    self.note(format!(
+                        "⚠ cannot hear the group channel - {why} · still retrying"
+                    ))
+                    .await;
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+                }
+            }
+        };
         self.rotation_seed = Some(payload.rotation_seed);
         self.chan = Some((chan, sub));
         Ok(())
@@ -1332,7 +1401,7 @@ impl RitualLeg for NostrLeg {
         &mut self,
         phase: Phase,
         deadline: Option<tokio::time::Instant>,
-    ) -> Result<RitualMsg, String> {
+    ) -> Result<Option<RitualMsg>, String> {
         if let Some(note) = self.pending_note.take() {
             self.note(note).await;
         }
@@ -1344,26 +1413,27 @@ impl RitualLeg for NostrLeg {
                     Some(d) => {
                         let now = tokio::time::Instant::now();
                         if now >= d {
-                            return Err(
-                                "the founder did not accept within 90 s - check the link and the relays"
-                                    .to_string(),
-                            );
+                            return Ok(None);
                         }
-                        d - now
+                        (d - now).min(RECV_SLICE)
                     }
                     None => RECV_SLICE,
                 };
                 match self.inbox.recv(budget).await {
                     Some(RitualDelivery::Msg(msg, sender)) if sender == self.founder_npub => {
-                        return Ok(msg);
+                        return Ok(Some(msg));
                     }
                     // a fast founder's Welcome may overtake the advisory
                     // ack; it counts as acceptance
                     Some(RitualDelivery::Welcome(p, sender)) if sender == self.founder_npub => {
                         self.join_group(p).await?;
-                        return Ok(RitualMsg::JoinAccepted { seat: self.seat });
+                        return Ok(Some(RitualMsg::JoinAccepted { seat: self.seat }));
                     }
-                    _ => continue,
+                    Some(_) => continue,
+                    None => {
+                        self.wait_note(phase).await;
+                        continue;
+                    }
                 }
             }
             let Some((_, sub)) = self.chan.as_mut() else {
@@ -1383,19 +1453,7 @@ impl RitualLeg for NostrLeg {
                     // deliberation is not a failure) — but silence and
                     // progress must not look identical, so the wait says how
                     // long it has been waiting
-                    if phase == Phase::Genesis {
-                        let (since, noted) = self
-                            .genesis_wait
-                            .get_or_insert_with(|| (tokio::time::Instant::now(), 0));
-                        if let Some(next) = genesis_wait_note(since.elapsed().as_secs(), *noted) {
-                            *noted = next;
-                            self.note(format!(
-                                "⧗ waiting for the genesis · {}",
-                                elapsed_label(next)
-                            ))
-                            .await;
-                        }
-                    }
+                    self.wait_note(phase).await;
                     continue;
                 }
                 // loud, never fatal — the join keeps waiting, visibly
@@ -1421,21 +1479,38 @@ impl RitualLeg for NostrLeg {
                 tracing::warn!(%from, "group frame from a co-member on the ritual path - ignored");
                 continue;
             }
-            return Ok(msg);
+            return Ok(Some(msg));
         }
     }
 
     async fn send(&mut self, msg: &RitualMsg) -> Result<(), String> {
         match (&self.chan, &self.group) {
-            // inside the group: a 445 frame
-            (Some((chan, _)), Some(group)) => publish_frame_now(chan, group, msg).await.map(|_| ()),
-            // before the Welcome: a gift wrap to the founder's anchor
-            _ => self
-                .net
-                .send_ritual(&self.founder_npub, msg)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string()),
+            // inside the group: a 445 frame, retried until a relay takes it
+            // (a signature lost to a relay blip must not end the join)
+            (Some((chan, _)), Some(group)) => {
+                let (ct, exporter) = seal_frame(group, msg)?;
+                let mut wait = PUBLISH_RETRY_INITIAL;
+                loop {
+                    match chan.publish_frame(&exporter, &ct).await {
+                        Ok(_) => return Ok(()),
+                        Err(e) => {
+                            self.note(format!("⚠ could not publish - {e} · retrying")).await;
+                            tokio::time::sleep(wait).await;
+                            wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+                        }
+                    }
+                }
+            }
+            // before the Welcome: a gift wrap to the founder's anchor; the
+            // ladder's resend is the retry
+            _ => match self.net.send_ritual(&self.founder_npub, msg).await {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    self.pending_note =
+                        Some(format!("⚠ the join request did not publish - {e} · retrying"));
+                    Err(e.to_string())
+                }
+            },
         }
     }
 
@@ -1537,16 +1612,29 @@ async fn member_join(
     // endpoint + inbox BEFORE announcing (subscribe-before-advertise)
     let net = RitualNet::new(dialer.clone(), dial_relays.clone(), &seat.nostr_sk)
         .map_err(|e| format!("transport keys: {e}"))?;
-    let mut inbox = net
-        .inbox()
-        .await
-        .map_err(|e| format!("inbox subscribe: {e}"))?;
     // announcing a JoinRequest over an unreadable inbox means the founder's
-    // reply lands nowhere and the join hangs with no reason
-    let st = inbox.live_state(LIVE_WAIT).await;
-    if !st.any() {
-        return Err("the join inbox is not readable on any relay".to_string());
-    }
+    // reply lands nowhere: retry until it is readable
+    let mut wait = PUBLISH_RETRY_INITIAL;
+    let inbox = loop {
+        let why = match net.inbox().await {
+            Ok(mut inbox) => {
+                if inbox.live_state(LIVE_WAIT).await.any() {
+                    break inbox;
+                }
+                "not readable on any relay".to_string()
+            }
+            Err(e) => e.to_string(),
+        };
+        let note = Command::NetJoinNote {
+            note: format!("⚠ the join inbox is not up - {why} · retrying"),
+            generation,
+        };
+        if !send_cmd(tx, note).await {
+            return Err("the engine is gone".to_string());
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+    };
 
     let mut leg = NostrLeg {
         net,
@@ -1564,7 +1652,7 @@ async fn member_join(
         rotation_seed: None,
         was_deaf: false,
         pending_note: None,
-        genesis_wait: None,
+        waiting: None,
     };
     let gate = CommandGate {
         tx: tx.clone(),
