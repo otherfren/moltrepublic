@@ -66,10 +66,10 @@ approve/decline by the members (threshold m-of-n, one stance per member); \
 withdraw pulls back an OWN pending proposal. 5) any *_start/backup/test call \
 returns immediately - poll read_session for the outcome. propose payloads \
 {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, \
-set_image {value,bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, \
-set_features {value: \"memory quests\"}, set_member_image {member,value,bytes_b64} \
+set_image {path | bytes_b64, value?}, remove_image, set_relays {value: \"wss://a wss://b\"}, \
+set_features {value: \"memory quests\"}, set_member_image {member, path | bytes_b64, value?} \
 /remove_member_image/set_member_desc {member,value} (own seat only, square \
-picture); memory add_note {title}; files persist {id} (the engine fills the \
+picture; a picture is `path` on this node or inline base64, never share_file); memory add_note {title}; files persist {id} (the engine fills the \
 share's identity; a live share only), unpersist {id, at: unix now} (a \
 persistent share only), delete {id} (a temporary share - gone for good); \
 quests kanban_ops {summary, base_rev, ops} (typed: quests_propose; read: \
@@ -1699,12 +1699,12 @@ pub fn tools() -> Vec<ToolDef> {
             name: "propose",
             command: "propose",
             scope: Scope::Seat,
-            description: "Put an object forward for threshold approval on a gated surface. An Organization set_image payload must embed the actual image as base64 `bytes_b64` and the bytes must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. Payload size is capped at what one relay message can carry (about 64 KiB of image for a small roster); an over-size proposal is refused with the exact figure that fits. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. vault needs a vault-prepared republic and 2 <= m <= n-2 (status.vault_enable = offer). Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set); organization, chat and files are CORE surfaces - always proposable, never in a feature set. Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" where `+` `-` `→` count FILES added, deleted and renamed and `~` counts changed LINES - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the base it is proposed against; wiki_edit writes the wiki without one. A path another OPEN proposal also touches is NOT that refusal: the patch goes to the vote and reads `superseded` once the other one seals and moves the base. The proposer's own signature is the first of m; the reply names the proposal's `channel`. Ids are minted per seat, so the sequence has gaps by design.",
+            description: "Put an object forward for threshold approval on a gated surface. A picture proposal - organization set_image (the logo) or set_member_image (the own avatar, square) - names exactly ONE source: `path`, a file this node reads itself (absolute, ~ expanded, or a bare name in the download directory; at most 32 MiB), or `bytes_b64`, the file inline as base64. `value` is the display name (default: the file's name, else logo.<ext> / avatar.<ext>). The picture rides the proposal and every member gets it with the card: share_file is NOT the way to propose one (a chat share is a separate, temporary download). It must DECODE as a picture (png/jpeg/webp/gif/bmp, ≤8192x8192; svg is refused) - sign-what-you-see: members vote on the image, so undecodable bytes are refused here and dropped by every peer. A proposal is capped at what one relay message carries (about 64 KiB of picture for a small roster; status.image_budget): a larger picture is downscaled here - fewer pixels, same format - and members sign the downscaled bytes; an animation or a picture no downscale can fit is refused with the figure that fits. Any other over-size proposal is refused with the overshoot. Organization op set_features enables charter features: value = space-separated keys among memory/quests/vault/wallet, the FULL target set - it must keep every enabled feature (enable-only, never off again) and add at least one. vault needs a vault-prepared republic and 2 <= m <= n-2 (status.vault_enable = offer). Proposing on a surface whose feature is not enabled is refused (status.features lists the enabled set); organization, chat and files are CORE surfaces - always proposable, never in a feature set. Memory op wiki_patch is a wiki changeset vote: `value` carries a raw git-format patch (unified diffs; rename/new/deleted headers), `summary` a short count string like \"+2 -1 →1 ~34\" where `+` `-` `→` count FILES added, deleted and renamed and `~` counts changed LINES - the GUI's changeset vote emits exactly this shape and renders the patch in its diff viewer. It is the RAW form, for a caller that already holds a patch, and it is refused when the patch does not apply to the base it is proposed against; wiki_edit writes the wiki without one. A path another OPEN proposal also touches is NOT that refusal: the patch goes to the vote and reads `superseded` once the other one seals and moves the base. The proposer's own signature is the first of m; the reply names the proposal's `channel`. Ids are minted per seat, so the sequence has gaps by design.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "surface": { "type": "string", "enum": gated_enum() },
-                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {value, bytes_b64}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, value, bytes_b64}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests kanban_ops {summary, base_rev, ops: acts add/set/state} (an add without id gets a minted one, listed in the reply's `minted`; `@ref` cites an add's `ref` in the same changeset; creator is the proposing seat); wallet: use wallet_init; vault: use vault_seal / vault_grant; files persist {id} / unpersist {id, at} / delete {id} (id = the SHARE's chat message id from read_uploads, `at` = a unix stamp within an hour of this clock and not before the share; delete removes a temporary share for good)" }
+                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {path | bytes_b64, value?}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, path | bytes_b64, value?}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests kanban_ops {summary, base_rev, ops: acts add/set/state} (an add without id gets a minted one, listed in the reply's `minted`; `@ref` cites an add's `ref` in the same changeset; creator is the proposing seat); wallet: use wallet_init; vault: use vault_seal / vault_grant; files persist {id} / unpersist {id, at} / delete {id} (id = the SHARE's chat message id from read_uploads, `at` = a unix stamp within an hour of this clock and not before the share; delete removes a temporary share for good)" }
                 },
                 "required": ["surface", "payload"]
             }),
@@ -4878,6 +4878,62 @@ pub(crate) mod tests {
         } else {
             Ok(serde_json::from_str(&text).expect("json"))
         }
+    }
+
+    /// A real 2x2 24-bit BMP.
+    fn tiny_bmp() -> Vec<u8> {
+        let mut b = b"BM".to_vec();
+        b.extend_from_slice(&70u32.to_le_bytes());
+        b.extend_from_slice(&[0; 4]);
+        b.extend_from_slice(&54u32.to_le_bytes());
+        b.extend_from_slice(&40u32.to_le_bytes());
+        b.extend_from_slice(&2i32.to_le_bytes());
+        b.extend_from_slice(&2i32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&24u16.to_le_bytes());
+        b.extend_from_slice(&[0; 24]);
+        b.extend_from_slice(&[0x40; 16]);
+        b
+    }
+
+    /// The node reads a picture itself: `path` for the logo and for the
+    /// own avatar, as the alternative to `bytes_b64`.
+    #[tokio::test]
+    async fn a_picture_proposal_takes_a_path_on_the_node() {
+        let h = wallet();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("crest.bmp");
+        std::fs::write(&file, tiny_bmp()).expect("write");
+        let path = file.display().to_string();
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGM8ISfHwMDAxMDAwMDAAAANBAEIfXHKZgAAAABJRU5ErkJggg==";
+        for op in ["set_image", "set_member_image"] {
+            let propose = |payload: Value| call(&h, "propose", json!({ "surface": "organization", "payload": payload }));
+            let out = propose(json!({ "op": op, "member": "me", "path": path })).await.expect("by path");
+            let id = out["id"].as_u64().expect("the reply names the proposal");
+            let card = call(&h, "read_proposal", json!({ "id": id })).await.expect("card");
+            let text = card.to_string();
+            assert!(text.contains("crest.bmp"), "{op}: the file name is the display name: {text}");
+            assert!(text.contains("bytes_b64"), "{op}: the bytes ride the card");
+            assert!(!text.contains(&path), "{op}: the host path never rides the card");
+            let both = propose(json!({ "op": op, "member": "me", "path": path, "bytes_b64": png }))
+                .await
+                .expect_err("one source, not two");
+            assert!(both.contains("`path`"), "{both}");
+            let neither = propose(json!({ "op": op, "member": "me" })).await.expect_err("a picture needs a source");
+            assert!(neither.contains("`path`"), "{neither}");
+        }
+    }
+
+    /// The guide states the picture shape, the cap, and that a chat share
+    /// is not the logo.
+    #[test]
+    fn the_propose_guide_explains_picture_proposals() {
+        let d = tool_named("propose").description;
+        for needle in ["`path`", "`bytes_b64`", "downscaled", "share_file", "64 KiB"] {
+            assert!(d.contains(needle), "the propose description never says {needle}");
+        }
+        assert!(INSTRUCTIONS.contains("set_image {path | bytes_b64"));
+        assert!(INSTRUCTIONS.contains("set_member_image {member, path | bytes_b64"));
     }
 
     /// §6.2 "one source": every wake reason and every MOLT_WAKE_* variable
