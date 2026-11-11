@@ -41,6 +41,7 @@ mod configstore;
 mod events;
 mod files_state;
 mod founding;
+mod image_fit;
 mod kanban;
 mod lifecycles;
 mod loopback_mesh;

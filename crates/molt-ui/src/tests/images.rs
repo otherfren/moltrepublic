@@ -263,3 +263,18 @@ fn a_member_picture_proposal_offers_the_preview() {
         "the bytes reach the preview"
     );
 }
+
+/// An older or minimal proposal may carry bytes without a display name:
+/// the card and the save dialog still get one.
+#[test]
+fn an_unnamed_picture_card_gets_a_fallback_name() {
+    let mut v = profile_view("set_image", "");
+    v.payload = serde_json::json!({ "op": "set_image", "bytes_b64": "QUJD" });
+    assert_eq!(proposal_row(0, &v).proposed, "image");
+    v.proposed = "crest.png".to_string();
+    assert_eq!(proposal_row(0, &v).proposed, "crest.png");
+    // a removal carries no bytes and stays unnamed
+    v.proposed = String::new();
+    v.payload = serde_json::json!({ "op": "remove_image" });
+    assert_eq!(proposal_row(0, &v).proposed, "");
+}

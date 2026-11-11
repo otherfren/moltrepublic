@@ -575,7 +575,7 @@ impl State {
     pub(crate) fn cmd_propose(
         &mut self,
         surface: Surface,
-        payload: Value,
+        mut payload: Value,
     ) -> Result<Reply, MoltError> {
         // plan 1.3.7: deposits and grants come only from the vault commands
         if surface == Surface::Vault && self.is_vault_prepared() {
@@ -586,7 +586,112 @@ impl State {
         if surface == Surface::Wallet {
             return Err(MoltError::Wallet(molt_core::wallet::WalletRefusal::UseInit));
         }
+        if let Some(deferred) = self.prepare_image_proposal(surface, &mut payload)? {
+            return Ok(deferred);
+        }
         self.propose_payload(surface, payload)
+    }
+
+    /// A picture proposal names ONE source (`path` on this host, or
+    /// `bytes_b64`) and always gets a display name. One that must be read
+    /// or downscaled finishes off the actor and re-enters as a plain
+    /// `Propose` carrying the fitted bytes; `Some` = deferred that way.
+    fn prepare_image_proposal(
+        &mut self,
+        surface: Surface,
+        payload: &mut Value,
+    ) -> Result<Option<Reply>, MoltError> {
+        let stem = match (surface, payload.get("op").and_then(Value::as_str)) {
+            (Surface::Organization, Some("set_image")) => "logo",
+            (Surface::Organization, Some("set_member_image")) => "avatar",
+            _ => return Ok(None),
+        };
+        // removed either way: a host path is never signed
+        let path = payload
+            .as_object_mut()
+            .and_then(|o| o.remove("path"))
+            .and_then(|p| p.as_str().map(|p| p.trim().to_string()))
+            .filter(|p| !p.is_empty());
+        let has_b64 = payload
+            .get("bytes_b64")
+            .and_then(Value::as_str)
+            .is_some_and(|b| !b.is_empty());
+        let file = match (path, has_b64) {
+            (Some(_), true) => {
+                return Err(MoltError::BadPayload(
+                    "`path` and `bytes_b64` are alternatives - give one".into(),
+                ))
+            }
+            (None, false) => {
+                return Err(MoltError::BadPayload(
+                    "the image is missing - give `path` or `bytes_b64`".into(),
+                ))
+            }
+            (Some(p), false) => Some(molt_storage::expand_tilde(&self.host_path(&p)?)),
+            (None, true) => None,
+        };
+        let bytes = if file.is_none() { image_bytes(payload) } else { None };
+        let named = payload
+            .get("value")
+            .and_then(Value::as_str)
+            .is_some_and(|v| !v.trim().is_empty());
+        if !named {
+            let name = match (&file, &bytes) {
+                (Some(f), _) => f.file_name().map(|n| n.to_string_lossy().into_owned()),
+                (None, Some(b)) => Some(format!("{stem}.{}", crate::image_fit::sniffed_ext(b))),
+                (None, None) => None,
+            };
+            if let Some(name) = name {
+                payload["value"] = Value::String(name);
+            }
+        }
+        let roster = self.roster();
+        // bytes that fit, or that are no base64 at all, take the plain path
+        if file.is_none() && (bytes.is_none() || payload_fits(surface, payload, &roster)) {
+            return Ok(None);
+        }
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Err(MoltError::Engine("the engine is shutting down".into()));
+        };
+        let Some(reply) = self.deferred_reply.take() else {
+            // no operator to answer later: the plain path refuses the size
+            return match file {
+                Some(_) => Err(MoltError::Engine("propose: no reply channel".into())),
+                None => Ok(None),
+            };
+        };
+        let budget = image_headroom(surface, payload, &roster);
+        let mut payload = std::mem::take(payload);
+        tokio::spawn(async move {
+            let fitted = tokio::task::spawn_blocking(move || {
+                use base64::Engine as _;
+                let source = match file {
+                    Some(f) => crate::image_fit::read_source(&f)?,
+                    None => bytes.unwrap_or_default(),
+                };
+                let out = crate::image_fit::fit_image(&source, budget)?;
+                payload["bytes_b64"] =
+                    Value::String(base64::engine::general_purpose::STANDARD.encode(out));
+                Ok::<_, MoltError>(payload)
+            })
+            .await;
+            let out = match fitted {
+                Ok(Ok(payload)) => {
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    let cmd = molt_core::Command::Propose { surface, payload };
+                    match cmd_tx.send(crate::Envelope { cmd, reply: tx }).await {
+                        Ok(()) => rx.await.unwrap_or_else(|_| {
+                            Err(MoltError::Engine("the engine is shutting down".into()))
+                        }),
+                        Err(_) => Err(MoltError::Engine("the engine is shutting down".into())),
+                    }
+                }
+                Ok(Err(e)) => Err(e),
+                Err(e) => Err(MoltError::Engine(format!("image fit task failed: {e}"))),
+            };
+            let _ = reply.send(out);
+        });
+        Ok(Some(Reply::Ack))
     }
 
     /// The propose path behind [`State::cmd_propose`] and the vault commands.

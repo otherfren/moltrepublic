@@ -131,6 +131,34 @@ fn an_undecodable_peer_set_image_is_dropped_not_recorded() {
     );
 }
 
+/// A proposal dropped at ingest tells the receiver, not only the log.
+#[test]
+fn a_dropped_peer_proposal_leaves_a_notice() {
+    use base64::Engine as _;
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut peer = chain_peer("walter", &b, b.blocks.clone());
+    let mut deliver = |id: u64, b64: String| {
+        let env = molt_core::EventEnvelope {
+            prev_seq: 0,
+            seq: 90 + id,
+            ts: 1_751_000_000,
+            by: "petra".to_string(),
+            body: WorkspaceEvent::Proposed {
+                id: ProposalId(id),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_image", "value": "x.png", "bytes_b64": b64 }),
+            },
+        };
+        peer.cmd_net_delivered("petra".to_string(), env, None)
+            .expect("a wire drop acks, never errors");
+        std::mem::take(&mut peer.session.notice)
+    };
+    let garbage = base64::engine::general_purpose::STANDARD.encode(b"not an image");
+    assert_eq!(deliver(9, garbage), "proposal-dropped:petra:image");
+    let huge = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 256 * 1024]);
+    assert_eq!(deliver(10, huge), "proposal-dropped:petra:too-large");
+}
+
 /// **Self-edit, on the wire** (`member_profiles_plan.md` §2): a member
 /// profile belongs to its member, and the link identity is the only
 /// proof of authorship — so a profile proposal claiming ANOTHER seat is

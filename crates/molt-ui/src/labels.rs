@@ -190,6 +190,17 @@ pub(crate) fn vote_refused_copy(lang: i32, rest: &str) -> String {
     }
 }
 
+/// A peer's proposal was dropped at ingest. `rest` is `<peer>:<reason>`.
+pub(crate) fn proposal_dropped_copy(lang: i32, rest: &str) -> String {
+    let (peer, reason) = rest.rsplit_once(':').unwrap_or((rest, ""));
+    match (lang == 1, reason == "image") {
+        (true, true) => format!("Vorschlag von {peer} verworfen - Bild nicht lesbar."),
+        (true, false) => format!("Vorschlag von {peer} verworfen - zu groß für die Relays."),
+        (false, true) => format!("Proposal from {peer} dropped - its image cannot be decoded."),
+        (false, false) => format!("Proposal from {peer} dropped - too large for the relays."),
+    }
+}
+
 /// Render a chat timestamp as `2026-06-02 13:37 (~20 minutes ago)` in the
 /// local timezone. The relative part refreshes with every surfaces push.
 pub(crate) fn when_label(lang: i32, ts: u64) -> String {

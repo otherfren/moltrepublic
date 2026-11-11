@@ -1770,6 +1770,11 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
         },
         proposed: if op == "set_chat_retention" {
             retention_value(lang, &p.proposed)
+        } else if p.proposed.is_empty()
+            && p.payload.get("bytes_b64").and_then(serde_json::Value::as_str).is_some_and(|b| !b.is_empty())
+        {
+            // an unnamed picture still needs a card label and a save name
+            "image".to_string()
         } else {
             p.proposed.clone()
         },

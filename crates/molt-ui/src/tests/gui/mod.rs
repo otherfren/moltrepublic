@@ -18,6 +18,8 @@ mod kanban;
 mod layout;
 #[cfg(feature = "live-preview")]
 mod link_relays;
+#[cfg(feature = "live-preview")]
+mod logo;
 mod mirror;
 #[cfg(feature = "live-preview")]
 mod modals;

@@ -22,6 +22,16 @@ pub(crate) const PARKED_READS_PER_FRAME: usize = 16;
 
 
 impl State {
+    /// Tell the operator a peer's proposal was dropped here. Once per
+    /// distinct drop: a re-served card must not re-notify on every pass.
+    fn note_dropped_proposal(&mut self, from: &str, why: &str) {
+        let notice = format!("proposal-dropped:{from}:{why}");
+        if self.session.notice != notice {
+            self.session.notice = notice;
+            self.emit_session(crate::SessionScope::Full);
+        }
+    }
+
     /// R12: keep a peer's accepted governance event in the OWN log, under
     /// the peer's name and at the wire stamp (`declined_at` is ts-derived
     /// and must replay to the same value). Governance gossip used to live
@@ -270,6 +280,7 @@ impl State {
                 // the sealer's outbox
                 if !crate::proposals::payload_fits(surface, &payload, &self.roster()) {
                     tracing::warn!(from = %from, surface = ?surface, "dropping a proposal too large to publish");
+                    self.note_dropped_proposal(&from, "too-large");
                     return Ok(Reply::Ack);
                 }
                 // a Files vote must have the shape every seat can check
@@ -298,6 +309,7 @@ impl State {
                         .is_some_and(|b| crate::proposals::image_decodable(&b).is_ok())
                 {
                     tracing::warn!(from = %from, "dropping a set_image proposal without valid, decodable bytes");
+                    self.note_dropped_proposal(&from, "image");
                     return Ok(Reply::Ack);
                 }
                 if surface == molt_core::Surface::Organization
@@ -307,6 +319,7 @@ impl State {
                         .is_some_and(|b| crate::proposals::member_image_ok(&b).is_ok())
                 {
                     tracing::warn!(from = %from, "dropping a set_member_image proposal without valid, square bytes");
+                    self.note_dropped_proposal(&from, "image");
                     return Ok(Reply::Ack);
                 }
                 // (3) a set_relays with no relay at all could only ever fold
