@@ -2777,7 +2777,9 @@ export component DiffViewer inherits Rectangle {
     border-radius: Theme.win95 ? 0px : 10px;
     border-width: Theme.border-w;
     border-color: Theme.line;
-    height: 320px;
+    // no fixed height: every host states it, or lets its layout stretch it
+    min-height: 140px;
+    preferred-height: 320px;
     clip: true;
     // ONE tone vocabulary with the wiki, plus the viewer's own move tone:
     // added good · modified warn · deleted bad · moved purple; segments

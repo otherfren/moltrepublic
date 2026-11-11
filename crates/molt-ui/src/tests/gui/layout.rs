@@ -1256,6 +1256,120 @@ fn chat_tab_with(messages: usize) -> ModelRc<SurfaceTab> {
     }]))
 }
 
+/// The one rendered element of a type, as [`Geometry`].
+#[cfg(feature = "live-preview")]
+fn typed(ui: &AppWindow, type_name: &str) -> Geometry {
+    let mut found = i_slint_backend_testing::ElementHandle::find_by_element_type_name(ui, type_name)
+        .filter(|e| e.size().height > 0.0);
+    let e = found.next().unwrap_or_else(|| panic!("{type_name} renders"));
+    assert!(found.next().is_none(), "one {type_name} at a time");
+    (e.absolute_position().x, e.absolute_position().y, e.size().width, e.size().height)
+}
+
+/// **A decision nobody discussed yet shows its diff on the whole body.**
+/// No message list and no grab handle; the banner follows one pane gap
+/// below the viewer. The first message brings the 35 % split back.
+#[cfg(feature = "live-preview")]
+#[test]
+fn an_undiscussed_decision_gives_the_diff_the_whole_body() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = chat_pane_window_with(true, 0);
+    let gap = ui.global::<Theme>().get_pane_gap();
+    for height in [900_u32, 640] {
+        ui.window().set_size(slint::PhysicalSize::new(1400, height));
+        let card = typed(&ui, "ProposalCard");
+        let diff = typed(&ui, "DiffViewer");
+        let banner = geometry(&ui, "AppWindow::ch-banner");
+        assert!((diff.1 - (card.1 + card.3) - gap).abs() < 0.6, "{height}: card to diff");
+        assert!(
+            (banner.1 - (diff.1 + diff.3) - gap).abs() < 0.6,
+            "{height}: the diff ends at {}, the banner starts at {}",
+            diff.1 + diff.3,
+            banner.1
+        );
+        assert!(diff.3 > height as f32 * 0.5, "{height}: the diff is only {}px high", diff.3);
+        let list = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "AppWindow::ch-list")
+            .map(|e| e.size().height)
+            .fold(0.0, f32::max);
+        assert!(list < 0.5, "{height}: an empty list still takes {list}px");
+    }
+
+    // the first message: the split and its handle are back
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.set_surfaces(chat_tab_with(1));
+    let surface = 900.0 - 2.0 * gap;
+    let diff = typed(&ui, "DiffViewer");
+    let list = geometry(&ui, "AppWindow::ch-list");
+    assert!(
+        (diff.3 - 0.35 * surface).abs() < 24.0,
+        "the diff takes {}px of a {surface}px surface, not about 35 %",
+        diff.3
+    );
+    assert!((list.1 - (diff.1 + diff.3) - gap).abs() < 0.6, "the handle is the gap");
+    assert!(list.3 > 100.0, "the messages have room: {}px", list.3);
+
+    // and back: the last message gone, the diff takes the body again
+    ui.set_surfaces(chat_tab_with(0));
+    assert!(typed(&ui, "DiffViewer").3 > 540.0);
+}
+
+/// **The proposals list sizes its inline diff by the pane, not by a
+/// fixed 320 px:** it grows with the window, keeps a floor, and never
+/// outgrows the visible list.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_inline_diff_in_the_proposals_list_follows_the_pane_height() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("proposals".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "memory".into(),
+        gated: true,
+        pending_count: 1,
+        pending: ModelRc::new(VecModel::from(vec![ProposalRow {
+            id: 3,
+            text: "Wiki patch (~3)".into(),
+            approvals: 1,
+            threshold: 2,
+            patch_op: true,
+            proposed: "diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b\n".into(),
+            ..ProposalRow::default()
+        }])),
+        ..SurfaceTab::default()
+    }])));
+    ui.global::<PatchView>().set_for_id(3);
+    apply_strings(&ui, 0);
+    ui.window().set_size(slint::PhysicalSize::new(1400, 1000));
+    let _shown = show_headless(&ui);
+
+    let mut heights = Vec::new();
+    for height in [1000_u32, 700, 420] {
+        ui.window().set_size(slint::PhysicalSize::new(1400, height));
+        let diff = typed(&ui, "DiffViewer");
+        let visible = geometry(&ui, "AppWindow::gp-fl").3;
+        assert!(diff.3 <= visible + 0.5, "{height}: {}px diff in a {visible}px list", diff.3);
+        assert!(diff.3 >= visible.min(240.0) - 0.5, "{height}: the diff shrank to {}px", diff.3);
+        heights.push(diff.3);
+    }
+    assert!(heights[0] > 500.0, "a tall window shows a tall diff: {heights:?}");
+    assert!(heights[0] > heights[1] && heights[1] > heights[2], "it follows the pane: {heights:?}");
+}
+
+/// `(x, y, width, height)` of one element.
+#[cfg(feature = "live-preview")]
+type Geometry = (f32, f32, f32, f32);
+
+/// The [`Geometry`] of the single element with `id`.
+#[cfg(feature = "live-preview")]
+fn geometry(ui: &AppWindow, id: &str) -> Geometry {
+    let e = i_slint_backend_testing::ElementHandle::find_by_element_id(ui, id)
+        .next()
+        .unwrap_or_else(|| panic!("{id} renders"));
+    (e.absolute_position().x, e.absolute_position().y, e.size().width, e.size().height)
+}
+
 /// Put one surface pane on one sub-view, with every paged list `pages`
 /// long. Only the page COUNTS decide whether a pager row renders, so the
 /// row models stay one entry each.

@@ -5623,6 +5623,14 @@ export component AppWindow inherits Window {
                             // wider than every other panel gap in the pane.
                             chat-body := VerticalLayout {
                                 spacing: 0px;
+                                // a decision nobody discussed yet: the diff
+                                // takes the whole body, the split and its
+                                // handle come with the first message
+                                property <bool> diff-only: root.selected-decision.id > 0
+                                    && root.selected-decision.patch-op && s.log.length == 0;
+                                if chat-body.diff-only: DiffViewer {
+                                    vertical-stretch: 1;
+                                }
                                 // a wiki-patch decision is voted on its CONTENT:
                                 // the diff viewer sits between the card and the
                                 // discussion, so browsing the changes and talking
@@ -5635,7 +5643,7 @@ export component AppWindow inherits Window {
                                 // floor. Same pane = same splitter for a DECIDED
                                 // vote's archived discussion (Accepted/Denied).
                                 if root.selected-decision.id > 0
-                                    && root.selected-decision.patch-op: dv-wrap := VerticalLayout {
+                                    && root.selected-decision.patch-op && !chat-body.diff-only: dv-wrap := VerticalLayout {
                                     spacing: 0px;
                                     // the SURFACE rect's height (parent-fixed) —
                                     // reading the chat layout's own height here
@@ -5675,7 +5683,9 @@ export component AppWindow inherits Window {
                                 // straight onto the desktop background read badly,
                                 // especially in the brutalism theme
                                 ch-list := Rectangle {
-                                    vertical-stretch: 1;
+                                    vertical-stretch: chat-body.diff-only ? 0 : 1;
+                                    max-height: chat-body.diff-only ? 0px : 100000px;
+                                    visible: !chat-body.diff-only;
                                     background: Theme.panel;
                                     border-radius: Theme.win95 ? 0px : 8px;
                                     border-width: Theme.border-w;
@@ -7598,7 +7608,11 @@ export component AppWindow inherits Window {
                                         // right below: the read-only diff viewer
                                         // (file browser left, char-level colored
                                         // details right)
-                                        if p.patch-op && p.id == PatchView.for-id: DiffViewer { }
+                                        // as tall as the list shows, less a
+                                        // strip for the card it belongs to
+                                        if p.patch-op && p.id == PatchView.for-id: DiffViewer {
+                                            height: min(gp-fl.height, max(240px, gp-fl.height - 120px * Theme.ui-scale));
+                                        }
                                     }
                                     }
                                 }
