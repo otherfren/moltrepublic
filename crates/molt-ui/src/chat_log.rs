@@ -144,6 +144,7 @@ pub(crate) fn chat_line(lang: i32, m: &ChatMessage, me: &str, roster: &[String])
         // rejoin announcement) rides the same quiet-line rendering as the
         // UI-synthesized governance rows — one flag, no second style
         system: !m.kind.is_user(),
+        wake: m.kind == molt_core::ChatKind::Wake,
         quote_label: String::new(), // teaser, filled in by annotate_chat_log
         quote_indent: 0,            // reply depth, filled in by annotate_chat_log
         deleted_by: m.deleted_by.clone().unwrap_or_default(),
@@ -299,6 +300,7 @@ pub(crate) fn system_line_data(text: String) -> LogLineData {
         quote: -1,
         quote_id: String::new(),
         system: true,
+        wake: false,
         quote_label: String::new(),
         quote_indent: 0,
         deleted_by: String::new(),

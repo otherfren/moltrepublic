@@ -149,6 +149,9 @@ pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> S
                 .min(u64::from(molt_core::TASK_WAKE_LEAD_MAX)),
         )
         .unwrap_or(stored.task_wake_lead_min),
+        wake_timeout_secs: number_field(&ui.get_cfg_wake_timeout(), stored.wake_timeout_secs)
+            .clamp(1, molt_core::WAKE_TIMEOUT_MAX),
+        wake_chat_lines: ui.get_cfg_wake_chat_lines(),
         read_receipts: ui.get_cfg_read_receipts(),
         s3_backup: ui.get_cfg_s3_backup(),
         s3_endpoint: ui.get_cfg_s3_endpoint().to_string(),
@@ -251,6 +254,8 @@ pub(crate) fn apply_settings_fields(ui: &AppWindow, s: &SessionSettings) {
     ui.set_cfg_wake_on_start(on("task_start"));
     ui.set_cfg_wake_rest(s.wake_min_interval_secs.to_string().into());
     ui.set_cfg_wake_lead(s.task_wake_lead_min.to_string().into());
+    ui.set_cfg_wake_timeout(s.wake_timeout_secs.to_string().into());
+    ui.set_cfg_wake_chat_lines(s.wake_chat_lines);
     ui.set_cfg_read_receipts(s.read_receipts);
     ui.set_cfg_network_index(net_index(&s.anonymity));
     ui.set_cfg_tor_mode_index(mode_index(&s.tor_mode));

@@ -445,6 +445,8 @@ export component ChatRow inherits Rectangle {
     callback delete-requested();
     callback quote-jump();
     callback bring-into-view();
+    // a wake line: switch its kind off (the same switch as in Settings)
+    callback wake-hide();
     // shared-file card: click = download (host decides / toasts),
     // trash on own live shares = delete the local file
     callback file-clicked();
@@ -588,6 +590,26 @@ export component ChatRow inherits Rectangle {
             font-size: root.line.system ? Theme.fs-cap : Theme.fs-body;
             font-italic: root.line.system;
             font-family: "Twemoji Mozilla";
+        }
+        if root.line.wake: HorizontalLayout {
+            alignment: start;
+            Rectangle {
+                width: wake-hide-t.preferred-width;
+                height: wake-hide-t.preferred-height;
+                wake-hide-t := Text {
+                    text: Strings.wake-line-hide;
+                    color: wake-hide-ta.has-hover ? Theme.accent : Theme.faint;
+                    font-size: Theme.fs-cap;
+                    accessible-role: button;
+                    accessible-label: self.text;
+                }
+                wake-hide-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.wake-hide();
+                    }
+                }
+            }
         }
         // the shared-file card: metadata only (name, size · type · date).
         // Clicking downloads from the sharer's disk while the file exists;

@@ -379,6 +379,68 @@ fn the_wake_group_reads_into_the_settings_draft() {
     assert_eq!(d.task_wake_lead_min, molt_core::TASK_WAKE_LEAD_MAX, "clamped");
     ui.set_cfg_wake_rest("x".into());
     assert_eq!(read_settings_draft(&ui, &stored).wake_min_interval_secs, 300, "not a number keeps it");
+    assert_eq!(ui.get_cfg_wake_timeout().as_str(), "600");
+    assert!(ui.get_cfg_wake_chat_lines());
+    ui.set_cfg_wake_timeout("45".into());
+    ui.set_cfg_wake_chat_lines(false);
+    let d = read_settings_draft(&ui, &stored);
+    assert_eq!((d.wake_timeout_secs, d.wake_chat_lines), (45, false));
+    ui.set_cfg_wake_timeout("0".into());
+    assert_eq!(read_settings_draft(&ui, &stored).wake_timeout_secs, 1, "clamped");
+}
+
+/// A test wake's two lines reach the group chat through the real mirror;
+/// the control beside them switches both off, past lines included.
+#[test]
+fn a_test_wake_shows_in_the_chat_until_it_is_switched_off() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let node = quests_node(tmp.path(), &rt);
+    crate::actions::kanban::wire(&node.ui, &node.ctx(&rt));
+    let wake_rows = |node: &Node| -> Vec<String> {
+        surface_tab(&node.ui, "chat")
+            .map(|s| s.log.iter().filter(|l| l.wake).map(|l| l.text.to_string()).collect())
+            .unwrap_or_default()
+    };
+    let until = |what: &str, done: &dyn Fn(&Node) -> bool| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            // the session apply rides the event loop the headless backend
+            // never drains: run it directly, like `mirror` does the surfaces
+            let sv = rt.block_on(async {
+                match node.w.execute(Command::ReadSession).await.expect("session") {
+                    Reply::Session(s) => *s,
+                    other => panic!("{other:?}"),
+                }
+            });
+            apply_session(&node.ui, &sv, true, &node.chat_ui);
+            node.mirror(&rt);
+            if done(&node) {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "never: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    assert!(wake_rows(&node).is_empty());
+    // the draft, never saved
+    node.ui.invoke_wake_test("exit 4".into());
+    until("the test wake ends", &|n| n.ui.get_wake_test_result().as_str() == "exit 4");
+    assert_eq!(wake_rows(&node), ["wake: test", "wake: exit 4"]);
+    assert!(node.ui.get_cfg_wake_chat_lines());
+
+    node.ui.invoke_wake_lines_hide();
+    until("the switch lands", &|n| !n.ui.get_cfg_wake_chat_lines());
+    assert!(wake_rows(&node).is_empty(), "past lines are hidden too");
+    let stored = rt.block_on(async {
+        match node.w.execute(Command::ReadSession).await.expect("session") {
+            Reply::Session(s) => s.settings,
+            other => panic!("{other:?}"),
+        }
+    });
+    assert!(!stored.wake_chat_lines);
+    assert_eq!(stored.poke_wake_command, "", "the test stored no command");
 }
 
 /// The skill modal shows the one MCP text (§6.2).
@@ -389,7 +451,42 @@ fn the_skill_modal_shows_the_mcp_skill() {
     let _guard = rt.enter();
     let node = quests_node(tmp.path(), &rt);
     crate::actions::kanban::wire(&node.ui, &node.ctx(&rt));
-    assert_eq!(node.ui.get_skill_text().as_str(), molt_mcp::WAKE_SKILL);
+    let shown = node.ui.get_skill_text().to_string();
+    assert_eq!(shown, molt_mcp::fill_wake_skill(molt_mcp::WAKE_SKILL, 0, ""));
+    assert!(!shown.contains("{{"), "no placeholder reaches the modal");
+
+    // the UI language picks the text, the live config fills it
+    let mut sv = molt_core::SessionView::default();
+    sv.settings.mcp_port = 4711;
+    sv.config_path = "/srv/molt/config.toml".to_string();
+    let en = crate::actions::kanban::skill_text(0, &sv);
+    let de = crate::actions::kanban::skill_text(1, &sv);
+    assert!(en.starts_with("---\nname: moltrepublic-wake-script\n") && en.contains("# Build a wake script"));
+    assert!(de.contains("# Weckskript für MoltRepublic bauen"));
+    for text in [&en, &de] {
+        assert!(text.contains("http://localhost:4711/mcp") && text.contains("/srv/molt/config.toml"));
+        assert!(!text.contains("{{") && !text.contains('\u{2014}'));
+    }
+}
+
+/// English and German carry the same script: same lists, same limits.
+#[test]
+fn the_german_skill_carries_the_same_script() {
+    let lists = |text: &str| -> Vec<String> {
+        ["READ_TOOLS=(", "WRITE_TOOLS=(", "DENY_TOOLS=(", "TIMEOUT=\"", "flock -w "]
+            .iter()
+            .map(|key| {
+                let at = text.find(key).expect("in the script");
+                let rest = &text[at..];
+                let end = rest.find([')', '|', '#', '\n']).expect("ends");
+                rest[..end].split_whitespace().collect::<Vec<_>>().join(" ")
+            })
+            .collect()
+    };
+    let (en, de) = (crate::i18n::wake_skill(0), crate::i18n::wake_skill(1));
+    let (en, de) = (lists(en), lists(de));
+    assert_eq!(en, de, "the tool lists, the timeout, the lock wait");
+    assert_eq!((en[3].as_str(), en[4].as_str()), ("TIMEOUT=\"8m\"", "flock -w 60 9"));
 }
 
 #[cfg(feature = "live-preview")]

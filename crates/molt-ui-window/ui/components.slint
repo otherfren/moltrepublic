@@ -840,8 +840,8 @@ export component ConfirmModal inherits Rectangle {
     }
 }
 
-// The agent skill, read-only (kanban_workflows.md §6.2): one localized
-// line above the English skill, Copy and Save as file.
+// The agent skill, read-only (kanban_workflows.md §6.2): one line above
+// the raw skill text in the UI language, Copy and Save as file.
 export component SkillModal inherits ConfirmModal {
     in property <string> text;
     callback copy();

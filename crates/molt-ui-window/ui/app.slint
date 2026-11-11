@@ -2537,10 +2537,17 @@ export component AppWindow inherits Window {
     in-out property <bool> cfg-wake-on-start: true;
     in-out property <string> cfg-wake-rest: "300";
     in-out property <string> cfg-wake-lead: "10";
+    in-out property <string> cfg-wake-timeout: "600";
+    in-out property <bool> cfg-wake-chat-lines: true;
     in property <string> wake-test-result;
+    in property <string> wake-test-check;
+    in property <string> wake-test-stderr;
+    // how the last real wake failed ("" = it did not)
+    in property <string> wake-last;
+    callback wake-lines-hide();
     in property <string> skill-text;
     in-out property <bool> skill-open;
-    callback wake-test();
+    callback wake-test(string);
     callback skill-save();
     // send (and show) per-message chat read receipts — a local privacy
     // switch, seeded from the applied session so the chat's receipt rows
@@ -5732,6 +5739,9 @@ export component AppWindow inherits Window {
                                                     // (Rust-side annotate_chat_log)
                                                     indent-level: l.quote-indent;
                                                     scroll-request: root.chat-scroll-to;
+                                                    wake-hide => {
+                                                        root.wake-lines-hide();
+                                                    }
                                                     // feedback honesty: rows without a
                                                     // real id (legacy entries, system
                                                     // lines) must never trigger
@@ -7771,18 +7781,18 @@ export component AppWindow inherits Window {
                 // The tabs. A TITLE never breaks inside its tab; the BAR
                 // breaks instead, into a second row, as soon as one row
                 // cannot hold them all. The split is MEASURED, not guessed:
-                // `tm0..tm8` carry the titles in the real font (transparent,
+                // `tm0..tm9` carry the titles in the real font (transparent,
                 // never `visible: false` — that lowers to a Clip that would
-                // clip nothing away), `c1..c9` are the widths a row holding
+                // clip nothing away), `c1..c10` are the widths a row holding
                 // the first n tabs needs, and `row1` is the largest n that
                 // still fits. Two rows are enough by construction: the window
                 // floor leaves ~878px of bar, and the widest half of the
-                // nine German titles is far below that.
+                // ten German titles is far below that.
                 set-tabs := Rectangle {
                     property <length> tgap: 6px;
                     // 2 × SettingsTab.pad
                     property <length> tpad: 16px;
-                    property <int> count: root.active-workspace != "" ? 9 : 8;
+                    property <int> count: root.active-workspace != "" ? 10 : 9;
                     property <length> w0: tm0.preferred-width + self.tpad;
                     property <length> w1: tm1.preferred-width + self.tpad;
                     property <length> w2: tm2.preferred-width + self.tpad;
@@ -7792,6 +7802,7 @@ export component AppWindow inherits Window {
                     property <length> w6: tm6.preferred-width + self.tpad;
                     property <length> w7: tm7.preferred-width + self.tpad;
                     property <length> w8: tm8.preferred-width + self.tpad;
+                    property <length> w9: tm9.preferred-width + self.tpad;
                     property <length> c1: self.w0;
                     property <length> c2: self.c1 + self.tgap + self.w1;
                     property <length> c3: self.c2 + self.tgap + self.w2;
@@ -7801,8 +7812,10 @@ export component AppWindow inherits Window {
                     property <length> c7: self.c6 + self.tgap + self.w6;
                     property <length> c8: self.c7 + self.tgap + self.w7;
                     property <length> c9: self.c8 + self.tgap + self.w8;
+                    property <length> c10: self.c9 + self.tgap + self.w9;
                     property <int> row1: Math.min(self.count,
-                        self.c9 <= self.width ? 9
+                        self.c10 <= self.width ? 10
+                        : self.c9 <= self.width ? 9
                         : self.c8 <= self.width ? 8
                         : self.c7 <= self.width ? 7
                         : self.c6 <= self.width ? 6
@@ -7826,7 +7839,8 @@ export component AppWindow inherits Window {
                     tm5 := Text { text: Strings.set-tab-anon; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm6 := Text { text: Strings.set-tab-mcp; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm7 := Text { text: Strings.set-tab-node; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
-                    tm8 := Text { text: Strings.set-tab-chain; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm8 := Text { text: Strings.set-tab-agent; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm9 := Text { text: Strings.set-tab-chain; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     set-tab-rows := VerticalLayout {
                         spacing: 6px;
                         alignment: start;
@@ -7873,6 +7887,11 @@ export component AppWindow inherits Window {
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 > 8: SettingsTab {
+                                label: Strings.set-tab-agent;
+                                index: 9;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 > 9: SettingsTab {
                                 label: Strings.set-tab-chain;
                                 index: 8;
                                 current <=> root.set-tab;
@@ -7926,7 +7945,12 @@ export component AppWindow inherits Window {
                                 index: 7;
                                 current <=> root.set-tab;
                             }
-                            if set-tabs.count > 8 && set-tabs.row1 <= 8: SettingsTab {
+                            if set-tabs.row1 <= 8: SettingsTab {
+                                label: Strings.set-tab-agent;
+                                index: 9;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.count > 9 && set-tabs.row1 <= 9: SettingsTab {
                                 label: Strings.set-tab-chain;
                                 index: 8;
                                 current <=> root.set-tab;
@@ -8038,9 +8062,13 @@ export component AppWindow inherits Window {
                                     checked <=> root.cfg-poke-enabled;
                                 }
                             }
-                            // the wake hook is its OWN switch: a headless seat
-                            // may want to be woken for pending votes without
-                            // taking part in poking at all. Empty = off.
+                        }
+                        // the agent hooks. The wake hook is its OWN switch: a
+                        // headless seat may want to be woken for pending votes
+                        // without taking part in poking at all. Empty = off.
+                        if root.set-tab == 9: VerticalLayout {
+                            spacing: 14px;
+                            alignment: start;
                             DetailGroup {
                                 pack: true;
                                 title: Strings.field-wake;
@@ -8054,14 +8082,52 @@ export component AppWindow inherits Window {
                                     label: Strings.field-poke-wake;
                                     AppField {
                                         text <=> root.cfg-poke-wake;
-                                        placeholder: "claude -p '...'";
+                                        placeholder: "/home/me/project/bin/molt-wake.sh";
                                     }
                                 }
-                                Text {
-                                    text: Strings.field-wake-on;
-                                    color: Theme.dim;
-                                    font-size: Theme.fs-cap;
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    alignment: start;
+                                    AppButton {
+                                        label: Strings.wake-skill-btn;
+                                        clicked => {
+                                            root.skill-open = true;
+                                        }
+                                    }
+                                    // tests the text in the field, saved or not
+                                    AppButton {
+                                        label: Strings.wake-test-btn;
+                                        enabled: root.cfg-poke-wake != "";
+                                        clicked => {
+                                            root.wake-test(root.cfg-poke-wake);
+                                        }
+                                    }
                                 }
+                                if root.wake-test-result != "": Text {
+                                    text: "\{Strings.wake-test-last}: \{root.wake-test-result}\{root.wake-test-check != "" ? " - " + root.wake-test-check : ""}";
+                                    color: root.wake-test-result == "exit 0" ? Theme.accent
+                                        : root.wake-test-result == "started" || root.wake-test-result == "waiting" ? Theme.dim
+                                        : Theme.bad;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
+                                }
+                                if root.wake-test-stderr != "": Text {
+                                    text: root.wake-test-stderr;
+                                    color: Theme.dim;
+                                    font-family: "monospace";
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
+                                }
+                                if root.wake-last != "": Text {
+                                    text: "\{Strings.wake-last}: \{root.wake-last}";
+                                    color: Theme.bad;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            DetailGroup {
+                                pack: true;
+                                title: Strings.field-wake-on;
                                 HorizontalLayout {
                                     spacing: 14px;
                                     alignment: start;
@@ -8098,29 +8164,17 @@ export component AppWindow inherits Window {
                                             numeric: true;
                                         }
                                     }
+                                    FieldLabel {
+                                        label: Strings.field-wake-timeout;
+                                        AppField {
+                                            text <=> root.cfg-wake-timeout;
+                                            numeric: true;
+                                        }
+                                    }
                                 }
-                                HorizontalLayout {
-                                    spacing: 10px;
-                                    alignment: start;
-                                    AppButton {
-                                        label: Strings.wake-skill-btn;
-                                        clicked => {
-                                            root.skill-open = true;
-                                        }
-                                    }
-                                    AppButton {
-                                        label: Strings.wake-test-btn;
-                                        enabled: root.cfg-poke-wake != "";
-                                        clicked => {
-                                            root.wake-test();
-                                        }
-                                    }
-                                    if root.wake-test-result != "": Text {
-                                        text: "\{Strings.wake-test-last}: \{root.wake-test-result}";
-                                        color: Theme.dim;
-                                        font-size: Theme.fs-cap;
-                                        vertical-alignment: center;
-                                    }
+                                AppCheck {
+                                    label: Strings.wake-chat-lines;
+                                    checked <=> root.cfg-wake-chat-lines;
                                 }
                             }
                         }

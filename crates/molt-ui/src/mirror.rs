@@ -744,6 +744,13 @@ pub(crate) fn apply_session(
     // technical specifics ride along untranslated.
     ui.set_cfg_tor_test(sv.tor_test.state.as_str().into());
     ui.set_wake_test_result(sv.wake_test.as_str().into());
+    ui.set_wake_test_check(sv.wake_test_check.as_str().into());
+    ui.set_wake_test_stderr(sv.wake_test_stderr.as_str().into());
+    ui.set_wake_last(sv.wake_last.as_str().into());
+    let skill = crate::actions::kanban::skill_text(lang, sv);
+    if ui.get_skill_text().as_str() != skill {
+        ui.set_skill_text(skill.into());
+    }
     crate::actions::kanban::set_wake_on(sv.settings.wake_on.clone());
     // a confirmed-but-switched-off pool is a DIFFERENT problem from an empty
     // one, and telling the user to "confirm a relay" they already confirmed
@@ -1202,6 +1209,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                         when: l.when.clone().into(),
                         quote: l.quote,
                         system: l.system,
+                        wake: l.wake,
                         quote_label: l.quote_label.clone().into(),
                         quote_indent: l.quote_indent,
                         deleted_by: l.deleted_by.clone().into(),

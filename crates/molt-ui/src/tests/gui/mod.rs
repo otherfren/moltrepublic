@@ -11,6 +11,8 @@
 //! (checked against a live `moltd` over MCP), and the fault was in this
 //! layer, where nothing could observe it.
 
+#[cfg(feature = "live-preview")]
+mod agent_tab;
 mod chat;
 mod files;
 mod founding_fold;

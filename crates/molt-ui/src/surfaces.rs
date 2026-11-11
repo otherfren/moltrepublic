@@ -760,6 +760,8 @@ pub(crate) struct LogLineData {
     /// A UI-synthesized governance line (patch channels, P8): quiet
     /// styling, no author, no actions.
     pub(crate) system: bool,
+    /// A wake notice of this node (a system line with a hide control).
+    pub(crate) wake: bool,
     pub(crate) quote_label: String,
     /// Reply-indent depth (0 = no quote; 1/2 alternate between NEIGHBORING
     /// quote groups of different targets, so stacked replies to different
@@ -1427,6 +1429,7 @@ pub(crate) fn surface_data(
                 quote: -1,
                 quote_id: String::new(),
                 system: false,
+                wake: false,
                 quote_label: String::new(),
                 quote_indent: 0,
                 deleted_by: String::new(),

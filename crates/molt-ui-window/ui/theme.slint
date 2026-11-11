@@ -39,6 +39,7 @@ export struct LogLine {
     when: string, // "2026-06-02 13:37 (~20 minutes ago)", grey in the header
     quote: int, // quoted row in the DISPLAYED log (-1 = none/out of view)
     system: bool, // a UI-synthesized governance line (patch channels): quiet, no author, no actions
+    wake: bool, // a wake notice of this node: a system line that offers to hide its kind
     quote-label: string, // "author: body" teaser of the quoted message ("" = no quote; may be set with quote == -1 for a cross-channel quote)
     quote-indent: int, // reply-indent depth: 0 = none, 1/2 alternate between neighboring quote groups of different targets
     deleted-by: string, // who deleted the message ("" = live)
@@ -1693,6 +1694,11 @@ export global Strings {
     in property <string> wake-skill-btn;
     in property <string> wake-test-btn;
     in property <string> wake-test-last;
+    in property <string> wake-last;
+    in property <string> field-wake-timeout;
+    in property <string> wake-chat-lines;
+    in property <string> wake-line-hide;
+    in property <string> set-tab-agent;
     in property <string> skill-title;
     in property <string> skill-line;
     in property <string> skill-save;

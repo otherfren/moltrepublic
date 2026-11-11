@@ -749,7 +749,7 @@ fn the_settings_tabs_stay_one_line_and_the_bar_wraps_when_it_must() {
     let tabs: Vec<_> =
         i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SettingsTab")
             .collect();
-    assert_eq!(tabs.len(), 9, "nine tabs with a workspace open");
+    assert_eq!(tabs.len(), 10, "ten tabs with a workspace open");
     for t in &tabs {
         assert!(
             t.size().height <= 30.0,
@@ -764,7 +764,7 @@ fn the_settings_tabs_stay_one_line_and_the_bar_wraps_when_it_must() {
     let narrow: Vec<_> =
         i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SettingsTab")
             .collect();
-    assert_eq!(narrow.len(), 9, "no tab may disappear when the bar wraps");
+    assert_eq!(narrow.len(), 10, "no tab may disappear when the bar wraps");
     for t in &narrow {
         assert!(
             t.size().height <= 30.0,
@@ -1203,6 +1203,12 @@ fn every_chat_panel_gap_is_one_pane_gap() {
 /// plain group chat, rendered headless.
 #[cfg(feature = "live-preview")]
 fn chat_pane_window(patch: bool) -> (AppWindow, Shown) {
+    chat_pane_window_with(patch, 1)
+}
+
+/// [`chat_pane_window`] with `messages` rows in the channel.
+#[cfg(feature = "live-preview")]
+fn chat_pane_window_with(patch: bool, messages: usize) -> (AppWindow, Shown) {
     let ui = AppWindow::new().expect("headless window");
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
     ui.set_screen(AppScreen::Main);
@@ -1222,26 +1228,32 @@ fn chat_pane_window(patch: bool) -> (AppWindow, Shown) {
             ..ProposalRow::default()
         });
     }
-    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
-        key: "chat".into(),
-        ..SurfaceTab::default()
-    }])));
+    ui.set_surfaces(chat_tab_with(messages));
     apply_strings(&ui, 0);
     let shown = show_headless(&ui);
     (ui, shown)
 }
 
-/// `(x, y, width, height)` of one element.
+/// The chat surface with `messages` rows.
 #[cfg(feature = "live-preview")]
-type Geometry = (f32, f32, f32, f32);
-
-/// The [`Geometry`] of the single element with `id`.
-#[cfg(feature = "live-preview")]
-fn geometry(ui: &AppWindow, id: &str) -> Geometry {
-    let e = i_slint_backend_testing::ElementHandle::find_by_element_id(ui, id)
-        .next()
-        .unwrap_or_else(|| panic!("{id} renders"));
-    (e.absolute_position().x, e.absolute_position().y, e.size().width, e.size().height)
+fn chat_tab_with(messages: usize) -> ModelRc<SurfaceTab> {
+    let rows: Vec<LogLine> = (0..messages)
+        .map(|i| LogLine {
+            id: format!("{i:032x}").into(),
+            lead: "petra".into(),
+            text: "a word on this".into(),
+            first: true,
+            quote: -1,
+            patch_id: -1,
+            ..LogLine::default()
+        })
+        .collect();
+    ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "chat".into(),
+        applied_count: i32::try_from(messages).expect("small"),
+        log: ModelRc::new(VecModel::from(rows)),
+        ..SurfaceTab::default()
+    }]))
 }
 
 /// Put one surface pane on one sub-view, with every paged list `pages`
