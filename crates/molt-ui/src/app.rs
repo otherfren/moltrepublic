@@ -60,7 +60,7 @@ pub fn run_app(
         .unwrap_or_default();
     ui.set_config_dir(dir.into());
     ui.set_config_file(file.into());
-    ui.set_app_version(env!("CARGO_PKG_VERSION").into());
+    ui.set_app_version(version_label(env!("CARGO_PKG_VERSION"), cfg!(debug_assertions)).into());
     // Surface the compile-time embedded-tor availability into the tor-mode
     // dropdown's per-row enabled flags (a constant for the process lifetime).
     ui.set_tor_mode_enabled(ModelRc::new(VecModel::from(
@@ -271,4 +271,22 @@ fn issue(rt: &Handle, wallet: &WalletHandle, weak: &slint::Weak<AppWindow>, cmd:
             });
         }
     });
+}
+
+/// The version as the GUI shows it: a debug build says so.
+pub(crate) fn version_label(version: &str, debug: bool) -> String {
+    if debug {
+        format!("{version} debug")
+    } else {
+        version.to_string()
+    }
+}
+
+#[cfg(test)]
+mod version_tests {
+    #[test]
+    fn a_debug_build_is_marked_beside_the_version() {
+        assert_eq!(super::version_label("1.2.3", true), "1.2.3 debug");
+        assert_eq!(super::version_label("1.2.3", false), "1.2.3");
+    }
 }

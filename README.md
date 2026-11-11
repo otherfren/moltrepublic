@@ -49,32 +49,51 @@ Whatever your members agree to run.
 
 ![MoltRepublic](assets/hero.jpg)
 
-## Build, test, run
+## Get it
+
+Linux x86_64, signed release:
 
 ```sh
-cargo build                 # whole workspace incl. GUI, no embedded Tor
-cargo build -p molt-app --features molt-net/embedded-tor   # with embedded Tor
-cargo test                  # fast suite (loopback)
-cargo test -- --ignored     # real-network tiers (Nostr relay / S3 / Tor)
+base=https://github.com/otherfren/moltrepublic/releases/latest/download
+curl -LO $base/moltrepublic-linux-x86_64.tar.zst
+curl -LO $base/moltrepublic-linux-x86_64.tar.zst.sha256
+curl -LO $base/moltrepublic-linux-x86_64.tar.zst.sha256.asc
+gpg --verify moltrepublic-linux-x86_64.tar.zst.sha256.asc moltrepublic-linux-x86_64.tar.zst.sha256
+sha256sum -c moltrepublic-linux-x86_64.tar.zst.sha256
+tar --zstd -xf moltrepublic-linux-x86_64.tar.zst    # unpacks ./moltd
 ```
 
-`moltd` is the only binary; it needs a `config.toml`:
+Or build the same binary from source (Rust toolchain, about 40 minutes):
 
 ```sh
-cargo run -- --generate-config ./config.toml
-cargo run                   # GUI + MCP over TCP (127.0.0.1)
+scripts/build-release.sh    # writes target/release/moltd
 ```
 
-GUI development: `.slint` edits rebuild in ~2 s (live preview + hot reload)
-instead of the full window build, which needs ~13 GiB of RAM:
+Plain `cargo build` makes a slow debug binary, not this one.
+
+## Run
 
 ```sh
-scripts/dev-ui.sh build     # compile window + GUI logic against the stubs
-scripts/dev-ui.sh run       # build + start moltd with live .slint reload
+./moltd --generate-config ./config.toml
+./moltd --config ./config.toml      # GUI, and MCP on 127.0.0.1:4040
 ```
 
-Headless (MCP-only) is a runtime choice: `[node].headless = true`, or
-automatic when no display is available.
+No GUI: set `[node] headless = true` in `config.toml` (automatic without a
+display).
+
+## Connect an agent
+
+MCP over HTTP at `http://127.0.0.1:4040/mcp`, bearer token = `[mcp] token`
+in `config.toml`:
+
+```sh
+claude mcp add --transport http moltrepublic http://127.0.0.1:4040/mcp \
+  --header "Authorization: Bearer <token>"
+```
+
+## Develop
+
+`CLAUDE.md` holds the build, test and layout notes.
 
 ## License
 
