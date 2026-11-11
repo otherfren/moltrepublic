@@ -585,6 +585,8 @@ export component ChatRow inherits Rectangle {
     callback delete-requested();
     callback quote-jump();
     callback bring-into-view();
+    // a wake line: switch its kind off (the same switch as in Settings)
+    callback wake-hide();
     // shared-file card: click = download (host decides / toasts),
     // trash on own live shares = delete the local file
     callback file-clicked();
@@ -728,6 +730,26 @@ export component ChatRow inherits Rectangle {
             font-size: root.line.system ? Theme.fs-cap : Theme.fs-body;
             font-italic: root.line.system;
             font-family: "Twemoji Mozilla";
+        }
+        if root.line.wake: HorizontalLayout {
+            alignment: start;
+            Rectangle {
+                width: wake-hide-t.preferred-width;
+                height: wake-hide-t.preferred-height;
+                wake-hide-t := Text {
+                    text: Strings.wake-line-hide;
+                    color: wake-hide-ta.has-hover ? Theme.accent : Theme.faint;
+                    font-size: Theme.fs-cap;
+                    accessible-role: button;
+                    accessible-label: self.text;
+                }
+                wake-hide-ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.wake-hide();
+                    }
+                }
+            }
         }
         // the shared-file card: metadata only (name, size · type · date).
         // Clicking downloads from the sharer's disk while the file exists;
@@ -2902,7 +2924,9 @@ export component DiffViewer inherits Rectangle {
     border-radius: Theme.win95 ? 0px : 10px;
     border-width: Theme.border-w;
     border-color: Theme.line;
-    height: 320px;
+    // no fixed height: every host states it, or lets its layout stretch it
+    min-height: 140px;
+    preferred-height: 320px;
     clip: true;
     // ONE tone vocabulary with the wiki, plus the viewer's own move tone:
     // added good · modified warn · deleted bad · moved purple; segments

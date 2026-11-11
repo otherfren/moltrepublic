@@ -36,6 +36,10 @@ NOT_REFERENCES = {
     "satzung.md": "fixture in tests/file_transfer.rs",
     # a working document of that session, absorbed into the doc that cites it
     "fixme.md": "historical prose in docs_archive/transport/mesh/stage_b.md",
+    # the agent skill (molt-mcp wake_skill, its German twin in molt-ui)
+    "wake-prompt.md": "a file the wake skill has the agent create in the operator's project",
+    "ontology.md": "a wiki page the wake skill's prompt names as an example",
+    "moltrepublic-wake-skill.md": "the file name the GUI offers when saving the wake skill",
 }
 
 # Paths that point INTO ANOTHER REPOSITORY (we cite their layout, not ours).

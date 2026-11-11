@@ -996,22 +996,40 @@ fn list_of(st: &mut KanbanUi, which: i32) -> &mut Vec<String> {
     }
 }
 
-/// The Wake group's two buttons and the skill text (§6.2).
+/// The agent skill as the modal shows it: the UI language's text with
+/// this node's MCP port and config path filled in.
+pub(crate) fn skill_text(lang: i32, sv: &molt_core::SessionView) -> String {
+    molt_mcp::fill_wake_skill(crate::i18n::wake_skill(lang), sv.settings.mcp_port, &sv.config_path)
+}
+
+/// The Agent tab's buttons, the skill text and the chat's wake-line switch.
 fn wire_settings(ui: &AppWindow, ctx: &Ctx) {
-    ui.set_skill_text(molt_mcp::WAKE_SKILL.into());
+    ui.set_skill_text(molt_mcp::fill_wake_skill(crate::i18n::wake_skill(0), 0, "").into());
+    {
+        // the text in the field, saved or not
+        let cx = ctx.clone();
+        ui.on_wake_test(move |draft| cx.issue(Command::TestWake { command: Some(draft.to_string()) }));
+    }
     {
         let cx = ctx.clone();
-        ui.on_wake_test(move || cx.issue(Command::TestWake));
+        ui.on_wake_lines_hide(move || {
+            cx.issue(Command::PatchSettings {
+                patch: serde_json::json!({ "wake_chat_lines": false }),
+            });
+        });
     }
     let weak = ui.as_weak();
     let rt = ctx.rt.clone();
     ui.on_skill_save(move || {
+        let Some(text) = weak.upgrade().map(|ui| ui.get_skill_text().to_string()) else {
+            return;
+        };
         let weak = weak.clone();
         rt.spawn_blocking(move || {
-            let Some(dir) = rfd::FileDialog::new().pick_folder() else {
+            let Some(path) = rfd::FileDialog::new().set_file_name(molt_mcp::WAKE_SKILL_FILE).save_file() else {
                 return;
             };
-            let outcome = write_skill(&dir);
+            let outcome = write_skill(&path, &text);
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = weak.upgrade() else { return };
                 match outcome {
@@ -1019,21 +1037,19 @@ fn wire_settings(ui: &AppWindow, ctx: &Ctx) {
                         let saved = ui.global::<Strings>().get_skill_saved();
                         ui.invoke_show_toast(format!("{saved} {}", path.display()).into());
                     }
-                    Err(e) => ui.invoke_show_toast_error(format!("SKILL.md: {e}").into()),
+                    Err(e) => ui.invoke_show_toast_error(format!("{}: {e}", molt_mcp::WAKE_SKILL_FILE).into()),
                 }
             });
         });
     });
 }
 
-/// `dir/SKILL.md`, created new: an existing file or link there is refused.
-pub(crate) fn write_skill(dir: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
-    use std::io::Write as _;
-    let path = dir.join("SKILL.md");
-    std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?
-        .write_all(molt_mcp::WAKE_SKILL.as_bytes())?;
-    Ok(path)
+/// The skill at the path the save dialog returned (it asked before
+/// replacing a file); a link there is refused, never followed.
+pub(crate) fn write_skill(path: &std::path::Path, text: &str) -> std::io::Result<std::path::PathBuf> {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "a link"));
+    }
+    std::fs::write(path, text)?;
+    Ok(path.to_path_buf())
 }

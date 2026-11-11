@@ -12,6 +12,7 @@ fn line(lead: &str, text: &str) -> LogLineData {
         quote: -1,
         quote_id: String::new(),
         system: false,
+        wake: false,
         quote_label: String::new(),
         quote_indent: 0,
         deleted_by: String::new(),

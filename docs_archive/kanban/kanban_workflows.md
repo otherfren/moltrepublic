@@ -658,7 +658,40 @@ local node posture, saved to `config.toml`, never governance:
   tool see the identical contract. A test pins that every reason in
   `spawn_wake` and every env var appears in it.
 
-**Draft of the skill** (as built, `WAKE_SKILL` in `molt-mcp` is the
+**Changed 2026-11-11** (`docs/reviews/beta_feedback_2026-11-11.md`, WP3):
+
+- The wake group is its own Settings tab, "Agent".
+- `WAKE_SKILL` is a step-by-step guide to BUILD the wake script
+  (`crates/molt-mcp/src/wake_skill.md`; German twin
+  `crates/molt-ui/src/wake_skill_de.md`, picked by the UI language). Both
+  doors fill in the node's MCP port and config path. The modal saves the
+  shown text under a suggested file name. The draft below is the first
+  text, kept as history; its kanban working rules are no longer served.
+- **Test wake** runs the text in the field (MCP: `test_wake {command}`,
+  absent = the stored command) and stores nothing. It first checks, as the
+  node's user and without running anything, what can be decided about the
+  first word: program found (path, `~/`, or the node's `PATH`), every
+  folder traversable, file readable and executable, a script's `#!`
+  interpreter present. Shell syntax passes unchecked. Outcome:
+  `session.wake_test` (`started`, `waiting`, `check failed`, `exit <n>`,
+  `timeout`, `error: …`), `wake_test_check` (the first failed check),
+  `wake_test_stderr` (the last 8 lines). A test wake runs alone, never
+  merged with other pending reasons.
+- `[node] wake_timeout_secs` (1..=86400, default 600): on expiry the
+  script is killed, not what it started. A plain program line runs as
+  `sh -c "exec …"` so the kill reaches the script; behind shell syntax
+  (`;`, `&&`, a redirect, an assignment) it reaches the shell only.
+- A failed real wake logs `wake=failed reason=… exit=…` and reads
+  `session.wake_last` (`""` after a wake that exited 0).
+- Poke and test wakes leave two lines (start, result) in the woken
+  node's group chat: `ChatKind::Wake`, held OUTSIDE the event log
+  (`WakeState.lines`, runtime only, 200 kept) and merged in at read, so
+  they can reach neither the log nor the wire. `[node] wake_chat_lines =
+  false` hides them, past ones included; the chat offers the same switch
+  beside each line.
+
+**Draft of the skill** (first text, superseded 2026-11-11 - see above;
+as built then, `WAKE_SKILL` in `molt-mcp` was the
 authority: it also names every `MOLT_WAKE_*` variable, carries the
 reviewing checklist and moves the one `quests_propose` to the end of the
 wake):

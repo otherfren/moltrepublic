@@ -481,6 +481,12 @@ pub struct SessionSettings {
     /// Minutes before a task's start its `task_start` wake fires (0..=120).
     #[serde(default = "default_task_wake_lead_min")]
     pub task_wake_lead_min: u16,
+    /// Seconds a wake may run before its script is killed (1..=86400).
+    #[serde(default = "default_wake_timeout_secs")]
+    pub wake_timeout_secs: u64,
+    /// Show the poke and test wake lines in the group chat.
+    #[serde(default = "default_true")]
+    pub wake_chat_lines: bool,
     /// Send (and show) per-message chat read receipts. A local per-node
     /// privacy switch, on by default; while off this node broadcasts no
     /// receipts and hides others' from its chat view (symmetric).
@@ -564,6 +570,14 @@ pub fn default_task_wake_lead_min() -> u16 {
     10
 }
 
+/// Default wake timeout: ten minutes.
+pub fn default_wake_timeout_secs() -> u64 {
+    600
+}
+
+/// Upper bound of `wake_timeout_secs` (its lower bound is 1).
+pub const WAKE_TIMEOUT_MAX: u64 = 86_400;
+
 /// Upper bound of `wake_min_interval_secs`.
 pub const WAKE_MIN_INTERVAL_MAX: u64 = 86_400;
 
@@ -635,6 +649,8 @@ impl Default for SessionSettings {
             wake_min_interval_secs: default_wake_min_interval_secs(),
             wake_on: default_wake_on(),
             task_wake_lead_min: default_task_wake_lead_min(),
+            wake_timeout_secs: default_wake_timeout_secs(),
+            wake_chat_lines: true,
             read_receipts: true,
             font_app: default_font_app(),
             font_nav: default_font_nav(),
@@ -1446,6 +1462,8 @@ pub enum ChatKind {
     User,
     /// An engine-authored notice, rendered as a quiet system line.
     System,
+    /// A wake notice of this node: never in the log, never on the wire.
+    Wake,
 }
 
 impl ChatKind {
@@ -3833,6 +3851,16 @@ pub struct SessionView {
     /// running wake), `"started"`, `"exit <code>"` or `"error: …"`.
     #[serde(default)]
     pub wake_test: String,
+    /// The first check the last test wake failed (`""` = passed, it ran).
+    #[serde(default)]
+    pub wake_test_check: String,
+    /// The last lines of the last test wake's stderr.
+    #[serde(default)]
+    pub wake_test_stderr: String,
+    /// How the last REAL wake failed (`"exit 127"`, `"timeout"`,
+    /// `"error: …"`); `""` after one that succeeded.
+    #[serde(default)]
+    pub wake_last: String,
     /// Config keys (file names, e.g. `"mcp.port"`) whose current value
     /// differs from what the node booted with and which only take effect on
     /// restart. Set by the engine on every save/reload; NOT transient — it
@@ -3840,6 +3868,9 @@ pub struct SessionView {
     /// The GUI renders it as a persistent "restart required" warning.
     #[serde(default)]
     pub restart_required: Vec<String>,
+    /// The node's `config.toml`, absolute; `""` on a node without one.
+    #[serde(default)]
+    pub config_path: String,
     /// The OPEN workspace's transport kind: `"nostr"` for a relay republic,
     /// `""` otherwise. What the GUI keys transport-specific affordances on
     /// (§10.7 file gating, §6.5 coarse presence) — the engine enforces the
@@ -3907,7 +3938,11 @@ impl Default for SessionView {
             s3_list: String::new(),
             tor_test: TorTest::default(),
             wake_test: String::new(),
+            wake_test_check: String::new(),
+            wake_test_stderr: String::new(),
+            wake_last: String::new(),
             restart_required: Vec::new(),
+            config_path: String::new(),
             transport: String::new(),
             settings: SessionSettings::default(),
             relays: Vec::new(),
@@ -6123,8 +6158,13 @@ pub enum Command {
     ReadActions,
     /// Run the wake command once with `MOLT_WAKE_REASON=test` (§6.2), past
     /// `wake_on` and the interval; behind a running wake it waits. The
-    /// outcome lands in `session.wake_test`.
-    TestWake,
+    /// outcome lands in `session.wake_test`. The command is checked as
+    /// this node's user before it runs (`session.wake_test_check`).
+    TestWake {
+        /// The command to test; absent = the stored one.
+        #[serde(default)]
+        command: Option<String>,
+    },
     /// Set (or clear) this node's **wake command** — the local shell hook a
     /// poke or pending vote runs. The GUI's direct door; over MCP the key
     /// rides the settings surface (`poke_wake_command`, ADR-0007), so this

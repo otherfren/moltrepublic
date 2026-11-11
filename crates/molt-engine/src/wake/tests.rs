@@ -318,18 +318,18 @@ fn a_chat_read_answers_the_poke_through_every_door() {
 #[test]
 fn test_wake_runs_the_command_past_wake_on_and_reports_its_exit() {
     let mut s = crate::tests::plain_state();
-    assert!(matches!(s.cmd_test_wake(), Err(MoltError::Settings(_))), "no command");
+    assert!(matches!(s.cmd_test_wake(None), Err(MoltError::Settings(_))), "no command");
     s.session.settings.poke_wake_command = "exit 3".to_string();
     s.session.settings.wake_on = Vec::new();
     s.wake_trigger("kanban", "");
-    s.cmd_test_wake().expect("test wake");
+    s.cmd_test_wake(None).expect("test wake");
     assert_eq!(s.wake.log, ["test"]);
     assert_eq!(s.session.wake_test, "started");
     settle(&mut s);
     assert_eq!(s.session.wake_test, "exit 3");
 
     s.wake.set_running(true);
-    s.cmd_test_wake().expect("test wake");
+    s.cmd_test_wake(None).expect("test wake");
     assert_eq!(s.session.wake_test, "waiting");
     s.wake.set_running(false);
     s.wake_tick();
@@ -480,4 +480,234 @@ fn a_re_anchor_on_a_served_cut_wakes_for_its_quests_blocks() {
     assert_eq!(bot.chain.head.as_ref().expect("head").height, 3, "re-anchored");
     settle(&mut bot);
     assert_eq!(bot.wake.log, ["kanban"]);
+}
+
+fn write_script(path: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::write(path, body).expect("script");
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+}
+
+/// The wake lines the chat read serves, as `(kind, body)`.
+fn chat_lines(s: &crate::State, channel: Option<&ChannelRef>) -> Vec<(String, String)> {
+    s.applied_values(Surface::Chat, channel, None)
+        .into_iter()
+        .map(|(_, v)| {
+            (
+                v["kind"].as_str().unwrap_or("user").to_string(),
+                v["body"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+fn capture<T>(run: impl FnOnce() -> T) -> (T, String) {
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let sink = Sink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, run);
+    let logs = String::from_utf8(sink.0.lock().expect("lock").clone()).expect("utf8");
+    (out, logs)
+}
+
+#[test]
+fn the_test_wake_runs_the_draft_not_the_stored_command() {
+    let mut s = crate::tests::plain_state();
+    s.session.settings.poke_wake_command = "exit 3".to_string();
+    s.cmd_test_wake(Some(" exit 5 ".to_string())).expect("draft");
+    settle(&mut s);
+    assert_eq!(s.session.wake_test, "exit 5");
+    assert_eq!(s.session.settings.poke_wake_command, "exit 3", "a test stores nothing");
+    assert_eq!(s.session.wake_last, "", "a test is no real wake");
+
+    s.session.settings.poke_wake_command = String::new();
+    s.cmd_test_wake(Some("exit 6".to_string())).expect("nothing stored yet");
+    settle(&mut s);
+    assert_eq!(s.session.wake_test, "exit 6");
+    assert!(matches!(s.cmd_test_wake(Some("  ".to_string())), Err(MoltError::Settings(_))));
+    assert!(matches!(s.cmd_test_wake(Some("a\nb".to_string())), Err(MoltError::Settings(_))));
+}
+
+#[test]
+fn a_test_wake_leaves_the_other_reasons_to_the_stored_command() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let marker = dir.path().join("marker");
+    let mut s = crate::tests::plain_state();
+    s.session.settings.wake_min_interval_secs = 0;
+    s.session.settings.poke_wake_command =
+        format!("echo \"stored $MOLT_WAKE_REASON\" >> '{}'", marker.display());
+    s.wake.set_running(true);
+    s.wake_trigger("kanban", "");
+    s.cmd_test_wake(Some(format!("echo \"draft $MOLT_WAKE_REASON\" >> '{}'", marker.display())))
+        .expect("draft");
+    s.wake.set_running(false);
+    s.wake_tick();
+    settle(&mut s);
+    settle(&mut s);
+    let lines = std::fs::read_to_string(&marker).expect("marker");
+    assert_eq!(lines.lines().collect::<Vec<_>>(), ["draft test", "stored kanban"]);
+}
+
+#[test]
+fn a_failed_check_is_reported_and_nothing_runs() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let script = dir.path().join("wake.sh");
+    let marker = dir.path().join("marker");
+    std::fs::write(&script, format!("#!/bin/sh\ntouch '{}'\n", marker.display())).expect("script");
+    let mut s = crate::tests::plain_state();
+    s.cmd_test_wake(Some(script.display().to_string())).expect("test wake");
+    settle(&mut s);
+    assert_eq!(s.session.wake_test, "check failed");
+    assert_eq!(s.session.wake_test_check, format!("not executable: {}", script.display()));
+    assert!(!marker.exists(), "a refused command never ran");
+
+    write_script(&script, &format!("#!/bin/sh\ntouch '{}'\n", marker.display()));
+    s.cmd_test_wake(Some(script.display().to_string())).expect("test wake");
+    assert_eq!(s.session.wake_test_check, "", "a new test starts clean");
+    settle(&mut s);
+    assert_eq!((s.session.wake_test.as_str(), s.session.wake_test_check.as_str()), ("exit 0", ""));
+    assert!(marker.exists());
+}
+
+#[test]
+fn the_test_wake_returns_the_stderr_tail() {
+    let mut s = crate::tests::plain_state();
+    s.cmd_test_wake(Some("echo one >&2; echo two >&2; echo out; exit 4".to_string())).expect("test");
+    settle(&mut s);
+    assert_eq!(s.session.wake_test, "exit 4");
+    assert_eq!(s.session.wake_test_stderr, "one\ntwo");
+
+    s.cmd_test_wake(Some("i=0; while [ $i -lt 400 ]; do echo \"line $i\" >&2; i=$((i+1)); done".to_string()))
+        .expect("test");
+    assert_eq!(s.session.wake_test_stderr, "");
+    settle(&mut s);
+    let tail: Vec<&str> = s.session.wake_test_stderr.lines().collect();
+    assert_eq!(tail.len(), 8, "capped");
+    assert_eq!(tail.last(), Some(&"line 399"));
+}
+
+#[test]
+fn a_failed_real_wake_is_logged_and_noted() {
+    let mut s = crate::tests::plain_state();
+    s.session.settings.wake_min_interval_secs = 0;
+    s.session.settings.poke_wake_command = "echo secret >&2; exit 7".to_string();
+    let ((), logs) = capture(|| {
+        s.wake_trigger("kanban", "");
+        settle(&mut s);
+    });
+    assert_eq!(s.session.wake_last, "exit 7");
+    let line = logs.lines().find(|l| l.contains("wake=failed")).expect("logged");
+    assert!(line.contains("reason=kanban") && line.contains("exit=7"), "{line}");
+    assert_eq!(s.session.wake_test, "", "no test ran");
+
+    s.session.settings.poke_wake_command = "true".to_string();
+    let ((), logs) = capture(|| {
+        s.wake_trigger("kanban", "");
+        settle(&mut s);
+    });
+    assert_eq!(s.session.wake_last, "", "a good wake clears the note");
+    assert!(!logs.contains("wake=failed"), "{logs}");
+}
+
+#[test]
+fn the_timeout_kills_the_script() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let script = dir.path().join("wake.sh");
+    let pid_file = dir.path().join("pid");
+    write_script(
+        &script,
+        &format!("#!/bin/sh\necho $$ > '{}'\nwhile :; do sleep 0.05; done\n", pid_file.display()),
+    );
+    let mut s = crate::tests::plain_state();
+    s.session.settings.wake_min_interval_secs = 0;
+    s.session.settings.wake_timeout_secs = 1;
+    s.session.settings.poke_wake_command = script.display().to_string();
+    let started = std::time::Instant::now();
+    let ((), logs) = capture(|| {
+        s.wake_trigger("kanban", "");
+        settle(&mut s);
+    });
+    assert!(started.elapsed() < std::time::Duration::from_secs(8), "the timeout ended it");
+    assert_eq!(s.session.wake_last, "timeout");
+    let line = logs.lines().find(|l| l.contains("wake=failed")).expect("logged");
+    assert!(line.contains("exit=timeout"), "{line}");
+    let pid = std::fs::read_to_string(&pid_file).expect("pid");
+    let gone = !std::path::Path::new(&format!("/proc/{}", pid.trim())).exists();
+    assert!(gone, "the script is still running");
+}
+
+#[test]
+fn poke_and_test_wakes_leave_local_chat_lines_and_nothing_else_does() {
+    let b = republic();
+    let mut s = seat("walter", &b, NOON);
+    s.session.settings.poke_enabled = true;
+    let (seq, logged) = (s.next_seq, s.chat.len());
+    s.wake_trigger("kanban", "");
+    settle(&mut s);
+    s.wake_trigger("vote_pending", "mara");
+    settle(&mut s);
+    assert!(chat_lines(&s, None).is_empty(), "kanban and votes write nothing");
+
+    let me = s.member();
+    s.receive_poke("mara", &me);
+    assert_eq!(chat_lines(&s, None), [("wake".to_string(), "wake: poked by mara".to_string())]);
+    settle(&mut s);
+    s.cmd_test_wake(Some("exit 2".to_string())).expect("test");
+    settle(&mut s);
+    let want: Vec<(String, String)> =
+        ["wake: poked by mara", "wake: exit 0", "wake: test", "wake: exit 2"]
+            .iter()
+            .map(|b| ("wake".to_string(), (*b).to_string()))
+            .collect();
+    assert_eq!(chat_lines(&s, None), want);
+    assert_eq!(chat_lines(&s, Some(&ChannelRef::Group)), want);
+    assert!(chat_lines(&s, Some(&ChannelRef::Patch { id: molt_core::ProposalId(1) })).is_empty());
+    let unread = s.applied_values(Surface::Chat, None, Some("unread"));
+    assert!(unread.is_empty(), "own lines are never unread");
+
+    // nothing was recorded: the log is the only way onto the wire
+    assert_eq!((s.next_seq, s.chat.len()), (seq, logged));
+    assert!(s.chat.iter().all(|m| m.kind != molt_core::ChatKind::Wake));
+}
+
+#[test]
+fn the_switch_hides_the_wake_lines_past_ones_included() {
+    let b = republic();
+    let mut s = seat("walter", &b, NOON);
+    s.cmd_test_wake(Some("true".to_string())).expect("test");
+    settle(&mut s);
+    assert_eq!(chat_lines(&s, None).len(), 2);
+    s.session.settings.wake_chat_lines = false;
+    assert!(chat_lines(&s, None).is_empty(), "past lines go too");
+    s.cmd_test_wake(Some("true".to_string())).expect("test");
+    settle(&mut s);
+    assert!(chat_lines(&s, None).is_empty());
+    s.session.settings.wake_chat_lines = true;
+    assert_eq!(chat_lines(&s, None).len(), 4, "hidden, not dropped");
+}
+
+#[test]
+fn a_test_wake_line_names_the_failed_check() {
+    let b = republic();
+    let mut s = seat("walter", &b, NOON);
+    s.cmd_test_wake(Some("no-such-wake-program-x".to_string())).expect("test");
+    settle(&mut s);
+    assert_eq!(
+        chat_lines(&s, None).last().map(|l| l.1.clone()),
+        Some("wake: check failed - not found on PATH".to_string())
+    );
 }

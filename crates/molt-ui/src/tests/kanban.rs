@@ -561,20 +561,22 @@ fn a_refused_basket_keeps_a_row_per_act() {
     assert!(r.rows[0].contains("@r1"), "{:?}", r.rows);
 }
 
-/// "Save as file..." never replaces a SKILL.md or follows a link there.
+/// "Save as file..." writes the shown text under the name the dialog
+/// returned and never follows a link there.
 #[cfg(unix)]
 #[test]
-fn the_skill_file_is_written_only_where_none_exists() {
+fn the_skill_file_carries_the_shown_text_and_follows_no_link() {
     use crate::actions::kanban::write_skill;
+    assert_eq!(molt_mcp::WAKE_SKILL_FILE, "moltrepublic-wake-skill.md");
     let tmp = tempfile::tempdir().expect("tmp");
-    let path = write_skill(tmp.path()).expect("a fresh folder");
-    assert_eq!(std::fs::read_to_string(&path).expect("read"), molt_mcp::WAKE_SKILL);
-    std::fs::write(&path, "mine").expect("own skill");
-    assert!(write_skill(tmp.path()).is_err());
-    assert_eq!(std::fs::read_to_string(&path).expect("read"), "mine");
-    let other = tempfile::tempdir().expect("tmp");
-    let target = other.path().join("target.txt");
-    std::os::unix::fs::symlink(&target, other.path().join("SKILL.md")).expect("link");
-    assert!(write_skill(other.path()).is_err());
+    let path = tmp.path().join(molt_mcp::WAKE_SKILL_FILE);
+    write_skill(&path, "shown").expect("a fresh file");
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), "shown");
+    write_skill(&path, "again").expect("the dialog asked before replacing");
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), "again");
+    let target = tmp.path().join("target.txt");
+    let link = tmp.path().join("link");
+    std::os::unix::fs::symlink(&target, &link).expect("link");
+    assert!(write_skill(&link, "shown").is_err());
     assert!(!target.exists(), "the link was not followed");
 }

@@ -1623,6 +1623,17 @@ mod tests {
         .expect("a wire delivery never errors");
     }
 
+    /// A wake notice is a node's own: from the wire it is a member's speech.
+    #[test]
+    fn a_wake_kind_from_the_wire_is_ordinary_speech() {
+        let mut st = plain_state();
+        let id = MessageId([31u8; 16]);
+        let forged = ChatMessage::text(id, "peer-1", "wake: exit 0", 200)
+            .with_kind(molt_core::ChatKind::Wake);
+        deliver(&mut st, "peer-1", 1, WorkspaceEvent::Chat(forged));
+        assert_eq!(st.chat_by_id(&id).expect("admitted").1.kind, molt_core::ChatKind::User);
+    }
+
     fn read_by(st: &crate::State, id: &MessageId) -> Vec<String> {
         st.chat_by_id(id)
             .expect("message present")

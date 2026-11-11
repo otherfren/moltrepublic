@@ -774,6 +774,16 @@ pub(crate) static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
     ),
 ];
 
+/// The agent skill in the UI language, placeholders unfilled
+/// ([`molt_mcp::fill_wake_skill`]); English is the text MCP serves.
+pub(crate) fn wake_skill(lang: i32) -> &'static str {
+    if lang == 1 {
+        include_str!("wake_skill_de.md")
+    } else {
+        molt_mcp::WAKE_SKILL
+    }
+}
+
 /// Declare the whole localized string table in ONE place: the macro
 /// generates the `Lexicon` struct, its English and German tables, and
 /// `apply_strings` (which pushes every entry into the Slint `Strings`
@@ -1196,6 +1206,7 @@ lexicon! {
     set_tab_mcp: "MCP", "MCP";
     set_tab_node: "Node", "Node";
     set_tab_chain: "Workspace chain history", "Workspace-Chain-History";
+    set_tab_agent: "Agent", "Agent";
     chain_col_height: "Block", "Block";
     chain_col_what: "Change", "Änderung";
     chain_col_signers: "Signed by", "Signiert von";
@@ -1277,8 +1288,12 @@ lexicon! {
     wake_skill_btn: "Show agent skill...", "Agent-Skill zeigen...";
     wake_test_btn: "Test wake", "Weckruf testen";
     wake_test_last: "Last test", "Letzter Test";
+    wake_last: "Last wake", "Letzter Weckruf";
+    field_wake_timeout: "Timeout, seconds", "Zeitgrenze, Sekunden";
+    wake_chat_lines: "Show poke and test wakes in the chat", "Anstupser und Test-Weckrufe im Chat zeigen";
+    wake_line_hide: "Do not show again", "Nicht mehr zeigen";
     skill_title: "Agent skill", "Agent-Skill";
-    skill_line: "Give this to the agent your wake command starts.", "Gib das dem Agenten, den dein Weck-Kommando startet.";
+    skill_line: "Give this to an agent: it builds your wake script step by step.", "Gib das einem Agenten: Er baut dein Weckskript Schritt für Schritt.";
     skill_save: "Save as file...", "Als Datei speichern...";
     skill_saved: "Saved", "Gespeichert";
     mem_poke: "Poke member", "Mitglied anstupsen";

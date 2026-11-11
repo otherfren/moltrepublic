@@ -451,6 +451,11 @@ pub fn spawn_with_config(
     config_path: PathBuf,
 ) -> std::io::Result<(WalletHandle, ConfigStoreHandle)> {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
+    let mut session = session;
+    session.config_path = std::path::absolute(&config_path)
+        .unwrap_or_else(|_| config_path.clone())
+        .display()
+        .to_string();
     let store = configstore::spawn(config_path, cmd_tx.clone())?;
     let seams = SpawnSeams {
         store: Some(store.clone()),
@@ -1876,7 +1881,7 @@ impl State {
                 self.cmd_net_mirror_done(id, ok, reason, bytes)
             }
             Command::SetWakeCommand { command } => self.cmd_set_wake_command(command),
-            Command::TestWake => self.cmd_test_wake(),
+            Command::TestWake { command } => self.cmd_test_wake(command),
             Command::ReadActions => Ok(Reply::Actions { actions: self.read_actions() }),
             Command::SetNodePosture { posture } => self.cmd_set_node_posture(posture),
             // file-transfer task feedback (engine-internal, scope-guarded)

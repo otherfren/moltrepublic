@@ -4149,8 +4149,10 @@ impl State {
                 .filter(|(_, st)| matches!(st, crate::files_state::FileState::Deleted(_)))
                 .map(|(id, _)| id)
                 .collect();
-            self.chat_visible_in(view)
-                .filter(|m| channel.map_or(true, |c| &m.channel == c))
+            let logged = self
+                .chat_visible_in(view)
+                .filter(|m| channel.map_or(true, |c| &m.channel == c));
+            self.with_wake_lines(logged, channel, view)
                 .map(|m| {
                     let mut v = serde_json::to_value(m).unwrap_or_default();
                     if deleted.contains(&m.id) {
@@ -4171,6 +4173,30 @@ impl State {
             }
             v
         }
+    }
+
+    /// `logged` with this node's wake lines filed in by time: group chat
+    /// only, never unread, absent while `wake_chat_lines` is off. A
+    /// read-time overlay - the lines are no log entries.
+    fn with_wake_lines<'a>(
+        &'a self,
+        logged: impl Iterator<Item = &'a molt_core::ChatMessage> + 'a,
+        channel: Option<&ChannelRef>,
+        view: Option<&str>,
+    ) -> impl Iterator<Item = &'a molt_core::ChatMessage> + 'a {
+        let group = channel.map_or(true, |c| *c == ChannelRef::Group);
+        let lines: &[molt_core::ChatMessage] = if group && view != Some("unread") {
+            self.wake_lines()
+        } else {
+            &[]
+        };
+        let mut lines = lines.iter().peekable();
+        let mut logged = logged.peekable();
+        std::iter::from_fn(move || match (logged.peek(), lines.peek()) {
+            (Some(m), Some(l)) if l.ts < m.ts => lines.next(),
+            (Some(_), _) => logged.next(),
+            (None, _) => lines.next(),
+        })
     }
 
     /// Every distinct channel in the visible chat log, one pass (chat-bus
