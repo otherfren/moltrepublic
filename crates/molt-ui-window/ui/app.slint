@@ -9105,14 +9105,9 @@ export component AppWindow inherits Window {
                         scroll-y: set-fl.viewport-y;
                     }
                 }
+                // no Close here: the header × and Escape leave the screen
                 HorizontalLayout {
                     spacing: 10px;
-                    AppButton {
-                        label: Strings.set-close;
-                        clicked => {
-                            root.close-settings();
-                        }
-                    }
                     // the running version, its own small panel
                     Rectangle {
                         background: Theme.zebra;

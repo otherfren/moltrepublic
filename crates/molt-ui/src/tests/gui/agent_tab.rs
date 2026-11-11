@@ -22,6 +22,26 @@ fn settings_window() -> (AppWindow, Shown) {
     (ui, shown)
 }
 
+/// The header × is the screen's only close control: the footer carries
+/// the version, the config path and Save. Escape still leaves.
+#[test]
+fn the_settings_screen_has_exactly_one_close_control() {
+    let (ui, _shown) = settings_window();
+    let closed = Rc::new(std::cell::Cell::new(0));
+    let seen = closed.clone();
+    ui.on_close_settings(move || seen.set(seen.get() + 1));
+    for tab in 0..10 {
+        ui.set_set_tab(tab);
+        assert_eq!(labelled(&ui, "×").len(), 1, "tab {tab}: one ×");
+        assert!(labelled(&ui, "Close").is_empty(), "tab {tab}: a second close control");
+    }
+    assert_eq!(labelled(&ui, "Save").len(), 1, "the footer keeps Save");
+    click(&ui, &labelled(&ui, "×")[0]);
+    assert_eq!(closed.get(), 1, "the × closes");
+    press(&ui, slint::platform::Key::Escape);
+    assert_eq!(closed.get(), 2, "Escape closes");
+}
+
 /// The wake group left General for a tab of its own.
 #[test]
 fn the_agent_hooks_have_their_own_tab() {
