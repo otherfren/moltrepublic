@@ -1683,6 +1683,8 @@ export component AppWindow inherits Window {
     in-out property <bool> confirm-leave-open: false;
     // modal: aborting a RUNNING founding ritual (voids every invite link)
     in-out property <bool> confirm-abort-ritual-open: false;
+    // modal: leaving a RUNNING join (cancel it, or let it run on)
+    in-out property <bool> confirm-leave-join-open: false;
     // the wizards' ritual/run log modal (footer log button)
     property <bool> wizard-log-open: false;
     // mirrored from the engine session (co-equal): which surface the main
@@ -1746,6 +1748,7 @@ export component AppWindow inherits Window {
     property <bool> any-modal-open: root.checksum-modal-open || root.confirm-close-open
         || root.confirm-leave-open
         || root.confirm-abort-ritual-open
+        || root.confirm-leave-join-open
         || root.confirm-quit-open
         || root.confirm-delete-open
         || root.confirm-delmsg-open
@@ -2738,6 +2741,8 @@ export component AppWindow inherits Window {
             root.confirm-quit-open = false;
         } else if (root.confirm-abort-ritual-open) {
             root.confirm-abort-ritual-open = false;
+        } else if (root.confirm-leave-join-open) {
+            root.confirm-leave-join-open = false;
         } else if (root.confirm-leave-open) {
             root.confirm-leave-open = false;
         } else if (root.confirm-close-open) {
@@ -2832,9 +2837,10 @@ export component AppWindow inherits Window {
                 root.navigate(AppScreen.choice);
             }
         } else if (root.screen == AppScreen.join) {
-            // a joiner may bail out any time — a stuck wait (spent link,
-            // vanished founder) must never trap them
-            if (root.jw-step == 1) {
+            // a running join asks: it may keep running behind the screen
+            if (root.jw-running) {
+                root.confirm-leave-join-open = true;
+            } else if (root.jw-step == 1) {
                 root.join-cancel();
             } else {
                 root.navigate(AppScreen.choice);
@@ -4703,7 +4709,9 @@ export component AppWindow inherits Window {
                 // vanished founder) must never be trapped — cancel
                 // invalidates the in-flight join task engine-side
                 close => {
-                    if (root.jw-step == 1) {
+                    if (root.jw-running) {
+                        root.confirm-leave-join-open = true;
+                    } else if (root.jw-step == 1) {
                         root.join-cancel();
                     } else {
                         root.navigate(AppScreen.choice);
@@ -9233,13 +9241,37 @@ export component AppWindow inherits Window {
     if root.confirm-abort-ritual-open: ConfirmModal {
         title: Strings.cw-abort-title;
         body: Strings.cw-abort-body;
+        dialog-width: 520px;
         confirm-label: Strings.cw-abort-confirm;
+        alt-label: Strings.run-keep;
         dismissed => {
             root.confirm-abort-ritual-open = false;
+        }
+        alted => {
+            root.confirm-abort-ritual-open = false;
+            root.navigate(AppScreen.choice);
         }
         confirmed => {
             root.confirm-abort-ritual-open = false;
             root.create-cancel();
+        }
+    }
+
+    if root.confirm-leave-join-open: ConfirmModal {
+        title: Strings.jw-leave-title;
+        dialog-width: 520px;
+        confirm-label: Strings.jw-leave-confirm;
+        alt-label: Strings.run-keep;
+        dismissed => {
+            root.confirm-leave-join-open = false;
+        }
+        alted => {
+            root.confirm-leave-join-open = false;
+            root.navigate(AppScreen.choice);
+        }
+        confirmed => {
+            root.confirm-leave-join-open = false;
+            root.join-cancel();
         }
     }
 
@@ -9894,13 +9926,17 @@ export component AppWindow inherits Window {
     // …but NOT while the charter awaits ratification: that step is still
     // "running" and needs the joiner's decision, so blocking the screen there
     // would hang the join on a panel the operator cannot reach.
-    if root.jw-running && !root.jw-awaiting-ratify && !root.jw-awaiting-backup && !root.jw-sealed: BusyModal {
+    if root.screen == AppScreen.join && root.jw-running && !root.jw-awaiting-ratify && !root.jw-awaiting-backup && !root.jw-sealed: BusyModal {
         title: root.jw-republic == "" ? Strings.jw-busy-title : root.jw-republic;
         detail: root.jw-progress < 0.3 ? Strings.jw-ph1
             : (root.jw-progress < 0.5 ? Strings.jw-ph-founder
             : (root.jw-progress < 0.75 ? Strings.jw-ph2 : Strings.jw-ph3));
         progress: root.jw-progress;
         cancel-label: Strings.jw-busy-cancel;
+        alt-label: Strings.run-keep;
+        alted => {
+            root.navigate(AppScreen.choice);
+        }
         cancelled => {
             root.join-cancel();
         }

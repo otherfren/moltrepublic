@@ -322,10 +322,9 @@ fn workspace_net_label_mirrors_the_global_anonymity_setting() {
 }
 
 #[test]
-fn leaving_the_create_screen_abandons_an_in_flight_founding() {
+fn leaving_the_create_screen_keeps_an_in_flight_founding() {
     rt().block_on(async {
-        // manual seam: the ritual opens but no member joins, so it stays
-        // open (it cannot seal and hijack the session behind our back)
+        // manual seam: the ritual opens but no member joins, so it stays open
         let (w, _material_rx) =
             __spawn_manual_founding(GroupConfig::demo(), SessionView::default());
         w.execute(Command::CreateStart {
@@ -343,12 +342,19 @@ fn leaving_the_create_screen_abandons_an_in_flight_founding() {
             }
             other => panic!("unexpected: {other:?}"),
         }
-        // navigating away abandons it (the session is in-memory)
+        // navigating away keeps it: a founding ends by Cancel only
         w.execute(Command::Navigate { screen: Screen::Choice }).await.expect("nav");
         match w.execute(Command::ReadSession).await.expect("read2") {
             Reply::Session(s) => {
                 assert_eq!(s.screen, Screen::Choice);
-                assert_eq!(s.create, molt_core::CreateState::default(), "founding abandoned");
+                assert!(s.create.run.running(), "the founding is still running");
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        w.execute(Command::CreateCancel).await.expect("cancel");
+        match w.execute(Command::ReadSession).await.expect("read3") {
+            Reply::Session(s) => {
+                assert_eq!(s.create, molt_core::CreateState::default(), "cancel ends it");
             }
             other => panic!("unexpected: {other:?}"),
         }

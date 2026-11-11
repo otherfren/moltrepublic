@@ -97,6 +97,9 @@ fn main() -> anyhow::Result<()> {
     let config_path = resolve_config_path(cli.config.as_deref())?;
     let config = load_config(&config_path)?;
     tracing::info!(path = %config_path.display(), "loaded config");
+    if cfg!(debug_assertions) {
+        tracing::warn!(build = "debug", release = "scripts/build-release.sh", "slow debug build");
+    }
 
     let workspace_dir = provision_workspace_dir(&config.storage.workspace_dir)?;
     // recoverable deletes expire after 30 days
@@ -429,6 +432,13 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    // A founding or join in flight dies with the process: tell the other
+    // side instead of leaving it waiting.
+    rt.block_on(async {
+        let _ = shutdown_wallet.execute(molt_core::Command::CreateCancel).await;
+        let _ = shutdown_wallet.execute(molt_core::Command::JoinCancel).await;
+        shutdown_wallet.drain_farewells(std::time::Duration::from_secs(15)).await;
+    });
     // Close any open workspace durably (flush, closing snapshot, LOCK
     // release) — quitting must be as safe as the in-app close button.
     match rt.block_on(shutdown_wallet.execute(molt_core::Command::CloseWorkspace)) {

@@ -799,6 +799,9 @@ impl State {
         relays: Vec<String>,
     ) -> Result<Reply, MoltError> {
         guard_idle(&self.session.create.run, MoltError::Create)?;
+        if let Some(why) = self.ritual_busy() {
+            return Err(MoltError::Create(why.to_string()));
+        }
         let name = name.trim().to_string();
         let member = member.trim().to_string();
         if name.is_empty() {
@@ -1319,6 +1322,9 @@ impl State {
         pick: Vec<String>,
     ) -> Result<Reply, MoltError> {
         guard_idle(&self.session.join.run, MoltError::Join)?;
+        if let Some(why) = self.ritual_busy() {
+            return Err(MoltError::Join(why.to_string()));
+        }
         let member = member.trim().to_string();
         crate::founding::check_handle(&member).map_err(MoltError::Join)?;
         // the founding's twin gate: "adopt relays" confirms async, and a
@@ -1440,6 +1446,8 @@ impl State {
         if let Some(task) = self.join_task.take() {
             task.abort();
         }
+        let (quit_tx, quit_rx) = tokio::sync::oneshot::channel();
+        self.join_quit = Some(quit_tx);
         self.join_task = Some(crate::nostr_ritual::spawn_member_join(
             dialer,
             crate::nostr_ritual::JoinCtx {
@@ -1451,6 +1459,7 @@ impl State {
             },
             confirm_rx,
             backup_rx,
+            quit_rx,
             cmd_tx.downgrade(),
         ));
         Ok(Reply::Ack)
@@ -1862,6 +1871,9 @@ impl State {
         phrase: String,
         pick: Vec<String>,
     ) -> Result<Reply, MoltError> {
+        if let Some(why) = self.ritual_busy() {
+            return Err(MoltError::Recover(why.to_string()));
+        }
         let link = link.trim().to_string();
         // an actionable recovery link carries the coordinator's transport
         // handover — a bare preview link cannot reach anyone
@@ -2397,11 +2409,17 @@ impl State {
 
     pub(crate) fn invalidate_join(&mut self) {
         self.join_generation += 1;
+        if let Some(task) = self.join_task.take() {
+            // a join inside the born group tells the founder before it goes:
+            // its seat can never be filled again. The quit fires BEFORE the
+            // gates close, or the closing gate ends the task first.
+            match self.join_quit.take().map(|quit| quit.send(())) {
+                Some(Ok(())) => self.farewell(task),
+                _ => task.abort(),
+            }
+        }
         self.join_confirm = None;
         self.join_backup = None;
-        if let Some(task) = self.join_task.take() {
-            task.abort();
-        }
         self.session.join = JoinState::default();
         // a fresh transport slot: the abandoned incarnation's must not be
         // inherited by whatever runs next

@@ -639,6 +639,7 @@ impl State {
     /// `NostrRitual`'s Drop aborts only INBOUND tasks, so the sends survive
     /// the teardown. A no-op on loopback and on a ritual that never started.
     pub(crate) fn abandon_ritual(&mut self, reason: &str) {
+        let mut sends = Vec::new();
         if let Some(ritual) = &self.net_ritual {
             let gen = ritual.generation();
             if let Some(nostr) = &ritual.nostr {
@@ -648,17 +649,17 @@ impl State {
                 for seat in ritual.anchored_nostr_pks() {
                     let net = nostr.net.clone();
                     let msg = msg.clone();
-                    tokio::spawn(async move {
+                    sends.push(tokio::spawn(async move {
                         if let Err(e) = net.send_ritual(&seat, &msg).await {
                             tracing::warn!(error = %e, "abort wrap did not publish");
                         }
-                    });
+                    }));
                 }
                 // post-birth: they moved to the group channel
                 if let (Some(group), Some(chan), Some(tx)) =
                     (nostr.group.clone(), nostr.chan.clone(), self.cmd_tx.upgrade())
                 {
-                    crate::nostr_ritual::spawn_publish_frame(
+                    sends.push(crate::nostr_ritual::spawn_publish_frame(
                         chan,
                         crate::nostr_ritual::FramePayload::Encrypt(group, Box::new(msg)),
                         "abort",
@@ -670,9 +671,12 @@ impl State {
                         // ~30 s later
                         Some(gen),
                         String::new(),
-                    );
+                    ));
                 }
             }
+        }
+        for send in sends {
+            self.farewell(send);
         }
         self.teardown_ritual();
     }

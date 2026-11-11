@@ -28,10 +28,10 @@ Three properties fall out of this and shape the whole ritual:
   identity is derived from the *content* of the roster, not from the founder's
   keys. Symmetry is deliberate (see §5).
 - **Ephemeral until sealed.** Nothing touches the disk until the last signature
-  arrives. Abandon the ritual — cancel, navigate away, crash — and every
-  distributed invite is void and the disk is untouched. A new attempt starts
-  from scratch. (The session is in-memory: a founding that has not sealed does
-  not survive an app restart.)
+  arrives. Abandon the ritual — cancel, quit, crash — and every distributed
+  invite is void and the disk is untouched. A new attempt starts from
+  scratch. (The session is in-memory: a founding that has not sealed does
+  not survive an app restart. It does survive leaving its screen — §9.)
 
 ---
 
@@ -412,17 +412,34 @@ leaf does not carry the anchored key of the name it claims.
 - **Ephemeral.** No disk write happens before the final seal — and since ❻½
   the seal itself waits behind every participant's phrase-backup
   confirmation, so the first write sits behind the last human act. Cancelling
-  the ritual, navigating away from it, or crashing **voids** every distributed
-  link and leaves the disk untouched; the founding is abandoned and its
-  background work torn down so it can never seal and hijack the session later.
-- **Provisioning failure** (the founder cannot reach the transport) fails the
-  founding with a surfaced error rather than waiting forever for links that
-  never appear.
-- **Join failure** (bad roster, unreachable founder, disk error) surfaces into
-  the join run as a retryable failure — never a silent hang.
-- **Waiting is real.** Members join off-band on their own schedule; a founding
-  legitimately waits (minutes, hours) for every link to be activated and signed.
-  The wizard shows a real member list filling in, not a fake progress bar.
+  the ritual, quitting, or crashing **voids** every distributed link and
+  leaves the disk untouched; the founding is abandoned and its background
+  work torn down so it can never seal and hijack the session later.
+- **No deadline (2026-11).** A founding may take days: no wait on a person
+  or on the network ends it. It ends by Cancel, by a decline, by a failed
+  check, or with the process.
+  - The joiner waits for the founder's acceptance without bound and
+    re-announces its `JoinRequest` on a 30 s..10 min backoff. The founder
+    answers a repeated request from the anchored member again (the ack, and
+    the Welcome once the group is born; one answer per 20 s).
+  - A subscription that is not readable and a publish no relay takes are
+    retried on a backoff and named in the run log; neither fails the run.
+  - The Seal is re-published every 15 min until the ritual ends, the
+    genesis on a widening schedule over a week. Ritual subscriptions keep
+    every day window since the ritual started (the joiner: the last 30
+    days), so a frame from an earlier day stays reachable.
+  - Leaving the wizard keeps the ritual running (the start screen says so
+    and leads back). While one runs, the same client starts no other
+    founding, join or recovery and opens no workspace.
+  - A clean cancel or quit tells the other side: the founder publishes
+    `Aborted`; a joiner inside the born group publishes `Declined`, which
+    ends the founding (its seat cannot be filled again).
+  - Not covered: a restart. The founder's process must stay up for the
+    whole founding.
+- **Join failure** (bad roster, refused activation, disk error) surfaces
+  into the join run as a failure — never a silent hang.
+- **Waiting is real.** Members join off-band on their own schedule. The
+  wizard shows a real member list filling in, not a fake progress bar.
 
 ---
 

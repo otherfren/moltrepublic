@@ -43,18 +43,13 @@ pub(crate) const NOSTR_RUNTIME_PENDING: &str =
 
 impl State {
     pub(crate) fn cmd_navigate(&mut self, screen: Screen) -> Result<Reply, MoltError> {
-        // leaving an in-flight founding abandons it (the session is in-memory):
-        // its recv loops must not seal a workspace and hijack the session — and
-        // materialising it would even close the user's active workspace. This
-        // also covers walking away while a post-seal mesh bootstrap is still
-        // running (net_ritual is already gone by then, so check the bootstrap
-        // too) — teardown_ritual reaps it.
-        if screen != Screen::Create
-            && (self.net_ritual.is_some() || self.founder_mesh_in.is_some())
-        {
-            self.abandon_ritual("the founder navigated away");
-            self.ritual_attestations.clear();
-            self.session.create = molt_core::CreateState::default();
+        // a founding or join in flight keeps running behind any screen and
+        // ends by Cancel only - but no workspace is used beside it: its
+        // seal would take the session over mid-use
+        if screen == Screen::Main {
+            if let Some(why) = self.ritual_busy() {
+                return Err(MoltError::WorkspaceBusy(why.to_string()));
+            }
         }
         // a join starts at the link entry; `Join` only shows a run
         self.session.screen = if screen == Screen::Join && self.session.join.run.step == 0 {
@@ -1207,9 +1202,26 @@ impl State {
         }
     }
 
+    /// A founding or join in flight ends by Cancel only: whatever would
+    /// switch the context under it is refused with this reason.
+    pub(crate) fn ritual_busy(&self) -> Option<&'static str> {
+        if self.session.create.run.running()
+            && (self.net_ritual.is_some() || self.founder_mesh_in.is_some())
+        {
+            Some("a founding is running - cancel it first")
+        } else if self.session.join.run.running() {
+            Some("a join is running - cancel it first")
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn cmd_open_workspace(&mut self, id: WorkspaceId) -> Result<Reply, MoltError> {
         if !self.session.workspaces.iter().any(|w| w.id == id) {
             return Err(MoltError::UnknownWorkspace(id));
+        }
+        if let Some(why) = self.ritual_busy() {
+            return Err(MoltError::WorkspaceBusy(why.to_string()));
         }
         // an at-rest-encrypted workspace is inactive until decrypted
         if self.session.workspaces.iter().any(|w| w.id == id && w.encrypted) {

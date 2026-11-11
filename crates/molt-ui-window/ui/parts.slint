@@ -2677,8 +2677,11 @@ export component BusyModal inherits Rectangle {
     in property <string> detail;
     in property <float> progress;
     in property <string> cancel-label;
+    // a second way out that ends nothing ("" = not offered)
+    in property <string> alt-label;
     in property <length> dialog-width: 420px;
     callback cancelled();
+    callback alted();
     width: 100%;
     height: 100%;
     background: #0000008c;
@@ -2733,6 +2736,13 @@ export component BusyModal inherits Rectangle {
             }
             HorizontalLayout {
                 alignment: end;
+                spacing: 8px;
+                if root.alt-label != "": AppButton {
+                    label: root.alt-label;
+                    clicked => {
+                        root.alted();
+                    }
+                }
                 AppButton {
                     label: root.cancel-label;
                     clicked => {

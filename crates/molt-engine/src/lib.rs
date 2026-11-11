@@ -164,9 +164,30 @@ pub struct WalletHandle {
     ev_tx: broadcast::Sender<Event>,
     vault_seams: std::sync::Arc<net::vault_payload::VaultSeams>,
     wallet_seams: std::sync::Arc<wallet_run::WalletSeams>,
+    farewells: Farewells,
 }
 
+/// The last sends of a ritual that is ending (the abort to the members, a
+/// member's decline): a quitting process waits for them
+/// ([`WalletHandle::drain_farewells`]).
+pub(crate) type Farewells = std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>;
+
 impl WalletHandle {
+    /// Wait until the farewells of every ended ritual are published, at
+    /// most `cap` - call before the process exits.
+    pub async fn drain_farewells(&self, cap: std::time::Duration) {
+        let tasks: Vec<_> = match self.farewells.lock() {
+            Ok(mut f) => f.drain(..).collect(),
+            Err(_) => return,
+        };
+        let all = async {
+            for t in tasks {
+                let _ = t.await;
+            }
+        };
+        let _ = tokio::time::timeout(cap, all).await;
+    }
+
     /// Execute one command and await its reply.
     pub async fn execute(&self, cmd: Command) -> Result<Reply, MoltError> {
         let (reply, rx) = oneshot::channel();
@@ -501,6 +522,7 @@ fn spawn_actor(
     state.demo_mesh = seams.demo_mesh;
     state.reopen_seam = seams.reopen_seam;
     let vault_seams = state.vault_seams.clone();
+    let farewells = state.farewells.clone();
     let wallet_seams = state.wallet_seams.clone();
     if vault::receipts::lab_complain_at_spawn() {
         tracing::warn!("vault_lab=complain");
@@ -530,7 +552,7 @@ fn spawn_actor(
         tracing::debug!("engine actor stopped");
     });
 
-    WalletHandle { cmd_tx, ev_tx, vault_seams, wallet_seams }
+    WalletHandle { cmd_tx, ev_tx, vault_seams, wallet_seams, farewells }
 }
 
 // The one shared clock (event timestamps must not drift from the storage
@@ -1411,6 +1433,9 @@ pub(crate) struct State {
     /// restarted join (its generation-guarded commands would be dropped
     /// anyway; aborting also releases its relay sockets).
     pub(crate) join_task: Option<tokio::task::JoinHandle<()>>,
+    /// Ends the running join task politely: it tells the founder, then stops.
+    pub(crate) join_quit: Option<oneshot::Sender<()>>,
+    pub(crate) farewells: Farewells,
     /// Monotonic mesh/ritual-incarnation counter: `Net*` commands carry
     /// the generation of the runtime that sent them, and commands from a
     /// torn-down runtime are dropped (a delivery queued behind a workspace
@@ -1454,6 +1479,14 @@ pub(crate) struct State {
 }
 
 impl State {
+    /// Keep a farewell send reachable for [`WalletHandle::drain_farewells`].
+    pub(crate) fn farewell(&self, task: tokio::task::JoinHandle<()>) {
+        if let Ok(mut f) = self.farewells.lock() {
+            f.retain(|t| !t.is_finished());
+            f.push(task);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         config: GroupConfig,
@@ -1644,6 +1677,8 @@ impl State {
             runtime_transport: None,
             join_transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
             join_task: None,
+            join_quit: None,
+            farewells: Farewells::default(),
             net_generation: 0,
             net_scope: 0,
             join_generation: 0,

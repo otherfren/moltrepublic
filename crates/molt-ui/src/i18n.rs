@@ -924,6 +924,9 @@ lexicon! {
     cw_abort_title: "Abort the founding ritual?", "Gründungsritual abbrechen?";
     cw_abort_body: "Every distributed invite link becomes invalid and the ritual ends for all participants. You can start a fresh founding afterwards.", "Alle verteilten Einladungslinks werden ungültig und das Ritual endet für alle Beteiligten. Danach kann eine neue Gründung gestartet werden.";
     cw_abort_confirm: "Abort ritual", "Ritual abbrechen";
+    run_keep: "Keep running", "Weiterlaufen lassen";
+    jw_leave_title: "Cancel the join?", "Beitritt abbrechen?";
+    jw_leave_confirm: "Cancel join", "Beitritt abbrechen";
     cw_declined_title: "The founding is over", "Die Gründung ist beendet";
     cw_declined_hint: "A member declined the charter - close and found anew.", "Ein Mitglied hat die Satzung abgelehnt - schließen und neu gründen.";
     cw_propose: "Propose & seal", "Vorschlagen & versiegeln";

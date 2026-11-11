@@ -1270,11 +1270,13 @@ pub(crate) fn spawn_member_join(
     ctx: JoinCtx,
     confirm: mpsc::Receiver<bool>,
     backup: mpsc::Receiver<bool>,
+    // fired by a cancel or a clean quit: tell the founder, then stop
+    quit: tokio::sync::oneshot::Receiver<()>,
     tx: mpsc::WeakSender<Envelope>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let generation = Some(ctx.generation);
-        if let Err(error) = member_join(dialer, ctx, confirm, backup, &tx).await {
+        if let Err(error) = member_join(dialer, ctx, confirm, backup, quit, &tx).await {
             let _ = send_cmd(&tx, Command::NetJoinFailed { error, generation }).await;
         }
     })
@@ -1600,8 +1602,10 @@ async fn member_join(
     ctx: JoinCtx,
     confirm: mpsc::Receiver<bool>,
     backup: mpsc::Receiver<bool>,
+    mut quit: tokio::sync::oneshot::Receiver<()>,
     tx: &mpsc::WeakSender<Envelope>,
 ) -> Result<(), String> {
+    const QUIT: &str = "the join was cancelled";
     let h = ctx.invite.handover;
     let generation = Some(ctx.generation);
     let dial_relays = ctx.dial_relays;
@@ -1614,26 +1618,32 @@ async fn member_join(
         .map_err(|e| format!("transport keys: {e}"))?;
     // announcing a JoinRequest over an unreadable inbox means the founder's
     // reply lands nowhere: retry until it is readable
-    let mut wait = PUBLISH_RETRY_INITIAL;
-    let inbox = loop {
-        let why = match net.inbox().await {
-            Ok(mut inbox) => {
-                if inbox.live_state(LIVE_WAIT).await.any() {
-                    break inbox;
+    let readable = async {
+        let mut wait = PUBLISH_RETRY_INITIAL;
+        loop {
+            let why = match net.inbox().await {
+                Ok(mut inbox) => {
+                    if inbox.live_state(LIVE_WAIT).await.any() {
+                        return Ok(inbox);
+                    }
+                    "not readable on any relay".to_string()
                 }
-                "not readable on any relay".to_string()
+                Err(e) => e.to_string(),
+            };
+            let note = Command::NetJoinNote {
+                note: format!("⚠ the join inbox is not up - {why} · retrying"),
+                generation,
+            };
+            if !send_cmd(tx, note).await {
+                return Err("the engine is gone".to_string());
             }
-            Err(e) => e.to_string(),
-        };
-        let note = Command::NetJoinNote {
-            note: format!("⚠ the join inbox is not up - {why} · retrying"),
-            generation,
-        };
-        if !send_cmd(tx, note).await {
-            return Err("the engine is gone".to_string());
+            tokio::time::sleep(wait).await;
+            wait = (wait * 2).min(PUBLISH_RETRY_CAP);
         }
-        tokio::time::sleep(wait).await;
-        wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+    };
+    let inbox = tokio::select! {
+        inbox = readable => inbox?,
+        _ = &mut quit => return Err(QUIT.to_string()),
     };
 
     let mut leg = NostrLeg {
@@ -1660,7 +1670,34 @@ async fn member_join(
         confirm,
         backup,
     };
-    let out = run_member_ladder(&mut leg, &ctx.member, seat, Some(gate), true).await?;
+    let seat_no = seat.seat;
+    let out = tokio::select! {
+        biased;
+        _ = &mut quit => None,
+        out = run_member_ladder(&mut leg, &ctx.member, seat, Some(gate), true) => Some(out),
+    };
+    // a cancel also closes the human gates, which ends the ladder on its
+    // own: an error with the quit already fired is still the quit
+    let out = match out {
+        Some(Err(_)) if quit.try_recv().is_ok() => None,
+        other => other,
+    };
+    let Some(out) = out else {
+        // inside the born group this seat can never be filled again: say so
+        // once, so the founder is not left waiting on it
+        if let (Some((chan, _)), Some(group)) = (&leg.chan, &leg.group) {
+            match seal_frame(group, &RitualMsg::Declined { seat: seat_no }) {
+                Ok((ct, exporter)) => {
+                    if let Err(e) = chan.publish_frame(&exporter, &ct).await {
+                        tracing::warn!(error = %e, "leave notice did not publish");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "leave notice could not be sealed"),
+            }
+        }
+        return Err(QUIT.to_string());
+    };
+    let out = out?;
 
     let sealed = out.sealed.ok_or_else(|| "no sealed roster".to_string())?;
     let snap = out
