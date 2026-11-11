@@ -2687,6 +2687,9 @@ fn validate_wake_settings(s: &SessionSettings) -> Result<(), MoltError> {
     if s.task_wake_lead_min > molt_core::TASK_WAKE_LEAD_MAX {
         return Err(MoltError::Settings("task_wake_lead_min: 0..120".to_string()));
     }
+    if !(1..=molt_core::WAKE_TIMEOUT_MAX).contains(&s.wake_timeout_secs) {
+        return Err(MoltError::Settings("wake_timeout_secs: 1..86400".to_string()));
+    }
     let reasons = molt_core::kanban_wake::WAKE_REASONS;
     for (i, r) in s.wake_on.iter().enumerate() {
         if !reasons.contains(&r.as_str()) {
@@ -2700,7 +2703,7 @@ fn validate_wake_settings(s: &SessionSettings) -> Result<(), MoltError> {
 }
 
 /// The wake command is run through `sh -c`: one line, bounded, no NUL.
-fn validate_wake_command(command: &str) -> Result<(), MoltError> {
+pub(crate) fn validate_wake_command(command: &str) -> Result<(), MoltError> {
     if command.len() > 4096 {
         return Err(MoltError::Settings(
             "wake command: too long (max 4096)".to_string(),
@@ -2976,6 +2979,8 @@ two" }),
                 "wake_min_interval_secs": 0,
                 "wake_on": ["kanban", "task_start"],
                 "task_wake_lead_min": 120,
+                "wake_timeout_secs": 30,
+                "wake_chat_lines": false,
             }),
         })
         .await
@@ -2984,12 +2989,15 @@ two" }),
         assert_eq!(s.wake_min_interval_secs, 0);
         assert_eq!(s.wake_on, ["kanban", "task_start"]);
         assert_eq!(s.task_wake_lead_min, 120);
+        assert_eq!((s.wake_timeout_secs, s.wake_chat_lines), (30, false));
         for key in ["wake_min_interval_secs", "wake_on", "task_wake_lead_min"] {
             assert!(molt_core::NODE_POSTURE_KEYS.contains(&key), "{key}");
         }
         for patch in [
             serde_json::json!({ "wake_min_interval_secs": 86_401 }),
             serde_json::json!({ "task_wake_lead_min": 121 }),
+            serde_json::json!({ "wake_timeout_secs": 0 }),
+            serde_json::json!({ "wake_timeout_secs": 86_401 }),
             serde_json::json!({ "wake_on": ["bogus"] }),
             serde_json::json!({ "wake_on": ["kanban", "kanban"] }),
         ] {

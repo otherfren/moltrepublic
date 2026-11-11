@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::{Scope, ToolDef, WAKE_SKILL};
 
 /// The skill's `name` (its front matter), as read_session names it.
-pub(crate) const WAKE_SKILL_NAME: &str = "moltrepublic-wake";
+pub(crate) const WAKE_SKILL_NAME: &str = "moltrepublic-wake-script";
 
 const DATE: &str = "YYYY-MM-DD (UTC)";
 
@@ -209,14 +209,13 @@ pub(crate) fn present_view(args: &Value, snapshot: Value) -> Result<Value, Strin
     Ok(v)
 }
 
-/// A tool answered from a constant, never the engine: its reply.
-pub(crate) fn served(name: &str) -> Option<Value> {
-    (name == "wake_skill").then(present_skill)
-}
-
-/// The wake skill as a reply.
-fn present_skill() -> Value {
-    json!({ "reply": "wake_skill", "name": WAKE_SKILL_NAME, "skill": WAKE_SKILL })
+/// The wake skill as a reply, the node's port and config path filled in.
+pub(crate) fn present_skill(mcp_port: u16, config_path: &str) -> Value {
+    json!({
+        "reply": "wake_skill",
+        "name": WAKE_SKILL_NAME,
+        "skill": crate::fill_wake_skill(WAKE_SKILL, mcp_port, config_path),
+    })
 }
 
 /// The kanban tools, in catalogue order.
@@ -270,9 +269,9 @@ pub(crate) fn tools() -> Vec<ToolDef> {
             name: "wake_skill",
             command: "read_session",
             scope: Scope::Seat,
-            description: "The agent skill for being woken by this node's wake command (MOLT_WAKE_REASON set): what each reason and MOLT_WAKE_* variable means and what to do. The same text the GUI's Show agent skill shows; save it as SKILL.md for a harness that loads skills from disk.",
+            description: "The agent skill for this node's wake command: a step-by-step guide to build and check a safe wake script (prompt, script, tool allow and deny lists), with this node's MCP port filled in. The same text the GUI's Show agent skill shows; save it as SKILL.md for a harness that loads skills from disk.",
             schema: || json!({ "type": "object", "properties": {} }),
-            // never executed: `served` answers first
+            // never executed: `call_tool` answers first
             build: |_| Ok(Command::ReadSession),
         },
     ]

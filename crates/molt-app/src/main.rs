@@ -267,6 +267,8 @@ fn main() -> anyhow::Result<()> {
             wake_min_interval_secs: flat.wake_min_interval_secs,
             wake_on: flat.wake_on.clone(),
             task_wake_lead_min: flat.task_wake_lead_min,
+            wake_timeout_secs: flat.wake_timeout_secs,
+            wake_chat_lines: flat.wake_chat_lines,
             read_receipts: config.storage.read_receipts,
             font_app: config.ui.font_app,
             font_nav: config.ui.font_nav,

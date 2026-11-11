@@ -118,6 +118,10 @@ impl State {
         match envelope.body {
             WorkspaceEvent::Chat(mut msg) => {
                 msg.from = from.clone(); // defense in depth: the link decides
+                // a wake notice never leaves its node: a peer's is speech
+                if msg.kind == molt_core::ChatKind::Wake {
+                    msg.kind = molt_core::ChatKind::User;
+                }
                 msg.quote = None; // sender-local LEGACY index — does not transfer
                                   // (`quote_id`/`channel` are global refs and stay)
                 // The channel tag is a CLAIM, not a fact (display routing,

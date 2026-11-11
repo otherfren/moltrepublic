@@ -141,6 +141,12 @@ pub struct NodeConfig {
     /// Minutes a `task_start` wake fires before the start (0..=120).
     #[serde(default = "molt_core::default_task_wake_lead_min")]
     pub task_wake_lead_min: u16,
+    /// Seconds a wake may run before its script is killed (1..=86400).
+    #[serde(default = "molt_core::default_wake_timeout_secs")]
+    pub wake_timeout_secs: u64,
+    /// Show the poke and test wake lines in the group chat.
+    #[serde(default = "default_true")]
+    pub wake_chat_lines: bool,
     /// Workspace id to open at start (a service seat). File-owned like
     /// `[ui] renderer`: never in [`Settings`], so a save leaves it alone.
     #[serde(default)]
@@ -156,6 +162,8 @@ impl Default for NodeConfig {
             wake_min_interval_secs: molt_core::default_wake_min_interval_secs(),
             wake_on: molt_core::default_wake_on(),
             task_wake_lead_min: molt_core::default_task_wake_lead_min(),
+            wake_timeout_secs: molt_core::default_wake_timeout_secs(),
+            wake_chat_lines: true,
             open_on_start: String::new(),
         }
     }
@@ -167,6 +175,15 @@ fn wake_interval_or_default(v: u64) -> u64 {
         v
     } else {
         molt_core::default_wake_min_interval_secs()
+    }
+}
+
+/// `wake_timeout_secs` in range, else the default.
+fn wake_timeout_or_default(v: u64) -> u64 {
+    if (1..=molt_core::WAKE_TIMEOUT_MAX).contains(&v) {
+        v
+    } else {
+        molt_core::default_wake_timeout_secs()
     }
 }
 
@@ -685,6 +702,10 @@ pub struct Settings {
     pub wake_on: Vec<String>,
     /// Minutes a `task_start` wake fires before the start.
     pub task_wake_lead_min: u16,
+    /// Seconds a wake may run before its script is killed.
+    pub wake_timeout_secs: u64,
+    /// Show the poke and test wake lines in the group chat.
+    pub wake_chat_lines: bool,
     /// Send (and show) per-message chat read receipts (local privacy switch).
     pub read_receipts: bool,
     /// Anonymity network: `"tor" | "none"`.
@@ -765,6 +786,8 @@ impl Default for Settings {
             wake_min_interval_secs: molt_core::default_wake_min_interval_secs(),
             wake_on: molt_core::default_wake_on(),
             task_wake_lead_min: molt_core::default_task_wake_lead_min(),
+            wake_timeout_secs: molt_core::default_wake_timeout_secs(),
+            wake_chat_lines: true,
             read_receipts: true,
             anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
@@ -838,6 +861,8 @@ impl From<&Config> for Settings {
             wake_min_interval_secs: wake_interval_or_default(c.node.wake_min_interval_secs),
             wake_on: known_wake_reasons(c.node.wake_on.iter().map(String::as_str)),
             task_wake_lead_min: wake_lead_or_default(c.node.task_wake_lead_min),
+            wake_timeout_secs: wake_timeout_or_default(c.node.wake_timeout_secs),
+            wake_chat_lines: c.node.wake_chat_lines,
             read_receipts: c.storage.read_receipts,
             anonymity: c.transport.anonymity.network.as_str().to_string(),
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
@@ -909,6 +934,10 @@ poke_wake_command = {poke_wake_command}
 {wake_on_line}
 # Minutes before a task's start (UTC) its task_start wake fires, 0..120.
 {wake_lead_line}
+# Seconds a wake may run before its script is killed, 1..86400.
+{wake_timeout_line}
+# Show the poke and test wake lines in the group chat.
+{wake_chat_line}
 # Workspace id opened at start without a client (a service seat). "" = none.
 # A phrase-sealed workspace is only logged as a warning: decrypt it over MCP.
 # As a service (scripts/moltd.service): headless = true, and start moltd with
@@ -1028,6 +1057,16 @@ renderer = {renderer}
             "task_wake_lead_min",
             &settings.task_wake_lead_min.to_string(),
             &molt_core::default_task_wake_lead_min().to_string(),
+        ),
+        wake_timeout_line = off_default_line(
+            "wake_timeout_secs",
+            &settings.wake_timeout_secs.to_string(),
+            &molt_core::default_wake_timeout_secs().to_string(),
+        ),
+        wake_chat_line = off_default_line(
+            "wake_chat_lines",
+            &settings.wake_chat_lines.to_string(),
+            "true",
         ),
         workspace_dir = toml_str(&settings.workspace_dir),
         s3_backup = settings.s3_backup,
@@ -1150,6 +1189,16 @@ pub fn salvage(text: &str) -> Settings {
             .and_then(|v| u16::try_from(v).ok())
         {
             s.task_wake_lead_min = wake_lead_or_default(v);
+        }
+        if let Some(v) = node
+            .get("wake_timeout_secs")
+            .and_then(toml::Value::as_integer)
+            .and_then(|v| u64::try_from(v).ok())
+        {
+            s.wake_timeout_secs = wake_timeout_or_default(v);
+        }
+        if let Some(b) = node.get("wake_chat_lines").and_then(toml::Value::as_bool) {
+            s.wake_chat_lines = b;
         }
     }
     if let Some(files) = value.get("files") {
@@ -1503,6 +1552,20 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
         node.remove("task_wake_lead_min");
     } else {
         set_int(node, "task_wake_lead_min", i64::from(settings.task_wake_lead_min));
+    }
+    if settings.wake_timeout_secs == molt_core::default_wake_timeout_secs() {
+        node.remove("wake_timeout_secs");
+    } else {
+        set_int(
+            node,
+            "wake_timeout_secs",
+            i64::try_from(settings.wake_timeout_secs).unwrap_or(i64::MAX),
+        );
+    }
+    if settings.wake_chat_lines {
+        node.remove("wake_chat_lines");
+    } else {
+        set_bool(node, "wake_chat_lines", false);
     }
 
     let storage = table_at(doc.as_table_mut(), &["storage"]);
@@ -1939,6 +2002,14 @@ mod tests {
         assert_eq!(parse(&saved).expect("parses").node.open_on_start, "ws-1234");
     }
 
+    const WAKE_KEYS: [&str; 5] = [
+        "wake_min_interval_secs",
+        "wake_on",
+        "task_wake_lead_min",
+        "wake_timeout_secs",
+        "wake_chat_lines",
+    ];
+
     /// §6.2: the wake keys are off-default only, so a generated config
     /// still opens on a build that predates them; absent = every reason.
     #[test]
@@ -1950,12 +2021,13 @@ mod tests {
         assert_eq!(s.task_wake_lead_min, 10);
 
         let text = render(&Settings::default());
-        for key in ["wake_min_interval_secs", "wake_on", "task_wake_lead_min"] {
+        assert_eq!((s.wake_timeout_secs, s.wake_chat_lines), (600, true));
+        for key in WAKE_KEYS {
             assert!(text.contains(&format!("# {key} = ")), "{key} documented: {text}");
             assert!(!text.lines().any(|l| l.starts_with(key)), "{key} off-default only");
         }
         let base = update(old, &s).expect("update");
-        for key in ["wake_min_interval_secs", "wake_on", "task_wake_lead_min"] {
+        for key in WAKE_KEYS {
             assert!(!base.contains(key), "{base}");
         }
 
@@ -1963,6 +2035,8 @@ mod tests {
             wake_min_interval_secs: 60,
             wake_on: vec!["task_start".to_string()],
             task_wake_lead_min: 0,
+            wake_timeout_secs: 30,
+            wake_chat_lines: false,
             ..Settings::default()
         };
         let off = Settings { poke_wake_command: "true".to_string(), ..off };
@@ -1972,7 +2046,10 @@ mod tests {
             (back.wake_min_interval_secs, back.wake_on.clone(), back.task_wake_lead_min),
             (60, vec!["task_start".to_string()], 0)
         );
-        assert_eq!(salvage(&render(&off)).wake_on, ["task_start"]);
+        assert_eq!((back.wake_timeout_secs, back.wake_chat_lines), (30, false));
+        let salvaged = salvage(&render(&off));
+        assert_eq!(salvaged.wake_on, ["task_start"]);
+        assert_eq!((salvaged.wake_timeout_secs, salvaged.wake_chat_lines), (30, false));
         let reset = update(&saved, &s).expect("update");
         assert_eq!(reset, base, "back at the defaults the keys leave the file");
     }
@@ -1981,10 +2058,11 @@ mod tests {
     #[test]
     fn bad_wake_values_fall_back() {
         let s = salvage(
-            "[node]\nwake_min_interval_secs = 90000\ntask_wake_lead_min = 500\nwake_on = [\"kanban\", \"bogus\"]\n",
+            "[node]\nwake_min_interval_secs = 90000\ntask_wake_lead_min = 500\nwake_timeout_secs = 0\nwake_on = [\"kanban\", \"bogus\"]\n",
         );
         assert_eq!(s.wake_min_interval_secs, 300);
         assert_eq!(s.task_wake_lead_min, 10);
+        assert_eq!(s.wake_timeout_secs, 600);
         assert_eq!(s.wake_on, ["kanban"]);
         let strict = parse("[node]\nwake_min_interval_secs = 90000\nwake_on = [\"bogus\"]\n")
             .expect("parses");
@@ -2119,6 +2197,8 @@ mod tests {
             wake_min_interval_secs: 0,
             wake_on: vec!["poked".to_string(), "kanban".to_string()],
             task_wake_lead_min: 120,
+            wake_timeout_secs: 45,
+            wake_chat_lines: false,
             read_receipts: false,
             anonymity: "tor".to_string(),
             tor_mode: "whonix".to_string(),
