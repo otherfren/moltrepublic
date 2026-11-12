@@ -101,6 +101,19 @@ impl ArtiHandle {
     }
 }
 
+/// The operator's "Tor reset": drop the embedded client and remove its
+/// on-disk state and cache, entry guards included. Returns what was removed.
+#[cfg(feature = "embedded-tor")]
+pub async fn reset_embedded_tor() -> Result<Vec<std::path::PathBuf>, NetError> {
+    crate::tor_embedded::shared().reset().await
+}
+
+/// Without the feature there is no embedded client: nothing is removed.
+#[cfg(not(feature = "embedded-tor"))]
+pub async fn reset_embedded_tor() -> Result<Vec<std::path::PathBuf>, NetError> {
+    Err(NetError::TorMisconfigured("embedded Tor not built".into()))
+}
+
 /// A dialed byte stream: a direct / SOCKS5h `TcpStream`, or (only on the
 /// `embedded-tor` build) an in-process arti
 /// [`DataStream`](arti_client::DataStream). Both concrete streams are

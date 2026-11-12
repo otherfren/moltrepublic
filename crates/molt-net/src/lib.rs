@@ -61,6 +61,7 @@ pub mod ritual_net;
 pub mod ritual_wrap;
 pub mod s3;
 pub mod supervisor;
+pub mod tor_health;
 pub mod tor_probe;
 pub mod transfer;
 pub mod trickle;
