@@ -278,6 +278,8 @@ WP1b is dropped (R1): a founding does not survive a restart, and the
 - B7 "What you can build", the feature table and technologies stay.
 - B8 The window-build memory figure is deleted, not re-measured.
 - W10 Wake and poke lines are local system lines of the woken node.
+  Amended 2026-11-12: a poke also writes a line with no wake command
+  set, on both ends (`poked by <member>`, `poked <member>`).
 - W11 Lines for poke and test wakes only: one at start, one with the
   result.
 - W12 One switch for both kinds; switching off hides past lines too.

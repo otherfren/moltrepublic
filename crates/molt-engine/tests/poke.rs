@@ -124,6 +124,19 @@ two" }),
     })
     .await
     .expect("poke member-b");
+    let sent = match a
+        .execute(Command::ReadState { surface: molt_core::Surface::Chat, channel: None, view: None })
+        .await
+        .expect("read chat")
+    {
+        molt_core::Reply::State(s) => s,
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(
+        sent.applied.iter().any(|m| m["kind"] == "wake" && m["body"] == "poked member-b"),
+        "the sender's chat notes the poke: {:?}",
+        sent.applied
+    );
 
     // the poke leaves as a CONTROL FRAME: nothing lands in the log, and the
     // member's sink (which only ever sees application envelopes) gains

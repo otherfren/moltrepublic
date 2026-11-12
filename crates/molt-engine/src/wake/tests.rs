@@ -664,12 +664,16 @@ fn poke_and_test_wakes_leave_local_chat_lines_and_nothing_else_does() {
 
     let me = s.member();
     s.receive_poke("mara", &me);
-    assert_eq!(chat_lines(&s, None), [("wake".to_string(), "wake: poked by mara".to_string())]);
+    let want: Vec<(String, String)> = ["poked by mara", "wake: poked by mara"]
+        .iter()
+        .map(|b| ("wake".to_string(), (*b).to_string()))
+        .collect();
+    assert_eq!(chat_lines(&s, None), want);
     settle(&mut s);
     s.cmd_test_wake(Some("exit 2".to_string())).expect("test");
     settle(&mut s);
     let want: Vec<(String, String)> =
-        ["wake: poked by mara", "wake: exit 0", "wake: test", "wake: exit 2"]
+        ["poked by mara", "wake: poked by mara", "wake: exit 0", "wake: test", "wake: exit 2"]
             .iter()
             .map(|b| ("wake".to_string(), (*b).to_string()))
             .collect();
@@ -682,6 +686,21 @@ fn poke_and_test_wakes_leave_local_chat_lines_and_nothing_else_does() {
     // nothing was recorded: the log is the only way onto the wire
     assert_eq!((s.next_seq, s.chat.len()), (seq, logged));
     assert!(s.chat.iter().all(|m| m.kind != molt_core::ChatKind::Wake));
+}
+
+#[test]
+fn a_poke_shows_in_the_chat_of_a_seat_without_a_wake_command() {
+    let b = republic();
+    let mut s = seat("walter", &b, NOON);
+    s.session.settings.poke_enabled = true;
+    s.session.settings.poke_wake_command = String::new();
+    let me = s.member();
+    s.receive_poke("mara", &me);
+    assert_eq!(chat_lines(&s, None), [("wake".to_string(), "poked by mara".to_string())]);
+    s.receive_poke("mara", &me);
+    assert_eq!(chat_lines(&s, None).len(), 1, "the cooldown holds for the line too");
+    s.receive_poke("mara", &"mara".to_string());
+    assert_eq!(chat_lines(&s, None).len(), 1, "a poke for another seat writes nothing");
 }
 
 #[test]

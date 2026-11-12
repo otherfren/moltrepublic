@@ -826,6 +826,9 @@ impl State {
             return Err(MoltError::Poke("unknown member"));
         }
         self.send_poke(&from, &member)?;
+        if self.note_line(&format!("poked {member}")) {
+            self.emit_session(molt_core::SessionScope::Full);
+        }
         self.emit(Event::Poked {
             by: from,
             to: member,
@@ -890,6 +893,9 @@ impl State {
         self.presence.poke_at.insert(from.to_string(), now);
         self.wake.pokes.entry(from.to_string()).or_insert(now);
         tracing::info!(%from, "poked");
+        if self.note_line(&format!("poked by {from}")) {
+            self.emit_session(molt_core::SessionScope::Full);
+        }
         self.emit(Event::Poked {
             by: from.to_string(),
             to: to.clone(),

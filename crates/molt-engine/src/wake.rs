@@ -211,7 +211,12 @@ impl State {
     /// line of THIS node, held outside the event log.
     fn wake_line(&mut self, reason: &str, body: &str) -> bool {
         let noted = reason.split(',').any(|r| r == "poked" || r == TEST_REASON);
-        if !noted || self.session.active_workspace.is_empty() {
+        noted && self.note_line(body)
+    }
+
+    /// A local line in the open workspace's group chat, never on the wire.
+    pub(crate) fn note_line(&mut self, body: &str) -> bool {
+        if self.session.active_workspace.is_empty() {
             return false;
         }
         let Ok(id) = crate::chat::mint_message_id() else {
