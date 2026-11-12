@@ -198,6 +198,17 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     }
 
     {
+        let cx = ctx.clone();
+        ui.on_reset_tor(move || {
+            let Some(ui) = cx.weak.upgrade() else {
+                return;
+            };
+            let done = ui.global::<Strings>().get_tor_reset_done().to_string();
+            cx.issue_then_toast(Command::NetResetTor, done);
+        });
+    }
+
+    {
         // Refresh the backup table's bucket side: a real ListObjectsV2
         // against the SAVED backup target (never a draft — the table shows
         // the configured bucket). Fired on opening the backup tab and by

@@ -1298,6 +1298,11 @@ lexicon! {
     // kept short on purpose: HoverTip does not wrap, and the verdict line
     // under the button carries the full story anyway
     tor_test_tip: "Probes the draft above: the Tor SOCKS address, then a relay from your own pool through it.", "Prüft den Entwurf oben: die Tor-SOCKS-Adresse, dann ein Relay aus deinem eigenen Pool hindurch.";
+    // the embedded client's reset: the body is the cost, in one line
+    set_tor_reset: "Reset embedded Tor", "Eingebettetes Tor zurücksetzen";
+    tor_reset_body: "Picks new entry guards and reloads the directory.", "Wählt neue Eingangsknoten und lädt das Verzeichnis neu.";
+    tor_reset_confirm: "Reset", "Zurücksetzen";
+    tor_reset_done: "Embedded Tor reset", "Eingebettetes Tor zurückgesetzt";
     tor_v_idle: "Tor has not been tested yet.", "Tor wurde noch nicht getestet.";
     tor_v_testing: "testing Tor…", "teste Tor…";
     tor_v_off: "Nothing was sent - the anonymity network is not set to Tor.", "Es wurde nichts gesendet - das Anonymitäts-Netzwerk steht nicht auf Tor.";

@@ -1752,6 +1752,7 @@ export component AppWindow inherits Window {
         || root.confirm-quit-open
         || root.confirm-delete-open
         || root.confirm-delmsg-open
+        || root.tor-reset-confirm-open
         || root.backup-modal-open
         || root.bk-restore-open
         || root.ws-dir-modal-open
@@ -2519,6 +2520,9 @@ export component AppWindow inherits Window {
     // probe the anonymity settings in the DRAFT (restart-required, so they are
     // usually unsaved when the user wants to know whether Tor is there)
     callback test-tor();
+    // the embedded client's reset: removes its guards, so it asks first
+    callback reset-tor();
+    in-out property <bool> tor-reset-confirm-open: false;
     // pushed from Rust: "" never listed · "listing" · "ok" · "error: …"
     in property <string> cfg-bk-list;
     // list the SAVED backup target's bucket (real ListObjectsV2); the
@@ -2760,6 +2764,8 @@ export component AppWindow inherits Window {
             root.confirm-delete-open = false;
         } else if (root.confirm-delmsg-open) {
             root.confirm-delmsg-open = false;
+        } else if (root.tor-reset-confirm-open) {
+            root.tor-reset-confirm-open = false;
         } else if (root.nt-open) {
             // ConfirmModal's own FocusScope takes Escape only while IT holds
             // focus; once the name field is clicked, Escape bubbles here — so
@@ -8604,6 +8610,7 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
                                 HorizontalLayout {
                                     alignment: start;
+                                    spacing: 8px;
                                     AppButton {
                                         height: 34px * Theme.ui-scale;
                                         emoji: "🧅";
@@ -8613,6 +8620,13 @@ export component AppWindow inherits Window {
                                         enabled: root.cfg-tor-test != "testing";
                                         clicked => {
                                             root.test-tor();
+                                        }
+                                    }
+                                    if root.cfg-tor-mode-index == 1: AppButton {
+                                        height: 34px * Theme.ui-scale;
+                                        label: Strings.set-tor-reset;
+                                        clicked => {
+                                            root.tor-reset-confirm-open = true;
                                         }
                                     }
                                 }
@@ -9352,6 +9366,21 @@ export component AppWindow inherits Window {
             text: "\{root.nt-draft.character-count} / \{root.nt-max}";
             color: Theme.bad;
             font-size: Theme.fs-cap;
+        }
+    }
+
+    // Modal: the embedded Tor reset - the one path that gives up the entry
+    // guards, so it names that cost and asks.
+    if root.tor-reset-confirm-open: ConfirmModal {
+        title: Strings.set-tor-reset;
+        body: Strings.tor-reset-body;
+        confirm-label: Strings.tor-reset-confirm;
+        dismissed => {
+            root.tor-reset-confirm-open = false;
+        }
+        confirmed => {
+            root.tor-reset-confirm-open = false;
+            root.reset-tor();
         }
     }
 

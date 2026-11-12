@@ -36,6 +36,8 @@ mod snapshot;
 mod tab_order;
 mod vault;
 #[cfg(feature = "live-preview")]
+mod tor_reset;
+#[cfg(feature = "live-preview")]
 mod vault_charter;
 mod version_panel;
 #[cfg(feature = "live-preview")]
