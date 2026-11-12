@@ -959,10 +959,6 @@ export global Theme {
     out property <color> bad: active.accent-bad;
     out property <color> moved: active.accent-moved;
 
-    // Win95 chrome bevel (3D raised look); neutral on the other themes.
-    out property <color> bevel-light: win95 ? #ffffff : active.border-subtle;
-    out property <color> bevel-dark: win95 ? #000000 : active.border-subtle;
-
     out property <length> radius: theme-index == 0 ? 4px : (win95 ? 0px : 8px);
     out property <length> border-w: win95 ? 2px : 1px;
     out property <length> pad: 18px;
@@ -1376,8 +1372,6 @@ export global Strings {
     in property <string> cw-net-warn;
     in property <string> cw-net-hint-settings;
     in property <string> cw-found;
-    in property <string> cw-invites;
-    in property <string> cw-invites-hint;
     // founding-ritual lobby
     in property <string> cw-members-title;
     // the folded setup step's header: "<n> relays"
@@ -1402,8 +1396,6 @@ export global Strings {
     in property <string> jw-back-to-start;
     in property <string> cw-sim-badge;
     in property <string> cw-log-title;
-    in property <string> cw-charter-title;
-    in property <string> cw-charter-name-ph;
     in property <string> cw-charter-agenda-ph;
     in property <string> cw-charter-hint;
     in property <string> cw-propose;
@@ -1424,10 +1416,8 @@ export global Strings {
     in property <string> jw-ratify-confirm;
     in property <string> jw-ratify-decline;
     in property <string> jw-ratify-agenda-empty;
-    in property <string> const-immutable;
     in property <string> const-charter-title;
     in property <string> const-no-agenda;
-    in property <string> const-signatories;
     in property <string> enter-republic;
     // Organization → Status / Members
     in property <string> org-reachable;
@@ -1530,7 +1520,6 @@ export global Strings {
     in property <string> ocr2-add;
     in property <string> ocr2-remove;
     in property <string> om-coarse;
-    in property <string> cs-files-off;
     in property <string> ocs-days;
     in property <string> ocr-title;
     in property <string> ocr-body;
@@ -1837,10 +1826,6 @@ export global Strings {
     in property <string> chain-col-height;
     in property <string> chain-col-what;
     in property <string> chain-col-signers;
-    in property <string> chain-kind-genesis;
-    in property <string> chain-kind-membership;
-    in property <string> chain-kind-checkpoint;
-    in property <string> chain-pre-cut;
     in property <string> chain-empty;
     in property <string> unsaved-title;
     in property <string> unsaved-body;
@@ -1974,8 +1959,6 @@ export global Strings {
     in property <string> mem-search-ph;
     in property <string> mem-search-none;
     in property <string> mem-search-building;
-    in property <string> mem-title-archive;
-    in property <string> mem-hint-archive;
     // Memory: changeset panel + per-file revert + link markup + editor menu
     in property <string> mem-cs-title;
     in property <string> mem-cs-new;

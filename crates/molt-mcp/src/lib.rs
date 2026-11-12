@@ -15,9 +15,9 @@
 //! and the `co_equality` test checks the catalogue against the command set.
 //!
 //! Two transports are provided. [`serve_stdio`] is the standard MCP server
-//! transport an agent host launches (used in headless mode). [`serve_tcp`] runs
-//! the identical protocol over a socket so an agent can attach while a GUI is
-//! also running (UI mode).
+//! transport an agent host launches (used in headless mode). [`serve_tcp_live`]
+//! runs the identical protocol over a socket so an agent can attach while a GUI
+//! is also running (UI mode).
 
 use std::net::IpAddr;
 
@@ -113,26 +113,6 @@ pub async fn serve_stdio(handle: WalletHandle) -> std::io::Result<()> {
     serve_conn(handle, reader, writer, None).await // stdio IS the seat
 }
 
-/// Serve the MCP protocol over a TCP listener. A connection is refused unless the
-/// peer IP is on `allowlist` (or `allow_all` is set), and every client must
-/// present `token` in its `initialize` request. Each connection runs on its own
-/// task. An empty `token` serves nothing ([`tcp_refusal`]).
-pub async fn serve_tcp(
-    handle: WalletHandle,
-    addr: &str,
-    allow_all: bool,
-    allowlist: Vec<IpAddr>,
-    token: String,
-    read_token: String,
-) -> std::io::Result<()> {
-    if let Some(why) = tcp_refusal(&token) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, why));
-    }
-    let listener = TcpListener::bind(addr).await?;
-    tracing::info!(%addr, allow_all, allowed = allowlist.len(), "MCP server on tcp");
-    serve_listener(handle, listener, allow_all, allowlist, token, read_token).await
-}
-
 /// Why a TCP endpoint must not start with this seat key, or `None`.
 pub fn tcp_refusal(seat_token: &str) -> Option<&'static str> {
     seat_token.is_empty().then_some(TCP_OFF)
@@ -140,7 +120,11 @@ pub fn tcp_refusal(seat_token: &str) -> Option<&'static str> {
 
 const TCP_OFF: &str = "[mcp].token empty - TCP MCP off";
 
-/// [`serve_tcp`] on a listener the caller bound (tests bind port 0).
+/// Serve the MCP protocol on a listener the caller bound (tests bind port 0).
+/// A connection is refused unless the peer IP is on `allowlist` (or
+/// `allow_all` is set), and every client must present `token` in its
+/// `initialize` request. Each connection runs on its own task. An empty
+/// `token` serves nothing ([`tcp_refusal`]).
 pub async fn serve_listener(
     handle: WalletHandle,
     listener: TcpListener,
@@ -4534,7 +4518,7 @@ pub(crate) mod tests {
 
     /// **A rotated token applies to the next connection, not the next
     /// restart.** `mcp-security.md` promises rotation "takes effect
-    /// immediately"; `serve_tcp` captured its copy at startup, so a leaked
+    /// immediately"; the accept loop captured its copy at startup, so a leaked
     /// token kept working until the process was restarted and the new one
     /// was refused — the exact inverse of what an operator rotating under
     /// suspicion needs.

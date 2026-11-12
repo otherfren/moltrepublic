@@ -427,17 +427,6 @@ pub fn __spawn_sim_founding(config: GroupConfig, session: SessionView, persist: 
     spawn_actor(config, session, cmd_tx, cmd_rx, seams)
 }
 
-/// Storage-backed engine with the post-founding **mesh bootstrap** ON — the
-/// production joiner configuration (`spawn_with_config` sets the same flag),
-/// as a seam for multi-instance tests whose joiners must assemble a real
-/// direct mesh after `JoinStart`.
-#[doc(hidden)]
-pub fn __spawn_with_storage_bootstrap(config: GroupConfig, session: SessionView) -> WalletHandle {
-    let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let seams = SpawnSeams { persist: true, ritual_bootstrap: true, ..SpawnSeams::default() };
-    spawn_actor(config, session, cmd_tx, cmd_rx, seams)
-}
-
 /// Start the engine bound to `config_path`: a [`configstore`] task persists
 /// every settings change to that file (format-preserving, atomic) and watches
 /// it for external edits, which are validated and mirrored into the shared

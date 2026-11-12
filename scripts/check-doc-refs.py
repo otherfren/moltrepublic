@@ -64,7 +64,7 @@ NO_BARE_SCAN_FILES = {
     # the strict fold's fixtures + doc examples are WIKI paths (a.md, b.md,
     # folder/file.md), never repo docs — same class as the sample tree
     "crates/molt-core/src/wiki_fold.rs": "fold keystone fixtures",
-    "crates/molt-core/src/lib.rs": "WikiDoc doc-comment path examples",
+    "crates/molt-core/src/lib.rs": "WikiDocMeta doc-comment path examples",
     "crates/molt-engine/src/chain/projection_tests.rs": "supersede-walk keystone fixtures",
     "crates/molt-engine/src/chain/checkpoint_tests.rs": "wiki-fold-across-a-cut fixtures",
     "crates/molt-engine/src/chain/governance_tests.rs": "the superseded-card keystone's patch fixtures are wiki paths",

@@ -51,13 +51,6 @@ const HEALTHY_SESSION: Duration = Duration::from_secs(30);
 /// 2026-08-25).
 const DEDUP_CAP: usize = 4096;
 
-/// Clock-skew margin (concept §4.4's ±1h): how far past local now a peer's
-/// `created_at` may plausibly sit. It is deliberately NOT applied to the
-/// cursor — the cursor clamps to local now, so a future-dated event cannot
-/// eat into the resubscribe overlap. The envelope layer (N3) applies it when
-/// judging an event's freshness.
-pub const CURSOR_SKEW: u64 = 3_600;
-
 /// Re-subscribe overlap: `since = cursor − OVERLAP`, the full NIP-59
 /// timestamp-tweak width — without it, offline gift-wraps are permanently
 /// skipped (MDK port #2, `mdk_evaluation.md` §2.2).

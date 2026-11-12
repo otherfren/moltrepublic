@@ -1444,13 +1444,6 @@ pub fn is_well_formed(text: &str) -> bool {
     text.parse::<toml::Value>().is_ok()
 }
 
-/// Read a file and lenient-salvage it into [`Settings`]. The file must exist;
-/// any salvageable fields are kept, the rest defaulted.
-pub fn read_settings(path: &Path) -> std::io::Result<Settings> {
-    let text = std::fs::read_to_string(path)?;
-    Ok(salvage(&text))
-}
-
 /// `config.toml` -> `config.toml.bak` (keeps the original file name intact).
 pub fn backup_path(path: &Path) -> PathBuf {
     let mut name = path

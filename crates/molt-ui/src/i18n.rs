@@ -903,8 +903,6 @@ lexicon! {
     cw_net_warn: "Not anonymized - peers see your IP.", "Nicht anonymisiert - Peers sehen deine IP.";
     cw_net_hint_settings: "Global setting - change it under Settings → Anonymity network.", "Globale Einstellung - ändern unter Einstellungen → Anonymitäts-Netzwerk.";
     cw_found: "Begin ritual", "Ritual beginnen";
-    cw_invites: "Invites", "Einladungen";
-    cw_invites_hint: "One link per future member - share each once, over a private channel.", "Ein Link pro künftigem Mitglied - jeden nur einmal teilen, über einen privaten Kanal.";
     cw_members_title: "Members", "Mitglieder";
     fold_relays: "relays", "Relays";
     cw_sealed_word: "sealed", "versiegelt";
@@ -919,7 +917,6 @@ lexicon! {
     cw_open_relay_settings: "Relay settings", "Relay-Einstellungen";
     cw_ritual_hint_sim: "No real network yet: this node simulates the other members - it auto-activates and signs for them. Nothing is shared with anyone. Real members arrive with the Nostr transport (N4).", "Noch kein echtes Netzwerk: dieser Knoten simuliert die anderen Mitglieder - er aktiviert und signiert selbst für sie. Es wird nichts mit jemandem geteilt. Echte Mitglieder kommen mit dem Nostr-Transport (N4).";
     cw_log_title: "Ritual log", "Ritual-Protokoll";
-    cw_charter_title: "Agree on the charter", "Auf die Satzung einigen";
     cw_charter_step: "Agree on the charter", "Einigt euch auf die Satzung";
     cw_seed_confirm_title: "Save your recovery phrase", "Sichere deine Wiederherstellungs-Phrase";
     cw_backup_confirm: "Confirm backup", "Backup bestätigen";
@@ -928,7 +925,6 @@ lexicon! {
     cw_seed_confirm_ph: "Re-type the phrase - Ctrl+Enter continues", "Phrase erneut eingeben - Strg+Enter bestätigt";
     cw_ratify_wait: "The charter is with the members - waiting for their signatures…", "Die Satzung liegt bei den Mitgliedern - warte auf ihre Unterschriften…";
     cw_charter_name_label: "Republic name", "Name der Republik";
-    cw_charter_name_ph: "Final republic name", "Endgültiger Name der Republik";
     cw_charter_agenda_ph: "Agenda / charter - what this republic is for", "Agenda / Satzung - wofür diese Republik steht";
     cw_charter_hint: "Write the republic's agenda - every member must sign it.", "Schreib die Agenda der Republik - alle Mitglieder müssen sie unterzeichnen.";
     cw_abort_title: "Abort the founding ritual?", "Gründungsritual abbrechen?";
@@ -970,10 +966,8 @@ lexicon! {
     jw_ratify_confirm: "Confirm & join", "Bestätigen & beitreten";
     jw_ratify_decline: "Decline", "Ablehnen";
     jw_ratify_agenda_empty: "(no agenda set)", "(keine Agenda festgelegt)";
-    const_immutable: "Immutable · ratified by everyone at founding", "Unveränderlich · von allen bei der Gründung ratifiziert";
     const_charter_title: "Charter", "Satzung";
     const_no_agenda: "(founded without a written charter)", "(ohne schriftliche Satzung gegründet)";
-    const_signatories: "Founding members · ratified by all", "Gründungsmitglieder · von allen ratifiziert";
     enter_republic: "Enter republic", "Republik betreten";
     org_reachable: "reachable", "erreichbar";
     org_approvals: "Approvals", "Approvals";
@@ -1063,7 +1057,6 @@ lexicon! {
     ocr2_add: "Add relay", "Relay hinzufügen";
     ocr2_remove: "Remove", "Entfernen";
     om_coarse: "Presence over relays is coarse: last seen at the last message, not pinged live.", "Präsenz über Relays ist grob: zuletzt gesehen bei der letzten Nachricht, kein Live-Ping.";
-    cs_files_off: "File sharing is not available over relays yet", "Dateifreigabe über Relays gibt es noch nicht";
     ocr_title: "Change chat deletion period", "Chat-Löschfrist ändern";
     ocr_body: "Chat is ephemeral: messages older than this are deleted on every member.", "Chat ist flüchtig: ältere Nachrichten werden bei allen Mitgliedern gelöscht.";
     ou_note: "Only metadata is shared - the bytes move user-to-user over an encrypted transfer when a member downloads, as long as the sharer keeps the file. The share expires with the chat retention window.", "Geteilt werden nur Metadaten - die Bytes wandern user-to-user über eine verschlüsselte Übertragung, wenn ein Mitglied lädt, solange der Teilende die Datei behält. Der Share läuft mit dem Chat-Aufbewahrungsfenster ab.";
@@ -1210,10 +1203,6 @@ lexicon! {
     chain_col_height: "Block", "Block";
     chain_col_what: "Change", "Änderung";
     chain_col_signers: "Signed by", "Signiert von";
-    chain_kind_genesis: "Founding", "Gründung";
-    chain_kind_membership: "Membership", "Mitgliedschaft";
-    chain_kind_checkpoint: "Checkpoint (compacted)", "Checkpoint (kompaktiert)";
-    chain_pre_cut: "before the cut", "vor dem Schnitt";
     chain_empty: "No chain - this workspace is not chain-governed.", "Keine Chain - dieser Workspace ist nicht chain-regiert.";
     set_ws_choose: "Choose folder…", "Ordner auswählen…";
     set_ws_dir_title: "Choose workspace folder", "Workspace-Ordner auswählen";
@@ -1507,8 +1496,6 @@ lexicon! {
     mem_search_ph: "Search the wiki", "Wiki durchsuchen";
     mem_search_none: "No hit", "Kein Treffer";
     mem_search_building: "Reading the wiki - search answers in a moment", "Wiki wird gelesen - die Suche antwortet gleich";
-    mem_title_archive: "Archived notes", "Archivierte Notizen";
-    mem_hint_archive: "Retired from the wiki - still readable, no longer linked.", "Aus dem Wiki zurückgezogen - weiter lesbar, nicht mehr verknüpft.";
     mem_cs_title: "Changeset", "Changeset";
     mem_cs_new: "new", "neu";
     mem_cs_deleted: "deleted", "gelöscht";

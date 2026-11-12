@@ -432,11 +432,6 @@ impl ImportStaging {
         self.dropped.iter().any(|d| d == crate::WALLET_KEYS_FILE)
     }
 
-    /// The staging directory (dot-invisible until commit).
-    pub fn staging_dir(&self) -> &Path {
-        &self.dir
-    }
-
     /// The recovery-seed entropy the blob carries, if any (§3.6). The
     /// ENGINE uses it to derive + roster-verify the seat identity before
     /// commit — storage cannot know which ritual derivation was anchored.

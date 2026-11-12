@@ -36,11 +36,6 @@ pub const POKE_V: u32 = 1;
 /// already.
 pub const POKE_MAX_BYTES: usize = 4 * 1024;
 
-/// How many pokes may await publication before further ones are dropped.
-/// Small on purpose: a nudge is worth one best-effort attempt, and a queue
-/// that absorbs a flood would only publish it late.
-pub const POKE_QUEUE: usize = 8;
-
 /// One nudge from `by` to `to`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Poke {

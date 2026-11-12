@@ -200,32 +200,23 @@ pub struct QueuePair {
 /// once the block's content is safely applied — an unacked block is
 /// redelivered (at-least-once; the reassembler and the per-sender cursors
 /// absorb the duplicates).
-pub struct AckToken(Option<Box<dyn FnOnce() + Send>>);
+pub struct AckToken(Box<dyn FnOnce() + Send>);
 
 impl AckToken {
     /// Wrap the transport-specific acknowledgement action.
     pub fn new(f: impl FnOnce() + Send + 'static) -> AckToken {
-        AckToken(Some(Box::new(f)))
-    }
-
-    /// An ack that does nothing (tests, already-acked redeliveries).
-    pub fn noop() -> AckToken {
-        AckToken(None)
+        AckToken(Box::new(f))
     }
 
     /// Acknowledge the block.
-    pub fn ack(mut self) {
-        if let Some(f) = self.0.take() {
-            f();
-        }
+    pub fn ack(self) {
+        (self.0)();
     }
 }
 
 impl std::fmt::Debug for AckToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AckToken")
-            .field("armed", &self.0.is_some())
-            .finish()
+        f.write_str("AckToken")
     }
 }
 

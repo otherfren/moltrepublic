@@ -829,20 +829,6 @@ pub async fn publish_series_v2(
     Ok((first.unwrap_or_else(crate::ritual_net::now_secs), count))
 }
 
-/// [`publish_series_v2`] on the hour's shared publish budget - one round
-/// per series, like v1 (M2 turns the whole publish into a trickle).
-pub async fn publish_series_v2_metered<S: crate::supervisor::StateStore>(
-    chan: &GroupChannel,
-    key: &[u8; 32],
-    source: &std::path::Path,
-    manifest: &Manifest,
-    store: &S,
-    now: u64,
-) -> Result<(u64, u32), NetError> {
-    take_publish_round(store, now).await?;
-    publish_series_v2(chan, key, source, manifest, None).await
-}
-
 /// Where manifest-chunk candidates wait for the top record: an append-only
 /// spill file beside the `.part` when the sink has one, bounded memory
 /// otherwise. Dedups by hash, bounded per slot and in total; the spill

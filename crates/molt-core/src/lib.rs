@@ -7075,15 +7075,6 @@ pub struct WikiBaseProgress {
     pub size: u64,
 }
 
-/// One document of the folded Shared-Memory base.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WikiDoc {
-    /// Normalized relative path (`file.md` or `folder/file.md`).
-    pub path: String,
-    /// The full markdown content.
-    pub content: String,
-}
-
 /// One document's METADATA in a paged wiki listing ([`Reply::WikiList`]).
 /// Carries no content: a knowledge base of tens of thousands of entries
 /// is read page by page and fetched document by document
