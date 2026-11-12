@@ -1885,6 +1885,8 @@ export component AppWindow inherits Window {
     // the compose row collapses and the banner says so (computed in Rust
     // from the engine's channel annotation, instant on selection)
     in property <bool> selected-channel-closed: false;
+    // no member has posted in the selected channel yet
+    in property <bool> selected-channel-undiscussed: false;
     // the selected channel is an ORGANIZATION decision's discussion: the
     // compact detail panel sits above the log, so opening a decision's chat
     // always says WHICH decision without scrolling anywhere. Other surfaces'
@@ -5637,7 +5639,7 @@ export component AppWindow inherits Window {
                                 // takes the whole body, the split and its
                                 // handle come with the first message
                                 property <bool> diff-only: root.selected-decision.id > 0
-                                    && root.selected-decision.patch-op && s.log.length == 0;
+                                    && root.selected-decision.patch-op && root.selected-channel-undiscussed;
                                 if chat-body.diff-only: DiffViewer {
                                     vertical-stretch: 1;
                                 }

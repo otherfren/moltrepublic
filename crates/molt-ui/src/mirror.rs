@@ -1358,6 +1358,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_selected_channel_votable(b.selected_key.starts_with("patch:"));
     ui.set_selected_channel_label(b.selected_label.as_str().into());
     ui.set_selected_channel_closed(b.selected_closed);
+    ui.set_selected_channel_undiscussed(b.selected_undiscussed);
     ui.set_selected_channel_org(b.selected_org);
     // the wiki-patch diff viewer: a SELECTED patch decision owns the
     // global; otherwise the first pending wiki patch on Shared Memory

@@ -188,6 +188,8 @@ pub(crate) struct SurfacesBundle {
     pub(crate) org_stats: OrgStats,
     /// Group-channel unread count (badges the Gruppe nav row).
     pub(crate) group_unread: i32,
+    /// No member has posted in the selected channel yet.
+    pub(crate) selected_undiscussed: bool,
     /// A discussion post to announce ([`discussion_toast`]), rendered.
     pub(crate) talk_toast: Option<String>,
     /// The vault's read model (`None` = no vault surface in this charter).
@@ -1341,6 +1343,10 @@ pub(crate) async fn gather_surfaces(
             )
         })
         .collect();
+    let selected_undiscussed = surfaces
+        .iter()
+        .find(|s| s.key == "chat")
+        .is_some_and(|s| s.log.iter().all(|l| l.system));
     let bundle = SurfacesBundle {
         lang,
         chain_rows,
@@ -1365,6 +1371,7 @@ pub(crate) async fn gather_surfaces(
         list_pages,
         org_stats,
         group_unread,
+        selected_undiscussed,
         talk_toast,
         vault,
         wallet: purse,

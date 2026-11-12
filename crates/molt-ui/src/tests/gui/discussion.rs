@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! A vote's discussion made visible: the count on the Chat row, the
-//! marker and the preview on the vote card, and the toast.
+//! marker and the preview on the vote card, the toast, and the pane of a
+//! vote nobody posted on.
 
 use super::*;
 
@@ -89,6 +90,25 @@ impl Opened {
     fn mirror(&self) {
         self.rt.block_on(mirror(&self.w, &self.ui, &self.last, &self.chat_ui));
     }
+
+    /// Propose a rename (it stays open at m=2), put its discussion on
+    /// screen and mirror; the discussion's channel.
+    fn open_a_vote_and_its_discussion(&self) -> ChannelRef {
+        self.run(Command::Propose {
+            surface: Surface::Organization,
+            payload: serde_json::json!({ "op": "set_name", "value": "NewName" }),
+        });
+        self.mirror();
+        let id = surface_tab(&self.ui, "organization")
+            .and_then(|s| s.pending.row_data(0))
+            .expect("the open vote")
+            .id;
+        let vote = ChannelRef::Patch { id: ProposalId(u64::try_from(id).expect("id")) };
+        self.run(Command::SelectSurface { surface: Surface::Chat });
+        self.chat_ui.lock().expect("ui state").select(vote.clone());
+        self.mirror();
+        vote
+    }
 }
 
 /// **A post in a vote's discussion is counted on the top-level Chat row
@@ -140,6 +160,53 @@ fn a_post_arriving_on_an_unvoted_vote_toasts_author_and_title() {
         .expect("the open vote")
         .text;
     assert_eq!(o.ui.get_toast_text(), format!("mara on {title}"));
+}
+
+/// **A vote nobody posted on reads as undiscussed although its log is
+/// never empty:** the projection always merges the governance line in.
+#[test]
+fn a_vote_nobody_posted_on_reads_as_undiscussed() {
+    let o = Opened::new(|root| drop(workspace_on_disk(root, 2, &["walter", "mara"], "test")));
+    let vote = o.open_a_vote_and_its_discussion();
+    let log = surface_tab(&o.ui, "chat").expect("chat tab").log;
+    assert_eq!(log.row_count(), 1, "the governance line alone");
+    assert!(log.row_data(0).expect("row").system);
+    assert!(o.ui.get_selected_channel_undiscussed());
+
+    o.run(Command::Chat { body: "one".to_string(), quote: None, channel: vote });
+    o.mirror();
+    assert!(!o.ui.get_selected_channel_undiscussed(), "the first post ends it");
+}
+
+/// **That same undiscussed vote gives its diff the whole body, and the
+/// compose row stays.** The log comes from the real projection; only the
+/// card is swapped for a wiki patch, the one kind that has a diff.
+#[cfg(feature = "live-preview")]
+#[test]
+fn an_undiscussed_real_vote_gives_the_diff_the_whole_body() {
+    let o = Opened::new(|root| drop(workspace_on_disk(root, 2, &["walter", "mara"], "test")));
+    o.open_a_vote_and_its_discussion();
+    assert!(o.ui.get_selected_decision().id > 0, "the real card heads the pane");
+    o.ui.set_screen(AppScreen::Main);
+    o.ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    o.ui.set_selected_decision(ProposalRow {
+        patch_op: true,
+        proposed: "diff --git a/a b/a\n@@ -1 +1 @@\n-one\n+two\n".into(),
+        ..o.ui.get_selected_decision()
+    });
+    let _shown = show_headless(&o.ui);
+
+    let height = |name: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_element_type_name(&o.ui, name)
+            .map(|e| e.size().height)
+            .fold(0.0, f32::max)
+    };
+    assert!(height("DiffViewer") > 450.0, "the diff is only {}px high", height("DiffViewer"));
+    let compose = i_slint_backend_testing::ElementHandle::find_by_element_id(&o.ui, "AppWindow::ch-compose")
+        .next()
+        .expect("the compose box");
+    assert!(compose.size().height > 20.0, "the first post needs its box");
+    assert!(compose.absolute_position().y + compose.size().height <= 900.0);
 }
 
 /// **The mirror shows the toast a bundle carries.**

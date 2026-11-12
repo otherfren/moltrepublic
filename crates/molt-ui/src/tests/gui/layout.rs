@@ -1268,12 +1268,28 @@ fn typed(ui: &AppWindow, type_name: &str) -> Geometry {
 
 /// **A decision nobody discussed yet shows its diff on the whole body.**
 /// No message list and no grab handle; the banner follows one pane gap
-/// below the viewer. The first message brings the 35 % split back.
+/// below the viewer. The first message brings the 35 % split back. The
+/// governance line every real log carries does not count as discussion.
 #[cfg(feature = "live-preview")]
 #[test]
 fn an_undiscussed_decision_gives_the_diff_the_whole_body() {
     i_slint_backend_testing::init_no_event_loop();
     let (ui, _shown) = chat_pane_window_with(true, 0);
+    let undiscussed = |ui: &AppWindow| {
+        ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+            key: "chat".into(),
+            log: ModelRc::new(VecModel::from(vec![LogLine {
+                text: "⚖ #3 · Wiki patch (~3) - 1/2".into(),
+                system: true,
+                quote: -1,
+                patch_id: -1,
+                ..LogLine::default()
+            }])),
+            ..SurfaceTab::default()
+        }])));
+        ui.set_selected_channel_undiscussed(true);
+    };
+    undiscussed(&ui);
     let gap = ui.global::<Theme>().get_pane_gap();
     for height in [900_u32, 640] {
         ui.window().set_size(slint::PhysicalSize::new(1400, height));
@@ -1297,6 +1313,7 @@ fn an_undiscussed_decision_gives_the_diff_the_whole_body() {
     // the first message: the split and its handle are back
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
     ui.set_surfaces(chat_tab_with(1));
+    ui.set_selected_channel_undiscussed(false);
     let surface = 900.0 - 2.0 * gap;
     let diff = typed(&ui, "DiffViewer");
     let list = geometry(&ui, "AppWindow::ch-list");
@@ -1309,7 +1326,7 @@ fn an_undiscussed_decision_gives_the_diff_the_whole_body() {
     assert!(list.3 > 100.0, "the messages have room: {}px", list.3);
 
     // and back: the last message gone, the diff takes the body again
-    ui.set_surfaces(chat_tab_with(0));
+    undiscussed(&ui);
     assert!(typed(&ui, "DiffViewer").3 > 540.0);
 }
 
