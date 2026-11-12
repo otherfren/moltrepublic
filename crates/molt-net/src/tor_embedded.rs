@@ -20,6 +20,8 @@
 //!   mints a cheap [`ArtiShared`] handle. The actual bootstrap happens inside
 //!   [`ArtiShared::connect`] on first use, one at a time, and is *not* cached
 //!   on failure — a transient bootstrap error is retried on the next dial.
+//!   It runs in a task of its own that every waiting dial shares, so a dial
+//!   that gives up (a caller's deadline) does not take it down.
 //! * **Per-host stream isolation.** Each remote host gets its own
 //!   [`IsolationToken`] (minted once, stable thereafter), so arti puts each on
 //!   its own circuit — two of our connections never share an exit / timing
@@ -38,7 +40,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -61,18 +63,32 @@ type Boot = Box<dyn Fn(TorClientConfig) -> BootFuture + Send + Sync>;
 const REBUILD_DRAIN: Duration = Duration::from_secs(30);
 const RESET_DRAIN: Duration = Duration::from_secs(5);
 
-#[derive(Default)]
-struct Slot {
-    client: Option<Client>,
+/// What a bootstrap task leaves for the dials waiting on it.
+type Booted = Option<Result<Client, String>>;
+
+enum Slot {
+    Empty,
+    /// A bootstrap in its own task. Every dial waits on this one, and none
+    /// of them giving up ends it.
+    Booting(tokio::sync::watch::Receiver<Booted>),
+    Ready(Client),
+    Resetting,
+}
+
+/// The client a rebuild replaces, and what its log lines carry.
+struct Rebuild {
+    old: Client,
+    reason: Reason,
+    count: u32,
 }
 
 /// The process-wide embedded-Tor state: one lazily-bootstrapped [`TorClient`]
 /// reused across every dial, plus a per-host [`IsolationToken`] map so each
 /// remote host rides its own Tor circuit (stream isolation, concept §4/§5).
 pub struct ArtiShared {
-    /// Held across a bootstrap, so there is one at a time. Only success is
-    /// stored: a transient bootstrap failure is retried on the next dial.
-    slot: tokio::sync::Mutex<Slot>,
+    /// Only success is stored: a failed bootstrap leaves the slot empty and
+    /// the next dial starts a fresh one.
+    slot: Mutex<Slot>,
     /// Bumped on every swap; an outcome from an older client is not evidence
     /// about the current one.
     generation: AtomicU64,
@@ -80,10 +96,9 @@ pub struct ArtiShared {
     /// distinct hosts never share an exit / timing fingerprint.
     iso: Mutex<HashMap<String, IsolationToken>>,
     health: Mutex<Health>,
-    rebuilding: AtomicBool,
     /// A reset interrupts a bootstrap that may never return.
     resets: tokio::sync::watch::Sender<u64>,
-    resets_waiting: AtomicUsize,
+    reset_serial: tokio::sync::Mutex<()>,
     /// `None` = `~/.moltrepublic/arti`.
     base: Option<PathBuf>,
     boot: Boot,
@@ -101,13 +116,12 @@ impl ArtiShared {
     fn with(base: Option<PathBuf>, boot: Boot) -> ArtiShared {
         install_crypto_provider();
         ArtiShared {
-            slot: tokio::sync::Mutex::new(Slot::default()),
+            slot: Mutex::new(Slot::Empty),
             generation: AtomicU64::new(0),
             iso: Mutex::new(HashMap::new()),
             health: Mutex::new(Health::default()),
-            rebuilding: AtomicBool::new(false),
             resets: tokio::sync::watch::Sender::new(0),
-            resets_waiting: AtomicUsize::new(0),
+            reset_serial: tokio::sync::Mutex::new(()),
             base,
             boot,
             clock: Instant::now(),
@@ -125,6 +139,11 @@ impl ArtiShared {
 
     fn health(&self) -> std::sync::MutexGuard<'_, Health> {
         self.health.lock().expect("arti health mutex poisoned")
+    }
+
+    /// Lock order: the slot before the health record, never the reverse.
+    fn slot(&self) -> std::sync::MutexGuard<'_, Slot> {
+        self.slot.lock().expect("arti client slot mutex poisoned")
     }
 
     /// The embedded-Tor `(state_dir, cache_dir)` (concept §4). Uses `$HOME`;
@@ -146,21 +165,42 @@ impl ArtiShared {
         Ok((base.join("state"), base.join("cache")))
     }
 
-    /// The shared [`TorClient`] and its generation. The first call
-    /// bootstraps the Tor directory (slow); later calls reuse it. A bootstrap
-    /// error is not cached, so it is retried on the next dial.
-    async fn client(&self) -> Result<(Client, u64), NetError> {
-        let mut slot = self.slot.lock().await;
-        let client = match &slot.client {
-            Some(client) => client.clone(),
-            None => self.bootstrap_into(&mut slot).await?,
+    /// The shared [`TorClient`] and its generation. The first call starts
+    /// the bootstrap of the Tor directory (slow) and waits for it; a call
+    /// during a bootstrap waits for the same one; later calls reuse the
+    /// client. A bootstrap error is not cached.
+    async fn client(self: &Arc<Self>) -> Result<(Client, u64), NetError> {
+        let (mut booting, generation) = {
+            let mut slot = self.slot();
+            let generation = self.generation.load(Ordering::SeqCst);
+            let booting = match &*slot {
+                Slot::Ready(client) => return Ok((client.clone(), generation)),
+                Slot::Resetting => return Err(NetError::TorUnavailable("arti: reset in progress".into())),
+                Slot::Booting(booting) => booting.clone(),
+                Slot::Empty => self.start_boot(&mut slot, &tokio::runtime::Handle::current(), None)?,
+            };
+            (booting, generation)
         };
-        Ok((client, self.generation.load(Ordering::SeqCst)))
+        let mut waiter = Waiter(true);
+        let booted = booting.wait_for(Option::is_some).await.map(|booted| booted.clone());
+        waiter.0 = false;
+        match booted {
+            Ok(Some(Ok(client))) => Ok((client, generation)),
+            Ok(Some(Err(error))) => Err(NetError::TorUnavailable(format!("arti bootstrap failed: {error}"))),
+            Ok(None) | Err(_) => Err(NetError::TorUnavailable("arti bootstrap failed: task ended".into())),
+        }
     }
 
-    /// Bootstrap a fresh client against the on-disk state / cache dirs into
-    /// the (empty) slot. Slow (Tor directory bootstrap over the network).
-    async fn bootstrap_into(&self, slot: &mut Slot) -> Result<Client, NetError> {
+    /// Start a bootstrap against the on-disk state / cache dirs in a task of
+    /// its own and put it into the slot. A dial that gives up does not end
+    /// it: the relay runtime allows a connect 20 s, a stale directory takes
+    /// longer to reload, and a bootstrap tied to its first dial never ended.
+    fn start_boot(
+        self: &Arc<Self>,
+        slot: &mut Slot,
+        runtime: &tokio::runtime::Handle,
+        rebuild: Option<Rebuild>,
+    ) -> Result<tokio::sync::watch::Receiver<Booted>, NetError> {
         let (state_dir, cache_dir) = self.dirs()?;
         for dir in [&state_dir, &cache_dir] {
             std::fs::create_dir_all(dir).map_err(|e| {
@@ -168,32 +208,58 @@ impl ArtiShared {
             })?;
         }
         let config = build_config(&state_dir, &cache_dir)?;
+        let (done, booting) = tokio::sync::watch::channel(None);
+        // subscribed under the slot lock: a reset from here on is seen
         let mut resets = self.resets.subscribe();
-        if self.resets_waiting.load(Ordering::SeqCst) > 0 {
-            return Err(NetError::TorUnavailable("arti bootstrap: reset in progress".into()));
-        }
-        tracing::info!(tor = "embedded", event = "bootstrap_start");
-        let started = Instant::now();
-        let mut abandoned = Abandoned(Some(started));
-        let booted = tokio::select! {
-            booted = (self.boot)(config) => booted,
-            _ = resets.changed() => Err("interrupted by a reset".to_string()),
-        };
-        abandoned.0 = None;
-        let ms = started.elapsed().as_millis();
-        match booted {
-            Ok(client) => {
-                tracing::info!(tor = "embedded", event = "bootstrap_ok", ms);
-                let client = Arc::new(client);
-                slot.client = Some(client.clone());
-                Ok(client)
+        let generation = self.generation.load(Ordering::SeqCst);
+        *slot = Slot::Booting(booting.clone());
+        let this = self.clone();
+        runtime.spawn(async move {
+            let started = Instant::now();
+            let label = rebuild.as_ref().map(|r| (r.count, r.reason.as_str()));
+            match label {
+                Some((count, reason)) => tracing::warn!(tor = "embedded", event = "rebuild_start", count, reason),
+                None => tracing::info!(tor = "embedded", event = "bootstrap_start"),
             }
-            Err(error) => {
-                tracing::warn!(tor = "embedded", event = "bootstrap_failed", ms, error = %error);
+            let booted = tokio::select! {
+                booted = async {
+                    if let Some(rebuild) = rebuild {
+                        drain(rebuild.old, REBUILD_DRAIN).await;
+                    }
+                    (this.boot)(config).await
+                } => booted,
+                _ = resets.changed() => Err("interrupted by a reset".to_string()),
+            };
+            let booted = this.settle(generation, booted.map(Arc::new));
+            let ms = started.elapsed().as_millis();
+            match (&booted, label) {
+                (Ok(_), None) => tracing::info!(tor = "embedded", event = "bootstrap_ok", ms),
+                (Ok(_), Some((count, _))) => tracing::info!(tor = "embedded", event = "rebuild_ok", count, ms),
+                (Err(error), None) => tracing::warn!(tor = "embedded", event = "bootstrap_failed", ms, error = %error),
+                (Err(error), Some((count, _))) => {
+                    tracing::warn!(tor = "embedded", event = "rebuild_failed", count, ms, error = %error);
+                }
+            }
+            let _ = done.send(Some(booted));
+        });
+        Ok(booting)
+    }
+
+    /// Put a finished bootstrap into the slot, unless a reset took the slot
+    /// away meanwhile.
+    fn settle(&self, generation: u64, booted: Result<Client, String>) -> Result<Client, String> {
+        let mut slot = self.slot();
+        if generation != self.generation.load(Ordering::SeqCst) {
+            return Err("interrupted by a reset".to_string());
+        }
+        match &booted {
+            Ok(client) => *slot = Slot::Ready(client.clone()),
+            Err(_) => {
+                *slot = Slot::Empty;
                 self.health().record(self.clock.elapsed(), "", Evidence::Client);
-                Err(NetError::TorUnavailable(format!("arti bootstrap failed: {error}")))
             }
         }
+        booted
     }
 
     /// Dial `host:port` over the embedded Tor client, on the host's own circuit.
@@ -222,7 +288,9 @@ impl ArtiShared {
         out.map_err(|e| NetError::TorUnavailable(format!("arti dial {host}:{port}: {e}")))
     }
 
-    /// Feed one dial outcome to the health record and act on the verdict.
+    /// Feed one dial outcome to the health record and act on the verdict:
+    /// a rebuild drops the client and bootstraps a new one from the same
+    /// directories.
     fn observe(
         self: &Arc<Self>,
         now: Duration,
@@ -235,11 +303,7 @@ impl ArtiShared {
         if generation != self.generation.load(Ordering::SeqCst) {
             return;
         }
-        // a dial dropped at runtime shutdown has nowhere to rebuild
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
-        let (reason, count) = {
+        let reason = {
             let mut health = self.health();
             health.record(now, host, evidence);
             // a stream that opened outranks arti's own estimate
@@ -255,41 +319,27 @@ impl ArtiShared {
             if health.flag() {
                 tracing::warn!(tor = "embedded", event = "health_bad", reason = reason.as_str(), host, detail);
             }
-            if matches!(verdict, Verdict::Wait(_)) || self.rebuilding.swap(true, Ordering::SeqCst) {
+            if matches!(verdict, Verdict::Wait(_)) {
                 return;
             }
-            (reason, health.rebuilt(now))
+            reason
         };
-        let this = self.clone();
-        runtime.spawn(async move {
-            this.rebuild(reason, count).await;
-            this.rebuilding.store(false, Ordering::SeqCst);
-        });
-    }
-
-    /// Drop the client and bootstrap a new one from the same directories.
-    async fn rebuild(&self, reason: Reason, count: u32) {
-        tracing::warn!(tor = "embedded", event = "rebuild_start", count, reason = reason.as_str());
-        let started = Instant::now();
-        let mut slot = self.slot.lock().await;
-        self.retire(&mut slot, REBUILD_DRAIN).await;
-        let ms = || started.elapsed().as_millis();
-        match self.bootstrap_into(&mut slot).await {
-            Ok(_) => tracing::info!(tor = "embedded", event = "rebuild_ok", count, ms = ms()),
-            Err(error) => tracing::warn!(tor = "embedded", event = "rebuild_failed", count, ms = ms(), error = %error),
-        }
-    }
-
-    /// Empty the slot and let go of the old client, once the dials still
-    /// holding it are done or `drain` is over.
-    async fn retire(&self, slot: &mut Slot, drain: Duration) {
-        self.generation.fetch_add(1, Ordering::SeqCst);
-        let Some(old) = slot.client.take() else {
+        // a dial dropped at runtime shutdown has nowhere to rebuild
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let until = Instant::now() + drain;
-        while Arc::strong_count(&old) > 1 && Instant::now() < until && self.resets_waiting.load(Ordering::SeqCst) == 0 {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        let mut slot = self.slot();
+        // only a client that is there can be rebuilt, and only once
+        if generation != self.generation.load(Ordering::SeqCst) || !matches!(*slot, Slot::Ready(_)) {
+            return;
+        }
+        let Slot::Ready(old) = std::mem::replace(&mut *slot, Slot::Empty) else {
+            return;
+        };
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        let count = self.health().rebuilt(now);
+        if let Err(error) = self.start_boot(&mut slot, &runtime, Some(Rebuild { old, reason, count })) {
+            tracing::warn!(tor = "embedded", event = "rebuild_failed", count, ms = 0, error = %error);
         }
     }
 
@@ -297,11 +347,22 @@ impl ArtiShared {
     /// directories, entry guards included. The next dial bootstraps from
     /// scratch. Returns what was removed.
     pub async fn reset(&self) -> Result<Vec<PathBuf>, NetError> {
-        self.resets_waiting.fetch_add(1, Ordering::SeqCst);
+        let _serial = self.reset_serial.lock().await;
+        let prior = {
+            let mut slot = self.slot();
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            std::mem::replace(&mut *slot, Slot::Resetting)
+        };
+        // no dial may bootstrap into directories about to be removed
+        let _reopen = Reopen(self);
         self.resets.send_modify(|n| *n += 1);
-        let mut slot = self.slot.lock().await;
-        self.resets_waiting.fetch_sub(1, Ordering::SeqCst);
-        self.retire(&mut slot, RESET_DRAIN).await;
+        match prior {
+            Slot::Ready(old) => drain(old, RESET_DRAIN).await,
+            Slot::Booting(mut booting) => {
+                let _ = tokio::time::timeout(RESET_DRAIN, booting.wait_for(Option::is_some)).await;
+            }
+            Slot::Empty | Slot::Resetting => {}
+        }
         self.iso.lock().expect("arti isolation map mutex poisoned").clear();
         *self.health() = Health::default();
         let (state_dir, cache_dir) = self.dirs()?;
@@ -324,13 +385,34 @@ impl ArtiShared {
     }
 }
 
-/// Logs a bootstrap its dial gave up on (a caller's deadline).
-struct Abandoned(Option<Instant>);
+/// Let go of a replaced client once the dials still holding it are done or
+/// `limit` is over.
+async fn drain(old: Client, limit: Duration) {
+    let until = Instant::now() + limit;
+    while Arc::strong_count(&old) > 1 && Instant::now() < until {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
 
-impl Drop for Abandoned {
+/// Opens the slot again when a reset ends, however it ends.
+struct Reopen<'a>(&'a ArtiShared);
+
+impl Drop for Reopen<'_> {
     fn drop(&mut self) {
-        if let Some(started) = self.0 {
-            tracing::warn!(tor = "embedded", event = "bootstrap_abandoned", ms = started.elapsed().as_millis());
+        let mut slot = self.0.slot();
+        if matches!(*slot, Slot::Resetting) {
+            *slot = Slot::Empty;
+        }
+    }
+}
+
+/// A dial that stopped waiting for the bootstrap; the bootstrap goes on.
+struct Waiter(bool);
+
+impl Drop for Waiter {
+    fn drop(&mut self) {
+        if self.0 {
+            tracing::debug!(tor = "embedded", event = "waiter_left");
         }
     }
 }
@@ -424,6 +506,7 @@ pub(crate) fn build_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     /// arti's TLS (tor-rtcompat) builds its `ClientConfig` on the PROCESS
     /// default provider. Our graph is ring-free, so nothing auto-installs
@@ -476,7 +559,7 @@ mod tests {
 
     async fn settled(shared: &ArtiShared) {
         tokio::time::timeout(Duration::from_secs(20), async {
-            while shared.rebuilding.load(Ordering::SeqCst) {
+            while matches!(*shared.slot(), Slot::Booting(_)) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
@@ -496,6 +579,43 @@ mod tests {
         assert_eq!((generation, same, boots.load(Ordering::SeqCst)), (0, 0, 2));
     }
 
+    /// A caller's deadline (the relay runtime gives a connect 20 s) used to
+    /// take the bootstrap down with it, every time.
+    #[tokio::test]
+    async fn a_bootstrap_outlives_the_dial_that_started_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let boots = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let (counter, held) = (boots.clone(), gate.clone());
+        let boot: Boot = Box::new(move |config| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            let held = held.clone();
+            Box::pin(async move {
+                let _open = held.acquire().await.map_err(|e| e.to_string())?;
+                TorClient::builder().config(config).create_unbootstrapped().map_err(|e| e.to_string())
+            })
+        });
+        let shared = Arc::new(ArtiShared::with(Some(dir.path().to_path_buf()), boot));
+        let dial = |shared: &Arc<ArtiShared>| {
+            let shared = shared.clone();
+            tokio::spawn(async move { shared.client().await.map(|(client, _)| client) })
+        };
+        let first = dial(&shared);
+        while boots.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        first.abort();
+        assert!(first.await.is_err(), "dropped mid-bootstrap");
+
+        let (second, third) = (dial(&shared), dial(&shared));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        gate.add_permits(1);
+        let second = second.await.expect("joined").expect("the running bootstrap's client");
+        let third = third.await.expect("joined").expect("shared by every waiter");
+        assert!(Arc::ptr_eq(&second, &third));
+        assert_eq!(boots.load(Ordering::SeqCst), 1, "one bootstrap, whoever gave up on it");
+    }
+
     #[tokio::test]
     async fn a_sustained_failure_swaps_the_client_and_keeps_its_directories() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -510,8 +630,7 @@ mod tests {
         assert_eq!(boots.load(Ordering::SeqCst), 1, "below the threshold nothing is rebuilt");
         drop(old);
         shared.observe(min(10), generation, "a.example", Evidence::Client, Some(true), "x");
-        settled(&shared).await;
-        let (_new, swapped) = shared.client().await.expect("the new client");
+        let (_new, swapped) = shared.client().await.expect("a dial joins the rebuild");
         assert_eq!((swapped, boots.load(Ordering::SeqCst)), (generation + 1, 2));
         assert_eq!(std::fs::read(&guards).expect("still there"), b"kept", "a rebuild removes nothing");
         assert_eq!(token, shared.token_for("relay", "a.example"), "circuits stay isolated as before");
@@ -575,7 +694,7 @@ mod tests {
             let shared = shared.clone();
             async move { shared.client().await.map(|_| ()) }
         });
-        while shared.slot.try_lock().is_ok() {
+        while !matches!(*shared.slot(), Slot::Booting(_)) {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         tokio::time::timeout(Duration::from_secs(10), shared.reset())

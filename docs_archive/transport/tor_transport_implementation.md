@@ -469,6 +469,34 @@ succeeded, and a restart did not help. The client used to be created once
 per process and its state under `~/.moltrepublic/arti` never left the disk.
 Two remedies, deliberately different in what they keep.
 
+### 9.0 The bootstrap outlives the dial that started it (2026-11-12)
+
+The likely field failure. The bootstrap used to run INSIDE the first dial,
+and every caller that can reach the embedded client puts a deadline around
+that dial:
+
+| Caller (`molt-net`) | Deadline |
+|---|---|
+| relay subscription connect and reconnect (`relay_runtime.rs`, `CONNECT_TIMEOUT`) | 20 s |
+| publish, single and pooled (`PUBLISH_TIMEOUT`) | 10 s |
+| relay probe (`PROBE_PHASE_TIMEOUT`; NIP-11 `PROBE_NIP11_TIMEOUT`) | 10 s; 3 s |
+| Tor test (`tor_probe.rs`, `CIRCUIT_TIMEOUT`) | 45 s |
+| S3, purse daemon | none around the dial |
+
+A deadline dropped the dial, the dial dropped `create_bootstrapped`, and
+the next dial began again. A warm directory bootstraps well inside 20 s; a
+stale one (the node had run for a day) has to be reloaded and does not, so
+no bootstrap ever finished - and a restart changed nothing, because the
+stale cache is on disk. A SOCKS daemon bootstraps on its own clock, which
+is why switching to it worked.
+
+Now the bootstrap runs in a task of its own. The slot holds it while it
+runs; every dial waits on that one task, and a dial that gives up leaves
+it running (`event=waiter_left`, debug). One bootstrap at a time; a failed
+one empties the slot, so the next dial starts a fresh one; a reset
+interrupts it. The rebuild below is the same task with the old client's
+drain in front.
+
 ### 9.1 Automatic rebuild - keeps everything on disk
 
 `crates/molt-net/src/tor_health.rs` (pure, in the default build) decides,
@@ -500,7 +528,7 @@ Then the client is dropped and a new one bootstraps from the SAME state and
 cache directories: entry guards, circuit timeouts and the directory cache
 stay. The first rebuild comes after 10 minutes; the next ones no sooner
 than 20, 40, then 60 minutes after the previous. Any alive outcome resets
-that. One rebuild at a time. A dial in flight keeps the client it started
+that. One rebuild at a time; dials arriving meanwhile wait for it. A dial in flight keeps the client it started
 on (the swap waits up to 30 s for them, so two clients do not contend for
 the state lock); its outcome is not counted against the new client.
 Isolation tokens survive a rebuild.
@@ -535,7 +563,7 @@ guards up is a decision a human (or the seat's operator) takes knowingly.
 ### 9.4 Log lines
 
 One line each, `tor=embedded event=...`: `bootstrap_start`, `bootstrap_ok`
-/ `bootstrap_failed` / `bootstrap_abandoned` (`ms`, `error`), `health_bad`
+/ `bootstrap_failed` (`ms`, `error`), `waiter_left` (debug), `health_bad`
 (`reason=not_ready | all_dials_failing`, once per bad spell),
 `rebuild_start` / `rebuild_ok` / `rebuild_failed` (`count`, `reason`, `ms`),
 `reset` (`removed`).
