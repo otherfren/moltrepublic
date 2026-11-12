@@ -103,6 +103,15 @@ fn main() -> anyhow::Result<()> {
     });
     // held to the end of main: dropping it flushes the file
     let log_guard = init_tracing(log_dir.as_deref());
+    if log_guard.is_some() {
+        let stderr_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            tracing::error!(panic = %info, "panic");
+            // the release build aborts next: give the file writer its turn
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            stderr_hook(info);
+        }));
+    }
     tracing::info!(path = %config_path.display(), "loaded config");
     if cfg!(debug_assertions) {
         tracing::warn!(build = "debug", release = "scripts/build-release.sh", "slow debug build");
