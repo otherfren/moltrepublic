@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! A vote's discussion made visible: the count on the Chat row, the
-//! marker and the preview on the vote card.
+//! marker and the preview on the vote card, and the toast.
 
 use super::*;
 
@@ -94,7 +94,7 @@ impl Opened {
 /// **A post in a vote's discussion is counted on the top-level Chat row
 /// and marked on the vote's card, with the post itself.** The count is
 /// the chat tab's own field: the pending-proposals total stays what it
-/// was.
+/// was. Opening the workspace announces none of it.
 #[test]
 fn a_post_in_a_votes_discussion_reaches_the_chat_row_and_the_card() {
     let o = Opened::new(workspace_with_a_discussed_vote);
@@ -110,6 +110,8 @@ fn a_post_in_a_votes_discussion_reaches_the_chat_row_and_the_card() {
     let talk: Vec<(String, String)> =
         card.talk.iter().map(|t| (t.who.to_string(), t.text.to_string())).collect();
     assert_eq!(talk, vec![("mara".to_string(), "one".to_string())]);
+
+    assert_eq!(o.ui.get_toast_text(), "", "the backlog of an open is not announced");
 }
 
 /// **A channel left selected behind another surface still counts.** Being
@@ -122,6 +124,31 @@ fn a_channel_selected_but_not_on_screen_keeps_its_unread_count() {
     o.mirror();
     o.mirror();
     assert_eq!(o.ui.get_group_unread(), 0, "on screen is read");
+}
+
+/// **A post arriving after the first pass raises the toast** - through
+/// the real gather, with the first pass's record emptied to stand in for
+/// "arrived since".
+#[test]
+fn a_post_arriving_on_an_unvoted_vote_toasts_author_and_title() {
+    let o = Opened::new(workspace_with_a_discussed_vote);
+    assert_eq!(o.ui.get_toast_text(), "");
+    o.chat_ui.lock().expect("ui state").talk_seen = Some(std::collections::HashSet::new());
+    o.mirror();
+    let title = surface_tab(&o.ui, "organization")
+        .and_then(|s| s.pending.row_data(0))
+        .expect("the open vote")
+        .text;
+    assert_eq!(o.ui.get_toast_text(), format!("mara on {title}"));
+}
+
+/// **The mirror shows the toast a bundle carries.**
+#[test]
+fn a_bundles_discussion_toast_is_shown() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_surfaces(&ui, &SurfacesBundle { talk_toast: Some("mara on a".to_string()), ..SurfacesBundle::default() });
+    assert_eq!(ui.get_toast_text(), "mara on a");
 }
 
 /// The chat tab with `unread` messages and an Organization tab holding

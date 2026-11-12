@@ -1288,6 +1288,7 @@ lexicon! {
     mem_poke: "Poke member", "Mitglied anstupsen";
     toast_poked: "poked you", "hat dich angestupst";
     toast_poke_sent: "Poked:", "Angestupst:";
+    toast_talk_on: "on", "zu";
     set_tor_embedded_missing: "\"embedded\" needs a build with --features embedded-tor - use a local Tor daemon instead.", "\"embedded\" braucht einen Build mit --features embedded-tor - nutze stattdessen einen lokalen Tor-Daemon.";
     // settings → Anonymity network: the Tor connectivity probe. The ladder's
     // rungs are worded so that NONE of them can be mistaken for a working Tor

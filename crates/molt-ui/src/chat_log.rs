@@ -410,3 +410,37 @@ fn vote_post(m: &ChatMessage) -> Option<(&ChatMessage, u64)> {
         _ => None,
     }
 }
+
+/// The newest discussion post worth a toast, as (author, proposal):
+/// another member's, in an open vote this seat has not voted on, off
+/// screen, not weighed by an earlier pass. The first pass only records.
+pub(crate) fn discussion_toast<'a>(
+    seen: &mut Option<std::collections::HashSet<molt_core::MessageId>>,
+    msgs: &'a [ChatMessage],
+    on_screen: Option<&ChannelRef>,
+    pending: &'a [ProposalView],
+    me: &str,
+) -> Option<(&'a str, &'a ProposalView)> {
+    let posts: Vec<(&ChatMessage, u64)> = msgs
+        .iter()
+        .filter_map(vote_post)
+        .filter(|(m, _)| !m.id.is_nil() && m.from != me)
+        .collect();
+    let before = seen.replace(posts.iter().map(|(m, _)| m.id).collect())?;
+    posts
+        .into_iter()
+        .rev()
+        .filter(|(m, _)| !before.contains(&m.id) && on_screen != Some(&m.channel))
+        .find_map(|(m, vote)| {
+            let open = pending
+                .iter()
+                .find(|p| p.id.0 == vote && !p.approved_by_me && !p.declined_by_me)?;
+            Some((m.from.as_str(), open))
+        })
+}
+
+/// The toast naming a discussion post.
+pub(crate) fn talk_toast_text(lang: i32, author: &str, title: &str) -> String {
+    let l = if lang == 1 { crate::i18n::Lexicon::de() } else { crate::i18n::Lexicon::en() };
+    format!("{author} {} {title}", l.toast_talk_on)
+}

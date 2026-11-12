@@ -1480,6 +1480,9 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     }
 
     ui.set_group_unread(b.group_unread);
+    if let Some(toast) = &b.talk_toast {
+        ui.invoke_show_toast(toast.as_str().into());
+    }
 
     // the status info strip (founding date + mock activity trio)
     ui.set_org_founded(b.org_stats.founded.as_str().into());

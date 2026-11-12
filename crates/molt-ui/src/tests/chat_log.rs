@@ -300,3 +300,96 @@ fn a_vote_card_previews_the_last_three_member_posts() {
     assert_eq!(talk[&8].len(), 1);
     assert_eq!(talk.len(), 2, "a vote without posts has no preview");
 }
+
+/// The toast decision over one arriving post, `seen` already past the
+/// first pass.
+fn toast_for(
+    msgs: &[ChatMessage],
+    on_screen: Option<&ChannelRef>,
+    pending: &[ProposalView],
+) -> Option<(String, u64)> {
+    let mut seen = Some(std::collections::HashSet::new());
+    discussion_toast(&mut seen, msgs, on_screen, pending, "walter")
+        .map(|(who, p)| (who.to_string(), p.id.0))
+}
+
+fn open_vote(id: u64) -> ProposalView {
+    super::channels::view_of(id, "a", ProposalState::Proposed)
+}
+
+/// **Another member's post in an open vote this seat has not voted on
+/// raises one toast naming the author and the vote.**
+#[test]
+fn a_post_on_a_vote_still_missing_the_own_vote_toasts() {
+    let msgs = [post(1, "mara", "one", 7)];
+    assert_eq!(toast_for(&msgs, None, &[open_vote(7)]), Some(("mara".to_string(), 7)));
+    assert_eq!(talk_toast_text(0, "mara", "a"), "mara on a");
+    assert_eq!(talk_toast_text(1, "mara", "a"), "mara zu a");
+}
+
+#[test]
+fn the_own_post_does_not_toast() {
+    assert_eq!(toast_for(&[post(1, "walter", "one", 7)], None, &[open_vote(7)]), None);
+}
+
+#[test]
+fn a_post_on_a_decided_vote_does_not_toast() {
+    // a decided vote is not in the Proposed-only pending read
+    assert_eq!(toast_for(&[post(1, "mara", "one", 7)], None, &[open_vote(8)]), None);
+}
+
+#[test]
+fn a_post_on_a_vote_already_voted_on_does_not_toast() {
+    let msgs = [post(1, "mara", "one", 7)];
+    let mut approved = open_vote(7);
+    approved.approved_by_me = true;
+    assert_eq!(toast_for(&msgs, None, &[approved]), None);
+    let mut declined = open_vote(7);
+    declined.declined_by_me = true;
+    assert_eq!(toast_for(&msgs, None, &[declined]), None);
+}
+
+#[test]
+fn a_post_in_the_discussion_on_screen_does_not_toast() {
+    let msgs = [post(1, "mara", "one", 7)];
+    let here = ChannelRef::Patch { id: ProposalId(7) };
+    assert_eq!(toast_for(&msgs, Some(&here), &[open_vote(7)]), None);
+    let other = ChannelRef::Patch { id: ProposalId(8) };
+    assert!(toast_for(&msgs, Some(&other), &[open_vote(7)]).is_some());
+}
+
+#[test]
+fn system_lines_and_deleted_posts_do_not_toast() {
+    let mut deleted = post(2, "mara", "", 7);
+    deleted.deleted_by = Some("mara".into());
+    let msgs = [post(1, "mara", "⚖", 7).with_kind(molt_core::ChatKind::System), deleted];
+    assert_eq!(toast_for(&msgs, None, &[open_vote(7)]), None);
+}
+
+/// **The backlog of a freshly opened workspace is recorded, not
+/// announced** - and no post is ever announced twice.
+#[test]
+fn the_first_pass_and_a_repeated_post_do_not_toast() {
+    let pending = [open_vote(7)];
+    let mut seen = None;
+    let backlog = [post(1, "mara", "one", 7)];
+    assert!(discussion_toast(&mut seen, &backlog, None, &pending, "walter").is_none());
+    assert!(seen.is_some(), "the first pass arms the next one");
+
+    let grown = [post(1, "mara", "one", 7), post(2, "mara", "two", 7), post(3, "ingrid", "three", 7)];
+    let hit = discussion_toast(&mut seen, &grown, None, &pending, "walter").map(|(who, _)| who);
+    assert_eq!(hit, Some("ingrid"), "one toast per pass: the newest post");
+    assert!(discussion_toast(&mut seen, &grown, None, &pending, "walter").is_none());
+}
+
+/// A post weighed while it could not toast (the vote was on screen) stays
+/// weighed: leaving the discussion does not announce it afterwards.
+#[test]
+fn a_post_read_on_screen_is_not_announced_after_leaving() {
+    let pending = [open_vote(7)];
+    let msgs = [post(1, "mara", "one", 7)];
+    let here = ChannelRef::Patch { id: ProposalId(7) };
+    let mut seen = Some(std::collections::HashSet::new());
+    assert!(discussion_toast(&mut seen, &msgs, Some(&here), &pending, "walter").is_none());
+    assert!(discussion_toast(&mut seen, &msgs, None, &pending, "walter").is_none());
+}
