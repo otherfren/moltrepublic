@@ -749,7 +749,7 @@ fn the_settings_tabs_stay_one_line_and_the_bar_wraps_when_it_must() {
     let tabs: Vec<_> =
         i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SettingsTab")
             .collect();
-    assert_eq!(tabs.len(), 10, "ten tabs with a workspace open");
+    assert_eq!(tabs.len(), 11, "eleven tabs with a workspace open");
     for t in &tabs {
         assert!(
             t.size().height <= 30.0,
@@ -764,7 +764,7 @@ fn the_settings_tabs_stay_one_line_and_the_bar_wraps_when_it_must() {
     let narrow: Vec<_> =
         i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SettingsTab")
             .collect();
-    assert_eq!(narrow.len(), 10, "no tab may disappear when the bar wraps");
+    assert_eq!(narrow.len(), 11, "no tab may disappear when the bar wraps");
     for t in &narrow {
         assert!(
             t.size().height <= 30.0,
