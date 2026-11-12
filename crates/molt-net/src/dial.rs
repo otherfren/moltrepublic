@@ -472,6 +472,13 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "embedded-tor"))]
+    #[tokio::test]
+    async fn a_build_without_the_embedded_client_has_nothing_to_reset() {
+        let err = reset_embedded_tor().await.expect_err("refused");
+        assert_eq!(err.to_string(), "tor misconfigured: embedded Tor not built");
+    }
+
     /// Two lanes to one host must never share a circuit: distinct SOCKS
     /// credentials per lane, stable for equal input, and the base dialer's
     /// credential is a third one.

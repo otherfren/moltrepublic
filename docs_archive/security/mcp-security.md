@@ -281,6 +281,11 @@ Consequences worth knowing before opening the port:
 * `export_workspace` writes the same seed-carrying blob the GUI does:
   blob + passphrase restores the seat.
 
+* `net_reset_tor` deletes the embedded Tor client's state and cache, entry
+  guards included (`docs_archive/transport/tor_transport_implementation.md` §9). Each
+  call picks new guards; a client that calls it routinely gives up what
+  guards protect. Seat scope only.
+
 Still open (product): a ritual in flight is abandoned as a side effect of
 `create_start` / `join_start` / `recover_start` / `open_workspace` from
 any surface — a griefing primitive against the human's own in-flight

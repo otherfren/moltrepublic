@@ -461,3 +461,78 @@ test files + CI wiring only.
 - **Onion SNI** — cert pin ignores the hostname, so onion+clearnet share one
   fingerprint; confirm rustls accepts an `.onion` `ServerName` (it is a valid DNS
   name syntactically).
+
+## 9. Embedded client recovery: rebuild and reset (BUILT 2026-11-12)
+
+Field report: a node on the embedded client ran for a day, then no dial
+succeeded, and a restart did not help. The client used to be created once
+per process and its state under `~/.moltrepublic/arti` never left the disk.
+Two remedies, deliberately different in what they keep.
+
+### 9.1 Automatic rebuild - keeps everything on disk
+
+`crates/molt-net/src/tor_health.rs` (pure, in the default build) decides,
+`tor_embedded.rs` acts. The evidence is one classification per dial:
+
+| Outcome | Reads as |
+|---|---|
+| stream opened; or arti's `ErrorKind` says the far end answered (`RemoteConnectionRefused`, `RemoteHostNotFound`, `OnionServiceNotFound`, `OnionServiceNotRunning`, ...) | **alive** - clears the record and the backoff |
+| `TorNetworkTimeout`, `TransientFailure`, `CircuitCollapse`, `CircuitRefused`, `RelayTooBusy`, `NoExit`, a dial its caller dropped | **ambiguous** - one dead onion service looks the same |
+| every other kind (`TorAccessFailed`, `TorDirectoryUnusable`, `DirectoryExpired`, `NoPath`, `LocalNetworkError`, state and cache errors, ...), a failed bootstrap | **client** |
+
+The client is unusable when, for 10 minutes without one alive outcome,
+either
+
+- arti's own `bootstrap_status()` is not `ready_for_traffic()` or reports a
+  `blocked()` reason (sampled at each failed dial), or
+- at least 3 dials failed and they are not all ambiguous failures to ONE
+  host.
+
+One dead relay therefore never triggers it: a dead destination is either
+"alive" by its error kind, or ambiguous on a single host, or interleaved
+with successes elsewhere. A TLS refusal happens above the dialer, on an
+opened stream.
+
+Then the client is dropped and a new one bootstraps from the SAME state and
+cache directories: entry guards, circuit timeouts and the directory cache
+stay. The first rebuild comes after 10 minutes; the next ones no sooner
+than 20, 40, then 60 minutes after the previous. Any alive outcome resets
+that. One rebuild at a time. A dial in flight keeps the client it started
+on (the swap waits up to 30 s for them, so two clients do not contend for
+the state lock); its outcome is not counted against the new client.
+Isolation tokens survive a rebuild.
+
+### 9.2 Manual reset - removes state and cache
+
+`Command::NetResetTor` (MCP `net_reset_tor`, seat scope; Settings ›
+Anonymity network, shown for the embedded mode) drops the client and
+deletes
+
+- `~/.moltrepublic/arti/state` - `state/guards.json`,
+  `state/circuit_timeouts.json`, `state/state.lock`, the (unused) `keystore`
+- `~/.moltrepublic/arti/cache` - `dir.sqlite3`, `dir_blobs/`, `dir.lock`
+
+and forgets the isolation tokens. The next dial bootstraps from scratch. A
+bootstrap in flight is interrupted. Refused, with nothing removed, unless
+the saved route is `tor` / `embedded`, and on a build without the feature.
+
+The directory is shared by every `moltd` of the user, so the reset removes
+it for all of them; a second running process carries on with the files it
+holds open.
+
+### 9.3 Why only the manual path removes the guards
+
+A Tor client keeps a small, long-lived guard set so that an adversary who
+runs some relays is picked as the first hop rarely, not eventually. A
+client that picks fresh guards whenever something looks stuck re-rolls that
+dice on every hiccup - and an adversary able to cause hiccups could force
+the re-roll. So the automatic path never deletes `guards.json`; giving the
+guards up is a decision a human (or the seat's operator) takes knowingly.
+
+### 9.4 Log lines
+
+One line each, `tor=embedded event=...`: `bootstrap_start`, `bootstrap_ok`
+/ `bootstrap_failed` / `bootstrap_abandoned` (`ms`, `error`), `health_bad`
+(`reason=not_ready | all_dials_failing`, once per bad spell),
+`rebuild_start` / `rebuild_ok` / `rebuild_failed` (`count`, `reason`, `ms`),
+`reset` (`removed`).

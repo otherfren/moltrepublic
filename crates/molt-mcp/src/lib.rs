@@ -2671,6 +2671,14 @@ pub fn tools() -> Vec<ToolDef> {
             },
         },
         ToolDef {
+            name: "net_reset_tor",
+            command: "net_reset_tor",
+            scope: Scope::Seat,
+            description: "Reset the EMBEDDED Tor client (settings.anonymity = \"tor\", tor_mode = \"embedded\"): drops the in-process client and deletes its state and cache under ~/.moltrepublic/arti, so the next dial bootstraps from scratch. COST: new entry guards and a full directory download - a last resort when nothing connects, not a routine step; the node already rebuilds a stuck client by itself and keeps its guards. Returns when the removal is done. Refused with \"embedded Tor not in use\" on any other route, \"embedded Tor not built\" on a build without it; nothing is removed then.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::NetResetTor),
+        },
+        ToolDef {
             name: "net_list_backups",
             command: "net_list_backups",
             scope: Scope::Seat,
@@ -4273,6 +4281,12 @@ pub(crate) mod tests {
         // a present view of the wrong type is an error, never ignored
         assert!(build("read_state", &json!({ "surface": "chat", "view": 5 })).is_err());
         assert!(build("read_state", &json!({ "surface": "chat", "view": ["today"] })).is_err());
+    }
+
+    #[test]
+    fn net_reset_tor_is_a_seat_tool_without_arguments() {
+        assert!(matches!(build("net_reset_tor", &json!({})).expect("builds"), Command::NetResetTor));
+        assert!(matches!(tool_named("net_reset_tor").scope, Scope::Seat), "never the read-only key");
     }
 
     #[test]

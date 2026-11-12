@@ -5422,6 +5422,12 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// Reset the embedded Tor client: drop it and remove its on-disk state
+    /// and cache, so the next dial bootstraps from scratch. This picks new
+    /// entry guards, so it is the operator's act only - the automatic
+    /// rebuild keeps them. Refused unless the saved route is `tor` /
+    /// `embedded`.
+    NetResetTor,
     /// List the configured S3 bucket's backup objects (the settings backup
     /// table's refresh): a SigV4-signed ListObjectsV2 under the `molt/`
     /// prefix over the configured dialer (Tor when enabled — fail-closed),

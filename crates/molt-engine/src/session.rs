@@ -936,6 +936,27 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Reset the embedded Tor client ([`molt_core::Command::NetResetTor`]).
+    /// The removal runs off the actor and answers through the deferred slot.
+    pub(crate) fn cmd_net_reset_tor(&mut self) -> Result<Reply, MoltError> {
+        let s = &self.session.settings;
+        if s.anonymity != "tor" || s.tor_mode != "embedded" {
+            return Err(MoltError::Settings("embedded Tor not in use".to_string()));
+        }
+        let Some(reply) = self.deferred_reply.take() else {
+            return Err(MoltError::Engine("tor reset: no reply channel".to_string()));
+        };
+        tokio::spawn(async move {
+            let out = match molt_net::dial::reset_embedded_tor().await {
+                Ok(_) => Ok(Reply::Ack),
+                Err(molt_net::NetError::TorMisconfigured(why)) => Err(MoltError::Settings(why)),
+                Err(e) => Err(MoltError::Settings(e.to_string())),
+            };
+            let _ = reply.send(out);
+        });
+        Ok(Reply::Ack)
+    }
+
     /// A changed anonymity configuration (network / tor mode / SOCKS port)
     /// invalidates the Tor verdict: it described the OLD setting, and a
     /// "circuit" badge must never be read as a statement about a

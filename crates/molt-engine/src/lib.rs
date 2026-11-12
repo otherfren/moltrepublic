@@ -2444,6 +2444,7 @@ impl State {
             Command::NetTestTorResult { result, generation } => {
                 self.cmd_net_test_tor_result(result, generation)
             }
+            Command::NetResetTor => self.cmd_net_reset_tor(),
             Command::NetListBackups => self.cmd_net_list_backups(),
             Command::NetListBackupsResult {
                 result,
