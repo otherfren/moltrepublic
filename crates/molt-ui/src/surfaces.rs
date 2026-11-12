@@ -16,8 +16,8 @@ use crate::channels::{
     selected_channel_org, update_known_proposals, KnownProposal,
 };
 use crate::chat_log::{
-    annotate_chat_log, chat_line, chat_messages, discussion_toast, merge_by_time,
-    patch_system_lines, quote_sources, talk_previews, talk_toast_text, ChatViewCtx,
+    annotate_chat_log, chat_line, chat_messages, merge_by_time, patch_system_lines, quote_sources,
+    talk_feed, talk_previews, ChatViewCtx, TalkFeed,
 };
 use crate::images::avatar_cache_key;
 use crate::labels::{
@@ -190,8 +190,9 @@ pub(crate) struct SurfacesBundle {
     pub(crate) group_unread: i32,
     /// No member has posted in the selected channel yet.
     pub(crate) selected_undiscussed: bool,
-    /// A discussion post to announce ([`discussion_toast`]), rendered.
-    pub(crate) talk_toast: Option<String>,
+    /// The discussion posts this pass saw (`None` = the chat read failed,
+    /// which must not pass for the backlog-recording first landing).
+    pub(crate) talk: Option<TalkFeed>,
     /// The vault's read model (`None` = no vault surface in this charter).
     pub(crate) vault: Option<molt_core::vault::VaultView>,
     /// The purse's read model, read whether or not the nav lists the
@@ -421,8 +422,8 @@ pub(crate) struct ChatUiState {
     /// timestamp, so the patch-channel system lines interleave at this
     /// first-seen approximation (documented in `patch_system_lines`).
     pub(crate) first_seen: HashMap<u64, u64>,
-    /// The discussion posts already weighed for a toast (`None` = no pass
-    /// yet: the backlog never toasts).
+    /// The discussion posts a LANDED bundle already weighed for a toast
+    /// (`None` = none landed yet: the backlog never toasts).
     pub(crate) talk_seen: Option<std::collections::HashSet<molt_core::MessageId>>,
     /// Everything this UI ever learned about a proposal from `pending` —
     /// the read contract's `pending` is Proposed-only, so a sealed/closed
@@ -1161,7 +1162,7 @@ pub(crate) async fn gather_surfaces(
     };
     let chain_len = chain_rows.len();
     let uploads_total = uploads.len();
-    let (unread, first_seen, known, org_view, list_pages, mut uploads, mut persistent, talk_toast) = {
+    let (unread, first_seen, known, org_view, list_pages, mut uploads, mut persistent) = {
         // …and here for the same reason: this is the chat pane's own
         // bookkeeping, and losing the mirror is worse than working from a
         // state some other panic left mid-update
@@ -1178,13 +1179,6 @@ pub(crate) async fn gather_surfaces(
             st.first_seen.entry(p.id.0).or_insert(now);
         }
         update_known_proposals(&mut st.proposals, &all_pending, &all_declined, &applied_by_surface);
-        // a failed chat read must not pass for the backlog-recording first pass
-        let talk_toast = full_chat
-            .as_ref()
-            .and_then(|_| {
-                discussion_toast(&mut st.talk_seen, &full_msgs, on_screen, &all_pending, &member)
-            })
-            .map(|(who, p)| talk_toast_text(lang, who, &display_title(lang, &p.payload)));
         // the paged proposal-outcome lists: re-base every stored page
         // against its list's CURRENT length (a shrunk list must never
         // leave the view on a page that no longer exists), then capture
@@ -1222,7 +1216,6 @@ pub(crate) async fn gather_surfaces(
             list_pages,
             uploads,
             persistent,
-            talk_toast,
         )
     };
     // the Members table's presentation pass - same rule, the engine's
@@ -1289,6 +1282,9 @@ pub(crate) async fn gather_surfaces(
         _ => ProposalRowData::default(),
     };
     let talk = talk_previews(lang, &full_msgs);
+    let talk_feed_now = full_chat
+        .as_ref()
+        .map(|_| talk_feed(lang, &full_msgs, on_screen, &all_pending, &member));
     let ctx = ChatViewCtx {
         selected,
         proposals: all_pending,
@@ -1372,7 +1368,7 @@ pub(crate) async fn gather_surfaces(
         org_stats,
         group_unread,
         selected_undiscussed,
-        talk_toast,
+        talk: talk_feed_now,
         vault,
         wallet: purse,
         workspace: active_ws.clone(),

@@ -1093,7 +1093,7 @@ pub(crate) async fn push_surfaces(
             return;
         }
         if let Some(ui) = weak.upgrade() {
-            apply_surfaces(&ui, &bundle);
+            land_surfaces(&ui, &chat_ui, &bundle);
             tracing::debug!(
                 gen = my_gen,
                 chat_rows = ui
@@ -1111,6 +1111,19 @@ pub(crate) async fn push_surfaces(
     // surfaces-only change (a chat message arriving) left the published
     // snapshot stale until the next SESSION push
     publish_ui_state(wallet, weak).await;
+}
+
+/// Apply a bundle that LANDED and raise its discussion toast: only here do
+/// its posts count as weighed.
+pub(crate) fn land_surfaces(ui: &AppWindow, chat_ui: &Arc<Mutex<ChatUiState>>, b: &SurfacesBundle) {
+    apply_surfaces(ui, b);
+    let toast = match (&b.talk, chat_ui.lock()) {
+        (Some(feed), Ok(mut st)) => feed.land(&mut st.talk_seen),
+        _ => None,
+    };
+    if let Some(toast) = toast {
+        ui.invoke_show_toast(toast.into());
+    }
 }
 
 /// Build the Slint surface models from a bundle (on the UI thread). The rows
@@ -1481,9 +1494,6 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     }
 
     ui.set_group_unread(b.group_unread);
-    if let Some(toast) = &b.talk_toast {
-        ui.invoke_show_toast(toast.as_str().into());
-    }
 
     // the status info strip (founding date + mock activity trio)
     ui.set_org_founded(b.org_stats.founded.as_str().into());

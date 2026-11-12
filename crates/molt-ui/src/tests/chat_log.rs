@@ -301,16 +301,23 @@ fn a_vote_card_previews_the_last_three_member_posts() {
     assert_eq!(talk.len(), 2, "a vote without posts has no preview");
 }
 
-/// The toast decision over one arriving post, `seen` already past the
-/// first pass.
+/// One pass over `msgs`, landed on `seen`: the toast it raises.
+fn land(
+    seen: &mut Option<std::collections::HashSet<MessageId>>,
+    msgs: &[ChatMessage],
+    on_screen: Option<&ChannelRef>,
+    pending: &[ProposalView],
+) -> Option<String> {
+    talk_feed(0, msgs, on_screen, pending, "walter").land(seen)
+}
+
+/// [`land`] with the first pass already behind it.
 fn toast_for(
     msgs: &[ChatMessage],
     on_screen: Option<&ChannelRef>,
     pending: &[ProposalView],
-) -> Option<(String, u64)> {
-    let mut seen = Some(std::collections::HashSet::new());
-    discussion_toast(&mut seen, msgs, on_screen, pending, "walter")
-        .map(|(who, p)| (who.to_string(), p.id.0))
+) -> Option<String> {
+    land(&mut Some(std::collections::HashSet::new()), msgs, on_screen, pending)
 }
 
 fn open_vote(id: u64) -> ProposalView {
@@ -322,9 +329,9 @@ fn open_vote(id: u64) -> ProposalView {
 #[test]
 fn a_post_on_a_vote_still_missing_the_own_vote_toasts() {
     let msgs = [post(1, "mara", "one", 7)];
-    assert_eq!(toast_for(&msgs, None, &[open_vote(7)]), Some(("mara".to_string(), 7)));
-    assert_eq!(talk_toast_text(0, "mara", "a"), "mara on a");
-    assert_eq!(talk_toast_text(1, "mara", "a"), "mara zu a");
+    assert_eq!(toast_for(&msgs, None, &[open_vote(7)]), Some("mara on a".to_string()));
+    let de = talk_feed(1, &msgs, None, &[open_vote(7)], "walter").land(&mut Some(Default::default()));
+    assert_eq!(de, Some("mara zu a".to_string()));
 }
 
 #[test]
@@ -373,13 +380,13 @@ fn the_first_pass_and_a_repeated_post_do_not_toast() {
     let pending = [open_vote(7)];
     let mut seen = None;
     let backlog = [post(1, "mara", "one", 7)];
-    assert!(discussion_toast(&mut seen, &backlog, None, &pending, "walter").is_none());
-    assert!(seen.is_some(), "the first pass arms the next one");
+    assert!(land(&mut seen, &backlog, None, &pending).is_none());
+    assert!(seen.is_some(), "the first landing arms the next one");
 
     let grown = [post(1, "mara", "one", 7), post(2, "mara", "two", 7), post(3, "ingrid", "three", 7)];
-    let hit = discussion_toast(&mut seen, &grown, None, &pending, "walter").map(|(who, _)| who);
-    assert_eq!(hit, Some("ingrid"), "one toast per pass: the newest post");
-    assert!(discussion_toast(&mut seen, &grown, None, &pending, "walter").is_none());
+    let hit = land(&mut seen, &grown, None, &pending);
+    assert_eq!(hit, Some("ingrid on a".to_string()), "one toast per pass: the newest post");
+    assert!(land(&mut seen, &grown, None, &pending).is_none());
 }
 
 /// A post weighed while it could not toast (the vote was on screen) stays
@@ -390,6 +397,26 @@ fn a_post_read_on_screen_is_not_announced_after_leaving() {
     let msgs = [post(1, "mara", "one", 7)];
     let here = ChannelRef::Patch { id: ProposalId(7) };
     let mut seen = Some(std::collections::HashSet::new());
-    assert!(discussion_toast(&mut seen, &msgs, Some(&here), &pending, "walter").is_none());
-    assert!(discussion_toast(&mut seen, &msgs, None, &pending, "walter").is_none());
+    assert!(land(&mut seen, &msgs, Some(&here), &pending).is_none());
+    assert!(land(&mut seen, &msgs, None, &pending).is_none());
+}
+
+/// **Only a landing weighs a post.** A pass that never lands changes
+/// nothing; two passes over the same post landing one after the other
+/// toast once; a late older pass landing last forgets nothing.
+#[test]
+fn a_pass_that_never_lands_leaves_the_post_for_the_next_one() {
+    let pending = [open_vote(7)];
+    let old = [post(1, "mara", "one", 7)];
+    let new = [post(1, "mara", "one", 7), post(2, "mara", "two", 7)];
+    let mut seen = Some(std::collections::HashSet::new());
+    let _dropped = talk_feed(0, &new, None, &pending, "walter");
+    assert_eq!(seen.as_ref().map(|s| s.len()), Some(0));
+
+    let (first, second) = (talk_feed(0, &new, None, &pending, "walter"), talk_feed(0, &new, None, &pending, "walter"));
+    assert!(first.land(&mut seen).is_some());
+    assert!(second.land(&mut seen).is_none(), "the overlapping pass does not repeat it");
+
+    assert!(talk_feed(0, &old, None, &pending, "walter").land(&mut seen).is_none());
+    assert!(talk_feed(0, &new, None, &pending, "walter").land(&mut seen).is_none(), "nothing was forgotten");
 }

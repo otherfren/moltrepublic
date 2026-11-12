@@ -411,36 +411,57 @@ fn vote_post(m: &ChatMessage) -> Option<(&ChatMessage, u64)> {
     }
 }
 
-/// The newest discussion post worth a toast, as (author, proposal):
-/// another member's, in an open vote this seat has not voted on, off
-/// screen, not weighed by an earlier pass. The first pass only records.
-pub(crate) fn discussion_toast<'a>(
-    seen: &mut Option<std::collections::HashSet<molt_core::MessageId>>,
-    msgs: &'a [ChatMessage],
-    on_screen: Option<&ChannelRef>,
-    pending: &'a [ProposalView],
-    me: &str,
-) -> Option<(&'a str, &'a ProposalView)> {
-    let posts: Vec<(&ChatMessage, u64)> = msgs
-        .iter()
-        .filter_map(vote_post)
-        .filter(|(m, _)| !m.id.is_nil() && m.from != me)
-        .collect();
-    let before = seen.replace(posts.iter().map(|(m, _)| m.id).collect())?;
-    posts
-        .into_iter()
-        .rev()
-        .filter(|(m, _)| !before.contains(&m.id) && on_screen != Some(&m.channel))
-        .find_map(|(m, vote)| {
-            let open = pending
-                .iter()
-                .find(|p| p.id.0 == vote && !p.approved_by_me && !p.declined_by_me)?;
-            Some((m.from.as_str(), open))
-        })
+/// One pass's view of the vote discussions, for the toast: every post of
+/// another member, and the ones worth announcing. Weighed against the
+/// seen-set only when its bundle LANDS ([`TalkFeed::land`]) - a dropped
+/// bundle must not eat the toast.
+#[derive(Default)]
+pub(crate) struct TalkFeed {
+    ids: std::collections::HashSet<molt_core::MessageId>,
+    /// Oldest first, rendered: in an open vote this seat has not voted
+    /// on, off screen.
+    toasts: Vec<(molt_core::MessageId, String)>,
 }
 
-/// The toast naming a discussion post.
-pub(crate) fn talk_toast_text(lang: i32, author: &str, title: &str) -> String {
-    let l = if lang == 1 { crate::i18n::Lexicon::de() } else { crate::i18n::Lexicon::en() };
-    format!("{author} {} {title}", l.toast_talk_on)
+pub(crate) fn talk_feed(
+    lang: i32,
+    msgs: &[ChatMessage],
+    on_screen: Option<&ChannelRef>,
+    pending: &[ProposalView],
+    me: &str,
+) -> TalkFeed {
+    let mut feed = TalkFeed::default();
+    for (m, vote) in msgs.iter().filter_map(vote_post) {
+        if m.id.is_nil() || m.from == me {
+            continue;
+        }
+        feed.ids.insert(m.id);
+        let open = pending
+            .iter()
+            .find(|p| p.id.0 == vote && !p.approved_by_me && !p.declined_by_me);
+        if let Some(p) = open.filter(|_| on_screen != Some(&m.channel)) {
+            let l = if lang == 1 { crate::i18n::Lexicon::de() } else { crate::i18n::Lexicon::en() };
+            let title = display_title(lang, &p.payload);
+            feed.toasts.push((m.id, format!("{} {} {title}", m.from, l.toast_talk_on)));
+        }
+    }
+    feed
+}
+
+impl TalkFeed {
+    /// The toast of the newest post no landed pass has weighed. The first
+    /// landing (`seen` = None) only records the backlog.
+    pub(crate) fn land(
+        &self,
+        seen: &mut Option<std::collections::HashSet<molt_core::MessageId>>,
+    ) -> Option<String> {
+        let Some(seen) = seen else {
+            *seen = Some(self.ids.clone());
+            return None;
+        };
+        let toast = self.toasts.iter().rev().find(|(id, _)| !seen.contains(id)).map(|(_, t)| t.clone());
+        // a union: a late bundle landing after a newer one forgets nothing
+        seen.extend(&self.ids);
+        toast
+    }
 }

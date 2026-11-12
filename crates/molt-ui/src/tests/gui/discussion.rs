@@ -209,15 +209,6 @@ fn an_undiscussed_real_vote_gives_the_diff_the_whole_body() {
     assert!(compose.absolute_position().y + compose.size().height <= 900.0);
 }
 
-/// **The mirror shows the toast a bundle carries.**
-#[test]
-fn a_bundles_discussion_toast_is_shown() {
-    i_slint_backend_testing::init_no_event_loop();
-    let ui = AppWindow::new().expect("headless window");
-    apply_surfaces(&ui, &SurfacesBundle { talk_toast: Some("mara on a".to_string()), ..SurfacesBundle::default() });
-    assert_eq!(ui.get_toast_text(), "mara on a");
-}
-
 /// The chat tab with `unread` messages and an Organization tab holding
 /// one open vote with `posts` discussion posts, `unread` of them unread.
 #[cfg(feature = "live-preview")]
@@ -310,4 +301,19 @@ fn the_compact_card_shows_no_pill_and_no_preview() {
     );
     assert_eq!(rendered(&ui, "ProposalCard::pc-unread"), 0);
     assert_eq!(rendered(&ui, "ProposalCard::pc-talk"), 0);
+}
+
+/// **A dropped bundle does not eat the toast.** A pass whose bundle never
+/// lands (stale by the time the UI thread runs) leaves the post
+/// unweighed: the next bundle that lands raises it, once.
+#[test]
+fn a_dropped_bundle_does_not_eat_the_toast() {
+    let o = Opened::new(workspace_with_a_discussed_vote);
+    o.chat_ui.lock().expect("ui state").talk_seen = Some(std::collections::HashSet::new());
+    let dropped = o.rt.block_on(gather_surfaces(&o.w, &o.chat_ui));
+    assert!(dropped.is_some(), "the pass gathered a bundle");
+    assert_eq!(o.ui.get_toast_text(), "", "nothing landed yet");
+    o.mirror();
+    assert!(o.ui.get_toast_text().starts_with("mara on "), "toast: {:?}", o.ui.get_toast_text());
+    assert_eq!(o.chat_ui.lock().expect("ui state").talk_seen.as_ref().map(|s| s.len()), Some(1));
 }

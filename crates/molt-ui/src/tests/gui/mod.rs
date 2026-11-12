@@ -441,6 +441,6 @@ async fn mirror(
     let weak = ui.as_weak();
     push_session(w, &weak, last, SessionScope::Full, chat_ui).await;
     if let Some((_, b)) = gather_surfaces(w, chat_ui).await {
-        apply_surfaces(ui, &b);
+        land_surfaces(ui, chat_ui, &b);
     }
 }
