@@ -2677,7 +2677,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "net_reset_tor",
             command: "net_reset_tor",
             scope: Scope::Seat,
-            description: "Reset the EMBEDDED Tor client (settings.anonymity = \"tor\", tor_mode = \"embedded\"): drops the in-process client and deletes its state and cache under ~/.moltrepublic/arti, so the next dial bootstraps from scratch. COST: new entry guards and a full directory download - a last resort when nothing connects, not a routine step; the node already rebuilds a stuck client by itself and keeps its guards. Returns when the removal is done. Refused with \"embedded Tor not in use\" on any other route, \"embedded Tor not built\" on a build without it; nothing is removed then.",
+            description: "Reset the EMBEDDED Tor client (anonymity \"tor\", tor_mode \"embedded\", in the saved settings or the ones the node started with): drops the in-process client and deletes its state and cache under ~/.moltrepublic/arti, so the next dial bootstraps from scratch. COST: new entry guards and a full directory download - a last resort when nothing connects, not a routine step; the node already rebuilds a stuck client by itself and keeps its guards. Returns when the removal is done. The directory is shared, so this also removes the guards of every other moltd of this OS user. Refused with \"embedded Tor not in use\" on any other route, \"embedded Tor not built\" on a build without it; nothing is removed then.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::NetResetTor),
         },
