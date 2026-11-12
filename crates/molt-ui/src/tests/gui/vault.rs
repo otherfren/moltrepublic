@@ -113,7 +113,7 @@ fn bundle(vault: Option<VaultView>) -> SurfacesBundle {
         vault: vault.clone(),
         ..snap
     };
-    let tab = surface_data(0, Surface::Vault, &snap, "a", None, &HashMap::new());
+    let tab = surface_data(0, Surface::Vault, &snap, "a", None, &HashMap::new(), &HashMap::new());
     SurfacesBundle {
         member: "a".to_string(),
         surfaces: vec![tab],

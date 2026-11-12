@@ -11,7 +11,9 @@ use serde::Deserialize;
 
 use crate::labels::{file_date_label, file_size_label, when_label};
 use crate::channels::{KnownFate, KnownProposal};
-use crate::surfaces::{display_title, LogLineData, ReactionData, ReceiptData};
+use crate::surfaces::{
+    display_title, one_line, LogLineData, ReactionData, ReceiptData, TalkLineData,
+};
 
 /// One quotable message, as the teaser renderer needs it — built over the
 /// FULL chat log, because a quote may point across channels (the sanctioned
@@ -378,4 +380,33 @@ pub(crate) fn merge_by_time(
     }
     out.extend(sys.map(|(_, l)| l));
     out
+}
+
+/// How many posts a vote card previews.
+pub(crate) const TALK_PREVIEW: usize = 3;
+
+/// The latest member posts of every vote discussion, by proposal id.
+pub(crate) fn talk_previews(lang: i32, msgs: &[ChatMessage]) -> HashMap<u64, Vec<TalkLineData>> {
+    let mut talk: HashMap<u64, Vec<TalkLineData>> = HashMap::new();
+    for (m, vote) in msgs.iter().filter_map(vote_post) {
+        let text = match &m.file {
+            Some(f) if m.body.is_empty() => f.name.clone(),
+            _ => one_line(&m.body),
+        };
+        let when = if m.ts > 0 { when_label(lang, m.ts) } else { String::new() };
+        talk.entry(vote).or_default().push(TalkLineData { who: m.from.clone(), text, when });
+    }
+    for lines in talk.values_mut() {
+        lines.drain(..lines.len().saturating_sub(TALK_PREVIEW));
+    }
+    talk
+}
+
+/// A member's live post in a vote discussion, with the vote's id: no
+/// system line, no wake notice, nothing deleted.
+fn vote_post(m: &ChatMessage) -> Option<(&ChatMessage, u64)> {
+    match &m.channel {
+        ChannelRef::Patch { id } if m.kind.is_user() && m.deleted_by.is_none() => Some((m, id.0)),
+        _ => None,
+    }
 }

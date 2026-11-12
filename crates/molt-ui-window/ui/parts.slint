@@ -259,6 +259,8 @@ export component SurfaceRow inherits Rectangle {
     in property <image> logo;
     in property <bool> logo-set: false;
     out property <bool> shows-logo: root.s.key == "organization" && root.logo-set && LogoFit.square(root.logo);
+    // open votes, plus the chat's unread messages
+    property <int> badge: root.s.pending-count + root.s.unread-count;
     callback chosen();
     height: 46px * Theme.ui-scale;
     border-radius: Theme.win95 ? 0px : 8px;
@@ -309,7 +311,7 @@ export component SurfaceRow inherits Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
         }
-        if root.compact && root.s.pending-count > 0: Rectangle {
+        if root.compact && root.badge > 0: sr-dot := Rectangle {
             x: parent.width - 6px;
             y: -3px;
             width: 10px;
@@ -350,8 +352,8 @@ export component SurfaceRow inherits Rectangle {
                 }
             }
         }
-        if root.s.pending-count > 0: PendingBadge {
-            count: root.s.pending-count;
+        if root.badge > 0: sr-badge := PendingBadge {
+            count: root.badge;
             y: (parent.height - self.height) / 2;
         }
         Text {
@@ -374,7 +376,7 @@ export component SurfaceRow inherits Rectangle {
         changed has-hover => {
             if (root.compact) {
                 if (self.has-hover) {
-                    self.tip-gen = HintTip.show(root.s.pending-count > 0 ? "\{root.s.name} · \{root.s.pending-count}" : root.s.name,
+                    self.tip-gen = HintTip.show(root.badge > 0 ? "\{root.s.name} · \{root.badge}" : root.s.name,
                         root.absolute-position.x + root.width + 8px,
                         root.absolute-position.y + (root.height - 23px) / 2);
                 } else {
@@ -1658,6 +1660,22 @@ export component ProposalCard inherits Rectangle {
                 wrap: word-wrap;
                 horizontal-stretch: 1;
             }
+            // unread posts in this open vote's discussion
+            if !root.compact && !root.read-only && root.p.unread > 0: VerticalLayout {
+                alignment: start;
+                pc-unread := HorizontalLayout {
+                    spacing: 4px;
+                    Text {
+                        text: "💬";
+                        font-family: "Twemoji Mozilla";
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
+                    PendingBadge {
+                        count: root.p.unread;
+                    }
+                }
+            }
             if root.p.patch-op && root.p.proposed != "": AppButton {
                 height: 26px * Theme.ui-scale;
                 y: 0px;
@@ -1992,6 +2010,31 @@ export component ProposalCard inherits Rectangle {
                 color: Theme.faint;
                 font-size: Theme.fs-cap;
                 vertical-alignment: center;
+            }
+        }
+        // the discussion's latest posts; the card's click opens the rest
+        if !root.compact && root.p.talk.length > 0: pc-talk := VerticalLayout {
+            spacing: 3px;
+            for t in root.p.talk: HorizontalLayout {
+                spacing: 8px;
+                Text {
+                    text: t.who;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    font-weight: 700;
+                }
+                Text {
+                    text: t.text;
+                    color: Theme.text;
+                    font-size: Theme.fs-cap;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: t.when;
+                    color: Theme.faint;
+                    font-size: Theme.fs-cap;
+                }
             }
         }
         // approve/decline only while the vote is open (`read-only` gates

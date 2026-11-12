@@ -220,7 +220,7 @@ fn applied_log_lines_carry_their_patch_id() {
         wallet: None,
         board: None,
     };
-    let data = surface_data(0, Surface::Memory, &snap, "petra", None, &HashMap::new());
+    let data = surface_data(0, Surface::Memory, &snap, "petra", None, &HashMap::new(), &HashMap::new());
     assert_eq!(data.log.len(), 2);
     assert_eq!(data.log[0].proposal_id, Some(7));
     assert_eq!(data.log[1].proposal_id, None);
@@ -985,4 +985,34 @@ fn an_adopt_plan_confirms_onion_and_gathers_the_rest_for_one_warning() {
     );
     let onion_only = AdoptPlan::of(&rows[..1]);
     assert!(onion_only.exposed.is_empty() && !onion_only.clearnet && !onion_only.local);
+}
+
+/// **A discussion post refreshes its vote card.** The preview is a nested
+/// model: compared by pointer every row would differ on every push, left
+/// out of the comparison a new post would never reach the card.
+#[test]
+fn a_vote_cards_row_equality_follows_its_discussion_preview() {
+    let line = |text: &str| TalkLineData {
+        who: "mara".to_string(),
+        text: text.to_string(),
+        when: "now".to_string(),
+    };
+    let data = |talk: Vec<TalkLineData>| ProposalRowData { id: 7, talk, ..ProposalRowData::default() };
+    let row = to_proposal_row(&data(vec![line("one")]));
+    assert_eq!(row.talk.row_count(), 1);
+    assert!(crate::models::proposal_row_eq(&row, &to_proposal_row(&data(vec![line("one")]))));
+    assert!(!crate::models::proposal_row_eq(&row, &to_proposal_row(&data(vec![line("two")]))));
+    assert!(!crate::models::proposal_row_eq(&row, &to_proposal_row(&data(Vec::new()))));
+}
+
+/// A pending row carries its vote's preview; a decided one does not.
+#[test]
+fn only_a_pending_row_carries_the_discussion_preview() {
+    let snap = outcome_snapshot(1, 0, 1);
+    let talk = HashMap::from_iter(snap.pending.iter().chain(&snap.declined).map(|p| {
+        (p.id.0, vec![TalkLineData { who: "mara".into(), text: "one".into(), when: String::new() }])
+    }));
+    let data = surface_data(0, Surface::Organization, &snap, "walter", None, &HashMap::new(), &talk);
+    assert_eq!(data.pending[0].talk.len(), 1);
+    assert!(data.declined[0].talk.is_empty());
 }

@@ -134,14 +134,16 @@ pub(crate) fn log_line_eq(a: &LogLine, b: &LogLine) -> bool {
             }
 }
 
-/// [`wiki_block_eq`] for a vote card (`relay_changes`, `votes`).
+/// [`wiki_block_eq`] for a vote card (`relay_changes`, `votes`, `talk`).
 pub(crate) fn proposal_row_eq(a: &ProposalRow, b: &ProposalRow) -> bool {
     models_eq(&a.relay_changes, &b.relay_changes)
         && models_eq(&a.votes, &b.votes)
+        && models_eq(&a.talk, &b.talk)
         && *b
             == ProposalRow {
                 relay_changes: b.relay_changes.clone(),
                 votes: b.votes.clone(),
+                talk: b.talk.clone(),
                 ..a.clone()
             }
 }

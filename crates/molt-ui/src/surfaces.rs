@@ -17,7 +17,7 @@ use crate::channels::{
 };
 use crate::chat_log::{
     annotate_chat_log, chat_line, chat_messages, merge_by_time, patch_system_lines, quote_sources,
-    ChatViewCtx,
+    talk_previews, ChatViewCtx,
 };
 use crate::images::avatar_cache_key;
 use crate::labels::{
@@ -800,6 +800,14 @@ pub(crate) struct ReceiptData {
     /// Whether they have confirmed reading (green) or not yet (yellow).
     pub(crate) read: bool,
 }
+/// One member post of a vote's discussion, as its card previews it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TalkLineData {
+    pub(crate) who: String,
+    pub(crate) text: String,
+    pub(crate) when: String,
+}
+
 /// `Default` = "no decision selected": the compact panel above a chat needs
 /// an empty row when the selected channel is not a decision at all, and the
 /// panel itself is gated on `selected_org` so the empty one never renders.
@@ -854,6 +862,8 @@ pub(crate) struct ProposalRowData {
     /// Unread messages in this proposal's discussion channel (the 💬
     /// button's badge); 0 = caught up.
     pub(crate) unread: i32,
+    /// The discussion's latest member posts (pending cards only).
+    pub(crate) talk: Vec<TalkLineData>,
     /// Why approve is grayed ("" = approvable): a vault deposit this seat
     /// has not verified yet (spec §7).
     pub(crate) blocked: String,
@@ -924,16 +934,17 @@ pub(crate) async fn gather_surfaces(
     // never narrows the read: `ReadState { view: None }` IS the General
     // pane. The engine's `view` axis survives for the agent-facing "unread"
     // slice, which is deliberately not somewhere a human navigates.
-    let (active_ws, lang, mark_read_active) = match wallet.execute(Command::ReadSession).await {
+    let (active_ws, lang, chat_on_screen, mark_read_active) = match wallet.execute(Command::ReadSession).await {
         Ok(Reply::Session(s)) => (
             s.active_workspace.clone(),
             i32::from(s.language == "de"),
+            s.surface == Surface::Chat,
             // only auto-confirm reads when the chat surface is on screen AND
             // this node's read receipts are enabled (off = reveal nothing, so
             // do not even issue the no-op'd command)
             s.surface == Surface::Chat && s.settings.read_receipts,
         ),
-        _ => (String::new(), 0, false),
+        _ => (String::new(), 0, false, false),
     };
     // stamp this push BEFORE the surface reads: any selection change or
     // newer push from here on makes this pass stale, and a stale pass must
@@ -1114,19 +1125,20 @@ pub(crate) async fn gather_surfaces(
     let selected_key = channel_key(&selected);
     // B2: unread comes from the ENGINE's per-channel cursor now (the same
     // count an MCP agent reads) — the on-screen channel renders 0 and its
-    // cursor is advanced below, because being on screen IS being read
+    // cursor is advanced below, because being on screen IS being read.
+    // Selected behind another surface is not on screen.
+    let on_screen = chat_on_screen.then_some(&selected);
     let engine_unread: HashMap<String, usize> = infos
         .iter()
         .map(|i| {
-            let key = channel_key(&i.channel);
-            let u = if key == selected_key { 0 } else { i.unread };
-            (key, u)
+            let u = if on_screen == Some(&i.channel) { 0 } else { i.unread };
+            (channel_key(&i.channel), u)
         })
         .collect();
     if full_chat.is_some()
         && infos
             .iter()
-            .any(|i| channel_key(&i.channel) == selected_key && i.unread > 0)
+            .any(|i| on_screen == Some(&i.channel) && i.unread > 0)
     {
         let _ = wallet
             .execute(Command::MarkChannelRead { channel: selected.clone(), up_to: String::new() })
@@ -1261,6 +1273,7 @@ pub(crate) async fn gather_surfaces(
         }
         _ => ProposalRowData::default(),
     };
+    let talk = talk_previews(lang, &full_msgs);
     let ctx = ChatViewCtx {
         selected,
         proposals: all_pending,
@@ -1311,6 +1324,7 @@ pub(crate) async fn gather_surfaces(
                 &member,
                 (*sf == Surface::Chat).then_some(&ctx),
                 &unread,
+                &talk,
             )
         })
         .collect();
@@ -1374,6 +1388,7 @@ pub(crate) fn surface_data(
     me: &str,
     chat_ctx: Option<&ChatViewCtx>,
     unread: &HashMap<String, usize>,
+    talk: &HashMap<u64, Vec<TalkLineData>>,
 ) -> SurfaceData {
     // the 💬 badge: unread entries in a proposal's discussion channel
     let badge = |row: ProposalRowData| -> ProposalRowData {
@@ -1459,7 +1474,11 @@ pub(crate) fn surface_data(
             let text = vault
                 .and_then(|ctx| vault_title(lang, &p.payload, ctx, pending_replaces(ctx, &p.payload)));
             let blocked = vault.and_then(|v| vault_vote_block(v, p.id.0)).map(|r| crate::i18n::localize_vault_refusal(lang, &r));
-            let row = ProposalRowData { blocked: blocked.unwrap_or_default(), ..row };
+            let row = ProposalRowData {
+                blocked: blocked.unwrap_or_default(),
+                talk: talk.get(&p.id.0).cloned().unwrap_or_default(),
+                ..row
+            };
             badge(match text {
                 Some(text) => ProposalRowData { text, ..row },
                 None => row,
@@ -1613,7 +1632,7 @@ pub(crate) fn to_decided_row(p: &ProposalRowData) -> ProposalRow {
 }
 
 /// Collapse every run of whitespace — newlines included — into one space.
-fn one_line(text: &str) -> String {
+pub(crate) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -1657,6 +1676,16 @@ pub(crate) fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
         applied: p.applied,
         withdrawn: p.withdrawn,
         unread: p.unread,
+        talk: ModelRc::new(VecModel::from(
+            p.talk
+                .iter()
+                .map(|t| crate::TalkLine {
+                    who: t.who.as_str().into(),
+                    text: t.text.as_str().into(),
+                    when: t.when.as_str().into(),
+                })
+                .collect::<Vec<_>>(),
+        )),
         blocked: p.blocked.as_str().into(),
         notes: p.notes.as_str().into(),
         notes_bad: p.notes_bad,
@@ -1845,6 +1874,7 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
         applied: p.state == molt_core::ProposalState::Applied,
         withdrawn: p.withdrawn,
         unread: 0, // filled by the caller where the unread map is at hand
+        talk: Vec::new(),
         blocked: String::new(),
         notes,
         notes_bad,

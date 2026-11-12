@@ -119,6 +119,13 @@ export struct RelayChange {
     url: string,
 }
 
+// One member post of a vote's discussion, previewed on its card.
+export struct TalkLine {
+    who: string,
+    text: string, // one line
+    when: string,
+}
+
 // A pending proposal on a gated surface, with its approval progress.
 export struct ProposalRow {
     id: int,
@@ -155,6 +162,8 @@ export struct ProposalRow {
     withdrawn: bool,
     // unread entries in the vote's discussion channel (💬 badge; 0 = none)
     unread: int,
+    // the discussion's latest member posts (open votes only)
+    talk: [TalkLine],
     // why approve is grayed ("" = approvable): a vault deposit this seat
     // has not verified yet
     blocked: string,
@@ -350,6 +359,8 @@ export struct SurfaceTab {
     gated: bool,
     applied-count: int,
     pending-count: int,
+    // chat only: unread messages, the group plus every listed channel
+    unread-count: int,
     // the approvals table splits pending by the reader's own vote
     // (engine-derived: ProposalView.approved_by_me / snapshot.denied)
     pending-voted-count: int,

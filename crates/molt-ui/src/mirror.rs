@@ -1167,6 +1167,8 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         .filter_map(|i| shown.row_data(i))
         .map(|t| (t.key.to_string(), t))
         .collect();
+    // the Chat row's badge: the group plus every listed channel
+    let chat_unread = b.channels.iter().fold(b.group_unread, |n, c| n.saturating_add(c.unread));
     let tabs: Vec<SurfaceTab> = b
         .surfaces
         .iter()
@@ -1281,6 +1283,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 gated: s.gated,
                 applied_count: s.log.len() as i32,
                 pending_count: s.pending.len() as i32,
+                unread_count: if s.key == "chat" { chat_unread } else { 0 },
                 pending_voted_count: s.pending_voted as i32,
                 pending_my_vote_count: (s.pending.len() - s.pending_voted) as i32,
                 denied_count: s.denied as i32,

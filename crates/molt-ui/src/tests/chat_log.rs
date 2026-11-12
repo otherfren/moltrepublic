@@ -264,3 +264,39 @@ fn quote_indent_groups_by_target_and_alternates_between_neighbors() {
     assert_eq!(log[4].quote_indent, 0, "plain rows sit flush and end the run");
     assert_eq!(log[5].quote_indent, 1, "after a break the next group restarts at 1");
 }
+
+/// A post in vote `vote`'s discussion.
+fn post(id: u8, from: &str, body: &str, vote: u64) -> ChatMessage {
+    ChatMessage::text(MessageId([id; 16]), from, body, u64::from(id))
+        .with_channel(ChannelRef::Patch { id: ProposalId(vote) })
+}
+
+/// **A vote card previews the last three member posts of its own
+/// discussion** - no system line, no wake notice, no deleted post, and
+/// nothing from another channel.
+#[test]
+fn a_vote_card_previews_the_last_three_member_posts() {
+    let mut deleted = post(6, "mara", "", 7);
+    deleted.deleted_by = Some("mara".into());
+    let msgs = vec![
+        post(1, "mara", "one", 7),
+        post(2, "walter", "two", 7),
+        ChatMessage::text(MessageId([3; 16]), "mara", "in the group", 3),
+        post(4, "mara", "three\n\n  spread   out", 7),
+        post(5, "walter", "⚖ #7 summary", 7).with_kind(molt_core::ChatKind::System),
+        deleted,
+        post(8, "walter", "woke", 7).with_kind(molt_core::ChatKind::Wake),
+        post(9, "walter", "four", 7),
+        post(10, "mara", "elsewhere", 8),
+    ];
+    let talk = talk_previews(0, &msgs);
+    let seven: Vec<(&str, &str)> =
+        talk[&7].iter().map(|t| (t.who.as_str(), t.text.as_str())).collect();
+    assert_eq!(
+        seven,
+        vec![("walter", "two"), ("mara", "three spread out"), ("walter", "four")]
+    );
+    assert!(talk[&7].iter().all(|t| !t.when.is_empty()), "each line carries its when label");
+    assert_eq!(talk[&8].len(), 1);
+    assert_eq!(talk.len(), 2, "a vote without posts has no preview");
+}
