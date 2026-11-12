@@ -22,6 +22,8 @@ mod layout;
 #[cfg(feature = "live-preview")]
 mod link_relays;
 #[cfg(feature = "live-preview")]
+mod log_tab;
+#[cfg(feature = "live-preview")]
 mod logo;
 mod mirror;
 #[cfg(feature = "live-preview")]

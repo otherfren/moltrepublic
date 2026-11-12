@@ -30,7 +30,7 @@ fn the_settings_screen_has_exactly_one_close_control() {
     let closed = Rc::new(std::cell::Cell::new(0));
     let seen = closed.clone();
     ui.on_close_settings(move || seen.set(seen.get() + 1));
-    for tab in 0..10 {
+    for tab in 0..11 {
         ui.set_set_tab(tab);
         assert_eq!(labelled(&ui, "×").len(), 1, "tab {tab}: one ×");
         assert!(labelled(&ui, "Close").is_empty(), "tab {tab}: a second close control");
@@ -47,14 +47,15 @@ fn the_settings_screen_has_exactly_one_close_control() {
 fn the_agent_hooks_have_their_own_tab() {
     let (ui, _shown) = settings_window();
     let tabs = Handle::find_by_element_type_name(&ui, "SettingsTab").count();
-    assert_eq!(tabs, 9, "nine tabs without a workspace");
+    assert_eq!(tabs, 10, "ten tabs without a workspace");
     assert_eq!(ui.get_set_tab(), 0);
     assert!(labelled(&ui, "Wake command").is_empty(), "General lost the wake group");
     assert!(!labelled(&ui, "Enable poking").is_empty(), "poking stays on General");
 
-    let mut bar: Vec<Handle> = Handle::find_by_element_type_name(&ui, "SettingsTab").collect();
-    bar.sort_by(|a, b| a.absolute_position().x.total_cmp(&b.absolute_position().x));
-    click(&ui, bar.last().expect("the Agent tab is the last one without a workspace"));
+    let agent = Handle::find_by_element_id(&ui, "AppButton::abtn-label")
+        .find(|e| e.accessible_label().is_some_and(|l| l == "Agent"))
+        .expect("the Agent tab");
+    click(&ui, &agent);
     assert_eq!(ui.get_set_tab(), 9);
     for label in [
         "Wake command",

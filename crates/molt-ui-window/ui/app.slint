@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, LogRun, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
@@ -2569,6 +2569,15 @@ export component AppWindow inherits Window {
     // in-out: the settings tab index is a test seam (headless geometry
     // tests drive the backup table directly)
     in-out property <int> set-tab: 0;
+    // Settings > Error log: the newest log entries, as runs of one tint
+    in property <[LogRun]> log-runs;
+    in property <string> log-path;
+    // the shown entries as text (Copy)
+    in property <string> log-text;
+    // bumped per load: the view is rebuilt pinned to the newest line
+    in property <int> log-gen;
+    in-out property <bool> log-all: false;
+    callback log-load(bool);
     // the backup tab's local↔bucket mapping table (mirrored, built in Rust)
     in property <[BackupRow]> bk-rows;
     // S7: the fetched-sealed outcome (workspace id / honest failure), from
@@ -7715,9 +7724,9 @@ export component AppWindow inherits Window {
                 // The tabs. A TITLE never breaks inside its tab; the BAR
                 // breaks instead, into a second row, as soon as one row
                 // cannot hold them all. The split is MEASURED, not guessed:
-                // `tm0..tm9` carry the titles in the real font (transparent,
+                // `tm0..tm10` carry the titles in the real font (transparent,
                 // never `visible: false` — that lowers to a Clip that would
-                // clip nothing away), `c1..c10` are the widths a row holding
+                // clip nothing away), `c1..c11` are the widths a row holding
                 // the first n tabs needs, and `row1` is the largest n that
                 // still fits. Two rows are enough by construction: the window
                 // floor leaves ~878px of bar, and the widest half of the
@@ -7726,7 +7735,7 @@ export component AppWindow inherits Window {
                     property <length> tgap: 6px;
                     // 2 × SettingsTab.pad
                     property <length> tpad: 16px;
-                    property <int> count: root.active-workspace != "" ? 10 : 9;
+                    property <int> count: root.active-workspace != "" ? 11 : 10;
                     property <length> w0: tm0.preferred-width + self.tpad;
                     property <length> w1: tm1.preferred-width + self.tpad;
                     property <length> w2: tm2.preferred-width + self.tpad;
@@ -7737,6 +7746,7 @@ export component AppWindow inherits Window {
                     property <length> w7: tm7.preferred-width + self.tpad;
                     property <length> w8: tm8.preferred-width + self.tpad;
                     property <length> w9: tm9.preferred-width + self.tpad;
+                    property <length> w10: tm10.preferred-width + self.tpad;
                     property <length> c1: self.w0;
                     property <length> c2: self.c1 + self.tgap + self.w1;
                     property <length> c3: self.c2 + self.tgap + self.w2;
@@ -7747,8 +7757,10 @@ export component AppWindow inherits Window {
                     property <length> c8: self.c7 + self.tgap + self.w7;
                     property <length> c9: self.c8 + self.tgap + self.w8;
                     property <length> c10: self.c9 + self.tgap + self.w9;
+                    property <length> c11: self.c10 + self.tgap + self.w10;
                     property <int> row1: Math.min(self.count,
-                        self.c10 <= self.width ? 10
+                        self.c11 <= self.width ? 11
+                        : self.c10 <= self.width ? 10
                         : self.c9 <= self.width ? 9
                         : self.c8 <= self.width ? 8
                         : self.c7 <= self.width ? 7
@@ -7774,7 +7786,8 @@ export component AppWindow inherits Window {
                     tm6 := Text { text: Strings.set-tab-mcp; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm7 := Text { text: Strings.set-tab-node; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     tm8 := Text { text: Strings.set-tab-agent; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
-                    tm9 := Text { text: Strings.set-tab-chain; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm9 := Text { text: Strings.set-tab-log; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
+                    tm10 := Text { text: Strings.set-tab-chain; color: transparent; font-size: Theme.fs-body; font-weight: 600; }
                     set-tab-rows := VerticalLayout {
                         spacing: 6px;
                         alignment: start;
@@ -7826,6 +7839,11 @@ export component AppWindow inherits Window {
                                 current <=> root.set-tab;
                             }
                             if set-tabs.row1 > 9: SettingsTab {
+                                label: Strings.set-tab-log;
+                                index: 10;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.row1 > 10: SettingsTab {
                                 label: Strings.set-tab-chain;
                                 index: 8;
                                 current <=> root.set-tab;
@@ -7884,7 +7902,12 @@ export component AppWindow inherits Window {
                                 index: 9;
                                 current <=> root.set-tab;
                             }
-                            if set-tabs.count > 9 && set-tabs.row1 <= 9: SettingsTab {
+                            if set-tabs.row1 <= 9: SettingsTab {
+                                label: Strings.set-tab-log;
+                                index: 10;
+                                current <=> root.set-tab;
+                            }
+                            if set-tabs.count > 10 && set-tabs.row1 <= 10: SettingsTab {
                                 label: Strings.set-tab-chain;
                                 index: 8;
                                 current <=> root.set-tab;
@@ -8997,13 +9020,115 @@ export component AppWindow inherits Window {
                                 }
                             }
                         }
+                        // Error log: the node's log file, read on opening
+                        // the tab and on Refresh - no live tail
+                        if root.set-tab == 10: VerticalLayout {
+                            spacing: 8px;
+                            vertical-stretch: 1;
+                            init => {
+                                root.log-load(root.log-all);
+                            }
+                            if root.log-path != "": Rectangle {
+                                height: log-path-text.preferred-height;
+                                log-path-text := Text {
+                                    width: 100%;
+                                    text: root.log-path;
+                                    color: Theme.dim;
+                                    font-size: Theme.fs-cap;
+                                    overflow: elide;
+                                }
+                                TouchArea {
+                                    mouse-cursor: pointer;
+                                    clicked => {
+                                        root.copy-text(root.log-path);
+                                        root.show-toast(Strings.toast-copied);
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                AppButton {
+                                    label: Strings.log-filter-warn;
+                                    primary: !root.log-all;
+                                    clicked => {
+                                        root.log-all = false;
+                                        root.log-load(false);
+                                    }
+                                }
+                                AppButton {
+                                    label: Strings.log-filter-all;
+                                    primary: root.log-all;
+                                    clicked => {
+                                        root.log-all = true;
+                                        root.log-load(true);
+                                    }
+                                }
+                                Rectangle {
+                                    horizontal-stretch: 1;
+                                }
+                                AppButton {
+                                    label: Strings.log-refresh;
+                                    clicked => {
+                                        root.log-load(root.log-all);
+                                    }
+                                }
+                                AppButton {
+                                    label: Strings.log-copy;
+                                    enabled: root.log-text != "";
+                                    clicked => {
+                                        root.copy-text(root.log-text);
+                                        root.show-toast(Strings.toast-copied);
+                                    }
+                                }
+                            }
+                            if root.log-runs.length == 0: Text {
+                                text: root.log-path == "" ? Strings.log-off : Strings.log-empty;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                            }
+                            log-view := Rectangle {
+                                vertical-stretch: 1;
+                                min-height: 100px;
+                                clip: true;
+                                // a fresh Flickable per load: its viewport-y
+                                // binding holds the newest line in view until
+                                // the first scroll replaces it
+                                for gen in [root.log-gen]: Rectangle {
+                                    log-fl := Flickable {
+                                        viewport-width: self.width;
+                                        viewport-height: log-lines.preferred-height;
+                                        viewport-y: min(0px, self.height - self.viewport-height);
+                                        log-lines := VerticalLayout {
+                                            width: log-fl.width;
+                                            padding: 4px;
+                                            padding-right: 12px;
+                                            spacing: 0px;
+                                            alignment: start;
+                                            for r in root.log-runs: Text {
+                                                text: r.text;
+                                                color: r.level == 2 ? Theme.bad : r.level == 1 ? Theme.warn : Theme.dim;
+                                                font-family: "monospace";
+                                                font-size: Theme.fs-cap;
+                                                wrap: char-wrap;
+                                            }
+                                        }
+                                    }
+                                    ScrollHint {
+                                        x: parent.width - 7px;
+                                        view-h: log-fl.height;
+                                        content-h: log-fl.viewport-height;
+                                        scroll-y: log-fl.viewport-y;
+                                    }
+                                }
+                            }
+                        }
                         // list tabs claim the leftover height themselves — the
-                        // backup table (2), the chain history (8) and the relay
+                        // backup table (2), the chain history (8), the log (10) and the relay
                         // pool (5) but only while it HAS rows; every other tab
                         // (and the empty pool) pushes its fields up. Leaving 8
                         // out of this list split the height 50/50 between the
                         // chain list and this spacer.
-                        if root.set-tab != 2 && root.set-tab != 8
+                        if root.set-tab != 2 && root.set-tab != 8 && root.set-tab != 10
                             && !(root.set-tab == 5 && root.relay-rows.length > 0): Rectangle {
                             vertical-stretch: 1;
                         }

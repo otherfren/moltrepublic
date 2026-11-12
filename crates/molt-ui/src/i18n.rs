@@ -1200,6 +1200,13 @@ lexicon! {
     set_tab_node: "Node", "Node";
     set_tab_chain: "Workspace chain history", "Workspace-Chain-History";
     set_tab_agent: "Agent", "Agent";
+    set_tab_log: "Error log", "Fehlerlog";
+    log_filter_warn: "Warnings and errors", "Warnungen und Fehler";
+    log_filter_all: "Everything", "Alles";
+    log_refresh: "Refresh", "Aktualisieren";
+    log_copy: "Copy", "Kopieren";
+    log_empty: "No entries", "Keine Einträge";
+    log_off: "No log file", "Keine Logdatei";
     chain_col_height: "Block", "Block";
     chain_col_what: "Change", "Änderung";
     chain_col_signers: "Signed by", "Signiert von";

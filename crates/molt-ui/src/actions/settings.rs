@@ -3,7 +3,7 @@
 //! (plain, rotate-token, leave-guarded), the S3 and Tor probes, the backup
 //! tab, the WM close guard and the sound preview.
 
-use molt_core::Command;
+use molt_core::{Command, LogEntry, LogFilter, Reply};
 use slint::{ComponentHandle, Global, Model, ModelRc, VecModel};
 
 use crate::alerts::play_alert;
@@ -16,9 +16,69 @@ use crate::settings::{
     settings_draft_differs, stored_settings,
 };
 use crate::app::Ctx;
-use crate::{AppScreen, AppWindow, BackupRow, Strings, Theme};
+use crate::{AppScreen, AppWindow, BackupRow, LogRun, Strings, Theme};
+
+/// The Error log tab's read: everything, or warnings and errors.
+pub(crate) fn log_request(all: bool) -> Command {
+    Command::ReadLog {
+        lines: molt_core::READ_LOG_MAX_LINES,
+        level: if all { LogFilter::All } else { LogFilter::Warn },
+    }
+}
+
+/// Consecutive entries of one tint as one text: a quiet log is a handful
+/// of elements, not one per line.
+pub(crate) fn log_runs(entries: &[LogEntry]) -> Vec<LogRun> {
+    let mut runs: Vec<(i32, String)> = Vec::new();
+    for e in entries {
+        let level = match e.level.as_str() {
+            "ERROR" => 2,
+            "WARN" => 1,
+            _ => 0,
+        };
+        match runs.last_mut() {
+            Some((l, text)) if *l == level => {
+                text.push('\n');
+                text.push_str(&e.text);
+            }
+            _ => runs.push((level, e.text.clone())),
+        }
+    }
+    runs.into_iter().map(|(level, text)| LogRun { level, text: text.into() }).collect()
+}
+
+/// Show a log read in the Error log tab, pinned to its newest line.
+pub(crate) fn apply_log(ui: &AppWindow, path: &str, entries: &[LogEntry]) {
+    let text = entries.iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n");
+    ui.set_log_path(path.into());
+    ui.set_log_text(text.into());
+    ui.set_log_runs(ModelRc::new(VecModel::from(log_runs(entries))));
+    ui.set_log_gen(ui.get_log_gen().wrapping_add(1));
+}
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
+    {
+        let cx = ctx.clone();
+        ui.on_log_load(move |all| {
+            let w = cx.wallet.clone();
+            let weak = cx.weak.clone();
+            cx.rt.spawn(async move {
+                let outcome = w.execute(log_request(all)).await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(ui) = weak.upgrade() else { return };
+                    match outcome {
+                        // a slower answer to the other filter is dropped
+                        Ok(Reply::Log { path, lines }) if ui.get_log_all() == all => {
+                            apply_log(&ui, &path, &lines);
+                        }
+                        Ok(_) => {}
+                        Err(e) => ui.invoke_show_toast_error(error_toast(&ui, &e)),
+                    }
+                });
+            });
+        });
+    }
+
     {
         let cx = ctx.clone();
         ui.on_set_language(move |idx| {

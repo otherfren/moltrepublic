@@ -316,6 +316,12 @@ export struct WorkspaceItem {
     members: [MemberSync], // who is in the DAO + when they last synced
 }
 
+// Settings > Error log: consecutive log entries of one tint, as one text.
+export struct LogRun {
+    text: string,
+    level: int, // 0 = plain, 1 = WARN, 2 = ERROR
+}
+
 // One row of the settings backup table: a local workspace, its backup in
 // the S3 bucket, or both. Built Rust-side from the session's workspaces +
 // the bucket-only orphans; prose cells (size/last) are rendered there too.
@@ -1702,6 +1708,13 @@ export global Strings {
     in property <string> wake-chat-lines;
     in property <string> wake-line-hide;
     in property <string> set-tab-agent;
+    in property <string> set-tab-log;
+    in property <string> log-filter-warn;
+    in property <string> log-filter-all;
+    in property <string> log-refresh;
+    in property <string> log-copy;
+    in property <string> log-empty;
+    in property <string> log-off;
     in property <string> skill-title;
     in property <string> skill-line;
     in property <string> skill-save;
