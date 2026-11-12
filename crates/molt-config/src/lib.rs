@@ -117,6 +117,21 @@ pub fn usable_s3_plaintext_confirmed(endpoint: &str) -> String {
     if molt_core::relay::parse_s3_endpoint(endpoint).is_ok() { endpoint.to_string() } else { String::new() }
 }
 
+/// File name parts of the daily log: `moltd.<UTC date>.log`.
+pub const LOG_FILE_PREFIX: &str = "moltd";
+/// See [`LOG_FILE_PREFIX`].
+pub const LOG_FILE_SUFFIX: &str = "log";
+/// Daily log files kept.
+pub const LOG_KEEP_FILES: usize = 7;
+
+/// Where the node bound to `config_path` logs: a directory of its own, so
+/// two nodes never share a file or prune each other's.
+#[must_use]
+pub fn log_dir(config_path: &Path) -> PathBuf {
+    let stem = config_path.file_stem().unwrap_or_else(|| std::ffi::OsStr::new("moltd"));
+    config_path.parent().unwrap_or_else(|| Path::new("")).join("logs").join(stem)
+}
+
 /// Node-level runtime settings (`[node]`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -147,6 +162,9 @@ pub struct NodeConfig {
     /// Show the poke and test wake lines in the group chat.
     #[serde(default = "default_true")]
     pub wake_chat_lines: bool,
+    /// Write the log to a daily file under [`log_dir`] as well.
+    #[serde(default = "default_true")]
+    pub log_file: bool,
     /// Workspace id to open at start (a service seat). File-owned like
     /// `[ui] renderer`: never in [`Settings`], so a save leaves it alone.
     #[serde(default)]
@@ -164,6 +182,7 @@ impl Default for NodeConfig {
             task_wake_lead_min: molt_core::default_task_wake_lead_min(),
             wake_timeout_secs: molt_core::default_wake_timeout_secs(),
             wake_chat_lines: true,
+            log_file: true,
             open_on_start: String::new(),
         }
     }
@@ -706,6 +725,8 @@ pub struct Settings {
     pub wake_timeout_secs: u64,
     /// Show the poke and test wake lines in the group chat.
     pub wake_chat_lines: bool,
+    /// Write the log to a daily file as well (read at start).
+    pub log_file: bool,
     /// Send (and show) per-message chat read receipts (local privacy switch).
     pub read_receipts: bool,
     /// Anonymity network: `"tor" | "none"`.
@@ -788,6 +809,7 @@ impl Default for Settings {
             task_wake_lead_min: molt_core::default_task_wake_lead_min(),
             wake_timeout_secs: molt_core::default_wake_timeout_secs(),
             wake_chat_lines: true,
+            log_file: true,
             read_receipts: true,
             anonymity: "none".to_string(),
             tor_mode: "local".to_string(),
@@ -863,6 +885,7 @@ impl From<&Config> for Settings {
             task_wake_lead_min: wake_lead_or_default(c.node.task_wake_lead_min),
             wake_timeout_secs: wake_timeout_or_default(c.node.wake_timeout_secs),
             wake_chat_lines: c.node.wake_chat_lines,
+            log_file: c.node.log_file,
             read_receipts: c.storage.read_receipts,
             anonymity: c.transport.anonymity.network.as_str().to_string(),
             tor_mode: c.transport.anonymity.tor.mode.as_str().to_string(),
@@ -938,6 +961,9 @@ poke_wake_command = {poke_wake_command}
 {wake_timeout_line}
 # Show the poke and test wake lines in the group chat.
 {wake_chat_line}
+# Also write the log to <config dir>/logs/<config name>/moltd.<UTC date>.log
+# (daily, 7 files kept). Read at start.
+{log_file_line}
 # Workspace id opened at start without a client (a service seat). "" = none.
 # A phrase-sealed workspace is only logged as a warning: decrypt it over MCP.
 # As a service (scripts/moltd.service): headless = true, and start moltd with
@@ -1068,6 +1094,7 @@ renderer = {renderer}
             &settings.wake_chat_lines.to_string(),
             "true",
         ),
+        log_file_line = off_default_line("log_file", &settings.log_file.to_string(), "true"),
         workspace_dir = toml_str(&settings.workspace_dir),
         s3_backup = settings.s3_backup,
         s3_endpoint = toml_str(&settings.s3_endpoint),
@@ -1199,6 +1226,9 @@ pub fn salvage(text: &str) -> Settings {
         }
         if let Some(b) = node.get("wake_chat_lines").and_then(toml::Value::as_bool) {
             s.wake_chat_lines = b;
+        }
+        if let Some(b) = node.get("log_file").and_then(toml::Value::as_bool) {
+            s.log_file = b;
         }
     }
     if let Some(files) = value.get("files") {
@@ -1559,6 +1589,11 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
         node.remove("wake_chat_lines");
     } else {
         set_bool(node, "wake_chat_lines", false);
+    }
+    if settings.log_file {
+        node.remove("log_file");
+    } else {
+        set_bool(node, "log_file", false);
     }
 
     let storage = table_at(doc.as_table_mut(), &["storage"]);
@@ -2047,6 +2082,35 @@ mod tests {
         assert_eq!(reset, base, "back at the defaults the keys leave the file");
     }
 
+    /// `[node] log_file`: on when absent, written off-default only, and a
+    /// repair keeps an `false`.
+    #[test]
+    fn log_file_defaults_on_and_round_trips() {
+        let old = "[node]\nheadless = true\n";
+        let s = Settings::from(&parse(old).expect("an old config parses"));
+        assert!(s.log_file);
+        let text = render(&Settings::default());
+        assert!(text.contains("# log_file = true"), "{text}");
+        let base = update(old, &s).expect("update");
+        assert!(!base.contains("log_file"), "{base}");
+
+        let off = Settings { log_file: false, ..s.clone() };
+        let saved = update(&base, &off).expect("update");
+        assert!(saved.contains("log_file = false"), "{saved}");
+        assert!(!Settings::from(&parse(&saved).expect("parses")).log_file);
+        assert!(!salvage(&render(&off)).log_file);
+        assert_eq!(update(&saved, &s).expect("update"), base);
+    }
+
+    #[test]
+    fn the_log_dir_is_named_after_the_config_file() {
+        let dir = |p: &str| log_dir(Path::new(p));
+        assert_eq!(dir("/home/u/.moltrepublic/config.toml"), Path::new("/home/u/.moltrepublic/logs/config"));
+        assert_eq!(dir("/srv/a/config1.toml"), Path::new("/srv/a/logs/config1"));
+        assert_ne!(dir("/srv/a/config.toml"), dir("/srv/a/config1.toml"));
+        assert_eq!(dir("node.toml"), Path::new("logs/node"));
+    }
+
     /// An out-of-range value or an unknown reason never reaches the engine.
     #[test]
     fn bad_wake_values_fall_back() {
@@ -2192,6 +2256,7 @@ mod tests {
             task_wake_lead_min: 120,
             wake_timeout_secs: 45,
             wake_chat_lines: false,
+            log_file: false,
             read_receipts: false,
             anonymity: "tor".to_string(),
             tor_mode: "whonix".to_string(),

@@ -28,6 +28,7 @@ pub mod kanban_fold;
 pub mod kanban_review;
 pub mod kanban_view;
 pub mod kanban_wake;
+pub mod log_tail;
 pub mod relay;
 pub mod vault;
 pub mod wallet;
@@ -487,6 +488,9 @@ pub struct SessionSettings {
     /// Show the poke and test wake lines in the group chat.
     #[serde(default = "default_true")]
     pub wake_chat_lines: bool,
+    /// Write the log to a daily file as well. Read at start.
+    #[serde(default = "default_true")]
+    pub log_file: bool,
     /// Send (and show) per-message chat read receipts. A local per-node
     /// privacy switch, on by default; while off this node broadcasts no
     /// receipts and hides others' from its chat view (symmetric).
@@ -651,6 +655,7 @@ impl Default for SessionSettings {
             task_wake_lead_min: default_task_wake_lead_min(),
             wake_timeout_secs: default_wake_timeout_secs(),
             wake_chat_lines: true,
+            log_file: true,
             read_receipts: true,
             font_app: default_font_app(),
             font_nav: default_font_nav(),
@@ -3871,6 +3876,9 @@ pub struct SessionView {
     /// The node's `config.toml`, absolute; `""` on a node without one.
     #[serde(default)]
     pub config_path: String,
+    /// The directory this node's daily log files are in; `""` = no log file.
+    #[serde(default)]
+    pub log_dir: String,
     /// The OPEN workspace's transport kind: `"nostr"` for a relay republic,
     /// `""` otherwise. What the GUI keys transport-specific affordances on
     /// (§10.7 file gating, §6.5 coarse presence) — the engine enforces the
@@ -3943,6 +3951,7 @@ impl Default for SessionView {
             wake_last: String::new(),
             restart_required: Vec::new(),
             config_path: String::new(),
+            log_dir: String::new(),
             transport: String::new(),
             settings: SessionSettings::default(),
             relays: Vec::new(),
@@ -3986,6 +3995,33 @@ pub enum ProposalFilter {
     Decided,
     /// Both.
     All,
+}
+
+/// The most entries one [`Command::ReadLog`] answers.
+pub const READ_LOG_MAX_LINES: usize = 500;
+
+fn default_read_log_lines() -> usize {
+    200
+}
+
+/// Which entries a [`Command::ReadLog`] returns.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogFilter {
+    /// WARN and ERROR only.
+    #[default]
+    Warn,
+    /// Every level.
+    All,
+}
+
+/// One log entry: a line, plus the lines a multi-line message continued on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LogEntry {
+    /// `"ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE"`, `""` if unreadable.
+    pub level: String,
+    /// The entry as written.
+    pub text: String,
 }
 
 /// The one command set. This is the single source of truth for "what the
@@ -5428,6 +5464,16 @@ pub enum Command {
     /// rebuild keeps them. Refused unless the saved route is `tor` /
     /// `embedded`.
     NetResetTor,
+    /// The newest entries of this node's log file ([`Reply::Log`]), read
+    /// across the daily files. SEAT scope: a log names members and relays.
+    ReadLog {
+        /// Entries wanted, capped at [`READ_LOG_MAX_LINES`].
+        #[serde(default = "default_read_log_lines")]
+        lines: usize,
+        /// Which entries.
+        #[serde(default)]
+        level: LogFilter,
+    },
     /// List the configured S3 bucket's backup objects (the settings backup
     /// table's refresh): a SigV4-signed ListObjectsV2 under the `molt/`
     /// prefix over the configured dialer (Tor when enabled — fail-closed),
@@ -6711,6 +6757,13 @@ pub enum Reply {
     UploadBytes {
         /// The bytes; their sha256 equals the requested checksum.
         bytes: Vec<u8>,
+    },
+    /// The log's newest entries, newest LAST ([`Command::ReadLog`]).
+    Log {
+        /// The newest log file; `""` on a node without one.
+        path: String,
+        /// The entries.
+        lines: Vec<LogEntry>,
     },
     /// A stored workspace's recovery phrase ([`Command::RevealSeed`]).
     Seed {

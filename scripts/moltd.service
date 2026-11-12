@@ -7,6 +7,8 @@
 # durable close. tor.mode = "local" needs tor.service; drop the After= line
 # for "embedded" (feature build) or "whonix". A workspace or download dir
 # under /home needs ProtectHome= dropped.
+# Logs: the journal, and /var/lib/molt/logs/config/moltd.<UTC date>.log
+# (7 days kept; node.log_file = false turns the file off).
 [Unit]
 Description=MoltRepublic node
 After=network-online.target tor.service

@@ -235,7 +235,7 @@ DENY_TOOLS=(propose withdraw wiki_edit quests_propose propose_checkpoint poke
             read_ui_state ui_action navigate select_surface select_view
             set_language set_theme set_fonts set_read_receipts
             relay_probe relay_add relay_remove relay_move relay_confirm relay_revoke
-            relay_clearnet_session net_test_s3 net_test_tor net_reset_tor net_list_backups
+            relay_clearnet_session net_test_s3 net_test_tor net_reset_tor read_log net_list_backups
             test_wake clear_notice set_workspace_backup backup_now backup_fetch
             encrypt_workspace decrypt_workspace wiki_export
             restore_start restore_cancel restore_finish

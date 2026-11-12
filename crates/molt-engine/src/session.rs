@@ -957,6 +957,32 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// The log's newest entries ([`molt_core::Command::ReadLog`]); the file
+    /// read runs off the actor and answers through the deferred slot.
+    pub(crate) fn cmd_read_log(
+        &mut self,
+        lines: usize,
+        level: molt_core::LogFilter,
+    ) -> Result<Reply, MoltError> {
+        let dir = self.session.log_dir.clone();
+        if dir.is_empty() {
+            return Ok(Reply::Log { path: String::new(), lines: Vec::new() });
+        }
+        let Some(reply) = self.deferred_reply.take() else {
+            return Err(MoltError::Engine("read log: no reply channel".to_string()));
+        };
+        tokio::task::spawn_blocking(move || {
+            let (path, lines) = crate::log_read::read(
+                std::path::Path::new(&dir),
+                level,
+                lines,
+                crate::log_read::SCAN_MAX_BYTES,
+            );
+            let _ = reply.send(Ok(Reply::Log { path, lines }));
+        });
+        Ok(Reply::Ack)
+    }
+
     /// A changed anonymity configuration (network / tor mode / SOCKS port)
     /// invalidates the Tor verdict: it described the OLD setting, and a
     /// "circuit" badge must never be read as a statement about a
@@ -1114,6 +1140,9 @@ impl State {
         let mut keys = Vec::new();
         if live.headless != boot.headless {
             keys.push("node.headless".to_string());
+        }
+        if live.log_file != boot.log_file {
+            keys.push("node.log_file".to_string());
         }
         if live.mcp_port != boot.mcp_port {
             keys.push("mcp.port".to_string());

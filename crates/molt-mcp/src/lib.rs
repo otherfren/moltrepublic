@@ -1320,6 +1320,7 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
             .get("wake_chat_lines")
             .and_then(Value::as_bool)
             .unwrap_or(d.wake_chat_lines),
+        log_file: args.get("log_file").and_then(Value::as_bool).unwrap_or(d.log_file),
         read_receipts: flag("read_receipts")?,
         // the trickle pace (mirroring §3.2): optional, absent = the defaults
         mirror_publish_interval_secs: args
@@ -2394,6 +2395,7 @@ pub fn tools() -> Vec<ToolDef> {
                     "task_wake_lead_min": { "type": "integer", "description": "minutes before a task start its wake fires, 0..120" },
                     "wake_timeout_secs": { "type": "integer", "description": "seconds a wake may run before its script is killed, 1..86400 (default 600)" },
                     "wake_chat_lines": { "type": "boolean", "description": "show the poke and test wake lines in the group chat (default true)" },
+                    "log_file": { "type": "boolean", "description": "also write the log to a daily file, readable with read_log (default true; applies at the next start)" },
                     "s3_backup": { "type": "boolean" },
                     "s3_endpoint": { "type": "string" },
                     "s3_access_key": { "type": "string" },
@@ -2498,6 +2500,7 @@ pub fn tools() -> Vec<ToolDef> {
                 // set apart: json! is at its recursion limit with the keys above
                 schema["properties"]["wake_timeout_secs"] = json!({ "type": "integer", "description": "seconds a wake may run before its script is killed, 1..86400 (default 600)" });
                 schema["properties"]["wake_chat_lines"] = json!({ "type": "boolean", "description": "show the poke and test wake lines in the group chat (default true)" });
+                schema["properties"]["log_file"] = json!({ "type": "boolean", "description": "also write the log to a daily file, readable with read_log (default true; applies at the next start)" });
                 schema
             },
             build: |args| Ok(Command::PatchSettings { patch: args.clone() }),
@@ -2677,6 +2680,25 @@ pub fn tools() -> Vec<ToolDef> {
             description: "Reset the EMBEDDED Tor client (settings.anonymity = \"tor\", tor_mode = \"embedded\"): drops the in-process client and deletes its state and cache under ~/.moltrepublic/arti, so the next dial bootstraps from scratch. COST: new entry guards and a full directory download - a last resort when nothing connects, not a routine step; the node already rebuilds a stuck client by itself and keeps its guards. Returns when the removal is done. Refused with \"embedded Tor not in use\" on any other route, \"embedded Tor not built\" on a build without it; nothing is removed then.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::NetResetTor),
+        },
+        ToolDef {
+            name: "read_log",
+            command: "read_log",
+            scope: Scope::Seat,
+            description: "Read this node's log file: the newest entries, newest LAST, each with its `level` and the line as written (a multi-line message is one entry), plus the `path` of the newest daily file. `level` \"warn\" (default) returns WARN and ERROR only, \"all\" everything the node logged (INFO by default; RUST_LOG at start decides). Reads back across the daily files, 7 kept. An empty `path` = the node writes no log file (settings.log_file).",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "lines": { "type": "integer", "description": "entries wanted, newest (default 200, at most 500)" },
+                    "level": { "type": "string", "enum": ["warn", "all"], "description": "default \"warn\"" }
+                }
+            }),
+            build: |args| {
+                let mut cmd = args.as_object().cloned().unwrap_or_default();
+                cmd.retain(|k, v| (k == "lines" || k == "level") && !v.is_null());
+                cmd.insert("cmd".to_string(), json!("read_log"));
+                serde_json::from_value(Value::Object(cmd)).map_err(|e| e.to_string())
+            },
         },
         ToolDef {
             name: "net_list_backups",
@@ -4281,6 +4303,38 @@ pub(crate) mod tests {
         // a present view of the wrong type is an error, never ignored
         assert!(build("read_state", &json!({ "surface": "chat", "view": 5 })).is_err());
         assert!(build("read_state", &json!({ "surface": "chat", "view": ["today"] })).is_err());
+    }
+
+    #[test]
+    fn read_log_is_a_seat_tool_defaulting_to_warnings() {
+        let Command::ReadLog { lines, level } = build("read_log", &json!({})).expect("builds") else {
+            panic!("not a log read");
+        };
+        assert_eq!((lines, level), (200, molt_core::LogFilter::Warn));
+        let Command::ReadLog { lines, level } =
+            build("read_log", &json!({ "lines": 7, "level": "all" })).expect("builds")
+        else {
+            panic!("not a log read");
+        };
+        assert_eq!((lines, level), (7, molt_core::LogFilter::All));
+        assert!(build("read_log", &json!({ "level": "info" })).is_err());
+        assert!(build("read_log", &json!({ "lines": -1 })).is_err());
+        assert!(matches!(tool_named("read_log").scope, Scope::Seat), "a log names members and relays");
+        let listed = |scope| tool_defs(scope).iter().any(|t| t["name"] == "read_log");
+        assert!(listed(Scope::Seat) && !listed(Scope::Read));
+    }
+
+    #[test]
+    fn save_settings_carries_the_log_file_switch() {
+        let mut args = serde_json::to_value(molt_core::SessionSettings::default()).expect("json");
+        args["log_file"] = json!(false);
+        let Command::SaveSettings { settings } = build("save_settings", &args).expect("builds") else {
+            panic!("not a save");
+        };
+        assert!(!settings.log_file);
+        for tool in ["save_settings", "patch_settings"] {
+            assert!((tool_named(tool).schema)().to_string().contains("log_file"), "{tool}");
+        }
     }
 
     #[test]

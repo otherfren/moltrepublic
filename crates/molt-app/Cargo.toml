@@ -51,6 +51,7 @@ clap.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-appender.workspace = true
 # lockstep with the workspace's slint version (molt-ui pins the same pairing)
 i-slint-backend-testing = { version = "1.17", optional = true }
 

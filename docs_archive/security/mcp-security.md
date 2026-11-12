@@ -286,10 +286,30 @@ Consequences worth knowing before opening the port:
   call picks new guards; a client that calls it routinely gives up what
   guards protect. Seat scope only.
 
+* `read_log` returns the node's own log file - the diagnostics a headless
+  seat otherwise has no way to reach. Seat scope only: a log names members,
+  relays and paths. It carries what stderr carries, nothing more; a secret
+  that must not reach stderr must not be logged in the first place.
+
 Still open (product): a ritual in flight is abandoned as a side effect of
 `create_start` / `join_start` / `recover_start` / `open_workspace` from
 any surface — a griefing primitive against the human's own in-flight
 work; a `force` argument or an "in flight" refusal is the fix direction.
+
+### The log file
+
+`[node] log_file` (default `true`, read at start) writes the stderr log to
+`<config dir>/logs/<config file stem>/moltd.<UTC date>.log` as well: one
+file per UTC day, 7 kept, the directory created owner-only, the same filter
+as stderr (`RUST_LOG` overrides it), no colour codes. A directory of its own
+per config file keeps two nodes on one machine apart. If the directory
+cannot be made the node starts anyway and says `log file off` once on
+stderr. `Command::ReadLog` (`read_log`, Settings > Error log) reads the
+newest entries back - at most 500, from at most the last 8 MiB, WARN and
+ERROR only unless asked for everything; the read runs off the actor
+(`molt-engine/src/log_read.rs`, the parsing in `molt-core/src/log_tail.rs`).
+The writer is non-blocking: a line reaches the file within moments, and the
+shutdown paths flush it; a hard kill or an abort can lose the last ones.
 
 ## Co-equality audit: what the GUI can do vs. what a bot can do
 

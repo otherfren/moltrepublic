@@ -44,6 +44,7 @@ use molt_config::{
 };
 use molt_engine::WalletHandle;
 use tokio::runtime::Runtime;
+use tracing_appender::non_blocking::{NonBlocking, WorkerGuard};
 use tracing_subscriber::EnvFilter;
 
 // ---------------------------------------------------------------------------
@@ -80,7 +81,6 @@ struct Cli {
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    init_tracing();
 
     // Maintenance subcommands short-circuit everything else.
     if let Some(maybe_path) = cli.generate_config {
@@ -88,14 +88,21 @@ fn main() -> anyhow::Result<()> {
             Some(p) => p,
             None => default_generate_path()?,
         };
+        let _ = init_tracing(None);
         return generate_config(&path);
     }
     if let Some(path) = cli.repair_config {
+        let _ = init_tracing(None);
         return repair_config(&path);
     }
 
     let config_path = resolve_config_path(cli.config.as_deref())?;
     let config = load_config(&config_path)?;
+    let log_dir = config.node.log_file.then(|| {
+        molt_config::log_dir(&std::path::absolute(&config_path).unwrap_or_else(|_| config_path.clone()))
+    });
+    // held to the end of main: dropping it flushes the file
+    let log_guard = init_tracing(log_dir.as_deref());
     tracing::info!(path = %config_path.display(), "loaded config");
     if cfg!(debug_assertions) {
         tracing::warn!(build = "debug", release = "scripts/build-release.sh", "slow debug build");
@@ -272,6 +279,7 @@ fn main() -> anyhow::Result<()> {
             task_wake_lead_min: flat.task_wake_lead_min,
             wake_timeout_secs: flat.wake_timeout_secs,
             wake_chat_lines: flat.wake_chat_lines,
+            log_file: flat.log_file,
             read_receipts: config.storage.read_receipts,
             font_app: config.ui.font_app,
             font_nav: config.ui.font_nav,
@@ -331,6 +339,10 @@ fn main() -> anyhow::Result<()> {
                 flat.wallet_daemon_login.clone()
             },
             wallet_network: flat.wallet_network.clone(),
+        },
+        log_dir: match (&log_guard, &log_dir) {
+            (Some(_), Some(dir)) => dir.display().to_string(),
+            _ => String::new(),
         },
         // the scanned on-disk workspaces replace the demo list
         workspaces,
@@ -859,7 +871,10 @@ fn renderer_selection(
     }
 }
 
-/// Logs go to stderr — in headless/stdio mode, stdout is the MCP channel.
+/// Logs go to stderr — in headless/stdio mode, stdout is the MCP channel —
+/// and, with `log_dir`, to a daily file there under the same filter. The
+/// returned guard flushes the file when dropped: keep it until exit. `None`
+/// = no file (not asked for, or refused - said once on stderr).
 ///
 /// zbus is capped at ERROR by default: the XDG-portal request pattern
 /// (client creates the Request proxy before the portal creates the object)
@@ -871,12 +886,74 @@ fn renderer_selection(
 /// which does not mention openmls keeps it off (round 3: `RUST_LOG=info`
 /// on a headless node printed 182 openmls ERROR lines for the resends a
 /// restart provokes, which the engine already classifies as stale).
-fn init_tracing() {
+fn init_tracing(log_dir: Option<&Path>) -> Option<WorkerGuard> {
+    use tracing_subscriber::util::SubscriberInitExt;
     let filter = EnvFilter::new(effective_log_filter(std::env::var("RUST_LOG").ok().as_deref()));
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(filter)
-        .init();
+    let (writer, guard) = log_dir
+        .and_then(|dir| match file_sink(dir) {
+            Ok(sink) => Some(sink),
+            Err(error) => {
+                eprintln!("log file off: {}: {error}", dir.display());
+                None
+            }
+        })
+        .unzip();
+    subscriber(filter, writer).init();
+    guard
+}
+
+/// The daily log file under `dir` (created owner-only: a log names members
+/// and relays), pruned to [`molt_config::LOG_KEEP_FILES`].
+fn file_sink(dir: &Path) -> anyhow::Result<(NonBlocking, WorkerGuard)> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)?;
+    let appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix(molt_config::LOG_FILE_PREFIX)
+        .filename_suffix(molt_config::LOG_FILE_SUFFIX)
+        .max_log_files(molt_config::LOG_KEEP_FILES)
+        .build(dir)?;
+    Ok(tracing_appender::non_blocking(appender))
+}
+
+/// stderr as ever, plus `file` in the format `molt_core::log_tail` reads.
+fn subscriber(
+    filter: EnvFilter,
+    file: Option<NonBlocking>,
+) -> impl tracing::Subscriber + Send + Sync + 'static {
+    use tracing_subscriber::layer::SubscriberExt;
+    let file = file.map(|writer| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .fmt_fields(PlainFields::default())
+            .with_writer(writer)
+    });
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stderr))
+        .with(file)
+}
+
+/// The default field format under a type of its own: two fmt layers that
+/// share a field formatter TYPE share each span's formatted fields, and the
+/// file would inherit stderr's colour codes.
+#[derive(Default)]
+struct PlainFields(tracing_subscriber::fmt::format::DefaultFields);
+
+impl<'writer> tracing_subscriber::fmt::FormatFields<'writer> for PlainFields {
+    fn format_fields<R: tracing_subscriber::field::RecordFields>(
+        &self,
+        writer: tracing_subscriber::fmt::format::Writer<'writer>,
+        fields: R,
+    ) -> std::fmt::Result {
+        self.0.format_fields(writer, fields)
+    }
 }
 
 /// The filter to install: the default, or `RUST_LOG` with `openmls=off`
@@ -918,6 +995,60 @@ mod tests {
         assert_eq!(effective_log_filter(Some("molt_net=debug")), "molt_net=debug,openmls=off");
         assert_eq!(effective_log_filter(Some("debug,openmls=info")), "debug,openmls=info");
         assert!(EnvFilter::try_new(effective_log_filter(Some("info"))).is_ok());
+    }
+
+    fn daily_files(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .expect("the log dir exists")
+            .map(|e| e.expect("entry").path())
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                molt_core::log_tail::is_daily_file(
+                    name,
+                    molt_config::LOG_FILE_PREFIX,
+                    molt_config::LOG_FILE_SUFFIX,
+                )
+            })
+            .collect()
+    }
+
+    /// The sink creates its directory and writes what the reader parses:
+    /// a level per line, the filter applied, no colour codes - not even in
+    /// the span fields the stderr layer formatted first.
+    #[test]
+    fn the_file_sink_writes_lines_the_log_reader_parses() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("logs").join("config");
+        let (writer, guard) = file_sink(&dir).expect("a sink");
+        let filter = EnvFilter::try_new("info").expect("a filter");
+        tracing::subscriber::with_default(subscriber(filter, Some(writer)), || {
+            let span = tracing::info_span!("dial", relay = "ws://relay");
+            let _in = span.enter();
+            tracing::warn!(error = "refused", "dial failed");
+            tracing::debug!("not at this level");
+        });
+        drop(guard);
+        let files = daily_files(&dir);
+        assert_eq!(files.len(), 1, "{files:?}");
+        let text = std::fs::read_to_string(&files[0]).expect("readable");
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert_eq!(text.lines().count(), 1, "{text:?}");
+        assert_eq!(molt_core::log_tail::level_of(&text), Some("WARN"), "{text:?}");
+        assert!(text.contains("dial failed") && text.contains("relay=\"ws://relay\""), "{text:?}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).expect("dir").permissions().mode();
+            assert_eq!(mode & 0o077, 0, "{mode:o}");
+        }
+    }
+
+    #[test]
+    fn a_log_dir_that_cannot_be_made_is_an_error_not_a_panic() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let file = tmp.path().join("occupied");
+        std::fs::write(&file, "").expect("write");
+        assert!(file_sink(&file.join("logs")).is_err());
     }
 
     #[test]

@@ -44,6 +44,8 @@ mod founding;
 mod image_fit;
 mod kanban;
 mod lifecycles;
+#[doc(hidden)]
+pub mod log_read;
 mod loopback_mesh;
 mod net;
 mod nostr_ritual;
@@ -2445,6 +2447,7 @@ impl State {
                 self.cmd_net_test_tor_result(result, generation)
             }
             Command::NetResetTor => self.cmd_net_reset_tor(),
+            Command::ReadLog { lines, level } => self.cmd_read_log(lines, level),
             Command::NetListBackups => self.cmd_net_list_backups(),
             Command::NetListBackupsResult {
                 result,

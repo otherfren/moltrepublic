@@ -71,6 +71,7 @@ anyhow             = "1"
 thiserror          = "1"
 tracing            = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender   = "0.2"    # the daily log file: rotation, pruning, non-blocking writer
 zeroize            = { version = "1", features = ["derive"] }
 arboard            = { version = "3", default-features = false }
 chrono             = { version = "0.4", default-features = false, features = ["std"] }
