@@ -190,7 +190,14 @@ impl ArtiShared {
         match booted {
             Ok(Some(Ok(client))) => Ok((client, generation)),
             Ok(Some(Err(error))) => Err(NetError::TorUnavailable(format!("arti bootstrap failed: {error}"))),
-            Ok(None) | Err(_) => Err(NetError::TorUnavailable("arti bootstrap failed: task ended".into())),
+            Ok(None) | Err(_) => {
+                // the task died without a result: its slot would wait forever
+                let mut slot = self.slot();
+                if matches!(&*slot, Slot::Booting(theirs) if theirs.same_channel(&booting)) {
+                    *slot = Slot::Empty;
+                }
+                Err(NetError::TorUnavailable("arti bootstrap failed: task ended".into()))
+            }
         }
     }
 
@@ -255,6 +262,25 @@ impl ArtiShared {
         Ok(booting)
     }
 
+    /// Run one dial; a reset ends it, so the client it holds is let go.
+    async fn unless_reset<T>(
+        &self,
+        resets: &mut tokio::sync::watch::Receiver<u64>,
+        generation: u64,
+        dial: impl Future<Output = T>,
+    ) -> Option<T> {
+        // a reset bumps the generation before it signals: one that ran
+        // while this dial fetched its client shows in either
+        resets.borrow_and_update();
+        if generation != self.generation.load(Ordering::SeqCst) {
+            return None;
+        }
+        tokio::select! {
+            out = dial => Some(out),
+            _ = resets.changed() => None,
+        }
+    }
+
     /// Put a finished bootstrap into the slot, unless a reset took the slot
     /// away meanwhile.
     fn settle(&self, generation: u64, booted: Result<Client, String>) -> Result<Client, String> {
@@ -263,7 +289,10 @@ impl ArtiShared {
             return Err("interrupted by a reset".to_string());
         }
         match &booted {
-            Ok(client) => *slot = Slot::Ready(client.clone()),
+            Ok(client) => {
+                *slot = Slot::Ready(client.clone());
+                self.health().booted();
+            }
             Err(_) => {
                 *slot = Slot::Empty;
                 self.health().record(self.clock.elapsed(), "", Evidence::Client);
@@ -277,22 +306,27 @@ impl ArtiShared {
     /// [`DataStream`] is `AsyncRead + AsyncWrite + Unpin + Send`, so a TLS
     /// handshake rides straight over it.
     pub async fn connect(self: &Arc<Self>, lane: &str, host: &str, port: u16) -> Result<DataStream, NetError> {
+        let mut resets = self.resets.subscribe();
         let (client, generation) = self.client().await?;
         let token = self.token_for(lane, host);
         let mut prefs = StreamPrefs::new();
         prefs.set_isolation(token);
-        // a caller's deadline dropping this dial is a failure nobody else reports
-        let mut cut = CutShort(Some((self.clone(), generation, host.to_string())));
-        let out = client.connect_with_prefs((host, port), &prefs).await;
+        // a caller's deadline dropping this dial: no verdict of arti's, but
+        // the moment to ask arti how it is
+        let mut cut = CutShort(Some((self.clone(), client.clone(), generation, host.to_string())));
+        let out = self
+            .unless_reset(&mut resets, generation, client.connect_with_prefs((host, port), &prefs))
+            .await;
         cut.0 = None;
+        let Some(out) = out else {
+            return Err(NetError::TorUnavailable(format!("arti dial {host}:{port}: interrupted by a reset")));
+        };
         let (evidence, error) = match &out {
             Ok(_) => (Some(Evidence::Alive), String::new()),
             Err(e) => (evidence_of(e.kind()), e.to_string()),
         };
         if let Some(evidence) = evidence {
-            let status = client.bootstrap_status();
-            let blocked = status.blocked().map(|b| b.to_string());
-            let ready = status.ready_for_traffic() && blocked.is_none();
+            let (ready, blocked) = readiness(&client);
             self.observe(self.clock.elapsed(), generation, host, evidence, Some(ready), &blocked.unwrap_or(error));
         }
         out.map_err(|e| NetError::TorUnavailable(format!("arti dial {host}:{port}: {e}")))
@@ -427,13 +461,23 @@ impl Drop for Waiter {
     }
 }
 
-/// Records a dial dropped before arti answered.
-struct CutShort(Option<(Arc<ArtiShared>, u64, String)>);
+/// Whether arti calls itself ready for traffic, and why not.
+fn readiness(client: &Client) -> (bool, Option<String>) {
+    let status = client.bootstrap_status();
+    let blocked = status.blocked().map(|b| b.to_string());
+    (status.ready_for_traffic() && blocked.is_none(), blocked)
+}
+
+/// A dial dropped before arti answered.
+struct CutShort(Option<(Arc<ArtiShared>, Client, u64, String)>);
 
 impl Drop for CutShort {
     fn drop(&mut self) {
-        if let Some((shared, generation, host)) = self.0.take() {
-            shared.observe(shared.clock.elapsed(), generation, &host, Evidence::Ambiguous, None, "dial dropped by its caller");
+        if let Some((shared, client, generation, host)) = self.0.take() {
+            let (ready, blocked) = readiness(&client);
+            drop(client);
+            let detail = blocked.unwrap_or_default();
+            shared.observe(shared.clock.elapsed(), generation, &host, Evidence::CutShort, Some(ready), &detail);
         }
     }
 }
@@ -654,6 +698,89 @@ mod tests {
         let _third = dial(&shared);
         tokio::time::sleep(Duration::from_secs(1)).await;
         assert_eq!(boots.load(Ordering::SeqCst), 2, "the next dial starts a fresh bootstrap");
+    }
+
+    /// A dial may hold the old client for its caller's 20 s; the reset must
+    /// not delete under it, nor wait that long.
+    #[tokio::test]
+    async fn a_reset_ends_a_dial_in_flight() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (shared, _) = offline(dir.path(), &[]);
+        let (client, generation) = shared.client().await.expect("boots");
+        let mut resets = shared.resets.subscribe();
+        let dial = tokio::spawn({
+            let shared = shared.clone();
+            async move {
+                let hangs = async move {
+                    let _held = client;
+                    std::future::pending::<()>().await;
+                };
+                shared.unless_reset(&mut resets, generation, hangs).await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let started = Instant::now();
+        shared.reset().await.expect("reset");
+        assert!(started.elapsed() < Duration::from_secs(2), "the drain does not wait out the dial");
+        assert!(dial.await.expect("joined").is_none(), "the dial ends with the reset");
+
+        // a dial that got its client just before the reset does not start
+        let mut late = shared.resets.subscribe();
+        assert!(shared.unless_reset(&mut late, generation, async {}).await.is_none());
+        let current = shared.generation.load(Ordering::SeqCst);
+        assert!(shared.unless_reset(&mut late, current, async {}).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_bootstrap_task_that_dies_does_not_wedge_the_slot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let boots = Arc::new(AtomicUsize::new(0));
+        let counter = boots.clone();
+        let boot: Boot = Box::new(move |config| {
+            let attempt = counter.fetch_add(1, Ordering::SeqCst) + 1;
+            Box::pin(async move {
+                assert!(attempt > 1, "the first bootstrap task dies");
+                TorClient::builder().config(config).create_unbootstrapped().map_err(|e| e.to_string())
+            })
+        });
+        let shared = Arc::new(ArtiShared::with(Some(dir.path().to_path_buf()), boot));
+        assert!(matches!(shared.client().await, Err(NetError::TorUnavailable(_))));
+        shared.client().await.expect("the next dial starts a fresh bootstrap");
+        assert_eq!(boots.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_successful_bootstrap_starts_the_client_with_a_clean_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (shared, _) = offline(dir.path(), &[1, 2]);
+        for _ in 0..2 {
+            assert!(shared.client().await.is_err());
+        }
+        assert_eq!(shared.health().input(Duration::ZERO).failures, 2);
+        shared.client().await.expect("boots");
+        assert_eq!(shared.health().input(Duration::ZERO).failures, 0);
+    }
+
+    /// Every dial dropped by its caller: no tally, but arti's own status is
+    /// still read, so a client that reports itself stuck is rebuilt.
+    #[tokio::test]
+    async fn a_dial_cut_short_counts_nothing_but_still_reads_the_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (shared, boots) = offline(dir.path(), &[]);
+        let (client, generation) = shared.client().await.expect("boots");
+        drop(client);
+        for m in 0..30 {
+            for host in ["a.example", "b.example"] {
+                shared.observe(min(m), generation, host, Evidence::CutShort, Some(true), "");
+            }
+        }
+        settled(&shared).await;
+        assert_eq!(boots.load(Ordering::SeqCst), 1, "a ready client is left alone");
+        for m in 30..=40 {
+            shared.observe(min(m), generation, "a.example", Evidence::CutShort, Some(false), "");
+        }
+        settled(&shared).await;
+        assert_eq!(boots.load(Ordering::SeqCst), 2, "a client that says it is stuck is rebuilt");
     }
 
     #[tokio::test]

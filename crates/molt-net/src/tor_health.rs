@@ -23,6 +23,9 @@ pub enum Evidence {
     Ambiguous,
     /// A failure only the client can cause (no directory, no path, state error).
     Client,
+    /// The caller dropped the dial before arti answered: its deadline, not
+    /// arti's verdict.
+    CutShort,
 }
 
 /// Why the client counts as unusable.
@@ -118,6 +121,9 @@ impl Health {
             *self = Health::default();
             return false;
         }
+        if evidence == Evidence::CutShort {
+            return false;
+        }
         let opened = self.failing_since.is_none();
         self.failing_since.get_or_insert(now);
         self.failures = self.failures.saturating_add(1);
@@ -135,6 +141,16 @@ impl Health {
         let turned = self.not_ready_since.is_none();
         self.not_ready_since.get_or_insert(now);
         turned
+    }
+
+    /// A bootstrap succeeded: failures from before it say nothing about the
+    /// client it produced. The backoff keeps counting.
+    pub fn booted(&mut self) {
+        *self = Health {
+            last_rebuild: self.last_rebuild,
+            rebuilds: self.rebuilds,
+            ..Health::default()
+        };
     }
 
     /// `true` the first time a bad spell is reported, so it is logged once.
@@ -252,6 +268,51 @@ mod tests {
         assert_eq!(decide(&h.input(min(10))), Verdict::Rebuild(Reason::NotReady));
         h.record_ready(min(11), true);
         assert_eq!(decide(&h.input(min(30))), Verdict::Healthy);
+    }
+
+    /// Two pool relays timing out at the relay runtime's 20 s while the
+    /// others sit on long-lived sockets: no new dial, so no proof of life.
+    #[test]
+    fn dials_cut_short_by_their_caller_never_rebuild_a_ready_client() {
+        let mut h = Health::default();
+        for m in 0..120 {
+            assert!(!h.record(min(m), "a", Evidence::CutShort), "no streak opens");
+            h.record(min(m), "b", Evidence::CutShort);
+            h.record_ready(min(m), true);
+            assert_eq!(decide(&h.input(min(m))), Verdict::Healthy, "minute {m}");
+        }
+        assert_eq!(h.input(min(120)).failures, 0);
+        // they neither prove life: a streak arti itself reported stands
+        for m in 120..=130 {
+            h.record(min(m), "c", Evidence::Client);
+            h.record(min(m), "a", Evidence::CutShort);
+        }
+        assert_eq!(decide(&h.input(min(130))), Verdict::Rebuild(Reason::AllDialsFailing));
+    }
+
+    #[test]
+    fn a_dead_client_whose_dials_are_all_cut_short_is_caught_by_its_own_status() {
+        let mut h = Health::default();
+        for m in 0..=10 {
+            h.record(min(m), "a", Evidence::CutShort);
+            h.record_ready(min(m), false);
+        }
+        assert_eq!(decide(&h.input(min(10))), Verdict::Rebuild(Reason::NotReady));
+    }
+
+    #[test]
+    fn a_successful_bootstrap_clears_the_failures_before_it() {
+        let mut h = Health::default();
+        h.rebuilt(min(0));
+        for m in 1..=15 {
+            h.record(min(m), "", Evidence::Client);
+        }
+        h.record_ready(min(1), false);
+        h.booted();
+        h.record(min(21), "a", Evidence::Client);
+        assert_eq!(decide(&h.input(min(21))), Verdict::Healthy, "the new client starts clean");
+        let i = h.input(min(21));
+        assert_eq!((i.failures, i.last_rebuild, i.rebuilds), (1, Some(min(0)), 1), "the backoff stays");
     }
 
     #[test]

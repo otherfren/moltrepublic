@@ -510,7 +510,8 @@ the cache.
 | Outcome | Reads as |
 |---|---|
 | stream opened; or arti's `ErrorKind` says the far end answered (`RemoteConnectionRefused`, `RemoteHostNotFound`, `OnionServiceNotFound`, `OnionServiceNotRunning`, ...) | **alive** - clears the record and the backoff |
-| `TorNetworkTimeout`, `TransientFailure`, `CircuitCollapse`, `CircuitRefused`, `RelayTooBusy`, `NoExit`, a dial its caller dropped | **ambiguous** - one dead onion service looks the same |
+| `TorNetworkTimeout`, `TransientFailure`, `CircuitCollapse`, `CircuitRefused`, `RelayTooBusy`, `NoExit` | **ambiguous** - one dead onion service looks the same |
+| a dial its caller dropped (a deadline, a closing workspace) | **nothing** for the tally: it is the caller's verdict, not arti's. arti's status is still sampled |
 | every other kind (`TorAccessFailed`, `TorDirectoryUnusable`, `DirectoryExpired`, `NoPath`, `LocalNetworkError`, state and cache errors, ...), a failed bootstrap | **client** |
 
 An address arti refuses to dial (`InvalidStreamTarget`,
@@ -520,7 +521,7 @@ The client is unusable when, for 10 minutes without one alive outcome,
 either
 
 - arti's own `bootstrap_status()` is not `ready_for_traffic()` or reports a
-  `blocked()` reason (sampled at each failed dial), or
+  `blocked()` reason (sampled at each failed or dropped dial), or
 - at least 3 dials failed and they are not all ambiguous failures to ONE
   host.
 
@@ -531,7 +532,8 @@ opened stream.
 
 Then the client is dropped and a new one bootstraps from the SAME state and
 cache directories: entry guards, circuit timeouts and the directory cache
-stay. The first rebuild comes after 10 minutes; the next ones no sooner
+stay. A successful bootstrap clears the failures recorded before it. The
+first rebuild comes after 10 minutes; the next ones no sooner
 than 20, 40, then 60 minutes after the previous. Any alive outcome resets
 that. One rebuild at a time; dials arriving meanwhile wait for it. A dial in flight keeps the client it started
 on (the swap waits up to 30 s for them, so two clients do not contend for
@@ -549,12 +551,18 @@ deletes
 - `~/.moltrepublic/arti/cache` - `dir.sqlite3`, `dir_blobs/`, `dir.lock`
 
 and forgets the isolation tokens. The next dial bootstraps from scratch. A
-bootstrap in flight is interrupted. Refused, with nothing removed, unless
-the saved route is `tor` / `embedded`, and on a build without the feature.
+bootstrap in flight is interrupted, and so is every dial in flight, so the
+old client is let go before its directories are removed (the reset still
+waits at most 5 s for it). Refused, with nothing removed, on a build
+without the feature and unless the route this node booted on or the saved
+one is `tor` / `embedded`: an open workspace keeps the route it booted on,
+every dial resolved after a save takes the saved one.
 
-The directory is shared by every `moltd` of the user, so the reset removes
-it for all of them; a second running process carries on with the files it
-holds open.
+**The directory is shared by every `moltd` of the user.** A reset in one
+process pulls the state from under all the others: their guards are gone
+too, a running one carries on only with the files it holds open, and it
+is not told. Reset with the other nodes stopped, or expect them to need
+their own restart.
 
 ### 9.3 Why only the manual path removes the guards
 
