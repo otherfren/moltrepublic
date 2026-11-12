@@ -62,6 +62,9 @@ type Boot = Box<dyn Fn(TorClientConfig) -> BootFuture + Send + Sync>;
 /// clients do not contend for one state lock.
 const REBUILD_DRAIN: Duration = Duration::from_secs(30);
 const RESET_DRAIN: Duration = Duration::from_secs(5);
+/// A bootstrap that neither ends nor fails is given up after this.
+const BOOT_LIMIT: Duration = Duration::from_secs(30 * 60);
+const TIMED_OUT: &str = "no result within 30 minutes";
 
 /// What a bootstrap task leaves for the dials waiting on it.
 type Booted = Option<Result<Client, String>>;
@@ -229,15 +232,22 @@ impl ArtiShared {
                     (this.boot)(config).await
                 } => booted,
                 _ = resets.changed() => Err("interrupted by a reset".to_string()),
+                _ = tokio::time::sleep(BOOT_LIMIT) => Err(TIMED_OUT.to_string()),
             };
             let booted = this.settle(generation, booted.map(Arc::new));
+            let reason = match &booted {
+                Err(error) if error == TIMED_OUT => "timeout",
+                _ => "error",
+            };
             let ms = started.elapsed().as_millis();
             match (&booted, label) {
                 (Ok(_), None) => tracing::info!(tor = "embedded", event = "bootstrap_ok", ms),
                 (Ok(_), Some((count, _))) => tracing::info!(tor = "embedded", event = "rebuild_ok", count, ms),
-                (Err(error), None) => tracing::warn!(tor = "embedded", event = "bootstrap_failed", ms, error = %error),
+                (Err(error), None) => {
+                    tracing::warn!(tor = "embedded", event = "bootstrap_failed", reason, ms, error = %error);
+                }
                 (Err(error), Some((count, _))) => {
-                    tracing::warn!(tor = "embedded", event = "rebuild_failed", count, ms, error = %error);
+                    tracing::warn!(tor = "embedded", event = "rebuild_failed", count, reason, ms, error = %error);
                 }
             }
             let _ = done.send(Some(booted));
@@ -614,6 +624,36 @@ mod tests {
         let third = third.await.expect("joined").expect("shared by every waiter");
         assert!(Arc::ptr_eq(&second, &third));
         assert_eq!(boots.load(Ordering::SeqCst), 1, "one bootstrap, whoever gave up on it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_bootstrap_that_never_ends_is_given_up_after_the_bound() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let boots = Arc::new(AtomicUsize::new(0));
+        let counter = boots.clone();
+        let boot: Boot = Box::new(move |_| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::pending())
+        });
+        let shared = Arc::new(ArtiShared::with(Some(dir.path().to_path_buf()), boot));
+        let dial = |shared: &Arc<ArtiShared>| {
+            let shared = shared.clone();
+            tokio::spawn(async move { shared.client().await.map(|_| ()) })
+        };
+        let first = dial(&shared);
+        tokio::time::sleep(BOOT_LIMIT - Duration::from_secs(60)).await;
+        let second = dial(&shared);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(boots.load(Ordering::SeqCst), 1, "inside the bound a dial joins the running bootstrap");
+        assert_eq!(shared.health().input(Duration::ZERO).failures, 0);
+
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(first.is_finished() && second.is_finished(), "the waiters are told");
+        assert!(matches!(first.await.expect("joined"), Err(NetError::TorUnavailable(_))));
+        assert_eq!(shared.health().input(Duration::ZERO).failures, 1, "one failure against the client");
+        let _third = dial(&shared);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(boots.load(Ordering::SeqCst), 2, "the next dial starts a fresh bootstrap");
     }
 
     #[tokio::test]

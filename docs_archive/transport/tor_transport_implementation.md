@@ -497,6 +497,11 @@ one empties the slot, so the next dial starts a fresh one; a reset
 interrupts it. The rebuild below is the same task with the old client's
 drain in front.
 
+A bootstrap that neither succeeds nor fails is dropped after 30 minutes:
+`bootstrap_failed reason=timeout`, one failure against the client, and the
+next dial starts a fresh one. The directory already downloaded stays in
+the cache.
+
 ### 9.1 Automatic rebuild - keeps everything on disk
 
 `crates/molt-net/src/tor_health.rs` (pure, in the default build) decides,
@@ -563,7 +568,8 @@ guards up is a decision a human (or the seat's operator) takes knowingly.
 ### 9.4 Log lines
 
 One line each, `tor=embedded event=...`: `bootstrap_start`, `bootstrap_ok`
-/ `bootstrap_failed` (`ms`, `error`), `waiter_left` (debug), `health_bad`
+/ `bootstrap_failed` (`reason=error | timeout`, `ms`, `error`),
+`waiter_left` (debug), `health_bad`
 (`reason=not_ready | all_dials_failing`, once per bad spell),
 `rebuild_start` / `rebuild_ok` / `rebuild_failed` (`count`, `reason`, `ms`),
 `reset` (`removed`).
