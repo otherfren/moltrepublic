@@ -10,24 +10,13 @@
 //! Driven through the real command surface on a real engine, so what these
 //! pin is what an MCP agent gets.
 
+mod common;
+
+use common::{spawn_solo, still_building};
 use std::time::Duration;
 
-use molt_core::{Command, GroupConfig, MoltError, Reply, SessionView, Surface, WikiChange};
+use molt_core::{Command, MoltError, Reply, Surface, WikiChange};
 use molt_engine::WalletHandle;
-
-/// A single-member group: threshold 1, no self-cosign - one `Approve`
-/// applies, and no peer ever writes behind the test's back.
-fn spawn_solo() -> WalletHandle {
-    molt_engine::spawn(
-        GroupConfig {
-            member: "me".to_string(),
-            members: vec!["me".to_string()],
-            threshold: 1,
-            self_cosign: false,
-        },
-        SessionView::default(),
-    )
-}
 
 /// A `new file` patch for `path` holding `body`.
 fn add(path: &str, body: &str) -> String {
@@ -81,17 +70,6 @@ async fn apply_patch(w: &WalletHandle, patch: &str) {
     w.execute(Command::Approve { proposal: id, note: None })
         .await
         .expect("approve");
-}
-
-/// E4: the graph reads answer `index_building: true` with empty lists
-/// instead of refusing, so a test waits that out too.
-fn still_building(reply: &Reply) -> bool {
-    matches!(
-        reply,
-        Reply::WikiHealth { index_building: true, .. }
-            | Reply::WikiNeighbors { index_building: true, .. }
-            | Reply::WikiSearch { index_building: true, .. }
-    )
 }
 
 /// The health read, waiting out the off-actor index build.

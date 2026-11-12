@@ -16,17 +16,10 @@ use std::time::Duration;
 
 mod common;
 
-use common::hard_kill;
-use molt_core::{Command, GroupConfig, Reply, SessionSettings, SessionView, Surface};
+use common::{engine, hard_kill, read_session};
+use molt_core::{Command, Reply, SessionView, Surface};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
 
 async fn wait_for(
     w: &WalletHandle,
@@ -42,21 +35,6 @@ async fn wait_for(
         assert!(tokio::time::Instant::now() < deadline, "timed out waiting for: {what}");
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-}
-
-fn engine(root: &std::path::Path) -> WalletHandle {
-    let session = SessionView {
-        workspaces: molt_storage::scan_workspaces(root)
-            .iter()
-            .map(molt_storage::ScanEntry::info)
-            .collect(),
-        settings: SessionSettings {
-            workspace_dir: root.display().to_string(),
-            ..SessionSettings::default()
-        },
-        ..SessionView::default()
-    };
-    molt_engine::spawn_with_storage(GroupConfig::demo(), session)
 }
 
 async fn adopt_relay(w: &WalletHandle, url: &str) {

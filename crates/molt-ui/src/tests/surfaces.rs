@@ -3,6 +3,24 @@
 
 use super::*;
 
+#[test]
+fn kanban_notes_join_rendered_lines_then_advisories_without_changing_empty_lines() {
+    for (rendered, advisories, expected) in [
+        (vec![], vec![], ""),
+        (vec!["one"], vec![], "one"),
+        (vec![], vec!["two"], "two"),
+        (vec!["one", ""], vec!["two", ""], "one\n\ntwo\n"),
+    ] {
+        let mut card = super::channels::view_of(1, "", ProposalState::Proposed);
+        card.surface = Surface::Quests;
+        card.rendered = rendered.into_iter().map(str::to_string).collect();
+        card.advisories = advisories.into_iter().map(str::to_string).collect();
+        let row = proposal_row(0, &card);
+        assert_eq!(row.notes, expected);
+        assert!(!row.notes_bad);
+    }
+}
+
 /// The set_relays vote card shows the CHANGES: every pool member of the
 /// union, marked kept / added / removed, in current-then-added order.
 /// Review 2026-08-12: a set_features card must never paint a red

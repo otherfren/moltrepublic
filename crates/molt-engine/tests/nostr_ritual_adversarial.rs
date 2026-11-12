@@ -22,9 +22,12 @@
 //! deletion experiment is undocumented rots into a green test that proves
 //! nothing (which is exactly how cluster H came to exist).
 
+mod common;
+
+use common::{adopt_relay, engine, read_session, wait_for};
 use std::time::Duration;
 
-use molt_core::{Command, GroupConfig, Reply, SessionSettings, SessionView};
+use molt_core::Command;
 use molt_engine::WalletHandle;
 use molt_net::invite::{self, JoinRequest, RitualMsg};
 use molt_net::ritual_net::RitualNet;
@@ -34,72 +37,6 @@ use nostr_relay_builder::MockRelay;
 // ---------------------------------------------------------------------------
 // the same engine harness the honest founding tests use
 // ---------------------------------------------------------------------------
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
-async fn wait_for(
-    w: &WalletHandle,
-    what: &str,
-    pred: impl Fn(&SessionView) -> bool,
-) -> Box<SessionView> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let s = read_session(w).await;
-        if pred(&s) {
-            return s;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for: {what}\nsession: notice={:?} create.log={:?} join.log={:?}",
-            s.notice,
-            s.create.run.log,
-            s.join.run.log
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-fn engine(root: &std::path::Path) -> WalletHandle {
-    let session = SessionView {
-        workspaces: molt_storage::scan_workspaces(root)
-            .iter()
-            .map(molt_storage::ScanEntry::info)
-            .collect(),
-        settings: SessionSettings {
-            workspace_dir: root.display().to_string(),
-            ..SessionSettings::default()
-        },
-        ..SessionView::default()
-    };
-    molt_engine::spawn_with_storage(GroupConfig::demo(), session)
-}
-
-async fn adopt_relay(w: &WalletHandle, url: &str) {
-    w.execute(Command::RelayAdd { url: url.to_string() })
-        .await
-        .expect("relay add");
-    w.execute(Command::RelayConfirm {
-        url: url.to_string(),
-        accept_clearnet: true,
-    })
-    .await
-    .expect("relay confirm");
-    wait_for(w, "the relay probe to confirm the relay", |s| {
-        s.settings
-            .relays
-            .iter()
-            .any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
-    })
-    .await;
-    w.execute(Command::RelayClearnetSession { unlock: true })
-        .await
-        .expect("session unlock");
-}
 
 fn dialer() -> molt_net::dial::Dialer {
     molt_net::dial::Dialer::resolve("none", "local", 0).expect("direct dialer")

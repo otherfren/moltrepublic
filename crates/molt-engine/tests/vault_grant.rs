@@ -14,7 +14,7 @@ use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
 
 mod vault_support;
-use vault_support::{close_and_open, found_n_at, read_session, wait_for, NAMES};
+use vault_support::{NAMES, close_and_open, copy_dir, found_n_at, read_session, wait_for};
 
 async fn vault_view(w: &WalletHandle) -> VaultView {
     match w
@@ -232,19 +232,6 @@ fn own_share(
     let share = molt_vault::check_my_share(&dep, republic_id, &ctx, name, &sk).ok()?;
     let bytes = share.as_bytes();
     Some((name.to_string(), hex::encode(bytes), serde_json::to_string(bytes.as_slice()).expect("json")))
-}
-
-fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
-    std::fs::create_dir_all(to).expect("mkdir");
-    for e in std::fs::read_dir(from).expect("read dir") {
-        let e = e.expect("entry");
-        let dest = to.join(e.file_name());
-        if e.file_type().expect("type").is_dir() {
-            copy_dir(&e.path(), &dest);
-        } else {
-            std::fs::copy(e.path(), &dest).expect("copy");
-        }
-    }
 }
 
 /// KEYSTONE §14.4: `d` reads once, then comes back from a copy of its

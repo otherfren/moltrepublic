@@ -15,7 +15,7 @@ use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
 
 mod vault_support;
-use vault_support::{engine, found_n_at, read_session, wait_for, NAMES};
+use vault_support::{NAMES, copy_dir, engine, found_n_at, read_session, wait_for};
 
 async fn vault_view(w: &WalletHandle) -> VaultView {
     match w
@@ -185,19 +185,6 @@ async fn deposit_cut_recover_grant_to_the_recovered_seat_reads() {
     let gid = grant(&all[1], &all[2], &sid, "d").await;
     wait_grant(&d, &gid).await;
     assert_eq!(read_text(&d, &sid).await, text);
-}
-
-fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
-    std::fs::create_dir_all(to).expect("mkdir");
-    for e in std::fs::read_dir(from).expect("read dir") {
-        let e = e.expect("entry");
-        let dest = to.join(e.file_name());
-        if e.file_type().expect("type").is_dir() {
-            copy_dir(&e.path(), &dest);
-        } else {
-            std::fs::copy(e.path(), &dest).expect("copy");
-        }
-    }
 }
 
 /// KEYSTONE §14.5, the twin of `a_folded_wiki_survives_every_seat_restoring_from_backup`:

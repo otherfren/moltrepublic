@@ -9,6 +9,36 @@ use crate::*;
 use base64::Engine as _;
 use serde_json::json;
 
+#[test]
+fn applied_organization_entries_reverse_without_materializing_a_vector() {
+    for (legacy, chain, expected) in [
+        (false, false, vec![]),
+        (true, false, vec!["one", "two"]),
+        (false, true, vec!["three", "four"]),
+        (true, true, vec!["one", "two", "three", "four"]),
+    ] {
+        let mut st = plain_state();
+        if legacy {
+            st.applied.insert(Surface::Organization, vec![
+                (None, json!("one")), (Some(2), json!("two")),
+            ]);
+        }
+        if chain {
+            st.chain.applied.insert(Surface::Organization, vec![
+                (Some(3), json!("three")), (Some(4), json!("four")),
+            ]);
+        }
+        st.applied.insert(Surface::Files, vec![(None, json!("unrelated"))]);
+        let forward: Vec<_> = st.applied_org_entries().collect();
+        assert_eq!(
+            forward.iter().map(|v| v.as_str().expect("string fixture")).collect::<Vec<_>>(),
+            expected,
+        );
+        let reverse: Vec<_> = st.applied_org_entries().rev().collect();
+        assert_eq!(reverse, forward.into_iter().rev().collect::<Vec<_>>());
+    }
+}
+
 fn b64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }

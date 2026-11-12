@@ -12,59 +12,18 @@
 //! — `verify_wiki_export` over exactly what was written is green, and goes red
 //! on a single flipped byte in an exported file.
 
+mod common;
+
+use common::{adopt_relay, engine, read_session, spawn_solo, wait_for};
 use std::time::Duration;
 
-use molt_core::{Command, GroupConfig, Reply, SessionSettings, SessionView, Surface};
+use molt_core::{Command, Reply, Surface};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
 
 const ADD_A: &str = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,2 @@\n+hello\n+world\n";
 
 // ---- helpers ---------------------------------------------------------------
-
-/// A single-member group: threshold 1, no self-cosign — one `Approve`
-/// applies. It has NO chain (the legacy counted path), which is exactly the
-/// workspace shape a `proof: true` export must refuse.
-fn spawn_solo() -> WalletHandle {
-    molt_engine::spawn(
-        GroupConfig {
-            member: "me".to_string(),
-            members: vec!["me".to_string()],
-            threshold: 1,
-            self_cosign: false,
-        },
-        SessionView::default(),
-    )
-}
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
-async fn wait_for(
-    w: &WalletHandle,
-    what: &str,
-    pred: impl Fn(&SessionView) -> bool,
-) -> Box<SessionView> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let s = read_session(w).await;
-        if pred(&s) {
-            return s;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for: {what}\nsession: notice={:?} create.log={:?} join.log={:?}",
-            s.notice,
-            s.create.run.log,
-            s.join.run.log
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
 
 /// Poll until the in-flight wiki export settles.
 async fn await_wiki_export(w: &WalletHandle) -> molt_core::ExportState {
@@ -128,40 +87,6 @@ async fn apply_wiki_patch(w: &WalletHandle, patch: &str) {
         .await
         .expect("approve");
     assert!(wiki_docs(w).await > 0, "the patch applied");
-}
-
-fn engine(root: &std::path::Path) -> WalletHandle {
-    let session = SessionView {
-        workspaces: Vec::new(),
-        settings: SessionSettings {
-            workspace_dir: root.display().to_string(),
-            ..SessionSettings::default()
-        },
-        ..SessionView::default()
-    };
-    molt_engine::spawn_with_storage(GroupConfig::demo(), session)
-}
-
-async fn adopt_relay(w: &WalletHandle, url: &str) {
-    w.execute(Command::RelayAdd { url: url.to_string() })
-        .await
-        .expect("relay add");
-    w.execute(Command::RelayConfirm {
-        url: url.to_string(),
-        accept_clearnet: true,
-    })
-    .await
-    .expect("relay confirm");
-    wait_for(w, "the relay probe to confirm the relay", |s| {
-        s.settings
-            .relays
-            .iter()
-            .any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
-    })
-    .await;
-    w.execute(Command::RelayClearnetSession { unlock: true })
-        .await
-        .expect("session unlock");
 }
 
 /// Found a real 2-of-2 republic over the relay; both engines end up entered

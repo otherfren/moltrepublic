@@ -6,34 +6,13 @@
 //! against the current base instead of a hand-written positional diff,
 //! and a refusal AT THE CALL when one of them cannot land.
 
+mod common;
+
+use common::{spawn_solo, still_building};
 use std::time::Duration;
 
-use molt_core::{AllowWarnings, Command, GroupConfig, MoltError, Reply, SessionView, Surface, WikiEdit};
+use molt_core::{AllowWarnings, Command, MoltError, Reply, Surface, WikiEdit};
 use molt_engine::WalletHandle;
-
-/// A single-member group: threshold 1, so one `Approve` applies a patch.
-fn spawn_solo() -> WalletHandle {
-    molt_engine::spawn(
-        GroupConfig {
-            member: "me".to_string(),
-            members: vec!["me".to_string()],
-            threshold: 1,
-            self_cosign: false,
-        },
-        SessionView::default(),
-    )
-}
-
-/// E4: the graph reads answer `index_building: true` with empty lists
-/// instead of refusing, so a test waits that out too.
-fn still_building(reply: &Reply) -> bool {
-    matches!(
-        reply,
-        Reply::WikiHealth { index_building: true, .. }
-            | Reply::WikiNeighbors { index_building: true, .. }
-            | Reply::WikiSearch { index_building: true, .. }
-    )
-}
 
 /// The graph is built OFF the actor, so a read (and an `add_relation`,
 /// which resolves against it) may refuse until it is there.

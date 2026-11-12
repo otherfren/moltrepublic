@@ -4,81 +4,14 @@
 //! **N5.2 keystone** — the kind-445 group runtime carries a WorkspaceEvent
 //! between two real engines over one relay, with no mesh and no queues.
 
+mod common;
+
+use common::{adopt_relay, engine, read_session, wait_for};
 use std::time::Duration;
 
-use molt_core::{Command, GroupConfig, Reply, SessionSettings, SessionView};
+use molt_core::{Command, Reply};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
-async fn wait_for(
-    w: &WalletHandle,
-    what: &str,
-    pred: impl Fn(&SessionView) -> bool,
-) -> Box<SessionView> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let s = read_session(w).await;
-        if pred(&s) {
-            return s;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for: {what}\nsession: notice={:?} create.log={:?} join.log={:?}",
-            s.notice,
-            s.create.run.log,
-            s.join.run.log
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-fn engine(root: &std::path::Path) -> WalletHandle {
-    let session = SessionView {
-        workspaces: molt_storage::scan_workspaces(root)
-            .iter()
-            .map(molt_storage::ScanEntry::info)
-            .collect(),
-        settings: SessionSettings {
-            workspace_dir: root.display().to_string(),
-            ..SessionSettings::default()
-        },
-        ..SessionView::default()
-    };
-    molt_engine::spawn_with_storage(GroupConfig::demo(), session)
-}
-
-/// ADR-0004: nothing is pre-configured — each node adds and confirms the
-/// relay itself, then unlocks the clearnet/local session.
-async fn adopt_relay(w: &WalletHandle, url: &str) {
-    w.execute(Command::RelayAdd { url: url.to_string() })
-        .await
-        .expect("relay add");
-    w.execute(Command::RelayConfirm {
-        url: url.to_string(),
-        accept_clearnet: true,
-    })
-    .await
-    .expect("relay confirm");
-    // B4: the confirmation lands on the PROBE's verdict, off-actor — an
-    // unusable relay never becomes a confirmed one
-    wait_for(w, "the relay probe to confirm the relay", |s| {
-        s.settings
-            .relays
-            .iter()
-            .any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
-    })
-    .await;
-    w.execute(Command::RelayClearnetSession { unlock: true })
-        .await
-        .expect("session unlock");
-}
 
 /// Found a real 2-of-2 "Chess Club" over one in-process relay, exactly as
 /// `nostr_founding.rs`'s capstone does, and hand back both live engines.

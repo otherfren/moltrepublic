@@ -2095,7 +2095,7 @@ impl State {
     /// The applied Organization entries, BORROWED (single-operator projection
     /// then the chain projection — one is always empty for a workspace). No
     /// clone: callers only read `op`/`value`/`bytes_b64` fields.
-    pub(crate) fn applied_org_entries(&self) -> impl Iterator<Item = &Value> {
+    pub(crate) fn applied_org_entries(&self) -> impl DoubleEndedIterator<Item = &Value> {
         self.applied
             .get(&Surface::Organization)
             .into_iter()
@@ -2135,7 +2135,7 @@ impl State {
 /// share-expiry point checks, so the two cannot drift.
 pub(crate) fn chat_view_admits(ts: u64, now: u64, retention_days: u64) -> bool {
     let cutoff = now.saturating_sub(retention_days * 86_400);
-    ts == 0 || !State::aged_out_at(cutoff, ts)
+    !State::aged_out_at(cutoff, ts)
 }
 
 impl State {

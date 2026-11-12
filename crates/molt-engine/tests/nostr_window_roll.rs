@@ -10,24 +10,20 @@
 //!
 //! OWN TEST BINARY: `shift_window_clock_for_tests` is process-global.
 
+mod common;
+
+use common::{engine, read_session};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use molt_core::{Command, GroupConfig, Reply, SessionSettings, SessionView};
+use molt_core::{Command, SessionView};
 use molt_engine::WalletHandle;
 use molt_net::envelope::H_WINDOW;
 use molt_net::ritual_net::shift_window_clock_for_tests;
 use nostr_relay_builder::MockRelay;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
 
 async fn wait_for(
     w: &WalletHandle,
@@ -49,17 +45,6 @@ async fn wait_for(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-}
-
-fn engine(root: &std::path::Path) -> WalletHandle {
-    let session = SessionView {
-        settings: SessionSettings {
-            workspace_dir: root.display().to_string(),
-            ..SessionSettings::default()
-        },
-        ..SessionView::default()
-    };
-    molt_engine::spawn_with_storage(GroupConfig::demo(), session)
 }
 
 async fn adopt_relay(w: &WalletHandle, url: &str) {

@@ -10,20 +10,13 @@
 
 mod common;
 
+use common::read_session;
 use std::time::Duration;
 
 use molt_core::{Command, EventEnvelope, Reply, SessionSettings, SessionView, Surface, WorkspaceEvent};
-use molt_engine::WalletHandle;
 use molt_net::supervisor::{self, MemLog, MemStateStore, NetConfig};
 use molt_net::{EngineSink, MlsChannel, MlsMember, NetError, PeerLink};
 use tokio::sync::watch;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
 
 /// Sink for a member supervisor whose deliveries the test only observes.
 #[derive(Clone, Default)]

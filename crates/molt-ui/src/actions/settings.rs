@@ -12,7 +12,7 @@ use crate::labels::{theme_name, to_screen};
 use crate::mirror::sort_bk_rows;
 use crate::net_tor::tor_probe_args;
 use crate::settings::{
-    apply_settings_fields, browse_start_dir, read_settings_draft, s3_plaintext_ask, save_draft,
+    apply_settings_fields, pick_folder, read_settings_draft, s3_plaintext_ask, save_draft,
     settings_draft_differs, stored_settings,
 };
 use crate::app::Ctx;
@@ -346,18 +346,9 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 .map(|ui| ui.get_ws_dir_draft().to_string())
                 .unwrap_or_default();
             cx.rt.spawn(async move {
-                let start_dir = tokio::task::spawn_blocking(move || browse_start_dir(&draft))
-                    .await
-                    .ok()
-                    .flatten();
-                let mut picker = rfd::AsyncFileDialog::new();
-                if let Some(dir) = start_dir {
-                    picker = picker.set_directory(dir);
-                }
-                let Some(folder) = picker.pick_folder().await else {
+                let Some(path) = pick_folder(draft).await else {
                     return; // cancelled
                 };
-                let path = folder.path().display().to_string();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.set_ws_dir_draft(path.into());

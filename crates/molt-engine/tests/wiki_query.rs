@@ -7,23 +7,13 @@
 //! and a traversal says WHY two documents are related instead of only
 //! that they are.
 
+mod common;
+
+use common::{spawn_solo, still_building};
 use std::time::Duration;
 
-use molt_core::{Command, GroupConfig, MoltError, Reply, SessionView, Surface};
+use molt_core::{Command, MoltError, Reply, Surface};
 use molt_engine::WalletHandle;
-
-/// A single-member group: threshold 1, so one `Approve` applies a patch.
-fn spawn_solo() -> WalletHandle {
-    molt_engine::spawn(
-        GroupConfig {
-            member: "me".to_string(),
-            members: vec!["me".to_string()],
-            threshold: 1,
-            self_cosign: false,
-        },
-        SessionView::default(),
-    )
-}
 
 /// A git patch that creates one document.
 fn add(path: &str, content: &str) -> String {
@@ -78,17 +68,6 @@ async fn read(w: &WalletHandle, cmd: Command) -> Reply {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-}
-
-/// E4: the graph reads answer `index_building: true` with empty lists
-/// instead of refusing, so a test waits that out too.
-fn still_building(reply: &Reply) -> bool {
-    matches!(
-        reply,
-        Reply::WikiHealth { index_building: true, .. }
-            | Reply::WikiNeighbors { index_building: true, .. }
-            | Reply::WikiSearch { index_building: true, .. }
-    )
 }
 
 fn hits(reply: Reply) -> Vec<String> {

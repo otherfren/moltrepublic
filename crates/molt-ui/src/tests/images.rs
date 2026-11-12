@@ -61,6 +61,49 @@ fn an_undecodable_image_payload_is_none_not_a_panic() {
     );
 }
 
+#[test]
+fn raster_dimension_limits_include_8192_but_reject_8193_on_either_axis() {
+    for (w, h) in [(8192, 1), (1, 8192)] {
+        let bytes = noisy_png(w, h);
+        let preview = image_from_bytes(&bytes).expect("boundary raster decodes");
+        assert_eq!((preview.size().width, preview.size().height), (w, h));
+        assert!(crate::images::decode_wiki_image(&bytes).is_some());
+        assert!(fit_member_image(&bytes, usize::MAX).is_ok());
+    }
+    for (w, h) in [(8193, 1), (1, 8193)] {
+        let bytes = noisy_png(w, h);
+        assert!(image_from_bytes(&bytes).is_none());
+        assert!(crate::images::decode_wiki_image(&bytes).is_none());
+        assert!(matches!(
+            fit_member_image(&bytes, usize::MAX),
+            Err(ImageFitError::Undecodable)
+        ));
+    }
+}
+
+#[test]
+fn svg_fallback_is_only_for_previews_and_broken_rasters_stay_rejected() {
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#f00"/></svg>"##;
+    assert!(image_from_bytes(svg).is_some());
+    for bytes in [
+        svg.as_slice(),
+        b"",
+        b"not an image",
+        b"\x89PNG\r\n\x1a\n",
+        b"GIF89a",
+        b"BM",
+    ] {
+        assert!(crate::images::decode_wiki_image(bytes).is_none());
+        assert!(matches!(
+            fit_member_image(bytes, usize::MAX),
+            Err(ImageFitError::Undecodable)
+        ));
+        if bytes != svg {
+            assert!(image_from_bytes(bytes).is_none());
+        }
+    }
+}
+
 // ---------------------------------------------------------------
 // Member profiles (`member_profiles_plan.md` §5): the picture a seat
 // proposes for itself is fitted HERE - square and inside this
@@ -104,6 +147,64 @@ fn a_wide_picture_is_center_cropped_to_a_square() {
         src.get_pixel(10, 0),
         "the crop starts at the middle, not at the left edge"
     );
+}
+
+#[test]
+fn cropping_and_resizing_preserve_exact_png_and_jpeg_output() {
+    for edge in [160, 600] {
+        let wide = noisy_png(edge * 2, edge);
+        let square = image::load_from_memory(&wide)
+            .expect("source decodes")
+            .crop_imm(edge / 2, 0, edge, edge);
+        let expected = if edge > 512 {
+            square.resize(512, 512, image::imageops::FilterType::Lanczos3)
+        } else {
+            square
+        };
+        let mut png = std::io::Cursor::new(Vec::new());
+        expected
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("png");
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(expected.to_rgb8())
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .expect("jpeg");
+        let (png, jpeg) = (png.into_inner(), jpeg.into_inner());
+        assert!(
+            jpeg.len() < png.len(),
+            "fixture must exercise jpeg fallback"
+        );
+        for (expected, ext) in [(png, "png"), (jpeg, "jpg")] {
+            let fitted = fit_member_image(&wide, expected.len()).expect("crop fits budget");
+            assert_eq!(fitted.ext, ext);
+            assert!(fitted.bytes == expected, "{edge}px {ext} bytes changed");
+        }
+    }
+}
+
+#[test]
+fn transparent_crop_preserves_alpha_and_never_falls_back_to_jpeg() {
+    let rgba = image::RgbaImage::from_fn(40, 20, |x, y| {
+        image::Rgba([x as u8, y as u8, 127, (x * 5) as u8])
+    });
+    let source = image::DynamicImage::ImageRgba8(rgba);
+    let mut input = std::io::Cursor::new(Vec::new());
+    source
+        .write_to(&mut input, image::ImageFormat::Png)
+        .expect("input");
+    let mut expected = std::io::Cursor::new(Vec::new());
+    source
+        .crop_imm(10, 0, 20, 20)
+        .write_to(&mut expected, image::ImageFormat::Png)
+        .expect("crop");
+    let expected = expected.into_inner();
+    let fitted = fit_member_image(input.get_ref(), expected.len()).expect("png fits");
+    assert_eq!(fitted.ext, "png");
+    assert!(fitted.bytes == expected, "transparent crop bytes changed");
+    assert!(matches!(
+        fit_member_image(input.get_ref(), fitted.bytes.len() - 1),
+        Err(ImageFitError::TooLarge)
+    ));
 }
 
 /// The served budget is the promise the engine keeps; a picture over

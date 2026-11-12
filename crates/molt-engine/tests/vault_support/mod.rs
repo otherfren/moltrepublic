@@ -352,3 +352,16 @@ pub async fn read_text(w: &WalletHandle, sid: &str) -> String {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
+
+pub fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).expect("mkdir");
+    for e in std::fs::read_dir(from).expect("read dir") {
+        let e = e.expect("entry");
+        let dest = to.join(e.file_name());
+        if e.file_type().expect("type").is_dir() {
+            copy_dir(&e.path(), &dest);
+        } else {
+            std::fs::copy(e.path(), &dest).expect("copy");
+        }
+    }
+}

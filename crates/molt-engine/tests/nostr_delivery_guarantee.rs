@@ -19,9 +19,12 @@
 //! gap is created. After that nothing can arrive from history, and anything
 //! that does arrive was genuinely re-sent.
 
+mod common;
+
+use common::{engine, read_session};
 use std::time::Duration;
 
-use molt_core::{Command, GroupConfig, Reply, SessionSettings, SessionView};
+use molt_core::{Command, Reply, SessionView};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::prelude::*;
 use nostr_relay_builder::{LocalRelay, RelayBuilder};
@@ -35,13 +38,6 @@ async fn prunable_relay() -> (LocalRelay, std::sync::Arc<MemoryDatabase>) {
     let relay = LocalRelay::new(RelayBuilder::default().database(db.clone()));
     relay.run().await.expect("relay runs");
     (relay, db)
-}
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
 }
 
 async fn wait_for(
@@ -64,21 +60,6 @@ async fn wait_for(
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-}
-
-fn engine(root: &std::path::Path) -> WalletHandle {
-    let session = SessionView {
-        workspaces: molt_storage::scan_workspaces(root)
-            .iter()
-            .map(molt_storage::ScanEntry::info)
-            .collect(),
-        settings: SessionSettings {
-            workspace_dir: root.display().to_string(),
-            ..SessionSettings::default()
-        },
-        ..SessionView::default()
-    };
-    molt_engine::spawn_with_storage(GroupConfig::demo(), session)
 }
 
 async fn adopt_relay(w: &WalletHandle, url: &str) {

@@ -4,17 +4,13 @@
 //! The kanban basket (`docs_archive/kanban/kanban_workflows.md` §8) survives a
 //! close and reopen, and is sealed at rest like the other state files.
 
+mod common;
+
+use common::read_session;
 use std::time::Duration;
 
 use molt_core::{Command, Reply, SessionSettings, SessionView};
 use molt_engine::WalletHandle;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
 
 async fn load(w: &WalletHandle) -> String {
     match w.execute(Command::KanbanDraftLoad).await.expect("load") {

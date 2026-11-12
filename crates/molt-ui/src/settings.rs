@@ -27,6 +27,20 @@ pub(crate) fn browse_start_dir(draft: &str) -> Option<std::path::PathBuf> {
     path.is_dir().then_some(path)
 }
 
+/// Pick a folder using the draft's existing directory, without blocking the UI.
+/// Cancellation returns `None`.
+pub(crate) async fn pick_folder(draft: String) -> Option<String> {
+    let start_dir = tokio::task::spawn_blocking(move || browse_start_dir(&draft))
+        .await
+        .ok()
+        .flatten();
+    let mut picker = rfd::AsyncFileDialog::new();
+    if let Some(dir) = start_dir {
+        picker = picker.set_directory(dir);
+    }
+    picker.pick_folder().await.map(|folder| folder.path().display().to_string())
+}
+
 /// Does the settings form hold unsaved edits against `stored`?
 ///
 /// The relay pool is deliberately excluded: it is NOT part of the settings

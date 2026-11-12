@@ -1861,7 +1861,7 @@ fn kanban_notes(lang: i32, p: &molt_core::ProposalView) -> (String, bool) {
         return (format!("{}: {reason}", l.kb_void), true);
     }
     let bad = p.advisories.iter().any(|a| a.starts_with(molt_core::kanban_review::WOULD_VOID_PREFIX));
-    (p.rendered.iter().chain(&p.advisories).cloned().collect::<Vec<_>>().join("\n"), bad)
+    (p.rendered.iter().chain(&p.advisories).map(String::as_str).collect::<Vec<_>>().join("\n"), bad)
 }
 
 /// A short human label for a surface transition payload: the human title

@@ -6,37 +6,16 @@
 //! each `upload:<hex>` names today, `wiki_edit` warns before a page
 //! references nothing, and `wiki_health` finds the references that rotted.
 
+mod common;
+
+use common::{spawn_solo, still_building};
 use std::time::Duration;
 
 use molt_core::{
-    AllowWarnings, ChannelRef, Command, GroupConfig, MoltError, ProposalId, Reply, SessionView, Surface, WikiEdit,
+    AllowWarnings, ChannelRef, Command, MoltError, ProposalId, Reply, Surface, WikiEdit,
 };
 use molt_engine::WalletHandle;
 
-/// A single-member group: threshold 1, so one `Approve` applies.
-fn spawn_solo() -> WalletHandle {
-    molt_engine::spawn(
-        GroupConfig {
-            member: "me".to_string(),
-            members: vec!["me".to_string()],
-            threshold: 1,
-            self_cosign: false,
-        },
-        SessionView::default(),
-    )
-}
-
-
-/// E4: the graph reads answer `index_building: true` with empty lists
-/// instead of refusing, so a test waits that out too.
-fn still_building(reply: &Reply) -> bool {
-    matches!(
-        reply,
-        Reply::WikiHealth { index_building: true, .. }
-            | Reply::WikiNeighbors { index_building: true, .. }
-            | Reply::WikiSearch { index_building: true, .. }
-    )
-}
 
 /// The graph is built OFF the actor, so a read may refuse until it is there.
 async fn settle(w: &WalletHandle, cmd: Command) -> Result<Reply, MoltError> {

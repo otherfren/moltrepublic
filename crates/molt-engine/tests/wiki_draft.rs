@@ -4,17 +4,13 @@
 //! The local wiki draft (`shared_memory_real.md` §9.2) survives a close and
 //! reopen, is sealed at rest, and a legacy plaintext file reads as none.
 
+mod common;
+
+use common::read_session;
 use std::time::Duration;
 
 use molt_core::{Command, Reply, SessionSettings, SessionView};
 use molt_engine::WalletHandle;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
 
 async fn load(w: &WalletHandle) -> String {
     match w.execute(Command::WikiDraftLoad).await.expect("load") {

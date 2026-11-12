@@ -5107,7 +5107,6 @@ dependencies = [
  "getrandom 0.2.17",
  "molt-core",
  "serde",
- "tempfile",
  "toml 0.8.23",
  "toml_edit 0.22.27",
 ]
@@ -5324,7 +5323,6 @@ dependencies = [
  "hpke",
  "molt-core",
  "rand_chacha 0.3.1",
- "serde_json",
  "sha2",
  "thiserror 1.0.69",
  "vsss-rs",

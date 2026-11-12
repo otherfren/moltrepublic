@@ -3,6 +3,28 @@
 
 use super::*;
 
+#[test]
+fn chat_messages_keep_legacy_defaults_and_skip_malformed_rows() {
+    let mut current = ChatMessage::text(MessageId([1; 16]), "two", "new", 7)
+        .with_kind(molt_core::ChatKind::System);
+    current.channel = ChannelRef::Topic { name: "topic".into() };
+    current.quote_id = Some(MessageId([2; 16]));
+    current.reactions.insert("+".into(), vec!["one".into()]);
+    current.read_by.insert("one".into());
+    let snap: molt_core::SurfaceSnapshot = serde_json::from_value(serde_json::json!({
+        "surface": "chat", "gated": false, "pending": [], "applied": [
+            { "from": "one", "body": "old", "quote": 0, "extra": { "ignored": [1, 2] } },
+            null,
+            { "from": false, "body": "invalid" },
+            current,
+            { "from": "three", "body": "invalid", "channel": { "kind": "unknown" } }
+        ]
+    })).expect("snapshot");
+    let mut legacy = ChatMessage::text(MessageId::NIL, "one", "old", 0);
+    legacy.quote = Some(0);
+    assert_eq!(chat_messages(&snap), vec![legacy, current]);
+}
+
 fn line(lead: &str, text: &str) -> LogLineData {
     LogLineData {
         id: String::new(),

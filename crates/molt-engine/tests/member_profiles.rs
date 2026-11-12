@@ -11,74 +11,14 @@
 //! Runs on a REAL 2-of-2 pair over an in-process relay, like `org_effective`:
 //! the applied EFFECT under the real threshold machinery.
 
+mod common;
+
+use common::{adopt_relay, approve_op, engine, read_session, wait_for};
 use std::time::Duration;
 
-use molt_core::{Command, GroupConfig, MemberView, Reply, SessionSettings, SessionView, Surface};
+use molt_core::{Command, MemberView, Reply, Surface};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
-async fn wait_for(
-    w: &WalletHandle,
-    what: &str,
-    pred: impl Fn(&SessionView) -> bool,
-) -> Box<SessionView> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let s = read_session(w).await;
-        if pred(&s) {
-            return s;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for: {what}\nsession: notice={:?} create.log={:?} join.log={:?}",
-            s.notice,
-            s.create.run.log,
-            s.join.run.log
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-fn engine(root: &std::path::Path) -> WalletHandle {
-    let session = SessionView {
-        workspaces: Vec::new(),
-        settings: SessionSettings {
-            workspace_dir: root.display().to_string(),
-            ..SessionSettings::default()
-        },
-        ..SessionView::default()
-    };
-    molt_engine::spawn_with_storage(GroupConfig::demo(), session)
-}
-
-async fn adopt_relay(w: &WalletHandle, url: &str) {
-    w.execute(Command::RelayAdd { url: url.to_string() })
-        .await
-        .expect("relay add");
-    w.execute(Command::RelayConfirm {
-        url: url.to_string(),
-        accept_clearnet: true,
-    })
-    .await
-    .expect("relay confirm");
-    wait_for(w, "the relay probe to confirm the relay", |s| {
-        s.settings
-            .relays
-            .iter()
-            .any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
-    })
-    .await;
-    w.execute(Command::RelayClearnetSession { unlock: true })
-        .await
-        .expect("session unlock");
-}
 
 /// Found a real 2-of-2 republic over the relay; both engines end up entered.
 async fn found_pair(
@@ -151,32 +91,6 @@ async fn found_pair(
     })
     .await;
     (a, b)
-}
-
-/// The second voice: wait until `w` sees the open proposal with this `op`,
-/// then approve it through the public command surface.
-async fn approve_op(w: &WalletHandle, op: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Reply::Proposals { proposals, .. } =
-            w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list proposals")
-        {
-            if let Some(p) = proposals.iter().find(|p| {
-                p.state == molt_core::ProposalState::Proposed
-                    && p.payload.get("op").and_then(|v| v.as_str()) == Some(op)
-            }) {
-                w.execute(Command::Approve { proposal: p.id, note: None })
-                    .await
-                    .expect("approve");
-                return;
-            }
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "the {op} proposal never reached the second voice"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
 }
 
 async fn members(w: &WalletHandle) -> Vec<MemberView> {

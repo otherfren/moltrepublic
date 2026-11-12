@@ -21,6 +21,7 @@
 
 mod common;
 
+use common::read_session;
 use std::time::Duration;
 
 use molt_core::{
@@ -50,13 +51,6 @@ async fn announce_v2(w: &WalletHandle, seats: &[&str]) {
         })
         .await
         .expect("status frame");
-    }
-}
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
     }
 }
 

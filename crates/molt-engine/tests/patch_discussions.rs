@@ -9,6 +9,9 @@
 //! stays writable too (chat-bus Q4). A vote carries its reasoning with
 //! it: `note` posts into the channel BEFORE the vote lands.
 
+mod common;
+
+use common::read_session;
 use std::time::Duration;
 
 use molt_core::{
@@ -195,13 +198,6 @@ async fn channel_enumeration_annotates_the_vote_state() {
         None,
         "an unknown referent stays unannotated (Q4)"
     );
-}
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected reply: {other:?}"),
-    }
 }
 
 async fn await_founding(w: &WalletHandle) {

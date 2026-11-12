@@ -823,7 +823,7 @@ fn present(name: &str, args: &Value, mut value: Value) -> Result<Value, String> 
         // G3: a dry run answers the verdict - summary, warnings and the
         // paths it would touch. The patch itself was 13 KB of answer for a
         // caller that only wanted the header.
-        "wiki_edit" if value.get("reply") == Some(&Value::String("wiki_preview".to_string())) => {
+        "wiki_edit" if value.get("reply").and_then(Value::as_str) == Some("wiki_preview") => {
             let with_patch = flag_arg(args, "with_patch");
             if let Some(o) = value.as_object_mut() {
                 let paths = o.get("patch").and_then(Value::as_str).map(patch_paths);
@@ -849,8 +849,8 @@ fn present(name: &str, args: &Value, mut value: Value) -> Result<Value, String> 
 fn withdrawn_is_a_state(v: &mut Value) {
     match v {
         Value::Object(o) => {
-            let rejected = o.get("state") == Some(&Value::String("rejected".to_string()));
-            let proposed = o.get("state") == Some(&Value::String("proposed".to_string()));
+            let rejected = o.get("state").and_then(Value::as_str) == Some("rejected");
+            let proposed = o.get("state").and_then(Value::as_str) == Some("proposed");
             let held = o.get("sealing") == Some(&Value::Bool(true))
                 || o.get("held_for_secs").is_some_and(Value::is_number);
             if o.get("withdrawn") == Some(&Value::Bool(true)) && o.contains_key("state") {
@@ -900,13 +900,14 @@ fn patch_paths(patch: &str) -> Vec<Value> {
 /// touches stay; the before/after texts and the patch body go unless asked.
 fn compact_proposal(p: &mut Value, with_patch: bool) {
     let Some(o) = p.as_object_mut() else { return };
-    let patch = o
+    let paths = o
         .get("payload")
         .and_then(|pl| pl.get("value"))
         .and_then(Value::as_str)
-        .map(str::to_string);
-    if let Some(patch) = &patch {
-        o.insert("paths".to_string(), Value::Array(patch_paths(patch)));
+        .map(patch_paths);
+    let has_patch = paths.is_some();
+    if let Some(paths) = paths {
+        o.insert("paths".to_string(), Value::Array(paths));
     }
     if let Some(id) = o.get("id").and_then(Value::as_u64) {
         o.insert("channel".to_string(), json!({ "kind": "patch", "id": id }));
@@ -914,7 +915,7 @@ fn compact_proposal(p: &mut Value, with_patch: bool) {
     if !with_patch {
         o.remove("current");
         o.remove("proposed");
-        if patch.is_some() {
+        if has_patch {
             if let Some(pl) = o.get_mut("payload").and_then(Value::as_object_mut) {
                 pl.remove("value");
             }
@@ -3464,6 +3465,47 @@ pub(crate) mod tests {
         let v = present("vault_read", &json!({}), serde_json::to_value(&pending).expect("serializes"))
             .expect("presents");
         assert_eq!(v, json!({ "reply": "vault_pending", "secret_id": "s", "have": 1, "need": 2 }));
+    }
+
+    #[test]
+    fn compact_proposals_preserve_missing_and_non_string_patch_values() {
+        let patch = "diff --git a/a b/a\n";
+        for value in [None, Some(Value::Null), Some(json!(7)), Some(json!("")), Some(json!(patch))] {
+            for with_patch in [false, true] {
+                let mut card = json!({
+                    "id": 9, "payload": { "summary": "one" },
+                    "current": "one", "proposed": "two"
+                });
+                if let Some(value) = &value {
+                    card["payload"]["value"] = value.clone();
+                }
+                let mut expected = card.clone();
+                expected["channel"] = json!({ "kind": "patch", "id": 9 });
+                if let Some(Value::String(text)) = &value {
+                    expected["paths"] = if text.is_empty() { json!([]) } else { json!(["a"]) };
+                    if !with_patch {
+                        expected["payload"].as_object_mut().expect("payload").remove("value");
+                    }
+                }
+                if !with_patch {
+                    let o = expected.as_object_mut().expect("card");
+                    o.remove("current");
+                    o.remove("proposed");
+                }
+                compact_proposal(&mut card, with_patch);
+                assert_eq!(card, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn state_presentation_leaves_non_string_states_unchanged() {
+        for state in [Value::Null, json!(false), json!(7), json!([]), json!({}), json!("other")] {
+            let mut reply = json!({ "state": state, "sealing": true });
+            let expected = reply.clone();
+            withdrawn_is_a_state(&mut reply);
+            assert_eq!(reply, expected);
+        }
     }
 
     /// Every tool builds a command from its own minimal example arguments —

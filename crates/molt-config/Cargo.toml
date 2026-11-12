@@ -21,6 +21,3 @@ serde.workspace = true
 getrandom.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

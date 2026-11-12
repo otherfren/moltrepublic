@@ -542,11 +542,11 @@ fn staged_board(feed: &KanbanFeed, basket: &Basket) -> Option<Value> {
 fn page_occurrences(board: Value, from: NaiveDate, to: NaiveDate) -> Vec<(String, Option<NaiveDate>, When)> {
     let Some(snap) = board_snap(board) else { return Vec::new() };
     let q = ViewQuery { from: Some(from), to: Some(to), ..ViewQuery::default() };
-    quests_view(&snap, &q)
-        .ok()
-        .and_then(|v| v.get("calendar").and_then(Value::as_array).cloned())
-        .unwrap_or_default()
-        .iter()
+    let Ok(view) = quests_view(&snap, &q) else { return Vec::new() };
+    view.get("calendar")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
         .filter_map(|o| {
             let w = When::parse(&json!({ "start": s(o, "start"), "end": s(o, "end") })).ok()?;
             Some((s(o, "task").to_string(), parse_date(s(o, "occurrence")), w))

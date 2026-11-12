@@ -7,17 +7,13 @@
 //! snapshot land on disk), always through the one
 //! `molt_storage::workspace_size_kib` helper the boot scan uses too.
 
+mod common;
+
+use common::read_session;
 use std::time::Duration;
 
-use molt_core::{ChannelRef, Command, Reply, SessionSettings, SessionView};
+use molt_core::{ChannelRef, Command, SessionSettings, SessionView};
 use molt_engine::WalletHandle;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
 
 async fn await_founding(w: &WalletHandle) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);

@@ -13,7 +13,7 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use crate::i18n::{error_toast, localize_wiki_err, Lexicon};
 use crate::labels::file_size_label;
 use crate::models::{sync_model, wiki_block_eq};
-use crate::settings::browse_start_dir;
+use crate::settings::pick_folder;
 use crate::app::Ctx;
 use crate::{
     patchview,
@@ -1932,18 +1932,9 @@ pub(crate) fn wire_wiki_export(ui: &AppWindow, cx: &Ctx) {
                 .map(|ui| ui.get_mem_export_dir().to_string())
                 .unwrap_or_default();
             cx.rt.spawn(async move {
-                let start_dir = tokio::task::spawn_blocking(move || browse_start_dir(&draft))
-                    .await
-                    .ok()
-                    .flatten();
-                let mut picker = rfd::AsyncFileDialog::new();
-                if let Some(dir) = start_dir {
-                    picker = picker.set_directory(dir);
-                }
-                let Some(folder) = picker.pick_folder().await else {
+                let Some(path) = pick_folder(draft).await else {
                     return; // cancelled
                 };
-                let path = folder.path().display().to_string();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         ui.set_mem_export_dir(path.into());

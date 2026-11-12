@@ -19,6 +19,7 @@
 
 mod common;
 
+use common::read_session;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -37,13 +38,6 @@ use molt_net::{
 };
 use sha2::Digest as _;
 use tokio::sync::watch;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
 
 async fn read_uploads(w: &WalletHandle) -> Vec<molt_core::UploadView> {
     match w.execute(Command::ReadUploads).await.expect("read uploads") {

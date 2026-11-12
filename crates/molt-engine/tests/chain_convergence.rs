@@ -9,69 +9,14 @@
 //! identical wikis and no divergence flag - the pacing keeps forks rare and
 //! the deep tie-break heals the ones that happen.
 
+mod common;
+
+use common::{adopt_relay, engine, read_session, wait_for};
 use std::time::Duration;
 
-use molt_core::{Command, GroupConfig, ProposalState, Reply, SessionSettings, SessionView};
+use molt_core::{Command, ProposalState, Reply};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
-async fn wait_for(
-    w: &WalletHandle,
-    what: &str,
-    pred: impl Fn(&SessionView) -> bool,
-) -> Box<SessionView> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let s = read_session(w).await;
-        if pred(&s) {
-            return s;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for: {what}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-fn engine(root: &std::path::Path) -> WalletHandle {
-    let session = SessionView {
-        workspaces: molt_storage::scan_workspaces(root)
-            .iter()
-            .map(molt_storage::ScanEntry::info)
-            .collect(),
-        settings: SessionSettings {
-            workspace_dir: root.display().to_string(),
-            ..SessionSettings::default()
-        },
-        ..SessionView::default()
-    };
-    molt_engine::spawn_with_storage(GroupConfig::demo(), session)
-}
-
-async fn adopt_relay(w: &WalletHandle, url: &str) {
-    w.execute(Command::RelayAdd { url: url.to_string() }).await.expect("relay add");
-    w.execute(Command::RelayConfirm {
-        url: url.to_string(),
-        accept_clearnet: true,
-    })
-    .await
-    .expect("relay confirm");
-    wait_for(w, "the relay probe", |s| {
-        s.settings
-            .relays
-            .iter()
-            .any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
-    })
-    .await;
-    w.execute(Command::RelayClearnetSession { unlock: true })
-        .await
-        .expect("session unlock");
-}
 
 /// A real 2-of-2 republic over the relay: petra founds, walter joins.
 async fn found_pair(root: &std::path::Path, url: &str) -> (WalletHandle, WalletHandle) {

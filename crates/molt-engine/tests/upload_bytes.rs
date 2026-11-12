@@ -7,72 +7,16 @@
 //! a cap below the size refuses before any read, and a source file
 //! swapped behind the share answers a mismatch - never bytes.
 
+mod common;
+mod file_support;
+
+use common::{adopt_relay, read_session, wait_for};
+use file_support::{engine, pattern, persist};
 use std::time::Duration;
 
-use molt_core::{Command, GroupConfig, Reply, SessionSettings, SessionView};
+use molt_core::{Command, Reply};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
-async fn wait_for(
-    w: &WalletHandle,
-    what: &str,
-    pred: impl Fn(&SessionView) -> bool,
-) -> Box<SessionView> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let s = read_session(w).await;
-        if pred(&s) {
-            return s;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for: {what}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// A node whose trickle publishes one piece per second.
-fn engine(root: &std::path::Path, download_dir: &std::path::Path) -> WalletHandle {
-    let session = SessionView {
-        workspaces: molt_storage::scan_workspaces(root)
-            .iter()
-            .map(molt_storage::ScanEntry::info)
-            .collect(),
-        settings: SessionSettings {
-            workspace_dir: root.display().to_string(),
-            download_dir: download_dir.display().to_string(),
-            mirror_publish_interval_secs: 1,
-            ..SessionSettings::default()
-        },
-        ..SessionView::default()
-    };
-    molt_engine::spawn_with_storage(GroupConfig::demo(), session)
-}
-
-async fn adopt_relay(w: &WalletHandle, url: &str) {
-    w.execute(Command::RelayAdd { url: url.to_string() }).await.expect("relay add");
-    w.execute(Command::RelayConfirm {
-        url: url.to_string(),
-        accept_clearnet: true,
-    })
-    .await
-    .expect("relay confirm");
-    wait_for(w, "the relay probe", |s| {
-        s.settings
-            .relays
-            .iter()
-            .any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
-    })
-    .await;
-    w.execute(Command::RelayClearnetSession { unlock: true })
-        .await
-        .expect("session unlock");
-}
 
 /// Found a real 2-of-2 republic over the relay: petra (founder, the
 /// sharer) and walter (the mirroring seat).
@@ -137,10 +81,6 @@ async fn found_pair(root: &std::path::Path, url: &str) -> (WalletHandle, WalletH
     (a, b)
 }
 
-fn pattern(len: usize) -> Vec<u8> {
-    (0..len).map(|i| u8::try_from(i % 251).unwrap_or(0)).collect()
-}
-
 /// Share `src` from petra and return the share's id as walter sees it.
 async fn share(a: &WalletHandle, b: &WalletHandle, src: &std::path::Path) -> molt_core::MessageId {
     a.execute(Command::ShareFile {
@@ -171,36 +111,6 @@ async fn share(a: &WalletHandle, b: &WalletHandle, src: &std::path::Path) -> mol
         assert!(tokio::time::Instant::now() < deadline, "the share never reached walter");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-}
-
-/// The second voice: wait until `w` sees the open proposal with this
-/// `op`, then approve it.
-async fn approve_op(w: &WalletHandle, op: &str) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        if let Reply::Proposals { proposals, .. } = w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list") {
-            if let Some(p) = proposals.iter().find(|p| {
-                p.state == molt_core::ProposalState::Proposed
-                    && p.payload.get("op").and_then(|v| v.as_str()) == Some(op)
-            }) {
-                w.execute(Command::Approve { proposal: p.id, note: None }).await.expect("approve");
-                return;
-            }
-        }
-        assert!(tokio::time::Instant::now() < deadline, "the {op} proposal never reached the second voice");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
-/// Persist `id` by the 2-of-2 vote: petra proposes, walter approves.
-async fn persist(a: &WalletHandle, b: &WalletHandle, id: molt_core::MessageId) {
-    a.execute(Command::Propose {
-        surface: molt_core::Surface::Files,
-        payload: serde_json::json!({ "op": "persist", "id": id.to_string() }),
-    })
-    .await
-    .expect("propose persist");
-    approve_op(b, "persist").await;
 }
 
 async fn uploads(w: &WalletHandle) -> Vec<molt_core::UploadView> {

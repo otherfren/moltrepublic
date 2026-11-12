@@ -15,6 +15,7 @@
 
 mod common;
 
+use common::read_session;
 use std::time::Duration;
 
 use molt_core::{
@@ -25,13 +26,6 @@ use molt_engine::WalletHandle;
 use molt_net::supervisor::{self, MemLog, MemStateStore, NetConfig};
 use molt_net::{MlsChannel, MlsMember, PeerLink};
 use tokio::sync::watch;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
 
 /// One `ReadState` on the chat surface, optionally channel-filtered.
 async fn read_chat_snap(w: &WalletHandle, channel: Option<ChannelRef>) -> SurfaceSnapshot {

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use molt_core::{
-    ChatMessage, Command, EventEnvelope, MemberId, MeshLink, Reply, SessionSettings, SessionView,
+    ChatMessage, Command, EventEnvelope, GroupConfig, MemberId, MeshLink, Reply, SessionSettings, SessionView,
     Surface, WorkspaceEvent,
 };
 use molt_engine::WalletHandle;
@@ -337,4 +337,130 @@ pub async fn hard_kill(a: WalletHandle, root: &Path, id: &str) -> std::path::Pat
         }
     }
     dir
+}
+
+/// A storage-backed engine over `root`, listing the workspaces already there.
+pub fn engine(root: &std::path::Path) -> WalletHandle {
+    let session = SessionView {
+        workspaces: molt_storage::scan_workspaces(root)
+            .iter()
+            .map(molt_storage::ScanEntry::info)
+            .collect(),
+        settings: SessionSettings {
+            workspace_dir: root.display().to_string(),
+            ..SessionSettings::default()
+        },
+        ..SessionView::default()
+    };
+    molt_engine::spawn_with_storage(GroupConfig::demo(), session)
+}
+
+/// A single-member group: threshold 1, no self-cosign - one `Approve`
+/// applies, and no peer ever writes behind the test's back. It has NO chain
+/// (the legacy counted path).
+pub fn spawn_solo() -> WalletHandle {
+    molt_engine::spawn(
+        GroupConfig {
+            member: "me".to_string(),
+            members: vec!["me".to_string()],
+            threshold: 1,
+            self_cosign: false,
+        },
+        SessionView::default(),
+    )
+}
+
+/// Poll the session until `pred` holds, at most `secs` — the same
+/// no-event-bus pattern every engine test uses.
+pub async fn wait_for_secs(
+    w: &WalletHandle,
+    what: &str,
+    secs: u64,
+    pred: impl Fn(&SessionView) -> bool,
+) -> Box<SessionView> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let s = read_session(w).await;
+        if pred(&s) {
+            return s;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "timed out waiting for: {what}\nsession: notice={:?} create.log={:?} join.log={:?}",
+            s.notice,
+            s.create.run.log,
+            s.join.run.log
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// [`wait_for_secs`] with the usual 30 s.
+pub async fn wait_for(w: &WalletHandle, what: &str, pred: impl Fn(&SessionView) -> bool) -> Box<SessionView> {
+    wait_for_secs(w, what, 30, pred).await
+}
+
+/// ADR-0004: nothing is pre-configured — each node adds and confirms the
+/// relay itself. A `ws://127.0.0.1` relay is `Local` kind, gated like
+/// clearnet (§10.14): confirm with the acknowledgement, then unlock the
+/// session.
+pub async fn adopt_relay(w: &WalletHandle, url: &str) {
+    w.execute(Command::RelayAdd { url: url.to_string() })
+        .await
+        .expect("relay add");
+    w.execute(Command::RelayConfirm {
+        url: url.to_string(),
+        accept_clearnet: true,
+    })
+    .await
+    .expect("relay confirm");
+    // B4: the confirmation lands on the PROBE's verdict, off-actor — an
+    // unusable relay never becomes a confirmed one
+    wait_for(w, "the relay probe to confirm the relay", |s| {
+        s.settings
+            .relays
+            .iter()
+            .any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
+    })
+    .await;
+    w.execute(Command::RelayClearnetSession { unlock: true })
+        .await
+        .expect("session unlock");
+}
+
+/// The second voice: wait until `w` sees the open proposal with this `op`,
+/// then approve it through the public command surface.
+pub async fn approve_op(w: &WalletHandle, op: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Reply::Proposals { proposals, .. } =
+            w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list proposals")
+        {
+            if let Some(p) = proposals.iter().find(|p| {
+                p.state == molt_core::ProposalState::Proposed
+                    && p.payload.get("op").and_then(|v| v.as_str()) == Some(op)
+            }) {
+                w.execute(Command::Approve { proposal: p.id, note: None })
+                    .await
+                    .expect("approve");
+                return;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the {op} proposal never reached the second voice"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// E4: the graph reads answer `index_building: true` with empty lists
+/// instead of refusing, so a test waits that out too.
+pub fn still_building(reply: &Reply) -> bool {
+    matches!(
+        reply,
+        Reply::WikiHealth { index_building: true, .. }
+            | Reply::WikiNeighbors { index_building: true, .. }
+            | Reply::WikiSearch { index_building: true, .. }
+    )
 }

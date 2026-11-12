@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 
 use molt_core::{ChannelRef, ChatMessage, ProposalView, SurfaceSnapshot};
+use serde::Deserialize;
 
 use crate::labels::{file_date_label, file_size_label, when_label};
 use crate::channels::{KnownFate, KnownProposal};
@@ -43,7 +44,7 @@ pub(crate) struct ChatViewCtx {
 pub(crate) fn chat_messages(snap: &SurfaceSnapshot) -> Vec<ChatMessage> {
     snap.applied
         .iter()
-        .filter_map(|v| serde_json::from_value::<ChatMessage>(v.clone()).ok())
+        .filter_map(|v| ChatMessage::deserialize(v).ok())
         .collect()
 }
 

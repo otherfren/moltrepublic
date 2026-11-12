@@ -22,25 +22,18 @@
 
 mod common;
 
+use common::{await_chat_len, hard_kill, read_chat, read_session};
 use std::path::Path;
 use std::time::Duration;
 
-use common::{await_chat_len, hard_kill, read_chat};
 use molt_core::{
-    Command, EventEnvelope, MemberId, MeshLink, NetHealth, Reply, SessionSettings, SessionView,
+    Command, EventEnvelope, MemberId, MeshLink, NetHealth, SessionSettings, SessionView,
     WorkspaceEvent,
 };
 use molt_engine::WalletHandle;
 use molt_net::supervisor::{self, MemLog, MemStateStore, NetConfig};
 use molt_net::{EngineSink, MlsChannel, MlsMember, NetError, PeerLink};
 use tokio::sync::watch;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
 
 /// Records what the member-side supervisor delivers.
 #[derive(Clone, Default)]

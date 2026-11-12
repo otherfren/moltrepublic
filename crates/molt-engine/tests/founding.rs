@@ -8,17 +8,13 @@
 //! canonical table. This is the "sealed from birth" guarantee, checked
 //! with real Ed25519 signatures, not a mock.
 
+mod common;
+
+use common::read_session;
 use std::time::Duration;
 
-use molt_core::{Command, Reply, SessionSettings, SessionView, WorkspaceEvent};
+use molt_core::{Command, SessionSettings, SessionView, WorkspaceEvent};
 use molt_engine::WalletHandle;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
 
 async fn await_founding(w: &WalletHandle) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);

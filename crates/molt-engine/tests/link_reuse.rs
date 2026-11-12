@@ -13,17 +13,12 @@
 //! 3. The FIRST joiner's seat stays anchored and untouched — the ritual
 //!    remains viable for the remaining links.
 
+mod common;
+
+use common::read_session;
 use std::time::Duration;
 
-use molt_core::{Command, Reply, SessionSettings, SessionView};
-use molt_engine::WalletHandle;
-
-async fn read_session(w: &WalletHandle) -> Box<SessionView> {
-    match w.execute(Command::ReadSession).await.expect("read session") {
-        Reply::Session(s) => s,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
+use molt_core::{Command, SessionSettings, SessionView};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_second_activation_of_the_same_link_fails_loudly_on_both_sides() {

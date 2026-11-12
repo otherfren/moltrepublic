@@ -25,14 +25,8 @@ pub(crate) fn proposal_image_from_b64(img_b64: &str) -> Option<slint::Image> {
 /// gets one try as SVG source. Untrusted peer input: decode dimensions are
 /// capped so a tiny compressed bomb cannot balloon in memory.
 pub(crate) fn image_from_bytes(bytes: &[u8]) -> Option<slint::Image> {
-    let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
-        .with_guessed_format()
-        .ok()?;
+    let reader = capped_reader(bytes)?;
     if reader.format().is_some() {
-        let mut limits = image::Limits::default();
-        limits.max_image_width = Some(8192);
-        limits.max_image_height = Some(8192);
-        reader.limits(limits);
         let rgba = reader.decode().ok()?.into_rgba8();
         let (w, h) = rgba.dimensions();
         let buf =
@@ -165,10 +159,12 @@ pub(crate) fn fit_member_image(bytes: &[u8], budget: usize) -> Result<FittedImag
         square.color().has_alpha() && square.to_rgba8().pixels().any(|p| p.0[3] != u8::MAX);
     let mut target = edge.min(AVATAR_EDGE_START);
     loop {
+        let resized;
         let scaled = if target < edge {
-            square.resize(target, target, image::imageops::FilterType::Lanczos3)
+            resized = square.resize(target, target, image::imageops::FilterType::Lanczos3);
+            &resized
         } else {
-            square.clone()
+            &square
         };
         for fmt in [image::ImageFormat::Png, image::ImageFormat::Jpeg] {
             if fmt == image::ImageFormat::Jpeg && transparent {
@@ -179,7 +175,7 @@ pub(crate) fn fit_member_image(bytes: &[u8], budget: usize) -> Result<FittedImag
                     &image::DynamicImage::ImageRgb8(scaled.to_rgb8()),
                     fmt,
                 ),
-                _ => encode(&scaled, fmt),
+                _ => encode(scaled, fmt),
             };
             if let Some(out) = encoded.filter(|out| out.len() <= budget) {
                 return Ok(FittedImage {
@@ -199,18 +195,25 @@ pub(crate) fn fit_member_image(bytes: &[u8], budget: usize) -> Result<FittedImag
     }
 }
 
-/// Decode with the same 8192² ceiling [`image_from_bytes`] enforces - a
-/// picked file is as untrusted as a proposed one (a tiny compressed bomb
-/// balloons in memory either way).
-fn decode_capped(bytes: &[u8]) -> Option<image::DynamicImage> {
+/// Sniff content and apply the 8192² raster ceiling. Leave unknown formats
+/// unset so previews alone can try SVG; malformed rasters must not fall back.
+fn capped_reader(bytes: &[u8]) -> Option<image::ImageReader<std::io::Cursor<&[u8]>>> {
     let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
         .with_guessed_format()
         .ok()?;
-    reader.format()?;
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(8192);
     reader.limits(limits);
+    Some(reader)
+}
+
+/// Decode raster bytes only, under that ceiling - a picked file is as
+/// untrusted as a proposed one (a tiny compressed bomb balloons in memory
+/// either way). SVG is handled separately by previews.
+fn decode_capped(bytes: &[u8]) -> Option<image::DynamicImage> {
+    let reader = capped_reader(bytes)?;
+    reader.format()?;
     reader.decode().ok()
 }
 

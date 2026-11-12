@@ -1798,7 +1798,7 @@ impl State {
         // exactly one payload (not every historical set_image), and only when
         // it is actually the current image
         let mut want: Option<(String, Vec<u8>)> = None;
-        for v in self.applied_org_entries().collect::<Vec<_>>().into_iter().rev() {
+        for v in self.applied_org_entries().rev() {
             match v.get("op").and_then(serde_json::Value::as_str) {
                 Some("remove_image") => break, // the current image was cleared
                 Some("set_image") => {
@@ -1829,7 +1829,7 @@ impl State {
         // decides, and only that one payload is decoded
         let mut want: std::collections::BTreeMap<&str, Option<(String, Vec<u8>)>> =
             std::collections::BTreeMap::new();
-        for v in self.applied_org_entries().collect::<Vec<_>>().into_iter().rev() {
+        for v in self.applied_org_entries().rev() {
             let Some(member) = v
                 .get("member")
                 .and_then(serde_json::Value::as_str)
