@@ -231,6 +231,13 @@ impl State {
         up_to: String,
     ) -> Result<Reply, MoltError> {
         let channel = channel.normalized().map_err(MoltError::BadPayload)?;
+        // a wake line is a row of the read but no message: reading up to it
+        // reads the channel
+        let up_to = if self.wake.lines.iter().any(|l| hex::encode(l.id.0) == up_to.trim()) {
+            String::new()
+        } else {
+            up_to
+        };
         let id = if up_to.trim().is_empty() {
             match self.chat_visible().filter(|m| m.channel == channel).last().map(|m| m.id) {
                 // an empty channel has nothing to read

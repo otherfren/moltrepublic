@@ -658,7 +658,7 @@ local node posture, saved to `config.toml`, never governance:
   tool see the identical contract. A test pins that every reason in
   `spawn_wake` and every env var appears in it.
 
-**Changed 2026-11-11** (`docs/reviews/beta_feedback_2026-11-11.md`, WP3):
+**Changed 2026-11-11** (`docs_archive/reviews/beta_feedback_2026-11-11.md`, WP3):
 
 - The wake group is its own Settings tab, "Agent".
 - `WAKE_SKILL` is a step-by-step guide to BUILD the wake script

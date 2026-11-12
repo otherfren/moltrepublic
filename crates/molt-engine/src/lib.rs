@@ -1382,6 +1382,12 @@ pub(crate) struct State {
     /// double-report and advance the MLS ratchet past the snapshot
     /// `finalize_founding` takes. Reset with the ritual.
     pub(crate) seal_published: bool,
+    /// Ends the genesis re-publish of the republic founded here once its
+    /// workspace is left.
+    pub(crate) genesis_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Dropped peer proposals already reported (`from:why`), so a re-served
+    /// card notifies once.
+    pub(crate) dropped_noted: std::collections::HashSet<String>,
     /// Seal signatures collected so far this ritual (founder first at
     /// finalize).
     pub(crate) ritual_attestations: Vec<molt_core::RosterAttestation>,
@@ -1673,6 +1679,8 @@ impl State {
             net,
             net_ritual: None,
             seal_published: false,
+            genesis_stop: None,
+            dropped_noted: std::collections::HashSet::new(),
             ritual_attestations: Vec::new(),
             ritual_material_sink: None,
             ritual_sim: false,

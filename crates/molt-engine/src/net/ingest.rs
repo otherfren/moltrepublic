@@ -25,9 +25,12 @@ impl State {
     /// Tell the operator a peer's proposal was dropped here. Once per
     /// distinct drop: a re-served card must not re-notify on every pass.
     fn note_dropped_proposal(&mut self, from: &str, why: &str) {
-        let notice = format!("proposal-dropped:{from}:{why}");
-        if self.session.notice != notice {
-            self.session.notice = notice;
+        if !self.dropped_noted.insert(format!("{from}:{why}")) {
+            return;
+        }
+        // never over a notice the operator has not seen yet
+        if self.session.notice.is_empty() {
+            self.session.notice = format!("proposal-dropped:{from}:{why}");
             self.emit_session(crate::SessionScope::Full);
         }
     }

@@ -1,7 +1,12 @@
 # Beta feedback 2026-11-11: action plan
 
-**Status: PLAN, all questions decided (sections 4-6). Nothing here is
-built.**
+**Status: EXECUTED (2026-11-12). WP1-WP7 are built; WP1b was dropped
+(R1). Do not build new work from this document.**
+
+Left as known debt: the GUI's own avatar fitter duplicates the engine's
+`image_fit`; a wake line and a dropped-proposal notice announce with a
+full session event; a wake command with shell syntax is not `exec`ed, so
+its timeout ends the shell only.
 
 Source: first founding by beta testers on v0.0.9, one GUI seat and one
 headless seat. Eleven raw findings, grouped into seven work packages.

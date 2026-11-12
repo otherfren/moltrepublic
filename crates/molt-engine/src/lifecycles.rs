@@ -1152,6 +1152,8 @@ impl State {
         let ws_id = id.clone();
         if let Some((ct, exporter)) = nostr_genesis_frame {
             if let (Some(chan), Some(tx)) = (ritual.nostr_chan(), self.cmd_tx.upgrade()) {
+                let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.genesis_stop = Some(stop.clone());
                 crate::nostr_ritual::spawn_publish_frame(
                     chan,
                     crate::nostr_ritual::FramePayload::Sealed { ct, exporter },
@@ -1162,6 +1164,7 @@ impl State {
                     // the genesis outlives the ritual, so it carries the
                     // workspace it belongs to instead
                     ws_id.clone(),
+                    Some(stop),
                 );
             }
         } else if let Ok(json) = serde_json::to_string(&sealed) {

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Fit a proposed picture into the transport budget: fewer pixels, same
-//! format (`docs/reviews/beta_feedback_2026-11-11.md` L4, L9).
+//! format (`docs_archive/reviews/beta_feedback_2026-11-11.md` L4, L9).
 
 use image::ImageFormat;
 use molt_core::MoltError;
@@ -31,6 +31,13 @@ pub(crate) fn fit_image(bytes: &[u8], budget: usize) -> Result<Vec<u8>, MoltErro
         return Ok(bytes.to_vec());
     }
     let format = image::guess_format(bytes).map_err(|_| undecodable())?;
+    // the size gate comes first: the frame probe below allocates a canvas
+    let (dw, dh) = image::ImageReader::with_format(std::io::Cursor::new(bytes), format)
+        .into_dimensions()
+        .map_err(|_| undecodable())?;
+    if dw == 0 || dh == 0 || dw > MAX_DIM || dh > MAX_DIM {
+        return Err(undecodable());
+    }
     if animated(bytes, format) {
         return Err(too_large(bytes.len(), budget));
     }
@@ -106,6 +113,9 @@ pub(crate) fn sniffed_ext(bytes: &[u8]) -> &'static str {
 pub(crate) fn read_source(path: &std::path::Path) -> Result<Vec<u8>, MoltError> {
     let unreadable = || MoltError::BadPayload(format!("cannot read {}", path.display()));
     let meta = std::fs::metadata(path).map_err(|_| unreadable())?;
+    if !meta.is_file() {
+        return Err(unreadable());
+    }
     if meta.len() > SOURCE_MAX {
         return Err(MoltError::BadPayload(format!(
             "the file is {} MiB - the limit is {} MiB",
@@ -113,7 +123,16 @@ pub(crate) fn read_source(path: &std::path::Path) -> Result<Vec<u8>, MoltError> 
             SOURCE_MAX / (1024 * 1024)
         )));
     }
-    std::fs::read(path).map_err(|_| unreadable())
+    // capped again at the read: the file may grow after the stat
+    use std::io::Read as _;
+    let mut out = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(SOURCE_MAX + 1).read_to_end(&mut out))
+        .map_err(|_| unreadable())?;
+    if u64::try_from(out.len()).unwrap_or(u64::MAX) > SOURCE_MAX {
+        return Err(unreadable());
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -131,6 +150,22 @@ pub(crate) mod tests {
             image::Rgb([r, g, b])
         });
         encode(&image::DynamicImage::ImageRgb8(img), format).expect("encodes")
+    }
+
+    /// A GIF claiming a 65535x65535 screen is refused at the size gate,
+    /// before any frame canvas is allocated.
+    #[test]
+    fn a_giant_logical_screen_is_refused_before_decoding() {
+        let mut gif = b"GIF89a\xff\xff\xff\xff\x00\x00\x00".to_vec();
+        gif.extend_from_slice(&[0x3b; 64]);
+        assert!(fit_image(&gif, 8).is_err());
+    }
+
+    #[test]
+    fn a_path_that_is_no_file_is_refused() {
+        let dir = tempfile::tempdir().expect("tmp");
+        assert!(read_source(dir.path()).is_err());
+        assert!(read_source(std::path::Path::new("/dev/zero")).is_err());
     }
 
     #[test]

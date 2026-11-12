@@ -671,6 +671,7 @@ impl State {
                         // ~30 s later
                         Some(gen),
                         String::new(),
+                        None,
                     ));
                 }
             }
@@ -2898,6 +2899,7 @@ mod ritual_ops {
                         tx.downgrade(),
                         Some(generation),
                         String::new(),
+                        None,
                     );
                     // re-published until the ritual ends
                     if let Some(nostr) = self.net_ritual.as_mut().and_then(|r| r.nostr.as_mut()) {

@@ -89,6 +89,8 @@ pub(crate) struct WakeState {
 impl WakeState {
     /// Forget the workspace-scoped part (a switch or close).
     pub(crate) fn reset_workspace(&mut self) {
+        // a wake still running belongs to the workspace left: no line here
+        self.running_reason.clear();
         self.pending.clear();
         self.pending_by.clear();
         self.last_at = None;

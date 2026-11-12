@@ -1874,6 +1874,10 @@ impl State {
     }
 
     pub(crate) fn close_active_storage(&mut self) {
+        if let Some(stop) = self.genesis_stop.take() {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.dropped_noted.clear();
         // WP4a F8: the clean close is the second compaction trigger — the
         // snapshot and the delivery cursors are freshest exactly here. It
         // runs BEFORE the close so its trimmed snapshot is the one the

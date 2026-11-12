@@ -370,7 +370,7 @@ First read the newest file in `<PROJECT>/logs/wake/`. Then find the symptom in t
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Test wake: `not found`, `not traversable`, `not readable`, `not executable` | MoltRepublic's user cannot reach the script | fix the path or the modes it names; every folder on the way needs `x` for that user |
+| Test wake: `not found`, `not traversable`, `not executable` | MoltRepublic's user cannot reach the script | fix the path or the modes it names; every folder on the way needs `x` for that user |
 | Test wake: `interpreter missing` or `interpreter not on PATH` | the first line of the script names a program MoltRepublic does not find | install it, or write its absolute path into the first line |
 | `wake: exit 127` | agent not found | `AGENT_BIN` must be the absolute path from step 2 |
 | `wake: exit 124` | time limit reached, the agent waits for an answer | switch D is missing or wrong |

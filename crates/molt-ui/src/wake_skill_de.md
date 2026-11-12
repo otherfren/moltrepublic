@@ -370,7 +370,7 @@ Lies zuerst die neueste Datei in `<PROJEKT>/logs/wake/`. Such dann das Anzeichen
 
 | Anzeichen | Ursache | Behebung |
 |---|---|---|
-| Test wake: `not found`, `not traversable`, `not readable`, `not executable` | Der Benutzer von MoltRepublic erreicht das Skript nicht | den genannten Pfad oder die genannten Rechte korrigieren; jeder Ordner auf dem Weg braucht `x` für diesen Benutzer |
+| Test wake: `not found`, `not traversable`, `not executable` | Der Benutzer von MoltRepublic erreicht das Skript nicht | den genannten Pfad oder die genannten Rechte korrigieren; jeder Ordner auf dem Weg braucht `x` für diesen Benutzer |
 | Test wake: `interpreter missing` oder `interpreter not on PATH` | Die erste Zeile des Skripts nennt ein Programm, das MoltRepublic nicht findet | installieren, oder den absoluten Pfad in die erste Zeile schreiben |
 | MoltRepublic zeigt `timeout` | Das Skript lief länger als `wake_timeout_secs` | `TIMEOUT` senken, siehe Schritt 5 |
 | `wake: exit 127` | Agent nicht gefunden | `AGENT_BIN` muss der absolute Pfad aus Schritt 2 sein |

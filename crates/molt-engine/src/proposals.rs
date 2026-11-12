@@ -281,6 +281,9 @@ pub(crate) const DESC_MAX: usize = 500;
 /// molt-ui preview decoder enforces, so the engine never accepts an image
 /// the GUI could not render.
 const IMAGE_MAX_DIM: u32 = 8192;
+/// Payload key a fitted picture proposal carries back into the actor: the
+/// workspace it was issued in. Removed before anything is recorded.
+const FITTED_FOR: &str = "_fitted_for";
 
 /// WP3: can these bytes become a picture on every member's screen? A cheap
 /// sniff, never a full decode (decode bombs): `guess_format` reads magic
@@ -606,6 +609,15 @@ impl State {
             (Surface::Organization, Some("set_member_image")) => "avatar",
             _ => return Ok(None),
         };
+        // a fitted proposal re-enters bound to the workspace it was issued
+        // in: the fit runs off the actor, and the workspace may have changed
+        if let Some(bound) = payload.as_object_mut().and_then(|o| o.remove(FITTED_FOR)) {
+            if bound.as_str() != Some(self.session.active_workspace.as_str()) {
+                return Err(MoltError::BadPayload(
+                    "the workspace changed while the image was prepared - propose again".into(),
+                ));
+            }
+        }
         // removed either way: a host path is never signed
         let path = payload
             .as_object_mut()
@@ -662,6 +674,7 @@ impl State {
         };
         let budget = image_headroom(surface, payload, &roster);
         let mut payload = std::mem::take(payload);
+        payload[FITTED_FOR] = Value::String(self.session.active_workspace.clone());
         tokio::spawn(async move {
             let fitted = tokio::task::spawn_blocking(move || {
                 use base64::Engine as _;

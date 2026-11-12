@@ -174,9 +174,8 @@ fn check_file(path: &Path) -> Result<(), String> {
     if !meta.is_file() {
         return Err(format!("not a file: {}", path.display()));
     }
-    if !can(path, Access::READ_OK) {
-        return Err(format!("not readable: {}", path.display()));
-    }
+    // no read check: a binary runs execute-only, and an unreadable script
+    // shows in the run's own stderr
     if !can(path, Access::EXEC_OK) {
         return Err(format!("not executable: {}", path.display()));
     }
@@ -307,10 +306,8 @@ mod tests {
             Err(format!("not executable: {line}")),
             "a PATH hit without the bit"
         );
-        mode(&script, 0o300);
-        if !can(&script, Access::READ_OK) {
-            assert_eq!(check_command(&line, &e), Err(format!("not readable: {line}")));
-        }
+        mode(&script, 0o100);
+        assert_eq!(check_command(&line, &e), Ok(()), "execute-only passes the check");
         assert_eq!(
             check_command(&dir.path().display().to_string(), &e),
             Err(format!("not a file: {}", dir.path().display()))

@@ -489,6 +489,7 @@ impl RetryPolicy {
 /// `None`, and the reporting path was dead code — so a refused Seal hung both
 /// sides in silence. Deleting the Option deletes the seam a future call site
 /// can forget to wire.
+#[allow(clippy::too_many_arguments)] // one leg's wiring, not a bag
 pub(crate) fn spawn_publish_frame(
     chan: GroupChannel,
     payload: FramePayload,
@@ -500,6 +501,8 @@ pub(crate) fn spawn_publish_frame(
     // the ritual was taken (the genesis), so a late report cannot be
     // attributed to a founding that started meanwhile
     workspace: String,
+    // set = no further re-publish (the first publish is never cut short)
+    stop: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // encrypt ONCE — see FramePayload
@@ -569,7 +572,10 @@ pub(crate) fn spawn_publish_frame(
             };
             last = Some(secs);
             tokio::time::sleep(Duration::from_secs(secs)).await;
-            if tx.upgrade().is_none() {
+            let stopped = stop
+                .as_ref()
+                .is_some_and(|s| s.load(std::sync::atomic::Ordering::SeqCst));
+            if stopped || tx.upgrade().is_none() {
                 return;
             }
             if let Err(e) = chan.publish_frame(&exporter, &ct).await {
