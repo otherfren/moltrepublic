@@ -480,6 +480,9 @@ Two remedies, deliberately different in what they keep.
 | `TorNetworkTimeout`, `TransientFailure`, `CircuitCollapse`, `CircuitRefused`, `RelayTooBusy`, `NoExit`, a dial its caller dropped | **ambiguous** - one dead onion service looks the same |
 | every other kind (`TorAccessFailed`, `TorDirectoryUnusable`, `DirectoryExpired`, `NoPath`, `LocalNetworkError`, state and cache errors, ...), a failed bootstrap | **client** |
 
+An address arti refuses to dial (`InvalidStreamTarget`,
+`ForbiddenStreamTarget`, ...) is no evidence either way.
+
 The client is unusable when, for 10 minutes without one alive outcome,
 either
 

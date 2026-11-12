@@ -210,13 +210,15 @@ impl ArtiShared {
         let out = client.connect_with_prefs((host, port), &prefs).await;
         cut.0 = None;
         let (evidence, error) = match &out {
-            Ok(_) => (Evidence::Alive, String::new()),
+            Ok(_) => (Some(Evidence::Alive), String::new()),
             Err(e) => (evidence_of(e.kind()), e.to_string()),
         };
-        let status = client.bootstrap_status();
-        let blocked = status.blocked().map(|b| b.to_string());
-        let ready = status.ready_for_traffic() && blocked.is_none();
-        self.observe(self.clock.elapsed(), generation, host, evidence, Some(ready), &blocked.unwrap_or(error));
+        if let Some(evidence) = evidence {
+            let status = client.bootstrap_status();
+            let blocked = status.blocked().map(|b| b.to_string());
+            let ready = status.ready_for_traffic() && blocked.is_none();
+            self.observe(self.clock.elapsed(), generation, host, evidence, Some(ready), &blocked.unwrap_or(error));
+        }
         out.map_err(|e| NetError::TorUnavailable(format!("arti dial {host}:{port}: {e}")))
     }
 
@@ -286,7 +288,7 @@ impl ArtiShared {
             return;
         };
         let until = Instant::now() + drain;
-        while Arc::strong_count(&old) > 1 && Instant::now() < until {
+        while Arc::strong_count(&old) > 1 && Instant::now() < until && self.resets_waiting.load(Ordering::SeqCst) == 0 {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
@@ -317,7 +319,7 @@ impl ArtiShared {
         .await
         .map_err(|e| NetError::TorMisconfigured(format!("arti reset: {e}")))??;
         let listed: Vec<String> = removed.iter().map(|p| p.display().to_string()).collect();
-        tracing::warn!(tor = "embedded", event = "reset", removed = %listed.join(","));
+        tracing::info!(tor = "embedded", event = "reset", removed = %listed.join(","));
         Ok(removed)
     }
 }
@@ -346,10 +348,17 @@ impl Drop for CutShort {
 
 /// What a failed dial's kind says about the client. The far end answering,
 /// in whatever way, proves the client works; a timeout inside the Tor
-/// network is what one dead onion service looks like too.
-fn evidence_of(kind: ErrorKind) -> Evidence {
+/// network is what one dead onion service looks like too; an address arti
+/// refuses to dial says nothing.
+fn evidence_of(kind: ErrorKind) -> Option<Evidence> {
     use ErrorKind as K;
-    match kind {
+    Some(match kind {
+        K::InvalidStreamTarget
+        | K::ForbiddenStreamTarget
+        | K::OnionServiceAddressInvalid
+        | K::BadApiUsage
+        | K::FeatureDisabled
+        | K::NotImplemented => return None,
         K::RemoteStreamClosed
         | K::RemoteStreamReset
         | K::RemoteStreamError
@@ -366,10 +375,7 @@ fn evidence_of(kind: ErrorKind) -> Evidence {
         | K::OnionServiceProtocolViolation
         | K::OnionServiceConnectionFailed
         | K::OnionServiceMissingClientAuth
-        | K::OnionServiceWrongClientAuth
-        | K::OnionServiceAddressInvalid
-        | K::InvalidStreamTarget
-        | K::ForbiddenStreamTarget => Evidence::Alive,
+        | K::OnionServiceWrongClientAuth => Evidence::Alive,
         K::TorNetworkTimeout
         | K::TransientFailure
         | K::CircuitCollapse
@@ -377,7 +383,7 @@ fn evidence_of(kind: ErrorKind) -> Evidence {
         | K::RelayTooBusy
         | K::NoExit => Evidence::Ambiguous,
         _ => Evidence::Client,
-    }
+    })
 }
 
 impl Default for ArtiShared {
@@ -583,11 +589,12 @@ mod tests {
     fn only_a_tor_level_failure_counts_against_the_client() {
         use ErrorKind as K;
         for kind in [K::RemoteConnectionRefused, K::OnionServiceNotFound, K::OnionServiceNotRunning, K::RemoteHostNotFound] {
-            assert_eq!(evidence_of(kind), Evidence::Alive, "{kind:?}");
+            assert_eq!(evidence_of(kind), Some(Evidence::Alive), "{kind:?}");
         }
-        assert_eq!(evidence_of(K::TorNetworkTimeout), Evidence::Ambiguous);
+        assert_eq!(evidence_of(K::TorNetworkTimeout), Some(Evidence::Ambiguous));
+        assert_eq!(evidence_of(K::InvalidStreamTarget), None, "a refused address is no evidence");
         for kind in [K::TorAccessFailed, K::TorDirectoryUnusable, K::DirectoryExpired, K::NoPath, K::LocalNetworkError] {
-            assert_eq!(evidence_of(kind), Evidence::Client, "{kind:?}");
+            assert_eq!(evidence_of(kind), Some(Evidence::Client), "{kind:?}");
         }
     }
 
