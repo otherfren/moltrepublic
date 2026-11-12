@@ -392,15 +392,19 @@ component LinkRun inherits Rectangle {
     in property <string> target;
     in property <string> rel;
     in property <length> fsize: Theme.fs-editor;
-    width: lt.preferred-width + 4px;
+    // a label wider than this wraps instead of leaving the pane
+    in property <length> max-w: 100000px;
+    width: min(lt.preferred-width + 4px, root.max-w);
     height: lt.preferred-height;
     border-radius: 3px;
     background: lta.has-hover ? Theme.accent-soft : transparent;
     lt := Text {
         x: 2px;
+        width: parent.width - 4px;
         text: root.label;
         color: Theme.accent;
         font-size: root.fsize;
+        wrap: word-wrap;
     }
     // Text has no underline — the link affordance is drawn
     Rectangle {
@@ -903,6 +907,8 @@ component SpanFlow inherits Rectangle {
                     target: sp.link;
                     rel: sp.rel;
                     fsize: root.fsize;
+                    // the tail keeps room to wrap in
+                    max-w: row.has-tail ? root.width * 0.6 : root.width;
                 }
                 if sp.file-state != 0: FileRun {
                     label: sp.text;
@@ -2293,6 +2299,7 @@ export component MemoryPane inherits VerticalLayout {
                                     label: l;
                                     target: l;
                                     fsize: Theme.fs-cap;
+                                    max-w: doc-body.width - 32px;
                                 }
                             }
                         }
@@ -2317,6 +2324,7 @@ export component MemoryPane inherits VerticalLayout {
                                     label: l;
                                     target: l;
                                     fsize: Theme.fs-cap;
+                                    max-w: doc-body.width - 32px;
                                 }
                             }
                         }

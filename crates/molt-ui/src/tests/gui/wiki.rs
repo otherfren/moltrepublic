@@ -3172,3 +3172,54 @@ fn wiki_pane_paint_cost_offscreen() {
     }
 }
 
+
+/// **The prose ends inside the preview.** Whatever a document holds, no
+/// block runs past the body's right padding.
+#[cfg(feature = "live-preview")]
+#[test]
+fn no_block_runs_past_the_right_edge_of_the_preview() {
+    let long = "one two three four five six seven eight nine ten ".repeat(12);
+    let path = "folder/".repeat(30);
+    let docs = [
+        ("plain", format!("# A\n\n{long}\n")),
+        ("linked", format!("# A\n\n{long} [[b]] {long}\n")),
+        ("bullet", format!("# A\n\n- {long}\n- [[b]] {long}\n")),
+        ("link list", format!("# A\n\n{long}\n\n[[{path}b]]\n")),
+        ("table", format!("# A\n\n{long}\n\n| a | b |\n|---|---|\n| {long} | {long} |\n")),
+        ("long link", format!("# A\n\n{long} [[{}]] {long}\n", "title ".repeat(60).trim())),
+        ("long bullet link", format!("# A\n\n- {long} [[{}]] {long}\n", "title ".repeat(60).trim())),
+        ("code", format!("# A\n\n{long}\n\n```\n{long}\n```\n")),
+        ("word", format!("# A\n\n{long}\n\n{}\n", "x".repeat(600))),
+        ("heading", format!("# {long}\n\n## {long}\n\n{long}\n")),
+        ("header", format!("---\ntags: [alpha]\nsource: {}\n---\n# A\n\n{long}\n", "y".repeat(400))),
+    ];
+    let mut bad = Vec::new();
+    let (ui, _shown) = tagged_doc_window("# A\n");
+    let g = ui.global::<WikiState>();
+    for (rev, (name, doc)) in docs.iter().enumerate() {
+        g.set_base_docs(ModelRc::new(VecModel::from(vec![WikiBase {
+            path: "a.md".into(),
+            content: doc.as_str().into(),
+            loaded: true,
+        }])));
+        g.set_base_rev(rev as i32 + 2);
+        g.invoke_base_arrived();
+        assert!(g.get_blocks().row_count() > 1, "{name}: the document shows");
+        for width in [1400_u32, 1100] {
+            ui.window().set_size(slint::PhysicalSize::new(width, 900));
+            let body = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "MemoryPane::doc-body")
+                .next()
+                .expect("the body renders");
+            let edge = body.absolute_position().x + body.size().width - 16.0;
+            let past = ["BrainBlockView", "LinkRun", "SpanFlow"]
+                .into_iter()
+                .flat_map(|t| i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, t))
+                .map(|e| e.absolute_position().x + e.size().width)
+                .find(|right| *right > edge + 0.6);
+            if let Some(right) = past {
+                bad.push(format!("{name} at {width}: a run ends at {right}, the body at {edge}"));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}
