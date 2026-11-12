@@ -5461,8 +5461,8 @@ pub enum Command {
     /// Reset the embedded Tor client: drop it and remove its on-disk state
     /// and cache, so the next dial bootstraps from scratch. This picks new
     /// entry guards, so it is the operator's act only - the automatic
-    /// rebuild keeps them. Refused unless the saved route is `tor` /
-    /// `embedded`.
+    /// rebuild keeps them. Refused unless the route the node booted on or
+    /// the saved one is `tor` / `embedded`.
     NetResetTor,
     /// The newest entries of this node's log file ([`Reply::Log`]), read
     /// across the daily files. SEAT scope: a log names members and relays.

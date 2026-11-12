@@ -939,8 +939,7 @@ impl State {
     /// Reset the embedded Tor client ([`molt_core::Command::NetResetTor`]).
     /// The removal runs off the actor and answers through the deferred slot.
     pub(crate) fn cmd_net_reset_tor(&mut self) -> Result<Reply, MoltError> {
-        let s = &self.session.settings;
-        if s.anonymity != "tor" || s.tor_mode != "embedded" {
+        if !embedded_tor_in_use(&self.boot_settings, &self.session.settings) {
             return Err(MoltError::Settings("embedded Tor not in use".to_string()));
         }
         let Some(reply) = self.deferred_reply.take() else {
@@ -2596,6 +2595,14 @@ fn export_to_file(
 /// unsaved draft straight from an MCP argument — that must not be able to
 /// smuggle newlines or terminal escapes into a message the GUI, the MCP
 /// answer and the log all render.
+/// Whether this process may be dialing through the embedded client. A
+/// workspace opened before a save keeps the route it booted on, while
+/// every dial resolved after it ([`State::dialer_for`]) takes the saved
+/// one - so either can be the running route.
+fn embedded_tor_in_use(boot: &SessionSettings, saved: &SessionSettings) -> bool {
+    [boot, saved].iter().any(|s| s.anonymity == "tor" && s.tor_mode == "embedded")
+}
+
 fn quote_for_display(value: &str) -> String {
     clamp_for_display(value, 32)
 }
@@ -2794,6 +2801,21 @@ fn daemon_moved(old: &SessionSettings, new: &SessionSettings) -> bool {
 
 #[cfg(test)]
 mod patch_tests {
+    #[test]
+    fn the_embedded_client_counts_as_in_use_on_the_booted_or_the_saved_route() {
+        let route = |anonymity: &str, mode: &str| molt_core::SessionSettings {
+            anonymity: anonymity.to_string(),
+            tor_mode: mode.to_string(),
+            ..molt_core::SessionSettings::default()
+        };
+        let (embedded, local, off) = (route("tor", "embedded"), route("tor", "local"), route("none", "embedded"));
+        assert!(super::embedded_tor_in_use(&embedded, &embedded));
+        assert!(super::embedded_tor_in_use(&embedded, &local), "an open workspace still dials on the booted route");
+        assert!(super::embedded_tor_in_use(&local, &embedded), "new dials already take the saved route");
+        assert!(!super::embedded_tor_in_use(&local, &local));
+        assert!(!super::embedded_tor_in_use(&off, &off), "the mode alone is not a route");
+    }
+
     use molt_core::{Command, GroupConfig, Reply, SessionView};
 
     fn node() -> crate::WalletHandle {
