@@ -219,6 +219,22 @@ fn main() -> anyhow::Result<()> {
         // once something constructs it, which is after a workspace or a
         // ritual opens. "My config.toml says X and nothing connects" is
         // unanswerable at the moment the operator asks it without this.
+        let nostr = &config.transport.nostr;
+        molt_net::timeouts::set_relay_timeouts(nostr.connect_timeout_secs, nostr.publish_timeout_secs);
+        let timeouts = molt_net::timeouts::RelayTimeouts::configured();
+        if timeouts.connect.as_secs() != nostr.connect_timeout_secs
+            || timeouts.publish.as_secs() != nostr.publish_timeout_secs
+        {
+            tracing::warn!(
+                key = "[transport.nostr] connect_timeout_secs/publish_timeout_secs",
+                "out of range 5..=600 - default used"
+            );
+        }
+        tracing::info!(
+            connect_s = timeouts.connect.as_secs(),
+            publish_s = timeouts.publish.as_secs(),
+            "relay timeouts"
+        );
         let anonymity = &config.transport.anonymity;
         let mode = anonymity.tor.mode.as_str();
         match molt_net::dial::Dialer::resolve(anonymity.network.as_str(), mode, anonymity.tor.port)

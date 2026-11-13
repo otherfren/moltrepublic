@@ -203,7 +203,7 @@ impl ArtiShared {
 
     /// Start a bootstrap against the on-disk state / cache dirs in a task of
     /// its own and put it into the slot. A dial that gives up does not end
-    /// it: the relay runtime allows a connect 20 s, a stale directory takes
+    /// it: the relay runtime bounds a connect (60 s by default), a stale directory takes
     /// longer to reload, and a bootstrap tied to its first dial never ended.
     fn start_boot(
         self: &Arc<Self>,
@@ -633,7 +633,7 @@ mod tests {
         assert_eq!((generation, same, boots.load(Ordering::SeqCst)), (0, 0, 2));
     }
 
-    /// A caller's deadline (the relay runtime gives a connect 20 s) used to
+    /// A caller's deadline (the relay runtime bounds a connect, 60 s by default) used to
     /// take the bootstrap down with it, every time.
     #[tokio::test]
     async fn a_bootstrap_outlives_the_dial_that_started_it() {
@@ -700,7 +700,7 @@ mod tests {
         assert_eq!(boots.load(Ordering::SeqCst), 2, "the next dial starts a fresh bootstrap");
     }
 
-    /// A dial may hold the old client for its caller's 20 s; the reset must
+    /// A dial may hold the old client for its caller's connect deadline; the reset must
     /// not delete under it, nor wait that long.
     #[tokio::test]
     async fn a_reset_ends_a_dial_in_flight() {

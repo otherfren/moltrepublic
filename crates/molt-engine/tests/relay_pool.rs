@@ -16,6 +16,9 @@ const ONION: &str = "wss://abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrstu
 const CLEARNET: &str = "wss://relay.example.org";
 
 fn rt() -> tokio::runtime::Runtime {
+    // the confirm probe dials fictional hosts: the production connect
+    // deadline (60 s) would outlast `wait_confirmed`
+    molt_net::timeouts::set_relay_timeouts(5, 5);
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

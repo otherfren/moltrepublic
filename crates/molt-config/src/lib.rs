@@ -372,10 +372,10 @@ pub struct TransportConfig {
     pub nostr: NostrConfig,
 }
 
-/// Nostr transport settings (`[transport.nostr]`) — currently just the relay
-/// pool. **No relay ships with the app**: the node connects to nothing until
+/// Nostr transport settings (`[transport.nostr]`): the relay pool and the
+/// relay deadlines. **No relay ships with the app**: the node connects to nothing until
 /// its operator adds one and confirms it (`docs_archive/transport/relay_pool.md`).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NostrConfig {
     /// The relay pool as `[[transport.nostr.relay]]` tables — **the file
@@ -390,6 +390,39 @@ pub struct NostrConfig {
     /// start, which made the operator re-perform the same consent forever).
     #[serde(default)]
     pub clearnet_enabled: bool,
+    /// Seconds a relay connect may take: dial (an onion rendezvous
+    /// included), TLS and WebSocket upgrade (5..=600, else the default).
+    /// File-owned like `[node] open_on_start`: never in [`Settings`], so a
+    /// save leaves it alone.
+    #[serde(default = "default_relay_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+    /// Seconds one publish may wait for the relay's OK on a live
+    /// connection (5..=600, else the default). File-owned.
+    #[serde(default = "default_relay_publish_timeout_secs")]
+    pub publish_timeout_secs: u64,
+}
+
+impl Default for NostrConfig {
+    fn default() -> Self {
+        NostrConfig {
+            relay: Vec::new(),
+            clearnet_enabled: false,
+            connect_timeout_secs: default_relay_connect_timeout_secs(),
+            publish_timeout_secs: default_relay_publish_timeout_secs(),
+        }
+    }
+}
+
+/// Default `[transport.nostr] connect_timeout_secs`.
+#[must_use]
+pub fn default_relay_connect_timeout_secs() -> u64 {
+    60
+}
+
+/// Default `[transport.nostr] publish_timeout_secs`.
+#[must_use]
+pub fn default_relay_publish_timeout_secs() -> u64 {
+    30
 }
 
 /// One relay in the pool. The onion/clearnet kind is deliberately NOT a field:
@@ -1050,6 +1083,10 @@ port = {tor_port}
 # exposure acknowledgement sets this to true and KEEPS it - the decision is
 # remembered instead of being asked again after every restart.
 clearnet_enabled = {clearnet_enabled}
+# Seconds a relay connect may take (dial, Tor circuit, TLS, upgrade) and
+# seconds a publish waits for the relay's OK. 5..=600.
+connect_timeout_secs = {connect_timeout_secs}
+publish_timeout_secs = {publish_timeout_secs}
 {relays}
 {wallet}
 [ui]
@@ -1130,6 +1167,8 @@ renderer = {renderer}
         relays = render_relays(&settings.relays),
         wallet = render_wallet(settings),
         clearnet_enabled = settings.clearnet_relays_enabled,
+        connect_timeout_secs = default_relay_connect_timeout_secs(),
+        publish_timeout_secs = default_relay_publish_timeout_secs(),
         lang = toml_str(&settings.lang),
         theme = toml_str(&settings.theme),
         font_app = settings.font_app,
@@ -2028,6 +2067,25 @@ mod tests {
         assert_eq!(parse(&edited).expect("parses").node.open_on_start, "ws-1234");
         let saved = update(&edited, &Settings::default()).expect("update");
         assert_eq!(parse(&saved).expect("parses").node.open_on_start, "ws-1234");
+    }
+
+    /// The relay deadlines are FILE-OWNED: the template writes the
+    /// defaults, a hand edit parses, a runtime save keeps it, and a config
+    /// without the keys reads the defaults.
+    #[test]
+    fn relay_timeouts_are_file_owned_transport_keys() {
+        let text = render(&Settings::default());
+        assert!(text.contains("connect_timeout_secs = 60"), "{text}");
+        assert!(text.contains("publish_timeout_secs = 30"), "{text}");
+        let edited = text
+            .replace("connect_timeout_secs = 60", "connect_timeout_secs = 120")
+            .replace("publish_timeout_secs = 30", "publish_timeout_secs = 45");
+        let saved = update(&edited, &Settings::default()).expect("update");
+        let nostr = parse(&saved).expect("parses").transport.nostr;
+        assert_eq!((nostr.connect_timeout_secs, nostr.publish_timeout_secs), (120, 45));
+        let bare = parse("[transport.nostr]\nclearnet_enabled = false\n").expect("parses");
+        assert_eq!(bare.transport.nostr.connect_timeout_secs, 60);
+        assert_eq!(bare.transport.nostr.publish_timeout_secs, 30);
     }
 
     const WAKE_KEYS: [&str; 5] = [

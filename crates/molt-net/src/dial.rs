@@ -24,8 +24,12 @@ use tokio::time::timeout;
 use crate::NetError;
 
 /// Deadline for opening the raw socket (TCP connect incl. SOCKS negotiation /
-/// Tor circuit build) — sized for a cold Tor circuit (T4 §P5).
-pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Tor circuit build) — the configured connect deadline
+/// (`[transport.nostr] connect_timeout_secs`), sized for a cold Tor circuit
+/// and an onion rendezvous (T4 §P5).
+pub(crate) fn connect_timeout() -> Duration {
+    crate::timeouts::RelayTimeouts::configured().connect
+}
 
 /// The rustcrypto provider with key exchange restricted to X25519 — the
 /// shared base of every TLS client in this crate. Offering the alpha
@@ -359,7 +363,7 @@ impl Dialer {
                     )));
                 }
                 let addr = format!("{host}:{port}");
-                let tcp = timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
+                let tcp = timeout(connect_timeout(), TcpStream::connect(&addr))
                     .await
                     .map_err(|_| NetError::Unreachable(format!("tcp {addr}: connect timed out")))?
                     .map_err(|e| NetError::Unreachable(format!("tcp {addr}: {e}")))?;
@@ -383,7 +387,7 @@ impl Dialer {
                     isolation.truncate(cut);
                 }
                 let stream = timeout(
-                    CONNECT_TIMEOUT,
+                    connect_timeout(),
                     tokio_socks::tcp::Socks5Stream::connect_with_password(
                         proxy.as_str(),
                         (host, port),
@@ -567,7 +571,7 @@ mod tests {
         // returns cleanly (never an infinite await), bounded by the deadline.
         assert!(matches!(res, Err(NetError::TorUnavailable(_))), "got {res:?}");
         assert!(
-            elapsed <= CONNECT_TIMEOUT + Duration::from_secs(5),
+            elapsed <= connect_timeout() + Duration::from_secs(5),
             "elapsed {elapsed:?} exceeds the connect deadline"
         );
     }

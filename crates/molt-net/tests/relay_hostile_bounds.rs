@@ -27,6 +27,13 @@ use nostr::{Filter, Kind};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
+/// Shorter than the production defaults (60 s / 30 s) so a pinned attempt
+/// shows as a test past 30 s, not as a slow suite.
+const BOUNDS: molt_net::timeouts::RelayTimeouts = molt_net::timeouts::RelayTimeouts {
+    connect: Duration::from_secs(10),
+    publish: Duration::from_secs(10),
+};
+
 fn dialer() -> Dialer {
     Dialer::resolve("none", "local", 0).expect("direct dialer")
 }
@@ -168,7 +175,8 @@ async fn dribbler() -> String {
 }
 
 /// **A relay that stays live and answers nothing cannot pin a publish**
-/// (`relay_runtime.rs` `PUBLISH_TIMEOUT`, inside `publish_one`'s recv loop).
+/// (`relay_runtime.rs` `RelayTimeouts::publish`, the deadline of
+/// `send_and_await_ok`'s recv loop).
 ///
 /// The subtlety is in `RelayWs::recv`: its deadline is computed ONCE, before
 /// the skip loop, so transport frames the loop steps over — pings here, a
@@ -177,7 +185,7 @@ async fn dribbler() -> String {
 /// no progress.
 ///
 /// **Prove red:** move `let deadline = …` inside `RelayWs::recv`'s loop, or
-/// drop the `PUBLISH_TIMEOUT` from `publish_one`'s `recv` call — this publish
+/// drop the deadline from `send_and_await_ok`'s `recv` call — this publish
 /// then never returns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_relay_that_answers_nothing_cannot_pin_a_publish() {
@@ -189,6 +197,7 @@ async fn a_relay_that_answers_nothing_cannot_pin_a_publish() {
 
     let started = tokio::time::Instant::now();
     let outcome = RelayRuntime::new(dialer(), vec![url.clone()])
+        .with_timeouts(BOUNDS)
         .publish(&event)
         .await;
     let elapsed = started.elapsed();
@@ -225,15 +234,14 @@ async fn silent_tcp() -> String {
 }
 
 /// **…and neither can one that never finishes the handshake**
-/// (`relay_runtime.rs`, the `tokio::time::timeout(PUBLISH_TIMEOUT, …)`
-/// wrapper around the whole `publish_one`).
+/// (`relay_runtime.rs`, `connect_bounded` with `RelayTimeouts::connect`).
 ///
-/// This is the shape the inner bound cannot see. `publish_one` calls
-/// `RelayWs::connect` directly, and the WebSocket upgrade has no deadline of
-/// its own there — the dial and TLS carry theirs, but a relay that accepts
-/// TCP and then stays mute is past both. Only the outer timeout ends it.
+/// This is the shape the recv bound cannot see. The WebSocket upgrade has no
+/// deadline of its own — the dial and TLS carry theirs, but a relay that
+/// accepts TCP and then stays mute is past both. Only the connect bound
+/// ends it.
 ///
-/// **Prove red** (verified 2026-08-04): drop that wrapper and the publish
+/// **Prove red** (verified 2026-08-04): drop that bound and the publish
 /// never returns — the test hangs until the harness kills it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_relay_that_never_finishes_the_handshake_cannot_pin_a_publish() {
@@ -245,6 +253,7 @@ async fn a_relay_that_never_finishes_the_handshake_cannot_pin_a_publish() {
 
     let started = tokio::time::Instant::now();
     let outcome = RelayRuntime::new(dialer(), vec![url])
+        .with_timeouts(BOUNDS)
         .publish(&event)
         .await;
     let elapsed = started.elapsed();

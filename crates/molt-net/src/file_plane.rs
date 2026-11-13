@@ -1378,7 +1378,8 @@ mod tests {
     fn publish_refusals_sort_into_transient_and_permanent() {
         let u = |t: &str| NetError::Unreachable(t.to_string());
         assert!(transient_publish_error(&u("relay refused: rate-limited: slow down")));
-        assert!(transient_publish_error(&u("publish timed out")));
+        assert!(transient_publish_error(&u("connect timed out")));
+        assert!(transient_publish_error(&u("ws recv: timed out")));
         assert!(transient_publish_error(&u("backing off")));
         assert!(transient_publish_error(&u("no relay accepted the event (1 tried): connection reset")));
         assert!(!transient_publish_error(&u("no dialable relay - the pool is empty or gated")));

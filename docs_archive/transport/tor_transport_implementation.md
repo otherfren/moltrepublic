@@ -483,6 +483,12 @@ that dial:
 | Tor test (`tor_probe.rs`, `CIRCUIT_TIMEOUT`) | 45 s |
 | S3, purse daemon | none around the dial |
 
+(The table is the state of 2026-11-12. Since 2026-11-13 the relay bounds
+are configured, `relay_pool.md` §5.1: connect 60 s, publish 30 s by
+default, the probe's reachability phase uses the connect bound, the Tor
+test the connect bound + 15 s, and a publish no longer waits for a slow
+relay past a 2 s grace once another accepted.)
+
 A deadline dropped the dial, the dial dropped `create_bootstrapped`, and
 the next dial began again. A warm directory bootstraps well inside 20 s; a
 stale one (the node had run for a day) has to be reloaded and does not, so

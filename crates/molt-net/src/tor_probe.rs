@@ -37,7 +37,7 @@
 //! say exactly that. The strong evidence comes from rung 5, which uses the
 //! REAL dialer against the operator's OWN confirmed relay.
 //!
-//! Every rung is deadline-bounded ([`PROXY_TIMEOUT`], [`CIRCUIT_TIMEOUT`]),
+//! Every rung is deadline-bounded ([`PROXY_TIMEOUT`], [`circuit_timeout`]),
 //! so a hung Tor daemon can never wedge the caller.
 
 use std::time::Duration;
@@ -53,11 +53,16 @@ use crate::dial::Dialer;
 /// SOCKS listener either answers immediately or is not there.
 pub const PROXY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Deadline for the circuit rung. Generous enough for a cold Tor circuit
-/// (the dialer's own `CONNECT_TIMEOUT` fires first on the SOCKS path) and
-/// for a partial embedded-arti bootstrap, but bounded — a probe that never
-/// returns is a probe that lies about being in progress.
-pub const CIRCUIT_TIMEOUT: Duration = Duration::from_secs(45);
+/// Deadline for the circuit rung: the configured connect deadline plus a
+/// margin, so the dialer's own deadline fires first on the SOCKS path and
+/// the test never gives up on a circuit the transport would wait for.
+/// Generous enough for a cold Tor circuit and a partial embedded-arti
+/// bootstrap, but bounded — a probe that never returns is a probe that
+/// lies about being in progress.
+#[must_use]
+pub fn circuit_timeout() -> Duration {
+    crate::timeouts::RelayTimeouts::configured().connect + Duration::from_secs(15)
+}
 
 /// What each rung of the probe observed. `None` means the rung did not run.
 ///
@@ -300,7 +305,7 @@ async fn circuit_rung(dialer: &Dialer, url: &str) -> Result<u32, String> {
     // test showed. Completing the WebSocket upgrade proves the RELAY
     // answered, through Tor, on the exact path the transport uses.
     let dialed = timeout(
-        CIRCUIT_TIMEOUT,
+        circuit_timeout(),
         crate::relay_ws::RelayWs::connect(&dialer.isolated("probe"), url),
     )
     .await;
@@ -313,7 +318,7 @@ async fn circuit_rung(dialer: &Dialer, url: &str) -> Result<u32, String> {
         Ok(Err(e)) => Err(format!("no relay handshake through Tor to {host}: {e}")),
         Err(_) => Err(format!(
             "{TIMEOUT_MARK} {host}: no answer within {}s",
-            CIRCUIT_TIMEOUT.as_secs()
+            circuit_timeout().as_secs()
         )),
     }
 }

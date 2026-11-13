@@ -421,7 +421,7 @@ async fn every_rung_is_deadline_bounded() {
     let elapsed = started.elapsed();
     assert_eq!(v.state, TorTestState::CircuitFailed, "{v:?}");
     assert!(
-        elapsed <= tor_probe::PROXY_TIMEOUT + tor_probe::CIRCUIT_TIMEOUT,
+        elapsed <= tor_probe::PROXY_TIMEOUT + tor_probe::circuit_timeout(),
         "the probe ran {elapsed:?}, past its own deadlines"
     );
 }

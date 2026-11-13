@@ -256,7 +256,9 @@ async fn a_confirmed_relay_is_the_target_and_a_lying_proxy_earns_no_circuit() {
     .await
     .expect("relay confirmed");
     // B4: the confirmation lands on the PROBE's verdict (this fictional
-    // relay is unreachable -> unverified, and the consent stands)
+    // relay is unreachable -> unverified, and the consent stands); the
+    // production connect deadline (60 s) would outlast the wait below
+    molt_net::timeouts::set_relay_timeouts(5, 5);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         let s = match w.execute(Command::ReadSession).await.expect("read") {

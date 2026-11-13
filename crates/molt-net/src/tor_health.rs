@@ -270,7 +270,7 @@ mod tests {
         assert_eq!(decide(&h.input(min(30))), Verdict::Healthy);
     }
 
-    /// Two pool relays timing out at the relay runtime's 20 s while the
+    /// Two pool relays timing out at the relay runtime's connect deadline while the
     /// others sit on long-lived sockets: no new dial, so no proof of life.
     #[test]
     fn dials_cut_short_by_their_caller_never_rebuild_a_ready_client() {

@@ -16,10 +16,13 @@ use tokio::sync::{mpsc, Mutex};
 
 use crate::dial::Dialer;
 use crate::relay_ws::{dial_maybe_tls, RecvFail, RelayWs};
+// A (re)connect completes inside `RelayTimeouts::connect`: dial and TLS
+// carry their own deadlines, but the WS upgrade itself would otherwise wait
+// forever on a relay that accepts bytes and never answers (review finding,
+// HIGH). Publishing bounds the dial and the EVENT → OK round-trip
+// separately - one shared bound cut a slow onion dial off every time.
+use crate::timeouts::RelayTimeouts;
 use crate::NetError;
-
-/// Per-relay deadline for one publish attempt (dial + upgrade + OK).
-const PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A subscription reader's INBOUND idle bound: with a keepalive Ping every
 /// [`KEEPALIVE`] a healthy relay ponges, so a relay from which not one frame
@@ -32,11 +35,6 @@ const SUB_IDLE_TIMEOUT: Duration = Duration::from_secs(150);
 /// Idle interval after which the reader pings the relay, so a silently
 /// dropped flow surfaces in seconds rather than at the idle bound.
 const KEEPALIVE: Duration = Duration::from_secs(45);
-
-/// A (re)connect must complete inside this: dial and TLS carry their own
-/// deadlines, but the WS upgrade itself would otherwise wait forever on a
-/// relay that accepts bytes and never answers (review finding, HIGH).
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long a session must live for the reconnect backoff to reset.
 const HEALTHY_SESSION: Duration = Duration::from_secs(30);
@@ -149,6 +147,8 @@ pub struct RelayRuntime {
     /// publish channel would link every ephemeral-key event to the member
     /// (`mdk_evaluation.md` §5, concept §7.5).
     auth_keys: Option<nostr::Keys>,
+    /// Connect and publish deadlines (the config's; tests pin their own).
+    timeouts: RelayTimeouts,
 }
 
 // manual: the auth keys hold a SECRET key — never in Debug output
@@ -218,7 +218,14 @@ impl RelayRuntime {
             history_bound: Some(MAX_STORED_EVENTS_PER_REQ),
             channel_capacity: None,
             sub_timing: (KEEPALIVE, SUB_IDLE_TIMEOUT),
+            timeouts: RelayTimeouts::configured(),
         }
+    }
+
+    /// Override the connect and publish deadlines (tests use milliseconds).
+    #[must_use]
+    pub fn with_timeouts(self, timeouts: RelayTimeouts) -> Self {
+        Self { timeouts, ..self }
     }
 
     /// Provide the NIP-42 identity for subscribe connections (the transport
@@ -299,7 +306,8 @@ impl RelayRuntime {
 
     /// Publish one signed event to EVERY relay concurrently. Success iff at
     /// least one relay accepted (or already held) it; the per-relay outcomes
-    /// ride in the report either way.
+    /// ride in the report, except a relay still busy [`PUBLISH_GRACE`] after
+    /// the first accept - its attempt runs on and logs its own failure.
     pub async fn publish(&self, event: &Event) -> Result<PublishReport, NetError> {
         if self.urls.is_empty() {
             return Err(NetError::Unreachable(
@@ -321,28 +329,22 @@ impl RelayRuntime {
                 "event of {size} bytes exceeds the smallest relay cap ({budget} bytes)"
             )));
         }
-        let attempts = self.urls.iter().map(|url| {
-            let dialer = self.dialer.clone();
-            let event = event.clone();
-            async move {
-                let outcome =
-                    tokio::time::timeout(PUBLISH_TIMEOUT, publish_one(&dialer, url, &event))
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err(NetError::Unreachable("publish timed out".into()))
-                        });
-                (url.clone(), outcome)
-            }
-        });
-        let mut report = PublishReport::default();
-        for (url, outcome) in futures_util::future::join_all(attempts).await {
-            match outcome {
-                Ok(()) => report.accepted.push(url),
-                Err(e) => report.failed.push((url, e.to_string())),
-            }
-        }
+        let timeouts = self.timeouts;
+        let attempts = self
+            .urls
+            .iter()
+            .map(|url| {
+                let dialer = self.dialer.clone();
+                let event = event.clone();
+                let target = url.clone();
+                let task = tokio::spawn(async move {
+                    publish_one(&dialer, &target, &event, timeouts).await
+                });
+                (url.clone(), task)
+            })
+            .collect();
         // the shared ≥1-OK reduction (the persistent pool uses it too)
-        finish_publish_report(report)
+        gather_publish(attempts).await
     }
 }
 
@@ -513,6 +515,8 @@ struct SubShared {
     history_bound: Option<usize>,
     /// (keepalive interval, idle bound) — see [`KEEPALIVE`] / [`SUB_IDLE_TIMEOUT`].
     sub_timing: (Duration, Duration),
+    /// The (re)connect deadline.
+    connect_timeout: Duration,
 }
 
 impl RelayRuntime {
@@ -556,6 +560,7 @@ impl RelayRuntime {
             auth_keys: self.auth_keys.clone(),
             history_bound: self.history_bound,
             sub_timing: self.sub_timing,
+            connect_timeout: self.timeouts.connect,
         });
         // the FIRST connects run CONCURRENTLY and bounded: sequentially, one
         // relay that accepts TCP but never answers the WS upgrade would wedge
@@ -568,7 +573,7 @@ impl RelayRuntime {
                 let began = tokio::time::Instant::now();
                 // every outcome is reported: a node that reached no relay must
                 // say why, in the log and in the error
-                match tokio::time::timeout(CONNECT_TIMEOUT, connect_and_req(&shared, url)).await {
+                match tokio::time::timeout(shared.connect_timeout, connect_and_req(&shared, url)).await {
                     Ok(Ok(ws)) => {
                         tracing::info!(
                             relay = %url, via = %via,
@@ -584,7 +589,7 @@ impl RelayRuntime {
                     Err(_) => {
                         tracing::warn!(
                             relay = %url, via = %via,
-                            after_s = CONNECT_TIMEOUT.as_secs(),
+                            after_s = shared.connect_timeout.as_secs(),
                             "relay connect timed out"
                         );
                         Err(format!("{url} via {via}: timed out"))
@@ -720,7 +725,7 @@ async fn supervise(
                 shared.health.lock().await.insert(url.clone(), RelayHealth::Connecting);
                 let began = tokio::time::Instant::now();
                 let outcome =
-                    tokio::time::timeout(CONNECT_TIMEOUT, connect_and_req(&shared, &url)).await;
+                    tokio::time::timeout(shared.connect_timeout, connect_and_req(&shared, &url)).await;
                 // NEVER discard the reason. This arm used to be a bare `_`,
                 // so every connect failure — proxy refused, TLS rejected, WS
                 // upgrade 4xx, auth required — vanished and the loop retried
@@ -765,21 +770,21 @@ async fn supervise(
                         // firewalled or blackholed relay (or a dead SOCKS
                         // port) is the most common PERMANENT failure, and it
                         // lands here — unsuppressed it warned every
-                        // CONNECT_TIMEOUT + backoff forever, burying the
+                        // connect timeout + backoff forever, burying the
                         // diagnostics this reporting exists to surface.
                         const TIMED_OUT: &str = "connect timed out";
                         let repeat = last_reason.as_deref() == Some(TIMED_OUT);
                         if repeat {
                             tracing::debug!(
                                 relay = %url, via = %via, attempt,
-                                after_s = CONNECT_TIMEOUT.as_secs(),
+                                after_s = shared.connect_timeout.as_secs(),
                                 retry_in_s = backoff.as_secs(),
                                 "relay connect timed out again"
                             );
                         } else {
                             tracing::warn!(
                                 relay = %url, via = %via, attempt,
-                                after_s = CONNECT_TIMEOUT.as_secs(),
+                                after_s = shared.connect_timeout.as_secs(),
                                 retry_in_s = backoff.as_secs(),
                                 "relay connect timed out"
                             );
@@ -1002,8 +1007,9 @@ async fn read_session(
     }
 }
 
-/// One probe phase's bound — a probe that hangs is worse than one that
-/// fails (B4).
+/// The retention phase's bound — a probe that hangs is worse than one that
+/// fails (B4). The connect and publish phases use the configured
+/// [`RelayTimeouts`]: a slow onion dial is not an unreachable relay.
 const PROBE_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The NIP-11 phase's own, SHORTER bound: it is best-effort metadata (an
@@ -1054,8 +1060,9 @@ pub async fn probe_relay(dialer: &Dialer, url: &str) -> ProbeVerdict {
 }
 
 async fn probe_relay_inner(dialer: &Dialer, url: &str) -> Result<(), ProbeVerdict> {
+    let timeouts = RelayTimeouts::configured();
     // phase 0 — reachability: everything after this is a judgement
-    match tokio::time::timeout(PROBE_PHASE_TIMEOUT, crate::relay_ws::RelayWs::connect(dialer, url))
+    match tokio::time::timeout(timeouts.connect, crate::relay_ws::RelayWs::connect(dialer, url))
         .await
     {
         Err(_) => {
@@ -1089,12 +1096,15 @@ async fn probe_relay_inner(dialer: &Dialer, url: &str) -> Result<(), ProbeVerdic
     // phase 0 PROVED reachability, so a publish that comes back refused —
     // whether as a report or as a total-failure error — is the relay's own
     // JUDGEMENT about kind 445, not an outage
-    let report = tokio::time::timeout(PROBE_PHASE_TIMEOUT, runtime.publish(&event))
-        .await
-        .map_err(|_| ProbeVerdict::Unreachable("the publish probe timed out".to_string()))
-        .and_then(|r| {
-            r.map_err(|e| ProbeVerdict::Unusable(format!("does not accept kind 445: {e}")))
-        })?;
+    // the runtime bounds dial and OK itself, so its own timeout fires first;
+    // this only guards against a runtime that stopped bounding them
+    let report = tokio::time::timeout(
+        timeouts.connect + timeouts.publish + Duration::from_secs(1),
+        runtime.publish(&event),
+    )
+    .await
+    .map_err(|_| ProbeVerdict::Unreachable("the publish probe timed out".to_string()))
+    .and_then(|r| r.map_err(|e| ProbeVerdict::Unusable(format!("does not accept kind 445: {e}"))))?;
     if report.accepted.is_empty() {
         let reason = report
             .failed
@@ -1230,8 +1240,9 @@ pub struct PublishPool {
     /// change builds a new channel and thereby a new pool.
     conns: Arc<Vec<(String, tokio::sync::Mutex<PoolSlot>)>>,
     size_budget: Option<u64>,
-    /// Per-attempt bound (kept socket, then fresh dial) — tests shrink it.
-    publish_timeout: Duration,
+    /// The fresh dial's bound and the EVENT → OK bound, kept apart: one
+    /// shared bound cut a slow onion dial off on every attempt.
+    timeouts: RelayTimeouts,
 }
 
 /// One relay's kept connection plus its BREAKER: a relay that timed out is
@@ -1292,19 +1303,19 @@ impl PublishPool {
                     .collect(),
             ),
             size_budget: None,
-            publish_timeout: PUBLISH_TIMEOUT,
+            timeouts: RelayTimeouts::configured(),
         }
     }
 
-    /// Override the per-attempt publish bound (tests use milliseconds).
+    /// Override the connect and publish deadlines (tests use milliseconds).
     #[must_use]
-    pub fn with_publish_timeout(mut self, timeout: Duration) -> Self {
-        self.publish_timeout = timeout;
+    pub fn with_timeouts(mut self, timeouts: RelayTimeouts) -> Self {
+        self.timeouts = timeouts;
         self
     }
 
     /// Publish one signed event to EVERY relay concurrently over the kept
-    /// connections — the same ≥1-OK semantics and size gate as
+    /// connections — the same ≥1-OK semantics, grace and size gate as
     /// [`RelayRuntime::publish`].
     pub async fn publish(&self, event: &Event) -> Result<PublishReport, NetError> {
         if self.conns.is_empty() {
@@ -1320,35 +1331,32 @@ impl PublishPool {
                 "event of {size} bytes exceeds the smallest relay cap ({budget} bytes)"
             )));
         }
-        let timeout = self.publish_timeout;
-        let attempts = self.conns.iter().map(|(url, slot)| {
-            let dialer = self.dialer.clone();
-            let event = event.clone();
-            async move {
-                let outcome = Self::publish_pooled(&dialer, url, slot, &event, timeout).await;
-                (url.clone(), outcome)
-            }
-        });
-        let mut report = PublishReport::default();
-        for (url, outcome) in futures_util::future::join_all(attempts).await {
-            match outcome {
-                Ok(()) => report.accepted.push(url),
-                Err(e) => report.failed.push((url, e.to_string())),
-            }
-        }
-        finish_publish_report(report)
+        let timeouts = self.timeouts;
+        let attempts = (0..self.conns.len())
+            .map(|i| {
+                let conns = self.conns.clone();
+                let dialer = self.dialer.clone();
+                let event = event.clone();
+                let task = tokio::spawn(async move {
+                    let (url, slot) = &conns[i];
+                    Self::publish_pooled(&dialer, url, slot, &event, timeouts).await
+                });
+                (self.conns[i].0.clone(), task)
+            })
+            .collect();
+        gather_publish(attempts).await
     }
 
     /// One relay: try the kept connection; if the TRANSPORT broke (send or
     /// recv failed — an idle-closed socket looks like this), drop it and
-    /// dial fresh exactly once. A relay's VERDICT (refusal, auth demand)
+    /// dial fresh exactly once. A missing OK trips the breaker instead. A relay's VERDICT (refusal, auth demand)
     /// is a real answer over a live socket — it never redials.
     async fn publish_pooled(
         dialer: &Dialer,
         url: &str,
         slot: &tokio::sync::Mutex<PoolSlot>,
         event: &Event,
-        timeout: Duration,
+        timeouts: RelayTimeouts,
     ) -> Result<(), NetError> {
         let mut guard = slot.lock().await;
         if let Some(until) = guard.down_until {
@@ -1357,28 +1365,33 @@ impl PublishPool {
             }
         }
         if let Some(ws) = guard.ws.as_mut() {
-            match tokio::time::timeout(timeout, send_and_await_ok(ws, event)).await {
-                Ok(Ok(verdict)) => {
+            match send_and_await_ok(ws, event, timeouts.publish).await {
+                Ok(verdict) => {
                     guard.healthy();
                     return verdict;
                 }
-                // transport broke or the OK never came — the socket is not
-                // trustworthy any more either way
-                Ok(Err(_)) | Err(_) => {
+                // the OK never came: a relay that holds a live socket and
+                // stays mute gets the breaker, not a fresh dial on top -
+                // dial + round-trip after a full round-trip stacked to
+                // minutes per publish once the deadlines grew
+                Err(RecvFail::TimedOut) => {
+                    guard.tripped();
+                    return Err(RecvFail::TimedOut.into_error());
+                }
+                // the transport broke (an idle-closed socket): dial fresh
+                Err(_) => {
                     guard.ws = None;
                 }
             }
         }
-        let attempt = async {
-            let mut ws = RelayWs::connect(dialer, url).await?;
-            let verdict = send_and_await_ok(&mut ws, event)
+        let outcome = async {
+            let mut ws = connect_bounded(dialer, url, timeouts.connect).await?;
+            let verdict = send_and_await_ok(&mut ws, event, timeouts.publish)
                 .await
                 .map_err(RecvFail::into_error)?;
             Ok::<(RelayWs, Result<(), NetError>), NetError>((ws, verdict))
-        };
-        let outcome = tokio::time::timeout(timeout, attempt)
-            .await
-            .unwrap_or_else(|_| Err(NetError::Unreachable("publish timed out".into())));
+        }
+        .await;
         match outcome {
             Ok((ws, verdict)) => {
                 // keep the live socket — a refusal verdict still proves it works
@@ -1397,15 +1410,23 @@ impl PublishPool {
 /// Send EVENT and await the OK for THIS event id on an already-connected
 /// socket. `Err` = the transport broke (caller drops the socket); `Ok`
 /// carries the relay's verdict (accepted / refused — a live answer).
+///
+/// `timeout` bounds the whole round-trip, the send included: a relay that
+/// stops reading must not hold the send open past it either.
 async fn send_and_await_ok(
     ws: &mut RelayWs,
     event: &Event,
+    timeout: Duration,
 ) -> Result<Result<(), NetError>, RecvFail> {
-    if let Err(e) = ws.send(ClientMessage::event(event.clone())).await {
-        return Err(RecvFail::Dead(e));
+    let deadline = tokio::time::Instant::now() + timeout;
+    match tokio::time::timeout_at(deadline, ws.send(ClientMessage::event(event.clone()))).await {
+        Err(_) => return Err(RecvFail::TimedOut),
+        Ok(Err(e)) => return Err(RecvFail::Dead(e)),
+        Ok(Ok(())) => {}
     }
     loop {
-        match ws.recv(PUBLISH_TIMEOUT).await? {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match ws.recv(left).await? {
             RelayMessage::Ok { event_id, status, message } if event_id == event.id => {
                 return Ok(if counts_as_published(status, &message) {
                     Ok(())
@@ -1440,6 +1461,63 @@ fn relay_reason(message: &str) -> String {
 /// Longest relay-supplied reason that reaches a log line or an error.
 const RELAY_REASON_MAX_CHARS: usize = 200;
 
+/// How long a publish still waits for the other relays once one accepted.
+/// A slow relay keeps its attempt (it runs on, in its own task, and its
+/// outcome is logged), but the caller - the outbox, the ack task, a ritual
+/// step - no longer waits out its deadline.
+const PUBLISH_GRACE: Duration = Duration::from_secs(2);
+
+/// Bound on the closing handshake of a one-shot publish connection.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Collect the per-relay publish tasks: every outcome until the first
+/// accept, then [`PUBLISH_GRACE`] more; whatever is still running is left
+/// to finish on its own and logs its failure then.
+async fn gather_publish(
+    attempts: Vec<(String, tokio::task::JoinHandle<Result<(), NetError>>)>,
+) -> Result<PublishReport, NetError> {
+    use futures_util::stream::{FuturesUnordered, StreamExt};
+    let mut pending: FuturesUnordered<_> = attempts
+        .into_iter()
+        .map(|(url, task)| async move {
+            let outcome = task
+                .await
+                .unwrap_or_else(|e| Err(NetError::Unreachable(format!("publish task: {e}"))));
+            (url, outcome)
+        })
+        .collect();
+    let mut report = PublishReport::default();
+    let mut grace_until: Option<tokio::time::Instant> = None;
+    loop {
+        let next = match grace_until {
+            None => pending.next().await,
+            Some(until) => match tokio::time::timeout_at(until, pending.next()).await {
+                Ok(next) => next,
+                Err(_) => break,
+            },
+        };
+        let Some((url, outcome)) = next else { break };
+        match outcome {
+            Ok(()) => {
+                report.accepted.push(url);
+                grace_until.get_or_insert_with(|| tokio::time::Instant::now() + PUBLISH_GRACE);
+            }
+            Err(e) => report.failed.push((url, e.to_string())),
+        }
+    }
+    if !pending.is_empty() {
+        tracing::debug!(relays = pending.len(), "publish continues in the background");
+        tokio::spawn(async move {
+            while let Some((url, outcome)) = pending.next().await {
+                if let Err(e) = outcome {
+                    tracing::warn!(relay = %url, error = %e, "publish rejected");
+                }
+            }
+        });
+    }
+    finish_publish_report(report)
+}
+
 /// The shared ≥1-OK reduction: log per-relay failures, fail typed when
 /// NOTHING accepted, warn on a partial landing.
 fn finish_publish_report(report: PublishReport) -> Result<PublishReport, NetError> {
@@ -1470,13 +1548,26 @@ fn finish_publish_report(report: PublishReport) -> Result<PublishReport, NetErro
     Ok(report)
 }
 
+/// A relay connect (dial + TLS + WS upgrade) bounded by `timeout`.
+async fn connect_bounded(dialer: &Dialer, url: &str, timeout: Duration) -> Result<RelayWs, NetError> {
+    tokio::time::timeout(timeout, RelayWs::connect(dialer, url))
+        .await
+        .unwrap_or_else(|_| Err(NetError::Unreachable("connect timed out".into())))
+}
+
 /// One relay, one publish: connect, EVENT, await the OK for THIS event id.
-async fn publish_one(dialer: &Dialer, url: &str, event: &Event) -> Result<(), NetError> {
-    let mut ws = RelayWs::connect(dialer, url).await?;
-    let verdict = send_and_await_ok(&mut ws, event)
+async fn publish_one(
+    dialer: &Dialer,
+    url: &str,
+    event: &Event,
+    timeouts: RelayTimeouts,
+) -> Result<(), NetError> {
+    let mut ws = connect_bounded(dialer, url, timeouts.connect).await?;
+    let verdict = send_and_await_ok(&mut ws, event, timeouts.publish)
         .await
         .map_err(RecvFail::into_error)?;
-    ws.close().await;
+    // a relay that stops reading must not hold the close open
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, ws.close()).await;
     verdict
 }
 
@@ -1520,7 +1611,10 @@ mod tests {
             crate::dial::Dialer::Direct,
             vec![live.clone(), hole.clone()],
         )
-        .with_publish_timeout(Duration::from_millis(300));
+        .with_timeouts(crate::timeouts::RelayTimeouts {
+            connect: Duration::from_millis(300),
+            publish: Duration::from_millis(300),
+        });
         let keys = nostr::Keys::generate();
         let event = |n: &str| {
             nostr::EventBuilder::new(nostr::Kind::Custom(crate::kinds::KIND_GROUP), n)
@@ -1540,6 +1634,92 @@ mod tests {
         );
         assert_eq!(second.accepted, vec![live]);
         assert!(second.failed.iter().any(|(u, e)| *u == hole && e.contains("backing off")));
+    }
+
+    /// A proxy in front of `target` that holds every new connection for
+    /// `delay` before forwarding: a relay whose dial is slow (an onion
+    /// rendezvous) but which answers fine once connected.
+    async fn slow_dial(target: String, delay: Duration) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("ws://{}", listener.local_addr().expect("addr"));
+        let target = target.trim_start_matches("ws://").trim_end_matches('/').to_string();
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                let target = target.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    if let Ok(mut out) = tokio::net::TcpStream::connect(&target).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut out).await;
+                    }
+                });
+            }
+        });
+        url
+    }
+
+    /// **A slow dial is not a dead relay.** The publish bound used to cover
+    /// dial + EVENT + OK at once: a relay whose dial took longer (an onion
+    /// at 12 s against 10 s, live node 2026-11-13) was cut mid-dial on
+    /// every attempt and never received a publish, while the subscription
+    /// to the same relay connected fine. The dial has its own, longer bound.
+    #[tokio::test]
+    async fn a_slow_dial_still_publishes() {
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let slow = slow_dial(relay.url().await.to_string(), Duration::from_millis(600)).await;
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(crate::kinds::KIND_GROUP), "a")
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let timeouts = crate::timeouts::RelayTimeouts {
+            connect: Duration::from_secs(5),
+            publish: Duration::from_millis(300),
+        };
+
+        let pool = super::PublishPool::new(crate::dial::Dialer::Direct, vec![slow.clone()])
+            .with_timeouts(timeouts);
+        let report = pool.publish(&event).await.expect("the slow relay accepted (pool)");
+        assert_eq!(report.accepted, vec![slow.clone()]);
+
+        let rt = super::RelayRuntime::new(crate::dial::Dialer::Direct, vec![slow.clone()])
+            .with_timeouts(timeouts);
+        let report = rt.publish(&event).await.expect("the slow relay accepted (one-shot)");
+        assert_eq!(report.accepted, vec![slow]);
+    }
+
+    /// **A slow relay does not hold the publish.** With long deadlines, a
+    /// publish that waited for every relay waited for the slowest dial: the
+    /// outbox and the ack task stalled behind it. Once one relay accepted,
+    /// the publish returns after the grace; the slow dial runs on and its
+    /// socket serves the next publish.
+    #[tokio::test]
+    async fn a_slow_relay_does_not_hold_the_publish() {
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let live = relay.url().await.to_string();
+        let slow = slow_dial(live.clone(), PUBLISH_GRACE + Duration::from_secs(2)).await;
+        let keys = nostr::Keys::generate();
+        let event = |n: &str| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(crate::kinds::KIND_GROUP), n)
+                .sign_with_keys(&keys)
+                .expect("sign")
+        };
+        let pool = super::PublishPool::new(crate::dial::Dialer::Direct, vec![live.clone(), slow.clone()])
+            .with_timeouts(crate::timeouts::RelayTimeouts {
+                connect: Duration::from_secs(20),
+                publish: Duration::from_secs(5),
+            });
+        let started = tokio::time::Instant::now();
+        let first = pool.publish(&event("one")).await.expect("the live relay accepted");
+        assert!(
+            started.elapsed() < PUBLISH_GRACE + Duration::from_secs(1),
+            "the publish waited for the slow dial: {:?}",
+            started.elapsed()
+        );
+        assert_eq!(first.accepted, vec![live.clone()]);
+
+        // the dial was not abandoned: once it lands, the next publish rides it
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let second = pool.publish(&event("two")).await.expect("accepted");
+        assert_eq!(second.accepted.len(), 2, "{second:?}");
     }
 
     /// A failed subscribe names each relay, its route and its reason: a

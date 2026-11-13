@@ -258,6 +258,29 @@ not a reachable address. The relay array is rewritten wholesale on save (the
 entries are app-managed structured data); comments elsewhere in the file keep
 their format-preserving guarantee.
 
+### 5.1 Relay deadlines (2026-11-13)
+
+```toml
+[transport.nostr]
+connect_timeout_secs = 60   # dial (Tor circuit, onion rendezvous), TLS, WS upgrade
+publish_timeout_secs = 30   # one EVENT -> OK round-trip on a live connection
+```
+
+Both accept 5..=600; a value outside falls back to the default. They are
+file-owned like `[node] open_on_start` (never in `Settings`, so a save leaves
+them alone) and read once at start (`molt_net::timeouts`). The connect bound
+covers the subscription connect, the publish channel's fresh dial, the raw
+socket dial in `dial.rs` (so S3 and the purse daemon dial under it too),
+the relay probe's reachability phase and the Tor test (+ 15 s); the
+publish bound covers the round-trip that follows. A publish returns 2 s
+after the first relay accepted (`PUBLISH_GRACE`): a slower relay's attempt
+runs on in its own task, so a long deadline costs that relay time, not the
+node's outbox. A kept socket that never answers trips the breaker instead
+of dialing again in the same attempt. They used to be one 10 s
+bound for dial + OK on the publish path: an onion relay whose dial took 12 s
+was cut off on every attempt and never received a publish, while the
+subscription to it (20 s then) connected fine (live node, 2026-11-13).
+
 ## 6. What the user sees
 
 - Settings → Nostr relays is a dedicated tab with the relay-pool editor: add, remove, reorder (the
