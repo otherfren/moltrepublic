@@ -1743,6 +1743,7 @@ impl State {
         limit: u32,
         cursor: Option<u64>,
         with_texts: bool,
+        surface: Option<Surface>,
     ) -> Reply {
         use molt_core::ProposalFilter;
         let page = usize::try_from(match limit {
@@ -1758,6 +1759,7 @@ impl State {
                 ProposalFilter::Decided => p.state != ProposalState::Proposed,
                 ProposalFilter::All => true,
             })
+            .filter(|(_, p)| surface.map_or(true, |s| p.surface == s))
             .map(|(id, p)| (*id, p))
             .collect();
         cards.sort_unstable_by_key(|(id, _)| *id);
@@ -4534,6 +4536,28 @@ impl State {
             self.presence_of(member, last_seen, now)
         };
         let holders = self.mirror_holders();
+        // the open files vote per share; an older build's vote can sit
+        // beside a current one, so the lowest id wins, not map order
+        let mut open: Vec<(&u64, &ProposalRecord)> = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| p.surface == Surface::Files && p.state == ProposalState::Proposed)
+            .collect();
+        open.sort_unstable_by_key(|(pid, _)| **pid);
+        let mut votes: HashMap<String, molt_core::UploadVote> = HashMap::new();
+        for (pid, p) in open {
+            let (Some(share), Some(op)) = (
+                p.payload.get("id").and_then(Value::as_str),
+                p.payload.get("op").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            votes.entry(share.to_string()).or_insert_with(|| molt_core::UploadVote {
+                op: op.to_string(),
+                proposal: ProposalId(*pid),
+                mine_open: self.waits_on(*pid, p, &me),
+            });
+        }
         let row = |id: molt_core::MessageId, ident: ShareIdentity, available: bool, expires_ts: u64, persistent: bool| {
             let mine = ident.by == me;
             let pieces = ident.pieces;
@@ -4583,6 +4607,7 @@ impl State {
                 mirror_held: self.mirror_held_of(&id, mine, pieces).0,
                 mirror_of: self.mirror_held_of(&id, mine, pieces).1,
                 local: String::new(),
+                vote: votes.get(&id.to_string()).cloned(),
             };
             u.local = crate::upload_refs::local_word(&self.local_copy_of(&u)).to_string();
             u
@@ -4980,6 +5005,7 @@ mod upload_ref_state_tests {
             mirrors: 0,
             mirror_held: 0,
             mirror_of: 0,
+            vote: None,
         }
     }
 

@@ -39,12 +39,24 @@ async fn list(
     cursor: Option<u64>,
     with_texts: bool,
 ) -> (Vec<molt_core::ProposalView>, u64, Option<u64>) {
+    list_on(w, filter, limit, cursor, with_texts, None).await
+}
+
+async fn list_on(
+    w: &WalletHandle,
+    filter: ProposalFilter,
+    limit: u32,
+    cursor: Option<u64>,
+    with_texts: bool,
+    surface: Option<Surface>,
+) -> (Vec<molt_core::ProposalView>, u64, Option<u64>) {
     match w
         .execute(Command::ListProposals {
             filter,
             limit,
             cursor,
             with_texts,
+            surface,
         })
         .await
         .expect("list")
@@ -100,6 +112,12 @@ async fn the_list_filters_and_pages_and_read_proposal_is_the_full_card() {
     assert_eq!((page[0].id, next), (b, Some(b.0)));
     let (page, _, next) = list(&w, ProposalFilter::All, 1, next, false).await;
     assert_eq!((page[0].id, next), (c, None), "the last page has no cursor");
+
+    // the surface filter: totals count the filtered cards only
+    let (org, total, _) = list_on(&w, ProposalFilter::All, 0, None, false, Some(Surface::Organization)).await;
+    assert_eq!((org.len(), total), (3, 3));
+    let (files, total, _) = list_on(&w, ProposalFilter::All, 0, None, false, Some(Surface::Files)).await;
+    assert_eq!((files.len(), total), (0, 0), "no files card here");
 
     let (page, _, _) = list(&w, ProposalFilter::All, 0, None, true).await;
     assert_eq!(page[2].proposed, "C", "with_texts builds the texts");

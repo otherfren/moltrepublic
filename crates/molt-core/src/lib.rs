@@ -4482,6 +4482,9 @@ pub enum Command {
         /// Build the before/after texts.
         #[serde(default)]
         with_texts: bool,
+        /// Only cards of this surface; `None` = every surface.
+        #[serde(default)]
+        surface: Option<Surface>,
     },
     /// One proposal in full, texts included; an unknown id is an error.
     ReadProposal {
@@ -6531,6 +6534,7 @@ impl Command {
         limit: 500,
         cursor: None,
         with_texts: false,
+        surface: None,
     };
 }
 
@@ -7872,6 +7876,21 @@ pub struct UploadView {
     /// The series' data piece count (0 = a legacy share).
     #[serde(default)]
     pub mirror_of: u32,
+    /// The open `files` vote on this share, if one is up. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vote: Option<UploadVote>,
+}
+
+/// An open `files` vote on one share: what it would do, the card to
+/// approve, and whether it still waits on this seat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadVote {
+    /// `persist`, `unpersist` or `delete`.
+    pub op: String,
+    /// The proposal `approve` / `decline` take.
+    pub proposal: ProposalId,
+    /// This seat has not voted on it yet.
+    pub mine_open: bool,
 }
 
 /// How a referenced file's bytes are on THIS device

@@ -2030,9 +2030,10 @@ impl State {
                 limit,
                 cursor,
                 with_texts,
+                surface,
             } => {
                 self.refresh_kanban_cache();
-                Ok(self.cmd_list_proposals(filter, limit, cursor, with_texts))
+                Ok(self.cmd_list_proposals(filter, limit, cursor, with_texts, surface))
             }
             Command::ReadProposal { id } => {
                 self.refresh_kanban_cache();

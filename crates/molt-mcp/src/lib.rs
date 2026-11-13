@@ -2178,17 +2178,22 @@ pub fn tools() -> Vec<ToolDef> {
             name: "list_proposals",
             command: "list_proposals",
             scope: Scope::Seat,
-            description: "List proposals - by default the OPEN ones, the cards a vote can still change (`proposed`, a held seal, a re-based patch). HEADERS: id, surface, by, state (`withdrawn` when the proposer pulled it back), approvals/threshold, the votes, `applied_at`/`declined_at` (when it was decided; unix secs, 0 = unknown), `payload.summary`, the `paths` a wiki patch touches, `channel`. `state` picks `open` (default), `decided` (applied, rejected, withdrawn, superseded - the whole history since the founding) or `all`; `limit` (default 100, max 500) and `cursor` (continue after this id; ids ascend) page the answer, `total` counts the whole filter and `next_cursor` is absent on the last page. The patch and the before/after texts are left out (a 9 KB patch was answered three times over); `with_patch: true` includes them, read_proposal {id} fetches ONE in full. Ids are minted per seat (seat k of n takes every n-th number), so gaps in the sequence are normal, not lost proposals. `superseded` says what the moved base did to a wiki patch: `\"rebase\"` = it still applies - open, votable, its votes kept, re-anchored by the engine; `\"conflict\"` = a committed change touched its paths and it no longer applies (dead, `state: \"superseded\"`); `null` = nothing moved under it, and on every decided card.",
+            description: "List proposals - by default the OPEN ones, the cards a vote can still change (`proposed`, a held seal, a re-based patch). HEADERS: id, surface, by, state (`withdrawn` when the proposer pulled it back), approvals/threshold, the votes, `applied_at`/`declined_at` (when it was decided; unix secs, 0 = unknown), `payload.summary`, the `paths` a wiki patch touches, `channel`. `surface` keeps one surface's cards (`files` = the persist/unpersist/delete votes). `state` picks `open` (default), `decided` (applied, rejected, withdrawn, superseded - the whole history since the founding) or `all`; `limit` (default 100, max 500) and `cursor` (continue after this id; ids ascend) page the answer, `total` counts the whole filter and `next_cursor` is absent on the last page. The patch and the before/after texts are left out (a 9 KB patch was answered three times over); `with_patch: true` includes them, read_proposal {id} fetches ONE in full. Ids are minted per seat (seat k of n takes every n-th number), so gaps in the sequence are normal, not lost proposals. `superseded` says what the moved base did to a wiki patch: `\"rebase\"` = it still applies - open, votable, its votes kept, re-anchored by the engine; `\"conflict\"` = a committed change touched its paths and it no longer applies (dead, `state: \"superseded\"`); `null` = nothing moved under it, and on every decided card.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "state": { "type": "string", "enum": ["open", "decided", "all"], "description": "optional: which cards (default open)" },
                     "limit": { "type": "integer", "description": "optional: page size, 1..=500 (default 100)" },
                     "cursor": { "type": "integer", "description": "optional: continue after this proposal id (a previous reply's next_cursor)" },
-                    "with_patch": { "type": "boolean", "description": "optional: include payload.value, current and proposed (default false)" }
+                    "with_patch": { "type": "boolean", "description": "optional: include payload.value, current and proposed (default false)" },
+                    "surface": { "type": "string", "enum": gated_enum(), "description": "optional: only this surface's cards (e.g. files)" }
                 }
             }),
             build: |args| {
+                let surface = match opt_str_arg(args, "surface")? {
+                    None => None,
+                    Some(_) => Some(surface_arg(args)?),
+                };
                 let filter = match opt_str_arg(args, "state")?.as_deref() {
                     None | Some("open") => ProposalFilter::Open,
                     Some("decided") => ProposalFilter::Decided,
@@ -2200,6 +2205,7 @@ pub fn tools() -> Vec<ToolDef> {
                     limit: opt_u32_arg(args, "limit")?,
                     cursor: opt_u64_or_none_arg(args, "cursor")?,
                     with_texts: flag_arg(args, "with_patch"),
+                    surface,
                 })
             },
         },
@@ -2235,7 +2241,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_uploads",
             command: "read_uploads",
             scope: Scope::Read,
-            description: "The Shared Files tables: every file shared into the chat (metadata only - bytes move user-to-user via the share link), with sharer, timestamp, availability and the deadline `expires_ts`. `persistent: false` = Temporary Uploads: ephemeral like chat, gone from the read (and undownloadable) after the chat retention window. `persistent: true` = Persistent Uploads: a threshold vote pinned it (`propose` on `files`, op `persist`), `expires_ts` is 0 and it outlives its chat message; an `unpersist` vote moves it back with a fresh window; a `delete` vote (temporary shares only) removes a share for good - a deleted share lists in neither table and downloads nowhere. The `id` is the chat message id `download_file` and the three ops take. `availability` says where the bytes can be had, in this precedence: `changed` (the sharer replaced the file on disk - a share is immutable, so this row is no longer the voted file), `gone` (nobody holds it), `mirrored` (a seat other than the sharer holds the whole series), `relay-held` (a live series stamp - no live sharer needed), `sharer-only` (the first download wakes the sharer). `local` says where THIS seat has them: own, downloaded, mirrored, partial, none. `mirrors` counts MEMBERS holding the whole series (the sharer included); `mirror_held`/`mirror_of` count this seat's verified PIECES.",
+            description: "The Shared Files tables: every file shared into the chat (metadata only - bytes move user-to-user via the share link), with sharer, timestamp, availability and the deadline `expires_ts`. `persistent: false` = Temporary Uploads: ephemeral like chat, gone from the read (and undownloadable) after the chat retention window. `persistent: true` = Persistent Uploads: a threshold vote pinned it (`propose` on `files`, op `persist`), `expires_ts` is 0 and it outlives its chat message; an `unpersist` vote moves it back with a fresh window; a `delete` vote (temporary shares only) removes a share for good - a deleted share lists in neither table and downloads nowhere. The `id` is the chat message id `download_file` and the three ops take. `availability` says where the bytes can be had, in this precedence: `changed` (the sharer replaced the file on disk - a share is immutable, so this row is no longer the voted file), `gone` (nobody holds it), `mirrored` (a seat other than the sharer holds the whole series), `relay-held` (a live series stamp - no live sharer needed), `sharer-only` (the first download wakes the sharer). `local` says where THIS seat has them: own, downloaded, mirrored, partial, none. `mirrors` counts MEMBERS holding the whole series (the sharer included); `mirror_held`/`mirror_of` count this seat's verified PIECES. `vote` (absent when none) is the open files vote on the share: `op`, the `proposal` id approve/decline take, and `mine_open` = it still waits on this seat.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadUploads),
         },
@@ -3752,7 +3758,7 @@ pub(crate) mod tests {
         let open = build("list_proposals", &json!({})).expect("builds");
         assert!(matches!(
             open,
-            Command::ListProposals { filter: ProposalFilter::Open, limit: 0, cursor: None, with_texts: false }
+            Command::ListProposals { filter: ProposalFilter::Open, limit: 0, cursor: None, with_texts: false, surface: None }
         ));
         let decided = build(
             "list_proposals",
@@ -3761,8 +3767,14 @@ pub(crate) mod tests {
         .expect("builds");
         assert!(matches!(
             decided,
-            Command::ListProposals { filter: ProposalFilter::Decided, limit: 20, cursor: Some(41), with_texts: true }
+            Command::ListProposals { filter: ProposalFilter::Decided, limit: 20, cursor: Some(41), with_texts: true, surface: None }
         ));
+        assert!(matches!(
+            build("list_proposals", &json!({ "surface": "files" })).expect("builds"),
+            Command::ListProposals { surface: Some(Surface::Files), .. }
+        ));
+        let err = build("list_proposals", &json!({ "surface": "nowhere" })).expect_err("refused");
+        assert!(err.contains("unknown surface"), "{err}");
         assert!(matches!(
             build("list_proposals", &json!({ "state": "all" })).expect("builds"),
             Command::ListProposals { filter: ProposalFilter::All, .. }

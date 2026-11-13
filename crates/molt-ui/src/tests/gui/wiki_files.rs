@@ -31,6 +31,7 @@ fn upload(name: &str) -> molt_core::UploadView {
         mirrors: 1,
         mirror_held: 0,
         mirror_of: 0,
+        vote: None,
     }
 }
 

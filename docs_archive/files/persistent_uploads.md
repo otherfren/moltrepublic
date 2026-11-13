@@ -154,6 +154,10 @@ the serve path and the `FileServed` ingest gate all read it.
 `propose` documents the two ops; `read_uploads` documents `persistent`
 and the expiry semantics; `select_view` lists `files: uploads/persistent/
 pending/accepted/declined`. No new `Command` (co-equality untouched).
+Added 2026-11-13: each `read_uploads` row carries `vote` (`op`,
+`proposal`, `mine_open`) while a files vote on it is open, and
+`list_proposals` takes `surface` - another seat finds the card without
+scanning every proposal.
 
 ## Keystones (red first)
 

@@ -55,6 +55,7 @@ fn upload(name: &str, kind: &str, member: &str, sum: &str, persistent: bool) -> 
         mirrors: 0,
         mirror_held: 0,
         mirror_of: 0,
+        vote: None,
     }
 }
 

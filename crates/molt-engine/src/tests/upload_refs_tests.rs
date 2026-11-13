@@ -59,6 +59,7 @@ fn row(tag: u8, checksum: &str, persistent: bool) -> UploadView {
         mirrors: 0,
         mirror_held: 0,
         mirror_of: 4,
+        vote: None,
     }
 }
 
