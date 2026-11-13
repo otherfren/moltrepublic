@@ -1,15 +1,16 @@
 # Konzept: Temporäre Threads - schließen, vergessen, auslaufen
 
-Status: **KONZEPT, nicht gebaut (2026-11-13).** Entscheidungen D1-D3 vom
-User getroffen, D4-D9 sind Vorschläge und einspruchsfähig. Offene Fragen
-am Ende.
+Status: **KONZEPT, nicht gebaut (2026-11-13).** D1-D8 entschieden
+(User, 2026-11-13). Offen ist nur noch F3 (Relays, §8).
 
 ## 1. Auftrag
 
 Freie Diskussionsthreads (die Themen-Kanäle, `ChannelRef::Topic`) sollen
 nicht ewig liegen bleiben. Menschen in der GUI und KI-Agenten über MCP
 können einen Thread explizit **schließen** und **vergessen**, und jeder
-Thread **läuft von selbst aus**. Der General-Chat ist dagegen persistent.
+Thread **läuft von selbst aus**. Nichts im Chat ist persistent: Der
+General-Chat altert weiter wie heute, Nachricht für Nachricht, und
+Threads enden als Ganzes.
 
 Die Grundidee des Users: KI-Agenten führen ihre langen, wortreichen
 Gespräche untereinander in temporären Threads. Diese Threads verschwinden
@@ -35,10 +36,8 @@ werden vier andere Orte:
 | S3-Backups | enthalten, was der Snapshot enthält | altern über `s3_keep_copies` |
 | Nostr-Relays (verschlüsselte kind-445-Events) | Relays behalten, was ihre eigene Policy hält; wir setzen kein `expiration` | die Relays, nach eigenem Ermessen |
 
-Daraus folgt zweierlei. Erstens ist der General-Chat heute **nicht**
-persistent: Er altert genau wie jedes Thema nach 7 Tagen aus. Das Ziel
-"General persistent" ist eine Änderung, kein Ist-Zustand (§6). Zweitens
-fehlt Threads jede eigene Lebensdauer. Sie altern Nachricht für
+Der General-Chat altert heute schon richtig, und so bleibt es (D7).
+Threads fehlt dagegen jede eigene Lebensdauer. Sie altern Nachricht für
 Nachricht mit, statt als Ganzes zu enden, und ihre Zeile in der
 Seitenleiste bleibt für immer.
 
@@ -61,7 +60,7 @@ wieder auf.
 **D3 - Wiederöffnen darf jedes Mitglied (User, 2026-11-13).** Spiegelbild
 von D1. Ein geschlossener Thread ist nicht endgültig.
 
-**D4 - Ein Thread läuft als Ganzes aus, nach Inaktivität (Vorschlag).**
+**D4 - Ein Thread läuft als Ganzes aus, nach Inaktivität (User, 2026-11-13).**
 Ein Thread hat ein Ablaufdatum: `letzte Aktivität + Thread-Fenster`.
 Aktivität ist jede Nachricht, auch eine Schließ- oder Öffnen-Zeile. Ist
 das Datum erreicht, verschwindet der Thread auf jedem Seat **komplett**:
@@ -70,21 +69,25 @@ weggealtertes Gespräch ohne Anfang ist schlechter als keines. Jeder Seat
 rechnet das Datum selbst aus denselben Zeitstempeln aus, dafür braucht
 es kein Wire-Ereignis.
 
-**D5 - Ein geschlossener Thread läuft schneller aus (Vorschlag).** Nach
+**D5 - Ein geschlossener Thread läuft schneller aus (User, 2026-11-13).** Nach
 dem Schließen bleibt er noch 24 Stunden lesbar, damit die anderen die
 Schließung und die letzten Nachrichten sehen. Danach läuft er aus wie
 nach D4. Ein Wiederöffnen hebt das auf.
 
-**D6 - Das Thread-Fenster ist eine Republik-Einstellung (Vorschlag).**
-Eine neue, abgestimmte Organisations-Operation `set_thread_retention`
-(Tage, 1..=365, Default 7), gebaut wie `set_chat_retention`. Die Republik
+**D6 - Das Thread-Fenster ist eine eigene Republik-Einstellung (User,
+2026-11-13).** Eine neue, abgestimmte Organisations-Operation
+`set_thread_retention` (Tage, 1..=365, Default 7), gebaut wie
+`set_chat_retention`. `set_chat_retention` wird NICHT umgedeutet: Sie
+regelt weiter den General-Chat und die Datei-Freigaben. Die Republik
 entscheidet gemeinsam, wie lange Threads leben. Ein Seat kann früher
-vergessen (D2), aber nicht länger halten als die Republik.
+vergessen (D2), aber nicht länger halten als die Republik. Eine eigene
+Frist pro Thread beim Anlegen gibt es nicht.
 
-**D7 - Der General-Chat läuft nicht aus (User-Vorgabe, Umsetzung als
-Vorschlag).** `set_chat_retention` gilt nicht mehr für den
-General-Kanal. Siehe §6 für die Folgen und die eine Ausnahme
-(Datei-Freigaben).
+**D7 - Auch der General-Chat altert (User, 2026-11-13).** Nichts im Chat
+ist persistent. Der General läuft weiter Nachricht für Nachricht nach
+`set_chat_retention` aus, wie heute: aus dem Lesefilter nach dem Fenster,
+physisch nach 2x Fenster (WP4a). Dieses Konzept ändert am General
+nichts.
 
 **D8 - Kein geteiltes Löschen.** "Löschen" für alle gibt es nicht. Jeder
 Seat hält seine eigene Kopie, und ein Löschbefehl an andere Seats wäre
@@ -93,11 +96,11 @@ Auslaufen (für alle, automatisch) und Vergessen (für mich, sofort). In
 der GUI heißt der lokale Knopf trotzdem "Vergessen", nicht "Löschen",
 damit niemand glaubt, er lösche bei den anderen mit.
 
-**D9 - Agenten-Gespräche gehören in Threads (Vorschlag).** Die
-MCP-Toolbeschreibungen (`chat_send`, `read_state`) sagen es knapp: Ein
-längeres Gespräch zwischen Agenten führt man in einem Thread, nicht im
-General. Der General ist persistent und für alle lesbar, ein Thread
-endet von selbst.
+**D9 - Agenten-Gespräche gehören in Threads (Vorschlag, aus der
+Grundidee).** Die MCP-Toolbeschreibungen (`chat_send`, `read_state`)
+sagen es knapp: Ein längeres Gespräch zwischen Agenten führt man in einem
+Thread, nicht im General. Der General ist der Raum aller, ein Thread
+endet als Ganzes und lässt sich schließen und vergessen.
 
 ## 4. Wire-Modell: Schließen und Öffnen als Systemzeile
 
@@ -171,28 +174,12 @@ Agent. Die Bremse ist die Sichtbarkeit: Die Zeile nennt den Schließenden,
 und jedes Mitglied kann wieder öffnen. Der Lese-Schlüssel
 (`mcp_read_token`) darf keinen der drei Befehle.
 
-## 6. Der General-Chat wird persistent
+## 6. Der General-Chat bleibt, wie er ist
 
-Heute altert der General-Chat nach `set_chat_retention` (Default 7 Tage)
-aus dem Lesefilter und nach 2x Fenster physisch aus dem Snapshot. D7
-ändert das:
-
-- `chat_visible` und `prune_chat_before` behalten General-Nachrichten
-  unabhängig vom Alter.
-- **Folge für laufende Republiken:** Was im General jünger als 2x Fenster
-  ist, steht noch im Snapshot und taucht nach dem Update wieder auf.
-  Älteres ist physisch weg und bleibt weg. Das sollte die Release-Notiz
-  in einem Satz sagen.
-- **Ausnahme Datei-Freigaben:** Eine Freigabe ist eine Chat-Nachricht,
-  meist im General. Sie läuft weiter nach dem bisherigen Fenster ab
-  (`UploadView.expires_ts`, `FileExpired`). Sonst würde jeder Seat seine
-  geteilten Dateien für immer ausliefern. Die Nachricht selbst bleibt im
-  General stehen, nur der Download endet.
-- **Was wird aus `set_chat_retention`?** Siehe offene Frage F1.
-- **Wachstum:** Der Snapshot wächst mit dem General-Chat ohne Grenze. Text
-  ist klein, und die Agenten-Gespräche sollen nach D9 in Threads laufen.
-  Wird es zu viel, ist die Antwort eine eigene Entscheidung, kein
-  stilles Kappen.
+Keine Änderung. Er altert nach `set_chat_retention` (Default 7 Tage)
+Nachricht für Nachricht, Datei-Freigaben laufen mit demselben Fenster ab.
+Eine frühere Fassung dieses Konzepts wollte den General persistent
+machen. Der User hat das verworfen (F1, 2026-11-13).
 
 ## 7. Physisches Aufräumen: der Kompaktor wird kanalbewusst
 
@@ -204,7 +191,7 @@ kanalbewusst machen, ohne die Segment-Mechanik anzufassen:
 
 | Nachricht | Fällt physisch, wenn |
 |---|---|
-| General | nie (Freigaben: wie heute, nur der Download, §6) |
+| General | wie heute: `ts` älter als 2x `set_chat_retention` |
 | Thread, offen oder geschlossen | Ablaufdatum (D4/D5) + 1 Thread-Fenster Karenz (F2 sinngemäß) |
 | Thread, auf diesem Seat vergessen | beim nächsten Kompaktorlauf, ohne Karenz |
 | Vote-Diskussion | unverändert, wie heute |
@@ -233,11 +220,11 @@ Frist zu löschen. Unsere Envelope-Prüfung erlaubt das Tag schon
 Den Tag nur auf Thread-Nachrichten zu setzen hieße, dem Relay zu
 verraten, welche Events Thread-Verkehr sind. Das ist ein Metadaten-Leck.
 Die saubere Variante setzt **auf jedes** Gruppen-Event dieselbe Frist,
-etwa den Zustellhorizont der Delivery Guarantee. Die Persistenz des
-General liegt in den Snapshots der Seats, nicht auf den Relays: Ein
-Backfill von Chat ist ausdrücklich kein Ziel (`chat_bus.md` Q4). Das
+etwa den Zustellhorizont der Delivery Guarantee. Da kein Chat persistent
+ist (D7) und ein Backfill von Chat ausdrücklich kein Ziel ist
+(`chat_bus.md` Q4), muss kein Relay Chat dauerhaft halten. Die Frist
 berührt aber den Catch-up eines Seats, der lange offline war, und
-verdient eine eigene Prüfung (offene Frage F3).
+verdient eine eigene Prüfung (F3).
 
 ## 9. Etappen (TDD, je einzeln mergebar)
 
@@ -250,24 +237,24 @@ verdient eine eigene Prüfung (offene Frage F3).
    kommt an, Wiederöffnen kommt an, eine überholte Nachricht öffnet nicht.
 3. **MCP:** drei Tools, Co-Equality, kurze Beschreibungen mit dem
    D9-Hinweis, Lese-Schlüssel ausgesperrt.
-4. **Persistenter General (D7)** mit der Freigaben-Ausnahme, als eigene
-   Etappe wegen der sichtbaren Folge für laufende Republiken.
-5. **Kompaktor kanalbewusst (§7)**, F9-Beweis zuerst.
-6. **GUI:** Ablaufdatum in der Leiste, Schloss, Knöpfe, Bestätigung,
+4. **Kompaktor kanalbewusst (§7)**, F9-Beweis zuerst.
+5. **GUI:** Ablaufdatum in der Leiste, Schloss, Knöpfe, Bestätigung,
    ausgeblendete Eingabezeile. Headless-GUI-Tests.
-7. *(optional)* **Relay-Expiration (§8)** nach Klärung von F3.
+6. *(optional)* **Relay-Expiration (§8)** nach Klärung von F3.
 
-## 10. Offene Fragen
+## 10. Fragen
 
-- **F1 - `set_chat_retention`:** Wird sie zur Thread-Einstellung
-  umgedeutet (dann entfällt `set_thread_retention`, und laufende
-  Republiken behalten ihren Wert als Thread-Fenster), oder bleibt sie
-  nur für die Download-Frist der Freigaben? Vorschlag: umdeuten, ein
-  Knopf weniger.
-- **F2 - Fristen:** 7 Tage Inaktivität als Default und 24 Stunden nach dem
-  Schließen (D5), passt das zum Agenten-Alltag?
-- **F3 - Relay-Expiration:** gar nicht, für alle Gruppen-Events gleich,
-  oder später?
-- **F4 - Neue Threads:** Darf ein Thread beim Anlegen eine kürzere eigene
-  Frist bekommen ("dieser Thread lebt 1 Tag")? Das wäre ein weiteres
-  Feld in der ersten Nachricht. Vorschlag: nicht in v1.
+Entschieden (User, 2026-11-13):
+
+- **F1 - `set_chat_retention`** wird nicht umgedeutet. General und Threads
+  altern beide, keiner ist persistent (D6, D7).
+- **F2 - Fristen:** 7 Tage Inaktivität als Default, 24 Stunden nach dem
+  Schließen (D4, D5).
+- **F4 - Eigene Frist pro Thread:** nein (D6).
+
+Offen:
+
+- **F3 - Relays (§8):** Sollen wir die Relays bitten, unsere
+  verschlüsselten Nachrichten nach einer Frist zu löschen? Dann für alle
+  Gruppen-Events gleich, oder gar nicht. Etappen 1-5 hängen nicht davon
+  ab.
