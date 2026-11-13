@@ -2450,8 +2450,8 @@ pub struct PublishJob {
     /// `wiki_base`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<String>,
-    /// NIP-40: the unix deadline the pieces ask the relays to drop them at
-    /// - a TEMPORARY share's own deadline. `None` for anything that must
+    /// NIP-40: the unix deadline the pieces ask the relays to drop them at,
+    /// a TEMPORARY share's own deadline. `None` for anything that must
     /// stay fetchable (`docs_archive/chat/chat_threads_lifecycle.md` §8.1). Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
