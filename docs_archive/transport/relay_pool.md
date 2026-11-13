@@ -266,7 +266,10 @@ connect_timeout_secs = 60   # dial (Tor circuit, onion rendezvous), TLS, WS upgr
 publish_timeout_secs = 30   # one EVENT -> OK round-trip on a live connection
 ```
 
-Both accept 5..=600; a value outside falls back to the default. They are
+Both accept 5..=600; a value outside falls back to the default. The
+generated template writes them commented out, so a moltd older than
+v0.0.12 (whose `[transport.nostr]` refuses unknown keys) still reads a file
+a newer build wrote. They are
 file-owned like `[node] open_on_start` (never in `Settings`, so a save leaves
 them alone) and read once at start (`molt_net::timeouts`). The connect bound
 covers the subscription connect, the publish channel's fresh dial, the raw

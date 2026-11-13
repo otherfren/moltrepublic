@@ -59,6 +59,9 @@ fn wire_cost(mls: &mut MlsMember, raw: usize) -> usize {
     let content = seal_outer(&exporter, &ciphertext).expect("seal");
     let event = EventBuilder::new(Kind::Custom(molt_net::kinds::KIND_GROUP), content)
         .tag(Tag::parse(["h", &"ab".repeat(32)]).expect("h tag"))
+        // the running group's frames carry a NIP-40 deadline (§8.2 of
+        // chat_threads_lifecycle.md): the model must cover the larger frame
+        .tag(Tag::expiration(nostr::Timestamp::from_secs(u64::from(u32::MAX))))
         .sign_with_keys(&Keys::generate())
         .expect("sign");
     nostr::ClientMessage::event(event).as_json().len()
@@ -74,6 +77,9 @@ fn measured_frame_cost(mls: &mut MlsMember, plaintext_len: usize) -> usize {
     let content = seal_outer(&exporter, &ciphertext).expect("seal");
     let event = EventBuilder::new(Kind::Custom(molt_net::kinds::KIND_GROUP), content)
         .tag(Tag::parse(["h", &"ab".repeat(32)]).expect("h tag"))
+        // the running group's frames carry a NIP-40 deadline (§8.2 of
+        // chat_threads_lifecycle.md): the model must cover the larger frame
+        .tag(Tag::expiration(nostr::Timestamp::from_secs(u64::from(u32::MAX))))
         .sign_with_keys(&Keys::generate())
         .expect("sign");
     nostr::ClientMessage::event(event).as_json().len()

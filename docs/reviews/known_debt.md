@@ -4,6 +4,17 @@ Status: **OPEN WORK.** The surviving deferred items whose home documents
 were executed and archived. One entry per item, with its fix direction;
 an item leaves in the change that closes it.
 
+## Own votes lost at a moltd restart (field report v0.0.11, 2026-11-13)
+
+`approve` on an OWN open wiki proposal answers `approvals: 1`, and
+`read_proposal` shows `approved_by_me: true`; after a moltd restart the
+same proposals read open again, `approved_by_me: false`. Seen three times
+on one day, each time for every open own proposal. Workaround: vote again
+after the restart. Not yet investigated: is the vote recorded in the log
+before the close, and is it on the wire? Start from the restart-replay of
+`Approved` for a chain-governed republic, next to "An unsigned card loses
+its `rebase` at a hard-kill reopen" below.
+
 ## Story 14 remainder - the Wallet's Stage 2
 
 From `docs_archive/ui/mock_todo.md` §14. Memory, Vault, Kanban and the

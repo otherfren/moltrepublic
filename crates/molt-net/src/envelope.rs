@@ -100,7 +100,8 @@ pub fn open_outer(secrets: &[[u8; 32]], content: &str) -> Result<Vec<u8>, Envelo
 const MLS_FRAME_OVERHEAD: usize = 384;
 
 /// What the signed kind-445 event adds around the sealed content: `id`,
-/// `pubkey` and `sig` hex, the `h` tag, `kind`/`created_at`, the JSON
+/// `pubkey` and `sig` hex, the `h` tag, the NIP-40 `expiration` tag of
+/// a running group's frame, `kind`/`created_at`, the JSON
 /// punctuation, and the `["EVENT",{…}]` framing `RelayRuntime::publish`
 /// counts. Same measurement, same guard.
 const EVENT_FRAME_OVERHEAD: usize = 512;

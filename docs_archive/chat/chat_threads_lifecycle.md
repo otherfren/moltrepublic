@@ -123,8 +123,15 @@ ChatMessage {
   Eine gewöhnliche Nachricht bleibt so byteidentisch. Die
   Byte-Fixtures der Chat-Oberfläche in `molt-core` müssen grün bleiben.
 - **Alte Leser** sehen nur eine Systemzeile. Sie kennen das Feld nicht,
-  verwerfen es und schreiben weiter in den Thread. Das ist die
-  akzeptierte Q3-Degradierung aus `chat_bus.md`.
+  verwerfen es und schreiben weiter in den Thread; Threads laufen bei
+  ihnen auch nicht ab. Das ist die akzeptierte Q3-Degradierung aus
+  `chat_bus.md`. Keine der betroffenen Strukturen (`ChatMessage`,
+  `WorkspacePrefs`, `PublishJob`, `ChannelInfo`, `StatusView`) verbietet
+  unbekannte Felder, ein älterer Build liest also alles, was ein neuer
+  schreibt. Das `expiration`-Tag nimmt jeder Build seit v0.0.1 an
+  (`envelope::parse_445_tags`, für 445 und 447). Ein Relay ohne NIP-40
+  speichert und liefert wie bisher, und der Empfang filtert abgelaufene
+  Events nicht (`tests/nip40_absent.rs`, rot mit einem solchen Filter).
 - **Prüfung beim Empfang** (`net/ingest.rs`, `Chat`-Arm): `thread_op`
   nur in einem `Topic`-Kanal, nur mit `kind: System`, und der Absender ist
   der authentifizierte Absender des Envelopes. Eine Zeile, die das

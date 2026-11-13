@@ -1084,9 +1084,10 @@ port = {tor_port}
 # remembered instead of being asked again after every restart.
 clearnet_enabled = {clearnet_enabled}
 # Seconds a relay connect may take (dial, Tor circuit, TLS, upgrade) and
-# seconds a publish waits for the relay's OK. 5..=600.
-connect_timeout_secs = {connect_timeout_secs}
-publish_timeout_secs = {publish_timeout_secs}
+# seconds a publish waits for the relay's OK. 5..=600. Commented out so a
+# moltd older than v0.0.12 still reads this file; remove the # to set them.
+# connect_timeout_secs = {connect_timeout_secs}
+# publish_timeout_secs = {publish_timeout_secs}
 {relays}
 {wallet}
 [ui]
@@ -2075,11 +2076,15 @@ mod tests {
     #[test]
     fn relay_timeouts_are_file_owned_transport_keys() {
         let text = render(&Settings::default());
-        assert!(text.contains("connect_timeout_secs = 60"), "{text}");
-        assert!(text.contains("publish_timeout_secs = 30"), "{text}");
+        // commented out: an older moltd (deny_unknown_fields) still reads a
+        // file this build wrote, and the defaults apply
+        assert!(text.contains("# connect_timeout_secs = 60"), "{text}");
+        assert!(text.contains("# publish_timeout_secs = 30"), "{text}");
+        let fresh = parse(&text).expect("parses").transport.nostr;
+        assert_eq!((fresh.connect_timeout_secs, fresh.publish_timeout_secs), (60, 30));
         let edited = text
-            .replace("connect_timeout_secs = 60", "connect_timeout_secs = 120")
-            .replace("publish_timeout_secs = 30", "publish_timeout_secs = 45");
+            .replace("# connect_timeout_secs = 60", "connect_timeout_secs = 120")
+            .replace("# publish_timeout_secs = 30", "publish_timeout_secs = 45");
         let saved = update(&edited, &Settings::default()).expect("update");
         let nostr = parse(&saved).expect("parses").transport.nostr;
         assert_eq!((nostr.connect_timeout_secs, nostr.publish_timeout_secs), (120, 45));
