@@ -2995,7 +2995,8 @@ pub fn tools() -> Vec<ToolDef> {
                     "name": { "type": "string", "description": "the new republic's name (must be unique locally)" },
                     "member": { "type": "string", "description": "the founder's handle (ASCII + ä ö ü ß)" },
                     "threshold": { "type": "integer", "description": "approvals required (m), 2..=members" },
-                    "members": { "type": "integer", "description": "member count (n), 2..=13" }
+                    "members": { "type": "integer", "description": "member count (n), 2..=13" },
+                    "relays": { "type": "array", "items": { "type": "string" }, "description": "the relays the republic runs on, carried by every invite; omitted = every one this node can dial" }
                 },
                 "required": ["name", "member", "threshold", "members"]
             }),
@@ -3004,7 +3005,7 @@ pub fn tools() -> Vec<ToolDef> {
                 member: str_arg(args, "member")?,
                 threshold: u8_arg(args, "threshold")?,
                 members: u8_arg(args, "members")?,
-                relays: Vec::new(),
+                relays: str_list_arg(args, "relays")?,
             }),
         },
         ToolDef {
@@ -3750,6 +3751,23 @@ pub(crate) mod tests {
 
     /// A well-formed message id for the argument-mapping tests.
     const HEX_ID: &str = "00112233445566778899aabbccddeeff";
+
+    /// `create_start` takes the founder's relay pick like the wizard does;
+    /// omitted = every relay this node can dial.
+    #[test]
+    fn create_start_takes_the_relay_pick() {
+        let base = json!({ "name": "r", "member": "a", "threshold": 2, "members": 3 });
+        assert!(matches!(
+            build("create_start", &base).expect("builds"),
+            Command::CreateStart { ref relays, .. } if relays.is_empty()
+        ));
+        let mut picked = base.clone();
+        picked["relays"] = json!(["wss://a.example"]);
+        assert!(matches!(
+            build("create_start", &picked).expect("builds"),
+            Command::CreateStart { ref relays, .. } if relays == &vec!["wss://a.example".to_string()]
+        ));
+    }
 
     /// `list_proposals` asks for the OPEN cards unless told otherwise, and
     /// `read_proposal` is its own command - one card, not the whole map.
