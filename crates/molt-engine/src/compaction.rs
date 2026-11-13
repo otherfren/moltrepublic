@@ -111,7 +111,7 @@ impl State {
     }
 
     /// [`Self::compact_chat`] at an explicit `now`. Beyond the age cutoff
-    /// the thread rules drop content (`docs/chat_threads_lifecycle.md` §7):
+    /// the thread rules drop content (`docs_archive/chat/chat_threads_lifecycle.md` §7):
     /// a thread this seat forgot at once (its own choice, no grace), an
     /// ended thread - or an ended incarnation of one - a further thread
     /// window after its end, the same grace F2 gives the age cutoff.

@@ -119,7 +119,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
 
     {
         // the selected topic thread's lifecycle verbs
-        // (`docs/chat_threads_lifecycle.md`): close and reopen for every
+        // (`docs_archive/chat/chat_threads_lifecycle.md`): close and reopen for every
         // seat, forget on this one - after which the pane returns to the
         // group chat, the thread having left this seat's list
         let selected_topic = |cx: &Ctx| -> Option<String> {

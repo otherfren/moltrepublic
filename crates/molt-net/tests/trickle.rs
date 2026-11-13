@@ -63,6 +63,7 @@ fn job(path: &std::path::Path, m: &Manifest, ranges: Vec<(u32, u32)>) -> molt_co
         stored: false,
         wiki_base: false,
         vault: None,
+        expires_at: None,
     }
 }
 
@@ -400,4 +401,64 @@ async fn a_vault_base_job_publishes_the_held_base_and_never_a_damaged_one() {
         assert!(store.load().await.file_jobs.publish.is_empty(), "the job is done either way");
         handle.shutdown().await;
     }
+}
+
+/// Every raw kind-447 event the relay holds within `budget`.
+async fn raw_pieces(url: &str, budget: Duration) -> Vec<nostr::Event> {
+    let rt = molt_net::relay_runtime::RelayRuntime::new(dialer(), vec![url.to_string()]);
+    let mut sub = rt
+        .subscribe(nostr::Filter::new().kind(nostr::Kind::Custom(molt_net::kinds::KIND_FILE_CHUNK)))
+        .await
+        .expect("subscribes");
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut out = Vec::new();
+    while let Some(left) = deadline.checked_duration_since(tokio::time::Instant::now()) {
+        if let Some(e) = sub.recv(left.min(Duration::from_millis(200))).await {
+            out.push(e);
+        }
+    }
+    out
+}
+
+fn expiration_of(e: &nostr::Event) -> Option<u64> {
+    e.tags
+        .iter()
+        .map(|t| t.as_slice())
+        .find(|t| t.first().map(String::as_str) == Some("expiration"))
+        .and_then(|t| t.get(1)?.parse().ok())
+}
+
+/// **A temporary share's pieces carry its deadline to the relays**
+/// (`docs_archive/chat/chat_threads_lifecycle.md` §8.1), and a job whose share already
+/// expired is dropped instead of published - a relay would refuse it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_temporary_share_tells_the_relays_its_deadline() {
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (path, m) = three_pieces(&tmp);
+    let layout = Manifest::layout_for(m.count).expect("layout");
+    let store = MemStateStore::new();
+    let deadline = unix_now() + 3_600;
+    let mut temporary = job(&path, &m, whole_series_ranges(layout));
+    temporary.expires_at = Some(deadline);
+    store.update(|s| enqueue_publish(s, temporary)).await;
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    let (_busy_tx, busy) = tokio::sync::watch::channel(false);
+    let clock = Arc::new(AtomicU64::new(unix_now()));
+    let handle = spawn_trickle(chan, store.clone(), busy, config(Duration::from_millis(100), clock));
+    handle.wake();
+    let seen = raw_pieces(&url, Duration::from_secs(3)).await;
+    assert_eq!(seen.len(), 5, "top, manifest and three data pieces");
+    assert!(seen.iter().all(|e| expiration_of(e) == Some(deadline)), "every piece names the deadline");
+
+    let mut expired = job(&path, &m, whole_series_ranges(layout));
+    expired.series = "bb02".to_string();
+    expired.expires_at = Some(unix_now() - 10);
+    store.update(|s| enqueue_publish(s, expired)).await;
+    handle.wake();
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(store.load().await.file_jobs.publish.is_empty(), "the expired job left the queue");
+    assert_eq!(raw_pieces(&url, Duration::from_secs(1)).await.len(), 5, "nothing more was published");
+    handle.shutdown().await;
 }

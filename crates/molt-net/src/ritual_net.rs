@@ -413,6 +413,45 @@ pub struct GroupChannel {
     /// by every clone of this channel — outbox, ack task and file plane
     /// ride the same kept sockets instead of dialing per frame.
     pool: crate::relay_runtime::PublishPool,
+    /// NIP-40 for the 445 frames of the RUNNING group: each one asks the
+    /// relays to drop it this long after its stamp
+    /// (`docs_archive/chat/chat_threads_lifecycle.md` §8.1). `None` on a ritual channel:
+    /// a joiner reads the founding's frames up to 30 days later.
+    group_expiry_secs: Option<u64>,
+    /// NIP-40 for the 447 pieces published through this channel: the
+    /// deadline of a TEMPORARY share. `None` for everything that must stay
+    /// fetchable (persistent shares, wiki and vault bases).
+    file_expires_at: Option<u64>,
+}
+
+/// How long a relay is asked to keep a 445 frame of the running group:
+/// the runtime never asks for a window older than the current UTC day
+/// (plus the skew margin), and what a laggard is still owed comes as a
+/// fresh resend - so three days cost nothing and leave nothing lying
+/// around on a stranger's relay.
+pub const GROUP_EVENT_EXPIRY_SECS: u64 = 3 * 86_400;
+
+/// Build one sealed group-plane event: EXACTLY one `h` tag (the window of
+/// `created_at`), at most one NIP-40 `expiration`, nothing else - the tag
+/// set `envelope.rs` admits. One value drives tag and stamp (see
+/// [`GroupChannel::publish_frame_at`]).
+pub(crate) fn group_event(
+    rotation_seed: &[u8; 32],
+    kind: u16,
+    sealed: String,
+    created_at: u64,
+    expires_at: Option<u64>,
+) -> Result<nostr::Event, NetError> {
+    let now = Timestamp::from_secs(created_at);
+    let tag = envelope::h_tag(rotation_seed, now.as_secs());
+    let h = Tag::parse(["h", tag.as_str()]).map_err(|e| NetError::Framing(format!("h tag: {e}")))?;
+    let mut builder = EventBuilder::new(Kind::Custom(kind), sealed).tag(h).custom_created_at(now);
+    if let Some(at) = expires_at {
+        builder = builder.tag(Tag::expiration(Timestamp::from_secs(at)));
+    }
+    builder
+        .sign_with_keys(&Keys::generate())
+        .map_err(|e| NetError::Crypto(format!("signing the {kind} frame: {e}")))
 }
 
 // manual: the rotation seed is secret-class (plan §6) — never in Debug
@@ -442,7 +481,39 @@ impl GroupChannel {
             hex::encode(&Sha256::digest(rotation_seed)[..8])
         };
         let dialer = dialer.isolated(&format!("group:{sub_lane}"));
-        Self { dialer, relays, rotation_seed, pool }
+        Self { dialer, relays, rotation_seed, pool, group_expiry_secs: None, file_expires_at: None }
+    }
+
+    /// The channel of the RUNNING group: every 445 frame asks the relays to
+    /// drop it [`GROUP_EVENT_EXPIRY_SECS`] after its stamp. Uniform across
+    /// all frames, so the tag tells a relay nothing about any one of them.
+    #[must_use]
+    pub fn with_group_expiry(mut self) -> Self {
+        self.group_expiry_secs = Some(GROUP_EVENT_EXPIRY_SECS);
+        self
+    }
+
+    /// The NIP-40 deadline a `kind` event stamped `created_at` carries on
+    /// this channel (`None` = no `expiration` tag). A 445 counts from the
+    /// LATER of its stamp and now: a commit is resent at its original
+    /// stamp (M8), and a deadline already past would make every relay that
+    /// honours NIP-40 refuse the resend - the outbox would stall on it.
+    fn expiry_for(&self, kind: u16, created_at: u64) -> Option<u64> {
+        match kind {
+            crate::kinds::KIND_GROUP => self
+                .group_expiry_secs
+                .map(|s| created_at.max(now_secs()).saturating_add(s)),
+            crate::kinds::KIND_FILE_CHUNK => self.file_expires_at,
+            _ => None,
+        }
+    }
+
+    /// A copy whose 447 pieces ask the relays to drop them at `at` (unix):
+    /// a temporary share's own deadline, past which no seat would serve or
+    /// accept a download anyway.
+    #[must_use]
+    pub fn with_file_expiry(&self, at: u64) -> Self {
+        Self { file_expires_at: Some(at), ..self.clone() }
     }
 
     /// Seal `mls_ciphertext` under `exporter` and publish it as a kind-445
@@ -522,16 +593,8 @@ impl GroupChannel {
         sealed: String,
         created_at: u64,
     ) -> Result<(u64, PublishReport), NetError> {
-        // one value for tag and stamp — see the doc above
-        let now = Timestamp::from_secs(created_at);
-        let tag = envelope::h_tag(&self.rotation_seed, now.as_secs());
-        let h = Tag::parse(["h", tag.as_str()])
-            .map_err(|e| NetError::Framing(format!("h tag: {e}")))?;
-        let event = EventBuilder::new(Kind::Custom(kind), sealed)
-            .tag(h)
-            .custom_created_at(now)
-            .sign_with_keys(&Keys::generate())
-            .map_err(|e| NetError::Crypto(format!("signing the {kind} frame: {e}")))?;
+        let event =
+            group_event(&self.rotation_seed, kind, sealed, created_at, self.expiry_for(kind, created_at))?;
         let stamp = event.created_at.as_secs();
         let report = self.pool.publish(&event).await?;
         Ok((stamp, report))
@@ -911,6 +974,42 @@ impl GroupSub {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tags_of(e: &nostr::Event) -> Vec<Vec<String>> {
+        e.tags.iter().map(|t| t.as_slice().to_vec()).collect()
+    }
+
+    /// The running group's 445 frames ask the relays to drop them three
+    /// days on; a ritual channel's frames carry no deadline (a joiner reads
+    /// them up to 30 days later); a file piece carries only a temporary
+    /// share's own deadline (`docs_archive/chat/chat_threads_lifecycle.md` §8.1). The
+    /// receive side admits every shape this produces.
+    #[test]
+    fn the_relay_deadline_follows_the_channel_and_the_kind() {
+        let seed = [7u8; 32];
+        let ritual = GroupChannel::new(crate::dial::Dialer::Direct, Vec::new(), seed);
+        let running = ritual.clone().with_group_expiry();
+        let share = running.with_file_expiry(9_999);
+        let (group, file) = (crate::kinds::KIND_GROUP, crate::kinds::KIND_FILE_CHUNK);
+        let now = now_secs() + 600; // ahead of the clock: the stamp counts
+        assert_eq!(ritual.expiry_for(group, now), None, "the founding's frames stay");
+        assert_eq!(running.expiry_for(group, now), Some(now + GROUP_EVENT_EXPIRY_SECS));
+        assert_eq!(running.expiry_for(file, now), None, "a base or a persistent share stays");
+        assert_eq!(share.expiry_for(file, now), Some(9_999));
+        assert_eq!(share.expiry_for(group, now), Some(now + GROUP_EVENT_EXPIRY_SECS));
+        // a commit resent days later at its ORIGINAL stamp still gets a
+        // deadline in the future - a past one would be refused
+        let resent = running.expiry_for(group, 1_000).expect("deadline");
+        assert!(resent > now_secs(), "{resent}");
+
+        let at = running.expiry_for(group, 1_000);
+        let event = group_event(&seed, group, "x".into(), 1_000, at).expect("event");
+        let (h, exp) = envelope::parse_445_tags(&tags_of(&event)).expect("the receive side admits it");
+        assert_eq!(h, envelope::h_tag(&seed, 1_000));
+        assert_eq!(exp, at);
+        let plain = group_event(&seed, group, "x".into(), 1_000, None).expect("event");
+        assert_eq!(envelope::parse_445_tags(&tags_of(&plain)).expect("plain").1, None);
+    }
 
     /// A start stamp ahead of the fetcher's clock across a day boundary
     /// still names the start's window (the pieces sit there), the current

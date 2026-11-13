@@ -301,6 +301,10 @@ impl State {
         let Some((channel, _, current)) = self.nostr_file_context() else {
             return;
         };
+        let channel = match self.share_relay_deadline(id) {
+            Some(at) => channel.with_file_expiry(at),
+            None => channel,
+        };
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return;
         };
@@ -487,6 +491,7 @@ impl State {
             stored,
             wiki_base: false,
             vault: None,
+            expires_at: self.share_relay_deadline(id),
         };
         tokio::spawn(async move {
             let series = job.series.clone();

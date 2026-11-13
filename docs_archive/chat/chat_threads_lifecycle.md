@@ -1,9 +1,9 @@
 # Konzept: Temporäre Threads - schließen, vergessen, auslaufen
 
-Status: **GEBAUT bis auf §8 (2026-11-13).** Etappen 1-5 sind
-umgesetzt, D1-D8 entschieden (User, 2026-11-13). Offen ist nur F3
-(Relays, §8, optional); deshalb liegt das Dokument noch unter `docs/`.
-Präzisierungen aus der Umsetzung stehen in §11.
+Status: **GEBAUT (2026-11-13), Spezifikation des ausgelieferten
+Verhaltens.** Etappen 1-6 sind umgesetzt, D1-D8 und F1-F4 entschieden
+(User, 2026-11-13). Präzisierungen aus der Umsetzung stehen in §11, die
+Relay-Fristen in §8.2.
 
 ## 1. Auftrag
 
@@ -216,7 +216,7 @@ steht; alles, was später eintrifft, holt den Thread zurück (§11). Ein
 Eintrag fällt aus der Liste, sobald seine Nachricht verdichtet ist oder
 der Thread ohnehin ausgelaufen wäre.
 
-## 8. Relays (optional, eigene Etappe)
+## 8. Relays (Etappe 6)
 
 Auf den Relays liegen die Thread-Nachrichten als verschlüsselte
 kind-445-Events. Der Kanal steckt im Chiffrat, der Relay sieht ihn nicht.
@@ -269,6 +269,29 @@ Folgerungen:
    böswillig sammelt, behält alles. Der Gewinn liegt bei ehrlichen fremden
    Relays; beim eigenen Relay ist er gering.
 
+### 8.2 Gebaut (2026-11-13, User: alle drei Folgerungen)
+
+- **445 der laufenden Gruppe** tragen `expiration = created_at + 3 Tage`
+  (`ritual_net::GROUP_EVENT_EXPIRY_SECS`). Gesetzt in
+  `group_runtime::spawn_group` und für den Wiederherstellungs-Rekey
+  (`chain/membership.rs`) über `GroupChannel::with_group_expiry`.
+- **445 der Ritualphase** (Gründung, Beitritt) tragen keins: ein
+  frischer `GroupChannel` hat keine Frist.
+- **447 einer temporären Freigabe** tragen deren Frist
+  (`State::share_relay_deadline`: Chat-Fenster, bei einem früher
+  endenden Thread dessen Ende). Der Trickle-Job führt sie als
+  `PublishJob.expires_at`; ein Job, dessen Frist schon verstrichen ist,
+  fällt aus der Warteschlange. Dauerhafte Freigaben, Wiki- und
+  Vault-Basen tragen keine Frist.
+- Welche Relay-Software im Pool NIP-40 tatsächlich umsetzt, ist nicht
+  geprüft; ein Relay ohne NIP-40 behält die Events wie bisher.
+
+Belegt durch `ritual_net::tests::the_relay_deadline_follows_the_channel_and_the_kind`
+(beide Seiten: erzeugt und von `parse_445_tags` angenommen),
+`tests/trickle.rs::a_temporary_share_tells_the_relays_its_deadline`
+(rot ohne die Verdrahtung) und
+`thread_tests::a_share_tells_the_relays_its_own_deadline`.
+
 ## 9. Etappen (TDD, je einzeln mergebar)
 
 1. **Kern:** `ThreadOp`, das additive Feld, die Faltung "geschlossen"
@@ -283,7 +306,7 @@ Folgerungen:
 4. **Kompaktor kanalbewusst (§7)**, F9-Beweis zuerst.
 5. **GUI:** Ablaufdatum in der Leiste, Schloss, Knöpfe, Bestätigung,
    ausgeblendete Eingabezeile. Headless-GUI-Tests.
-6. *(optional)* **Relay-Expiration (§8)** nach Klärung von F3.
+6. **Relay-Fristen (§8.2).**
 
 ## 10. Fragen
 
@@ -295,12 +318,7 @@ Entschieden (User, 2026-11-13):
   Schließen (D4, D5).
 - **F4 - Eigene Frist pro Thread:** nein (D6).
 
-Offen:
-
-- **F3 - Relays (§8):** Sollen wir die Relays bitten, unsere
-  verschlüsselten Nachrichten nach einer Frist zu löschen? Dann für alle
-  Gruppen-Events gleich, oder gar nicht. Etappen 1-5 hängen nicht davon
-  ab.
+- **F3 - Relays (§8):** alle drei Folgerungen aus §8.1 gebaut (§8.2).
 
 ## 11. Präzisierungen aus der Umsetzung (2026-11-13)
 

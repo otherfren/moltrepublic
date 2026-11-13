@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Temporary threads (`docs/chat_threads_lifecycle.md`): a topic channel
+//! Temporary threads (`docs_archive/chat/chat_threads_lifecycle.md`): a topic channel
 //! can be closed and reopened by any member (a system line every seat
 //! folds the same way), forgotten on one seat, and it ends as a whole once
 //! its window of silence passed. The general chat and the vote discussions

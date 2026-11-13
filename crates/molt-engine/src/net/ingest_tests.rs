@@ -193,7 +193,7 @@ fn a_wire_chat_carries_no_foreign_reactions_receipts_or_tombstone() {
 /// A thread verb from the wire counts only on a SYSTEM line in a TOPIC:
 /// on speech or in the general chat it is stripped, and the message lands
 /// as what it is - a peer cannot close the general chat or dress speech up
-/// as a close (`docs/chat_threads_lifecycle.md` §4).
+/// as a close (`docs_archive/chat/chat_threads_lifecycle.md` §4).
 #[test]
 fn a_wire_thread_verb_counts_only_on_a_system_line_in_a_topic() {
     let rt = tokio::runtime::Builder::new_current_thread()

@@ -1481,7 +1481,7 @@ impl ChatKind {
 }
 
 /// A thread's lifecycle verb, carried by a `System` line in a
-/// [`ChannelRef::Topic`] channel (`docs/chat_threads_lifecycle.md` §4).
+/// [`ChannelRef::Topic`] channel (`docs_archive/chat/chat_threads_lifecycle.md` §4).
 /// Riding the chat message keeps the wire shape: an older reader sees a
 /// plain system line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1548,7 +1548,7 @@ impl ThreadLife {
 }
 
 /// Fold every topic thread's lifecycle out of the chat log
-/// (`docs/chat_threads_lifecycle.md` §4): the messages are walked in
+/// (`docs_archive/chat/chat_threads_lifecycle.md` §4): the messages are walked in
 /// `(ts, id)` order, never arrival order, so every seat reaches the same
 /// state from the same messages. Any message is activity; a lifecycle
 /// verb counts only on a `System` line in a `Topic` channel, and the last
@@ -1696,7 +1696,7 @@ pub struct ChatMessage {
     /// the message drops the share with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<FileMeta>,
-    /// A thread lifecycle verb (`docs/chat_threads_lifecycle.md` §4): only
+    /// A thread lifecycle verb (`docs_archive/chat/chat_threads_lifecycle.md` §4): only
     /// meaningful on a `System` line in a `Topic` channel. Absent on every
     /// other message, so their bytes stay as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1891,7 +1891,7 @@ pub struct WorkspacePrefs {
     /// RECEIPTS are a different thing and stay in the log.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub read_cursors: std::collections::BTreeMap<String, String>,
-    /// Threads this seat FORGOT (`docs/chat_threads_lifecycle.md` D2): topic
+    /// Threads this seat FORGOT (`docs_archive/chat/chat_threads_lifecycle.md` D2): topic
     /// name → the id (hex) of the thread's newest message at the time. That
     /// message and every one before it in this seat's log stay hidden; a
     /// message arriving later brings the thread back. Id-addressed like the
@@ -2450,6 +2450,11 @@ pub struct PublishJob {
     /// `wiki_base`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vault: Option<String>,
+    /// NIP-40: the unix deadline the pieces ask the relays to drop them at
+    /// - a TEMPORARY share's own deadline. `None` for anything that must
+    /// stay fetchable (`docs_archive/chat/chat_threads_lifecycle.md` §8.1). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
 }
 
 /// Whether bit `index` of a little-endian bitmap is set.
@@ -3457,7 +3462,7 @@ impl EngineStateDump {
     }
 
     /// [`Self::prune_chat_before`] under an arbitrary drop predicate (the
-    /// channel-aware compaction of `docs/chat_threads_lifecycle.md` §7). The
+    /// channel-aware compaction of `docs_archive/chat/chat_threads_lifecycle.md` §7). The
     /// same carry-forward of the legacy sender ordinals and the same
     /// all-or-nothing refusal on a nil id apply to every dropped message,
     /// whatever the reason it fell.
@@ -4186,7 +4191,7 @@ pub enum Command {
         channel: ChannelRef,
     },
     /// Close a topic thread for every seat: a system line, no vote
-    /// (`docs/chat_threads_lifecycle.md` D1).
+    /// (`docs_archive/chat/chat_threads_lifecycle.md` D1).
     ThreadClose {
         /// The topic's name.
         name: String,
@@ -7121,7 +7126,7 @@ pub struct ChannelInfo {
     /// the retention horizon, so that is honest too. Additive.
     #[serde(default)]
     pub unread: usize,
-    /// A topic thread's close state (`docs/chat_threads_lifecycle.md`):
+    /// A topic thread's close state (`docs_archive/chat/chat_threads_lifecycle.md`):
     /// closed threads take no new speech. Always false off topics.
     #[serde(default)]
     pub closed: bool,
@@ -9771,7 +9776,7 @@ mod tests {
         assert_eq!(patch.clone().normalized().expect("patch passes"), patch);
     }
 
-    // ---- temporary threads (docs/chat_threads_lifecycle.md) -------------
+    // ---- temporary threads (docs_archive/chat/chat_threads_lifecycle.md) -------------
 
     fn topic_line(id: u8, from: &str, ts: u64, op: Option<ThreadOp>) -> ChatMessage {
         let mut b = [0u8; 16];

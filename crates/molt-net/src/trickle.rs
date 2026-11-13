@@ -266,6 +266,21 @@ async fn tick<S: StateStore>(
         return Err(Hold::Idle);
     };
     *last = Some(job.series.clone());
+    // a temporary share's pieces carry its deadline to the relays (§8.1);
+    // past it nobody serves or accepts the download, and a relay would
+    // refuse an already expired event - the job is done
+    let file_chan;
+    let chan = match job.expires_at {
+        Some(at) if at <= crate::ritual_net::now_secs() => {
+            drop_job(store, job.series.clone(), "the share expired".into()).await;
+            return Err(Hold::Failed);
+        }
+        Some(at) => {
+            file_chan = chan.with_file_expiry(at);
+            &file_chan
+        }
+        None => chan,
+    };
     if *busy.borrow() {
         tracing::debug!(series = %job.series, gate = "outbox", "file trickle: waiting");
         return Err(Hold::Gated);
@@ -619,6 +634,7 @@ mod tests {
             stored: false,
             wiki_base: false,
             vault: None,
+            expires_at: None,
         };
         let whole = whole_series_ranges(Manifest::layout_for(3).expect("layout"));
         let jobs = vec![job("a", whole.clone()), job("b", vec![(1, 1)]), job("c", whole)];

@@ -64,7 +64,7 @@ pub(crate) fn derive_channels(
     // made the New-topic button a trapdoor - the channel existed, held
     // messages, and had nowhere to be clicked back to.
     // a closed thread wears a lock, every thread its time left
-    // (`docs/chat_threads_lifecycle.md`)
+    // (`docs_archive/chat/chat_threads_lifecycle.md`)
     let mut topics: Vec<(&str, &ChannelInfo)> = infos
         .iter()
         .filter_map(|i| match &i.channel {

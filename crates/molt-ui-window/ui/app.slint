@@ -742,7 +742,7 @@ component PagerRow inherits HorizontalLayout {
 // strip when the pane is wide enough, below the charter otherwise.
 component OrgSettingsCard inherits DetailGroup {
     in property <int> retention;
-    // the thread window (docs/chat_threads_lifecycle.md D6)
+    // the thread window (docs_archive/chat/chat_threads_lifecycle.md D6)
     in property <int> thread-retention;
     callback edit-thread();
     // the GROUP's relay pool — a group setting like the name or the
@@ -1918,7 +1918,7 @@ export component AppWindow inherits Window {
     // from the engine's channel annotation, instant on selection)
     in property <bool> selected-channel-closed: false;
     // the selected channel is a CLOSED topic thread: no compose row; the
-    // heading offers the reopen (docs/chat_threads_lifecycle.md)
+    // heading offers the reopen (docs_archive/chat/chat_threads_lifecycle.md)
     in property <bool> selected-thread-closed: false;
     // the selected topic's time left, short ("3 d"); "" off topics
     in property <string> selected-thread-ends: "";

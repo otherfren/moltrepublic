@@ -94,7 +94,7 @@ pub(crate) struct OrgEffective {
     pub retention_days: u64,
     /// Last applied `set_thread_retention` in days (default 7): a topic
     /// thread ends this long after its last activity
-    /// (`docs/chat_threads_lifecycle.md` D6).
+    /// (`docs_archive/chat/chat_threads_lifecycle.md` D6).
     pub thread_retention_days: u64,
     /// Last applied `set_image` reference, cleared by `remove_image`.
     pub image: String,

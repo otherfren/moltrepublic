@@ -319,7 +319,7 @@ fn a_dropped_bundle_does_not_eat_the_toast() {
 }
 
 /// **A topic thread wears its lifecycle in the window**
-/// (`docs/chat_threads_lifecycle.md`): the sidebar row carries the time
+/// (`docs_archive/chat/chat_threads_lifecycle.md`): the sidebar row carries the time
 /// left, a close puts the lock on the row and takes the compose row away,
 /// a reopen gives it back, a forget takes the row off this seat.
 #[test]

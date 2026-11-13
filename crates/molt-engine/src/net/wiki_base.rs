@@ -213,6 +213,7 @@ impl crate::State {
             stored: false,
             wiki_base: true,
             vault: None,
+            expires_at: None,
         };
         tokio::spawn(async move {
             let mut queued = false;

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Temporary threads (`docs/chat_threads_lifecycle.md`): close, reopen and
+//! Temporary threads (`docs_archive/chat/chat_threads_lifecycle.md`): close, reopen and
 //! forget a topic thread, and its end as a whole after inactivity.
 
 use super::support::*;
@@ -158,7 +158,7 @@ fn forget_hides_the_thread_here_until_a_newer_message() {
 
 /// The compactor drops thread content physically: a forgotten thread at
 /// once, an ended one a further window later; the general chat keeps its
-/// own rhythm (`docs/chat_threads_lifecycle.md` §7).
+/// own rhythm (`docs_archive/chat/chat_threads_lifecycle.md` §7).
 #[test]
 fn compaction_drops_forgotten_and_long_ended_threads() {
     let mut st = plain_state();
@@ -224,4 +224,25 @@ fn a_share_in_an_ended_thread_is_expired() {
     let live = share_in(&mut st, 2, now - 60, "peer-1", topic("b"));
     assert!(st.share_expired(&old), "the thread ended a day ago");
     assert!(!st.share_expired(&live));
+}
+
+/// The deadline a share's pieces ask the relays for (§8.1): a temporary
+/// share's own expiry, its thread's end when sooner, nothing for an
+/// unknown age.
+#[test]
+fn a_share_tells_the_relays_its_own_deadline() {
+    let mut st = plain_state();
+    let now = now_secs();
+    let window = 7 * 86_400;
+    let general = share_in(&mut st, 1, now - 60, "peer-1", ChannelRef::Group);
+    assert_eq!(st.share_relay_deadline(general), Some(now - 60 + window));
+    let in_thread = share_in(&mut st, 2, now - 60, "peer-1", topic("a"));
+    land(&mut st, 3, now - 30, topic("a"), Some(ThreadOp::Close));
+    assert_eq!(
+        st.share_relay_deadline(in_thread),
+        Some(now - 30 + molt_core::THREAD_CLOSED_GRACE_SECS),
+        "the closed thread ends first"
+    );
+    let unknown = share_in(&mut st, 4, 0, "peer-1", ChannelRef::Group);
+    assert_eq!(st.share_relay_deadline(unknown), None, "unknown age is kept");
 }

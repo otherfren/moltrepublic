@@ -12,7 +12,7 @@ discussion stays writable (see the last entry under "Known v1
 limitations"). Amended 2026-11-13: a `Topic` channel is a temporary
 thread - closable and reopenable by any member, forgettable per seat,
 ending as a whole after its window of silence
-(`docs/chat_threads_lifecycle.md`). The decision log below is unchanged
+(`docs_archive/chat/chat_threads_lifecycle.md`). The decision log below is unchanged
 history.
 
 ## The idea

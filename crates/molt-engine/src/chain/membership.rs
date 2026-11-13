@@ -1035,7 +1035,10 @@ impl State {
                 return;
             }
         };
-        let channel = molt_net::ritual_net::GroupChannel::new(dialer, relays, rotation_seed);
+        // a running group's re-key: its 445 frames carry the same relay
+        // deadline as every other frame of the group (§8.1)
+        let channel =
+            molt_net::ritual_net::GroupChannel::new(dialer, relays, rotation_seed).with_group_expiry();
         // the NEW anchor: the `Restored` block that triggered this re-key has
         // already been folded, so this is the key the seat just proved it holds
         let to = self.working_nostr_pk(member);

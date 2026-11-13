@@ -97,7 +97,8 @@ lands the work.
 
 The read-first specs of shipping behaviour, all under `docs_archive/`:
 `ritual/founding_ritual.md` and `ritual/recovery_ritual.md` (the two
-rituals), `chain/persistent_chain.md` (the state model), `chat/chat_bus.md`,
+rituals), `chain/persistent_chain.md` (the state model), `chat/chat_bus.md`
++ `chat/chat_threads_lifecycle.md` (temporary topic threads, relay deadlines),
 `transport/nostr_transport_marmot.md` + `transport/relay_pool.md` (transport
 and the user-owned relay pool), `transport/delivery_guarantee.md`,
 `security/mcp-security.md` (the MCP endpoint and the agent's host boundary),

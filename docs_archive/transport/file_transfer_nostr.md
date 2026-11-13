@@ -93,5 +93,8 @@ plane limit is 65535 chunks; the REAL cap must come from relay behaviour
 4. **Pool courtesy (default):** chunk publishes ride the same hourly
    publish budget machinery as resends — no second budget to reason
    about; a spent budget holds the upload and says so.
-5. **Retention honesty (default):** one status word on the share card —
+5. **Relay deadline (2026-11-13):** the pieces of a TEMPORARY share carry
+   NIP-40 `expiration` = the share's own deadline; persistent shares and
+   the wiki/vault bases carry none (`chat/chat_threads_lifecycle.md` §8.2).
+6. **Retention honesty (default):** one status word on the share card —
    relay-held / sharer-only / gone — mapped from the last fetch outcome.

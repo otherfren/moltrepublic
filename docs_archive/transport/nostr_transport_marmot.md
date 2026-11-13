@@ -487,6 +487,10 @@ Resolution — split the two secrets explicitly:
   `max_past_epochs = 0` tests pin — the INNER MLS layer still rejects an
   evicted leaf's old-epoch message. Add a test asserting exactly that
   asymmetry (outer strips, inner rejects).
+- **Relay deadline (2026-11-13):** every 445 frame of the RUNNING group
+  carries NIP-40 `expiration` = `created_at` + 3 days; the runtime never
+  reads a window older than the current day, so nothing it needs goes.
+  Ritual-phase frames carry none (`chat/chat_threads_lifecycle.md` §8).
 - **Catch-up is bounded by the exporter ring, not by relay retention.** Beyond
   the ring, old-epoch events are epoch-opaque and must be reported loudly (G4)
   rather than silently skipped. The ACK/rewind layer — not the subscription —

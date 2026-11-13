@@ -267,6 +267,10 @@ where
     S: StateStore,
     K: EngineSink,
 {
+    // the running group's frames ask the relays to let them go after three
+    // days (`docs_archive/chat/chat_threads_lifecycle.md` §8.1) - the ritual that made
+    // the group publishes without a deadline, a joiner may read it late
+    let channel = channel.with_group_expiry();
     let (stop, stop_rx) = watch::channel(false);
     let (log2, store2) = (log.clone(), store.clone());
     let (acks, acks_rx) = watch::channel(None);

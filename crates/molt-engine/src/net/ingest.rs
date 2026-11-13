@@ -161,7 +161,7 @@ impl State {
                 msg.read_by.clear();
                 msg.deleted_by = None;
                 // a thread verb is only one on a SYSTEM line in a TOPIC
-                // (`docs/chat_threads_lifecycle.md` §4): elsewhere it is a
+                // (`docs_archive/chat/chat_threads_lifecycle.md` §4): elsewhere it is a
                 // claim with no meaning, and stored it would still fold
                 // wherever a reader skipped the kind check
                 let is_topic = matches!(msg.channel, molt_core::ChannelRef::Topic { .. });

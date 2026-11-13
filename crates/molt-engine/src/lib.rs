@@ -1168,7 +1168,7 @@ pub(crate) struct State {
     pub(crate) read_cursors: std::collections::BTreeMap<String, String>,
     /// The seat's forgotten threads (topic name → the newest message id at
     /// the time), the WORKING copy of `prefs.forgotten_threads`
-    /// (`docs/chat_threads_lifecycle.md` D2).
+    /// (`docs_archive/chat/chat_threads_lifecycle.md` D2).
     pub(crate) forgotten_threads: std::collections::BTreeMap<String, MessageId>,
     /// This workspace has physically dropped expired chat (WP4a compaction),
     /// so chat POSITIONS are no longer meaningful and a legacy index-addressed

@@ -357,7 +357,7 @@ impl State {
                 let msg = self.chat_by_id(id).ok().map(|(_, m)| m);
                 let ts = msg.map(|m| m.ts).unwrap_or(0);
                 // a share in an ENDED thread ends with it
-                // (`docs/chat_threads_lifecycle.md`): the thread's end, if
+                // (`docs_archive/chat/chat_threads_lifecycle.md`): the thread's end, if
                 // sooner than the chat window
                 let thread_end = msg.and_then(|m| match &m.channel {
                     molt_core::ChannelRef::Topic { name } => {
@@ -384,6 +384,14 @@ impl State {
             None | Some(0) => false,
             Some(deadline) => deadline < crate::now_secs(),
         }
+    }
+
+    /// The NIP-40 deadline a share's pieces ask the relays for
+    /// (`docs_archive/chat/chat_threads_lifecycle.md` §8.1): a TEMPORARY share's own
+    /// expiry - past it no seat serves or accepts the download anyway.
+    /// `None` for a persistent share and for an unknown age.
+    pub(crate) fn share_relay_deadline(&self, id: MessageId) -> Option<u64> {
+        self.share_expiry_in(&self.files_state(), &id).filter(|at| *at > 1)
     }
 
     pub(crate) fn share_expired(&self, id: &MessageId) -> bool {

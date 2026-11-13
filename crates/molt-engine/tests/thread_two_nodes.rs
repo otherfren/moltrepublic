@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! **Temporary threads over the wire** (`docs/chat_threads_lifecycle.md`):
+//! **Temporary threads over the wire** (`docs_archive/chat/chat_threads_lifecycle.md`):
 //! two real engines of a 2-of-2 republic. A close made on one seat reaches
 //! the other and refuses its speech there too, a reopen lifts it on both,
 //! and a forget stays on the seat that forgot.

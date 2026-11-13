@@ -479,6 +479,7 @@ impl crate::State {
             stored: false,
             wiki_base: false,
             vault: Some(named.hash.clone()),
+            expires_at: None,
         };
         tokio::spawn(async move {
             store.update(|s| molt_net::trickle::enqueue_publish(s, job)).await;
