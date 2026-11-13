@@ -240,6 +240,7 @@ fn votes_window(unread: i32, posts: usize) -> (AppWindow, Shown) {
     ])));
     apply_strings(&ui, 0);
     let shown = show_headless(&ui);
+    rail_settled();
     (ui, shown)
 }
 

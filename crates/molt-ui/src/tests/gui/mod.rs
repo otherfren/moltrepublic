@@ -81,6 +81,13 @@ fn show_headless(ui: &AppWindow) -> Shown {
     Shown(ui.clone_strong())
 }
 
+/// Past the sidebar's expand animation: a window shown straight onto
+/// the main screen opens its rail animated, and widths move until then.
+#[cfg(feature = "live-preview")]
+fn rail_settled() {
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(200));
+}
+
 /// Organization → Members with two seats, rendered headless. `on` is
 /// the applied poke switch the menus gate on.
 #[cfg(feature = "live-preview")]

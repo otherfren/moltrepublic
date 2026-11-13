@@ -3109,180 +3109,197 @@ export component AppWindow inherits Window {
                 // surfaces at the top level, each expandable into its
                 // sub-views. The selected surface's group is the open one
                 // (accordion — mirrored: an MCP select opens it too).
-                if root.screen == AppScreen.main: VerticalLayout {
-                    padding: 8px;
-                    spacing: 3px;
-                    alignment: start;
-                    for s in root.surfaces: VerticalLayout {
-                        spacing: 2px;
-                        SurfaceRow {
-                            s: s;
-                            selected: s.key == root.nav-expanded;
-                            logo: root.org-img;
-                            logo-set: root.org-img-set;
-                            compact: root.nav-collapsed;
-                            // every row the model delivers is selectable: the
-                            // charter's feature gating hides disabled surfaces
-                            // in Rust (surface_tabs), and an enabled-but-unbuilt
-                            // one opens its badged DESIGN-MOCK pane
-                            enabled: true;
-                            chosen => {
-                                root.mv-draft = "";
-                                // clicking "Chat" while an Organization
-                                // decision's discussion is the filter is the
-                                // way OUT of the nav-expanded pin: the surface
-                                // is already "chat", so without resetting the
-                                // channel the click changes nothing and the
-                                // chat section can never be expanded again
-                                // (live incident 2026-08-09, every approval)
-                                if (s.key == "chat" && root.selected-channel-org) {
-                                    root.select-channel("group");
-                                }
-                                root.select-surface(s.key);
-                            }
-                        }
-                        if s.key == root.nav-expanded && !root.nav-collapsed: VerticalLayout {
-                            spacing: 1px;
-                            for v in s.views: VerticalLayout {
-                                // Organization → Pending exists only while
-                                // something is in voting; open decisions of
-                                // THIS node raise the ⚠-badge on the row.
-                                // Declined exists only while a decline is
-                                // still inside the retention window (the
-                                // view empties on the chat rhythm); Accepted
-                                // only once something was applied.
-                                if (v.key != "pending" || s.pending-count > 0)
-                                    && (v.key != "accepted" || s.applied-count > 0)
-                                    && (v.key != "declined" || s.declined-count > 0)
-                                    // Memory's outcome view (key "denied",
-                                    // same semantics as org's "declined")
-                                    && (v.key != "denied" || s.declined-count > 0): ViewRow {
-                                    // chat's "today" IS the group view —
-                                    // localized like the old group channel
-                                    // row it replaces
-                                    label: s.key == "chat" && v.key == "today" ? Strings.ch-group : v.name;
-                                    icon: v.icon;
-                                    // exactly ONE active sub-item per surface:
-                                    // while an OPEN discussion is the chat
-                                    // filter, ITS row below is the active one.
-                                    // A filter with no row of its own — group,
-                                    // a topic, a decided vote's read-only
-                                    // discussion (the sections lists open
-                                    // votes only) — keeps the Gruppe row lit;
-                                    // the compose banner names the filter.
-                                    // exactly ONE active sub-item per surface.
-                                    // On chat the Gruppe row is the stand-in
-                                    // for every filter WITHOUT a row of its
-                                    // own; a filter that has one (a topic, an
-                                    // open vote's discussion) owns the
-                                    // highlight itself. Standing in for a
-                                    // listed channel is how a topic could be
-                                    // on screen while the nav said "Gruppe".
-                                    selected: v.key == root.selected-view
-                                        && (s.key != "chat" || v.key != "today"
-                                            || root.selected-channel == "group"
-                                            || !root.selected-channel-listed);
-                                    pending: v.key == "proposals" || v.key == "pending"
-                                        || (s.key == "wallet" && v.key == "status") ? s.pending-count
-                                        : (s.key == "chat" && v.key == "today" ? root.group-unread : 0);
-                                    alert: v.key == "pending" ? s.pending-my-vote-count : 0;
-                                    alert-total: v.key == "pending" ? s.pending-count : 0;
-                                    chosen => {
-                                        root.mv-draft = "";
-                                        root.select-view(s.key, v.key);
-                                        // entering ANY chat view resets the
-                                        // channel filter (the Gruppe row
-                                        // replaces the old group channel row;
-                                        // Archive must not stay silently
-                                        // scoped to a stale discussion)
-                                        if (s.key == "chat") {
-                                            root.select-channel("group");
-                                        }
-                                    }
-                                }
-                                // …and Organization → Pending lists its open
-                                // decisions BELOW itself: one row each, going
-                                // straight into that decision's chat (which
-                                // the compact card above the log then heads).
-                                //
-                                // The section survives the click because the
-                                // nav follows `nav-expanded`, not the visible
-                                // pane — the chat surface owns that pane, and
-                                // collapsing Organization here would hide the
-                                // row the user just used.
-                                if (s.key == "organization" || s.key == "files") && v.key == "pending"
-                                    && s.pending-count > 0: VerticalLayout {
-                                    spacing: 1px;
-                                    for p in s.pending: ViewRow {
-                                        label: p.text;
-                                        icon: "🗳";
-                                        // one level deeper than the view rows
-                                        // they hang under — these are the
-                                        // first sub-sub-items in this nav, so
-                                        // without it they read as siblings of
-                                        // Pending rather than its contents
-                                        indent: 14px;
-                                        // where this decision stands, quietly
-                                        quorum: "\{p.approvals}/\{p.threshold}";
-                                        // the channel filter OUTLIVES the
-                                        // chat surface, so matching it alone
-                                        // left a row lit (and bold) while the
-                                        // user was somewhere else entirely —
-                                        // the row is active only when its
-                                        // discussion is actually on screen
-                                        selected: root.selected-channel == "patch:\{p.id}"
-                                            && root.selected-surface == "chat"
-                                            && root.selected-view == "today";
+                // Scrolls when it outgrows the window, so the footer stays put.
+                Rectangle {
+                    vertical-stretch: 1;
+                    clip: true;
+                    nav-fl := Flickable {
+                        width: 100%;
+                        height: 100%;
+                        viewport-width: self.width;
+                        viewport-height: max(nav-body.preferred-height, self.height);
+                        nav-body := VerticalLayout {
+                            alignment: start;
+                            if root.screen == AppScreen.main: VerticalLayout {
+                                padding: 8px;
+                                spacing: 3px;
+                                alignment: start;
+                                for s in root.surfaces: VerticalLayout {
+                                    spacing: 2px;
+                                    SurfaceRow {
+                                        s: s;
+                                        selected: s.key == root.nav-expanded;
+                                        logo: root.org-img;
+                                        logo-set: root.org-img-set;
+                                        compact: root.nav-collapsed;
+                                        // every row the model delivers is selectable: the
+                                        // charter's feature gating hides disabled surfaces
+                                        // in Rust (surface_tabs), and an enabled-but-unbuilt
+                                        // one opens its badged DESIGN-MOCK pane
+                                        enabled: true;
                                         chosen => {
                                             root.mv-draft = "";
-                                            root.select-view("chat", "today");
-                                            root.select-channel("patch:\{p.id}");
+                                            // clicking "Chat" while an Organization
+                                            // decision's discussion is the filter is the
+                                            // way OUT of the nav-expanded pin: the surface
+                                            // is already "chat", so without resetting the
+                                            // channel the click changes nothing and the
+                                            // chat section can never be expanded again
+                                            // (live incident 2026-08-09, every approval)
+                                            if (s.key == "chat" && root.selected-channel-org) {
+                                                root.select-channel("group");
+                                            }
+                                            root.select-surface(s.key);
                                         }
                                     }
-                                }
-                            }
-                        }
-                        // chat discussions (chat bus): the patch channels of
-                        // OPEN votes only — views over the ONE log, with a
-                        // per-channel unread pill; the section exists only
-                        // while something is up for a vote. Selecting
-                        // re-reads through the engine's channel filter.
-                        if s.key == "chat" && s.key == root.nav-expanded && !root.nav-collapsed && root.chat-channels.length > 0: VerticalLayout {
-                            spacing: 1px;
-                            HorizontalLayout {
-                                padding-left: 26px;
-                                padding-top: 6px;
-                                padding-bottom: 2px;
-                                Text {
-                                    text: Strings.ch-discussions;
-                                    color: Theme.faint;
-                                    font-size: Theme.fs-cap;
-                                    font-weight: 700;
-                                }
-                            }
-                            for c in root.chat-channels: ViewRow {
-                                label: c.label;
-                                icon: c.icon;
-                                // …and a discussion row only while the log
-                                // view shows it (Archive selected = only the
-                                // Archive row is active)
-                                selected: c.key == root.selected-channel
-                                    && root.selected-view == "today";
-                                pending: c.unread;
-                                quorum: c.note;
-                                chosen => {
-                                    // channel switches keep the compose
-                                    // draft — only the filter changes
-                                    root.select-view("chat", "today");
-                                    root.select-channel(c.key);
+                                    if s.key == root.nav-expanded && !root.nav-collapsed: VerticalLayout {
+                                        spacing: 1px;
+                                        for v in s.views: VerticalLayout {
+                                            // Organization → Pending exists only while
+                                            // something is in voting; open decisions of
+                                            // THIS node raise the ⚠-badge on the row.
+                                            // Declined exists only while a decline is
+                                            // still inside the retention window (the
+                                            // view empties on the chat rhythm); Accepted
+                                            // only once something was applied.
+                                            if (v.key != "pending" || s.pending-count > 0)
+                                                && (v.key != "accepted" || s.applied-count > 0)
+                                                && (v.key != "declined" || s.declined-count > 0)
+                                                // Memory's outcome view (key "denied",
+                                                // same semantics as org's "declined")
+                                                && (v.key != "denied" || s.declined-count > 0): ViewRow {
+                                                // chat's "today" IS the group view —
+                                                // localized like the old group channel
+                                                // row it replaces
+                                                label: s.key == "chat" && v.key == "today" ? Strings.ch-group : v.name;
+                                                icon: v.icon;
+                                                // exactly ONE active sub-item per surface:
+                                                // while an OPEN discussion is the chat
+                                                // filter, ITS row below is the active one.
+                                                // A filter with no row of its own — group,
+                                                // a topic, a decided vote's read-only
+                                                // discussion (the sections lists open
+                                                // votes only) — keeps the Gruppe row lit;
+                                                // the compose banner names the filter.
+                                                // exactly ONE active sub-item per surface.
+                                                // On chat the Gruppe row is the stand-in
+                                                // for every filter WITHOUT a row of its
+                                                // own; a filter that has one (a topic, an
+                                                // open vote's discussion) owns the
+                                                // highlight itself. Standing in for a
+                                                // listed channel is how a topic could be
+                                                // on screen while the nav said "Gruppe".
+                                                selected: v.key == root.selected-view
+                                                    && (s.key != "chat" || v.key != "today"
+                                                        || root.selected-channel == "group"
+                                                        || !root.selected-channel-listed);
+                                                pending: v.key == "proposals" || v.key == "pending"
+                                                    || (s.key == "wallet" && v.key == "status") ? s.pending-count
+                                                    : (s.key == "chat" && v.key == "today" ? root.group-unread : 0);
+                                                alert: v.key == "pending" ? s.pending-my-vote-count : 0;
+                                                alert-total: v.key == "pending" ? s.pending-count : 0;
+                                                chosen => {
+                                                    root.mv-draft = "";
+                                                    root.select-view(s.key, v.key);
+                                                    // entering ANY chat view resets the
+                                                    // channel filter (the Gruppe row
+                                                    // replaces the old group channel row;
+                                                    // Archive must not stay silently
+                                                    // scoped to a stale discussion)
+                                                    if (s.key == "chat") {
+                                                        root.select-channel("group");
+                                                    }
+                                                }
+                                            }
+                                            // …and Organization → Pending lists its open
+                                            // decisions BELOW itself: one row each, going
+                                            // straight into that decision's chat (which
+                                            // the compact card above the log then heads).
+                                            //
+                                            // The section survives the click because the
+                                            // nav follows `nav-expanded`, not the visible
+                                            // pane — the chat surface owns that pane, and
+                                            // collapsing Organization here would hide the
+                                            // row the user just used.
+                                            if (s.key == "organization" || s.key == "files") && v.key == "pending"
+                                                && s.pending-count > 0: VerticalLayout {
+                                                spacing: 1px;
+                                                for p in s.pending: ViewRow {
+                                                    label: p.text;
+                                                    icon: "🗳";
+                                                    // one level deeper than the view rows
+                                                    // they hang under — these are the
+                                                    // first sub-sub-items in this nav, so
+                                                    // without it they read as siblings of
+                                                    // Pending rather than its contents
+                                                    indent: 14px;
+                                                    // where this decision stands, quietly
+                                                    quorum: "\{p.approvals}/\{p.threshold}";
+                                                    // the channel filter OUTLIVES the
+                                                    // chat surface, so matching it alone
+                                                    // left a row lit (and bold) while the
+                                                    // user was somewhere else entirely —
+                                                    // the row is active only when its
+                                                    // discussion is actually on screen
+                                                    selected: root.selected-channel == "patch:\{p.id}"
+                                                        && root.selected-surface == "chat"
+                                                        && root.selected-view == "today";
+                                                    chosen => {
+                                                        root.mv-draft = "";
+                                                        root.select-view("chat", "today");
+                                                        root.select-channel("patch:\{p.id}");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // chat discussions (chat bus): the patch channels of
+                                    // OPEN votes only — views over the ONE log, with a
+                                    // per-channel unread pill; the section exists only
+                                    // while something is up for a vote. Selecting
+                                    // re-reads through the engine's channel filter.
+                                    if s.key == "chat" && s.key == root.nav-expanded && !root.nav-collapsed && root.chat-channels.length > 0: VerticalLayout {
+                                        spacing: 1px;
+                                        HorizontalLayout {
+                                            padding-left: 26px;
+                                            padding-top: 6px;
+                                            padding-bottom: 2px;
+                                            Text {
+                                                text: Strings.ch-discussions;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                font-weight: 700;
+                                            }
+                                        }
+                                        for c in root.chat-channels: ViewRow {
+                                            label: c.label;
+                                            icon: c.icon;
+                                            // …and a discussion row only while the log
+                                            // view shows it (Archive selected = only the
+                                            // Archive row is active)
+                                            selected: c.key == root.selected-channel
+                                                && root.selected-view == "today";
+                                            pending: c.unread;
+                                            quorum: c.note;
+                                            chosen => {
+                                                // channel switches keep the compose
+                                                // draft — only the filter changes
+                                                root.select-view("chat", "today");
+                                                root.select-channel(c.key);
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
-                }
-
-                Rectangle {
-                    vertical-stretch: 1;
+                    // left of the collapse grip, which owns the right edge
+                    ScrollHint {
+                        x: parent.width - 14px;
+                        view-h: nav-fl.height;
+                        content-h: nav-fl.viewport-height;
+                        scroll-y: nav-fl.viewport-y;
+                    }
                 }
                 Rectangle {
                     height: 1px;

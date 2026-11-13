@@ -1589,3 +1589,76 @@ fn every_decided_votes_table_shows_the_decision_date() {
         );
     }
 }
+
+/// **A nav taller than the window scrolls.** With many surfaces and an
+/// expanded one, the rows below the window's bottom edge were out of
+/// reach (field feedback 2026-11-13); the footer stays in the window and
+/// the wheel brings the last sub-view up.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_nav_taller_than_the_window_scrolls_to_its_last_row() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1000, 400));
+    apply_strings(&ui, 1);
+    let views = ModelRc::new(VecModel::from(
+        (0..6)
+            .map(|i| ViewItem {
+                key: format!("v{i}").into(),
+                name: format!("View {i}").into(),
+                ..ViewItem::default()
+            })
+            .collect::<Vec<_>>(),
+    ));
+    ui.set_surfaces(ModelRc::new(VecModel::from(
+        (0..12)
+            .map(|i| SurfaceTab {
+                key: format!("s{i}").into(),
+                name: format!("Surface {i}").into(),
+                views: views.clone(),
+                ..SurfaceTab::default()
+            })
+            .collect::<Vec<_>>(),
+    )));
+    ui.set_screen(AppScreen::Main);
+    // the LAST surface is the open one: its sub-views are what fell off
+    ui.set_selected_surface("s11".into());
+    let _shown = show_headless(&ui);
+    rail_settled();
+
+    let win_h = ui.window().size().to_logical(ui.window().scale_factor()).height;
+    // the element query sees only what is on screen: a clipped row is absent
+    let last_view = || {
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "View 5")
+            .find(|e| e.size().width > 0.0)
+    };
+    let close = i_slint_backend_testing::ElementHandle::find_by_accessible_label(
+        &ui,
+        ui.global::<Strings>().get_mv_close_ws().as_str(),
+    )
+    .find(|e| e.size().width > 0.0)
+    .expect("close-workspace button");
+    let cb = close.absolute_position().y + close.size().height;
+    assert!(cb <= win_h, "the footer stays in the window: {cb} > {win_h}");
+    assert!(last_view().is_none(), "the fixture must push the last view out of sight");
+
+    let first = i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "SurfaceRow")
+        .find(|r| r.size().width > 0.0)
+        .expect("a surface row");
+    let p = first.absolute_position();
+    for _ in 0..40 {
+        ui.window()
+            .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                position: slint::LogicalPosition::new(p.x + 20.0, p.y + 10.0),
+                delta_x: 0.0,
+                delta_y: -60.0,
+            });
+        i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    }
+    let last = last_view().expect("the wheel brings the last view into sight");
+    let lb = last.absolute_position().y + last.size().height;
+    assert!(
+        lb <= close.absolute_position().y,
+        "the last view sits above the footer: {lb}"
+    );
+}

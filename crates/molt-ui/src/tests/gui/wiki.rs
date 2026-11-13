@@ -1450,7 +1450,7 @@ fn nav_window(paths: &[&str]) -> (AppWindow, Shown) {
     g.invoke_base_arrived();
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
     let shown = show_headless(&ui);
-    settle();
+    rail_settled();
     (ui, shown)
 }
 
