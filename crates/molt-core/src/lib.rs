@@ -1480,6 +1480,119 @@ impl ChatKind {
     }
 }
 
+/// A thread's lifecycle verb, carried by a `System` line in a
+/// [`ChannelRef::Topic`] channel (`docs/chat_threads_lifecycle.md` §4).
+/// Riding the chat message keeps the wire shape: an older reader sees a
+/// plain system line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadOp {
+    /// The thread is done: read-only for new speech on every seat.
+    Close,
+    /// The thread takes speech again.
+    Reopen,
+}
+
+/// Default `set_thread_retention`: a thread ends this many days after its
+/// last activity.
+pub fn default_thread_retention_days() -> u64 {
+    7
+}
+
+/// A closed thread stays readable this long after its close line, so the
+/// others see the close and the last words (D5).
+pub const THREAD_CLOSED_GRACE_SECS: u64 = 86_400;
+
+/// One thread's lifecycle, folded from its messages ([`thread_lives`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThreadLife {
+    /// Start of the thread's CURRENT incarnation (unix seconds): a thread
+    /// that ended and was written to again starts over, and a message
+    /// stamped before this belongs to the ended one - hidden everywhere.
+    pub since: u64,
+    /// Newest message stamp (unix seconds; 0 = only unknown-age messages).
+    pub last_ts: u64,
+    /// Who closed it, while closed.
+    pub closed_by: Option<MemberId>,
+    /// The deciding close line's stamp (0 while open).
+    pub closed_at: u64,
+    /// The thread window the fold ran under.
+    window_secs: u64,
+}
+
+impl ThreadLife {
+    /// When the current incarnation ends as a whole: the close line + the
+    /// grace while closed, else the last activity + the thread window.
+    /// 0 = never (no known stamp: unknown age must not silently vanish).
+    pub fn expires_at(&self) -> u64 {
+        if self.closed_by.is_some() {
+            return self.closed_at.saturating_add(THREAD_CLOSED_GRACE_SECS);
+        }
+        if self.last_ts == 0 {
+            return 0;
+        }
+        self.last_ts.saturating_add(self.window_secs)
+    }
+
+    /// Whether the thread has ended at `now`.
+    pub fn expired(&self, now: u64) -> bool {
+        let at = self.expires_at();
+        at != 0 && at <= now
+    }
+
+    /// Whether `m` (a message of this thread) belongs to an ended
+    /// incarnation.
+    pub fn predates(&self, m: &ChatMessage) -> bool {
+        m.ts < self.since
+    }
+}
+
+/// Fold every topic thread's lifecycle out of the chat log
+/// (`docs/chat_threads_lifecycle.md` §4): the messages are walked in
+/// `(ts, id)` order, never arrival order, so every seat reaches the same
+/// state from the same messages. Any message is activity; a lifecycle
+/// verb counts only on a `System` line in a `Topic` channel, and the last
+/// one decides. A message that arrives after the thread had ended - the
+/// window of silence passed, or the grace after a close - starts a new,
+/// open incarnation.
+pub fn thread_lives<'a>(
+    msgs: impl IntoIterator<Item = &'a ChatMessage>,
+    window_secs: u64,
+) -> BTreeMap<String, ThreadLife> {
+    let mut per: BTreeMap<&str, Vec<&ChatMessage>> = BTreeMap::new();
+    for m in msgs {
+        if let ChannelRef::Topic { name } = &m.channel {
+            per.entry(name.as_str()).or_default().push(m);
+        }
+    }
+    per.into_iter()
+        .map(|(name, mut thread)| {
+            thread.sort_by_key(|m| (m.ts, m.id));
+            let mut life = ThreadLife { window_secs, ..ThreadLife::default() };
+            for (i, m) in thread.into_iter().enumerate() {
+                if i == 0 {
+                    life.since = m.ts;
+                } else if life.last_ts != 0 && m.ts != 0 && life.expired(m.ts) {
+                    life = ThreadLife { since: m.ts, window_secs, ..ThreadLife::default() };
+                }
+                life.last_ts = life.last_ts.max(m.ts);
+                match m.thread_op.filter(|_| m.kind == ChatKind::System) {
+                    Some(ThreadOp::Close) => {
+                        life.closed_by = Some(m.from.clone());
+                        life.closed_at = m.ts;
+                    }
+                    Some(ThreadOp::Reopen) => {
+                        life.closed_by = None;
+                        life.closed_at = 0;
+                    }
+                    None => {}
+                }
+            }
+            (name.to_string(), life)
+        })
+        .collect()
+}
+
 impl ChatMessage {
     /// A plain text message — the one constructor chat posts and test
     /// builders share, so the default-field shape cannot drift. The id is
@@ -1506,6 +1619,7 @@ impl ChatMessage {
             read_by: BTreeSet::new(),
             deleted_by: None,
             file: None,
+            thread_op: None,
         }
     }
 
@@ -1518,6 +1632,12 @@ impl ChatMessage {
     /// The same message carrying `kind` (builder-style).
     pub fn with_kind(mut self, kind: ChatKind) -> ChatMessage {
         self.kind = kind;
+        self
+    }
+
+    /// The same message carrying a thread lifecycle verb (builder-style).
+    pub fn with_thread_op(mut self, op: ThreadOp) -> ChatMessage {
+        self.thread_op = Some(op);
         self
     }
 }
@@ -1576,6 +1696,11 @@ pub struct ChatMessage {
     /// the message drops the share with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file: Option<FileMeta>,
+    /// A thread lifecycle verb (`docs/chat_threads_lifecycle.md` §4): only
+    /// meaningful on a `System` line in a `Topic` channel. Absent on every
+    /// other message, so their bytes stay as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_op: Option<ThreadOp>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1766,6 +1891,14 @@ pub struct WorkspacePrefs {
     /// RECEIPTS are a different thing and stay in the log.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub read_cursors: std::collections::BTreeMap<String, String>,
+    /// Threads this seat FORGOT (`docs/chat_threads_lifecycle.md` D2): topic
+    /// name → the id (hex) of the thread's newest message at the time. That
+    /// message and every one before it in this seat's log stay hidden; a
+    /// message arriving later brings the thread back. Id-addressed like the
+    /// read cursors, never a stamp: a peer writing in the same second must
+    /// not vanish. This seat's business only, never on the wire.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub forgotten_threads: std::collections::BTreeMap<String, String>,
     /// The LOCAL-COPY registry (`wiki_files_and_images.md` §3.2): full
     /// sha256 hex → absolute path of a VERIFIED copy on this device (a
     /// download whose checksum matched, an own share). Read by
@@ -1806,6 +1939,7 @@ impl Default for WorkspacePrefs {
             shared_files: std::collections::BTreeMap::new(),
             shared_file_mtimes: std::collections::BTreeMap::new(),
             read_cursors: std::collections::BTreeMap::new(),
+            forgotten_threads: std::collections::BTreeMap::new(),
             local_copies: std::collections::BTreeMap::new(),
             last_seen: std::collections::BTreeMap::new(),
             seat_caps: std::collections::BTreeMap::new(),
@@ -3319,13 +3453,22 @@ impl EngineStateDump {
     /// quote pointing AT a dropped message keeps its id and simply dangles,
     /// exactly like a quote of a deleted message.
     pub fn prune_chat_before(&mut self, cutoff: u64) -> usize {
+        self.prune_chat_where(|m| m.ts != 0 && m.ts < cutoff)
+    }
+
+    /// [`Self::prune_chat_before`] under an arbitrary drop predicate (the
+    /// channel-aware compaction of `docs/chat_threads_lifecycle.md` §7). The
+    /// same carry-forward of the legacy sender ordinals and the same
+    /// all-or-nothing refusal on a nil id apply to every dropped message,
+    /// whatever the reason it fell.
+    pub fn prune_chat_where(&mut self, drop: impl Fn(&ChatMessage) -> bool) -> usize {
         if self.chat.iter().any(|m| m.id.is_nil()) {
             return 0;
         }
         let before = self.chat.len();
         let mut counts = std::mem::take(&mut self.chat_pruned_counts);
         self.chat.retain(|m| {
-            let keep = !(m.ts != 0 && m.ts < cutoff);
+            let keep = !drop(m);
             if !keep {
                 // carry the sender ordinal forward, or every legacy id
                 // synthesized after this compaction would differ from the
@@ -4041,6 +4184,23 @@ pub enum Command {
         /// The channel this message files under (`Group` when omitted).
         #[serde(default)]
         channel: ChannelRef,
+    },
+    /// Close a topic thread for every seat: a system line, no vote
+    /// (`docs/chat_threads_lifecycle.md` D1).
+    ThreadClose {
+        /// The topic's name.
+        name: String,
+    },
+    /// Reopen a closed topic thread for every seat (D3).
+    ThreadReopen {
+        /// The topic's name.
+        name: String,
+    },
+    /// Forget a topic thread on THIS seat only (D2): hidden here, dropped
+    /// at the next compaction; a newer message brings it back.
+    ThreadForget {
+        /// The topic's name.
+        name: String,
     },
     /// An authenticated peer event arrived over the transport. Sent by the
     /// node's own `molt-net` supervisor (engine-internal, like the run
@@ -6940,7 +7100,7 @@ pub struct ProposalView {
 /// (chat-bus concept Q5): every distinct [`ChannelRef`] in the log, with
 /// its message count and last activity — the sidebar's (and an agent's)
 /// orientation data.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelInfo {
     /// The channel.
     pub channel: ChannelRef,
@@ -6961,6 +7121,17 @@ pub struct ChannelInfo {
     /// the retention horizon, so that is honest too. Additive.
     #[serde(default)]
     pub unread: usize,
+    /// A topic thread's close state (`docs/chat_threads_lifecycle.md`):
+    /// closed threads take no new speech. Always false off topics.
+    #[serde(default)]
+    pub closed: bool,
+    /// Who closed it ("" while open).
+    #[serde(default)]
+    pub closed_by: MemberId,
+    /// When the thread ends as a whole (unix seconds; 0 = never - group,
+    /// patch, or no known stamp).
+    #[serde(default)]
+    pub expires_at: u64,
 }
 
 /// **What the GUI window is showing right now** (`docs_archive/ui/gui_over_mcp.md`).
@@ -7798,6 +7969,11 @@ pub struct StatusView {
     /// hides chat messages and declined proposals older than this.
     #[serde(default = "default_chat_retention_days")]
     pub chat_retention_days: u64,
+    /// The EFFECTIVE thread window in days: the last applied
+    /// `set_thread_retention`, default 7. A topic thread ends this long
+    /// after its last activity.
+    #[serde(default = "default_thread_retention_days")]
+    pub thread_retention_days: u64,
     /// The GROUP's relay pool — the relays every member must be able to
     /// reach (`nostr_transport_marmot.md` §10.15). Empty on a legacy
     /// queue-shaped republic, which has no relays.
@@ -8192,6 +8368,12 @@ pub enum MoltError {
     /// The chat log has no message with this id.
     #[error("unknown chat message {0}")]
     UnknownMessage(MessageId),
+    /// A topic thread that holds no message on this seat.
+    #[error("unknown thread `{0}`")]
+    UnknownThread(String),
+    /// New speech in a closed thread.
+    #[error("thread `{0}` is closed")]
+    ThreadClosed(String),
     /// The chat message with this id carries no shared file.
     #[error("message {0} has no shared file")]
     NoFile(MessageId),
@@ -9587,5 +9769,113 @@ mod tests {
         );
         let patch = ChannelRef::Patch { id: ProposalId(3) };
         assert_eq!(patch.clone().normalized().expect("patch passes"), patch);
+    }
+
+    // ---- temporary threads (docs/chat_threads_lifecycle.md) -------------
+
+    fn topic_line(id: u8, from: &str, ts: u64, op: Option<ThreadOp>) -> ChatMessage {
+        let mut b = [0u8; 16];
+        b[0] = id;
+        let m = ChatMessage::text(MessageId(b), from, "x", ts)
+            .with_channel(ChannelRef::Topic { name: "a".into() });
+        match op {
+            Some(op) => m.with_kind(ChatKind::System).with_thread_op(op),
+            None => m,
+        }
+    }
+
+    /// A message without a lifecycle verb serializes exactly as before.
+    #[test]
+    fn a_plain_message_carries_no_thread_op_on_the_wire() {
+        let m = topic_line(1, "anna", 5, None);
+        let json = serde_json::to_string(&m).expect("json");
+        assert!(!json.contains("thread_op"), "{json}");
+        let close = topic_line(2, "anna", 6, Some(ThreadOp::Close));
+        let json = serde_json::to_string(&close).expect("json");
+        assert!(json.contains("\"thread_op\":\"close\""), "{json}");
+        let back: ChatMessage = serde_json::from_str(&json).expect("parse");
+        assert_eq!(back, close);
+    }
+
+    const WEEK: u64 = 7 * 86_400;
+
+    /// The last lifecycle line by (ts, id) decides, whatever the arrival
+    /// order; speech is activity but never a verb.
+    #[test]
+    fn the_last_lifecycle_line_decides_in_any_order() {
+        let a = topic_line(1, "anna", 10, None);
+        let close = topic_line(2, "bert", 20, Some(ThreadOp::Close));
+        let reopen = topic_line(3, "carl", 30, Some(ThreadOp::Reopen));
+        let late = topic_line(4, "dora", 40, None);
+        for order in [
+            vec![&a, &close, &reopen, &late],
+            vec![&late, &reopen, &close, &a],
+            vec![&reopen, &a, &late, &close],
+        ] {
+            let life = thread_lives(order, WEEK).remove("a").expect("thread");
+            assert_eq!(life.closed_by, None);
+            assert_eq!(life.last_ts, 40);
+        }
+        let life = thread_lives([&a, &close], WEEK).remove("a").expect("thread");
+        assert_eq!(life.closed_by.as_deref(), Some("bert"));
+        assert_eq!(life.closed_at, 20);
+        // a late speech after the close does not reopen
+        let life = thread_lives([&close, &late], WEEK).remove("a").expect("thread");
+        assert_eq!(life.closed_by.as_deref(), Some("bert"));
+    }
+
+    /// A verb on a user message, or outside a topic, is no verb.
+    #[test]
+    fn only_a_system_line_in_a_topic_is_a_verb() {
+        let mut forged = topic_line(1, "anna", 10, Some(ThreadOp::Close));
+        forged.kind = ChatKind::User;
+        let life = thread_lives([&forged], WEEK).remove("a").expect("thread");
+        assert_eq!(life.closed_by, None);
+        let group = ChatMessage::text(MessageId([9; 16]), "anna", "x", 10)
+            .with_kind(ChatKind::System)
+            .with_thread_op(ThreadOp::Close);
+        assert!(thread_lives([&group], WEEK).is_empty());
+    }
+
+    /// Open: last activity + window. Closed: close + grace. Unknown age:
+    /// never.
+    #[test]
+    fn a_thread_expires_after_inactivity_or_after_its_close() {
+        let life = thread_lives([&topic_line(1, "anna", 100, None)], WEEK).remove("a").expect("t");
+        assert_eq!(life.expires_at(), 100 + WEEK);
+        assert!(!life.expired(100 + WEEK - 1));
+        assert!(life.expired(100 + WEEK));
+        let closed = thread_lives(
+            [&topic_line(1, "anna", 100, None), &topic_line(2, "anna", 200, Some(ThreadOp::Close))],
+            WEEK,
+        )
+        .remove("a")
+        .expect("t");
+        assert_eq!(closed.expires_at(), 200 + THREAD_CLOSED_GRACE_SECS);
+        let unknown = thread_lives([&topic_line(1, "anna", 0, None)], WEEK).remove("a").expect("t");
+        assert_eq!(unknown.expires_at(), 0);
+        assert!(!unknown.expired(u64::MAX));
+    }
+
+    /// Writing into an ended thread starts it over: the old messages stay
+    /// gone, the new incarnation is open - after silence and after a close.
+    #[test]
+    fn a_message_after_the_end_starts_a_new_incarnation() {
+        let old = topic_line(1, "anna", 100, None);
+        let again = topic_line(2, "bert", 100 + WEEK + 5, None);
+        let life = thread_lives([&again, &old], WEEK).remove("a").expect("t");
+        assert_eq!(life.since, 100 + WEEK + 5);
+        assert!(life.predates(&old) && !life.predates(&again));
+
+        let close = topic_line(3, "anna", 200, Some(ThreadOp::Close));
+        let after_grace = topic_line(4, "bert", 200 + THREAD_CLOSED_GRACE_SECS, None);
+        let life = thread_lives([&old, &close, &after_grace], WEEK).remove("a").expect("t");
+        assert_eq!(life.closed_by, None, "the new incarnation is open");
+        assert!(life.predates(&close));
+        // inside the grace it is the same, still closed thread
+        let within = topic_line(5, "bert", 200 + 60, None);
+        let life = thread_lives([&old, &close, &within], WEEK).remove("a").expect("t");
+        assert_eq!(life.closed_by.as_deref(), Some("anna"));
+        assert_eq!(life.since, 100);
     }
 }

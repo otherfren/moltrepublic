@@ -54,6 +54,7 @@ pub(crate) fn derive_channels(
     infos: &[ChannelInfo],
     known: &HashMap<u64, KnownProposal>,
     unread: &HashMap<String, usize>,
+    now: u64,
 ) -> Vec<ChannelRowData> {
     let unread_of =
         |key: &str| i32::try_from(unread.get(key).copied().unwrap_or(0)).unwrap_or(i32::MAX);
@@ -62,24 +63,27 @@ pub(crate) fn derive_channels(
     // channels as they occur"). They were dropped from this list once and it
     // made the New-topic button a trapdoor - the channel existed, held
     // messages, and had nowhere to be clicked back to.
-    let mut topics: Vec<&str> = infos
+    // a closed thread wears a lock, every thread its time left
+    // (`docs/chat_threads_lifecycle.md`)
+    let mut topics: Vec<(&str, &ChannelInfo)> = infos
         .iter()
         .filter_map(|i| match &i.channel {
-            ChannelRef::Topic { name } => Some(name.as_str()),
+            ChannelRef::Topic { name } => Some((name.as_str(), i)),
             _ => None,
         })
         .collect();
-    topics.sort_unstable();
-    topics.dedup();
+    topics.sort_unstable_by_key(|(name, _)| *name);
+    topics.dedup_by_key(|(name, _)| *name);
     let mut rows: Vec<ChannelRowData> = topics
         .into_iter()
-        .map(|name| {
+        .map(|(name, info)| {
             let key = format!("topic:{name}");
             ChannelRowData {
                 unread: unread_of(&key),
                 key,
                 label: name.to_string(),
-                icon: "🏷️".to_string(),
+                icon: if info.closed { "🔒" } else { "🏷️" }.to_string(),
+                note: thread_ends_label(lang, info.expires_at, now),
             }
         })
         .collect();
@@ -103,9 +107,37 @@ pub(crate) fn derive_channels(
             key,
             label: display_title(lang, &k.payload),
             icon: "🗳️".to_string(),
+            note: String::new(),
         })
     }));
     rows
+}
+
+/// Unix seconds now (the thread rows' time-left base).
+pub(crate) fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// A thread's time left, short and ROUNDED to the nearest unit (a fresh
+/// 7-day thread reads "7 d", not the "6 d" a cut-off second would make
+/// it): days from a day on, else hours from an hour on, else minutes
+/// ("3 d" / "3 T", "5 h", "12 min"). "" when it never ends (0).
+pub(crate) fn thread_ends_label(lang: i32, expires_at: u64, now: u64) -> String {
+    if expires_at == 0 {
+        return String::new();
+    }
+    let left = expires_at.saturating_sub(now);
+    if left + 1_800 >= 86_400 {
+        let d = (left + 43_200) / 86_400;
+        return if lang == 1 { format!("{d} T") } else { format!("{d} d") };
+    }
+    if left + 30 >= 3_600 {
+        return format!("{} h", (left + 1_800) / 3_600);
+    }
+    format!("{} min", left.div_ceil(60).max(1))
 }
 
 /// The command the patch-channel banner's "back to the vote" button

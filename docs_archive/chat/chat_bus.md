@@ -9,7 +9,11 @@ when they outrun their target). Executed per
 `chat_bus_implementation.md` (stages A, B1–B4, C); B5 (persisted unread)
 remains the stretch package. Amended 2026-09-06: a decided vote's
 discussion stays writable (see the last entry under "Known v1
-limitations"). The decision log below is unchanged history.
+limitations"). Amended 2026-11-13: a `Topic` channel is a temporary
+thread - closable and reopenable by any member, forgettable per seat,
+ending as a whole after its window of silence
+(`docs/chat_threads_lifecycle.md`). The decision log below is unchanged
+history.
 
 ## The idea
 

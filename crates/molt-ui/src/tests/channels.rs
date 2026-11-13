@@ -19,6 +19,7 @@ fn derive_channels_lists_only_open_vote_discussions() {
             last_ts: 40,
             state: None,
             unread: 0,
+            ..ChannelInfo::default()
         },
         ChannelInfo {
             channel: ChannelRef::Patch { id: ProposalId(7) },
@@ -26,6 +27,7 @@ fn derive_channels_lists_only_open_vote_discussions() {
             last_ts: 30,
             state: None,
             unread: 0,
+            ..ChannelInfo::default()
         },
         ChannelInfo {
             channel: ChannelRef::Patch { id: ProposalId(5) },
@@ -33,6 +35,7 @@ fn derive_channels_lists_only_open_vote_discussions() {
             last_ts: 20,
             state: Some(ProposalState::Applied),
             unread: 0,
+            ..ChannelInfo::default()
         },
         ChannelInfo {
             channel: ChannelRef::Patch { id: ProposalId(3) },
@@ -40,6 +43,7 @@ fn derive_channels_lists_only_open_vote_discussions() {
             last_ts: 10,
             state: Some(ProposalState::Proposed),
             unread: 0,
+            ..ChannelInfo::default()
         },
         ChannelInfo {
             channel: ChannelRef::Group,
@@ -47,6 +51,7 @@ fn derive_channels_lists_only_open_vote_discussions() {
             last_ts: 50,
             state: None,
             unread: 0,
+            ..ChannelInfo::default()
         },
     ];
     let known = HashMap::from([
@@ -54,7 +59,7 @@ fn derive_channels_lists_only_open_vote_discussions() {
         (5u64, known_of("sealed one", KnownFate::Applied)),
     ]);
     let unread = HashMap::from([("patch:3".to_string(), 2usize), ("group".to_string(), 1)]);
-    let rows = derive_channels(0, &infos, &known, &unread);
+    let rows = derive_channels(0, &infos, &known, &unread, 0);
     // topics first (a human named them), then the discussions of OPEN
     // votes. No group row - the Gruppe nav view covers it - and no
     // sealed/closed votes or unknown proposals: a discussion is
@@ -72,7 +77,7 @@ fn derive_channels_lists_only_open_vote_discussions() {
     assert_eq!(rows[1].label, "raise budget", "patch title from proposal state");
     assert_eq!(rows[1].unread, 2);
     // nothing open → no rows (the sidebar hides the whole section)
-    let rows = derive_channels(0, &[], &HashMap::new(), &HashMap::new());
+    let rows = derive_channels(0, &[], &HashMap::new(), &HashMap::new(), 0);
     assert!(rows.is_empty());
 }
 
@@ -190,8 +195,9 @@ fn patch_title_and_state_survive_the_proposal_leaving_pending() {
         last_ts: 10,
         state: None,
         unread: 0,
+        ..ChannelInfo::default()
     }];
-    let rows = derive_channels(0, &infos, &known, &HashMap::new());
+    let rows = derive_channels(0, &infos, &known, &HashMap::new(), 0);
     assert!(rows.is_empty(), "an Applied vote's discussion is hidden");
 
     // vanished WITHOUT an applied trace: the read contract cannot tell
@@ -302,9 +308,10 @@ fn declined_votes_fold_into_the_cache_as_closed() {
         last_ts: 20,
         state: Some(ProposalState::Rejected),
         unread: 0,
+        ..ChannelInfo::default()
     }];
     assert!(
-        derive_channels(0, &infos, &known, &HashMap::new()).is_empty(),
+        derive_channels(0, &infos, &known, &HashMap::new(), 0).is_empty(),
         "a declined vote's discussion is not a sidebar row"
     );
 }
@@ -366,6 +373,7 @@ fn selected_channel_closed_flags_only_decided_patch_votes() {
         last_ts: 10,
         state,
         unread: 0,
+        ..ChannelInfo::default()
     };
     let patch = |id: u64| ChannelRef::Patch { id: ProposalId(id) };
     let known = HashMap::from([
@@ -417,4 +425,19 @@ fn channel_keys_round_trip() {
     }
     assert_eq!(parse_channel_key("patch:xyz"), None, "junk never panics");
     assert_eq!(parse_channel_key(""), None);
+}
+
+/// A thread's time left reads in whole days, then hours, then minutes;
+/// a thread without an end reads nothing.
+#[test]
+fn a_threads_time_left_is_short() {
+    use crate::channels::thread_ends_label;
+    assert_eq!(thread_ends_label(0, 0, 100), "");
+    assert_eq!(thread_ends_label(0, 100 + 3 * 86_400 + 5, 100), "3 d");
+    assert_eq!(thread_ends_label(1, 100 + 3 * 86_400 + 5, 100), "3 T");
+    assert_eq!(thread_ends_label(0, 100 + 5 * 3_600, 100), "5 h");
+    assert_eq!(thread_ends_label(0, 100 + 125, 100), "3 min");
+    assert_eq!(thread_ends_label(0, 100 + 7 * 86_400 - 1, 100), "7 d", "a second short is still a week");
+    assert_eq!(thread_ends_label(0, 100 + 86_400 + 1, 100), "1 d");
+    assert_eq!(thread_ends_label(0, 100, 100), "1 min", "never a zero");
 }

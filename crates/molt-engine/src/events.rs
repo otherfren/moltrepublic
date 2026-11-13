@@ -769,6 +769,7 @@ impl State {
         self.session.transport = String::new();
         // …and the read cursors, which belong to the OLD workspace (B2)
         self.read_cursors.clear();
+        self.forgotten_threads.clear();
         self.delivery.last_mesh_out = 0;
         // a runtime-derived Degraded belongs to the mesh that just ended —
         // it resets with its backing maps (a Down verdict is the open/config
@@ -921,6 +922,7 @@ mod tests {
                 read_by: Default::default(),
                 deleted_by: None,
                 file: None,
+                thread_op: None,
             }
         };
         vec![
@@ -1709,6 +1711,7 @@ mod tests {
             read_by: Default::default(),
             deleted_by: None,
             file: None,
+            thread_op: None,
         };
         let env = |seq: u64, m: &ChatMessage| EventEnvelope { prev_seq: 0,
             seq,

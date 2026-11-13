@@ -317,3 +317,38 @@ fn a_dropped_bundle_does_not_eat_the_toast() {
     assert!(o.ui.get_toast_text().starts_with("mara on "), "toast: {:?}", o.ui.get_toast_text());
     assert_eq!(o.chat_ui.lock().expect("ui state").talk_seen.as_ref().map(|s| s.len()), Some(1));
 }
+
+/// **A topic thread wears its lifecycle in the window**
+/// (`docs/chat_threads_lifecycle.md`): the sidebar row carries the time
+/// left, a close puts the lock on the row and takes the compose row away,
+/// a reopen gives it back, a forget takes the row off this seat.
+#[test]
+fn a_topic_thread_shows_its_time_left_lock_and_forget() {
+    let o = Opened::new(|root| drop(workspace_on_disk(root, 2, &["walter", "mara"], "test")));
+    let topic = ChannelRef::Topic { name: "plan".to_string() };
+    o.run(Command::Chat { body: "one".to_string(), quote: None, channel: topic.clone() });
+    o.run(Command::SelectSurface { surface: Surface::Chat });
+    o.chat_ui.lock().expect("ui state").select(topic.clone());
+    o.mirror();
+    let row = |ui: &AppWindow| {
+        ui.get_chat_channels().iter().find(|c| c.key == "topic:plan")
+    };
+    let open = row(&o.ui).expect("the thread's row");
+    assert_eq!((open.icon.as_str(), open.note.as_str()), ("🏷️", "7 d"));
+    assert!(!o.ui.get_selected_thread_closed());
+    assert_eq!(o.ui.get_selected_thread_ends(), "7 d");
+
+    o.run(Command::ThreadClose { name: "plan".to_string() });
+    o.mirror();
+    let closed = row(&o.ui).expect("still listed");
+    assert_eq!((closed.icon.as_str(), closed.note.as_str()), ("🔒", "1 d"), "a day after the close");
+    assert!(o.ui.get_selected_thread_closed(), "no compose row on a closed thread");
+
+    o.run(Command::ThreadReopen { name: "plan".to_string() });
+    o.mirror();
+    assert!(!o.ui.get_selected_thread_closed());
+
+    o.run(Command::ThreadForget { name: "plan".to_string() });
+    o.mirror();
+    assert!(row(&o.ui).is_none(), "forgotten here");
+}

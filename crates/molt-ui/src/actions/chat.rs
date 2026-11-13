@@ -118,6 +118,40 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     }
 
     {
+        // the selected topic thread's lifecycle verbs
+        // (`docs/chat_threads_lifecycle.md`): close and reopen for every
+        // seat, forget on this one - after which the pane returns to the
+        // group chat, the thread having left this seat's list
+        let selected_topic = |cx: &Ctx| -> Option<String> {
+            cx.chat_ui.lock().ok().and_then(|st| match &st.selected {
+                ChannelRef::Topic { name } => Some(name.clone()),
+                _ => None,
+            })
+        };
+        let cx = ctx.clone();
+        ui.on_thread_close(move || {
+            if let Some(name) = selected_topic(&cx) {
+                cx.issue(Command::ThreadClose { name });
+            }
+        });
+        let cx = ctx.clone();
+        ui.on_thread_reopen(move || {
+            if let Some(name) = selected_topic(&cx) {
+                cx.issue(Command::ThreadReopen { name });
+            }
+        });
+        let cx = ctx.clone();
+        ui.on_thread_forget(move || {
+            if let Some(name) = selected_topic(&cx) {
+                cx.issue(Command::ThreadForget { name });
+                if let Some(ui) = cx.weak.upgrade() {
+                    ui.invoke_select_channel("group".into());
+                }
+            }
+        });
+    }
+
+    {
         let cx = ctx.clone();
         ui.on_delete_chat(move |id| {
             let Ok(id) = id.parse::<MessageId>() else {

@@ -11,7 +11,7 @@ use super::*;
 /// How far ahead of this node's clock a peer's stamp may claim to be
 /// (`FileServed` and wire chat): clock skew, not a licence to date a
 /// message into a retention-proof future.
-const WIRE_STAMP_SKEW_SECS: u64 = 900;
+pub(crate) const WIRE_STAMP_SKEW_SECS: u64 = 900;
 
 /// One requester is served a chain catch-up at most this often (review C3).
 pub(crate) const CHAIN_SERVE_DEBOUNCE_SECS: u64 = 30;
@@ -160,6 +160,14 @@ impl State {
                 msg.reactions.clear();
                 msg.read_by.clear();
                 msg.deleted_by = None;
+                // a thread verb is only one on a SYSTEM line in a TOPIC
+                // (`docs/chat_threads_lifecycle.md` §4): elsewhere it is a
+                // claim with no meaning, and stored it would still fold
+                // wherever a reader skipped the kind check
+                let is_topic = matches!(msg.channel, molt_core::ChannelRef::Topic { .. });
+                if msg.kind != molt_core::ChatKind::System || !is_topic {
+                    msg.thread_op = None;
+                }
                 let now = self.presence_now();
                 if msg.ts == 0 || msg.ts > now.saturating_add(WIRE_STAMP_SKEW_SECS) {
                     msg.ts = now;

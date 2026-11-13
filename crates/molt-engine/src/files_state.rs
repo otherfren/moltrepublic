@@ -354,8 +354,27 @@ impl State {
             // a delete ends the window at once: a deadline in the past
             Some(FileState::Deleted(_)) => Some(1),
             None => {
-                let ts = self.chat_by_id(id).map(|(_, m)| m.ts).unwrap_or(0);
-                Some(if ts == 0 { 0 } else { ts.saturating_add(self.retention_secs()) })
+                let msg = self.chat_by_id(id).ok().map(|(_, m)| m);
+                let ts = msg.map(|m| m.ts).unwrap_or(0);
+                // a share in an ENDED thread ends with it
+                // (`docs/chat_threads_lifecycle.md`): the thread's end, if
+                // sooner than the chat window
+                let thread_end = msg.and_then(|m| match &m.channel {
+                    molt_core::ChannelRef::Topic { name } => {
+                        let life = self.thread_lives().remove(name)?;
+                        if life.predates(m) {
+                            return Some(1);
+                        }
+                        Some(life.expires_at()).filter(|at| *at != 0)
+                    }
+                    _ => None,
+                });
+                let window = if ts == 0 { 0 } else { ts.saturating_add(self.retention_secs()) };
+                Some(match (window, thread_end) {
+                    (0, Some(end)) => end,
+                    (w, Some(end)) => w.min(end),
+                    (w, None) => w,
+                })
             }
         }
     }

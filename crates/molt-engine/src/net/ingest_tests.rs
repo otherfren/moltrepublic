@@ -190,6 +190,48 @@ fn a_wire_chat_carries_no_foreign_reactions_receipts_or_tombstone() {
     assert_ne!(m.ts, 0, "an unknown age is the arrival time, not 'forever'");
 }
 
+/// A thread verb from the wire counts only on a SYSTEM line in a TOPIC:
+/// on speech or in the general chat it is stripped, and the message lands
+/// as what it is - a peer cannot close the general chat or dress speech up
+/// as a close (`docs/chat_threads_lifecycle.md` §4).
+#[test]
+fn a_wire_thread_verb_counts_only_on_a_system_line_in_a_topic() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let mut st = crate::tests::plain_state();
+    let topic = molt_core::ChannelRef::Topic { name: "a".into() };
+    let speech = ChatMessage::text(id(1), "peer-1", "x", 0)
+        .with_channel(topic.clone())
+        .with_thread_op(molt_core::ThreadOp::Close);
+    let in_group = ChatMessage::text(id(2), "peer-1", "x", 0)
+        .with_kind(molt_core::ChatKind::System)
+        .with_thread_op(molt_core::ThreadOp::Close);
+    let genuine = ChatMessage::text(id(3), "peer-1", "closed the thread", 0)
+        .with_channel(topic)
+        .with_kind(molt_core::ChatKind::System)
+        .with_thread_op(molt_core::ThreadOp::Close);
+    for (seq, msg) in [(1, speech), (2, in_group), (3, genuine)] {
+        st.cmd_net_delivered(
+            "peer-1".to_string(),
+            EventEnvelope { prev_seq: 0,
+                seq,
+                ts: 0,
+                by: "peer-1".to_string(),
+                body: WorkspaceEvent::Chat(msg),
+            },
+            None,
+        )
+        .expect("a wire delivery never errors");
+    }
+    assert_eq!(st.chat.len(), 3, "every message lands");
+    assert_eq!(st.chat[0].thread_op, None, "speech carries no verb");
+    assert_eq!(st.chat[1].thread_op, None, "the general chat carries no verb");
+    assert_eq!(st.chat[2].thread_op, Some(molt_core::ThreadOp::Close));
+}
+
 /// E6: one `ChatRead` of random ids parks a bounded number of
 /// targets — never the whole P6 buffer.
 #[test]

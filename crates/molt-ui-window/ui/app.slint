@@ -742,6 +742,9 @@ component PagerRow inherits HorizontalLayout {
 // strip when the pane is wide enough, below the charter otherwise.
 component OrgSettingsCard inherits DetailGroup {
     in property <int> retention;
+    // the thread window (docs/chat_threads_lifecycle.md D6)
+    in property <int> thread-retention;
+    callback edit-thread();
     // the GROUP's relay pool — a group setting like the name or the
     // retention window, editable as a threshold-gated proposal (R6).
     in property <[string]> relays;
@@ -810,6 +813,34 @@ component OrgSettingsCard inherits DetailGroup {
             tooltip-left: true;
             clicked => {
                 root.edit();
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: 8px;
+        Text {
+            text: Strings.ocs-thread-retention;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        Text {
+            text: "\{root.thread-retention} \{Strings.ocs-days}";
+            color: Theme.dim;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+        }
+        AppButton {
+            width: 26px * Theme.ui-scale;
+            height: 26px * Theme.ui-scale;
+            pad: 0px;
+            label: "✎";
+            tooltip: Strings.org-edit;
+            tooltip-left: true;
+            clicked => {
+                root.edit-thread();
             }
         }
     }
@@ -1886,6 +1917,15 @@ export component AppWindow inherits Window {
     // the compose row collapses and the banner says so (computed in Rust
     // from the engine's channel annotation, instant on selection)
     in property <bool> selected-channel-closed: false;
+    // the selected channel is a CLOSED topic thread: no compose row; the
+    // heading offers the reopen (docs/chat_threads_lifecycle.md)
+    in property <bool> selected-thread-closed: false;
+    // the selected topic's time left, short ("3 d"); "" off topics
+    in property <string> selected-thread-ends: "";
+    callback thread-close();
+    callback thread-reopen();
+    callback thread-forget();
+    in-out property <bool> confirm-forget-open: false;
     // no member has posted in the selected channel yet
     in property <bool> selected-channel-undiscussed: false;
     // the selected channel is an ORGANIZATION decision's discussion: the
@@ -2370,6 +2410,10 @@ export component AppWindow inherits Window {
     // the effective "delete chat after" window — mirrored from the
     // engine's StatusView (an applied set_chat_retention changes it)
     in property <int> org-chat-retention: 7;
+    // the effective thread window, from the engine's StatusView
+    in property <int> org-thread-retention: 7;
+    // which window the retention modal edits: the chat's or the threads'
+    property <bool> org-retention-thread: false;
     // the GROUP's relay pool (StatusView.relays), shown beside the other
     // group settings — empty on a legacy queue-shaped republic
     in property <[string]> org-relays;
@@ -3225,6 +3269,7 @@ export component AppWindow inherits Window {
                                 selected: c.key == root.selected-channel
                                     && root.selected-view == "today";
                                 pending: c.unread;
+                                quorum: c.note;
                                 chosen => {
                                     // channel switches keep the compose
                                     // draft — only the filter changes
@@ -5641,6 +5686,39 @@ export component AppWindow inherits Window {
                                         horizontal-stretch: 1;
                                         overflow: elide;
                                     }
+                                    // a topic's lifecycle: closed or not, the
+                                    // time left, and the three verbs
+                                    if root.selected-channel-listed: Text {
+                                        text: root.selected-thread-closed
+                                            ? "🔒 \{Strings.th-closed} · \{root.selected-thread-ends}"
+                                            : root.selected-thread-ends;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                        font-family: "Twemoji Mozilla";
+                                        vertical-alignment: center;
+                                    }
+                                    if root.selected-channel-listed: AppButton {
+                                        y: (parent.height - self.height) / 2;
+                                        height: 26px * Theme.ui-scale;
+                                        pad: 10px * Theme.ui-scale;
+                                        label: root.selected-thread-closed ? Strings.th-reopen : Strings.th-close;
+                                        clicked => {
+                                            if (root.selected-thread-closed) {
+                                                root.thread-reopen();
+                                            } else {
+                                                root.thread-close();
+                                            }
+                                        }
+                                    }
+                                    if root.selected-channel-listed: AppButton {
+                                        y: (parent.height - self.height) / 2;
+                                        height: 26px * Theme.ui-scale;
+                                        pad: 10px * Theme.ui-scale;
+                                        label: Strings.th-forget;
+                                        clicked => {
+                                            root.confirm-forget-open = true;
+                                        }
+                                    }
                                 }
                             }
 
@@ -5972,8 +6050,10 @@ export component AppWindow inherits Window {
                                 // discussion takes writes since 2026-09-06
                                 // (the review of an applied change is not
                                 // dead chat), and an earlier gate on the
-                                // "today" view silently took the box away
-                                height: self.preferred-height;
+                                // "today" view silently took the box away.
+                                // Only a CLOSED topic thread takes none.
+                                visible: !root.selected-thread-closed;
+                                height: root.selected-thread-closed ? 0px : self.preferred-height;
                                 spacing: 8px;
                                 ch-compose := Rectangle {
                                     horizontal-stretch: 1;
@@ -6262,9 +6342,16 @@ export component AppWindow inherits Window {
                                     if os-row.side-settings: OrgSettingsCard {
                                         width: 300px * Theme.ui-scale;
                                         retention: root.org-chat-retention;
+                                        thread-retention: root.org-thread-retention;
                                         relays: root.org-relays;
                                         edit => {
+                                            root.org-retention-thread = false;
                                             root.org-retention-draft = root.org-chat-retention;
+                                            root.org-retention-modal-open = true;
+                                        }
+                                        edit-thread => {
+                                            root.org-retention-thread = true;
+                                            root.org-retention-draft = root.org-thread-retention;
                                             root.org-retention-modal-open = true;
                                         }
                                         edit-relays => {
@@ -6373,9 +6460,16 @@ export component AppWindow inherits Window {
                                 // narrow to seat the card beside the strip
                                 if !os-row.side-settings: OrgSettingsCard {
                                     retention: root.org-chat-retention;
+                                    thread-retention: root.org-thread-retention;
                                     relays: root.org-relays;
                                     edit => {
+                                        root.org-retention-thread = false;
                                         root.org-retention-draft = root.org-chat-retention;
+                                        root.org-retention-modal-open = true;
+                                    }
+                                    edit-thread => {
+                                        root.org-retention-thread = true;
+                                        root.org-retention-draft = root.org-thread-retention;
                                         root.org-retention-modal-open = true;
                                     }
                                     edit-relays => {
@@ -9509,6 +9603,20 @@ export component AppWindow inherits Window {
         }
     }
 
+    // Modal: forget the selected topic thread on this device only.
+    if root.confirm-forget-open: ConfirmModal {
+        title: Strings.th-forget-title;
+        body: Strings.th-forget-body;
+        confirm-label: Strings.th-forget;
+        dismissed => {
+            root.confirm-forget-open = false;
+        }
+        confirmed => {
+            root.confirm-forget-open = false;
+            root.thread-forget();
+        }
+    }
+
     // Modal: confirm deleting a chat message — the text is wiped for
     // everyone, only the deletion notice remains.
     if root.confirm-delmsg-open: ConfirmModal {
@@ -11210,10 +11318,11 @@ export component AppWindow inherits Window {
 
     if root.org-retention-modal-open: ConfirmModal {
         dialog-width: 460px;
-        title: Strings.ocr-title;
-        body: Strings.ocr-body;
+        title: root.org-retention-thread ? Strings.ocr-thread-title : Strings.ocr-title;
+        body: root.org-retention-thread ? Strings.ocr-thread-body : Strings.ocr-body;
         confirm-label: Strings.oc-propose;
-        confirm-enabled: root.org-retention-draft != root.org-chat-retention;
+        confirm-enabled: root.org-retention-draft
+            != (root.org-retention-thread ? root.org-thread-retention : root.org-chat-retention);
         dismissed => {
             root.org-retention-modal-open = false;
         }
@@ -11221,7 +11330,9 @@ export component AppWindow inherits Window {
             root.org-retention-modal-open = false;
             // L10: a MACHINE value - the unit renders per language in the
             // card (a baked "days" froze the proposer's English)
-            root.org-propose("set_chat_retention", root.org-retention-draft);
+            root.org-propose(
+                root.org-retention-thread ? "set_thread_retention" : "set_chat_retention",
+                root.org-retention-draft);
         }
         HorizontalLayout {
             spacing: 8px;

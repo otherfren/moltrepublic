@@ -105,9 +105,52 @@ impl State {
     ///
     /// The live state and the snapshot are trimmed by the SAME call, so the
     /// two can never disagree about what this node still holds.
+    #[cfg(test)]
     pub(crate) fn compact_chat(&mut self, cutoff: u64) -> Option<(EngineStateDump, usize)> {
+        self.compact_chat_at(cutoff, crate::now_secs())
+    }
+
+    /// [`Self::compact_chat`] at an explicit `now`. Beyond the age cutoff
+    /// the thread rules drop content (`docs/chat_threads_lifecycle.md` §7):
+    /// a thread this seat forgot at once (its own choice, no grace), an
+    /// ended thread - or an ended incarnation of one - a further thread
+    /// window after its end, the same grace F2 gives the age cutoff.
+    pub(crate) fn compact_chat_at(&mut self, cutoff: u64, now: u64) -> Option<(EngineStateDump, usize)> {
         let mut dump = self.dump();
-        let dropped = dump.prune_chat_before(cutoff);
+        let grace = self.org_effective().thread_retention_days.saturating_mul(86_400);
+        let lives = molt_core::thread_lives(&dump.chat, grace);
+        // forgetting is this seat's view: its OWN shares stay servable to
+        // the members who kept the thread, until they end the normal way
+        let me = self.member();
+        let forgotten: std::collections::HashSet<molt_core::MessageId> = dump
+            .chat
+            .iter()
+            .filter(|m| !(m.file.is_some() && m.from == me))
+            .filter(|m| match &m.channel {
+                molt_core::ChannelRef::Topic { name } => self.forgotten_hides(name, m),
+                _ => false,
+            })
+            .map(|m| m.id)
+            .collect();
+        let dropped = dump.prune_chat_where(|m| {
+            if m.ts != 0 && m.ts < cutoff {
+                return true;
+            }
+            if forgotten.contains(&m.id) {
+                return true;
+            }
+            let molt_core::ChannelRef::Topic { name } = &m.channel else {
+                return false;
+            };
+            let Some(life) = lives.get(name) else {
+                return false;
+            };
+            if life.predates(m) {
+                return life.since.saturating_add(grace) < now;
+            }
+            let end = life.expires_at();
+            end != 0 && end.saturating_add(grace) < now
+        });
         if dropped == 0 {
             return None;
         }
@@ -188,7 +231,7 @@ impl State {
     /// round would lose the race against `Close` and silently never happen.
     pub(crate) fn compact_now(&mut self, now: u64, wait: bool) {
         let cutoff = self.compaction_cutoff(now);
-        let (dump, dropped) = match self.compact_chat(cutoff) {
+        let (dump, dropped) = match self.compact_chat_at(cutoff, now) {
             Some(trimmed) => trimmed,
             // F4b: once pruned, every beat runs the round, or a quiet
             // republic's ack clock would stop and a lurker pin the floor

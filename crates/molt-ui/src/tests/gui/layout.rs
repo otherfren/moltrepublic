@@ -659,7 +659,7 @@ fn the_org_settings_pencils_stay_inside_the_card_and_line_up() {
                         && p.y <= card.absolute_position().y + card.size().height + 1.0
                 })
                 .collect();
-        assert_eq!(pencils.len(), 2, "font {font}: relays + retention pencil");
+        assert_eq!(pencils.len(), 3, "font {font}: relays + chat + thread retention pencil");
         let mut rights = Vec::new();
         for b in &pencils {
             let right = b.absolute_position().x + b.size().width;
@@ -671,7 +671,7 @@ fn the_org_settings_pencils_stay_inside_the_card_and_line_up() {
             rights.push(right);
         }
         assert!(
-            (rights[0] - rights[1]).abs() < 1.0,
+            rights.iter().all(|r| (r - rights[0]).abs() < 1.0),
             "font {font}: the pencils are not aligned: {rights:?}"
         );
 

@@ -104,6 +104,7 @@ export struct ChannelItem {
     label: string, // display label ("" for group: the UI substitutes Strings.ch-group)
     icon: string, // Twemoji glyph per kind
     unread: int, // messages since last seen (0 = caught up)
+    note: string, // quiet right-aligned fact: a topic's time left ("3 d")
 }
 
 // One member's stance on a pending proposal (the voting row's pills).
@@ -1531,6 +1532,9 @@ export global Strings {
     in property <string> cv-shrink;
     in property <string> ocs-title;
     in property <string> ocs-chat-retention;
+    in property <string> ocs-thread-retention;
+    in property <string> ocr-thread-title;
+    in property <string> ocr-thread-body;
     in property <string> ocs-relays;
     in property <string> ocr2-title;
     in property <string> ocr2-body;
@@ -1893,6 +1897,13 @@ export global Strings {
     in property <string> ch-topic-ph;
     in property <string> ch-to-vote;
     in property <string> ch-topic-open;
+    // temporary threads (docs/chat_threads_lifecycle.md)
+    in property <string> th-close;
+    in property <string> th-reopen;
+    in property <string> th-forget;
+    in property <string> th-closed;
+    in property <string> th-forget-title;
+    in property <string> th-forget-body;
     in property <string> mv-file-gone;
     in property <string> toast-dl-done; // "Saved:" + the landed path
     in property <string> toast-dl-failed; // "Download failed:" + the reason

@@ -295,6 +295,7 @@ fn org_pending_cards_carry_current_and_proposed_state() {
         name: "Guild".into(),
         agenda: "alte Satzung".into(),
         retention_days: 7,
+        thread_retention_days: 7,
         image: image.to_string(),
         relays: String::new(),
         features: String::new(),

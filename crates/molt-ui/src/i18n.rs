@@ -157,6 +157,8 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::Storage(t) => format!("Speicher: {t}"),
         E::UnknownView(sf, v) => format!("Surface {sf:?} hat keine Ansicht `{v}`"),
         E::UnknownMessage(id) => format!("Unbekannte Chat-Nachricht {id}"),
+        E::UnknownThread(n) => format!("Unbekannter Thread `{n}`"),
+        E::ThreadClosed(n) => format!("Thread `{n}` ist geschlossen"),
         E::NoFile(id) => format!("Nachricht {id} trägt keine geteilte Datei"),
         E::FileUnavailable(id) => format!("Die geteilte Datei an {id} ist nicht mehr verfügbar"),
         E::FileExpired(id) => format!("Die geteilte Datei an {id} ist aus dem Aufbewahrungsfenster gealtert"),
@@ -1050,6 +1052,7 @@ lexicon! {
     cv_shrink: "Shrink", "Verkleinern";
     ocs_title: "Settings", "Einstellungen";
     ocs_chat_retention: "Delete chat after", "Chat löschen nach";
+    ocs_thread_retention: "End threads after", "Threads beenden nach";
     ocs_relays: "Relays", "Relays";
     ocs_days: "days", "Tage";
     ocr2_title: "Change relay pool", "Relay-Pool ändern";
@@ -1059,6 +1062,8 @@ lexicon! {
     om_coarse: "Presence over relays is coarse: last seen at the last message, not pinged live.", "Präsenz über Relays ist grob: zuletzt gesehen bei der letzten Nachricht, kein Live-Ping.";
     ocr_title: "Change chat deletion period", "Chat-Löschfrist ändern";
     ocr_body: "Chat is ephemeral: messages older than this are deleted on every member.", "Chat ist flüchtig: ältere Nachrichten werden bei allen Mitgliedern gelöscht.";
+    ocr_thread_title: "Change thread period", "Thread-Frist ändern";
+    ocr_thread_body: "A thread silent this long ends as a whole, on every member.", "Ein Thread, der so lange still ist, endet als Ganzes, bei allen Mitgliedern.";
     ou_note: "Only metadata is shared - the bytes move user-to-user over an encrypted transfer when a member downloads, as long as the sharer keeps the file. The share expires with the chat retention window.", "Geteilt werden nur Metadaten - die Bytes wandern user-to-user über eine verschlüsselte Übertragung, wenn ein Mitglied lädt, solange der Teilende die Datei behält. Der Share läuft mit dem Chat-Aufbewahrungsfenster ab.";
     ow_title: "Open local workspace", "Lokalen Workspace öffnen";
     ow_empty: "No local workspaces found.", "Keine lokalen Workspaces gefunden.";
@@ -1410,6 +1415,12 @@ lexicon! {
     ch_topic_ph: "Topic name…", "Themenname…";
     ch_topic_open: "Open topic", "Thema öffnen";
     ch_to_vote: "To the vote", "Zur Abstimmung";
+    th_close: "Close", "Schließen";
+    th_reopen: "Reopen", "Wieder öffnen";
+    th_forget: "Forget", "Vergessen";
+    th_closed: "closed", "geschlossen";
+    th_forget_title: "Forget thread?", "Thread vergessen?";
+    th_forget_body: "It disappears on this device only. The others keep it.", "Er verschwindet nur auf diesem Gerät. Die anderen behalten ihn.";
     mv_file_gone: "File no longer available - its owner deleted it.", "Datei nicht mehr verfügbar - der Besitzer hat sie gelöscht.";
     toast_dl_done: "Saved:", "Gespeichert:";
     toast_dl_failed: "Download failed:", "Download fehlgeschlagen:";

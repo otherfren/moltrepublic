@@ -49,6 +49,7 @@ pub(crate) mod vault_base;
 pub(crate) mod vault_payload;
 #[cfg(test)]
 pub(crate) use ingest::{CHAIN_SERVE_DEBOUNCE_SECS, PARKED_READS_PER_FRAME};
+pub(crate) use ingest::WIRE_STAMP_SKEW_SECS;
 
 
 // ---------------------------------------------------------------------------

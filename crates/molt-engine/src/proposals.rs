@@ -92,6 +92,10 @@ pub(crate) struct OrgEffective {
     /// Last applied `set_chat_retention` in days (default 7): the "delete
     /// chat after" window the read contract filters on.
     pub retention_days: u64,
+    /// Last applied `set_thread_retention` in days (default 7): a topic
+    /// thread ends this long after its last activity
+    /// (`docs/chat_threads_lifecycle.md` D6).
+    pub thread_retention_days: u64,
     /// Last applied `set_image` reference, cleared by `remove_image`.
     pub image: String,
     /// The effective governed pool (R6), space-joined for display — the
@@ -449,6 +453,7 @@ pub(crate) fn change_summary(eff: &OrgEffective, p: &ProposalRecord) -> (String,
         // L10: a MACHINE value — the unit is rendered per-language by the
         // frontends (the op-placeholder title rule applied to the value)
         "set_chat_retention" => eff.retention_days.to_string(),
+        "set_thread_retention" => eff.thread_retention_days.to_string(),
         // the image ops show what they change: the current image reference
         "set_image" | "remove_image" => eff.image.clone(),
         "set_relays" => eff.relays.clone(),
@@ -474,7 +479,7 @@ fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltErr
         "set_name" if value.trim().is_empty() => Err(MoltError::BadPayload(
             "the republic needs a non-empty name".into(),
         )),
-        "set_chat_retention" if parse_retention_days(value).is_none() => {
+        "set_chat_retention" | "set_thread_retention" if parse_retention_days(value).is_none() => {
             Err(MoltError::BadPayload(
                 "the retention window must be 1..=365 days (e.g. \"14 days\")".into(),
             ))
@@ -1537,6 +1542,7 @@ impl State {
             "set_name" => "Name",
             "set_charter" => "Charter",
             "set_chat_retention" => "Chat retention",
+            "set_thread_retention" => "Thread retention",
             "set_image" => "Logo",
             "remove_image" => "Logo removed",
             "set_relays" => "Relay pool",
@@ -1967,6 +1973,7 @@ impl State {
             name: self.replica.as_ref().map(|r| r.name.clone()).unwrap_or_default(),
             agenda: self.replica.as_ref().map(|r| r.agenda.clone()).unwrap_or_default(),
             retention_days: molt_core::default_chat_retention_days(),
+            thread_retention_days: molt_core::default_thread_retention_days(),
             image: String::new(),
             relays: self.ratified_relays().join(" "),
             // the standalone union fold (baseline ∪ applied edits) — kept
@@ -1989,6 +1996,11 @@ impl State {
                 Some("set_chat_retention") => {
                     if let Some(days) = parse_retention_days(value) {
                         eff.retention_days = days;
+                    }
+                }
+                Some("set_thread_retention") => {
+                    if let Some(days) = parse_retention_days(value) {
+                        eff.thread_retention_days = days;
                     }
                 }
                 Some("set_image") => {
@@ -2162,11 +2174,14 @@ impl State {
         view: Option<&'a str>,
     ) -> impl Iterator<Item = &'a molt_core::ChatMessage> + 'a {
         let now = crate::now_secs();
-        let days = self.org_effective().retention_days;
+        let eff = self.org_effective();
+        let days = eff.retention_days;
+        let lives = self.thread_lives_with(eff.thread_retention_days);
         let unread = view == Some("unread");
         self.chat
             .iter()
             .filter(move |m| chat_view_admits(m.ts, now, days))
+            .filter(move |m| !self.thread_hides(&lives, m, now))
             .filter(move |m| !unread || self.chat_msg_unread(m))
     }
 
@@ -4222,20 +4237,14 @@ impl State {
     fn chat_channels(&self) -> Vec<ChannelInfo> {
         let mut infos = vec![ChannelInfo {
             channel: ChannelRef::Group,
-            count: 0,
-            last_ts: 0,
-            state: None,
-            unread: 0,
+            ..ChannelInfo::default()
         }];
         let mut pos: HashMap<ChannelRef, usize> = HashMap::from([(ChannelRef::Group, 0)]);
         for m in self.chat_visible() {
             let at = *pos.entry(m.channel.clone()).or_insert_with(|| {
                 infos.push(ChannelInfo {
                     channel: m.channel.clone(),
-                    count: 0,
-                    last_ts: 0,
-                    state: None,
-                    unread: 0,
+                    ..ChannelInfo::default()
                 });
                 infos.len() - 1
             });
@@ -4250,9 +4259,19 @@ impl State {
         // every frontend renders the decision from the same data. The
         // channel stays WRITABLE either way (2026-09-06); an unknown
         // referent stays `None` (Q4).
+        // and each topic thread with its lifecycle (close state, end date)
+        let lives = self.thread_lives();
         for i in &mut infos {
-            if let ChannelRef::Patch { id } = &i.channel {
-                i.state = self.proposals.get(&id.0).map(|p| p.state);
+            match &i.channel {
+                ChannelRef::Patch { id } => i.state = self.proposals.get(&id.0).map(|p| p.state),
+                ChannelRef::Topic { name } => {
+                    if let Some(life) = lives.get(name) {
+                        i.closed_by = life.closed_by.clone().unwrap_or_default();
+                        i.closed = life.closed_by.is_some();
+                        i.expires_at = life.expires_at();
+                    }
+                }
+                ChannelRef::Group => {}
             }
         }
         infos
@@ -4669,6 +4688,7 @@ impl State {
             name: eff.name,
             agenda: eff.agenda,
             chat_retention_days: eff.retention_days,
+            thread_retention_days: eff.thread_retention_days,
             // the group's pool, from the live transport material — NOT this
             // node's own settings pool, which is a different list (what I can
             // dial vs. what the group agreed on)
@@ -5020,6 +5040,7 @@ mod size_gate_tests {
             name: String::new(),
             agenda: String::new(),
             retention_days: 7,
+            thread_retention_days: 7,
             image: String::new(),
             relays: String::new(),
             features: String::new(),

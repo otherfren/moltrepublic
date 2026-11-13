@@ -57,6 +57,7 @@ pub use founding::HANDLE_CHARSET_REFUSAL;
 pub use relay_msg::known_headlines;
 pub use relay_msg::{known_log_shapes, LogShape};
 mod session;
+mod threads;
 mod transfer;
 mod upload_refs;
 mod vault;
@@ -1165,6 +1166,10 @@ pub(crate) struct State {
     /// message id hex), the WORKING copy of `prefs.read_cursors`: loaded at
     /// open (`adopt_read_cursors`), written through on every `MarkRead`.
     pub(crate) read_cursors: std::collections::BTreeMap<String, String>,
+    /// The seat's forgotten threads (topic name → the newest message id at
+    /// the time), the WORKING copy of `prefs.forgotten_threads`
+    /// (`docs/chat_threads_lifecycle.md` D2).
+    pub(crate) forgotten_threads: std::collections::BTreeMap<String, MessageId>,
     /// This workspace has physically dropped expired chat (WP4a compaction),
     /// so chat POSITIONS are no longer meaningful and a legacy index-addressed
     /// op must be ignored instead of mis-applied ([`State::chat_target`]).
@@ -1512,6 +1517,7 @@ impl State {
             chat: Vec::new(),
             chat_pos: HashMap::new(),
             read_cursors: std::collections::BTreeMap::new(),
+            forgotten_threads: std::collections::BTreeMap::new(),
             chat_pruned: false,
             chat_pruned_counts: std::collections::BTreeMap::new(),
             compacted_at: 0,
@@ -1779,6 +1785,9 @@ impl State {
                 quote,
                 channel,
             } => self.cmd_chat(body, quote, channel),
+            Command::ThreadClose { name } => self.cmd_thread_op(name, molt_core::ThreadOp::Close),
+            Command::ThreadReopen { name } => self.cmd_thread_op(name, molt_core::ThreadOp::Reopen),
+            Command::ThreadForget { name } => self.cmd_thread_forget(name),
             Command::ReactChat { id, emoji } => self.cmd_react_chat(id, emoji),
             Command::MarkRead { ids } => {
                 let r = self.cmd_mark_read(ids);

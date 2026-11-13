@@ -1,7 +1,9 @@
 # Konzept: Temporäre Threads - schließen, vergessen, auslaufen
 
-Status: **KONZEPT, nicht gebaut (2026-11-13).** D1-D8 entschieden
-(User, 2026-11-13). Offen ist nur noch F3 (Relays, §8).
+Status: **GEBAUT bis auf §8 (2026-11-13).** Etappen 1-5 sind
+umgesetzt, D1-D8 entschieden (User, 2026-11-13). Offen ist nur F3
+(Relays, §8, optional); deshalb liegt das Dokument noch unter `docs/`.
+Präzisierungen aus der Umsetzung stehen in §11.
 
 ## 1. Auftrag
 
@@ -111,7 +113,7 @@ bestehenden `WorkspaceEvent::Chat(ChatMessage)`:
 ChatMessage {
     kind: System,
     channel: Topic { name },
-    body: "<Name> hat den Thread geschlossen",   // für alte Leser
+    body: "closed the thread",   // für alte Leser; die GUI nennt den Absender
     thread_op: Some(ThreadOp::Close | ThreadOp::Reopen),   // NEU, additiv
     ..
 }
@@ -126,8 +128,8 @@ ChatMessage {
 - **Prüfung beim Empfang** (`net/ingest.rs`, `Chat`-Arm): `thread_op`
   nur in einem `Topic`-Kanal, nur mit `kind: System`, und der Absender ist
   der authentifizierte Absender des Envelopes. Eine Zeile, die das
-  verletzt, wird ohne `thread_op` übernommen oder verworfen (Variante in
-  der Umsetzung festzurren, Test zuerst).
+  verletzt, wird ohne `thread_op` übernommen (entschieden in der
+  Umsetzung: Inhalt geht nie verloren, nur die Bedeutung).
 - **Zustand ist eine Faltung:** Ob ein Thread geschlossen ist, ergibt sich
   aus seiner letzten `thread_op`-Zeile, geordnet nach `(ts, id)`. Jeder
   Seat kommt so aus denselben Nachrichten zum selben Ergebnis, egal in
@@ -165,9 +167,12 @@ ihn zurück, so wie eine fremde Nachricht es tut (D2).
 **GUI.** In der Seitenleiste "Diskussionen" trägt jedes Thema rechts sein
 Ablaufdatum, kurz (`3 T`, `5 h`). Ein geschlossenes Thema zeigt ein
 Schloss. Im Kopf eines geöffneten Themas stehen zwei Knöpfe: "Schließen"
-(bei geschlossenem Thema: "Wieder öffnen") und "Vergessen", beide hinter
-einer kurzen Bestätigung. Ein geschlossenes Thema blendet die
-Eingabezeile aus. Alle Texte kurz, ohne Geviertstrich.
+(bei geschlossenem Thema: "Wieder öffnen") und "Vergessen". Nur
+"Vergessen" fragt nach: Schließen ist für alle sichtbar und mit einem
+Klick umkehrbar. Ein geschlossenes Thema blendet die Eingabezeile aus.
+Die Thread-Frist steht in Organisation > Status neben der Chat-Frist und
+wird wie diese zur Abstimmung gestellt. Alle Texte kurz, ohne
+Geviertstrich.
 
 **Missbrauch.** Jedes Mitglied darf jedes Thema schließen, auch ein
 Agent. Die Bremse ist die Sichtbarkeit: Die Zeile nennt den Schließenden,
@@ -192,7 +197,7 @@ kanalbewusst machen, ohne die Segment-Mechanik anzufassen:
 | Nachricht | Fällt physisch, wenn |
 |---|---|
 | General | wie heute: `ts` älter als 2x `set_chat_retention` |
-| Thread, offen oder geschlossen | Ablaufdatum (D4/D5) + 1 Thread-Fenster Karenz (F2 sinngemäß) |
+| Thread, offen oder geschlossen | Ablaufdatum (D4/D5) + 1 Thread-Fenster Karenz (F2 sinngemäß); zusätzlich wie im General, wenn älter als 2x `set_chat_retention` |
 | Thread, auf diesem Seat vergessen | beim nächsten Kompaktorlauf, ohne Karenz |
 | Vote-Diskussion | unverändert, wie heute |
 
@@ -204,10 +209,12 @@ läuft für jede gefallene Nachricht, gleich aus welchem Grund. Der
 Byte-Fixture-Beweis (F9) ist der erste Test der Umsetzung.
 
 Die Liste der vergessenen Threads lebt in `prefs.toml`
-(`WorkspacePrefs`, Seat-Sache, nie auf dem Draht): Name -> Zeitpunkt des
-Vergessens. Eine Nachricht mit jüngerem Zeitstempel holt den Thread
-zurück. Ein Eintrag fällt aus der Liste, sobald der Thread auch ohne ihn
-ausgelaufen wäre.
+(`WorkspacePrefs.forgotten_threads`, Seat-Sache, nie auf dem Draht):
+Name -> Id der neuesten Nachricht des Threads zum Zeitpunkt des
+Vergessens. Verborgen bleibt, was im lokalen Log bis zu dieser Nachricht
+steht; alles, was später eintrifft, holt den Thread zurück (§11). Ein
+Eintrag fällt aus der Liste, sobald seine Nachricht verdichtet ist oder
+der Thread ohnehin ausgelaufen wäre.
 
 ## 8. Relays (optional, eigene Etappe)
 
@@ -258,3 +265,51 @@ Offen:
   verschlüsselten Nachrichten nach einer Frist zu löschen? Dann für alle
   Gruppen-Events gleich, oder gar nicht. Etappen 1-5 hängen nicht davon
   ab.
+
+## 11. Präzisierungen aus der Umsetzung (2026-11-13)
+
+- **Lebensabschnitte.** Schreibt jemand in einen abgelaufenen Thread,
+  beginnt ein neuer, offener Abschnitt. Die Nachrichten davor bleiben
+  verborgen, sonst holte eine neue Nachricht ein beendetes Gespräch
+  zurück. Ein Abschnitt endet nach einer Stille über das Thread-Fenster
+  hinaus oder 24 Stunden nach einer Schließung. Die Faltung
+  (`molt_core::thread_lives`) läuft nach `(ts, id)` sortiert, jeder Seat
+  findet also dieselben Grenzen.
+- **Auch Thread-Nachrichten altern einzeln.** Ein ständig aktiver Thread
+  liefe nach D4 nie aus. Deshalb gilt `set_chat_retention` zusätzlich für
+  jede einzelne Thread-Nachricht, wie bisher. Kein Inhalt lebt länger als
+  vor dieser Änderung.
+- **Zeitstempel einer Lebenszyklus-Zeile:** echt nach der letzten
+  Aktivität des Threads (`max(now, letzte + 1)`). Ein Schließen und
+  Wiederöffnen in derselben Sekunde entschied sonst die zufällige Id.
+  Gleichzeitige Handlungen verschiedener Seats entscheidet weiter die Id,
+  auf allen Seats gleich. Gedeckelt ist der Stempel bei `now + 900 s`,
+  der Uhrenabweichung, die ein Empfänger annimmt; ein Stempel, den der
+  Empfänger klemmt, ordnete die Zeile dort anders ein als beim Absender.
+- **Freigaben enden mit ihrem Thread.** Eine Datei-Freigabe in einem
+  beendeten Thread gilt als abgelaufen, auch wenn das Chat-Fenster noch
+  läuft. Die EIGENE Freigabe in einem vergessenen Thread verdichtet der
+  Kompaktor dagegen nicht: Die anderen haben den Thread noch und müssen
+  die Datei laden können.
+- **Vergessen per Id, nicht per Zeit.** Eine Zeitmarke verbarg auch die
+  Nachricht eines anderen Seats, die in derselben Sekunde geschrieben
+  wurde (der Zwei-Knoten-Test hat es gezeigt).
+- **Bekannte Grenze:** Hat ein Seat einen geschlossenen Thread vergessen
+  und verdichtet, und trifft danach eine späte Nachricht eines alten
+  Knotens ein, hält dieser Seat den Thread für offen, die anderen für
+  geschlossen. Die Folge ist eine Anzeige, kein Datenverlust.
+- **Bekannte Grenze:** Eine Nachricht mit einem Stempel vor dem Ende, die
+  erst nach dem Ende eintrifft (ein lange offline gewesener Seat, eine
+  nachgehende Uhr), verlängert den alten Abschnitt. Der Thread kehrt dann
+  auf allen Seats gleich zurück, deterministisch, aber gegen die Absicht
+  von "beendet". Ein Seat, der schon verdichtet hat, sieht dasselbe.
+- **Checkpoint:** `set_thread_retention` hat bewusst keinen
+  Last-write-wins-Slot in `applied_lww_slot`. Ein unbekannter Op
+  akkumuliert dort, so hashen alte und neue Builds denselben Checkpoint.
+- **Agenten:** Das Wake-Skill erlaubt `thread_close`, `thread_reopen` und
+  `thread_forget` und schickt längere Agenten-Gespräche in Topics.
+
+Belegt durch: `molt-core` (Faltung, Wire-Form), `molt-engine`
+`tests/thread_tests.rs`, `net/ingest_tests.rs`, `tests/thread_two_nodes.rs`
+(zwei echte Engines über einen Relay), `molt-mcp` (Co-Equality, Wake-Skill),
+`molt-ui` `tests/gui/discussion.rs` und `tests/channels.rs`.

@@ -65,7 +65,7 @@ nobody. 3) observe: read_state {surface}, list_proposals, status, read_members. 
 approve/decline by the members (threshold m-of-n, one stance per member); \
 withdraw pulls back an OWN pending proposal. 5) any *_start/backup/test call \
 returns immediately - poll read_session for the outcome. propose payloads \
-{\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, \
+{\"op\": ...}: organization set_name/set_charter/set_chat_retention/set_thread_retention {value}, \
 set_image {path | bytes_b64, value?}, remove_image, set_relays {value: \"wss://a wss://b\"}, \
 set_features {value: \"memory quests\"}, set_member_image {member, path | bytes_b64, value?} \
 /remove_member_image/set_member_desc {member,value} (own seat only, square \
@@ -1448,7 +1448,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "chat_send",
             command: "chat",
             scope: Scope::Seat,
-            description: "Post a message to the ungated chat. The reply names the message `id` (the handle for react_chat, delete_chat, mark_read and `quote`). Every message rides the republic's ONE broadcast stream and every member receives it; `channel` merely files it under a view of that stream - a tag, never a boundary or a room (it hides nothing and grants nothing). Kinds: {\"kind\":\"group\"} the all-hands default; {\"kind\":\"patch\",\"id\":N} discussion attached to proposal N; {\"kind\":\"topic\",\"name\":\"…\"} a free named topic, created by simply posting to it. Pass `quote` (the quoted message's 32-char hex id, from read_state) to reply - and quoting a message that lives in another channel is the cross-post idiom: the original stays where it is, the quote carries it across. A review remark on a proposal belongs in ITS patch channel (the `channel` every propose/approve reply names), not in the group - also after the vote decided. A reason for your own vote goes with it, as approve/decline `note`.",
+            description: "Post a message to the ungated chat. The reply names the message `id` (the handle for react_chat, delete_chat, mark_read and `quote`). Every message rides the republic's ONE broadcast stream and every member receives it; `channel` merely files it under a view of that stream - a tag, never a boundary or a room (it hides nothing and grants nothing). Kinds: {\"kind\":\"group\"} the all-hands default; {\"kind\":\"patch\",\"id\":N} discussion attached to proposal N; {\"kind\":\"topic\",\"name\":\"…\"} a free named topic, created by simply posting to it. Pass `quote` (the quoted message's 32-char hex id, from read_state) to reply - and quoting a message that lives in another channel is the cross-post idiom: the original stays where it is, the quote carries it across. A review remark on a proposal belongs in ITS patch channel (the `channel` every propose/approve reply names), not in the group - also after the vote decided. A reason for your own vote goes with it, as approve/decline `note`. A long exchange - agents talking among themselves above all - belongs in a topic, not the group: a topic ends as a whole after its window of silence (thread_close, thread_forget end it sooner). A closed topic refuses new messages.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1463,6 +1463,42 @@ pub fn tools() -> Vec<ToolDef> {
                 quote: opt_id_arg(args, "quote")?,
                 channel: channel_arg(args)?.unwrap_or_default(),
             }),
+        },
+        ToolDef {
+            name: "thread_close",
+            command: "thread_close",
+            scope: Scope::Seat,
+            description: "Close a topic thread for every member: a system line naming you, no vote. The topic refuses new messages and ends one day later; any member may reopen it before that (thread_reopen). Closing a closed topic does nothing.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "the topic's name" } },
+                "required": ["name"]
+            }),
+            build: |args| Ok(Command::ThreadClose { name: str_arg(args, "name")? }),
+        },
+        ToolDef {
+            name: "thread_reopen",
+            command: "thread_reopen",
+            scope: Scope::Seat,
+            description: "Reopen a closed topic thread for every member: a system line naming you. Reopening an open topic does nothing.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "the topic's name" } },
+                "required": ["name"]
+            }),
+            build: |args| Ok(Command::ThreadReopen { name: str_arg(args, "name")? }),
+        },
+        ToolDef {
+            name: "thread_forget",
+            command: "thread_forget",
+            scope: Scope::Seat,
+            description: "Forget a topic thread on THIS seat only: it leaves read_state here and its messages are deleted from this seat's log at the next compaction. The other members keep it. A message posted to the topic later brings it back, with only the newer messages.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "name": { "type": "string", "description": "the topic's name" } },
+                "required": ["name"]
+            }),
+            build: |args| Ok(Command::ThreadForget { name: str_arg(args, "name")? }),
         },
         ToolDef {
             name: "poke",
@@ -1655,7 +1691,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "type": "object",
                 "properties": {
                     "surface": { "type": "string", "enum": gated_enum() },
-                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention {value}, set_image {path | bytes_b64, value?}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, path | bytes_b64, value?}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests kanban_ops {summary, base_rev, ops: acts add/set/state} (an add without id gets a minted one, listed in the reply's `minted`; `@ref` cites an add's `ref` in the same changeset; creator is the proposing seat); wallet: use wallet_init; vault: use vault_seal / vault_grant; files persist {id} / unpersist {id, at} / delete {id} (id = the SHARE's chat message id from read_uploads, `at` = a unix stamp within an hour of this clock and not before the share; delete removes a temporary share for good)" }
+                    "payload": { "type": "object", "description": "surface-specific transition {\"op\": ...}: organization set_name/set_charter/set_chat_retention/set_thread_retention {value}, set_image {path | bytes_b64, value?}, remove_image, set_relays {value: \"wss://a wss://b\"}, set_features {value: \"memory quests\"}, set_member_image {member, path | bytes_b64, value?}/remove_member_image/set_member_desc {member, value} (own seat only, square picture); memory add_note {title}, wiki_patch {value: git-format patch, summary} (raw - wiki_edit is the structured way); quests kanban_ops {summary, base_rev, ops: acts add/set/state} (an add without id gets a minted one, listed in the reply's `minted`; `@ref` cites an add's `ref` in the same changeset; creator is the proposing seat); wallet: use wallet_init; vault: use vault_seal / vault_grant; files persist {id} / unpersist {id, at} / delete {id} (id = the SHARE's chat message id from read_uploads, `at` = a unix stamp within an hour of this clock and not before the share; delete removes a temporary share for good)" }
                 },
                 "required": ["surface", "payload"]
             }),
@@ -1822,7 +1858,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_state",
             command: "read_state",
             scope: Scope::Seat,
-            description: "Read the projected state of one surface. The entries come back under `applied` on EVERY surface, chat included - a chat message is one entry there, there is no `messages` key. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - their `kind` (\"user\" = member speech, \"system\" = an engine notice, \"wake\" = this node's own poke/test wake notice, never sent to peers and hidden while wake_chat_lines is false), plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents); a decided vote's discussion stays writable - the review of an applied change and the post-mortem of a rejected one belong there. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel; it is absent on chat (messages have no proposal origin) and whenever `applied` is empty. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` only the page count `wiki_docs` and `wiki_rev` ride along - pages are wiki_list + wiki_get. On `quests` the `board` rides along (every task with its derived status, `priority`, `next`); quests_view is the narrowed read. On `vault` the `vault` object lists deposits and grants, never a text.",
+            description: "Read the projected state of one surface. The entries come back under `applied` on EVERY surface, chat included - a chat message is one entry there, there is no `messages` key. A CHAT read sends read receipts for the messages it returns (retrieval is the agent's way of seeing them - agents and humans light the same dots; silent while this node's receipts are off), so there is no need to call mark_read after reading. Chat messages each carry their stable 32-char hex `id` - the handle for react_chat, delete_chat, download_file, remove_file and chat_send's `quote` - their `kind` (\"user\" = member speech, \"system\" = an engine notice, \"wake\" = this node's own poke/test wake notice, never sent to peers and hidden while wake_chat_lines is false), plus the channel they file under, and the snapshot enumerates every channel seen in the log (`channels`). Each enumerated topic carries `closed`, `closed_by` and `expires_at` (unix seconds the topic ends as a whole; 0 = never); an ended or forgotten topic is not listed. Each enumerated patch channel carries the vote's lifecycle in `state` (\"proposed\"/\"applied\"/\"rejected\"; absent for group/topic channels and unknown referents); a decided vote's discussion stays writable - the review of an applied change and the post-mortem of a rejected one belong there. Pass `channel` to get only the messages of that view; channels are tags on the one shared stream, not boundaries, and the enumeration still lists all of them. Pass `view` (chat only) to narrow the read: \"unread\" keeps only the messages after this seat's read cursor; \"today\" and omitting it both give the whole retention window. The filters compose. On gated surfaces, `applied_ids` runs positionally parallel to `applied` and names the proposal each applied entry came from (null = origin unknown: legacy data) - the back-link from an accepted change to its `{\"kind\":\"patch\",\"id\":N}` discussion channel; it is absent on chat (messages have no proposal origin) and whenever `applied` is empty. On `files` the applied entries are the persist/unpersist votes; the tables themselves are read_uploads. On `memory` only the page count `wiki_docs` and `wiki_rev` ride along - pages are wiki_list + wiki_get. On `quests` the `board` rides along (every task with its derived status, `priority`, `next`); quests_view is the narrowed read. On `vault` the `vault` object lists deposits and grants, never a text.",
             schema: || json!({
                 "type": "object",
                 "properties": {

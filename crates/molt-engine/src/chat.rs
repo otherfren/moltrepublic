@@ -82,6 +82,7 @@ impl State {
     ) -> Result<Reply, MoltError> {
         self.ensure_demo_net();
         let channel = channel.normalized().map_err(MoltError::BadPayload)?;
+        self.refuse_closed_thread(&channel)?;
         let from = self.member();
         let id = self.post_message(from, body, quote, channel)?;
         Ok(Reply::Sent { id })
@@ -128,10 +129,17 @@ impl State {
     ) -> Result<MessageId, MoltError> {
         // a quote only sticks when it points at a known message
         let quote_id = quote_id.filter(|q| self.chat_pos.contains_key(q));
-        let mut msg = ChatMessage::text(id, from.clone(), body.clone(), now_secs())
-            .with_channel(channel.clone())
+        let mut msg = ChatMessage::text(id, from.clone(), body, now_secs())
+            .with_channel(channel)
             .with_kind(kind);
         msg.quote_id = quote_id;
+        self.post_chat_message(from, msg);
+        Ok(id)
+    }
+
+    /// Record and announce a fully built chat message of this seat.
+    pub(crate) fn post_chat_message(&mut self, from: MemberId, msg: ChatMessage) {
+        let (id, body, channel) = (msg.id, msg.body.clone(), msg.channel.clone());
         let env = self.make_env(from.clone(), WorkspaceEvent::Chat(msg));
         self.record(env);
         self.emit(Event::Chat {
@@ -140,7 +148,6 @@ impl State {
             body,
             channel,
         });
-        Ok(id)
     }
 
     // ---- B2: the seat's own read cursors (buzz_followups.md) ------------
@@ -155,6 +162,21 @@ impl State {
     /// — opening a workspace must not present its whole history as one
     /// unread wall (the old GUI ledger's rule, now engine-side).
     pub(crate) fn adopt_read_cursors(&mut self) {
+        // the seat's forgotten threads ride the same prefs load
+        self.forgotten_threads = self
+            .active
+            .as_ref()
+            .map(|a| {
+                a.prefs
+                    .forgotten_threads
+                    .iter()
+                    .filter_map(|(name, hexid)| Some((name.clone(), hexid.parse().ok()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !self.forgotten_threads.is_empty() {
+            self.persist_forgotten_threads();
+        }
         self.read_cursors = self
             .active
             .as_ref()
@@ -291,6 +313,7 @@ impl State {
         // lazily on the first download request
         self.ensure_demo_net();
         let channel = channel.normalized().map_err(MoltError::BadPayload)?;
+        self.refuse_closed_thread(&channel)?;
         if path.trim().is_empty() {
             return Err(MoltError::BadPayload(
                 "the file path must not be empty".into(),

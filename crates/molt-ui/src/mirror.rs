@@ -1357,6 +1357,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             label: c.label.as_str().into(),
             icon: c.icon.as_str().into(),
             unread: c.unread,
+            note: c.note.as_str().into(),
         })
         .collect();
     // does the CURRENT filter have a row of its own? The Gruppe nav row
@@ -1371,6 +1372,8 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_selected_channel_votable(b.selected_key.starts_with("patch:"));
     ui.set_selected_channel_label(b.selected_label.as_str().into());
     ui.set_selected_channel_closed(b.selected_closed);
+    ui.set_selected_thread_closed(b.selected_thread_closed);
+    ui.set_selected_thread_ends(b.selected_thread_ends.as_str().into());
     ui.set_selected_channel_undiscussed(b.selected_undiscussed);
     ui.set_selected_channel_org(b.selected_org);
     // the wiki-patch diff viewer: a SELECTED patch decision owns the
@@ -1498,6 +1501,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     // the status info strip (founding date + mock activity trio)
     ui.set_org_founded(b.org_stats.founded.as_str().into());
     ui.set_org_chat_retention(b.org_stats.retention_days);
+    ui.set_org_thread_retention(b.org_stats.thread_retention_days);
     // the Members table offers "recovery link" only where recovery exists
     ui.set_org_chain_governed(b.org_stats.chain_governed);
     let feat_on = |key: &str| b.org_stats.features.iter().any(|f| f == key);

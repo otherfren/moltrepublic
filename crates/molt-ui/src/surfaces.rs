@@ -147,6 +147,10 @@ pub(crate) struct SurfacesBundle {
     /// The selected channel is a decided vote's read-only discussion
     /// (collapses the compose row, shows the banner's 🔒 note).
     pub(crate) selected_closed: bool,
+    /// The selected channel is a CLOSED topic thread (no compose row).
+    pub(crate) selected_thread_closed: bool,
+    /// The selected topic's time left, short; "" off topics.
+    pub(crate) selected_thread_ends: String,
     /// The selected channel is an ORGANIZATION decision's discussion — the
     /// compact detail panel above the log, and the nav section that stays
     /// expanded behind it ([`selected_channel_org`]).
@@ -217,6 +221,9 @@ pub(crate) struct OrgStats {
     /// The effective "delete chat after" window (engine
     /// `StatusView.chat_retention_days`).
     pub(crate) retention_days: i32,
+    /// The effective thread window (engine
+    /// `StatusView.thread_retention_days`).
+    pub(crate) thread_retention_days: i32,
     /// Whether the open workspace is a chain-governed republic (engine
     /// `StatusView.chain_governed`) — the per-member "recovery link" action
     /// exists exactly there, so the Members table offers it only then.
@@ -330,6 +337,8 @@ pub(crate) struct ChannelRowData {
     pub(crate) label: String,
     pub(crate) icon: String,
     pub(crate) unread: i32,
+    /// A topic's time left, short ("3 d"); "" for other rows.
+    pub(crate) note: String,
 }
 
 /// UI-local chat-bus state shared between the Slint callbacks and the
@@ -916,6 +925,7 @@ pub(crate) async fn gather_surfaces(
                 },
                 image: s.image,
                 retention_days: i32::try_from(s.chat_retention_days).unwrap_or(7),
+                thread_retention_days: i32::try_from(s.thread_retention_days).unwrap_or(7),
                 chain_governed: s.chain_governed,
                 relays: s.relays,
                 missing_relays: s
@@ -1247,7 +1257,13 @@ pub(crate) async fn gather_surfaces(
     // titles come from the cache, so a patch channel keeps its name (and
     // its ✓/⊘ state line) after the proposal left the Proposed-only read
     let titles = known_titles(lang, &known);
-    let channels = derive_channels(lang, &infos, &known, &unread);
+    let now = crate::channels::now_secs();
+    let channels = derive_channels(lang, &infos, &known, &unread, now);
+    let (selected_thread_closed, selected_thread_ends) = infos
+        .iter()
+        .find(|i| i.channel == selected && matches!(i.channel, ChannelRef::Topic { .. }))
+        .map(|i| (i.closed, crate::channels::thread_ends_label(lang, i.expires_at, now)))
+        .unwrap_or_default();
     // the group channel has no sidebar row anymore — its unread count
     // badges the Gruppe nav row instead
     let group_unread =
@@ -1353,6 +1369,8 @@ pub(crate) async fn gather_surfaces(
         selected_key,
         selected_label,
         selected_closed,
+        selected_thread_closed,
+        selected_thread_ends,
         selected_org,
         selected_decision,
         members,
@@ -1812,12 +1830,12 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
         text: display_title(lang, &p.payload),
         approvals: p.approvals as i32,
         threshold: p.threshold as i32,
-        current: if op == "set_chat_retention" {
+        current: if op == "set_chat_retention" || op == "set_thread_retention" {
             retention_value(lang, &p.current)
         } else {
             p.current.clone()
         },
-        proposed: if op == "set_chat_retention" {
+        proposed: if op == "set_chat_retention" || op == "set_thread_retention" {
             retention_value(lang, &p.proposed)
         } else if p.proposed.is_empty()
             && p.payload.get("bytes_b64").and_then(serde_json::Value::as_str).is_some_and(|b| !b.is_empty())
@@ -1949,6 +1967,8 @@ fn org_op_label(lang: i32, op: &str) -> Option<&'static str> {
         (_, "remove_image") => "Remove logo",
         (1, "set_chat_retention") => "Chat-Löschfrist",
         (_, "set_chat_retention") => "Chat retention",
+        (1, "set_thread_retention") => "Thread-Frist",
+        (_, "set_thread_retention") => "Thread retention",
         (1, "set_relays") => "Relay-Pool",
         (_, "set_relays") => "Relay pool",
         // the product term in both languages (Strings.cw-features)

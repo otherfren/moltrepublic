@@ -1869,6 +1869,7 @@ mod tests {
                 reactions: std::collections::BTreeMap::new(),
                 deleted_by: None,
                 file: None,
+                thread_op: None,
                 read_by: std::collections::BTreeSet::new(),
             }),
         );

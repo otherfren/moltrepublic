@@ -4953,6 +4953,7 @@ mod tests {
                 read_by: Default::default(),
                 deleted_by: None,
                 file: None,
+                thread_op: None,
             }),
         }
     }
