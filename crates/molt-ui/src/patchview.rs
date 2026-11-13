@@ -104,6 +104,49 @@ pub fn file_rows(f: &PatchFile) -> Vec<Row> {
     out
 }
 
+/// Continuation mark of a wrapped row, so one diff line never reads as two.
+const WRAP_MARK: &str = "↪ ";
+
+/// Break every row longer than `cols` characters into rows of at most
+/// `cols`; continuations start with [`WRAP_MARK`]. `cols` 0 = no wrap.
+pub fn wrap_rows(rows: Vec<Row>, cols: usize) -> Vec<Row> {
+    if cols == 0 {
+        return rows;
+    }
+    let mark = WRAP_MARK.chars().count();
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let len: usize = row.segs.iter().map(|s| s.text.chars().count()).sum();
+        if len <= cols {
+            out.push(row);
+            continue;
+        }
+        let marked = cols > mark;
+        let mut cur: Vec<Seg> = Vec::new();
+        let mut room = cols;
+        for seg in row.segs {
+            let mut chars = seg.text.chars().peekable();
+            while chars.peek().is_some() {
+                if room == 0 {
+                    out.push(Row { segs: std::mem::take(&mut cur) });
+                    room = cols;
+                    if marked {
+                        cur.push(Seg { text: WRAP_MARK.to_string(), tone: SegTone::Meta });
+                        room -= mark;
+                    }
+                }
+                let piece: String = chars.by_ref().take(room).collect();
+                room -= piece.chars().count();
+                cur.push(Seg { text: piece, tone: seg.tone });
+            }
+        }
+        if !cur.is_empty() {
+            out.push(Row { segs: cur });
+        }
+    }
+    out
+}
+
 fn plain_row(text: &str, tone: SegTone) -> Row {
     Row {
         segs: vec![Seg {
@@ -158,6 +201,35 @@ fn char_diff_row(old: &str, new: &str) -> Row {
 mod tests {
     use super::*;
     use crate::wiki::Wiki;
+
+    fn text(r: &Row) -> String {
+        r.segs.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    /// A row longer than the pane breaks into `cols`-wide rows; each
+    /// continuation starts with a meta mark, tones survive the cut, and
+    /// a short row or `cols` 0 stays as it is.
+    #[test]
+    fn a_long_row_wraps_at_the_column_count_and_marks_its_continuations() {
+        let row = Row {
+            segs: vec![
+                Seg { text: "abcdef".to_string(), tone: SegTone::Plain },
+                Seg { text: "ghij".to_string(), tone: SegTone::Added },
+            ],
+        };
+        let out = wrap_rows(vec![row.clone()], 4);
+        let texts: Vec<String> = out.iter().map(text).collect();
+        assert_eq!(texts, vec!["abcd", "↪ ef", "↪ gh", "↪ ij"]);
+        assert!(out.iter().all(|r| text(r).chars().count() <= 4));
+        assert_eq!(out[1].segs[0].tone, SegTone::Meta);
+        assert_eq!(out[1].segs[1].tone, SegTone::Plain);
+        assert_eq!(out[2].segs[1].tone, SegTone::Added);
+        assert_eq!(wrap_rows(vec![row.clone()], 0).len(), 1, "0 = no wrap");
+        assert_eq!(wrap_rows(vec![row], 80).len(), 1, "a row that fits stays one");
+        // too narrow for a mark: still progresses, one char a row
+        let tiny = wrap_rows(vec![Row { segs: vec![Seg { text: "abc".into(), tone: SegTone::Plain }] }], 2);
+        assert_eq!(tiny.iter().map(text).collect::<Vec<_>>(), vec!["ab", "c"]);
+    }
 
     /// Past the length cap a changed pair renders whole (one removed, one
     /// added segment) instead of a quadratic char diff.

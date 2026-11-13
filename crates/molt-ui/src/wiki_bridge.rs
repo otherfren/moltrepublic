@@ -1837,10 +1837,11 @@ pub(crate) fn patch_view_sync(ui: &AppWindow, patch: &str, sel: usize, for_id: i
             selected: i == sel,
         })
         .collect();
+    let cols = usize::try_from(g.get_wrap_cols()).unwrap_or(0);
     let rows: Vec<DiffRow> = files
         .get(sel)
         .map(|f| {
-            patchview::file_rows(f)
+            patchview::wrap_rows(patchview::file_rows(f), cols)
                 .into_iter()
                 .map(|r| DiffRow {
                     segs: ModelRc::new(VecModel::from(
@@ -1889,6 +1890,16 @@ pub(crate) fn wire_patch_view(ui: &AppWindow) {
         let id = ui.global::<PatchView>().get_for_id();
         if let Some(patch) = patch_text_for(&ui, id) {
             patch_view_sync(&ui, &patch, usize::try_from(idx).unwrap_or(0), id);
+        }
+    });
+    let weak = ui.as_weak();
+    ui.global::<PatchView>().on_rewrap(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        let g = ui.global::<PatchView>();
+        let id = g.get_for_id();
+        let sel = g.get_nav_rows().iter().position(|r| r.selected).unwrap_or(0);
+        if let Some(patch) = patch_text_for(&ui, id) {
+            patch_view_sync(&ui, &patch, sel, id);
         }
     });
 }

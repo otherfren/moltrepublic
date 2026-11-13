@@ -517,6 +517,10 @@ export global PatchView {
     in-out property <string> sel-marker;
     in-out property <int> sel-status;
     callback select(int); // navigator row index
+    // characters per diff row the shown viewer fits (0 = no wrap); a
+    // change asks Rust to re-cut the rows
+    in-out property <int> wrap-cols;
+    callback rewrap();
 }
 
 // The wiki pane's shared state + action bus: properties are pushed by the

@@ -353,3 +353,52 @@ fn a_topic_thread_shows_its_time_left_lock_and_forget() {
     o.mirror();
     assert!(row(&o.ui).is_none(), "forgotten here");
 }
+
+/// **A long diff line wraps inside the details pane** (field feedback
+/// 2026-11-13): it ran past the right edge with neither a wrap nor a
+/// working horizontal scroll. Every row now ends inside the pane, the
+/// line's tail is on screen, and a narrower window re-cuts the rows.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_long_diff_line_wraps_inside_the_pane() {
+    let o = Opened::new(|root| drop(workspace_on_disk(root, 2, &["walter", "mara"], "test")));
+    o.open_a_vote_and_its_discussion();
+    crate::wiki_bridge::wire_patch_view(&o.ui);
+    o.ui.set_screen(AppScreen::Main);
+    o.ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    let line = format!("{}TAIL", "word ".repeat(120));
+    let patch = format!("diff --git a/a b/a\n@@ -1 +1 @@\n-one\n+{line}\n");
+    let card = ProposalRow { patch_op: true, proposed: patch.clone().into(), ..o.ui.get_selected_decision() };
+    let id = card.id;
+    o.ui.set_selected_decision(card);
+    crate::wiki_bridge::patch_view_sync(&o.ui, &patch, 0, id);
+    let _shown = show_headless(&o.ui);
+    let frame = || i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(20));
+    frame();
+
+    let check = |o: &Opened| {
+        let pane = i_slint_backend_testing::ElementHandle::find_by_element_id(&o.ui, "DiffViewer::df")
+            .find(|e| e.size().width > 0.0)
+            .expect("the diff pane");
+        let right = pane.absolute_position().x + pane.size().width;
+        let segs: Vec<_> = i_slint_backend_testing::ElementHandle::find_by_element_id(&o.ui, "DiffViewer::st")
+            .filter(|e| e.size().width > 0.0)
+            .collect();
+        for s in &segs {
+            let r = s.absolute_position().x + s.size().width;
+            assert!(r <= right + 0.5, "a segment ends at {r}, the pane at {right}");
+        }
+        assert!(
+            segs.iter().any(|s| s.accessible_label().is_some_and(|l| l.ends_with("TAIL"))),
+            "the line's tail is on screen"
+        );
+        o.ui.global::<PatchView>().get_rows().row_count()
+    };
+    let wide = check(&o);
+    assert!(wide > 1, "the line wrapped");
+    o.ui.window().set_size(slint::PhysicalSize::new(1000, 900));
+    frame();
+    frame();
+    let narrow = check(&o);
+    assert!(narrow > wide, "a narrower pane cuts more rows: {narrow} vs {wide}");
+}
