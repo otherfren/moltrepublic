@@ -233,6 +233,42 @@ ist (D7) und ein Backfill von Chat ausdrücklich kein Ziel ist
 berührt aber den Catch-up eines Seats, der lange offline war, und
 verdient eine eigene Prüfung (F3).
 
+### 8.1 Prüfung der Nachhol-Wege (2026-11-13)
+
+Wer liest alte Events von den Relays, und was bräche ein Verfallsdatum?
+
+| Weg | Liest vom Relay | Folge eines Verfallsdatums |
+|---|---|---|
+| Laufende Gruppe (445, `group_runtime::inbox_loop`) | nur das AKTUELLE Tagesfenster (UTC-Tag, ±1 h, `ritual_net::window_tags`); ältere Fenster fragt sie nie ab | keine, solange die Frist ≥ 2 Tage ist |
+| Nachlieferung verpasster Nachrichten | nichts: der Absender sendet neu (ACK/Rewind, `delivery_guarantee.md`), solange er online ist, bis zur WP4a-Karenz | keine |
+| Verpasste MLS-Commits (Nachzügler, Reattach) | Original-Commits nur im aktuellen Fenster; sonst Neusendung, versiegelt bis 8 Epochen zurück (`detached_reattach.md` §7) | keine bei ≥ 2 Tagen |
+| Ketten-Nachholung, Checkpoint | nichts Altes: Peers antworten live auf `ChainRequest` | keine |
+| Vault | reitet auf der laufenden Gruppe | keine |
+| Wallet | Monero-Daemon, keine Relays | keine |
+| Gründung und Beitritt (445 der neuen Gruppe, `nostr_ritual.rs`) | bis zu 30 Tage zurück (`MEMBER_LOOKBACK_SECS`, `RITUAL_MAX_WINDOWS` 64): ein Beitretender liest Seal und Welcome, auch wenn sie Tage alt sind | eine Frist unter 30 Tagen bricht einen langsamen Beitritt |
+| Dateien (447, `file_transfer_nostr.md`) | ja: Relays halten die Stück-Serie, ein Download braucht den Teilenden nicht online | danach braucht jeder Download den Teilenden (oder einen Mirror) online, der neu veröffentlicht |
+| Gift-Wraps (1059) und Welcome (444) | Ritual-Posteingang | nicht Teil von F3 |
+
+Folgerungen:
+
+1. **445 der laufenden Gruppe:** Ein einheitliches Verfallsdatum, zum
+   Beispiel 3 Tage, kostet nichts. Die Gruppe liest ältere Events ohnehin
+   nie. Da jedes 445-Event dieselbe relative Frist trägt, verrät das Tag
+   dem Relay nichts Neues.
+2. **Gründung und Beitritt:** Die 445-Events der Ritualphase brauchen
+   keine oder eine Frist von mindestens 31 Tagen. Ohne Tag in der
+   Ritualphase erkennt ein Relay diese Phase, das ist aber ohnehin an
+   Zeitpunkt und Gift-Wraps sichtbar.
+3. **Dateien (447):** eigene Entscheidung. Naheliegend ist die Frist der
+   Freigabe selbst: Eine temporäre Freigabe ist nach dem Chat-Fenster
+   ohnehin nicht mehr herunterladbar (`FileExpired`), also darf auch der
+   Relay sie löschen. Eine dauerhafte Freigabe bekommt kein Verfallsdatum.
+   Die Art (447) sieht der Relay schon heute; die Frist verrät zusätzlich,
+   ob eine Freigabe temporär ist.
+4. **Grenze:** NIP-40 ist eine Bitte. Ein Relay, das sie ignoriert oder
+   böswillig sammelt, behält alles. Der Gewinn liegt bei ehrlichen fremden
+   Relays; beim eigenen Relay ist er gering.
+
 ## 9. Etappen (TDD, je einzeln mergebar)
 
 1. **Kern:** `ThreadOp`, das additive Feld, die Faltung "geschlossen"
