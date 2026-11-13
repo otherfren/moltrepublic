@@ -158,6 +158,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::UnknownView(sf, v) => format!("Surface {sf:?} hat keine Ansicht `{v}`"),
         E::UnknownMessage(id) => format!("Unbekannte Chat-Nachricht {id}"),
         E::UnknownThread(n) => format!("Unbekannter Thread `{n}`"),
+        E::CannotSign(why) => format!("Stimme nicht signiert: {why}"),
         E::ThreadClosed(n) => format!("Thread `{n}` ist geschlossen"),
         E::NoFile(id) => format!("Nachricht {id} trägt keine geteilte Datei"),
         E::FileUnavailable(id) => format!("Die geteilte Datei an {id} ist nicht mehr verfügbar"),

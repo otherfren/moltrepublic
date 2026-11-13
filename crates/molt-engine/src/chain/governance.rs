@@ -145,7 +145,32 @@ impl State {
     /// record + gossip it (the outbox fans the self-authored `Approved`
     /// envelope out over the mesh). Then try to seal. The proposer's own
     /// co-signature and every explicit approve funnel through here.
+    /// Why this seat could not sign an approval of `id` right now - the
+    /// silent early returns of [`Self::chain_sign_and_gossip_approval`],
+    /// named, so `approve` can refuse instead of answering like a counted
+    /// vote (field report v0.0.11, point 2). `None` = it can sign.
+    pub(crate) fn sign_blocker(&self, id: u64) -> Option<String> {
+        if self.identity_sk.is_none() {
+            return Some("no signing key on this seat".to_string());
+        }
+        if self.chain.head.is_none() {
+            return Some("no chain yet".to_string());
+        }
+        let Some(change) = self.proposal_change(id) else {
+            return Some("change unknown here".to_string());
+        };
+        if CutKind::of(&change).is_some() && (self.vault_base_pending() || self.wiki_base_pending()) {
+            return Some("base still loading".to_string());
+        }
+        None
+    }
+
     pub(crate) fn chain_sign_and_gossip_approval(&mut self, id: u64) {
+        if let Some(why) = self.sign_blocker(id) {
+            // the re-base path re-signs a STANDING decision: never silent
+            tracing::warn!(id, reason = %why, "approval not signed");
+            return;
+        }
         let (Some(sk), Some(head)) = (self.identity_sk.as_ref(), self.chain.head.as_ref()) else {
             return;
         };

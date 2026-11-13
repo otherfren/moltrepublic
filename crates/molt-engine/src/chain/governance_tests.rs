@@ -248,6 +248,8 @@ fn a_withdraw_turns_the_card_terminal_without_forging_a_vote() {
     let _guard = rt.enter();
     let b = Builder::new(&["petra", "walter", "dora"], 2);
     let mut peer = chain_peer_3("walter", &b);
+    // a real seat holds its key: proposing co-signs (refused without one)
+    peer.identity_sk = Some(b.key("walter").clone());
     let id = match peer
         .cmd_propose(
             Surface::Organization,
@@ -405,6 +407,8 @@ fn open_governance_reserves_the_own_withdraw() {
     let _guard = rt.enter();
     let b = Builder::new(&["petra", "walter", "dora"], 2);
     let mut peer = chain_peer_3("walter", &b);
+    // a real seat holds its key: proposing co-signs (refused without one)
+    peer.identity_sk = Some(b.key("walter").clone());
     let id = match peer
         .cmd_propose(
             Surface::Organization,
@@ -2513,4 +2517,41 @@ fn a_base_commitment_op_is_never_a_proposal() {
         assert!(!walter.receive_proposed(700, surface, payload, "petra"), "{op} is refused on the wire");
     }
     assert!(walter.wiki_base_committed().is_none());
+}
+
+/// **A vote this seat cannot sign fails loudly** (field report v0.0.11,
+/// point 2): a chain seat that opened without its signing key (a
+/// knowledge-only restore, a `transport.state` that lost `identity_sk`)
+/// answered `approve` like a counted vote while nothing was signed or
+/// sent - every other seat kept reading the member as open, proposal
+/// after proposal, and the voter never heard. The refusal comes BEFORE the
+/// vote's note is posted: a reason without a vote would read as one.
+#[test]
+fn a_vote_without_a_signing_key_is_refused_not_swallowed() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let (mut walter, _tmp, _dir) =
+        crate::tests::stored_chain_signer(&b, "walter", &["petra", "walter", "dora"]);
+    let id = match walter
+        .cmd_propose(Surface::Organization, serde_json::json!({ "op": "set_name", "value": "X" }))
+        .expect("propose")
+    {
+        molt_core::Reply::Proposed { id, .. } => id,
+        other => panic!("unexpected: {other:?}"),
+    };
+    walter.identity_sk = None;
+    let chat_before = walter.chat.len();
+    let refused = walter.cmd_approve(id, Some("looks good".into()));
+    assert!(
+        matches!(refused, Err(molt_core::MoltError::CannotSign(_))),
+        "a vote that cannot be signed must not read as cast: {refused:?}"
+    );
+    assert_eq!(walter.chat.len(), chat_before, "no orphaned reason in the discussion");
+
+    // …and a proposal whose proposer would co-sign it: put up WITHOUT the
+    // proposer's signature it read as theirs while counting as nobody's
+    let cards_before = walter.proposals.len();
+    let refused = walter
+        .cmd_propose(Surface::Organization, serde_json::json!({ "op": "set_name", "value": "Y" }));
+    assert!(matches!(refused, Err(molt_core::MoltError::CannotSign(_))), "{refused:?}");
+    assert_eq!(walter.proposals.len(), cards_before, "nothing was put up");
 }

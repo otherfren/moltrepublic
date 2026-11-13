@@ -895,6 +895,17 @@ impl State {
                 return Err(MoltError::BadPayload("already enabled".into()));
             }
         }
+        // the proposer co-signs below: a seat that cannot sign must not put
+        // up a card that reads as its own vote while counting as nobody's
+        // (field report v0.0.11, point 2)
+        if self.is_chain_governed() && self.config.self_cosign {
+            if self.identity_sk.is_none() {
+                return Err(MoltError::CannotSign("no signing key on this seat".into()));
+            }
+            if self.chain.head.is_none() {
+                return Err(MoltError::CannotSign("no chain yet".into()));
+            }
+        }
         let me = self.member();
         let id = ProposalId(self.mint_proposal_id());
         let env = self.make_env(
@@ -1072,6 +1083,14 @@ impl State {
         };
         if let Some(r) = wallet_refused {
             return Err(MoltError::Wallet(self.wallet_consent_waits(proposal.0, r)));
+        }
+        // a vote this seat cannot sign is refused, never answered like a
+        // counted one - and before its note, or the reason would read as a
+        // vote that never left (field report v0.0.11, point 2)
+        if !late && self.is_chain_governed() {
+            if let Some(why) = self.sign_blocker(proposal.0) {
+                return Err(MoltError::CannotSign(why));
+            }
         }
         // A2: the reason goes in FIRST — a tipping signature must never
         // leave its reasoning behind the decision

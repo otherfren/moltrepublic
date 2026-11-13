@@ -805,6 +805,8 @@ fn a_vote_is_refused_while_the_peers_are_ahead() {
     let _guard = rt.enter();
     let b = Builder::new(&["petra", "walter", "dora"], 2);
     let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    // a real seat holds its key: a keyless vote is refused for that reason
+    walter.identity_sk = Some(b.key("walter").clone());
     walter.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 }), "petra");
     assert!(
         walter.cmd_approve(molt_core::ProposalId(7), None).is_ok(),

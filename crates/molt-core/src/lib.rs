@@ -8401,6 +8401,11 @@ pub enum MoltError {
     /// The chat log has no message with this id.
     #[error("unknown chat message {0}")]
     UnknownMessage(MessageId),
+    /// This seat cannot sign the vote it was asked to cast (no signing
+    /// key, no chain head, a base still pending): refused instead of
+    /// answered like a counted vote.
+    #[error("vote not signed: {0}")]
+    CannotSign(String),
     /// A topic thread that holds no message on this seat.
     #[error("unknown thread `{0}`")]
     UnknownThread(String),
