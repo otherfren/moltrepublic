@@ -604,6 +604,23 @@ impl State {
             next_proposal_id: self.next_id,
             chat_pruned: self.chat_pruned,
             chat_pruned_counts: self.chat_pruned_counts.clone(),
+            // the vote collection the covered `Approved` frames built: a
+            // snapshot that dropped it lost every open vote at each clean
+            // close (field report v0.0.11)
+            votes: self
+                .chain
+                .pending_sigs
+                .iter()
+                .flat_map(|(id, p)| {
+                    p.sigs.iter().map(move |a| molt_core::DumpedVote {
+                        id: *id,
+                        height: p.height,
+                        member: a.member.clone(),
+                        sig: a.sig.clone(),
+                    })
+                })
+                .collect(),
+            own_approvals: self.chain.own_approvals.iter().copied().collect(),
         }
     }
 
@@ -735,6 +752,24 @@ impl State {
             tracing::warn!(healed, "applied cards carried a supersede verdict - cleared");
         }
         self.next_id = dump.next_proposal_id.max(1);
+        // the votes the snapshot covers, rebuilt exactly like the replay's
+        // `Approved` arm: an own signature is genuine by construction (only
+        // the own decision register vouches for it), every other one waits
+        // for `reverify_all_pending` after the chain adoption
+        self.chain.own_approvals.extend(dump.own_approvals.iter().copied());
+        let me = self.member();
+        for v in dump.votes {
+            let mine = v.member == me && self.chain.own_approvals.contains(&v.id);
+            if mine && self.chain.adoption_pending {
+                self.note_replay_held(v.id, v.height);
+            }
+            self.collect_sig(v.id, v.height, &v.member, &v.sig, mine);
+            if mine {
+                if let Some(p) = self.chain.pending_sigs.get_mut(&v.id) {
+                    p.verified.insert(v.member.clone());
+                }
+            }
+        }
     }
 
     /// Drop all workspace state (close path). The next open starts clean.

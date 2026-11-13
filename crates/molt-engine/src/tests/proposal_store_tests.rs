@@ -55,6 +55,19 @@ fn vote_of(v: &molt_core::ProposalView, member: &str) -> VoteState {
 /// the proposer's own signature stopped counting toward m.
 #[test]
 fn a_reopen_keeps_the_proposer_and_every_vote() {
+    reopen_keeps_the_proposer_and_every_vote(false);
+}
+
+/// …and the same from a SNAPSHOT, which is what every clean close writes
+/// (field report v0.0.11: own votes lost at each moltd restart). The
+/// snapshot covers the `Approved` frames, so the tail replay never sees
+/// them - the dump has to carry the collected signatures itself.
+#[test]
+fn a_reopen_from_a_snapshot_keeps_every_vote() {
+    reopen_keeps_the_proposer_and_every_vote(true);
+}
+
+fn reopen_keeps_the_proposer_and_every_vote(with_snapshot: bool) {
     let b = Builder::new(&["petra", "walter", "dora"], 2);
     let (mut walter, _tmp, dir) = stored_chain_signer(&b, "walter", &["petra", "walter", "dora"]);
 
@@ -102,7 +115,7 @@ fn a_reopen_keeps_the_proposer_and_every_vote() {
     let live_foreign = card(&walter, 7);
     assert_eq!(live_foreign.approvals, 1, "the live card counts petra's signature");
 
-    let back = reopen_chain_signer(walter, &dir, &b, "walter", false);
+    let back = reopen_chain_signer(walter, &dir, &b, "walter", with_snapshot);
 
     let foreign = card(&back, 7);
     assert_eq!(foreign.by, "petra", "the foreign card keeps its proposer");

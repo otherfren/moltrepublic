@@ -3436,6 +3436,34 @@ pub struct EngineStateDump {
     /// including out-of-order arrivals (it is a total, never a position).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub chat_pruned_counts: BTreeMap<MemberId, u64>,
+    /// Every signature collected for a still-open proposal (chain
+    /// governance). The collection lives in RAM and the log replay rebuilds
+    /// it from the `Approved` frames - but a snapshot COVERS those frames,
+    /// and the tail replays only what came after: without this field every
+    /// open vote, own or foreign, vanished at each clean close (field
+    /// report v0.0.11, own votes lost at a restart). Additive; empty skips.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub votes: Vec<DumpedVote>,
+    /// The proposals THIS seat approved (the own decision register the
+    /// re-base re-signs from) - rebuilt by the replay from own-authored
+    /// `Approved` frames, so a snapshot must carry it for the same reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub own_approvals: Vec<u64>,
+}
+
+/// One collected approval signature of an open proposal, as a snapshot
+/// keeps it ([`EngineStateDump::votes`]): exactly the content of the
+/// `Approved` frame it came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DumpedVote {
+    /// The proposal.
+    pub id: u64,
+    /// The chain height the signature is bound to.
+    pub height: u64,
+    /// The signer.
+    pub member: MemberId,
+    /// The Ed25519 signature, lowercase hex.
+    pub sig: String,
 }
 
 impl EngineStateDump {

@@ -111,6 +111,14 @@ signature across a reopen (today: reload re-labels foreign proposals as
 own and forgets the votes). Test: reopen keeps `by`, `mine`, `approvals`
 and `votes` of an open foreign proposal and of an own one.
 
+*Addendum 2026-11-13:* B1 held only for a reopen WITHOUT a snapshot (a
+hard kill); its test reopened that way. Every clean close writes one, it
+covers the `Approved` frames, and the tail replay never saw them again -
+each open vote, own or foreign, was gone after a restart (field report
+v0.0.11). The votes and the own decision register now ride
+`EngineStateDump` (`votes`, `own_approvals`); the B1 test runs both ways,
+and `molt-engine/tests/vote_survives_restart.rs` covers it end to end.
+
 B2 A pure `create` patch onto a path that the base already carries is
 `superseded: "conflict"` at reload and at receive (R2's dead proposals).
 
