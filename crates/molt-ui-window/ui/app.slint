@@ -20,7 +20,7 @@
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, LogRun, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, LogRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
@@ -2613,15 +2613,26 @@ export component AppWindow inherits Window {
     // in-out: the settings tab index is a test seam (headless geometry
     // tests drive the backup table directly)
     in-out property <int> set-tab: 0;
-    // Settings > Error log: the newest log entries, as runs of one tint
-    in property <[LogRun]> log-runs;
+    // Settings > Error log: one page of entries as tinted rows, the same
+    // rows as one selectable text laid over them, and the page unwrapped
+    // (Copy). Rows are cut to `log-cols` in Rust so both layers break alike.
+    in property <[LogRow]> log-rows;
+    in property <string> log-plain;
     in property <string> log-path;
-    // the shown entries as text (Copy)
     in property <string> log-text;
+    // "201-400 / 1834"
+    in property <string> log-range;
+    in property <bool> log-older;
+    in property <bool> log-newer;
     // bumped per load: the view is rebuilt pinned to the newest line
     in property <int> log-gen;
-    in-out property <bool> log-all: false;
-    callback log-load(bool);
+    // 0 errors · 1 warnings · 2 info · 3 everything
+    in-out property <int> log-level: 1;
+    in-out property <string> log-query;
+    callback log-load(int);
+    callback log-page(int); // +1 older, -1 newer
+    callback log-filter(string);
+    callback log-cols(int);
     // the backup tab's local↔bucket mapping table (mirrored, built in Rust)
     in property <[BackupRow]> bk-rows;
     // S7: the fetched-sealed outcome (workspace id / honest failure), from
@@ -8048,6 +8059,8 @@ export component AppWindow inherits Window {
                     set-fl := Flickable {
                         width: 100%;
                         height: 100%;
+                        // the log's drag selects text; the wheel still scrolls
+                        interactive: root.set-tab != 10;
                         viewport-width: self.width;
                         viewport-height: max(set-body.preferred-height, self.height);
                         set-body := VerticalLayout {
@@ -9137,7 +9150,7 @@ export component AppWindow inherits Window {
                             spacing: 8px;
                             vertical-stretch: 1;
                             init => {
-                                root.log-load(root.log-all);
+                                root.log-load(root.log-level);
                             }
                             if root.log-path != "": Rectangle {
                                 height: log-path-text.preferred-height;
@@ -9158,29 +9171,26 @@ export component AppWindow inherits Window {
                             }
                             HorizontalLayout {
                                 spacing: 6px;
-                                AppButton {
-                                    label: Strings.log-filter-warn;
-                                    primary: !root.log-all;
+                                for f[i] in [Strings.log-filter-error, Strings.log-filter-warn, Strings.log-filter-info, Strings.log-filter-all]: AppButton {
+                                    label: f;
+                                    primary: root.log-level == i;
                                     clicked => {
-                                        root.log-all = false;
-                                        root.log-load(false);
+                                        root.log-level = i;
+                                        root.log-load(i);
                                     }
                                 }
-                                AppButton {
-                                    label: Strings.log-filter-all;
-                                    primary: root.log-all;
-                                    clicked => {
-                                        root.log-all = true;
-                                        root.log-load(true);
-                                    }
-                                }
-                                Rectangle {
+                                log-find := AppField {
                                     horizontal-stretch: 1;
+                                    placeholder: Strings.log-search;
+                                    text <=> root.log-query;
+                                    edited => {
+                                        root.log-filter(self.text);
+                                    }
                                 }
                                 AppButton {
                                     label: Strings.log-refresh;
                                     clicked => {
-                                        root.log-load(root.log-all);
+                                        root.log-load(root.log-level);
                                     }
                                 }
                                 AppButton {
@@ -9192,7 +9202,7 @@ export component AppWindow inherits Window {
                                     }
                                 }
                             }
-                            if root.log-runs.length == 0: Text {
+                            if root.log-rows.length == 0: Text {
                                 text: root.log-path == "" ? Strings.log-off : Strings.log-empty;
                                 color: Theme.faint;
                                 font-size: Theme.fs-cap;
@@ -9200,28 +9210,81 @@ export component AppWindow inherits Window {
                             log-view := Rectangle {
                                 vertical-stretch: 1;
                                 min-height: 100px;
+                                background: Theme.bg;
+                                border-radius: Theme.win95 ? 0px : 6px;
+                                border-width: Theme.border-w;
+                                border-color: Theme.line;
                                 clip: true;
+                                // one monospace cell: the columns a row may take
+                                log-cell := Text {
+                                    visible: false;
+                                    text: "0";
+                                    font-family: "monospace";
+                                    font-size: Theme.fs-cap;
+                                }
+                                property <int> cols: log-cell.preferred-width > 0
+                                    ? max(1, Math.floor((self.width - 28px) / log-cell.preferred-width))
+                                    : 0;
+                                init => {
+                                    root.log-cols(self.cols);
+                                }
+                                changed cols => {
+                                    root.log-cols(self.cols);
+                                }
+                                pure function tint(tone: int) -> color {
+                                    return tone == 1 ? Theme.faint
+                                        : tone == 2 ? Theme.bad
+                                        : tone == 3 ? Theme.warn
+                                        : tone == 4 ? Theme.good
+                                        : tone == 5 ? Theme.faint
+                                        : tone == 6 ? Theme.moved
+                                        : tone == 7 ? Theme.dim
+                                        : Theme.text;
+                                }
                                 // a fresh Flickable per load: its viewport-y
                                 // binding holds the newest line in view until
                                 // the first scroll replaces it
                                 for gen in [root.log-gen]: Rectangle {
                                     log-fl := Flickable {
+                                        // a drag selects text, it does not pan
+                                        interactive: false;
                                         viewport-width: self.width;
-                                        viewport-height: log-lines.preferred-height;
+                                        viewport-height: max(self.height, log-lines.preferred-height + 12px);
                                         viewport-y: min(0px, self.height - self.viewport-height);
                                         log-lines := VerticalLayout {
-                                            width: log-fl.width;
-                                            padding: 4px;
-                                            padding-right: 12px;
+                                            x: 8px;
+                                            y: 6px;
+                                            width: log-fl.width - 20px;
+                                            height: self.preferred-height;
                                             spacing: 0px;
                                             alignment: start;
-                                            for r in root.log-runs: Text {
-                                                text: r.text;
-                                                color: r.level == 2 ? Theme.bad : r.level == 1 ? Theme.warn : Theme.dim;
-                                                font-family: "monospace";
-                                                font-size: Theme.fs-cap;
-                                                wrap: char-wrap;
+                                            for r in root.log-rows: HorizontalLayout {
+                                                alignment: start;
+                                                for s in r.segs: Text {
+                                                    text: s.text;
+                                                    color: log-view.tint(s.tone);
+                                                    font-family: "monospace";
+                                                    font-size: Theme.fs-cap;
+                                                }
                                             }
+                                        }
+                                        // the same rows as one text, invisible
+                                        // but for its selection: drag, Ctrl+A,
+                                        // Ctrl+C like any text field
+                                        log-sel := TextInput {
+                                            x: 8px;
+                                            y: 6px;
+                                            width: log-fl.width - 20px;
+                                            height: log-lines.preferred-height;
+                                            text: root.log-plain;
+                                            read-only: true;
+                                            single-line: false;
+                                            wrap: no-wrap;
+                                            font-family: "monospace";
+                                            font-size: Theme.fs-cap;
+                                            color: transparent;
+                                            selection-foreground-color: transparent;
+                                            selection-background-color: Theme.accent.transparentize(0.65);
                                         }
                                     }
                                     ScrollHint {
@@ -9229,6 +9292,30 @@ export component AppWindow inherits Window {
                                         view-h: log-fl.height;
                                         content-h: log-fl.viewport-height;
                                         scroll-y: log-fl.viewport-y;
+                                    }
+                                }
+                            }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                alignment: end;
+                                Text {
+                                    text: root.log-range;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    vertical-alignment: center;
+                                }
+                                AppButton {
+                                    label: "‹";
+                                    enabled: root.log-older;
+                                    clicked => {
+                                        root.log-page(1);
+                                    }
+                                }
+                                AppButton {
+                                    label: "›";
+                                    enabled: root.log-newer;
+                                    clicked => {
+                                        root.log-page(-1);
                                     }
                                 }
                             }

@@ -67,6 +67,7 @@ mod images;
 mod kanban;
 mod kanban_views;
 mod labels;
+mod log_view;
 mod mirror;
 mod models;
 mod net_tor;

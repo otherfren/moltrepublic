@@ -2731,7 +2731,7 @@ pub fn tools() -> Vec<ToolDef> {
             schema: || json!({
                 "type": "object",
                 "properties": {
-                    "lines": { "type": "integer", "description": "entries wanted, newest (default 200, at most 500)" },
+                    "lines": { "type": "integer", "description": "entries wanted, newest (default 200, at most 5000)" },
                     "level": { "type": "string", "enum": ["warn", "all"], "description": "default \"warn\"" }
                 }
             }),

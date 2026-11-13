@@ -16,60 +16,78 @@ use crate::settings::{
     settings_draft_differs, stored_settings,
 };
 use crate::app::Ctx;
-use crate::{AppScreen, AppWindow, BackupRow, LogRun, Strings, Theme};
+use crate::log_view::{Level, LogView};
+use crate::{AppScreen, AppWindow, BackupRow, LogRow, LogSeg, Strings, Theme};
+use std::sync::{Arc, Mutex};
 
-/// The Error log tab's read: everything, or warnings and errors.
-pub(crate) fn log_request(all: bool) -> Command {
+/// The Error log tab's read for a level (0 errors .. 3 everything): the
+/// node filters to warnings and errors for the two narrow levels.
+pub(crate) fn log_request(level: i32) -> Command {
     Command::ReadLog {
         lines: molt_core::READ_LOG_MAX_LINES,
-        level: if all { LogFilter::All } else { LogFilter::Warn },
+        level: if level <= 1 { LogFilter::Warn } else { LogFilter::All },
     }
 }
 
-/// Consecutive entries of one tint as one text: a quiet log is a handful
-/// of elements, not one per line.
-pub(crate) fn log_runs(entries: &[LogEntry]) -> Vec<LogRun> {
-    let mut runs: Vec<(i32, String)> = Vec::new();
-    for e in entries {
-        let level = match e.level.as_str() {
-            "ERROR" => 2,
-            "WARN" => 1,
-            _ => 0,
-        };
-        match runs.last_mut() {
-            Some((l, text)) if *l == level => {
-                text.push('\n');
-                text.push_str(&e.text);
-            }
-            _ => runs.push((level, e.text.clone())),
-        }
+/// Push the current page; `pin` rebuilds the view on its newest line.
+pub(crate) fn render_log(ui: &AppWindow, view: &LogView, pin: bool) {
+    let page = view.page();
+    let rows: Vec<LogRow> = page
+        .rows
+        .iter()
+        .map(|r| LogRow {
+            segs: ModelRc::new(VecModel::from(
+                r.iter()
+                    .map(|(text, tone)| LogSeg { text: text.as_str().into(), tone: *tone as i32 })
+                    .collect::<Vec<_>>(),
+            )),
+        })
+        .collect();
+    ui.set_log_rows(ModelRc::new(VecModel::from(rows)));
+    ui.set_log_plain(page.plain.into());
+    ui.set_log_text(page.raw.into());
+    ui.set_log_range(if page.total == 0 {
+        String::new().into()
+    } else {
+        format!("{}-{} / {}", page.first, page.last, page.total).into()
+    });
+    ui.set_log_older(page.older);
+    ui.set_log_newer(page.newer);
+    if pin {
+        ui.set_log_gen(ui.get_log_gen().wrapping_add(1));
     }
-    runs.into_iter().map(|(level, text)| LogRun { level, text: text.into() }).collect()
 }
 
-/// Show a log read in the Error log tab, pinned to its newest line.
-pub(crate) fn apply_log(ui: &AppWindow, path: &str, entries: &[LogEntry]) {
-    let text = entries.iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n");
+/// Show a log read in the Error log tab: its newest page.
+pub(crate) fn apply_log(ui: &AppWindow, view: &mut LogView, path: &str, entries: &[LogEntry]) {
     ui.set_log_path(path.into());
-    ui.set_log_text(text.into());
-    ui.set_log_runs(ModelRc::new(VecModel::from(log_runs(entries))));
-    ui.set_log_gen(ui.get_log_gen().wrapping_add(1));
+    view.entries = entries.to_vec();
+    view.level = Level(ui.get_log_level());
+    view.query = ui.get_log_query().to_string();
+    view.page = 0;
+    render_log(ui, view, true);
 }
 
-pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
+/// The Error log tab's callbacks over one shared view.
+fn wire_log(ui: &AppWindow, ctx: &Ctx) {
+    let view = Arc::new(Mutex::new(LogView::default()));
     {
         let cx = ctx.clone();
-        ui.on_log_load(move |all| {
+        let view = view.clone();
+        ui.on_log_load(move |level| {
             let w = cx.wallet.clone();
             let weak = cx.weak.clone();
+            let view = view.clone();
             cx.rt.spawn(async move {
-                let outcome = w.execute(log_request(all)).await;
+                let outcome = w.execute(log_request(level)).await;
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
                     match outcome {
-                        // a slower answer to the other filter is dropped
-                        Ok(Reply::Log { path, lines }) if ui.get_log_all() == all => {
-                            apply_log(&ui, &path, &lines);
+                        // a slower answer to another level is dropped
+                        Ok(Reply::Log { path, lines }) if ui.get_log_level() == level => {
+                            if let Ok(mut v) = view.lock() {
+                                apply_log(&ui, &mut v, &path, &lines);
+                            }
                         }
                         Ok(_) => {}
                         Err(e) => ui.invoke_show_toast_error(error_toast(&ui, &e)),
@@ -78,6 +96,48 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             });
         });
     }
+    wire_log_view(ui, &view);
+}
+
+/// Paging, filtering and re-cutting: the half of the tab that needs no
+/// engine.
+pub(crate) fn wire_log_view(ui: &AppWindow, view: &Arc<Mutex<LogView>>) {
+    {
+        let weak = ui.as_weak();
+        let view = view.clone();
+        ui.on_log_page(move |delta| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Ok(mut v) = view.lock() else { return };
+            let last = v.pages() - 1;
+            v.page = v.page.saturating_add_signed(isize::try_from(delta).unwrap_or(0)).min(last);
+            render_log(&ui, &v, true);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let view = view.clone();
+        ui.on_log_filter(move |query| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Ok(mut v) = view.lock() else { return };
+            v.query = query.to_string();
+            v.page = 0;
+            render_log(&ui, &v, true);
+        });
+    }
+    {
+        let weak = ui.as_weak();
+        let view = view.clone();
+        ui.on_log_cols(move |cols| {
+            let Some(ui) = weak.upgrade() else { return };
+            let Ok(mut v) = view.lock() else { return };
+            v.cols = usize::try_from(cols).unwrap_or(0);
+            render_log(&ui, &v, false);
+        });
+    }
+}
+
+pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
+    wire_log(ui, ctx);
 
     {
         let cx = ctx.clone();

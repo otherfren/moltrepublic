@@ -1207,8 +1207,11 @@ lexicon! {
     set_tab_chain: "Workspace chain history", "Workspace-Chain-History";
     set_tab_agent: "Agent", "Agent";
     set_tab_log: "Error log", "Fehlerlog";
-    log_filter_warn: "Warnings and errors", "Warnungen und Fehler";
-    log_filter_all: "Everything", "Alles";
+    log_filter_error: "Errors", "Fehler";
+    log_filter_warn: "Warnings", "Warnungen";
+    log_filter_info: "Info", "Info";
+    log_filter_all: "All", "Alles";
+    log_search: "Filter", "Filtern";
     log_refresh: "Refresh", "Aktualisieren";
     log_copy: "Copy", "Kopieren";
     log_empty: "No entries", "Keine Einträge";

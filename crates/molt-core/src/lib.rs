@@ -4174,7 +4174,7 @@ pub enum ProposalFilter {
 }
 
 /// The most entries one [`Command::ReadLog`] answers.
-pub const READ_LOG_MAX_LINES: usize = 500;
+pub const READ_LOG_MAX_LINES: usize = 5000;
 
 fn default_read_log_lines() -> usize {
     200
