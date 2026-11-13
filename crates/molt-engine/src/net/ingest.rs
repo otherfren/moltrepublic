@@ -284,6 +284,13 @@ impl State {
             // chain governance gossip + block broadcast — only a chain-governed
             // workspace acts on it (the transport carries it; the chain decides)
             WorkspaceEvent::Proposed { id, surface, payload } if self.is_chain_governed() => {
+                tracing::info!(
+                    from = %from,
+                    id = id.0,
+                    surface = ?surface,
+                    op = payload.get("op").and_then(serde_json::Value::as_str).unwrap_or(""),
+                    "proposal received"
+                );
                 // defense in depth: the same two gates the local propose path
                 // applies — dropped, never recorded (convergence before
                 // enforcement, like every wire guard). Both verdicts are
@@ -304,6 +311,7 @@ impl State {
                 if surface == molt_core::Surface::Files {
                     if let Err(e) = crate::files_state::validate_files_payload(&payload) {
                         tracing::warn!(from = %from, error = %e, "dropping a malformed files proposal");
+                        self.note_dropped_proposal(&from, "files");
                         return Ok(Reply::Ack);
                     }
                 }

@@ -1986,7 +1986,18 @@ impl State {
             }
 
             // proposals.rs
-            Command::Propose { surface, payload } => self.cmd_propose(surface, payload),
+            Command::Propose { surface, payload } => {
+                let op = payload.get("op").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                let out = self.cmd_propose(surface, payload);
+                match &out {
+                    Ok(Reply::Proposed { id, .. }) => {
+                        tracing::info!(id = id.0, surface = ?surface, op = %op, "proposal sent");
+                    }
+                    Err(e) => tracing::warn!(surface = ?surface, op = %op, error = %e, "proposal refused"),
+                    Ok(_) => {}
+                }
+                out
+            }
             Command::Approve { proposal, note } => self.cmd_approve(proposal, note),
             Command::Decline { proposal, note } => self.cmd_decline(proposal, note),
             Command::Withdraw { proposal, note } => self.cmd_withdraw(proposal, note),

@@ -174,4 +174,12 @@ fn a_dropped_proposal_names_the_sender_and_the_one_reason() {
         proposal_dropped_copy(1, "petra:image"),
         "Vorschlag von petra verworfen - Bild nicht lesbar."
     );
+    assert_eq!(
+        proposal_dropped_copy(0, "petra:files"),
+        "File vote from petra dropped - see Settings > Error log."
+    );
+    assert_eq!(
+        proposal_dropped_copy(1, "petra:files"),
+        "Datei-Abstimmung von petra verworfen - siehe Einstellungen > Fehlerlog."
+    );
 }
