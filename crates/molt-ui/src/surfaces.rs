@@ -858,6 +858,8 @@ pub(crate) struct ProposalRowData {
     pub(crate) relay_changes: Vec<(i32, String)>,
     /// Per-member stance in roster order (0 open · 1 approved · 2 declined).
     pub(crate) votes: Vec<(String, i32)>,
+    /// Who proposed it ("" = unknown).
+    pub(crate) by: String,
     /// Who declined it ("" = not declined) + the human "when" label.
     pub(crate) declined_by: String,
     pub(crate) declined_when: String,
@@ -1697,6 +1699,7 @@ pub(crate) fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
                 .collect::<Vec<_>>(),
         )),
         declined_by: p.declined_by.clone().into(),
+        by: p.by.as_str().into(),
         declined_when: p.declined_when.clone().into(),
         decided_when: p.decided_when.clone().into(),
         my_vote: p.my_vote,
@@ -1885,6 +1888,7 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
             })
             .collect(),
         declined_by: p.declined_by.clone(),
+        by: p.by.clone(),
         declined_when: if p.declined_at > 0 {
             when_label(lang, p.declined_at)
         } else {

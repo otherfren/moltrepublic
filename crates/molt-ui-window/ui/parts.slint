@@ -1686,6 +1686,13 @@ export component ProposalCard inherits Rectangle {
                     root.view-patch();
                 }
             }
+            // who proposed it: the card heads its discussion, whose
+            // first post may be far above
+            if root.p.by != "": Text {
+                text: Strings.pc-by + " " + root.p.by;
+                color: Theme.dim;
+                font-size: Theme.fs-cap;
+            }
             Text {
                 text: "#\{root.p.id}";
                 color: Theme.faint;

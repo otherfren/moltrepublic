@@ -402,3 +402,26 @@ fn a_long_diff_line_wraps_inside_the_pane() {
     let narrow = check(&o);
     assert!(narrow > wide, "a narrower pane cuts more rows: {narrow} vs {wide}");
 }
+
+/// **A vote card names who proposed it** - in the list and as the
+/// header above its discussion, so nobody scrolls the talk back to its
+/// first post to learn the author (field report 2026-11-14).
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_vote_card_names_its_proposer() {
+    let o = Opened::new(|root| drop(workspace_on_disk(root, 2, &["walter", "mara"], "test")));
+    o.open_a_vote_and_its_discussion();
+    let card = o.ui.get_selected_decision();
+    assert!(card.id > 0, "the real card heads the pane");
+    assert!(!card.by.is_empty(), "the row carries the proposer");
+    o.ui.set_screen(AppScreen::Main);
+    o.ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    apply_strings(&o.ui, 0);
+    let _shown = show_headless(&o.ui);
+    let line = format!("by {}", card.by);
+
+    assert!(
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&o.ui, &line).next().is_some(),
+        "the card says {line:?}"
+    );
+}

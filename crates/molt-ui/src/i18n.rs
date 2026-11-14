@@ -1397,6 +1397,7 @@ lexicon! {
     mv_declined: "Declined proposals", "Abgelehnte Vorschläge";
     mv_empty_declined: "No declined proposals right now - this view empties on the chat retention rhythm.", "Gerade keine abgelehnten Vorschläge - diese Ansicht leert sich im Chat-Aufbewahrungsrhythmus.";
     pc_declined_by: "Declined by", "Abgelehnt von";
+    pc_by: "by", "von";
     mv_applied: "Applied", "Angewandt";
     mv_accepted: "Accepted changes", "Angenommene Änderungen";
     // the decided-votes table (Accepted/Declined overviews)
