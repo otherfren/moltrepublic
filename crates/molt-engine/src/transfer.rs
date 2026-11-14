@@ -941,6 +941,8 @@ pub(crate) fn spawn_file_fetch(
                         id,
                         transferred,
                         total,
+                        held: 0,
+                        of: 0,
                         generation: Some(scope),
                     },
                     reply,
@@ -1017,23 +1019,6 @@ pub(crate) fn spawn_send_refusal(
 /// Copy the node's OWN share to the destination (the sharer downloading
 /// its own file needs no network — but the same dest/collision/.part rules
 /// and the same completion commands apply, so the GUI flow is identical).
-/// How long a parked relay download waits for the sharer's `FileServed`
-/// before its watchdog fails it (the operator can then retry).
-const WANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-
-/// The parked download's watchdog: fires `NetFileWantedTimeout` after the
-/// window — the actor ignores it when the park has drained (fetch running).
-pub(crate) fn spawn_want_timeout(id: MessageId, scope: u64, cmd_tx: mpsc::Sender<Envelope>) {
-    tokio::spawn(async move {
-        tokio::time::sleep(WANT_TIMEOUT).await;
-        feed(
-            &cmd_tx,
-            Command::NetFileWantedTimeout { id, generation: Some(scope) },
-        )
-        .await;
-    });
-}
-
 /// Report a download verdict without any task work — the spawn-shaped
 /// failure path for "the plane cannot even start" (no relay, no ring).
 pub(crate) fn spawn_file_verdict(
@@ -1431,7 +1416,6 @@ struct FileSink<S: FetchJobStore> {
     held_count: u64,
     since_persist: u32,
     last_persist: tokio::time::Instant,
-    last_pct: u64,
 }
 
 impl<S: FetchJobStore> FileSink<S> {
@@ -1468,7 +1452,6 @@ impl<S: FetchJobStore> FileSink<S> {
             held_count,
             since_persist: 0,
             last_persist: tokio::time::Instant::now(),
-            last_pct: 0,
         })
     }
 
@@ -1514,22 +1497,21 @@ impl<S: FetchJobStore> molt_net::file_plane::PieceSink for FileSink<S> {
         if self.since_persist >= HELD_PERSIST_EVERY || self.last_persist.elapsed() >= HELD_PERSIST_AFTER {
             self.persist();
         }
-        let pct = (self.held_count * 100).checked_div(u64::from(self.job.count)).unwrap_or(100);
-        if pct > self.last_pct {
-            self.last_pct = pct;
-            let block = u64::try_from(molt_net::file_plane::PIECE_PAYLOAD_LEN).unwrap_or(0);
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            // lossy and ordered, like the queue plane's progress
-            let _ = self.cmd_tx.try_send(Envelope {
-                cmd: Command::NetFileProgress {
-                    id: self.id,
-                    transferred: self.held_count.saturating_mul(block).min(self.job.size),
-                    total: self.job.size,
-                    generation: Some(self.scope),
-                },
-                reply,
-            });
-        }
+        // every piece: at the trickle's pace the rate needs each sample
+        let block = u64::try_from(molt_net::file_plane::PIECE_PAYLOAD_LEN).unwrap_or(0);
+        let (reply, _rx) = tokio::sync::oneshot::channel();
+        // lossy and ordered, like the queue plane's progress
+        let _ = self.cmd_tx.try_send(Envelope {
+            cmd: Command::NetFileProgress {
+                id: self.id,
+                transferred: self.held_count.saturating_mul(block).min(self.job.size),
+                total: self.job.size,
+                held: u32::try_from(self.held_count).unwrap_or(u32::MAX),
+                of: self.job.count,
+                generation: Some(self.scope),
+            },
+            reply,
+        });
     }
 }
 
@@ -1549,8 +1531,10 @@ pub(crate) fn spawn_nostr_fetch_v2<S: FetchJobStore>(
     store: S,
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
 ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
+        let mut cancelled = false;
         let series = job.series.clone();
         let result: Result<String, String> = async {
             let key = <[u8; 32]>::try_from(job.key.as_slice())
@@ -1596,17 +1580,25 @@ pub(crate) fn spawn_nostr_fetch_v2<S: FetchJobStore>(
                     ceiling: None,
                     on_quiet: Some(&mut on_quiet),
                 };
-                let manifest = molt_net::file_plane::fetch_series_v2_with(
+                let fetch = molt_net::file_plane::fetch_series_v2_with(
                     &channel,
                     &key,
                     job.started_at,
                     &expect,
                     &mut sink,
                     opts,
-                )
-                .await
-                .map_err(|e| format!("fetching the piece series: {e}"))?;
+                );
+                // a cancel drops the fetch here, so the sink's last save
+                // queues BEFORE the job's removal below
+                let manifest = tokio::select! {
+                    r = fetch => r.map_err(|e| format!("fetching the piece series: {e}"))?,
+                    Ok(_) = cancel.wait_for(|c| *c) => {
+                        cancelled = true;
+                        return Err(CANCELLED.to_string());
+                    }
+                };
                 drop(sink);
+                feed(&cmd_tx, Command::NetFileVerifying { id, generation: Some(scope) }).await;
                 let checksum = job.checksum.clone();
                 let landing_for_task = landing.clone();
                 // the size is the top record's, verified by root: whatever
@@ -1628,6 +1620,9 @@ pub(crate) fn spawn_nostr_fetch_v2<S: FetchJobStore>(
         }
         .await;
         store.remove_job(&series);
+        if cancelled {
+            return; // the actor already shows it; a retry may be running
+        }
         let cmd = match result {
             Ok(path) => Command::NetFileDone { id, path, generation: Some(scope) },
             Err(reason) => Command::NetFileFailed { id, reason, generation: Some(scope) },
@@ -1636,6 +1631,36 @@ pub(crate) fn spawn_nostr_fetch_v2<S: FetchJobStore>(
     })
     .abort_handle()
 }
+
+/// The reason a cancelled fetch ends with (never reported).
+const CANCELLED: &str = "cancelled";
+
+/// The stable key of a failure reason (`DownloadView::code`).
+pub(crate) fn failure_code(reason: &str) -> &'static str {
+    let r = reason.to_lowercase();
+    if r.contains("checksum") {
+        "checksum"
+    } else if r.contains("changed") {
+        "changed"
+    } else if r.contains("expired") {
+        "expired"
+    } else if r.contains("relay") {
+        "no_relay"
+    } else if r.starts_with("creating")
+        || r.starts_with("cutting")
+        || r.starts_with("reading the landed")
+        || r.starts_with("moving into place")
+        || r.starts_with("landing")
+        || r.contains("writing")
+    {
+        "write"
+    } else if r.contains("removed") || r.contains("deleted") || r.contains("unavailable") {
+        "gone"
+    } else {
+        "transfer"
+    }
+}
+
 
 /// **The folded wiki base's fetch** (K6). Unlike a share it lands in
 /// MEMORY: the engine holds the ratified tree anyway, and a `.part` file

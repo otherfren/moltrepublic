@@ -388,6 +388,7 @@ impl State {
                 h.abort();
             }
             self.files.mirror_progress.remove(&id);
+            self.release_mirror_rider(id);
         }
         self.files.mirror.jobs.remove(series);
         self.files.mirror_quota_noted = false;
@@ -405,10 +406,37 @@ impl State {
     /// The running fetch verified more pieces.
     pub(crate) fn cmd_net_mirror_progress(&mut self, id: MessageId, held: u32, bytes: u64) -> Result<Reply, MoltError> {
         self.files.mirror_progress.insert(id, held);
+        let mut of = 0;
         if let Some(job) = self.files.mirror.jobs.get_mut(&id.to_string()) {
             job.bytes = bytes;
+            of = job.count;
+        }
+        // a download riding this mirror shows its progress
+        if self.files.await_mirror.contains_key(&id) && of > 0 {
+            let size = self.files.downloads.get(&id).map_or(0, |d| d.size);
+            let block = u64::try_from(molt_net::file_plane::PIECE_PAYLOAD_LEN).unwrap_or(0);
+            let plain = u64::from(held).saturating_mul(block).min(size);
+            self.note_download_progress(id, plain, size, held, of);
         }
         Ok(Reply::Ack)
+    }
+
+    /// The mirror a download rode ended: assemble from it, or fetch on
+    /// the relay plane after all.
+    fn release_mirror_rider(&mut self, id: MessageId) {
+        let Some((target, dest)) = self.files.await_mirror.remove(&id) else {
+            return;
+        };
+        if !self.download_running(&id) {
+            return;
+        }
+        match (self.mirrored_byte_source(&id), self.cmd_tx.upgrade()) {
+            (Some(source), Some(cmd_tx)) => {
+                self.set_download_phase(id, molt_core::TransferPhase::Verifying);
+                crate::transfer::spawn_mirror_assembly(source, id, target, dest, self.net_scope, cmd_tx);
+            }
+            _ => self.nostr_download(id, target, dest),
+        }
     }
 
     /// The fetch ended: complete (say so to the members) or failed (gone).
@@ -430,6 +458,7 @@ impl State {
             let now = crate::now_secs();
             self.files.mirror_status_sent = 0; // a completion is always news
             self.note_mirror_holds_changed(now);
+            self.release_mirror_rider(id);
         } else {
             tracing::warn!(%id, reason = %reason, "mirror: fetch failed");
             self.files.mirror.jobs.remove(&series);
@@ -437,6 +466,7 @@ impl State {
             self.files
                 .mirror_failed
                 .insert(id, crate::now_secs().saturating_add(FAIL_BACKOFF_SECS));
+            self.release_mirror_rider(id);
         }
         Ok(Reply::Ack)
     }
@@ -447,13 +477,53 @@ impl State {
             .iter()
             .map(|h| (h.id.to_string(), h.held, h.of))
             .collect();
+        let serving = self.own_serving();
         let mut sent = true;
-        for page in MirrorStatusFrame::pages(self.member(), &wire, now) {
+        for (i, mut page) in MirrorStatusFrame::pages(self.member(), &wire, now).into_iter().enumerate() {
+            if i == 0 {
+                page.serving.clone_from(&serving);
+            }
             sent &= self.publish_mirror_frame(page.to_frame());
         }
         if sent {
             self.files.mirror_status_sent = now;
             self.files.mirror_status_last = holds;
+            self.files.serving_sent = serving;
+        }
+    }
+
+    /// The share series this seat publishes right now, for the status.
+    fn own_serving(&self) -> Vec<(String, u32, u32, String)> {
+        let Some(group) = self.group_net.as_ref() else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, u32, u32, String)> = group
+            .trickle
+            .status()
+            .into_iter()
+            .filter(|(_, v)| v.published < v.of)
+            .map(|(series, v)| (series, v.published, v.of, v.gate))
+            .collect();
+        out.sort();
+        out.truncate(molt_net::mirror_gossip::MIRROR_STATUS_MAX_SERVING);
+        out
+    }
+
+    /// `read_uploads`' `serving`: this seat publishing the share now.
+    pub(crate) fn serving_view(&self, id: &MessageId) -> Option<molt_core::ServeView> {
+        let v = self.group_net.as_ref()?.trickle.status().remove(&id.to_string())?;
+        (v.published < v.of).then_some(v)
+    }
+
+    /// A member's status named what it publishes: that replaces what it
+    /// said before (display only - a forged report misleads a bar).
+    pub(crate) fn note_remote_serving(&mut self, from: &MemberId, serving: Vec<(MessageId, molt_core::ServeView)>) {
+        if *from == self.member() || !self.roster().contains(from) {
+            return;
+        }
+        self.files.serve_remote.retain(|_, (by, _)| by != from);
+        for (id, view) in serving {
+            self.files.serve_remote.insert(id, (from.clone(), view));
         }
     }
 
@@ -466,7 +536,8 @@ impl State {
         }
         let holds = self.own_mirror_holds();
         let since = now.saturating_sub(self.files.mirror_status_sent);
-        let changed = holds != self.files.mirror_status_last;
+        // serving progress: at most once a minute, like a holds change
+        let changed = holds != self.files.mirror_status_last || self.own_serving() != self.files.serving_sent;
         if (changed && since >= STATUS_MIN_SECS) || (!holds.is_empty() && since >= STATUS_REPEAT_SECS) {
             self.send_mirror_status(now);
         }

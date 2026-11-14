@@ -914,6 +914,11 @@ impl State {
         self.files.share_paths.clear();
         self.files.share_stamps.clear();
         self.files.downloads.clear();
+        self.files.dl_samples.clear();
+        self.files.dl_cancel.clear();
+        self.files.serve_remote.clear();
+        self.files.serving_sent.clear();
+        self.files.await_mirror.clear();
         self.applied.clear();
         self.bump_applied_epoch();
         self.wiki_pending.clear();

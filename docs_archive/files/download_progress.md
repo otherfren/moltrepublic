@@ -1,7 +1,8 @@
 # Download progress: every file download says where it stands
 
-**Status: PLAN, decided 2026-11-14 (§7: every recommendation taken, Q3
-turned to yes) - in build.** Field report
+**Status: EXECUTED 2026-11-14 (§7: every recommendation taken, Q3
+turned to yes). §4 is the shipping behaviour; §8 records where the build
+differs from the plan.** Field report
 (2026-11-14): a member could not download a temporary share; the
 republic runs Tor + Nostr, so transfers take long and the operator sees
 nothing but "0 %" or a bare warning mark.
@@ -71,8 +72,8 @@ decision 2026-11-12: no deadlines, retry instead of abort).
 
 | phase | meaning | ends by |
 |---|---|---|
-| `waiting` | `FileWanted` sent, no `FileServed` yet | `FileServed` → `fetching`; cancel |
-| `fetching` | subscribed, pieces arriving or awaited | all pieces → `verifying`; cancel |
+| `waiting` | `FileWanted` sent, no `FileServed` yet | `FileServed` → `transferring`; cancel |
+| `transferring` | subscribed, pieces arriving or awaited | all pieces → `verifying`; cancel |
 | `verifying` | whole file hashed against the share checksum | `done` / `failed` |
 | `done` | landed | - |
 | `failed` | a fault the operator must act on (§4.4) | retry |
@@ -89,7 +90,7 @@ decision 2026-11-12: no deadlines, retry instead of abort).
 ### 4.2 The view (additive on `DownloadView`)
 
 ```
-phase      waiting | fetching | verifying | done | failed | cancelled
+phase      requested | waiting | transferring | verifying | done | failed | cancelled
 percent    0..=100 (verified data pieces / count)
 held, of   verified data pieces, data piece count
 bytes      verified plaintext bytes; size = the share's byte length
@@ -104,7 +105,7 @@ code       stable error key (failed only, §4.4)
 ```
 
 `wait` is derived on the actor: `waiting` + sharer offline in presence →
-`sharer_offline`; `waiting` + online → `sharer`; `fetching` with no
+`sharer_offline`; `waiting` + online → `sharer`; `transferring` with no
 piece for > 2 min → `relays` before the first `PieceWanted`, `pieces`
 after.
 
@@ -164,7 +165,7 @@ Temporary and Persistent tables, the status cell (same component in
 both, and the wiki file-ref chip uses the same words):
 
 - `waiting`: "Waiting for sharer" / "Sharer offline" (dim), a Cancel x.
-- `fetching`: a bar `held/of`, label "34 % - 1.2/3.5 MB - ~12 min"; the
+- `transferring`: a bar `held/of`, label "34 % - 1.2/3.5 MB - ~12 min"; the
   ETA part only with a rate. Tooltip: pieces, rate, last piece ago, last
   ask ago, what it waits on. Cancel x.
 - `verifying`: "Verifying".
@@ -242,3 +243,29 @@ bitmap would be the same thing - see Q6).
   when the relays went quiet past the deadline.
 - **Q6** Cancel keeps the `.part` and bitmap for a later retry, or
   wipes them? Recommendation: wipe - one clear meaning of cancel.
+
+## 8. As built
+
+- The phase word stays `transferring` (older MCP readers know it), not
+  the plan's `fetching`; `requested` remains the instant before the
+  first transition.
+- The serving report rides the mirror STATUS frame (`serving`, page 0,
+  additive) instead of a frame of its own: the status already goes out
+  at most once a minute on change, and an older build ignores the
+  field. `MIRROR_STATUS_MAX_SERVING` = 64, a gate word at most 16 bytes.
+- `UploadView.download` is boxed (`Reply` size).
+- GUI: the download column is 150 px; the cell shows the word, a bar
+  for this download, a second for the sharer's report, a cancel `×`
+  while running and Retry after a failure; the tooltip explains both
+  bars. The sharer's own row says "Sending n %" with one bar.
+- Keystones: `molt-engine/tests/download_progress.rs` (waiting across an
+  offline sharer and a restart; cancel removes `.part` and job, retry
+  lands, the sharer's row serves), `src/tests/download_tests.rs` (view,
+  cancel, wait, serving report, the stamp trust, failure codes),
+  `molt-ui/src/download_status.rs` and `tests/gui/files.rs` (the cell).
+- Not covered by a test: a download riding a running mirror job, and a
+  whole mirror re-seeding for an offline sharer (needs three seats and
+  presence aging; the election is the `PieceWanted` one, already
+  covered).
+- Cancel during `verifying` cannot stop the hash and rename: the file
+  may land while the row reads cancelled.

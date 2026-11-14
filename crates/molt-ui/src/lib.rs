@@ -62,6 +62,7 @@ mod alerts;
 mod app;
 mod channels;
 mod chat_log;
+mod download_status;
 mod i18n;
 mod images;
 mod kanban;

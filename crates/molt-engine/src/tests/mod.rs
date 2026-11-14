@@ -8,6 +8,7 @@ pub(crate) mod support;
 pub(crate) use support::{plain_state, reopen_chain_signer, stored_chain_signer, tiny_bmp_header};
 
 mod chat_tests;
+mod download_tests;
 mod files_tests;
 mod founding_tests;
 mod governance_tests;

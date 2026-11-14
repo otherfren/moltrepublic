@@ -4584,7 +4584,7 @@ impl State {
                 // the sharer's log-anchored sha256 ("" = legacy share,
                 // honestly unknown) — what a download must reproduce
                 checksum: ident.checksum,
-                download: self.files.downloads.get(&id).cloned(),
+                download: self.download_view(&id, &ident.by).map(Box::new),
                 // §5.5 + D4: ONE derived word, in the precedence
                 // changed > gone > mirrored > relay-held > sharer-only
                 // ("gone" is nowhere, so it cannot outrank a holder)
@@ -4608,6 +4608,7 @@ impl State {
                 mirror_of: self.mirror_held_of(&id, mine, pieces).1,
                 local: String::new(),
                 vote: votes.get(&id.to_string()).cloned(),
+                serving: self.serving_view(&id),
             };
             u.local = crate::upload_refs::local_word(&self.local_copy_of(&u)).to_string();
             u
@@ -5005,6 +5006,7 @@ mod upload_ref_state_tests {
             mirrors: 0,
             mirror_held: 0,
             mirror_of: 0,
+            serving: None,
             vote: None,
         }
     }

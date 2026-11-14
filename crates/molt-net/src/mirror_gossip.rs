@@ -37,6 +37,9 @@ pub const MIRROR_STATUS_MAX_HOLDS: usize = 500;
 /// sent; accepted so that such a peer keeps reading as a holder.
 pub const MIRROR_STATUS_LEGACY_MAX_HOLDS: usize = 4_096;
 
+/// Series a status may report as being published.
+pub const MIRROR_STATUS_MAX_SERVING: usize = 64;
+
 /// Pages per generation (32 000 series): a bound before anything
 /// accumulates.
 pub const MIRROR_STATUS_MAX_PAGES: u16 = 64;
@@ -141,6 +144,10 @@ pub struct MirrorStatusFrame {
     /// The generation's page count.
     #[serde(default = "one_page")]
     pub pages: u16,
+    /// Page 0 only: the series `by` publishes right now, `(share id hex,
+    /// published, of, gate)` (`docs_archive/files/download_progress.md` §4.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serving: Vec<(String, u32, u32, String)>,
 }
 
 fn one_page() -> u16 {
@@ -168,6 +175,7 @@ impl MirrorStatusFrame {
                 gen,
                 page: u16::try_from(page).unwrap_or(u16::MAX),
                 pages,
+                serving: Vec::new(),
             })
             .collect()
     }
@@ -189,6 +197,8 @@ impl MirrorStatusFrame {
         let most = if me.pages == 1 { MIRROR_STATUS_LEGACY_MAX_HOLDS } else { MIRROR_STATUS_MAX_HOLDS };
         if me.holds.len() > most
             || me.holds.iter().any(|(_, held, of)| held > of)
+            || me.serving.len() > MIRROR_STATUS_MAX_SERVING
+            || me.serving.iter().any(|(_, done, of, gate)| done > of || gate.len() > 16)
             || me.pages == 0
             || me.pages > MIRROR_STATUS_MAX_PAGES
             || me.page >= me.pages
@@ -257,6 +267,7 @@ mod tests {
             gen: 7,
             page: 0,
             pages: 1,
+            serving: vec![("aa03".into(), 2, 9, "daily".into())],
         };
         let who = MirrorWhoFrame { v: MIRROR_V, by: "petra".into() };
         assert_eq!(MirrorDeclFrame::from_frame(&decl.to_frame()).expect("decl"), decl);
@@ -281,6 +292,13 @@ mod tests {
         assert_eq!((early.gen, early.page, early.pages), (0, 0, 1));
         let bad_page = MirrorStatusFrame { page: 1, pages: 1, ..status.clone() };
         assert_eq!(MirrorStatusFrame::from_frame(&bad_page.to_frame()), Err(MirrorFrameError::Malformed));
+        // the serving list: a frame without it reads empty, a report
+        // past its count or with a long gate word is refused
+        assert!(early.serving.is_empty());
+        let past = MirrorStatusFrame { serving: vec![("aa".into(), 10, 9, String::new())], ..status.clone() };
+        assert_eq!(MirrorStatusFrame::from_frame(&past.to_frame()), Err(MirrorFrameError::Malformed));
+        let wordy = MirrorStatusFrame { serving: vec![("aa".into(), 1, 9, "x".repeat(17))], ..status.clone() };
+        assert_eq!(MirrorStatusFrame::from_frame(&wordy.to_frame()), Err(MirrorFrameError::Malformed));
     }
 
     /// A long hold list pages under the relay's event budget; each page

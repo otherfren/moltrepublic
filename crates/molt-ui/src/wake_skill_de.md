@@ -230,7 +230,7 @@ DENY_TOOLS=(propose withdraw wiki_edit quests_propose propose_checkpoint poke
             wallet_init wallet_consent wallet_retry wallet_acknowledge_loss
             patch_settings save_settings set_node_posture reveal_seed export_workspace
             open_workspace close_workspace delete_workspace read_session
-            share_file remove_file download_file delete_chat
+            share_file remove_file download_file cancel_download delete_chat
             set_mirror set_mirror_dir read_mirror read_chain read_uploads resolve_upload
             read_ui_state ui_action navigate select_surface select_view
             set_language set_theme set_fonts set_read_receipts

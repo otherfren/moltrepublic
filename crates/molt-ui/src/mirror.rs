@@ -1468,6 +1468,9 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         mirrors: u.mirrors,
         mirror_held: u.mirror_held,
         mirror_of: u.mirror_of,
+        dl_own: u.dl_own,
+        dl_sharer: u.dl_sharer,
+        status_tip: u.status_tip.as_str().into(),
     };
     // the two Shared Files tables (the gather split them on the vote): each
     // pages on its own, 15 rows a page like every outcome list

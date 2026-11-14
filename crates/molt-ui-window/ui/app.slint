@@ -898,6 +898,7 @@ component UploadsTable inherits Rectangle {
     in property <string> node-member;
     callback sort(string);
     callback download(string, string);
+    callback cancel-download(string);
     callback persist(string);
     callback unpersist(string);
     callback delete(string);
@@ -979,7 +980,7 @@ component UploadsTable inherits Rectangle {
                     active: root.sort-column == "download";
                     desc: !root.sort-ascending;
                     align: center;
-                    width: 110px * Theme.ui-scale;
+                    width: 150px * Theme.ui-scale;
                     clicked => { root.sort("download"); }
                 }
                 if !root.persistent: SortHeader {
@@ -1111,22 +1112,73 @@ component UploadsTable inherits Rectangle {
                             }
                         }
                     }
-                    // user-to-user transfer: the button needs the sharer
-                    // reachable — offline shows the hint instead
+                    // the download cell: the status word with two thin bars
+                    // (this download, the sharer sending), the tooltip says
+                    // which is which; offline shows the hint instead
                     HorizontalLayout {
-                        width: 110px * Theme.ui-scale;
+                        width: 150px * Theme.ui-scale;
                         alignment: center;
                         spacing: 6px;
-                        // live download status: the percent while moving, a
-                        // check/warn mark after
-                        if u.status != "": Text {
-                            text: u.status;
-                            color: u.status-kind == 3 ? Theme.bad
-                                : u.status-kind == 2 ? Theme.accent
-                                : Theme.dim;
-                            font-size: Theme.fs-cap;
-                            vertical-alignment: center;
-                            horizontal-alignment: center;
+                        if u.status != "": ou-st := Rectangle {
+                            horizontal-stretch: 1;
+                            min-width: 60px * Theme.ui-scale;
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: 2px;
+                                Text {
+                                    text: u.status;
+                                    color: u.status-kind == 3 ? Theme.bad
+                                        : u.status-kind == 2 ? Theme.accent
+                                        : Theme.dim;
+                                    font-size: Theme.fs-cap;
+                                    horizontal-alignment: center;
+                                    overflow: elide;
+                                }
+                                if u.dl-own >= 0: ou-bar-own := Rectangle {
+                                    height: 3px;
+                                    border-radius: 1.5px;
+                                    background: Theme.line;
+                                    Rectangle {
+                                        x: 0;
+                                        width: parent.width * clamp(u.dl-own, 0, 1);
+                                        border-radius: 1.5px;
+                                        background: Theme.accent;
+                                    }
+                                }
+                                if u.dl-sharer >= 0: ou-bar-sharer := Rectangle {
+                                    height: 3px;
+                                    border-radius: 1.5px;
+                                    background: Theme.line;
+                                    Rectangle {
+                                        x: 0;
+                                        width: parent.width * clamp(u.dl-sharer, 0, 1);
+                                        border-radius: 1.5px;
+                                        background: Theme.dim;
+                                    }
+                                }
+                            }
+                            ou-st-hover := TouchArea {
+                                property <int> tip-gen;
+                                changed has-hover => {
+                                    if (self.has-hover && u.status-tip != "") {
+                                        self.tip-gen = HintTip.show(u.status-tip,
+                                            parent.absolute-position.x,
+                                            parent.absolute-position.y + parent.height + 4px);
+                                    } else {
+                                        HintTip.hide(self.tip-gen);
+                                    }
+                                }
+                            }
+                        }
+                        if u.status-kind == 1: ou-cancel := AppButton {
+                            height: 24px * Theme.ui-scale;
+                            pad: 6px;
+                            y: (parent.height - self.height) / 2;
+                            label: "\u{00d7}";
+                            tooltip: Strings.ou-cancel;
+                            clicked => {
+                                root.cancel-download(u.id);
+                            }
                         }
                         // §5.5: a relay-held or mirrored series downloads
                         // WITHOUT a live sharer — the button follows the
@@ -1138,7 +1190,7 @@ component UploadsTable inherits Rectangle {
                             height: 28px * Theme.ui-scale;
                             pad: 10px;
                             y: (parent.height - self.height) / 2;
-                            label: Strings.ou-download;
+                            label: u.status-kind == 3 ? Strings.ou-retry : Strings.ou-download;
                             enabled: u.available && u.id != "";
                             clicked => {
                                 root.download(u.id, u.name);
@@ -1606,6 +1658,7 @@ export component AppWindow inherits Window {
     callback share-pick();
     // the shared file's id and its name (the save dialog's suggestion)
     callback download-file(string, string);
+    callback cancel-download-file(string);
     callback remove-file(string);
     // toggle the local member's emoji reaction on a chat message, by its
     // stable id (ReactChat)
@@ -7163,6 +7216,7 @@ export component AppWindow inherits Window {
                                 node-member: root.node-member;
                                 sort(col) => { root.sort-uploads(col); }
                                 download(id, name) => { root.download-file(id, name); }
+                                cancel-download(id) => { root.cancel-download-file(id); }
                                 persist(id) => { root.persist-upload(id); }
                                 unpersist(id) => { root.unpersist-upload(id); }
                                 delete(id) => { root.delete-upload(id); }
@@ -7262,6 +7316,7 @@ export component AppWindow inherits Window {
                                 node-member: root.node-member;
                                 sort(col) => { root.sort-uploads(col); }
                                 download(id, name) => { root.download-file(id, name); }
+                                cancel-download(id) => { root.cancel-download-file(id); }
                                 persist(id) => { root.persist-upload(id); }
                                 unpersist(id) => { root.unpersist-upload(id); }
                                 delete(id) => { root.delete-upload(id); }
@@ -11654,7 +11709,8 @@ export component AppWindow inherits Window {
         x: max(4px, min(HintTip.ax, root.width - self.width - 4px));
         y: HintTip.ay;
         width: hint-tt.preferred-width + 16px;
-        height: 23px;
+        // a multi-line tip (the download cell's) grows downwards
+        height: max(23px, hint-tt.preferred-height + 8px);
         background: Theme.text;
         border-radius: 5px;
         hint-tt := Text {

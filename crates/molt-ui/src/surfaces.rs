@@ -327,6 +327,10 @@ pub(crate) struct UploadRowData {
     /// This seat's verified pieces and the series' piece count.
     pub(crate) mirror_held: i32,
     pub(crate) mirror_of: i32,
+    /// The status cell's two bars (< 0 = none) and its tooltip.
+    pub(crate) dl_own: f32,
+    pub(crate) dl_sharer: f32,
+    pub(crate) status_tip: String,
 }
 
 /// One chat-channel sidebar row (plain, `Send` twin of the Slint
@@ -1017,7 +1021,9 @@ pub(crate) async fn gather_surfaces(
     let uploads: Vec<UploadRowData> = match wallet.execute(Command::ReadUploads).await {
         Ok(Reply::Uploads { uploads: rows }) => rows
             .into_iter()
-            .map(|u| UploadRowData {
+            .map(|u| {
+                let cell = crate::download_status::status_cell(lang, u.download.as_deref(), u.serving.as_ref(), upload_now);
+                UploadRowData {
                 persistent: u.persistent,
                 vote: String::new(),
                 delete_vote: String::new(),
@@ -1043,24 +1049,12 @@ pub(crate) async fn gather_surfaces(
                 expires_ts: u.expires_ts,
                 availability: u.availability,
                 checksum_full: u.checksum,
-                status: match u.download.as_ref().map(|d| d.phase.as_str()) {
-                    Some("requested") => "0 %".to_string(),
-                    Some("transferring") => u
-                        .download
-                        .as_ref()
-                        .map(|d| format!("{} %", d.percent))
-                        .unwrap_or_default(),
-                    Some("done") => "\u{2713}".to_string(),
-                    Some("failed") => "\u{26a0}".to_string(),
-                    _ => String::new(),
-                },
-                status_kind: match u.download.as_ref().map(|d| d.phase.as_str()) {
-                    Some("requested" | "transferring") => 1,
-                    Some("done") => 2,
-                    Some("failed") => 3,
-                    _ => 0,
-                },
-            })
+                status: cell.label,
+                status_kind: cell.kind,
+                dl_own: cell.own,
+                dl_sharer: cell.sharer,
+                status_tip: cell.tip,
+            }})
             .collect(),
         _ => Vec::new(),
     };

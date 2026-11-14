@@ -72,6 +72,16 @@ pub(crate) fn decision_summary_id(republic_id: &str, proposal: u64, declined: bo
     MessageId(id)
 }
 
+/// Progress samples the rate averages over.
+const RATE_SAMPLES: usize = 10;
+/// A transfer this long without a piece says what it waits on.
+const QUIET_WAIT_SECS: u64 = 120;
+
+/// `held` of `of` as 0..=100.
+pub(crate) fn percent_of(held: u32, of: u32) -> u8 {
+    u8::try_from((u64::from(held) * 100).checked_div(u64::from(of)).unwrap_or(0)).unwrap_or(100)
+}
+
 impl State {
     /// Post as the local member.
     pub(crate) fn cmd_chat(
@@ -462,9 +472,7 @@ impl State {
                 },
             )
         };
-        if self.files.downloads.get(&id).is_some_and(|d| {
-            d.phase == "requested" || d.phase == "transferring"
-        }) {
+        if self.download_running(&id) {
             return Err(MoltError::BadPayload(
                 "this share is already downloading".into(),
             ));
@@ -483,9 +491,29 @@ impl State {
             default_dir: self.session.settings.download_dir.clone(),
         };
         let me = self.member();
+        let via = if mirrored.is_some() {
+            "mirror"
+        } else if from == me {
+            "local"
+        } else {
+            "relay"
+        };
+        tracing::info!(%id, size = target.size, pieces = target.pieces, via, "download start");
+        self.begin_download(id, target.size);
         if let Some(source) = mirrored {
             crate::transfer::spawn_mirror_assembly(source, id, target, dest, self.net_scope, cmd_tx);
-            self.set_download_phase(id, molt_core::TransferPhase::Requested);
+            return Ok(Reply::Ack);
+        }
+        // this seat's own mirror job already pulls the series: ride it
+        // instead of a second subscription (`download_progress.md` §4.5)
+        if from != me && self.files.mirror_fetches.contains_key(&id) {
+            let (held, of) = self.mirror_held_of(&id, false, target.pieces);
+            self.files.await_mirror.insert(id, (target, dest));
+            self.set_download_phase(id, molt_core::TransferPhase::Progress {
+                percent: percent_of(held, of),
+                held,
+                of,
+            });
             return Ok(Reply::Ack);
         }
         if from == me {
@@ -531,8 +559,123 @@ impl State {
                 cmd_tx,
             );
         }
-        self.set_download_phase(id, molt_core::TransferPhase::Requested);
         Ok(Reply::Ack)
+    }
+
+    /// Whether a download of `id` is under way (any phase before an end).
+    pub(crate) fn download_running(&self, id: &MessageId) -> bool {
+        self.files
+            .downloads
+            .get(id)
+            .is_some_and(|d| matches!(d.phase.as_str(), "requested" | "waiting" | "transferring" | "verifying"))
+    }
+
+    /// A fresh download view: `requested`, stamped now.
+    fn begin_download(&mut self, id: MessageId, size: u64) {
+        self.files.dl_samples.remove(&id);
+        self.files.downloads.insert(
+            id,
+            molt_core::DownloadView {
+                phase: "requested".to_string(),
+                size,
+                since: crate::now_secs(),
+                ..molt_core::DownloadView::default()
+            },
+        );
+        self.emit(Event::FileTransfer { id, phase: molt_core::TransferPhase::Requested });
+    }
+
+    /// `cancel_download`: stop a running download of `id`.
+    pub(crate) fn cmd_cancel_download(&mut self, id: MessageId) -> Result<Reply, MoltError> {
+        if !self.download_running(&id) {
+            return Err(MoltError::BadPayload("no download of this share is running".into()));
+        }
+        self.stop_download(&id);
+        tracing::info!(%id, "download cancel");
+        self.set_download_phase(id, molt_core::TransferPhase::Cancelled);
+        Ok(Reply::Ack)
+    }
+
+    /// End whatever runs for `id`: the park, the mirror ride, the v2
+    /// fetch (its task drops the `.part` and the job); a parked job is
+    /// removed here.
+    pub(crate) fn stop_download(&mut self, id: &MessageId) {
+        let parked = self.files.pending.remove(id).is_some();
+        self.files.await_mirror.remove(id);
+        self.files.dl_samples.remove(id);
+        if let Some(cancel) = self.files.dl_cancel.remove(id) {
+            let _ = cancel.send(true);
+        } else if parked {
+            if let Some(store) = self.file_store() {
+                crate::transfer::FetchJobStore::remove_job(&store, &id.to_string());
+            }
+        }
+    }
+
+    /// A fetch reported verified bytes: the view, the rate samples, a log
+    /// line every tenth.
+    pub(crate) fn note_download_progress(&mut self, id: MessageId, bytes: u64, total: u64, held: u32, of: u32) {
+        if !self.download_running(&id) {
+            return;
+        }
+        let now = crate::now_secs();
+        let samples = self.files.dl_samples.entry(id).or_default();
+        samples.push_back((now, bytes));
+        while samples.len() > RATE_SAMPLES {
+            samples.pop_front();
+        }
+        let percent = if of > 0 {
+            percent_of(held, of)
+        } else {
+            u8::try_from((bytes * 100).checked_div(total).unwrap_or(100)).unwrap_or(100)
+        };
+        let before = self.files.downloads.get(&id).map_or(0, |d| d.percent);
+        if let Some(v) = self.files.downloads.get_mut(&id) {
+            v.bytes = bytes;
+            if total > 0 {
+                v.size = total;
+            }
+            v.last_piece = now;
+        }
+        if percent / 10 > before / 10 {
+            tracing::info!(%id, held, of, percent, "download progress");
+        }
+        self.set_download_phase(id, molt_core::TransferPhase::Progress { percent, held, of });
+    }
+
+    /// The view `read_uploads` shows: the stored one plus what derives
+    /// from the clock - rate, ETA, what it waits on, the server's report.
+    pub(crate) fn download_view(&self, id: &MessageId, sharer: &str) -> Option<molt_core::DownloadView> {
+        let mut v = self.files.downloads.get(id)?.clone();
+        let now = crate::now_secs();
+        if let Some(s) = self.files.dl_samples.get(id) {
+            if let (Some((t0, b0)), Some((t1, b1)), true) = (s.front(), s.back(), s.len() >= 3) {
+                let dt = t1.saturating_sub(*t0);
+                if dt > 0 && b1 > b0 {
+                    v.rate = (b1 - b0) / dt;
+                }
+            }
+        }
+        if v.rate > 0 && v.phase == "transferring" {
+            v.eta = v.size.saturating_sub(v.bytes) / v.rate;
+        }
+        v.wait = match v.phase.as_str() {
+            "waiting" if self.member_online(sharer) => "sharer",
+            "waiting" => "sharer_offline",
+            "transferring" if now.saturating_sub(v.last_piece.max(v.since)) > QUIET_WAIT_SECS => {
+                if v.asked > v.since {
+                    "pieces"
+                } else {
+                    "relays"
+                }
+            }
+            _ => "",
+        }
+        .to_string();
+        if matches!(v.phase.as_str(), "waiting" | "transferring") {
+            v.sharer = self.files.serve_remote.get(id).map(|(_, s)| s.clone());
+        }
+        Some(v)
     }
 
     /// The sharer deleted the local file: the share flips to unavailable
@@ -589,35 +732,47 @@ impl State {
         }
     }
 
-    /// Track a download's lifecycle for the uploads view + event stream.
+    /// Track a download's lifecycle for the uploads view + event stream:
+    /// the phase moves, what the earlier phases measured stays.
     pub(crate) fn set_download_phase(&mut self, id: MessageId, phase: molt_core::TransferPhase) {
-        let view = match &phase {
-            molt_core::TransferPhase::Requested => molt_core::DownloadView {
-                phase: "requested".to_string(),
-                percent: 0,
-                path: String::new(),
-                error: String::new(),
-            },
-            molt_core::TransferPhase::Progress { percent } => molt_core::DownloadView {
-                phase: "transferring".to_string(),
-                percent: *percent,
-                path: String::new(),
-                error: String::new(),
-            },
-            molt_core::TransferPhase::Done { path } => molt_core::DownloadView {
-                phase: "done".to_string(),
-                percent: 100,
-                path: path.clone(),
-                error: String::new(),
-            },
-            molt_core::TransferPhase::Failed { reason } => molt_core::DownloadView {
-                phase: "failed".to_string(),
-                percent: 0,
-                path: String::new(),
-                error: reason.clone(),
-            },
-        };
-        self.files.downloads.insert(id, view);
+        use molt_core::TransferPhase as P;
+        let now = crate::now_secs();
+        let v = self.files.downloads.entry(id).or_default();
+        if v.since == 0 {
+            v.since = now;
+        }
+        match &phase {
+            P::Requested => v.phase = "requested".to_string(),
+            P::Waiting => v.phase = "waiting".to_string(),
+            P::Progress { percent, held, of } => {
+                v.phase = "transferring".to_string();
+                v.percent = *percent;
+                if *of > 0 {
+                    v.held = *held;
+                    v.of = *of;
+                }
+            }
+            P::Verifying => {
+                v.phase = "verifying".to_string();
+                v.percent = 100;
+            }
+            P::Done { path } => {
+                v.phase = "done".to_string();
+                v.percent = 100;
+                v.path = path.clone();
+            }
+            P::Failed { reason } => {
+                v.phase = "failed".to_string();
+                v.error = reason.clone();
+                v.code = crate::transfer::failure_code(reason).to_string();
+            }
+            P::Cancelled => {
+                *v = molt_core::DownloadView { phase: "cancelled".to_string(), since: v.since, ..Default::default() };
+            }
+        }
+        if matches!(phase, P::Done { .. } | P::Failed { .. } | P::Cancelled) {
+            self.files.dl_samples.remove(&id);
+        }
         self.emit(Event::FileTransfer { id, phase });
     }
 

@@ -526,7 +526,7 @@ fn ref_face(
         return (f, None);
     }
     match u.download.as_ref().map(|d| (d.phase.as_str(), d.percent)) {
-        Some(("requested" | "transferring", pct)) => {
+        Some(("requested" | "waiting" | "transferring" | "verifying", pct)) => {
             f.state = file_state::FETCHING;
             f.avail = format!("{} {pct} %", lex.loading);
             return (f, None);

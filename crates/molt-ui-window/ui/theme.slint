@@ -223,6 +223,9 @@ export struct UploadRow {
     mirrors: int, // members holding the whole series, the sharer included
     mirror-held: int, // this seat's verified pieces
     mirror-of: int, // the series' piece count (0 = legacy share)
+    dl-own: float, // this seat's download 0..1 (< 0 = no bar)
+    dl-sharer: float, // the serving seat's publishing 0..1 (< 0 = no bar)
+    status-tip: string, // what the status cell and its bars say
 }
 
 // One complaint line on a deposit card.
@@ -1510,6 +1513,8 @@ export global Strings {
     in property <string> ou-mirror-of;
     in property <string> ou-copy;
     in property <string> ou-download;
+    in property <string> ou-retry;
+    in property <string> ou-cancel;
     in property <string> ou-offline;
     in property <string> ou-gone;
     in property <string> ou-changed;

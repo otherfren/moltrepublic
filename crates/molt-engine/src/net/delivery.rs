@@ -335,6 +335,7 @@ impl State {
         self.release_decision_lines(now);
         // the mirror worker's planning beat (mirroring §3.3; gated inside)
         self.mirror_worker_tick(now);
+        self.download_tick(crate::now_secs());
         self.mirror_decl_tick(now);
         self.wiki_base_tick();
         self.vault_payload_tick();

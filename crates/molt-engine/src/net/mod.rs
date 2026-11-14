@@ -166,6 +166,19 @@ impl EngineSink for CmdSink {
             .execute(Command::NetMirrorStatus {
                 from: member.clone(),
                 holds,
+                serving: status
+                    .serving
+                    .iter()
+                    .filter_map(|(id, published, of, gate)| {
+                        let view = molt_core::ServeView {
+                            published: *published,
+                            of: *of,
+                            gate: gate.clone(),
+                            at: crate::now_secs(),
+                        };
+                        Some((id.parse().ok()?, view))
+                    })
+                    .collect(),
                 gen: status.gen,
                 page: status.page,
                 pages: status.pages,

@@ -767,13 +767,13 @@ impl State {
                 // stamp names an h-window that holds nothing (forever);
                 // and a redelivered OLD announcement must not regress a
                 // newer stamp (at-least-once delivery)
-                let from_sharer =
-                    matches!(self.share_identity(&id), Ok((ident, _)) if ident.by == from);
+                let from_sharer = self.served_stamp_trusted(&id, &from);
                 let plausible = at <= crate::now_secs().saturating_add(WIRE_STAMP_SKEW_SECS);
                 let newer = self.files.series.get(&id).map_or(true, |old| at > *old);
                 if from_sharer && plausible && newer {
                     self.files.series.insert(id, at);
                     if let Some((target, dest)) = self.files.pending.remove(&id) {
+                        tracing::info!(%id, at, %from, "download served");
                         self.spawn_nostr_fetch(id, at, target, dest);
                     }
                     // the mirror worker waited for exactly this stamp

@@ -232,6 +232,16 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
 
     {
         let cx = ctx.clone();
+        ui.on_cancel_download_file(move |id| {
+            let Ok(id) = id.parse::<MessageId>() else {
+                return;
+            };
+            cx.issue(Command::CancelDownload { id });
+        });
+    }
+
+    {
+        let cx = ctx.clone();
         ui.on_remove_file(move |id| {
             let Ok(id) = id.parse::<MessageId>() else {
                 return; // legacy row without an id — nothing to address

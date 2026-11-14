@@ -139,6 +139,12 @@ pub fn __set_piece_want_after(d: std::time::Duration) {
     transfer::set_piece_want_after(d);
 }
 
+/// Test seam: how often a parked download asks again (default 10 min).
+#[doc(hidden)]
+pub fn __set_want_repeat(d: std::time::Duration) {
+    net::files::set_want_repeat(d);
+}
+
 /// The delivery-guarantee beat (`Command::NetDeliveryTick`): due-ACK flush +
 /// debounced persists. 1 s keeps the real ack latency at debounce+1s ≈ 4 s,
 /// safely inside the sender's 30 s resend timer.
@@ -745,6 +751,18 @@ pub(crate) struct FilePlane {
     /// Requester-side live download status per share (runtime-only; feeds
     /// [`molt_core::UploadView::download`]).
     pub(crate) downloads: HashMap<MessageId, molt_core::DownloadView>,
+    /// Per download the recent `(secs, bytes)` samples the rate reads.
+    pub(crate) dl_samples: HashMap<MessageId, std::collections::VecDeque<(u64, u64)>>,
+    /// The cancel switch of each running v2 download.
+    pub(crate) dl_cancel: HashMap<MessageId, tokio::sync::watch::Sender<bool>>,
+    /// What the serving seat last reported per share (display only).
+    pub(crate) serve_remote: HashMap<MessageId, (MemberId, molt_core::ServeView)>,
+    /// The serving list this seat's last status carried.
+    pub(crate) serving_sent: Vec<(String, u32, u32, String)>,
+    /// Downloads riding this seat's running mirror job: assembled from the
+    /// mirror folder once it completes.
+    pub(crate) await_mirror:
+        HashMap<MessageId, (crate::transfer::FetchTarget, crate::transfer::DestSpec)>,
     /// Sharer-side serve throttle: at most 2 concurrent uploads; further
     /// requests queue on the semaphore instead of saturating the uplink.
     pub(crate) serve_slots: std::sync::Arc<tokio::sync::Semaphore>,
@@ -1532,6 +1550,11 @@ impl State {
                 share_paths: HashMap::new(),
                 share_stamps: HashMap::new(),
                 downloads: HashMap::new(),
+                dl_samples: HashMap::new(),
+                dl_cancel: HashMap::new(),
+                serve_remote: HashMap::new(),
+                serving_sent: Vec::new(),
+                await_mirror: HashMap::new(),
                 serve_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
                 series: HashMap::new(),
                 pending: HashMap::new(),
@@ -1799,6 +1822,7 @@ impl State {
             Command::DeleteChat { id } => self.cmd_delete_chat(id),
             Command::ShareFile { path, channel } => self.cmd_share_file(path, channel),
             Command::DownloadFile { id, dest } => self.cmd_download_file(id, dest),
+            Command::CancelDownload { id } => self.cmd_cancel_download(id),
             Command::RemoveFile { id } => self.cmd_remove_file(id),
             Command::MarkChannelRead { channel, up_to } => {
                 let r = self.cmd_mark_channel_read(channel, up_to);
@@ -1864,9 +1888,12 @@ impl State {
                 }
                 self.cmd_net_mirror_decl(&from, on, quota, rev, caps)
             }
-            Command::NetMirrorStatus { from, holds, gen, page, pages, generation } => {
+            Command::NetMirrorStatus { from, holds, serving, gen, page, pages, generation } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
+                }
+                if page == 0 {
+                    self.note_remote_serving(&from, serving);
                 }
                 self.cmd_net_mirror_status(&from, holds, gen, page, pages)
             }
@@ -1942,21 +1969,30 @@ impl State {
                 id,
                 transferred,
                 total,
+                held,
+                of,
                 generation,
             } => {
                 if !self.net_scope_current(generation) {
                     return Ok(Reply::Ack);
                 }
-                let percent = (transferred * 100)
-                    .checked_div(total)
-                    .map_or(100, |p| u8::try_from(p).unwrap_or(100));
-                self.set_download_phase(id, molt_core::TransferPhase::Progress { percent });
+                self.note_download_progress(id, transferred, total, held, of);
+                Ok(Reply::Ack)
+            }
+            Command::NetFileVerifying { id, generation } => {
+                if !self.net_scope_current(generation) || !self.download_running(&id) {
+                    return Ok(Reply::Ack);
+                }
+                self.set_download_phase(id, molt_core::TransferPhase::Verifying);
                 Ok(Reply::Ack)
             }
             Command::NetFileDone { id, path, generation } => {
-                if !self.net_scope_current(generation) {
+                if !self.net_scope_current(generation) || !self.download_running(&id) {
                     return Ok(Reply::Ack);
                 }
+                let secs = self.files.downloads.get(&id).map_or(0, |d| crate::now_secs().saturating_sub(d.since));
+                tracing::info!(%id, secs, "download done");
+                self.files.dl_cancel.remove(&id);
                 // the landed bytes hashed to the share: remember the copy
                 // by CONTENT, so a restart still finds it (§3.2, Q5)
                 self.register_local_copy(id, &path);
@@ -1964,9 +2000,11 @@ impl State {
                 Ok(Reply::Ack)
             }
             Command::NetFileFailed { id, reason, generation } => {
-                if !self.net_scope_current(generation) {
+                if !self.net_scope_current(generation) || !self.download_running(&id) {
                     return Ok(Reply::Ack);
                 }
+                tracing::warn!(%id, code = crate::transfer::failure_code(&reason), reason = %reason, "download failed");
+                self.files.dl_cancel.remove(&id);
                 // relay plane: a failed fetch invalidates the cached stamp
                 // (the series may be pruned or sealed under a foreign
                 // epoch) — the NEXT attempt asks fresh via FileWanted and
@@ -1980,9 +2018,6 @@ impl State {
             }
             Command::NetFileSeriesPublished { id, at, generation } => {
                 self.cmd_net_file_series_published(id, at, generation)
-            }
-            Command::NetFileWantedTimeout { id, generation } => {
-                self.cmd_net_file_wanted_timeout(id, generation)
             }
 
             // proposals.rs

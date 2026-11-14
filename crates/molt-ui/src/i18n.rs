@@ -1031,6 +1031,8 @@ lexicon! {
     ou_gone: "gone", "weg";
     ou_changed: "file replaced", "Datei ersetzt";
     ou_download: "Download", "Download";
+    ou_retry: "Retry", "Erneut";
+    ou_cancel: "Cancel download", "Download abbrechen";
     ou_offline: "user offline", "Nutzer offline";
     ou_empty: "No files shared yet.", "Noch keine Dateien geteilt.";
     ou_filter_ph: "Filter: user, filename or checksum", "Filter: Nutzer, Dateiname oder Checksum";

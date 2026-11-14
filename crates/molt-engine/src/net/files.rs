@@ -47,6 +47,20 @@ pub(crate) fn v1_fetch_bound(cap: FileCap) -> u64 {
     }
 }
 
+/// A parked download asks again this often.
+static WANT_REPEAT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(600_000);
+/// A download of an expired temporary share fails once its pieces stopped
+/// this long.
+const EXPIRED_QUIET_SECS: u64 = 600;
+
+pub(crate) fn set_want_repeat(d: std::time::Duration) {
+    WANT_REPEAT_MS.store(u64::try_from(d.as_millis()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::SeqCst);
+}
+
+fn want_repeat() -> std::time::Duration {
+    std::time::Duration::from_millis(WANT_REPEAT_MS.load(std::sync::atomic::Ordering::SeqCst))
+}
+
 impl State {
     pub(crate) fn effective_file_cap(&self) -> FileCap {
         match self.session.settings.file_cap_bytes {
@@ -120,41 +134,74 @@ impl State {
     ) {
         if let Some(at) = self.files.series.get(&id).copied() {
             self.spawn_nostr_fetch(id, at, target, dest);
-        } else {
-            self.files.pending.insert(id, (target, dest));
-            let me = self.member();
-            let env = self.make_env(me, WorkspaceEvent::FileWanted { id });
-            self.record(env);
-            // a parked download must not wait forever: if no FileServed
-            // drains it within the window, it fails honestly and the
-            // operator can retry (review 2026-08-10 — the park had no
-            // timeout and the phase guard blocked every retry)
-            if let Some(cmd_tx) = self.cmd_tx.upgrade() {
-                crate::transfer::spawn_want_timeout(id, self.net_scope, cmd_tx);
-            }
+            return;
         }
-    }
-
-    /// The parked download's watchdog fired: if the `FileServed` answer
-    /// never came (the id still parks), fail the download honestly — a
-    /// drained park means the fetch is running and the watchdog is stale.
-    pub(crate) fn cmd_net_file_wanted_timeout(
-        &mut self,
-        id: MessageId,
-        generation: Option<u64>,
-    ) -> Result<Reply, MoltError> {
-        if !self.net_scope_current(generation) {
-            return Ok(Reply::Ack);
-        }
-        if self.files.pending.remove(&id).is_some() {
-            self.set_download_phase(
-                id,
-                molt_core::TransferPhase::Failed {
-                    reason: "the sharer did not answer".to_string(),
+        // waiting has no deadline (`download_progress.md` §4.1): the park
+        // persists as a stampless job, so a restart keeps waiting
+        if let (Some(key), Some(store)) = (crate::files_state::decode_share_key(&target.key_b64), self.file_store()) {
+            crate::transfer::FetchJobStore::save_job(
+                &store,
+                molt_core::FetchJob {
+                    series: target.id_hex.clone(),
+                    key: key.to_vec(),
+                    count: target.pieces,
+                    size: target.size,
+                    root: target.root.clone(),
+                    checksum: target.checksum.clone(),
+                    name: target.name.clone(),
+                    dest: dest.explicit.clone(),
+                    default_dir: dest.default_dir.clone(),
+                    started_at: 0,
+                    held: Vec::new(),
                 },
             );
         }
-        Ok(Reply::Ack)
+        self.files.pending.insert(id, (target, dest));
+        self.set_download_phase(id, molt_core::TransferPhase::Waiting);
+        self.send_file_wanted(id);
+    }
+
+    /// Ask for a parked download's series (again).
+    fn send_file_wanted(&mut self, id: MessageId) {
+        let me = self.member();
+        let env = self.make_env(me, WorkspaceEvent::FileWanted { id });
+        self.record(env);
+        if let Some(v) = self.files.downloads.get_mut(&id) {
+            v.asked = crate::now_secs();
+        }
+        tracing::info!(%id, "download want");
+    }
+
+    /// The downloads' beat (1 s delivery tick): a parked one asks again
+    /// every [`want_repeat`]; a temporary share past its deadline whose
+    /// pieces stopped for [`EXPIRED_QUIET_SECS`] fails `expired`.
+    pub(crate) fn download_tick(&mut self, now: u64) {
+        let repeat = want_repeat().as_secs();
+        let due: Vec<MessageId> = self
+            .files
+            .pending
+            .keys()
+            .filter(|id| self.files.downloads.get(id).map_or(true, |d| now.saturating_sub(d.asked) >= repeat))
+            .copied()
+            .collect();
+        for id in due {
+            self.send_file_wanted(id);
+        }
+        let expired: Vec<MessageId> = self
+            .files
+            .downloads
+            .iter()
+            .filter(|(id, d)| {
+                matches!(d.phase.as_str(), "waiting" | "transferring")
+                    && now >= d.last_piece.max(d.since).saturating_add(EXPIRED_QUIET_SECS)
+                    && self.share_expired(id)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            self.stop_download(&id);
+            self.set_download_phase(id, molt_core::TransferPhase::Failed { reason: "the share expired".to_string() });
+        }
     }
 
     /// Spawn the off-actor series fetch (reports back over the same
@@ -213,12 +260,17 @@ impl State {
         self.files.fetches.push(fetch);
     }
 
-    /// A `FileWanted` broadcast landed: ONLY the sharer answers (every
-    /// member receives it), by lazily publishing the chunk series — or by
+    /// A `FileWanted` broadcast landed: the sharer answers (every member
+    /// receives it), by lazily publishing the chunk series — or by
     /// re-announcing a fresh enough stamp, so a burst of requests does not
-    /// publish the series N times.
+    /// publish the series N times. With the sharer offline, an elected
+    /// whole mirror answers for a persistent share.
     pub(super) fn serve_file_wanted(&mut self, id: MessageId) {
         let me = self.member();
+        if matches!(self.share_identity(&id), Ok((ident, _)) if ident.by != me) {
+            self.serve_file_wanted_from_mirror(id);
+            return;
+        }
         let (is_mine, size, key_b64, root, pieces) = match self.share_identity(&id) {
             Ok((ident, available)) => (
                 ident.by == me && available,
@@ -232,6 +284,7 @@ impl State {
         if !is_mine || self.share_expired(&id) || self.files.serving.contains(&id) {
             return;
         }
+        tracing::info!(%id, "serve want");
         // the size is known here — an over-cap share must not cost a full
         // disk read per request only to be refused inside the publish
         // (review 2026-08-10; the share-time gate makes this an edge)
@@ -432,6 +485,61 @@ impl State {
         );
     }
 
+    /// Whose `FileServed` stamp counts: the sharer's, or a whole holder's -
+    /// a mirror re-seeds for an offline sharer, and a forged stamp costs
+    /// waiting only (every piece verifies by root).
+    pub(crate) fn served_stamp_trusted(&self, id: &MessageId, from: &MemberId) -> bool {
+        matches!(self.share_identity(id), Ok((ident, _)) if ident.by == *from)
+            || self.mirror_holders().get(id).is_some_and(|h| h.contains(from))
+    }
+
+    /// A whole mirror re-seeds a persistent share whose sharer is offline
+    /// (`download_progress.md` §4.5): the elected holder publishes its
+    /// stored pieces under a fresh stamp and announces it; within a day it
+    /// re-announces that stamp instead.
+    fn serve_file_wanted_from_mirror(&mut self, id: MessageId) {
+        let Ok((ident, _)) = self.share_identity(&id) else {
+            return;
+        };
+        if self.member_online(&ident.by) || !self.is_persistent_share(&id) || self.share_expired(&id) {
+            return;
+        }
+        let Some(key) = crate::files_state::decode_share_key(&ident.key_b64) else {
+            return;
+        };
+        let Some((path, true)) = self.piece_source_if_elected(&id, &ident) else {
+            return;
+        };
+        let now = crate::now_secs();
+        let me = self.member();
+        let fresh = self.files.announced.get(&id).is_some_and(|t| now.saturating_sub(*t) < 86_400);
+        let at = match (fresh, self.files.series.get(&id).copied()) {
+            (true, Some(at)) => at,
+            _ => {
+                let Some(layout) = molt_net::file_plane::Manifest::layout_for(ident.pieces) else {
+                    return;
+                };
+                self.files.series.insert(id, now);
+                self.enqueue_publish_from(
+                    id,
+                    key,
+                    ident.pieces,
+                    ident.size,
+                    ident.root.clone(),
+                    molt_net::trickle::whole_series_ranges(layout),
+                    now,
+                    path,
+                    true,
+                );
+                tracing::info!(%id, "serve reseed from mirror");
+                now
+            }
+        };
+        self.files.announced.insert(id, now);
+        let env = self.make_env(me, WorkspaceEvent::FileServed { id, at });
+        self.record(env);
+    }
+
     /// The store the file jobs persist through (the workspace's
     /// `transport.state`).
     pub(crate) fn file_store(&self) -> Option<crate::net::FileStateStore> {
@@ -574,6 +682,10 @@ impl State {
         if let Some(group) = self.group_net.as_ref() {
             let want = molt_net::piece_want::PieceWanted::new(self.member(), id.to_string(), ranges);
             group.handle.publish_control(want.to_frame());
+            if let Some(v) = self.files.downloads.get_mut(&id) {
+                v.asked = crate::now_secs();
+            }
+            tracing::info!(%id, "download piece want");
         }
         Ok(Reply::Ack)
     }
@@ -603,10 +715,29 @@ impl State {
             let Ok(id) = job.series.parse::<MessageId>() else {
                 continue;
             };
+            self.files.downloads.insert(
+                id,
+                molt_core::DownloadView { size: job.size, since: crate::now_secs(), ..Default::default() },
+            );
+            // a park: it waits on, asking again
+            if job.started_at == 0 {
+                let target = crate::transfer::FetchTarget {
+                    id_hex: job.series.clone(),
+                    name: job.name.clone(),
+                    size: job.size,
+                    checksum: job.checksum.clone(),
+                    key_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &job.key),
+                    pieces: job.count,
+                    root: job.root.clone(),
+                };
+                let dest = crate::transfer::DestSpec { explicit: job.dest.clone(), default_dir: job.default_dir.clone() };
+                self.nostr_download(id, target, dest);
+                continue;
+            }
             self.files.series.insert(id, job.started_at);
-            let held = u64::try_from(job.held_indices().len()).unwrap_or(0);
-            let percent = u8::try_from((held * 100).checked_div(u64::from(job.count)).unwrap_or(0)).unwrap_or(100);
-            self.set_download_phase(id, molt_core::TransferPhase::Progress { percent });
+            let held = u32::try_from(job.held_indices().len()).unwrap_or(u32::MAX);
+            let percent = crate::chat::percent_of(held, job.count);
+            self.set_download_phase(id, molt_core::TransferPhase::Progress { percent, held, of: job.count });
             self.spawn_fetch_job(id, job);
         }
     }
@@ -625,7 +756,9 @@ impl State {
             );
             return;
         };
-        let fetch = crate::transfer::spawn_nostr_fetch_v2(channel, id, job, store, self.net_scope, cmd_tx);
+        let (cancel, cancelled) = tokio::sync::watch::channel(false);
+        self.files.dl_cancel.insert(id, cancel);
+        let fetch = crate::transfer::spawn_nostr_fetch_v2(channel, id, job, store, self.net_scope, cmd_tx, cancelled);
         self.files.fetches.retain(|h| !h.is_finished());
         self.files.fetches.push(fetch);
     }

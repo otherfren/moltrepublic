@@ -60,8 +60,13 @@ impl TrickleConfig {
     }
 }
 
+/// Per series being published: pieces out of the queued ones and the gate
+/// holding the next (`docs_archive/files/download_progress.md` §4.3).
+pub type TrickleStatus = Arc<std::sync::Mutex<HashMap<String, molt_core::ServeView>>>;
+
 /// A running trickle sender.
 pub struct TrickleHandle {
+    status: TrickleStatus,
     wake: Arc<Notify>,
     stop: watch::Sender<bool>,
     task: Option<tokio::task::JoinHandle<()>>,
@@ -72,6 +77,12 @@ impl TrickleHandle {
     /// next interval.
     pub fn wake(&self) {
         self.wake.notify_one();
+    }
+
+    /// What each queued share series stands at.
+    #[must_use]
+    pub fn status(&self) -> HashMap<String, molt_core::ServeView> {
+        self.status.lock().map(|m| m.clone()).unwrap_or_default()
     }
 
     /// The wake signal, for a task that enqueues off the actor.
@@ -176,9 +187,10 @@ pub fn spawn_trickle<S: StateStore>(
     cfg: TrickleConfig,
 ) -> TrickleHandle {
     let wake = Arc::new(Notify::new());
+    let status = TrickleStatus::default();
     let (stop, stop_rx) = watch::channel(false);
-    let task = tokio::spawn(trickle_loop(chan, store, busy, cfg, wake.clone(), stop_rx));
-    TrickleHandle { wake, stop, task: Some(task) }
+    let task = tokio::spawn(trickle_loop(chan, store, busy, cfg, wake.clone(), stop_rx, status.clone()));
+    TrickleHandle { status, wake, stop, task: Some(task) }
 }
 
 /// Why the loop did not publish this tick.
@@ -198,6 +210,7 @@ async fn trickle_loop<S: StateStore>(
     cfg: TrickleConfig,
     wake: Arc<Notify>,
     mut stop: watch::Receiver<bool>,
+    status: TrickleStatus,
 ) {
     let mut manifests: HashMap<String, Manifest> = HashMap::new();
     let mut idle = false;
@@ -213,7 +226,7 @@ async fn trickle_loop<S: StateStore>(
         if *stop.borrow() {
             return;
         }
-        match tick(&chan, &store, &busy, &cfg, &mut manifests, &mut last).await {
+        match tick(&chan, &store, &busy, &cfg, &mut manifests, &mut last, &status).await {
             Ok(()) => {
                 idle = false;
                 backoff = 0;
@@ -260,12 +273,68 @@ async fn tick<S: StateStore>(
     cfg: &TrickleConfig,
     manifests: &mut HashMap<String, Manifest>,
     last: &mut Option<String>,
+    status: &TrickleStatus,
 ) -> Result<(), Hold> {
     let state = store.load().await;
+    note_status(status, &state.file_jobs.publish);
     let Some(job) = pick_job(&state.file_jobs.publish, last.as_deref()) else {
         return Err(Hold::Idle);
     };
     *last = Some(job.series.clone());
+    let out = tick_job(chan, store, busy, cfg, manifests, &state, job.clone()).await;
+    if let Ok(mut map) = status.lock() {
+        if let Some(v) = map.get_mut(&job.series) {
+            match &out {
+                Ok(()) => {
+                    v.published = v.published.saturating_add(1).min(v.of);
+                    v.gate.clear();
+                }
+                Err(Hold::Gated) => v.gate = gate_of(&job, &state, busy, cfg).to_string(),
+                Err(_) => v.gate.clear(),
+            }
+            v.at = crate::ritual_net::now_secs();
+        }
+    }
+    out
+}
+
+/// The snapshot of the share series queued (held sources are no share).
+fn note_status(status: &TrickleStatus, jobs: &[PublishJob]) {
+    let Ok(mut map) = status.lock() else {
+        return;
+    };
+    let shares: Vec<&PublishJob> = jobs.iter().filter(|j| !j.wiki_base && j.vault.is_none()).collect();
+    map.retain(|series, _| shares.iter().any(|j| &j.series == series));
+    for j in shares {
+        let v = map.entry(j.series.clone()).or_default();
+        v.published = j.next;
+        v.of = u32::try_from(job_total(&j.ranges)).unwrap_or(u32::MAX);
+    }
+}
+
+/// Which gate holds `job` now: `outbox`, `budget` or `daily`.
+fn gate_of(job: &PublishJob, state: &TransportState, busy: &watch::Receiver<bool>, cfg: &TrickleConfig) -> &'static str {
+    let _ = job;
+    if *busy.borrow() {
+        return "outbox";
+    }
+    let now = (cfg.clock)();
+    if crate::group_runtime::resend_headroom(&state.group.unwrap_or_default(), now) < BUDGET_HEADROOM {
+        return "budget";
+    }
+    "daily"
+}
+
+/// [`tick`] for the job the round-robin picked.
+async fn tick_job<S: StateStore>(
+    chan: &GroupChannel,
+    store: &S,
+    busy: &watch::Receiver<bool>,
+    cfg: &TrickleConfig,
+    manifests: &mut HashMap<String, Manifest>,
+    state: &TransportState,
+    job: PublishJob,
+) -> Result<(), Hold> {
     // a temporary share's pieces carry its deadline to the relays (§8.1);
     // past it nobody serves or accepts the download, and a relay would
     // refuse an already expired event - the job is done

@@ -21,7 +21,7 @@ use nostr_relay_builder::{LocalRelay, RelayBuilder};
 
 async fn download_view(w: &WalletHandle, id: molt_core::MessageId) -> Option<molt_core::DownloadView> {
     match w.execute(Command::ReadUploads).await.expect("uploads") {
-        Reply::Uploads { uploads } => uploads.into_iter().find(|u| u.id == id).and_then(|u| u.download),
+        Reply::Uploads { uploads } => uploads.into_iter().find(|u| u.id == id).and_then(|u| u.download.map(|d| *d)),
         other => panic!("unexpected: {other:?}"),
     }
 }

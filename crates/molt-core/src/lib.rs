@@ -4411,10 +4411,10 @@ pub enum Command {
         /// every construction site states its channel.
         channel: ChannelRef,
     },
-    /// Download a shared file: fetch the bytes peer-to-peer from the
-    /// sharer's device (async kickoff — progress and the result arrive as
-    /// `Event::FileTransfer` / `read_uploads`). Fails once the sharer
-    /// deleted the local file; an offline sharer times out honestly.
+    /// Download a shared file (async kickoff — progress and the result
+    /// arrive as `Event::FileTransfer` / `read_uploads`). Waiting for an
+    /// offline sharer has no deadline (`docs_archive/files/download_progress.md`);
+    /// a deleted or expired share is refused.
     DownloadFile {
         /// The share message's stable id.
         id: MessageId,
@@ -4425,6 +4425,12 @@ pub enum Command {
         /// download directory.
         #[serde(default)]
         dest: Option<String>,
+    },
+    /// Stop this seat's download of a share: the job, its `.part` and its
+    /// bitmap go; a later `DownloadFile` starts over.
+    CancelDownload {
+        /// The share message's stable id.
+        id: MessageId,
     },
     /// Sharer-only: the local file is gone (deleted from this disk) — the
     /// share becomes permanently unavailable for every participant.
@@ -6143,6 +6149,21 @@ pub enum Command {
         transferred: u64,
         /// Total bytes expected.
         total: u64,
+        /// Verified data pieces (0 on a plane without pieces).
+        #[serde(default)]
+        held: u32,
+        /// The series' data piece count.
+        #[serde(default)]
+        of: u32,
+        /// Workspace-net incarnation (stale task results are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// Every piece is in; the landed file is being hashed (engine-internal).
+    /// Never an MCP tool.
+    NetFileVerifying {
+        /// The share message's stable id.
+        id: MessageId,
         /// Workspace-net incarnation (stale task results are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -6165,16 +6186,6 @@ pub enum Command {
         /// The honest reason.
         reason: String,
         /// Workspace-net incarnation (stale task results are dropped).
-        #[serde(default)]
-        generation: Option<u64>,
-    },
-    /// A parked relay download's watchdog fired (engine-internal): if the
-    /// sharer's `FileServed` never came, the download fails honestly
-    /// instead of parking forever. Never an MCP tool.
-    NetFileWantedTimeout {
-        /// The share message's stable id.
-        id: MessageId,
-        /// Workspace-net incarnation (stale watchdogs are dropped).
         #[serde(default)]
         generation: Option<u64>,
     },
@@ -6244,6 +6255,9 @@ pub enum Command {
         from: MemberId,
         /// What it holds (this page of it).
         holds: Vec<MirrorHold>,
+        /// Page 0: the shares it publishes right now.
+        #[serde(default)]
+        serving: Vec<(MessageId, ServeView)>,
         /// The send this page belongs to; pages of one generation replace
         /// the stored status together.
         #[serde(default)]
@@ -7794,17 +7808,75 @@ pub struct MemberView {
 }
 
 /// A live download's progress, per share (requester side): what the
-/// Uploads table and an MCP `read_uploads` render while bytes move.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Uploads table and an MCP `read_uploads` render while bytes move
+/// (`docs_archive/files/download_progress.md` §4.2). Every field past `error` is
+/// additive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DownloadView {
-    /// `"requested" | "transferring" | "done" | "failed"`.
+    /// `"requested" | "waiting" | "transferring" | "verifying" | "done" |
+    /// "failed" | "cancelled"`.
     pub phase: String,
-    /// 0..=100 while transferring (piece counts are known up front).
+    /// 0..=100 (verified data pieces of the count).
     pub percent: u8,
     /// The final local path, set when done.
     pub path: String,
     /// The honest reason, set when failed.
     pub error: String,
+    /// Stable failure key: `no_relay | write | checksum | changed | gone |
+    /// expired | transfer`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub code: String,
+    /// Verified data pieces.
+    #[serde(default)]
+    pub held: u32,
+    /// The series' data piece count (0 = unknown).
+    #[serde(default)]
+    pub of: u32,
+    /// Verified bytes.
+    #[serde(default)]
+    pub bytes: u64,
+    /// The share's byte length.
+    #[serde(default)]
+    pub size: u64,
+    /// Unix seconds the download started.
+    #[serde(default)]
+    pub since: u64,
+    /// Unix seconds of the last verified piece (0 = none yet).
+    #[serde(default)]
+    pub last_piece: u64,
+    /// Bytes per second over the recent pieces (0 = not measured yet).
+    #[serde(default)]
+    pub rate: u64,
+    /// Seconds left at `rate` (0 = unknown).
+    #[serde(default)]
+    pub eta: u64,
+    /// What it waits on: `sharer | sharer_offline | relays | pieces`
+    /// ("" = nothing).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub wait: String,
+    /// Unix seconds of the last `FileWanted` / `PieceWanted` (0 = none).
+    #[serde(default)]
+    pub asked: u64,
+    /// The serving seat's own publish progress, as it last reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharer: Option<ServeView>,
+}
+
+/// A seat's publish progress of one series: pieces out of the queued
+/// ones, and the gate holding the next (`outbox | budget | daily`, "" =
+/// none).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ServeView {
+    /// Pieces published of the queued job.
+    pub published: u32,
+    /// Pieces the queued job holds.
+    pub of: u32,
+    /// What holds the next piece ("" = nothing).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gate: String,
+    /// Unix seconds of the report.
+    #[serde(default)]
+    pub at: u64,
 }
 
 /// One file shared into the chat (Shared Files → Uploads). Only metadata
@@ -7847,7 +7919,7 @@ pub struct UploadView {
     pub checksum: String,
     /// This node's live download of the share, if any (requester side).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub download: Option<DownloadView>,
+    pub download: Option<Box<DownloadView>>,
     /// ONE status word for where the bytes can be had, in this
     /// precedence: `"changed"` (the sharer's file was replaced on disk -
     /// a share is immutable, so the row is no longer the voted file),
@@ -7879,6 +7951,9 @@ pub struct UploadView {
     /// The open `files` vote on this share, if one is up. Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vote: Option<UploadVote>,
+    /// This seat publishes the share's pieces right now. Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serving: Option<ServeView>,
 }
 
 /// An open `files` vote on one share: what it would do, the card to
@@ -8168,11 +8243,23 @@ impl GroupConfig {
 pub enum TransferPhase {
     /// The fetch request went out to the sharer.
     Requested,
+    /// Asked the sharer; its answer has not come (no deadline).
+    Waiting,
     /// Bytes are moving.
     Progress {
         /// 0..=100.
         percent: u8,
+        /// Verified data pieces.
+        #[serde(default)]
+        held: u32,
+        /// The data piece count.
+        #[serde(default)]
+        of: u32,
     },
+    /// Every piece is in; hashing the landed file.
+    Verifying,
+    /// Stopped by the operator.
+    Cancelled,
     /// Landed and verified.
     Done {
         /// The final local path.

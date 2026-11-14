@@ -337,7 +337,7 @@ async fn a_shared_file_downloads_peer_to_peer_across_the_mesh() {
         assert!(
             tokio::time::Instant::now() < deadline,
             "the download never completed: {:?}",
-            rows.iter().find(|u| u.id == share_id).and_then(|u| u.download.clone())
+            rows.iter().find(|u| u.id == share_id).and_then(|u| u.download.as_deref().cloned())
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     };

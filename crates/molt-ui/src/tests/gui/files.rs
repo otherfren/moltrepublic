@@ -727,3 +727,77 @@ fn the_download_button_carries_the_rows_name_in_both_tables() {
         "both tables pass the row's name beside its id"
     );
 }
+
+/// **A running download squeezes into its table cell**: the word, two
+/// thin bars (this download, the sharer sending) filled to their share,
+/// a tooltip that says which is which, and a cancel button that hands
+/// the row's id over. A failed row offers Retry.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_running_download_shows_two_bars_a_tip_and_a_cancel() {
+    i_slint_backend_testing::init_no_event_loop();
+    let hex = "dd".repeat(16);
+    let row = UploadRow {
+        id: hex.as_str().into(),
+        name: "karte.pdf".into(),
+        user: "walter".into(),
+        available: true,
+        online: true,
+        status: "30 %".into(),
+        status_kind: 1,
+        dl_own: 0.3,
+        dl_sharer: 0.5,
+        status_tip: "Upper bar: your download.".into(),
+        ..UploadRow::default()
+    };
+    let (ui, _shown) = files_window(vec![row.clone()]);
+    ui.window().set_size(slint::PhysicalSize::new(1700, 800));
+    let one = |id: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .next()
+            .unwrap_or_else(|| panic!("{id}"))
+    };
+    let own = one("UploadsTable::ou-bar-own");
+    let sharer = one("UploadsTable::ou-bar-sharer");
+    assert!(own.size().width > 20.0 && own.size().height <= 4.0, "a thin bar: {:?}", own.size());
+    assert!(sharer.absolute_position().y > own.absolute_position().y, "the sharer's bar sits below");
+    assert!(
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "UploadsTable::ou-dl").next().is_none(),
+        "no download button while it runs"
+    );
+
+    let hover = one("UploadsTable::ou-st-hover");
+    let at = slint::LogicalPosition::new(
+        hover.absolute_position().x + hover.size().width / 2.0,
+        hover.absolute_position().y + hover.size().height / 2.0,
+    );
+    ui.window().dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+    assert_eq!(ui.global::<HintTip>().get_label().to_string(), "Upper bar: your download.");
+
+    let asked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = asked.clone();
+    ui.on_cancel_download_file(move |id| {
+        if let Ok(mut v) = sink.lock() {
+            v.push(id.to_string());
+        }
+    });
+    click(&ui, &one("UploadsTable::ou-cancel"));
+    assert_eq!(*asked.lock().expect("asked"), vec![hex.clone()]);
+
+    ui.set_org_uploads(ModelRc::new(VecModel::from(vec![UploadRow {
+        status: "\u{26a0} No relay".into(),
+        status_kind: 3,
+        dl_own: -1.0,
+        dl_sharer: -1.0,
+        ..row
+    }])));
+    assert!(
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "UploadsTable::ou-bar-own").next().is_none(),
+        "no bar once it ended"
+    );
+    assert_eq!(ui.global::<Strings>().get_ou_retry().to_string(), "Retry");
+    assert!(
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "UploadsTable::ou-dl").next().is_some(),
+        "the button is back, as Retry"
+    );
+}

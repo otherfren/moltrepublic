@@ -1635,7 +1635,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "download_file",
             command: "download_file",
             scope: Scope::Seat,
-            description: "Download a shared file. When this seat already MIRRORS the whole file (read_uploads `local: mirrored`) the bytes are assembled locally and no network is involved - otherwise they are fetched peer-to-peer from the sharer's device over a dedicated encrypted queue (the sharer must be online). Either way it verifies size + sha256 against the share, and writes it to `dest`: a bare name lands in the node's download directory (the EXCHANGE FOLDER), an ABSOLUTE path is that path, an existing directory takes the share's own name; omitted = the share's name in the download directory. A relative path is refused - it would resolve against the daemon's working directory. Async kickoff - poll read_uploads for the download's phase/percent/path/error. Addressed by the share message's stable id (32-char lowercase hex, from read_state). Fails honestly once the sharer deleted the file, a vote deleted the share, or the sharer stays offline.",
+            description: "Download a shared file. When this seat already MIRRORS the whole file (read_uploads `local: mirrored`) the bytes are assembled locally and no network is involved - otherwise they are fetched from the relays: the sharer, or for a persistent share a seat holding the whole file, publishes the pieces. Either way it verifies size + sha256 against the share, and writes it to `dest`: a bare name lands in the node's download directory (the EXCHANGE FOLDER), an ABSOLUTE path is that path, an existing directory takes the share's own name; omitted = the share's name in the download directory. A relative path is refused - it would resolve against the daemon's working directory. Async kickoff - poll read_uploads: `download.phase` is waiting (asked the sharer, no deadline; `wait` says sharer or sharer_offline), transferring (`held`/`of` pieces, `rate` B/s, `eta` s, `sharer` = the server's own publish progress), verifying, done (`path`) or failed (`code` + `error`; call again to retry). Over Tor and relays a file moves at a few KB/s. cancel_download stops it. Addressed by the share message's stable id (32-char lowercase hex, from read_state). Refused once the sharer deleted the file, a vote deleted the share, or the share expired.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -1653,6 +1653,18 @@ pub fn tools() -> Vec<ToolDef> {
                     .filter(|d| !d.is_empty())
                     .map(str::to_string),
             }),
+        },
+        ToolDef {
+            name: "cancel_download",
+            command: "cancel_download",
+            scope: Scope::Seat,
+            description: "Stop this seat's download of a share (any phase before done): the job, its partial file and its progress go; download_file starts over.",
+            schema: || json!({
+                "type": "object",
+                "properties": { "id": { "type": "string", "description": "share message id (32-char lowercase hex, from read_state)" } },
+                "required": ["id"]
+            }),
+            build: |args| Ok(Command::CancelDownload { id: id_arg(args, "id")? }),
         },
         ToolDef {
             name: "remove_file",
@@ -2241,7 +2253,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "read_uploads",
             command: "read_uploads",
             scope: Scope::Read,
-            description: "The Shared Files tables: every file shared into the chat (metadata only - bytes move user-to-user via the share link), with sharer, timestamp, availability and the deadline `expires_ts`. `persistent: false` = Temporary Uploads: ephemeral like chat, gone from the read (and undownloadable) after the chat retention window. `persistent: true` = Persistent Uploads: a threshold vote pinned it (`propose` on `files`, op `persist`), `expires_ts` is 0 and it outlives its chat message; an `unpersist` vote moves it back with a fresh window; a `delete` vote (temporary shares only) removes a share for good - a deleted share lists in neither table and downloads nowhere. The `id` is the chat message id `download_file` and the three ops take. `availability` says where the bytes can be had, in this precedence: `changed` (the sharer replaced the file on disk - a share is immutable, so this row is no longer the voted file), `gone` (nobody holds it), `mirrored` (a seat other than the sharer holds the whole series), `relay-held` (a live series stamp - no live sharer needed), `sharer-only` (the first download wakes the sharer). `local` says where THIS seat has them: own, downloaded, mirrored, partial, none. `mirrors` counts MEMBERS holding the whole series (the sharer included); `mirror_held`/`mirror_of` count this seat's verified PIECES. `vote` (absent when none) is the open files vote on the share: `op`, the `proposal` id approve/decline take, and `mine_open` = it still waits on this seat.",
+            description: "The Shared Files tables: every file shared into the chat (metadata only - bytes move user-to-user via the share link), with sharer, timestamp, availability and the deadline `expires_ts`. `persistent: false` = Temporary Uploads: ephemeral like chat, gone from the read (and undownloadable) after the chat retention window. `persistent: true` = Persistent Uploads: a threshold vote pinned it (`propose` on `files`, op `persist`), `expires_ts` is 0 and it outlives its chat message; an `unpersist` vote moves it back with a fresh window; a `delete` vote (temporary shares only) removes a share for good - a deleted share lists in neither table and downloads nowhere. The `id` is the chat message id `download_file` and the three ops take. `availability` says where the bytes can be had, in this precedence: `changed` (the sharer replaced the file on disk - a share is immutable, so this row is no longer the voted file), `gone` (nobody holds it), `mirrored` (a seat other than the sharer holds the whole series), `relay-held` (a live series stamp - no live sharer needed), `sharer-only` (the first download wakes the sharer). `local` says where THIS seat has them: own, downloaded, mirrored, partial, none. `mirrors` counts MEMBERS holding the whole series (the sharer included); `mirror_held`/`mirror_of` count this seat's verified PIECES. `vote` (absent when none) is the open files vote on the share: `op`, the `proposal` id approve/decline take, and `mine_open` = it still waits on this seat. `download` is this seat's download (see download_file); `serving` (absent when idle) is this seat publishing the share's pieces: `published` of `of`, `gate` = what holds the next piece (outbox, budget, daily).",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::ReadUploads),
         },
@@ -3357,13 +3369,12 @@ pub(crate) mod tests {
             "net_file_share_failed",
             "net_file_request_ready",
             "net_file_progress",
+            "net_file_verifying",
             "net_file_done",
             "net_file_failed",
             // the sharer's off-actor lazy series publish reporting its
             // stamp (relay file plane) — an agent must not forge one
             "net_file_series_published",
-            // the parked download's watchdog (relay file plane)
-            "net_file_wanted_timeout",
             // a PieceWanted control frame landing (the transport speaks), and
             // the running fetch asking the actor to send one (mirroring §3.2)
             "net_piece_wanted",
@@ -4489,7 +4500,7 @@ pub(crate) mod tests {
             json!(null),                               // required, so null is missing
         ];
         for bad in &bad_ids {
-            for tool in ["react_chat", "delete_chat", "download_file", "remove_file"] {
+            for tool in ["react_chat", "delete_chat", "download_file", "cancel_download", "remove_file"] {
                 let args = json!({ "id": bad, "emoji": "👍" });
                 assert!(
                     build(tool, &args).is_err(),

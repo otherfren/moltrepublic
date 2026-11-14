@@ -32,6 +32,7 @@ fn upload(name: &str) -> molt_core::UploadView {
         mirror_held: 0,
         mirror_of: 0,
         vote: None,
+        serving: None,
     }
 }
 
@@ -189,12 +190,13 @@ fn every_reference_state_renders_its_word() {
         (
             resolved(
                 Some(molt_core::UploadView {
-                    download: Some(molt_core::DownloadView {
+                    download: Some(Box::new(molt_core::DownloadView {
                         phase: "transferring".to_string(),
                         percent: 30,
                         path: String::new(),
                         error: String::new(),
-                    }),
+                        ..molt_core::DownloadView::default()
+                    })),
                     ..upload("netz.png")
                 }),
                 molt_core::LocalCopy::None,
@@ -508,6 +510,9 @@ fn upload_row() -> UploadRowData {
         expires: String::new(),
         status: String::new(),
         status_kind: 0,
+        dl_own: -1.0,
+        dl_sharer: -1.0,
+        status_tip: String::new(),
         availability: String::new(),
         ts: 0,
         bytes: 0,

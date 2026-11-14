@@ -189,7 +189,8 @@ and only the missing indices land) and seeds the series stamps from the
 publish jobs. After each quiet slice (10 s without a piece) the job
 computes its missing ranges; once `PIECE_WANT_AFTER` (10 min) has passed
 since the job started it sends `PieceWanted` for them, and again every
-30 min while incomplete. Progress rides `DownloadView` (percent =
+30 min while incomplete (`download_progress.md` amends this: no 90 s
+watchdog, the park persists, cancel). Progress rides `DownloadView` (percent =
 verified pieces). The job ends on completion, on a failure (both remove
 it) - the honest failures left are a landing that cannot be written and
 a relay pool that cannot be dialed at start.
