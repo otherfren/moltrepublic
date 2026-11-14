@@ -682,8 +682,8 @@ export component ChatRow inherits Rectangle {
         if root.line.quote-label != "": Rectangle {
             height: 4px;
         }
-        // the author is named once per block (with the grey timestamp) —
-        // consecutive messages of the same member just append below it
+        // the author is named on every card (with the grey timestamp); the
+        // tone still marks one member's run
         if root.line.first: HorizontalLayout {
             spacing: 8px;
             alignment: start;

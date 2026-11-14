@@ -186,8 +186,9 @@ pub(crate) fn annotate_chat_log(log: &mut [LogLineData], quotes: &HashMap<String
             alt = !alt;
         }
         line.alt = alt;
-        // the author header (name + time) shows once per author block
-        line.first = prev_lead.as_deref() != Some(line.lead.as_str());
+        // every card names its author: a long run of one member scrolled
+        // the block's only header out of sight; the stripe keeps the block
+        line.first = true;
         prev_lead = Some(line.lead.clone());
     }
     // id → displayed row: the jump target of an in-view quote

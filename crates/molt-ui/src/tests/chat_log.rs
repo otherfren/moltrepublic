@@ -138,10 +138,11 @@ fn annotate_chat_log_resolves_quotes_by_id() {
     log[3].quote_id = hex_id(99); // dangling id → dropped
     let quotes = HashMap::from([(hex_id(1), qsrc("me", "first", false))]);
     annotate_chat_log(&mut log, &quotes);
-    // the header shows once per author block …
+    // every card names its author - a long run of one member must not
+    // hide who wrote it above the viewport (field report 2026-11-14) …
     assert_eq!(
         log.iter().map(|l| l.first).collect::<Vec<_>>(),
-        [true, false, true, true]
+        [true, true, true, true]
     );
     // … and the zebra flips exactly on author changes
     assert_eq!(
