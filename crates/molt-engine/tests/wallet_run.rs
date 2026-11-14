@@ -14,7 +14,7 @@ use molt_net::monero_rpc::stub::{StubConfig, StubDaemon};
 use nostr_relay_builder::MockRelay;
 
 mod vault_support;
-use vault_support::{found_n_at, read_session, NAMES};
+use vault_support::{found_n_at, read_session, wallet, NAMES};
 
 /// Run deadlines in these tests: long enough for a loaded box, short
 /// enough for an abort test.
@@ -23,13 +23,6 @@ const DEADLINE: u64 = 30;
 async fn set_daemon(w: &WalletHandle, d: &StubDaemon) {
     let patch = serde_json::json!({ "wallet_daemon_url": d.url, "wallet_daemon_confirmed": true, "wallet_network": "mainnet" });
     w.execute(Command::PatchSettings { patch }).await.expect("daemon set");
-}
-
-async fn wallet(w: &WalletHandle) -> WalletView {
-    match w.execute(Command::ReadState { surface: Surface::Wallet, channel: None, view: None }).await {
-        Ok(Reply::State(s)) => *s.wallet.expect("wallet view"),
-        other => panic!("unexpected: {other:?}"),
-    }
 }
 
 async fn wait_wallet(w: &WalletHandle, what: &str, pred: impl Fn(&WalletView) -> bool) -> WalletView {

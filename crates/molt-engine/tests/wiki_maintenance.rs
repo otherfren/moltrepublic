@@ -12,24 +12,11 @@
 
 mod common;
 
-use common::{spawn_solo, still_building};
+use common::{spawn_solo, still_building, wiki_add as add};
 use std::time::Duration;
 
 use molt_core::{Command, MoltError, Reply, Surface, WikiChange};
 use molt_engine::WalletHandle;
-
-/// A `new file` patch for `path` holding `body`.
-fn add(path: &str, body: &str) -> String {
-    let lines: Vec<&str> = body.lines().collect();
-    let mut p = format!(
-        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
-        lines.len()
-    );
-    for l in lines {
-        p.push_str(&format!("+{l}\n"));
-    }
-    p
-}
 
 /// A `deleted file` patch that consumes exactly `body`.
 fn delete(path: &str, body: &str) -> String {

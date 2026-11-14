@@ -246,7 +246,7 @@ impl WikiGraph {
         };
         let (props, _) = front_matter::properties(content);
         let props = props.unwrap_or_default();
-        self.docs.insert(path.to_string(), doc_meta(content));
+        self.docs.insert(path.to_string(), doc_meta_of(&props, content));
         let mut edges: Vec<RawEdge> = Vec::new();
         // the header's typed relations: the KEY is the predicate
         for (key, value) in &props {
@@ -727,16 +727,14 @@ fn collect_typed(key: &str, value: &Value, out: &mut Vec<RawEdge>) {
 /// What the name index needs about one document. A free function so a
 /// WORKING COPY can be measured with the same rule the index uses (E1).
 pub(crate) fn doc_meta(content: &str) -> DocMeta {
-    let (props, _) = front_matter::properties(content);
-    let props = props.unwrap_or_default();
+    doc_meta_of(&front_matter::properties(content).0.unwrap_or_default(), content)
+}
+
+/// [`doc_meta`] for a caller that already parsed the header.
+fn doc_meta_of(props: &serde_json::Map<String, Value>, content: &str) -> DocMeta {
     DocMeta {
-        title: front_matter::title(content),
-        header_title: props
-            .get("title")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-            .map(str::to_string),
+        title: front_matter::title_of(props, content),
+        header_title: front_matter::header_title(props),
         kind: props.get("type").and_then(Value::as_str).map(str::to_string),
         aliases: string_list(props.get("aliases")),
     }

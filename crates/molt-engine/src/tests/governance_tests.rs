@@ -300,22 +300,7 @@ fn org_pending_cards_carry_current_and_proposed_state() {
         relays: String::new(),
         features: String::new(),
     };
-    let rec = |surface: Surface, op: &str, value: &str| molt_core::ProposalRecord {
-        surface,
-        payload: json!({"op": op, "title": "t", "value": value}),
-        approvals: 0,
-        state: molt_core::ProposalState::Proposed,
-        applied_at: 0,
-        declined_at: 0,
-        declined_by: String::new(),
-        decliners: Vec::new(),
-            voted: Vec::new(),
-        by: String::new(),
-        superseded: false,
-        superseded_kind: None,
-        withdrawn: false,
-        wiki_rev: None,
-    };
+    let rec = |surface: Surface, op: &str, value: &str| molt_core::ProposalRecord::new(surface, json!({"op": op, "title": "t", "value": value}), String::new());
     assert_eq!(
         proposals::change_summary(
             &eff(""),

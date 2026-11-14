@@ -132,10 +132,11 @@ impl State {
         let me = self.member();
         let mut ids: Vec<MessageId> = self.files.share_paths.keys().copied().collect();
         ids.sort_unstable_by_key(|id| id.to_string());
+        let states = self.files_state();
         let mut out: Vec<MirrorHold> = ids
             .into_iter()
             .filter_map(|id| {
-                let (ident, available) = self.share_identity(&id).ok()?;
+                let (ident, available) = self.share_identity_in(&states, &id).ok()?;
                 (ident.by == me && available && !ident.key_b64.is_empty())
                     .then_some(MirrorHold { id, held: ident.pieces, of: ident.pieces })
             })
@@ -191,14 +192,7 @@ impl State {
             return true;
         }
         let now = self.presence_now();
-        let last_seen = self
-            .session
-            .workspaces
-            .iter()
-            .find(|w| w.id == self.session.active_workspace)
-            .and_then(|e| e.members.iter().find(|mi| mi.name == member))
-            .map(|mi| mi.last_seen)
-            .unwrap_or(molt_core::MemberInfo::NEVER);
+        let last_seen = self.member_last_seen(member);
         self.presence_of(member, last_seen, now) != 2
     }
 
@@ -289,7 +283,7 @@ impl State {
         // candidates: persistent v2 shares of others this seat does not
         // hold complete and is not fetching; the least mirrored first,
         // the older share on a tie
-        let mut candidates: Vec<(usize, u64, MessageId, crate::files_state::ShareIdentity)> = states
+        let candidate = states
             .iter()
             .filter_map(|(id, st)| match st {
                 FileState::Persistent(ident) => Some((*id, ident.clone())),
@@ -307,9 +301,8 @@ impl State {
                 let mirrors = holders.get(&id).map_or(0, Vec::len);
                 (mirrors, ident.shared_ts, id, ident)
             })
-            .collect();
-        candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.to_string().cmp(&b.2.to_string())));
-        let Some((_, _, id, ident)) = candidates.into_iter().next() else {
+            .min_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.to_string().cmp(&b.2.to_string())));
+        let Some((_, _, id, ident)) = candidate else {
             return;
         };
         let used = self.mirror_used();

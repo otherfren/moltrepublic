@@ -359,31 +359,10 @@ fn strip_diff_body(text: &str) -> String {
 
 pub(crate) fn system_line_data(text: String) -> LogLineData {
     LogLineData {
-        id: String::new(),
-        lead: String::new(),
         text,
-        when: String::new(),
         quote: -1,
-        quote_id: String::new(),
         system: true,
-        wake: false,
-        quote_label: String::new(),
-        quote_indent: 0,
-        deleted_by: String::new(),
-        first: false,
-        own: false,
-        alt: false,
-        mine_emoji: String::new(),
-        reactions: Vec::new(),
-        receipts: Vec::new(),
-        has_file: false,
-        file_name: String::new(),
-        file_meta: String::new(),
-        file_available: false,
-        proposal_id: None,
-        op: String::new(),
-        op_agent: false,
-        segs: Vec::new(),
+        ..LogLineData::default()
     }
 }
 
@@ -506,7 +485,7 @@ pub(crate) fn talk_feed(
             .iter()
             .find(|p| p.id.0 == vote && !p.approved_by_me && !p.declined_by_me);
         if let Some(p) = open.filter(|_| on_screen != Some(&m.channel)) {
-            let l = if lang == 1 { crate::i18n::Lexicon::de() } else { crate::i18n::Lexicon::en() };
+            let l = crate::i18n::Lexicon::of(lang);
             let title = display_title(lang, &p.payload);
             feed.toasts.push((m.id, format!("{} {} {title}", m.from, l.toast_talk_on)));
         }

@@ -453,7 +453,7 @@ async fn tick_job<S: StateStore>(
         return Err(Hold::Failed);
     };
     let framed = {
-        let (manifest, job) = (manifest.clone(), job.clone());
+        let job = job.clone();
         tokio::task::spawn_blocking(move || piece_bytes(&job, &manifest, index)).await
     };
     let framed = match framed {

@@ -234,17 +234,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                             })
                         }
                         _ => {
-                            // no Debug dump at the user: the one important
-                            // thing is WHICH file did not read
-                            let _ = slint::invoke_from_event_loop(move || {
-                                if let Some(ui) = weak.upgrade() {
-                                    let msg = format!(
-                                        "\u{26a0} {} {path}",
-                                        ui.global::<Strings>().get_toast_file_unreadable()
-                                    );
-                                    ui.invoke_show_toast_error(msg.into());
-                                }
-                            });
+                            toast_unreadable(weak, path);
                             return;
                         }
                     };
@@ -253,22 +243,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                     // the payload cap, and a "Proposed" toast on the click
                     // followed by an error described a proposal that never
                     // existed
-                    let outcome = w
-                        .execute(Command::Propose {
-                            surface: Surface::Organization,
-                            payload,
-                        })
-                        .await;
-                    let _ = slint::invoke_from_event_loop(move || {
-                        let Some(ui) = weak.upgrade() else { return };
-                        match outcome {
-                            Ok(_) => {
-                                let msg = ui.global::<Strings>().get_toast_proposed();
-                                ui.invoke_show_toast(msg);
-                            }
-                            Err(e) => ui.invoke_show_toast_error(error_toast(&ui, &e)),
-                        }
-                    });
+                    propose_org(w, weak, payload).await;
                 });
                 return;
             }
@@ -341,17 +316,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 })
                 .await;
                 let Ok(Ok(bytes)) = read else {
-                    // no Debug dump at the user: the one important thing is
-                    // WHICH file did not read
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            let msg = format!(
-                                "\u{26a0} {} {path}",
-                                ui.global::<Strings>().get_toast_file_unreadable()
-                            );
-                            ui.invoke_show_toast_error(msg.into());
-                        }
-                    });
+                    toast_unreadable(weak, path);
                     return;
                 };
                 // the crop/downscale is CPU work on a picture up to 8192²
@@ -389,22 +354,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 });
                 // the confirmation belongs to the OUTCOME: the engine's own
                 // gates (square, budget, the seat) still run after this
-                let outcome = w
-                    .execute(Command::Propose {
-                        surface: Surface::Organization,
-                        payload,
-                    })
-                    .await;
-                let _ = slint::invoke_from_event_loop(move || {
-                    let Some(ui) = weak.upgrade() else { return };
-                    match outcome {
-                        Ok(_) => {
-                            let msg = ui.global::<Strings>().get_toast_proposed();
-                            ui.invoke_show_toast(msg);
-                        }
-                        Err(e) => ui.invoke_show_toast_error(error_toast(&ui, &e)),
-                    }
-                });
+                propose_org(w, weak, payload).await;
             });
         });
     }
@@ -412,24 +362,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     // pick the own seat's picture — same picker set as the republic image
     {
         let cx = ctx.clone();
-        ui.on_mp_img_pick(move || {
-            let weak = cx.weak.clone();
-            cx.rt.spawn(async move {
-                let picker = rfd::AsyncFileDialog::new()
-                    // no "svg": the engine refuses it, and a square check
-                    // on a vector is meaningless
-                    .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
-                let Some(file) = picker.pick_file().await else {
-                    return; // cancelled
-                };
-                let path = file.path().display().to_string();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.set_mp_img_draft(path.into());
-                    }
-                });
-            });
-        });
+        ui.on_mp_img_pick(move || pick_image(&cx, |ui, path| ui.set_mp_img_draft(path)));
     }
 
     // pick a new republic image via the native file dialog (async XDG
@@ -437,24 +370,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     // draft; proposing it ships the file REFERENCE, never bytes
     {
         let cx = ctx.clone();
-        ui.on_org_logo_pick(move || {
-            let weak = cx.weak.clone();
-            cx.rt.spawn(async move {
-                let picker = rfd::AsyncFileDialog::new()
-                    // no "svg" (L1, 2026-08-16): the engine refuses SVG proposals —
-                    // offering a format the vote will bounce is a trap
-                    .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
-                let Some(file) = picker.pick_file().await else {
-                    return; // cancelled
-                };
-                let path = file.path().display().to_string();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(ui) = weak.upgrade() {
-                        ui.set_org_logo_draft(path.into());
-                    }
-                });
-            });
-        });
+        ui.on_org_logo_pick(move || pick_image(&cx, |ui, path| ui.set_org_logo_draft(path)));
     }
 
     // the proposed image behind a pending set_image: the bytes RODE the
@@ -574,4 +490,63 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             );
         });
     }
+}
+
+/// Toast WHICH file did not read - no Debug dump at the user.
+fn toast_unreadable(weak: slint::Weak<AppWindow>, path: String) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            let msg = format!(
+                "\u{26a0} {} {path}",
+                ui.global::<Strings>().get_toast_file_unreadable()
+            );
+            ui.invoke_show_toast_error(msg.into());
+        }
+    });
+}
+
+/// Propose `payload` on the organization surface and toast the OUTCOME.
+async fn propose_org(
+    w: molt_engine::WalletHandle,
+    weak: slint::Weak<AppWindow>,
+    payload: serde_json::Value,
+) {
+    let outcome = w
+        .execute(Command::Propose {
+            surface: Surface::Organization,
+            payload,
+        })
+        .await;
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(ui) = weak.upgrade() else { return };
+        match outcome {
+            Ok(_) => {
+                let msg = ui.global::<Strings>().get_toast_proposed();
+                ui.invoke_show_toast(msg);
+            }
+            Err(e) => ui.invoke_show_toast_error(error_toast(&ui, &e)),
+        }
+    });
+}
+
+/// The native image picker (async XDG portal); only the picked path
+/// reaches `set`.
+fn pick_image(cx: &Ctx, set: fn(&AppWindow, slint::SharedString)) {
+    let weak = cx.weak.clone();
+    cx.rt.spawn(async move {
+        let picker = rfd::AsyncFileDialog::new()
+            // no "svg" (L1, 2026-08-16): the engine refuses SVG proposals -
+            // offering a format the vote will bounce is a trap, and a
+            // square check on a vector is meaningless
+            .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+        let Some(file) = picker.pick_file().await else {
+            return; // cancelled
+        };
+        let path = file.path().display().to_string();
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                set(&ui, path.into());
+            }
+        });
+    });
 }

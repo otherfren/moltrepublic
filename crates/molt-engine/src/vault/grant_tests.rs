@@ -5,31 +5,14 @@
 //! answers, nothing secret persisted, and the displaced audit (D17).
 
 use super::*;
-use crate::chain::test_support::{wire, Builder};
+use crate::chain::test_support::{applied, ctx_of, genesis_of, grant_op, idx, op, wire, Builder, SEATS};
 use molt_core::vault::{secret_id, SecretText, VaultGrantState};
-use molt_core::{ChainBlock, ChainChange, MemberIdentity, ProposalId, ProposalRecord, WorkspaceEvent};
+use molt_core::{ChainBlock, ChainChange, ProposalId, ProposalRecord, WorkspaceEvent};
 use std::sync::{Arc, Mutex};
-
-const SEATS: [&str; 4] = ["a", "b", "c", "d"];
-
-fn idx(member: &str) -> usize {
-    SEATS.iter().position(|s| *s == member).expect("a seat")
-}
 
 fn seed_of(member: &str) -> [u8; 32] {
     let (entropy, npk, _) = Builder::seat_keys(idx(member));
     *molt_vault::derive_vault_seed(&entropy, &npk, "id")
-}
-
-fn genesis_of(b: &Builder) -> (Vec<MemberIdentity>, Option<Vec<String>>) {
-    let ChainChange::Genesis { identities, features, .. } = &b.blocks[0].change else {
-        panic!("block 0 is not a genesis");
-    };
-    (identities.clone(), features.clone())
-}
-
-fn ctx_of(b: &Builder) -> VaultCtx {
-    crate::vault::ctx_from_founding(2, &genesis_of(b).0).expect("a v6 genesis")
 }
 
 fn seat(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
@@ -64,19 +47,6 @@ fn deposit_over(b: &Builder, depositor: &str, name: &str, text: &str, replaces: 
     molt_vault::build_deposit(&input, &seed_of(depositor), b.key(depositor), &mut rng).expect("built")
 }
 
-fn op(dep: &VaultDeposit) -> Value {
-    serde_json::to_value(VaultOp::Deposit(dep.clone())).expect("json")
-}
-
-fn grant_op(sid: &str, reader: &str, id: u64) -> Value {
-    let g = VaultGrant { grant_id: grant_id(sid, reader, id), secret_id: sid.to_string(), reader: reader.into() };
-    serde_json::to_value(VaultOp::Grant(g)).expect("json")
-}
-
-fn applied(proposal_id: u64, payload: Value) -> ChainChange {
-    ChainChange::Applied { proposal_id, surface: Surface::Vault, payload }
-}
-
 /// Hold the payload, and keep its bytes for a read.
 fn hold(st: &mut crate::State, b: &Builder, dep: &VaultDeposit, file: &[u8]) {
     let named = crate::net::vault_payload::NamedPayload {
@@ -90,22 +60,7 @@ fn hold(st: &mut crate::State, b: &Builder, dep: &VaultDeposit, file: &[u8]) {
 }
 
 fn card(payload: Value, by: &str) -> ProposalRecord {
-    ProposalRecord {
-        surface: Surface::Vault,
-        payload,
-        approvals: 0,
-        state: ProposalState::Proposed,
-        applied_at: 0,
-        declined_at: 0,
-        declined_by: String::new(),
-        decliners: Vec::new(),
-        voted: Vec::new(),
-        by: by.to_string(),
-        superseded: false,
-        superseded_kind: None,
-        withdrawn: false,
-        wiki_rev: None,
-    }
+    ProposalRecord::new(Surface::Vault, payload, by.to_string())
 }
 
 fn refused(r: Result<Reply, MoltError>, want: &VaultRefusal) {

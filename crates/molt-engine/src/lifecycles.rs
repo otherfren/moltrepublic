@@ -406,14 +406,7 @@ impl State {
                 RestorePlan::File(molt_storage::expand_tilde(&target))
             }
             "s3" => {
-                let s = &self.session.settings;
-                let config = molt_net::s3::S3Config::from_settings(
-                    &s.s3_endpoint,
-                    &s.s3_access_key,
-                    &s.s3_secret_key,
-                    &s.s3_bucket,
-                    &s.s3_plaintext_confirmed,
-                )
+                let config = self.saved_s3_config()
                 .map_err(|e| MoltError::Restore(format!("backup target: {e}")))?;
                 // fail-closed: a Tor misconfiguration aborts the restore
                 let dialer = self.resolve_dialer().map_err(MoltError::Restore)?;
@@ -1493,13 +1486,9 @@ impl State {
         // can never come up.
         let shape = match (relays.is_empty(), rotation_seed.is_empty()) {
             (true, true) => TransportShape::default(),
-            (false, false) => match hex::decode(&rotation_seed) {
-                Ok(seed) if seed.len() == 32 => {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&seed);
-                    TransportShape::nostr(relays.clone(), arr)
-                }
-                _ => {
+            (false, false) => match hex::decode(&rotation_seed).ok().and_then(|s| <[u8; 32]>::try_from(s).ok()) {
+                Some(seed) => TransportShape::nostr(relays.clone(), seed),
+                None => {
                     return self.cmd_net_join_failed(
                         "the join task delivered a malformed rotation seed".to_string(),
                         generation,
@@ -2114,13 +2103,9 @@ impl State {
         let shape = if rotation_seed.is_empty() {
             TransportShape::default()
         } else {
-            match hex::decode(&rotation_seed) {
-                Ok(seed) if seed.len() == 32 => {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(&seed);
-                    TransportShape::nostr(sealed.relays.clone(), arr)
-                }
-                _ => {
+            match hex::decode(&rotation_seed).ok().and_then(|s| <[u8; 32]>::try_from(s).ok()) {
+                Some(seed) => TransportShape::nostr(sealed.relays.clone(), seed),
+                None => {
                     return self.cmd_net_recover_failed(
                         "the rejoin task delivered a malformed rotation seed".to_string(),
                         generation,
@@ -2707,12 +2692,6 @@ pub(crate) enum S3Pick {
     NewestOf(String),
 }
 
-/// Send one engine-internal command (fire-and-forget reply).
-async fn send_internal(cmd_tx: &tokio::sync::mpsc::Sender<Envelope>, cmd: Command) {
-    let (reply, _rx) = oneshot::channel();
-    let _ = cmd_tx.send(Envelope { cmd, reply }).await;
-}
-
 /// The restore fetch+stage task: every progress line reports something
 /// that actually happened; the staged result parks in `slot` and the
 /// actor-side handler runs the mandatory chain verification. Failures
@@ -2726,7 +2705,7 @@ async fn restore_task(
     slot: std::sync::Arc<std::sync::Mutex<Option<molt_storage::import::ImportStaging>>>,
 ) {
     let progress = |pct: u8, line: String| {
-        send_internal(
+        crate::send_internal(
             &cmd_tx,
             Command::NetRestoreProgress {
                 pct,
@@ -2769,18 +2748,15 @@ async fn restore_task(
                             .await
                             .map_err(|e| format!("listing the bucket failed: {e}"))?;
                         // lexicographic max IS the newest (§6.2 zero-padded keys)
-                        let mut keys: Vec<String> = listed
+                        listed
                             .into_iter()
                             .filter(|o| {
                                 molt_core::parse_backup_key(&o.key)
                                     .is_some_and(|(kid, _)| kid == id)
                             })
                             .map(|o| o.key)
-                            .collect();
-                        keys.sort_unstable();
-                        keys.pop().ok_or_else(|| {
-                            format!("no backup for workspace {id} in the bucket")
-                        })?
+                            .max()
+                            .ok_or_else(|| format!("no backup for workspace {id} in the bucket"))?
                     }
                 };
                 progress(8, format!("→ s3: GET {object}")).await;
@@ -2800,15 +2776,14 @@ async fn restore_task(
                         if pct >= last_pct.saturating_add(5) || (done == total && pct > last_pct)
                         {
                             last_pct = pct;
-                            let (reply, _rx) = oneshot::channel();
-                            let _ = tx.try_send(Envelope {
-                                cmd: Command::NetRestoreProgress {
+                            crate::try_send_internal(
+                                &tx,
+                                Command::NetRestoreProgress {
                                     pct,
                                     line: format!("↓ {done} of {total} bytes"),
                                     generation: Some(generation),
                                 },
-                                reply,
-                            });
+                            );
                         }
                     })
                     .await
@@ -2844,7 +2819,7 @@ async fn restore_task(
     .await;
     match outcome {
         Ok(()) => {
-            send_internal(
+            crate::send_internal(
                 &cmd_tx,
                 Command::NetRestoreStaged {
                     generation: Some(generation),
@@ -2853,7 +2828,7 @@ async fn restore_task(
             .await;
         }
         Err(error) => {
-            send_internal(
+            crate::send_internal(
                 &cmd_tx,
                 Command::NetRestoreFailed {
                     error,

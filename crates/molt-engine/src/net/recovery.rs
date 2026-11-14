@@ -739,16 +739,14 @@ impl State {
                 wrap_in,
             }
             .to_mesh();
-            let (reply_tx, _rx) = oneshot::channel();
-            let _ = cmd_tx
-                .send(Envelope {
-                    cmd: Command::NetMeshExtended {
-                        link,
-                        generation: Some(generation),
-                    },
-                    reply: reply_tx,
-                })
-                .await;
+            crate::send_internal(
+                &cmd_tx,
+                Command::NetMeshExtended {
+                    link,
+                    generation: Some(generation),
+                },
+            )
+            .await;
         });
     }
 

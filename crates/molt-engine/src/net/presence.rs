@@ -163,12 +163,12 @@ impl State {
     /// (or it isn't in the active roster). Used by the self-heal liveness
     /// cross-check — a stamp older than a leg's mesh-up means nothing has
     /// been delivered on that leg since it came live.
-    pub(crate) fn member_last_seen(&self, member: &MemberId) -> u64 {
+    pub(crate) fn member_last_seen(&self, member: &str) -> u64 {
         self.session
             .workspaces
             .iter()
             .find(|w| w.id == self.session.active_workspace)
-            .and_then(|w| w.members.iter().find(|m| &m.name == member))
+            .and_then(|w| w.members.iter().find(|m| m.name == member))
             .map_or(molt_core::MemberInfo::NEVER, |m| m.last_seen)
     }
 

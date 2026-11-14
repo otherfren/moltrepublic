@@ -151,14 +151,6 @@ pub(crate) fn with<R>(f: impl FnOnce(&mut KanbanUi) -> R) -> R {
     KB.with_borrow_mut(f)
 }
 
-fn lex(lang: i32) -> Lexicon {
-    if lang == 1 {
-        Lexicon::de()
-    } else {
-        Lexicon::en()
-    }
-}
-
 /// The mirror's entry: adopt the push (a workspace switch resets the local
 /// state; the first push with a board brings the stored basket), then
 /// render.
@@ -193,7 +185,7 @@ pub(crate) fn apply(ui: &AppWindow, b: &SurfacesBundle) {
 pub(crate) fn render(ui: &AppWindow) {
     let k = ui.global::<Kanban>();
     with(|st| {
-        let l = lex(st.lang);
+        let l = Lexicon::of(st.lang);
         let Some(feed) = st.feed.as_ref() else {
             clear(&k);
             return;
@@ -397,7 +389,7 @@ fn arm_notice_timer(ui: &AppWindow) {
 pub(crate) fn flush_notices(ui: &AppWindow) {
     let poked = ui.global::<Strings>().get_toast_poked().to_string();
     if let Some(msg) = with(|st| {
-        let l = lex(st.lang);
+        let l = Lexicon::of(st.lang);
         st.notices.take(&l, &poked)
     }) {
         ui.invoke_show_toast(msg.into());
@@ -425,7 +417,7 @@ fn toast_error(ui: &AppWindow, msg: &str) {
 pub(crate) fn stage(ui: &AppWindow, id: &str, to: &str) -> bool {
     let k = ui.global::<Kanban>();
     let note = k.get_note().to_string();
-    let l = with(|st| lex(st.lang));
+    let l = with(|st| Lexicon::of(st.lang));
     if needs_note(to) && note.trim().is_empty() {
         toast_error(ui, l.kb_note_needed);
         return false;
@@ -442,7 +434,7 @@ pub(crate) fn stage(ui: &AppWindow, id: &str, to: &str) -> bool {
 
 /// A card dropped on column `col`: stage the move, or say why not.
 pub(crate) fn drop_card(ui: &AppWindow, id: &str, col: usize) -> bool {
-    let (target, l) = with(|st| (st.feed.as_ref().map(|f| drop_target(f, id, col)), lex(st.lang)));
+    let (target, l) = with(|st| (st.feed.as_ref().map(|f| drop_target(f, id, col)), Lexicon::of(st.lang)));
     match target.flatten() {
         Some(to) => {
             with(|st| st.basket.stage_state(id, to, "", &[]));
@@ -588,7 +580,7 @@ fn sync_lists(k: &Kanban<'_>) {
 /// The form into the basket; `false` with the reason shown on the form.
 pub(crate) fn form_submit(ui: &AppWindow) -> bool {
     let k = ui.global::<Kanban>();
-    let (form, l) = with(|st| (read_form(&k, st), lex(st.lang)));
+    let (form, l) = with(|st| (read_form(&k, st), Lexicon::of(st.lang)));
     match form_act(&l, &form) {
         Ok(act) => {
             with(|st| st.basket.add(act));
@@ -758,7 +750,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                     payload.map(|p| st.basket.rescue(&p))
                 });
                 if let Some(n) = n {
-                    let l = with(|st| lex(st.lang));
+                    let l = with(|st| Lexicon::of(st.lang));
                     let summary = with(|st| st.basket.summary.clone());
                     ui.global::<Kanban>().set_basket_summary(summary.into());
                     ui.invoke_show_toast(format!("{n} {}", l.kb_rescued).into());

@@ -11,32 +11,11 @@ mod common;
 mod file_support;
 
 use common::{read_session, wait_for};
-use file_support::{found_pair, pattern, persist, share};
+use file_support::{found_pair, pattern, persist, read_mirror, share, wait_mirror};
 use std::time::Duration;
 
-use molt_core::{Command, Reply};
-use molt_engine::WalletHandle;
+use molt_core::Command;
 use nostr_relay_builder::MockRelay;
-
-async fn read_mirror(w: &WalletHandle) -> Box<molt_core::MirrorView> {
-    match w.execute(Command::ReadMirror).await.expect("read mirror") {
-        Reply::Mirror(v) => v,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
-async fn wait_mirror(w: &WalletHandle, what: &str, pred: impl Fn(&molt_core::MirrorView) -> bool) -> Box<molt_core::MirrorView> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let v = read_mirror(w).await;
-        if pred(&v) {
-            return v;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for: {what}; view={v:?}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
 
 /// Petra shares a two-piece file and the republic persists it. Walter
 /// never downloads it - his worker mirrors it: the pieces land sealed in

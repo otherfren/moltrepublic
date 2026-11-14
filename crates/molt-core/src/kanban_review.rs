@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 
 use crate::kanban_calendar::{fmt_date, fmt_datetime};
 use crate::kanban_dates::{derive, impact, Derived, Flag, ImpactChange, Shown};
-use crate::kanban_fold::{kanban_fold_one, kanban_precheck, short_id, BoardState, TaskState};
+use crate::kanban_fold::{kanban_apply, short_id, BoardState, TaskState};
 use crate::kanban_wake::start_scan;
 
 impl Shown {
@@ -118,7 +118,7 @@ pub fn advisories(
     let base_rev = payload.get("base_rev").and_then(Value::as_u64).unwrap_or(0);
     let mut out = Vec::new();
 
-    let after = match kanban_precheck(board, payload, seats) {
+    let after = match kanban_apply(board, payload, seats) {
         Err(fault) => {
             let by = fault
                 .task
@@ -130,11 +130,7 @@ pub fn advisories(
             out.push(format!("{WOULD_VOID_PREFIX}{}{by}", fault.reason));
             None
         }
-        Ok(()) => {
-            let mut after = board.clone();
-            kanban_fold_one(&mut after, payload, seats);
-            Some(after)
-        }
+        Ok(after) => Some(after),
     };
 
     let mut changed: Vec<(&str, Vec<&str>)> = Vec::new();

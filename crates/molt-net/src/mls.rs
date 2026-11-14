@@ -520,12 +520,7 @@ impl MlsMember {
         }
         let mut parsed = Vec::with_capacity(key_packages.len());
         for kp in key_packages {
-            let kp_in = KeyPackageIn::tls_deserialize_exact(kp)
-                .map_err(|e| MlsError::Wire(format!("parsing key package: {e}")))?;
-            let validated = kp_in
-                .validate(self.provider.crypto(), ProtocolVersion::Mls10)
-                .map_err(|e| MlsError::Wire(format!("invalid key package: {e:?}")))?;
-            parsed.push(validated);
+            parsed.push(validated_key_package(&self.provider, kp)?);
         }
         // this add advances the epoch, so its outgoing exporter secret has
         // to enter the ring — otherwise catch-up across a founding-time add
@@ -556,11 +551,7 @@ impl MlsMember {
         member: &str,
         new_key_package: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
-        let kp_in = KeyPackageIn::tls_deserialize_exact(new_key_package)
-            .map_err(|e| MlsError::Wire(format!("parsing key package: {e}")))?;
-        let validated = kp_in
-            .validate(self.provider.crypto(), ProtocolVersion::Mls10)
-            .map_err(|e| MlsError::Wire(format!("invalid key package: {e:?}")))?;
+        let validated = validated_key_package(&self.provider, new_key_package)?;
         // the survivors' decrypt check, applied before merging: a leaf they
         // refuse would leave this node alone on the new epoch
         if let Some(roster) = &self.roster_keys {
@@ -1172,6 +1163,17 @@ impl MlsMember {
     }
 }
 
+/// Parse and validate one wire KeyPackage (untrusted input).
+fn validated_key_package(
+    provider: &OpenMlsRustCrypto,
+    bytes: &[u8],
+) -> Result<KeyPackage, MlsError> {
+    KeyPackageIn::tls_deserialize_exact(bytes)
+        .map_err(|e| MlsError::Wire(format!("parsing key package: {e}")))?
+        .validate(provider.crypto(), ProtocolVersion::Mls10)
+        .map_err(|e| MlsError::Wire(format!("invalid key package: {e:?}")))
+}
+
 /// The identity a wire `KeyPackage` commits to: its credential identity (the
 /// member handle bytes) and its signature public key. The founder uses this to
 /// enforce that a joiner's KeyPackage matches the exact `(name, key)` it
@@ -1182,11 +1184,7 @@ impl MlsMember {
 /// itself (self-consistency, signature, lifetime) as a side effect.
 pub fn key_package_binding(kp_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>), MlsError> {
     let provider = OpenMlsRustCrypto::default();
-    let kp_in = KeyPackageIn::tls_deserialize_exact(kp_bytes)
-        .map_err(|e| MlsError::Wire(format!("parsing key package: {e}")))?;
-    let kp = kp_in
-        .validate(provider.crypto(), ProtocolVersion::Mls10)
-        .map_err(|e| MlsError::Wire(format!("invalid key package: {e:?}")))?;
+    let kp = validated_key_package(&provider, kp_bytes)?;
     let leaf = kp.leaf_node();
     let identity = leaf.credential().serialized_content().to_vec();
     let sig_key = leaf.signature_key().as_slice().to_vec();
@@ -1444,21 +1442,7 @@ mod tests {
     /// and the old, removed leaf is locked out of the new epoch.
     #[test]
     fn restore_member_rekeys_the_seat_and_the_rejoiner_chats() {
-        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
-        let bob = MlsMember::new(&key(2), "bob").expect("bob");
-        let cara = MlsMember::new(&key(3), "cara").expect("cara");
-        founder.create_group().expect("create");
-        let welcome = founder
-            .add_members(&[
-                bob.key_package().expect("bob kp"),
-                cara.key_package().expect("cara kp"),
-            ])
-            .expect("add")
-            .expect("welcome");
-        let mut bob = bob;
-        let mut cara = cara;
-        bob.join_from_welcome(&welcome).expect("bob joins");
-        cara.join_from_welcome(&welcome).expect("cara joins");
+        let (mut founder, mut bob, mut cara) = three_seats();
 
         // bob lost its workspace; a fresh node re-derives the SAME identity (key 2)
         let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
@@ -1533,21 +1517,7 @@ mod tests {
     /// and the SAME ciphertext decrypts normally once the epoch caught up.
     #[test]
     fn a_future_epoch_message_classifies_for_retry_and_decrypts_after_the_commit() {
-        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
-        let bob = MlsMember::new(&key(2), "bob").expect("bob");
-        let cara = MlsMember::new(&key(3), "cara").expect("cara");
-        founder.create_group().expect("create");
-        let welcome = founder
-            .add_members(&[
-                bob.key_package().expect("bob kp"),
-                cara.key_package().expect("cara kp"),
-            ])
-            .expect("add")
-            .expect("welcome");
-        let mut bob = bob;
-        let mut cara = cara;
-        bob.join_from_welcome(&welcome).expect("bob joins");
-        cara.join_from_welcome(&welcome).expect("cara joins");
+        let (mut founder, _bob, mut cara) = three_seats();
 
         // bob's seat is re-keyed by cara → cara is at N+1, the founder still at N
         let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
@@ -1581,21 +1551,7 @@ mod tests {
     /// for an unbounded wall-clock window (epochs only advance on re-keys).
     #[test]
     fn the_evicted_leaf_cannot_speak_after_the_rekey() {
-        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
-        let bob = MlsMember::new(&key(2), "bob").expect("bob");
-        let cara = MlsMember::new(&key(3), "cara").expect("cara");
-        founder.create_group().expect("create");
-        let welcome = founder
-            .add_members(&[
-                bob.key_package().expect("bob kp"),
-                cara.key_package().expect("cara kp"),
-            ])
-            .expect("add")
-            .expect("welcome");
-        let mut bob = bob;
-        let mut cara = cara;
-        bob.join_from_welcome(&welcome).expect("bob joins");
-        cara.join_from_welcome(&welcome).expect("cara joins");
+        let (mut founder, mut bob, mut cara) = three_seats();
 
         // bob's (compromised) device is evicted by the recovery re-key
         let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
@@ -1706,11 +1662,7 @@ mod tests {
             .expect("welcome");
         let mut cara = cara;
         cara.join_from_welcome(&welcome).expect("cara joins");
-        let roster: BTreeMap<String, Vec<u8>> = [(1u8, "founder"), (2, "bob"), (3, "cara")]
-            .into_iter()
-            .map(|(k, n)| (n.to_string(), key(k).verifying_key().to_bytes().to_vec()))
-            .collect();
-        founder.set_roster_keys(roster);
+        founder.set_roster_keys(honest_roster());
 
         // the genuine re-key (bob's new device, same identity) merges
         let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
@@ -1751,11 +1703,7 @@ mod tests {
             cara.join_from_welcome(&welcome).expect("cara joins");
             (cara, bob)
         };
-        let roster: BTreeMap<String, Vec<u8>> = [(1u8, "founder"), (2, "bob"), (3, "cara")]
-            .into_iter()
-            .map(|(k, n)| (n.to_string(), key(k).verifying_key().to_bytes().to_vec()))
-            .collect();
-        cara.set_roster_keys(roster);
+        cara.set_roster_keys(honest_roster());
         let epoch = cara.epoch();
         let foreign = MlsMember::new(&key(9), "bob").expect("foreign key");
         assert!(cara
@@ -1782,10 +1730,7 @@ mod tests {
         let cara = MlsMember::new(&key(3), "cara").expect("cara");
         let rogue = MlsMember::new(&key(9), "bob").expect("rogue bob");
         founder.create_group().expect("create");
-        let honest_roster: BTreeMap<String, Vec<u8>> = [(1u8, "founder"), (2, "bob"), (3, "cara")]
-            .into_iter()
-            .map(|(k, n)| (n.to_string(), key(k).verifying_key().to_bytes().to_vec()))
-            .collect();
+        let honest_roster = honest_roster();
         let welcome = founder
             .add_members(&[
                 bob.key_package().expect("bob kp"),
@@ -2073,21 +2018,7 @@ mod tests {
     /// grindable, so the test grinds one.
     #[test]
     fn an_evicted_leaf_cannot_undo_its_eviction_with_a_lower_keyed_commit() {
-        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
-        let bob = MlsMember::new(&key(2), "bob").expect("bob");
-        let cara = MlsMember::new(&key(3), "cara").expect("cara");
-        founder.create_group().expect("create");
-        let welcome = founder
-            .add_members(&[
-                bob.key_package().expect("bob kp"),
-                cara.key_package().expect("cara kp"),
-            ])
-            .expect("add")
-            .expect("welcome");
-        let mut bob = bob;
-        let mut cara = cara;
-        bob.join_from_welcome(&welcome).expect("bob joins");
-        cara.join_from_welcome(&welcome).expect("cara joins");
+        let (mut founder, mut bob, mut cara) = three_seats();
 
         // the re-key evicts bob's old device at stamp 100
         let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
@@ -2268,21 +2199,7 @@ mod tests {
 
     #[test]
     fn an_old_epoch_message_is_rejected_after_a_rekey() {
-        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
-        let bob = MlsMember::new(&key(2), "bob").expect("bob");
-        let cara = MlsMember::new(&key(3), "cara").expect("cara");
-        founder.create_group().expect("create");
-        let welcome = founder
-            .add_members(&[
-                bob.key_package().expect("bob kp"),
-                cara.key_package().expect("cara kp"),
-            ])
-            .expect("add")
-            .expect("welcome");
-        let mut bob = bob;
-        let mut cara = cara;
-        bob.join_from_welcome(&welcome).expect("bob joins");
-        cara.join_from_welcome(&welcome).expect("cara joins");
+        let (mut founder, _bob, mut cara) = three_seats();
 
         // cara re-keys bob's seat and is at N+1; the founder, still at N,
         // has a chat in flight that was encrypted before the commit

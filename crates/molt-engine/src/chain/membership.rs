@@ -563,15 +563,7 @@ impl State {
         if me == member {
             return;
         }
-        let Some(head) = self.chain.head.as_ref() else {
-            return;
-        };
-        let Some(anchored) = head
-            .identities
-            .iter()
-            .find(|i| i.member == member)
-            .map(|i| i.identity_pk.clone())
-        else {
+        let Some(anchored) = self.anchored_identity(&member) else {
             return;
         };
         if identity_pk != anchored {
@@ -595,7 +587,7 @@ impl State {
             return;
         }
         let change = self.chain.proposal_changes.get(&id).cloned();
-        match change.map(|c| self.restore_consent_at(&c, head.height.saturating_add(1))) {
+        match change.map(|c| self.restore_consent_at(&c, self.next_chain_height())) {
             Some(Ok(ConsentKind::V2 { .. })) => {}
             // binds neither relays nor position (§7e): the human card
             Some(Ok(ConsentKind::V1)) => {

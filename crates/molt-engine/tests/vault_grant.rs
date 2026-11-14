@@ -14,7 +14,7 @@ use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
 
 mod vault_support;
-use vault_support::{NAMES, close_and_open, copy_dir, found_n_at, read_session, wait_for};
+use vault_support::{NAMES, close_and_open, copy_dir, found_n_at, proposed, read_session, wait_for};
 
 async fn vault_view(w: &WalletHandle) -> VaultView {
     match w
@@ -36,13 +36,6 @@ async fn wait_vault(w: &WalletHandle, what: &str, pred: impl Fn(&VaultView) -> b
         }
         assert!(tokio::time::Instant::now() < deadline, "timed out waiting for: {what}\n{v:?}");
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-fn proposed(r: Reply) -> ProposalId {
-    match r {
-        Reply::Proposed { id, .. } => id,
-        other => panic!("unexpected: {other:?}"),
     }
 }
 

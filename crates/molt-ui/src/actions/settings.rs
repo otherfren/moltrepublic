@@ -190,40 +190,14 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
         // Rotate the MCP token: mint a fresh one, drop it into the draft, and
         // persist the settings in one go (Slint cannot generate randomness).
         let cx = ctx.clone();
-        ui.on_rotate_token(move || {
-            let Some(ui) = cx.weak.upgrade() else {
-                return;
-            };
-            // a failed mint leaves the OLD token in place: overwriting it
-            // with "" would silently disable MCP authentication on save
-            let Ok(token) = molt_config::random_token() else {
-                ui.invoke_show_toast_error(Strings::get(&ui).get_set_token_failed());
-                return;
-            };
-            ui.set_cfg_mcp_token(token.into());
-            let settings = read_settings_draft(&ui, &stored_settings(&cx.last_settings));
-            let wake = ui.get_cfg_poke_wake().to_string();
-            cx.issue_draft(wake, settings);
-        });
+        ui.on_rotate_token(move || rotate(&cx, AppWindow::set_cfg_mcp_token));
     }
 
     {
         // Issue or rotate the READ-ONLY key (`knowledge_base_scale.md`
         // §4.7). Same mint, same failure posture as the seat key.
         let cx = ctx.clone();
-        ui.on_rotate_read_token(move || {
-            let Some(ui) = cx.weak.upgrade() else {
-                return;
-            };
-            let Ok(token) = molt_config::random_token() else {
-                ui.invoke_show_toast_error(Strings::get(&ui).get_set_token_failed());
-                return;
-            };
-            ui.set_cfg_mcp_read_token(token.into());
-            let settings = read_settings_draft(&ui, &stored_settings(&cx.last_settings));
-            let wake = ui.get_cfg_poke_wake().to_string();
-            cx.issue_draft(wake, settings);
-        });
+        ui.on_rotate_read_token(move || rotate(&cx, AppWindow::set_cfg_mcp_read_token));
     }
 
     {
@@ -235,9 +209,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 return;
             };
             ui.set_cfg_mcp_read_token(String::new().into());
-            let settings = read_settings_draft(&ui, &stored_settings(&cx.last_settings));
-            let wake = ui.get_cfg_poke_wake().to_string();
-            cx.issue_draft(wake, settings);
+            save_now(&ui, &cx);
         });
     }
 
@@ -558,4 +530,20 @@ fn test_s3_command(ui: &AppWindow) -> Command {
         secret_key: ui.get_cfg_s3_secret().to_string(),
         bucket: ui.get_cfg_s3_bucket().to_string(),
     }
+}
+
+/// Mint a fresh MCP key, drop it into the draft through `set` and persist
+/// the settings in one go (Slint cannot generate randomness).
+fn rotate(cx: &Ctx, set: fn(&AppWindow, slint::SharedString)) {
+    let Some(ui) = cx.weak.upgrade() else {
+        return;
+    };
+    // a failed mint leaves the OLD token in place: overwriting it with ""
+    // would silently disable MCP authentication on save
+    let Ok(token) = molt_config::random_token() else {
+        ui.invoke_show_toast_error(Strings::get(&ui).get_set_token_failed());
+        return;
+    };
+    set(&ui, token.into());
+    save_now(&ui, cx);
 }

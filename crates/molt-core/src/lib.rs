@@ -685,15 +685,6 @@ pub enum S3Target {
     Workspaces,
 }
 
-impl S3Target {
-    /// The wire/word form (`"workspaces"` | `"media"`).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            S3Target::Workspaces => "workspaces",
-        }
-    }
-}
-
 /// The inconspicuous default S3 bucket name.
 fn default_s3_bucket() -> String {
     "media-archive".to_string()
@@ -2764,10 +2755,20 @@ pub fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
 /// Append a `u32` (little-endian) entry COUNT — the run header that keeps
 /// a counted run injective once it is no longer the last field (see the
 /// member-run note in [`roster_canonical_bytes`]). The chain layouts count
-/// with `u64`, deliberately their own width; they do not use this.
+/// with `u64`, deliberately their own width: [`put_count_u64`].
 pub fn put_count(out: &mut Vec<u8>, n: usize) {
     out.extend_from_slice(
         &u32::try_from(n)
+            .expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written")
+            .to_le_bytes(),
+    );
+}
+
+/// [`put_count`] at the chain layouts' own width: a `u64` (little-endian)
+/// entry count.
+pub(crate) fn put_count_u64(out: &mut Vec<u8>, n: usize) {
+    out.extend_from_slice(
+        &u64::try_from(n)
             .expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written")
             .to_le_bytes(),
     );
@@ -3358,6 +3359,27 @@ pub struct ProposalRecord {
 }
 
 impl ProposalRecord {
+    /// A freshly registered, open card.
+    #[must_use]
+    pub fn new(surface: Surface, payload: Value, by: MemberId) -> Self {
+        ProposalRecord {
+            surface,
+            payload,
+            approvals: 0,
+            state: ProposalState::Proposed,
+            applied_at: 0,
+            declined_at: 0,
+            declined_by: MemberId::new(),
+            decliners: Vec::new(),
+            voted: Vec::new(),
+            by,
+            superseded: false,
+            superseded_kind: None,
+            withdrawn: false,
+            wiki_rev: None,
+        }
+    }
+
     /// The chain consumed this card: Applied, and whatever verdict a local
     /// supersede walk once wrote is void - a sealed block outranks it.
     pub fn settle_applied(&mut self) {

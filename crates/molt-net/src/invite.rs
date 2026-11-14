@@ -31,10 +31,7 @@ const TICKET_LEN: usize = 32;
 
 /// A fresh single-use invite ticket, lowercase hex (256-bit).
 pub fn mint_ticket() -> Result<String, NetError> {
-    let mut t = [0u8; TICKET_LEN];
-    getrandom::getrandom(&mut t)
-        .map_err(|e| NetError::Crypto(format!("os rng unavailable: {e}")))?;
-    Ok(hex::encode(t))
+    Ok(hex::encode(crate::os_random::<TICKET_LEN>()?))
 }
 
 /// The MAC binding an activation to its ticket (v2):

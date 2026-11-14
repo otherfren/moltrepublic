@@ -7,7 +7,6 @@
 //! AND a full re-verification under the base's own vault context.
 
 use molt_core::MessageId;
-use molt_net::supervisor::StateStore as _;
 
 /// How long the beat waits before the next attempt.
 const RETRY_EVERY_SECS: u64 = 15;
@@ -111,12 +110,7 @@ impl crate::State {
         let Some(layout) = molt_net::file_plane::Manifest::layout_for(series.count) else {
             return true;
         };
-        let ranges: Vec<(u32, u32)> = ranges
-            .iter()
-            .copied()
-            .filter(|(lo, hi)| lo <= hi && *hi <= layout.top)
-            .take(molt_net::piece_want::PIECE_WANT_MAX_RANGES)
-            .collect();
+        let ranges = crate::net::files::bounded_want_ranges(ranges, layout.top);
         if !ranges.is_empty() {
             tracing::debug!(%id, ranges = ranges.len(), "vault_base=wanted");
             self.enqueue_vault_base_publish(&series, ranges);
@@ -125,10 +119,6 @@ impl crate::State {
     }
 
     fn enqueue_vault_base_publish(&mut self, series: &VaultBaseSeries, ranges: Vec<(u32, u32)>) {
-        let Some(store) = self.file_store() else {
-            return;
-        };
-        let waker = self.group_net.as_ref().map(|g| g.trickle.waker());
         let job = molt_core::PublishJob {
             series: series.id.to_string(),
             key: series.key.to_vec(),
@@ -145,11 +135,6 @@ impl crate::State {
             vault: Some(series.hash.clone()),
             expires_at: None,
         };
-        tokio::spawn(async move {
-            store.update(|s| molt_net::trickle::enqueue_publish(s, job)).await;
-            if let Some(w) = waker {
-                w.notify_one();
-            }
-        });
+        self.spawn_enqueue_publish(job);
     }
 }

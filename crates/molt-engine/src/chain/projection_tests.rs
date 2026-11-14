@@ -644,9 +644,7 @@ fn a_sealed_wiki_patch_supersedes_overlapping_pending_patches() {
 /// the limit is clamped, and an unknown path is an error.
 #[test]
 fn the_wiki_reads_page_by_prefix_and_cursor() {
-    let add = |path: &str, body: &str| {
-        format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+{body}\n")
-    };
+    let add = wiki_add;
     let wp = |p: String| json!({"op": "wiki_patch", "summary": "x", "value": p});
     let b = Builder::new(&["petra", "walter"], 2);
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
@@ -744,19 +742,7 @@ fn the_wiki_reads_page_by_prefix_and_cursor() {
 /// only honest answer to "what should I write" is "what is written".
 #[test]
 fn the_property_inventory_is_what_the_documents_say() {
-    let add = |path: &str, body: &str| {
-        let lines: Vec<&str> = body.split('\n').collect();
-        let mut patch = format!(
-            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
-            lines.len()
-        );
-        for l in lines {
-            patch.push('+');
-            patch.push_str(l);
-            patch.push('\n');
-        }
-        patch
-    };
+    let add = wiki_add_lines;
     let wp = |p: String| json!({"op": "wiki_patch", "summary": "x", "value": p});
     let b = Builder::new(&["petra", "walter"], 2);
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
@@ -817,9 +803,7 @@ fn the_property_inventory_is_what_the_documents_say() {
 /// "nothing matched", which is a different claim.
 #[test]
 fn an_index_built_against_a_moved_base_is_discarded() {
-    let add = |path: &str, body: &str| {
-        format!("diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+{body}\n")
-    };
+    let add = wiki_add;
     let wp = |p: String| json!({"op": "wiki_patch", "summary": "x", "value": p});
     let b = Builder::new(&["petra", "walter"], 2);
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
@@ -893,19 +877,7 @@ fn an_index_built_against_a_moved_base_is_discarded() {
 /// ghost of the old text behind.
 #[test]
 fn the_search_index_follows_the_applied_base() {
-    let add = |path: &str, body: &str| {
-        let lines: Vec<&str> = body.split('\n').collect();
-        let mut patch = format!(
-            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
-            lines.len()
-        );
-        for l in lines {
-            patch.push('+');
-            patch.push_str(l);
-            patch.push('\n');
-        }
-        patch
-    };
+    let add = wiki_add_lines;
     let wp = |p: String| json!({"op": "wiki_patch", "summary": "x", "value": p});
     let hits = |r: molt_core::Reply| -> Vec<String> {
         match r {
@@ -990,19 +962,7 @@ fn the_search_index_follows_the_applied_base() {
 /// outside the subset warns the proposer without voiding anything.
 #[test]
 fn the_link_graph_follows_the_applied_base() {
-    let add = |path: &str, body: &str| {
-        let lines: Vec<&str> = body.split('\n').collect();
-        let mut patch = format!(
-            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
-            lines.len()
-        );
-        for l in lines {
-            patch.push('+');
-            patch.push_str(l);
-            patch.push('\n');
-        }
-        patch
-    };
+    let add = wiki_add_lines;
     let wp = |p: String| json!({"op": "wiki_patch", "summary": "x", "value": p});
     let b = Builder::new(&["petra", "walter"], 2);
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
@@ -1114,19 +1074,7 @@ fn the_link_graph_follows_the_applied_base() {
 /// with no relations at all.
 #[test]
 fn an_inline_predicate_reaches_wiki_links_and_wiki_props() {
-    let add = |path: &str, body: &str| {
-        let lines: Vec<&str> = body.split('\n').collect();
-        let mut patch = format!(
-            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
-            lines.len()
-        );
-        for l in lines {
-            patch.push('+');
-            patch.push_str(l);
-            patch.push('\n');
-        }
-        patch
-    };
+    let add = wiki_add_lines;
     let wp = |p: String| json!({"op": "wiki_patch", "summary": "x", "value": p});
     let b = Builder::new(&["petra", "walter"], 2);
     let mut walter = chain_signer("walter", &b, b.blocks.clone());

@@ -9,19 +9,12 @@
 mod common;
 mod file_support;
 
-use file_support::{found_pair, pattern, share};
+use file_support::{found_pair, pattern, share, uploads};
 use std::time::Duration;
 
 use molt_core::{Command, ProposalFilter, Reply, Surface};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
-
-async fn uploads(w: &WalletHandle) -> Vec<molt_core::UploadView> {
-    match w.execute(Command::ReadUploads).await.expect("uploads") {
-        Reply::Uploads { uploads } => uploads,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
 
 async fn wait_row(
     w: &WalletHandle,

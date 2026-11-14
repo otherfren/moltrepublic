@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use molt_core::wallet::{WalletPhase, WalletView};
-use molt_core::{Command, Event, Reply, Surface};
+use molt_core::{Command, Event};
 use molt_engine::WalletHandle;
 use molt_net::monero_rpc::stub::{StubBlock, StubConfig, StubDaemon};
 use molt_treasury::testing::{block, chain, Pay, TestBlock, Timelock};
@@ -18,7 +18,7 @@ use molt_treasury::Network;
 use nostr_relay_builder::MockRelay;
 
 mod vault_support;
-use vault_support::{found_n_prepared, read_session};
+use vault_support::{found_n_prepared, read_session, wallet};
 
 const DEADLINE: u64 = 30;
 /// The chain the daemons serve before the purse exists; the birthday is
@@ -26,13 +26,6 @@ const DEADLINE: u64 = 30;
 const BASE: u64 = 4900;
 const TIP: u64 = 5000;
 const AMOUNT: u64 = 1_250_000_000_000;
-
-async fn wallet(w: &WalletHandle) -> WalletView {
-    match w.execute(Command::ReadState { surface: Surface::Wallet, channel: None, view: None }).await {
-        Ok(Reply::State(s)) => *s.wallet.expect("wallet view"),
-        other => panic!("unexpected: {other:?}"),
-    }
-}
 
 async fn wait_wallet(w: &WalletHandle, what: &str, pred: impl Fn(&WalletView) -> bool) -> WalletView {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(150);

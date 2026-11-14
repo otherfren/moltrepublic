@@ -71,6 +71,39 @@ pub async fn read_chat(w: &WalletHandle) -> Vec<serde_json::Value> {
     }
 }
 
+/// A `new file` git patch for `path` holding `content`.
+pub fn wiki_add(path: &str, content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+    let mut patch = format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+        lines.len()
+    );
+    for l in lines {
+        patch.push('+');
+        patch.push_str(l);
+        patch.push('\n');
+    }
+    patch
+}
+
+/// How many documents the wiki base holds, as the engine serves it. The
+/// snapshot carries the count since 2026-09-05 (§4.10); the tree itself
+/// is the paged read's.
+pub async fn wiki_docs(w: &WalletHandle) -> u64 {
+    match w
+        .execute(Command::ReadState {
+            surface: Surface::Memory,
+            channel: None,
+            view: None,
+        })
+        .await
+        .expect("read memory")
+    {
+        Reply::State(s) => s.wiki_docs,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 /// Poll the session until a running founding seals (`create.run.outcome
 /// == 1`; panic on failure or after 20 s) — the sim ritual runs its
 /// members asynchronously.
@@ -463,4 +496,78 @@ pub fn still_building(reply: &Reply) -> bool {
             | Reply::WikiNeighbors { index_building: true, .. }
             | Reply::WikiSearch { index_building: true, .. }
     )
+}
+
+/// Found a real 2-of-2 republic over the relay; both engines end up entered.
+pub async fn found_pair(
+    root: &std::path::Path,
+    urls: &[&str],
+    name: &str,
+) -> (WalletHandle, WalletHandle) {
+    let a = engine(&root.join("founder"));
+    for url in urls {
+        adopt_relay(&a, url).await;
+    }
+    a.execute(Command::CreateStart {
+        name: name.to_string(),
+        member: "petra".to_string(),
+        threshold: 2,
+        members: 2,
+        relays: Vec::new(),
+    })
+    .await
+    .expect("create start");
+    let s = wait_for(&a, "the seat link to become joinable", |s| {
+        !s.create.seats.is_empty()
+            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
+    })
+    .await;
+    let link = s.create.seats[0].link.clone();
+
+    let b = engine(&root.join("member"));
+    for url in urls {
+        adopt_relay(&b, url).await;
+    }
+    b.execute(Command::JoinStart {
+        invite: link,
+        member: "walter".to_string(),
+        relays: Vec::new(),
+    })
+    .await
+    .expect("join starts");
+    wait_for(&a, "the founder to accept the join", |s| s.create.can_propose).await;
+    a.execute(Command::CreatePropose {
+        name: name.to_string(),
+        agenda: String::new(),
+        features: vec!["memory".to_string()],
+    })
+    .await
+    .expect("charter proposed");
+    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
+    {
+        let seed_ = read_session(&a).await.create.seed.clone();
+        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("founder backup confirm");
+    }
+    wait_for(&b, "walter to see the charter", |s| s.join.awaiting_ratify).await;
+    b.execute(Command::JoinConfirmCharter).await.expect("ratify");
+    {
+        let seed_ = read_session(&b).await.join.seed.clone();
+        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
+            .await
+            .expect("joiner backup confirm");
+    }
+    wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
+    // entering is gated on the phrase-backup step now (2026-08-08) — both ends
+    a.execute(Command::CreateFinish).await.expect("create finish");
+    wait_for(&b, "the join to seal", |s| s.join.run.outcome == 1 && !s.join.sealed_id.is_empty())
+        .await;
+    // entering is gated on the phrase-backup step now (2026-08-08)
+    b.execute(Command::JoinFinish).await.expect("join finish");
+    wait_for(&b, "the joiner to enter", |s| {
+        s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
+    })
+    .await;
+    (a, b)
 }

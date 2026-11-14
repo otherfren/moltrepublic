@@ -40,7 +40,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{put_bytes, roster_canonical_bytes, MemberId, MemberIdentity, RosterAttestation, Surface};
+use crate::{put_bytes, put_count_u64, roster_canonical_bytes, MemberId, MemberIdentity, RosterAttestation, Surface};
 
 /// The `prev` of the genesis block: 32 zero bytes as lowercase hex. A chain
 /// roots here and nowhere else.
@@ -285,7 +285,7 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             // (the marker occupies a position no v2 preimage ever wrote).
             if !relays.is_empty() {
                 out.push(1);
-                out.extend_from_slice(&u64::try_from(relays.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+                put_count_u64(&mut out, relays.len());
                 for r in relays {
                     put_bytes(&mut out, r.as_bytes());
                 }
@@ -449,7 +449,7 @@ pub fn restore_consent_bytes_v2(
         out.push(1);
         put_bytes(&mut out, nostr_pk.as_bytes());
     }
-    out.extend_from_slice(&u64::try_from(relays.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+    put_count_u64(&mut out, relays.len());
     for r in relays {
         put_bytes(&mut out, r.as_bytes());
     }
@@ -689,7 +689,7 @@ fn canonical_bytes_over(s: &CheckpointState, groups: &[(&str, &[(u64, Value)])])
     put_bytes(&mut out, s.founding_name.as_bytes());
     out.push(s.rule_m);
     out.push(s.rule_n);
-    out.extend_from_slice(&u64::try_from(s.founding_identities.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+    put_count_u64(&mut out, s.founding_identities.len());
     for i in &s.founding_identities {
         put_bytes(&mut out, i.member.as_bytes());
         put_bytes(&mut out, i.identity_pk.as_bytes());
@@ -703,7 +703,7 @@ fn canonical_bytes_over(s: &CheckpointState, groups: &[(&str, &[(u64, Value)])])
     // says nothing about who can reach whom, and the tamper-evidence
     // roster-v4 gives the genesis vanishes the moment the genesis is dropped
     // — exactly what the v1→v2 bump fixed for the third anchor.
-    out.extend_from_slice(&u64::try_from(s.relays.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+    put_count_u64(&mut out, s.relays.len());
     for r in &s.relays {
         put_bytes(&mut out, r.as_bytes());
     }
@@ -713,12 +713,12 @@ fn canonical_bytes_over(s: &CheckpointState, groups: &[(&str, &[(u64, Value)])])
         out.push(u8::from(s.founding_features.is_some()));
     }
     if let Some(features) = &s.founding_features {
-        out.extend_from_slice(&u64::try_from(features.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+        put_count_u64(&mut out, features.len());
         for f in features {
             put_bytes(&mut out, f.as_bytes());
         }
     }
-    out.extend_from_slice(&u64::try_from(s.roster.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+    put_count_u64(&mut out, s.roster.len());
     for i in &s.roster {
         put_bytes(&mut out, i.member.as_bytes());
         put_bytes(&mut out, i.identity_pk.as_bytes());
@@ -728,33 +728,33 @@ fn canonical_bytes_over(s: &CheckpointState, groups: &[(&str, &[(u64, Value)])])
         }
     }
     if later {
-        out.extend_from_slice(&u64::try_from(groups.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+        put_count_u64(&mut out, groups.len());
     }
     for (key, entries) in groups {
         put_bytes(&mut out, key.as_bytes());
-        out.extend_from_slice(&u64::try_from(entries.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+        put_count_u64(&mut out, entries.len());
         for (id, payload) in *entries {
             out.extend_from_slice(&id.to_le_bytes());
             put_bytes(&mut out, &serde_json::to_vec(payload).expect("a serde_json::Value serializes - an empty frame would sign a different payload"));
         }
     }
-    out.extend_from_slice(&u64::try_from(s.consumed_ids.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+    put_count_u64(&mut out, s.consumed_ids.len());
     for id in &s.consumed_ids {
         out.extend_from_slice(&id.to_le_bytes());
     }
     // v5: the working transport anchors. Without them a cut silently strands
     // every seat that had recovered (see the field's own doc).
-    out.extend_from_slice(&u64::try_from(s.anchors.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+    put_count_u64(&mut out, s.anchors.len());
     for (member, pk) in &s.anchors {
         put_bytes(&mut out, member.as_bytes());
         put_bytes(&mut out, pk.as_bytes());
     }
     // v6: the relay ledger. Without it a cut forgets every declared
     // reachability (see the field's own doc).
-    out.extend_from_slice(&u64::try_from(s.member_relays.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+    put_count_u64(&mut out, s.member_relays.len());
     for (member, relays) in &s.member_relays {
         put_bytes(&mut out, member.as_bytes());
-        out.extend_from_slice(&u64::try_from(relays.len()).expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written").to_le_bytes());
+        put_count_u64(&mut out, relays.len());
         for r in relays {
             put_bytes(&mut out, r.as_bytes());
         }

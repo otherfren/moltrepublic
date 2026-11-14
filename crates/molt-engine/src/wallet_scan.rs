@@ -353,12 +353,6 @@ impl State {
     }
 }
 
-impl PartialEq for ScanShown {
-    fn eq(&self, o: &Self) -> bool {
-        (self.balance, self.pending, self.scan_height, self.daemon_height, self.connected, &self.paused, &self.history)
-            == (o.balance, o.pending, o.scan_height, o.daemon_height, o.connected, &o.paused, &o.history)
-    }
-}
 
 /// `state` was scanned for this purse.
 fn for_purse(state: &ScanState, purse: &crate::wallet_run::Created) -> bool {

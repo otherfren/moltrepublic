@@ -15,7 +15,6 @@
 //! checked against the chain's own commitment, which is threshold-signed.
 //! A wrong piece costs a retry, never a wrong wiki.
 
-use molt_net::supervisor::StateStore as _;
 
 use molt_core::{MessageId, MoltError, Reply};
 
@@ -171,12 +170,7 @@ impl crate::State {
         let Some(layout) = molt_net::file_plane::Manifest::layout_for(series.count) else {
             return true;
         };
-        let ranges: Vec<(u32, u32)> = ranges
-            .iter()
-            .copied()
-            .filter(|(lo, hi)| lo <= hi && *hi <= layout.top)
-            .take(molt_net::piece_want::PIECE_WANT_MAX_RANGES)
-            .collect();
+        let ranges = crate::net::files::bounded_want_ranges(ranges, layout.top);
         if ranges.is_empty() {
             return true;
         }
@@ -193,10 +187,6 @@ impl crate::State {
         series: &WikiBaseSeries,
         ranges: Vec<(u32, u32)>,
     ) {
-        let Some(store) = self.file_store() else {
-            return;
-        };
-        let waker = self.group_net.as_ref().map(|g| g.trickle.waker());
         let job = molt_core::PublishJob {
             series: series.id.to_string(),
             key: series.key.to_vec(),
@@ -215,17 +205,6 @@ impl crate::State {
             vault: None,
             expires_at: None,
         };
-        tokio::spawn(async move {
-            let mut queued = false;
-            store
-                .update(|s| {
-                    queued = molt_net::trickle::enqueue_publish(s, job);
-                    queued
-                })
-                .await;
-            if let Some(w) = waker {
-                w.notify_one();
-            }
-        });
+        self.spawn_enqueue_publish(job);
     }
 }

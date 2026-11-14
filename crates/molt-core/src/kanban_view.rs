@@ -329,8 +329,7 @@ fn resolve<'a>(tasks: &'a Map<String, Value>, named: &str) -> Result<&'a str, St
 /// The task with its text, its prerequisites to any depth (breadth first,
 /// each once, with its depth) and how many of them succeeded.
 fn task_detail(tasks: &Map<String, Value>, id: &str) -> Value {
-    let t = tasks.get(id).cloned().unwrap_or(Value::Null);
-    let mut out = t.as_object().cloned().unwrap_or_default();
+    let mut out = tasks.get(id).and_then(Value::as_object).cloned().unwrap_or_default();
     out.insert("id".into(), Value::from(id));
     let mut seen = BTreeSet::from([id.to_string()]);
     let mut level: Vec<String> = vec![id.to_string()];
@@ -352,15 +351,15 @@ fn task_detail(tasks: &Map<String, Value>, id: &str) -> Value {
                 if !seen.insert(b.to_string()) {
                     continue;
                 }
-                let bt = tasks.get(b).cloned().unwrap_or(Value::Null);
-                if state_of(&bt) == Some(TaskState::Success) {
+                let bt = tasks.get(b).unwrap_or(&Value::Null);
+                if state_of(bt) == Some(TaskState::Success) {
                     succeeded += 1;
                 }
                 let mut row = Map::new();
                 row.insert("id".into(), Value::from(b));
-                row.insert("title".into(), Value::from(str_of(&bt, "title")));
-                row.insert("state".into(), Value::from(str_of(&bt, "state")));
-                row.insert("shown".into(), Value::from(str_of(&bt, "shown")));
+                row.insert("title".into(), Value::from(str_of(bt, "title")));
+                row.insert("state".into(), Value::from(str_of(bt, "state")));
+                row.insert("shown".into(), Value::from(str_of(bt, "shown")));
                 row.insert("depth".into(), Value::from(depth));
                 pre.push(Value::Object(row));
                 next.push(b.to_string());

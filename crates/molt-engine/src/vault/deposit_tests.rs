@@ -4,32 +4,15 @@
 //! wire and chain checks, replace and reorg, the view and the text scan.
 
 use super::*;
-use crate::chain::test_support::{wire, Builder};
+use crate::chain::test_support::{applied, ctx_of, genesis_of, grant_op, idx, op, wire, Builder, SEATS};
 use molt_core::vault::{deposit_signing_bytes, grant_id, share_aad, VaultPayloadRef};
-use molt_core::{MemberIdentity, ProposalId, ProposalRecord, WorkspaceEvent};
+use molt_core::{ProposalId, ProposalRecord, WorkspaceEvent};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-
-const SEATS: [&str; 4] = ["a", "b", "c", "d"];
-
-fn idx(member: &str) -> usize {
-    SEATS.iter().position(|s| *s == member).expect("a seat")
-}
 
 fn seed_of(i: usize) -> [u8; 32] {
     let (entropy, npk, _) = Builder::seat_keys(i);
     *molt_vault::derive_vault_seed(&entropy, &npk, "id")
-}
-
-fn genesis_of(b: &Builder) -> (Vec<MemberIdentity>, Option<Vec<String>>) {
-    let ChainChange::Genesis { identities, features, .. } = &b.blocks[0].change else {
-        panic!("block 0 is not a genesis");
-    };
-    (identities.clone(), features.clone())
-}
-
-fn ctx_of(b: &Builder) -> VaultCtx {
-    crate::vault::ctx_from_founding(2, &genesis_of(b).0).expect("a v6 genesis")
 }
 
 /// A seat of `b`'s republic holding `chain`, its identity key and its seed.
@@ -76,14 +59,6 @@ fn deposit_over(b: &Builder, depositor: &str, signer: &str, name: &str, text: &s
     molt_vault::build_deposit(&input, &seed_of(idx(signer)), b.key(signer), &mut rng).expect("built")
 }
 
-fn op(dep: &VaultDeposit) -> Value {
-    serde_json::to_value(VaultOp::Deposit(dep.clone())).expect("json")
-}
-
-fn applied(proposal_id: u64, payload: Value) -> ChainChange {
-    ChainChange::Applied { proposal_id, surface: Surface::Vault, payload }
-}
-
 fn resign(b: &Builder, signer: &str, dep: &mut VaultDeposit) {
     dep.sig_depositor = molt_storage::identity_sign(b.key(signer), &deposit_signing_bytes(&b.republic_id, dep));
 }
@@ -99,22 +74,7 @@ fn hold(st: &mut crate::State, b: &Builder, dep: &VaultDeposit, file: &[u8]) {
 }
 
 fn card(payload: Value, by: &str) -> ProposalRecord {
-    ProposalRecord {
-        surface: Surface::Vault,
-        payload,
-        approvals: 0,
-        state: ProposalState::Proposed,
-        applied_at: 0,
-        declined_at: 0,
-        declined_by: String::new(),
-        decliners: Vec::new(),
-        voted: Vec::new(),
-        by: by.to_string(),
-        superseded: false,
-        superseded_kind: None,
-        withdrawn: false,
-        wiki_rev: None,
-    }
+    ProposalRecord::new(Surface::Vault, payload, by.to_string())
 }
 
 fn signed_by(st: &crate::State, id: u64) -> Vec<String> {
@@ -447,11 +407,6 @@ fn a_replace_supersedes_pending_grants_and_keeps_the_old_payload() {
         serde_json::to_value(VaultOp::Grant(g)).expect("json")
     }, "d"));
     assert!(st.proposals.get(&16).is_some_and(|p| p.superseded));
-}
-
-fn grant_op(sid: &str, reader: &str, id: u64) -> Value {
-    let g = VaultGrant { grant_id: grant_id(sid, reader, id), secret_id: sid.to_string(), reader: reader.into() };
-    serde_json::to_value(VaultOp::Grant(g)).expect("json")
 }
 
 /// The reopen path (cards replay first, then the chain re-projects)

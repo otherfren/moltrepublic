@@ -227,21 +227,6 @@ pub fn valid_path(p: &str) -> bool {
         .all(|s| !s.is_empty() && *s != "." && *s != ".." && !s.contains('\\'))
 }
 
-/// Split into elements that each carry their newline (the last one may
-/// not have one); the empty string has NO elements.
-fn to_elements(s: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut rest = s;
-    while let Some(pos) = rest.find('\n') {
-        out.push(rest[..=pos].to_string());
-        rest = &rest[pos + 1..];
-    }
-    if !rest.is_empty() {
-        out.push(rest.to_string());
-    }
-    out
-}
-
 fn line_element(l: &HunkLine) -> String {
     if l.newline {
         format!("{}\n", l.text)
@@ -255,8 +240,10 @@ fn line_element(l: &HunkLine) -> String {
 /// Public for the wiki's RESCUE (best-effort per file into the local
 /// working copy); the consensus fold goes through [`apply_patch`].
 pub fn apply_hunks(old: &str, hunks: &[Hunk]) -> Result<String, VoidReason> {
-    let old: Vec<String> = to_elements(old);
-    let mut out: Vec<String> = Vec::new();
+    // elements that each carry their newline (the last one may not have
+    // one); the empty string has NO elements
+    let old: Vec<&str> = old.split_inclusive('\n').collect();
+    let mut out = String::new();
     let mut cursor = 0usize; // 0-based into `old`
     for h in hunks {
         // 1-based start; a 0-count hunk INSERTS after line `old_start`
@@ -274,23 +261,23 @@ pub fn apply_hunks(old: &str, hunks: &[Hunk]) -> Result<String, VoidReason> {
         if start0 > old.len() {
             return Err(void("hunk position beyond the file"));
         }
-        out.extend(old[cursor..start0].iter().cloned());
+        out.extend(old[cursor..start0].iter().copied());
         cursor = start0;
         let mut consumed = 0usize;
         for l in &h.lines {
             let elem = line_element(l);
             match l.op {
                 ' ' | '-' => {
-                    if old.get(cursor) != Some(&elem) {
+                    if old.get(cursor).copied() != Some(elem.as_str()) {
                         return Err(void("context does not match the base"));
                     }
                     if l.op == ' ' {
-                        out.push(elem);
+                        out.push_str(&elem);
                     }
                     cursor += 1;
                     consumed += 1;
                 }
-                '+' => out.push(elem),
+                '+' => out.push_str(&elem),
                 _ => return Err(void("unknown hunk op")),
             }
         }
@@ -300,8 +287,8 @@ pub fn apply_hunks(old: &str, hunks: &[Hunk]) -> Result<String, VoidReason> {
             return Err(void("hunk header count disagrees with its lines"));
         }
     }
-    out.extend(old[cursor..].iter().cloned());
-    Ok(out.concat())
+    out.extend(old[cursor..].iter().copied());
+    Ok(out)
 }
 
 /// Apply a WHOLE parsed patch to `tree`, all-or-nothing: on ANY mismatch
@@ -326,7 +313,13 @@ pub fn apply_patch(
             }
         }
     }
-    let mut work = tree.clone();
+    // only the paths the patch names are read or written (see
+    // [`touched_paths`]), so the working copy holds just those - never a
+    // clone of the whole wiki
+    let named = || files.iter().flat_map(|f| [&f.old_path, &f.new_path]);
+    let mut work: BTreeMap<String, String> = named()
+        .filter_map(|p| tree.get(p).map(|c| (p.clone(), c.clone())))
+        .collect();
     for f in files {
         if !valid_path(&f.new_path) && !f.deleted {
             return Err(void(format!("invalid path: {}", f.new_path)));
@@ -358,7 +351,10 @@ pub fn apply_patch(
         let content = apply_hunks(&old, &f.hunks)?;
         work.insert(f.new_path.clone(), content);
     }
-    *tree = work;
+    for p in named() {
+        tree.remove(p);
+    }
+    tree.append(&mut work);
     Ok(())
 }
 
@@ -428,11 +424,7 @@ pub fn wiki_fold_with_rev(applied: &[serde_json::Value]) -> (BTreeMap<String, St
 pub fn wiki_base_canonical_bytes(tree: &BTreeMap<String, String>) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"molt-wiki-base-v1\0");
-    out.extend_from_slice(
-        &u64::try_from(tree.len())
-            .expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written")
-            .to_le_bytes(),
-    );
+    crate::put_count_u64(&mut out, tree.len());
     for (path, content) in tree {
         crate::put_bytes(&mut out, path.as_bytes());
         crate::put_bytes(&mut out, content.as_bytes());
@@ -454,34 +446,18 @@ pub fn wiki_base_from_canonical_bytes(bytes: &[u8]) -> Result<BTreeMap<String, S
     let rest = bytes
         .strip_prefix(tag.as_slice())
         .ok_or_else(|| "not a molt-wiki-base-v1 stream".to_string())?;
-    let mut at = 0usize;
-    let mut take = |n: usize, what: &str| -> Result<&[u8], String> {
-        let end = at.checked_add(n).ok_or_else(|| format!("{what} overruns the stream"))?;
-        let slice = rest.get(at..end).ok_or_else(|| format!("{what} overruns the stream"))?;
-        at = end;
-        Ok(slice)
-    };
-    let count = u64::from_le_bytes(
-        take(8, "the entry count")?
-            .try_into()
-            .map_err(|_| "the entry count is truncated".to_string())?,
-    );
+    let mut r = crate::vault::Reader { rest, at: 0 };
+    let count = r.u64("the entry count")?;
     let mut tree = BTreeMap::new();
     for _ in 0..count {
         let mut field = |what: &str| -> Result<String, String> {
-            let len = u32::from_le_bytes(
-                take(4, what)?
-                    .try_into()
-                    .map_err(|_| format!("{what} is truncated"))?,
-            );
-            let raw = take(usize::try_from(len).map_err(|_| format!("{what} overruns the stream"))?, what)?;
-            String::from_utf8(raw.to_vec()).map_err(|_| format!("{what} is not utf-8"))
+            String::from_utf8(r.field(what)?.to_vec()).map_err(|_| format!("{what} is not utf-8"))
         };
         let path = field("a path")?;
         let content = field("a document")?;
         tree.insert(path, content);
     }
-    if at != rest.len() {
+    if r.at != r.rest.len() {
         return Err("trailing bytes after the tree".to_string());
     }
     Ok(tree)

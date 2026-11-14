@@ -176,7 +176,8 @@ fn patch_title_and_state_survive_the_proposal_leaving_pending() {
 
     // the proposal leaves the Proposed-only window and its payload
     // shows up in the surface's applied log → Applied
-    let applied = HashMap::from([(Surface::Memory, vec![pv.payload.clone()])]);
+    let vals = [pv.payload.clone()];
+    let applied = HashMap::from([(Surface::Memory, &vals[..])]);
     update_known_proposals(&mut known, &[], &[], &applied);
     assert_eq!(known[&4].fate, KnownFate::Applied);
 
@@ -222,10 +223,8 @@ fn patch_title_and_state_survive_the_proposal_leaving_pending() {
 
     // a Closed verdict corrects itself when the applied value shows up
     // in a later read (an out-of-order pass must not stick a wrong fate)
-    let applied9 = HashMap::from([(
-        Surface::Memory,
-        vec![serde_json::json!({ "title": "drop the fee" })],
-    )]);
+    let vals9 = [serde_json::json!({ "title": "drop the fee" })];
+    let applied9 = HashMap::from([(Surface::Memory, &vals9[..])]);
     update_known_proposals(&mut known, &[], &[], &applied9);
     assert_eq!(known[&9].fate, KnownFate::Applied);
     // … while an already-Applied fate is sticky even if the surface
@@ -293,7 +292,8 @@ fn declined_votes_fold_into_the_cache_as_closed() {
     // proved the seal; byte-identical-twin ambiguity must not un-seal)
     let pv9 = view_of(9, "sealed", ProposalState::Proposed);
     update_known_proposals(&mut known, std::slice::from_ref(&pv9), &[], &HashMap::new());
-    let applied = HashMap::from([(Surface::Memory, vec![pv9.payload.clone()])]);
+    let vals = [pv9.payload.clone()];
+    let applied = HashMap::from([(Surface::Memory, &vals[..])]);
     update_known_proposals(&mut known, &[], &[], &applied);
     assert_eq!(known[&9].fate, KnownFate::Applied);
     let dv9 = view_of(9, "sealed", ProposalState::Rejected);

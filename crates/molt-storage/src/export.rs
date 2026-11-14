@@ -426,9 +426,9 @@ fn export_dir_impl(
             kept.push((rel, src));
             continue;
         };
-        let checked = match &src {
-            ExportSource::File(path) => crate::read_capped(path, cap, &rel).map_err(StorageError::from),
-            ExportSource::Bytes(bytes) => Ok(bytes.clone()),
+        let checked = match src {
+            ExportSource::File(path) => crate::read_capped(&path, cap, &rel).map_err(StorageError::from),
+            ExportSource::Bytes(bytes) => Ok(bytes),
         }
         .and_then(|data| {
             match rel.as_str() {
@@ -462,9 +462,7 @@ fn export_dir_impl(
 
     let kdf = match key {
         ExportKey::Passphrase(_) => {
-            let mut salt = [0u8; 32];
-            getrandom::getrandom(&mut salt)
-                .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+            let salt: [u8; 32] = crate::os_random()?;
             Some(ExportKdf {
                 algo: "argon2id".to_string(),
                 m_kib: EXPORT_ARGON2_M_KIB,
@@ -477,9 +475,7 @@ fn export_dir_impl(
     };
     // the mandatory per-blob salt (both key modes) — fresh OS entropy so two
     // backups of the same workspace never share a stream key (design §3.7)
-    let mut salt = [0u8; EXPORT_SALT_LEN];
-    getrandom::getrandom(&mut salt)
-        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+    let salt: [u8; EXPORT_SALT_LEN] = crate::os_random()?;
     let header = ExportHeader {
         format: "molt-export-v1".to_string(),
         version: EXPORT_VERSION,
@@ -762,21 +758,23 @@ impl<'a> ChunkWriter<'a> {
         }
     }
 
-    fn write(&mut self, data: &[u8]) -> Result<(), StorageError> {
-        self.buf.extend_from_slice(data);
-        while self.buf.len() >= self.chunk_bytes {
-            let rest = self.buf.split_off(self.chunk_bytes);
+    fn write(&mut self, mut data: &[u8]) -> Result<(), StorageError> {
+        // stage at most one chunk: a large entry is cut straight from the
+        // caller's slice instead of being copied whole and re-split
+        while self.buf.len() + data.len() >= self.chunk_bytes {
+            let (head, rest) = data.split_at(self.chunk_bytes - self.buf.len());
+            self.buf.extend_from_slice(head);
+            data = rest;
             // the emitted chunk holds plaintext too — wipe it on drop
-            let full = Zeroizing::new(std::mem::replace(&mut *self.buf, rest));
+            let full = Zeroizing::new(std::mem::take(&mut *self.buf));
             self.emit(&full, false)?;
         }
+        self.buf.extend_from_slice(data);
         Ok(())
     }
 
     fn emit(&mut self, plaintext: &[u8], last: bool) -> Result<(), StorageError> {
-        let mut nonce = [0u8; crate::NONCE_LEN];
-        getrandom::getrandom(&mut nonce)
-            .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+        let nonce: [u8; crate::NONCE_LEN] = crate::os_random()?;
         let aad = export_aad(&self.id, self.index, last);
         let ct = self
             .cipher
@@ -1224,11 +1222,7 @@ mod tests {
         ws.write_wiki_base(b"the folded tree").expect("wiki base");
         let dir = ws.dir().to_path_buf();
         drop(ws);
-        let path = dir.join("wiki_base.bin");
-        let mut rotted = fs::read(&path).expect("base");
-        let last = rotted.len() - 1;
-        rotted[last] ^= 0x01; // flip one bit of the final AEAD tag
-        fs::write(&path, &rotted).expect("rot");
+        rot(&dir.join("wiki_base.bin")); // flip one bit of the final AEAD tag
 
         let mut blob = Vec::new();
         let outcome =
@@ -1489,16 +1483,9 @@ mod tests {
         ws.write_vault_payload(&sid('b'), b"two").expect("payload");
         let dir = ws.dir().to_path_buf();
         drop(ws);
-        let rot = |rel: &str| {
-            let path = dir.join(rel);
-            let mut bytes = fs::read(&path).expect("file");
-            let last = bytes.len() - 1;
-            bytes[last] ^= 0x01;
-            fs::write(&path, &bytes).expect("rot");
-        };
-        rot("vault_base.bin");
+        rot(&dir.join("vault_base.bin"));
         let bad = format!("vault/{}.bin", sid('a'));
-        rot(&bad);
+        rot(&dir.join(&bad));
         // a payload renamed to another deposit does not open under its stem
         let good = format!("vault/{}.bin", sid('b'));
         let moved = format!("vault/{}.bin", sid('c'));
@@ -1709,28 +1696,31 @@ mod tests {
         assert!(entry(&a, "manifest.toml").is_some());
     }
 
+    /// A blob of the magic, `header` and 64 zero bytes of body: enough for
+    /// the header gates, which refuse before the body is read.
+    fn forge_header(header: &serde_json::Value) -> Vec<u8> {
+        let hb = serde_json::to_vec(header).expect("json");
+        let mut b = EXPORT_MAGIC.to_vec();
+        b.extend_from_slice(&u32::try_from(hb.len()).expect("len").to_le_bytes());
+        b.extend_from_slice(&hb);
+        b.extend_from_slice(&[0u8; 64]); // never reached
+        b
+    }
+
     /// Format gates: bad magic; a newer version is refused politely BEFORE
     /// any KDF work; KDF parameters beyond the caps are refused before
     /// allocation; a zero chunk size is implausible.
     #[test]
     fn format_and_kdf_gates_hold() {
-        let forge = |header: &serde_json::Value| -> Vec<u8> {
-            let hb = serde_json::to_vec(header).expect("json");
-            let mut b = EXPORT_MAGIC.to_vec();
-            b.extend_from_slice(&u32::try_from(hb.len()).expect("len").to_le_bytes());
-            b.extend_from_slice(&hb);
-            b.extend_from_slice(&[0u8; 64]); // never reached
-            b
-        };
         let secret = ExportSecret::passphrase(PASS);
         // bad magic
-        let mut bad = forge(&serde_json::json!({}));
+        let mut bad = forge_header(&serde_json::json!({}));
         bad[0] ^= 0xff;
         let err = read_export(&mut bad.as_slice(), &secret).expect_err("bad magic");
         assert!(err.to_string().contains("bad magic"), "{err}");
         // newer version → polite NewerVersion refusal, no KDF attempted
         // (the huge m_kib would violate the caps if it were consulted)
-        let v2 = forge(&serde_json::json!({
+        let v2 = forge_header(&serde_json::json!({
             "format": "molt-export-v1", "version": 2,
             "workspace_id": "00".repeat(32), "key_mode": "passphrase",
             "kdf": { "algo": "argon2id", "m_kib": 8 * 1024 * 1024, "t": 1, "p": 1,
@@ -1742,7 +1732,7 @@ mod tests {
             other => panic!("expected NewerVersion(2), got {other:?}", other = other.err()),
         }
         // KDF caps: m_cost over 1 GiB → refusal before any allocation
-        let big = forge(&serde_json::json!({
+        let big = forge_header(&serde_json::json!({
             "format": "molt-export-v1", "version": 1,
             "workspace_id": "00".repeat(32), "key_mode": "passphrase",
             "kdf": { "algo": "argon2id", "m_kib": 2 * 1024 * 1024, "t": 1, "p": 1,
@@ -1753,7 +1743,7 @@ mod tests {
         let err = read_export(&mut big.as_slice(), &secret).expect_err("m_kib cap");
         assert!(err.to_string().contains("import caps"), "{err}");
         // zero chunk size
-        let zero = forge(&serde_json::json!({
+        let zero = forge_header(&serde_json::json!({
             "format": "molt-export-v1", "version": 1,
             "workspace_id": "00".repeat(32), "key_mode": "workspace",
             "cipher": "xchacha20poly1305", "chunk_bytes": 0
@@ -1857,17 +1847,9 @@ mod tests {
     /// blob lacking it is refused as `NewerVersion`, not for the salt.
     #[test]
     fn header_requires_export_salt_but_after_the_version_gate() {
-        let forge = |header: &serde_json::Value| -> Vec<u8> {
-            let hb = serde_json::to_vec(header).expect("json");
-            let mut b = EXPORT_MAGIC.to_vec();
-            b.extend_from_slice(&u32::try_from(hb.len()).expect("len").to_le_bytes());
-            b.extend_from_slice(&hb);
-            b.extend_from_slice(&[0u8; 64]); // never reached
-            b
-        };
         let key = ExportSecret::WorkspaceKey([0u8; 32]);
         // v1, workspace mode, NO export_salt → clean BadFile at read_header
-        let no_salt = forge(&serde_json::json!({
+        let no_salt = forge_header(&serde_json::json!({
             "format": "molt-export-v1", "version": 1,
             "workspace_id": "00".repeat(32), "key_mode": "workspace",
             "cipher": "xchacha20poly1305", "chunk_bytes": 4096
@@ -1875,7 +1857,7 @@ mod tests {
         let err = read_export(&mut no_salt.as_slice(), &key).expect_err("missing salt");
         assert!(err.to_string().contains("per-blob salt"), "{err}");
         // a malformed salt (not 32-byte hex) is refused the same way
-        let bad_salt = forge(&serde_json::json!({
+        let bad_salt = forge_header(&serde_json::json!({
             "format": "molt-export-v1", "version": 1,
             "workspace_id": "00".repeat(32), "key_mode": "workspace",
             "cipher": "xchacha20poly1305", "chunk_bytes": 4096,
@@ -1884,7 +1866,7 @@ mod tests {
         let err = read_export(&mut bad_salt.as_slice(), &key).expect_err("bad salt");
         assert!(err.to_string().contains("per-blob salt"), "{err}");
         // v2 without a salt → the version gate wins (NewerVersion, not salt)
-        let v2 = forge(&serde_json::json!({
+        let v2 = forge_header(&serde_json::json!({
             "format": "molt-export-v1", "version": 2,
             "workspace_id": "00".repeat(32), "key_mode": "workspace",
             "cipher": "xchacha20poly1305", "chunk_bytes": 4096

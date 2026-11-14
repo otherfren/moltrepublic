@@ -1605,6 +1605,37 @@ mod tests {
         GroupNetConfig::fast("walter".into(), vec!["petra".into(), "zoe".into()])
     }
 
+    /// A sink that collects delivered envelopes and nothing else.
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<molt_core::EventEnvelope>>>);
+    impl EngineSink for Sink {
+        async fn deliver(
+            &self,
+            _from: &MemberId,
+            env: molt_core::EventEnvelope,
+        ) -> Result<(), crate::NetError> {
+            self.0.lock().expect("sink").push(env);
+            Ok(())
+        }
+        async fn peer_seen(&self, _m: &MemberId) {}
+        async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+    }
+
+    /// A sink that drops everything.
+    #[derive(Clone)]
+    struct NullSink;
+    impl EngineSink for NullSink {
+        async fn deliver(
+            &self,
+            _from: &MemberId,
+            _env: molt_core::EventEnvelope,
+        ) -> Result<(), crate::NetError> {
+            Ok(())
+        }
+        async fn peer_seen(&self, _m: &MemberId) {}
+        async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+    }
+
     /// The exact-duplicate turnaround (live-incident 2026-08-15): a
     /// CONSUMED frame's re-delivery is seen, an un-noted frame is not,
     /// and the ring evicts oldest-first at its cap — so a re-delivery
@@ -1799,48 +1830,9 @@ mod tests {
     /// round and it passes with the hold absent.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_frame_ahead_of_its_commit_is_held_until_the_commit_lands() {
-        use crate::mls::MlsMember;
-        use ed25519_dalek::SigningKey;
         use nostr_relay_builder::MockRelay;
-        use std::sync::{Arc, Mutex};
 
-        #[derive(Clone, Default)]
-        struct Sink(Arc<Mutex<Vec<molt_core::EventEnvelope>>>);
-        impl EngineSink for Sink {
-            async fn deliver(
-                &self,
-                _from: &MemberId,
-                env: molt_core::EventEnvelope,
-            ) -> Result<(), crate::NetError> {
-                self.0.lock().expect("sink").push(env);
-                Ok(())
-            }
-            async fn peer_seen(&self, _m: &MemberId) {}
-            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
-        }
-
-        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
-        let mut alice = MlsMember::new(&key(1), "alice").expect("alice");
-        let bob = MlsMember::new(&key(2), "bob").expect("bob");
-        let cara = MlsMember::new(&key(3), "cara").expect("cara");
-        alice.create_group().expect("group");
-        let welcome = alice
-            .add_members(&[
-                bob.key_package().expect("bob kp"),
-                cara.key_package().expect("cara kp"),
-            ])
-            .expect("add")
-            .expect("a welcome");
-        let mut bob = bob;
-        bob.join_from_welcome(&welcome).expect("bob joins");
-        let cara2 = MlsMember::new(&key(4), "cara").expect("cara's fresh device");
-
-        // alice re-keys cara's seat: this is the RECOVERY shape, and it is the
-        // only API that hands the commit out for someone else to merge
-        let (commit, _w) = alice
-            .restore_member("cara", &cara2.key_package().expect("kp"))
-            .expect("re-key");
-        drop(cara);
+        let (alice, bob, commit) = alice_rekeys_cara();
 
         let relay = MockRelay::run().await.expect("relay");
         let url = relay.url().await.to_string();
@@ -1972,22 +1964,6 @@ mod tests {
         use ed25519_dalek::SigningKey;
         use nostr_relay_builder::MockRelay;
         use sha2::Digest as _;
-        use std::sync::{Arc, Mutex};
-
-        #[derive(Clone, Default)]
-        struct Sink(Arc<Mutex<Vec<molt_core::EventEnvelope>>>);
-        impl EngineSink for Sink {
-            async fn deliver(
-                &self,
-                _from: &MemberId,
-                env: molt_core::EventEnvelope,
-            ) -> Result<(), crate::NetError> {
-                self.0.lock().expect("sink").push(env);
-                Ok(())
-            }
-            async fn peer_seen(&self, _m: &MemberId) {}
-            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
-        }
 
         let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
         let mut alice = MlsMember::new(&key(21), "alice").expect("alice");
@@ -2104,45 +2080,9 @@ mod tests {
     /// retry proves it lost; `historic` publishes that frame before bob
     /// subscribes, stamped ten minutes back.
     async fn one_opaque_frame(historic: bool) -> GroupHealth {
-        use crate::mls::MlsMember;
-        use ed25519_dalek::SigningKey;
         use nostr_relay_builder::MockRelay;
-        use std::sync::{Arc, Mutex};
 
-        #[derive(Clone, Default)]
-        struct Sink(Arc<Mutex<Vec<molt_core::EventEnvelope>>>);
-        impl EngineSink for Sink {
-            async fn deliver(
-                &self,
-                _from: &MemberId,
-                env: molt_core::EventEnvelope,
-            ) -> Result<(), crate::NetError> {
-                self.0.lock().expect("sink").push(env);
-                Ok(())
-            }
-            async fn peer_seen(&self, _m: &MemberId) {}
-            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
-        }
-
-        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
-        let mut alice = MlsMember::new(&key(1), "alice").expect("alice");
-        let bob = MlsMember::new(&key(2), "bob").expect("bob");
-        let cara = MlsMember::new(&key(3), "cara").expect("cara");
-        alice.create_group().expect("group");
-        let welcome = alice
-            .add_members(&[
-                bob.key_package().expect("bob kp"),
-                cara.key_package().expect("cara kp"),
-            ])
-            .expect("add")
-            .expect("a welcome");
-        let mut bob = bob;
-        bob.join_from_welcome(&welcome).expect("bob joins");
-        let cara2 = MlsMember::new(&key(4), "cara").expect("cara's fresh device");
-        let (commit, _w) = alice
-            .restore_member("cara", &cara2.key_package().expect("kp"))
-            .expect("re-key");
-        drop(cara);
+        let (alice, bob, commit) = alice_rekeys_cara();
 
         let relay = MockRelay::run().await.expect("relay");
         let url = relay.url().await.to_string();
@@ -2237,20 +2177,6 @@ mod tests {
                 })
             }
         }
-        #[derive(Clone)]
-        struct Sink;
-        impl EngineSink for Sink {
-            async fn deliver(
-                &self,
-                _from: &MemberId,
-                _env: molt_core::EventEnvelope,
-            ) -> Result<(), crate::NetError> {
-                Ok(())
-            }
-            async fn peer_seen(&self, _m: &MemberId) {}
-            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
-        }
-
         let relay = nostr_relay_builder::LocalRelay::new(RelayBuilder::default().query_policy(SlowReq));
         relay.run().await.expect("relay");
         let url = relay.url().await.to_string();
@@ -2266,7 +2192,7 @@ mod tests {
             GroupNetConfig::fast("alice".into(), Vec::new()),
             crate::MemLog::default(),
             crate::MemStateStore::default(),
-            Sink,
+            NullSink,
             wake_rx,
             health_tx,
         );
@@ -2298,20 +2224,6 @@ mod tests {
     async fn a_stop_sent_before_the_tasks_first_poll_still_stops_them() {
         use crate::mls::MlsMember;
         use ed25519_dalek::SigningKey;
-
-        #[derive(Clone)]
-        struct NullSink;
-        impl EngineSink for NullSink {
-            async fn deliver(
-                &self,
-                _from: &MemberId,
-                _env: molt_core::EventEnvelope,
-            ) -> Result<(), crate::NetError> {
-                Ok(())
-            }
-            async fn peer_seen(&self, _m: &MemberId) {}
-            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
-        }
 
         let mls = MlsMember::new(&SigningKey::from_bytes(&[9u8; 32]), "walter").expect("mls");
         let channel = crate::ritual_net::GroupChannel::new(
@@ -2363,18 +2275,7 @@ mod tests {
         // three own events; the peer accepted only the LAST one (it joined
         // the broadcast after 1 and 2 were published)
         for seq in 1..=3u64 {
-            log.push(molt_core::EventEnvelope {
-                prev_seq: seq.saturating_sub(1),
-                seq,
-                ts: 1_751_000_000 + seq,
-                by: "walter".to_string(),
-                body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
-                    molt_core::MessageId([u8::try_from(seq).unwrap_or(0); 16]),
-                    "walter",
-                    "x",
-                    1_751_000_000,
-                )),
-            });
+            log.push(walter_event(seq));
         }
         let mut window = molt_core::AcceptedWindow::default();
         assert!(window.accept(3), "the rejoiner accepted only the newest");
@@ -2415,22 +2316,6 @@ mod tests {
         use crate::mls::MlsMember;
         use ed25519_dalek::SigningKey;
         use nostr_relay_builder::MockRelay;
-        use std::sync::{Arc, Mutex};
-
-        #[derive(Clone, Default)]
-        struct Sink(Arc<Mutex<Vec<molt_core::EventEnvelope>>>);
-        impl EngineSink for Sink {
-            async fn deliver(
-                &self,
-                _from: &MemberId,
-                env: molt_core::EventEnvelope,
-            ) -> Result<(), crate::NetError> {
-                self.0.lock().expect("sink").push(env);
-                Ok(())
-            }
-            async fn peer_seen(&self, _m: &MemberId) {}
-            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
-        }
 
         let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
         let mut walter = MlsMember::new(&key(1), "walter").expect("walter");
@@ -2453,18 +2338,7 @@ mod tests {
         // walter: two own events already in the log, nobody has ever acked
         let log = crate::MemLog::default();
         for seq in 1..=2u64 {
-            log.push(molt_core::EventEnvelope {
-                prev_seq: seq.saturating_sub(1),
-                seq,
-                ts: 1_751_000_000 + seq,
-                by: "walter".to_string(),
-                body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
-                    molt_core::MessageId([u8::try_from(seq).unwrap_or(0); 16]),
-                    "walter",
-                    "x",
-                    1_751_000_000,
-                )),
-            });
+            log.push(walter_event(seq));
         }
         let (_wake_w, wake_w_rx) = watch::channel(0u64);
         let (health_w, _hw) = watch::channel(GroupHealth::default());
@@ -2688,18 +2562,7 @@ mod tests {
         let log = crate::MemLog::default();
         let store = crate::MemStateStore::default();
         for seq in 1..=3u64 {
-            log.push(molt_core::EventEnvelope {
-                prev_seq: seq.saturating_sub(1),
-                seq,
-                ts: 1_751_000_000 + seq,
-                by: "walter".to_string(),
-                body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
-                    molt_core::MessageId([u8::try_from(seq).unwrap_or(0); 16]),
-                    "walter",
-                    "x",
-                    1_751_000_000,
-                )),
-            });
+            log.push(walter_event(seq));
         }
         // the publish cursor stands at 3; petra's window proves only seq 1
         {
@@ -2945,6 +2808,37 @@ mod tests {
             }
         });
         (url, up, relay)
+    }
+
+    /// alice, bob (joined) and the commit by which alice re-keyed cara's seat
+    /// onto a fresh device.
+    fn alice_rekeys_cara() -> (crate::mls::MlsMember, crate::mls::MlsMember, Vec<u8>) {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut alice = MlsMember::new(&key(1), "alice").expect("alice");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let cara = MlsMember::new(&key(3), "cara").expect("cara");
+        alice.create_group().expect("group");
+        let welcome = alice
+            .add_members(&[
+                bob.key_package().expect("bob kp"),
+                cara.key_package().expect("cara kp"),
+            ])
+            .expect("add")
+            .expect("a welcome");
+        let mut bob = bob;
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        let cara2 = MlsMember::new(&key(4), "cara").expect("cara's fresh device");
+
+        // alice re-keys cara's seat: this is the RECOVERY shape, and it is the
+        // only API that hands the commit out for someone else to merge
+        let (commit, _w) = alice
+            .restore_member("cara", &cara2.key_package().expect("kp"))
+            .expect("re-key");
+        drop(cara);
+        (alice, bob, commit)
     }
 
     fn walter_event(seq: u64) -> molt_core::EventEnvelope {

@@ -375,10 +375,7 @@ pub(crate) async fn push_session(
     // Here it is ordered by the event stream instead: the session mirror
     // runs on every SessionChanged, before the surfaces do.
     {
-        let mut st = match chat_ui.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut st = chat_ui.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let before = st.workspace.clone();
         st.enter_workspace(&sv.active_workspace);
         if before != st.workspace {
@@ -391,10 +388,7 @@ pub(crate) async fn push_session(
         // session: this cache only decides whether the settings FORM is
         // refreshed, and reading a possibly-stale copy is a redraw, while
         // panicking here ends the task that redraws anything at all.
-        let mut last = match last_settings.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut last = last_settings.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev = last.clone();
         let changed = prev.as_ref() != Some(&sv.settings);
         if changed {
@@ -1559,7 +1553,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         ui.set_org_mirror_quota_stored(quota.as_str().into());
         ui.set_org_mirror_quota(quota.as_str().into());
     }
-    let of = if b.lang == 1 { crate::i18n::Lexicon::de().ou_mirror_of } else { crate::i18n::Lexicon::en().ou_mirror_of };
+    let of = crate::i18n::Lexicon::of(b.lang).ou_mirror_of;
     ui.set_org_mirror_used(
         format!(
             "{} {of} {}",

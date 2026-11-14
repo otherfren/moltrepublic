@@ -308,13 +308,7 @@ impl State {
                 molt_net::relay_runtime::ProbeVerdict::Unreachable(e) => (e, true),
                 molt_net::relay_runtime::ProbeVerdict::Unusable(e) => (e, false),
             };
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            let _ = cmd_tx
-                .send(crate::Envelope {
-                    cmd: molt_core::Command::NetRelayProbed { url, error, unreachable, confirm },
-                    reply,
-                })
-                .await;
+            crate::send_internal(&cmd_tx, molt_core::Command::NetRelayProbed { url, error, unreachable, confirm }).await;
         });
         Ok(Reply::Ack)
     }
@@ -768,13 +762,7 @@ impl State {
                     Ok(()) => "ok".to_string(),
                     Err(e) => format!("error: {e}"),
                 };
-                let (reply, _rx) = tokio::sync::oneshot::channel();
-                let _ = cmd_tx
-                    .send(crate::Envelope {
-                        cmd: molt_core::Command::NetTestS3Result { target, result },
-                        reply,
-                    })
-                    .await;
+                crate::send_internal(&cmd_tx, molt_core::Command::NetTestS3Result { target, result }).await;
             });
         }
         Ok(Reply::Ack)
@@ -898,16 +886,14 @@ impl State {
             });
         tokio::spawn(async move {
             let result = molt_net::tor_probe::probe(&dialer, target.as_deref(), gap).await;
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            let _ = cmd_tx
-                .send(crate::Envelope {
-                    cmd: molt_core::Command::NetTestTorResult {
-                        result,
-                        generation: Some(generation),
-                    },
-                    reply,
-                })
-                .await;
+            crate::send_internal(
+                &cmd_tx,
+                molt_core::Command::NetTestTorResult {
+                    result,
+                    generation: Some(generation),
+                },
+            )
+            .await;
         });
         Ok(Reply::Ack)
     }
@@ -1011,14 +997,7 @@ impl State {
     /// actor** through the resolved dialer — fail-closed like every dial.
     /// The outcome returns as [`molt_core::Command::NetListBackupsResult`].
     pub(crate) fn cmd_net_list_backups(&mut self) -> Result<Reply, MoltError> {
-        let s = &self.session.settings;
-        let target = molt_net::s3::S3Config::from_settings(
-            &s.s3_endpoint,
-            &s.s3_access_key,
-            &s.s3_secret_key,
-            &s.s3_bucket,
-            &s.s3_plaintext_confirmed,
-        )
+        let target = self.saved_s3_config()
         .map_err(|e| e.to_string())
         .and_then(|config| {
             let dialer = self.dialer_for().map_err(|e| e.to_string())?;
@@ -1064,17 +1043,15 @@ impl State {
                 ),
                 Err(e) => (format!("error: {e}"), Vec::new()),
             };
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            let _ = cmd_tx
-                .send(crate::Envelope {
-                    cmd: molt_core::Command::NetListBackupsResult {
-                        result,
-                        objects,
-                        generation: Some(generation),
-                    },
-                    reply,
-                })
-                .await;
+            crate::send_internal(
+                &cmd_tx,
+                molt_core::Command::NetListBackupsResult {
+                    result,
+                    objects,
+                    generation: Some(generation),
+                },
+            )
+            .await;
         });
         Ok(Reply::Ack)
     }
@@ -1164,6 +1141,34 @@ impl State {
             keys.push("transport.nostr.clearnet_enabled".to_string());
         }
         self.session.restart_required = keys;
+    }
+
+    /// The backup target from the saved settings.
+    pub(crate) fn saved_s3_config(&self) -> Result<molt_net::s3::S3Config, molt_net::s3::S3Error> {
+        let s = &self.session.settings;
+        molt_net::s3::S3Config::from_settings(
+            &s.s3_endpoint,
+            &s.s3_access_key,
+            &s.s3_secret_key,
+            &s.s3_bucket,
+            &s.s3_plaintext_confirmed,
+        )
+    }
+
+    /// The workspace root and `id`'s directory under it; a workspace
+    /// without one is an error.
+    pub(crate) fn require_workspace_dir(
+        &self,
+        id: &str,
+    ) -> Result<(PathBuf, PathBuf), MoltError> {
+        let root = self.workspace_root();
+        let dir = molt_storage::find_workspace_dir(&root, id).ok_or_else(|| {
+            MoltError::Storage(format!(
+                "workspace {id} has no directory under {}",
+                root.display()
+            ))
+        })?;
+        Ok((root, dir))
     }
 
     /// The resolved workspace root (`storage.workspace_dir`, `~` expanded).
@@ -1492,13 +1497,7 @@ impl State {
     }
 
     fn open_stored_workspace(&mut self, id: &str) -> Result<molt_core::TransportState, MoltError> {
-        let root = self.workspace_root();
-        let dir = molt_storage::find_workspace_dir(&root, id).ok_or_else(|| {
-            MoltError::Storage(format!(
-                "workspace {id} has no directory under {}",
-                root.display()
-            ))
-        })?;
+        let (_, dir) = self.require_workspace_dir(id)?;
         let (mut opened, loaded) =
             molt_storage::open_workspace(&dir).map_err(molt_storage::StorageError::into_molt)?;
         if loaded.unknown_events > 0 {
@@ -2054,13 +2053,7 @@ impl State {
                     .to_string(),
             ));
         }
-        let root = self.workspace_root();
-        let dir = molt_storage::find_workspace_dir(&root, &id).ok_or_else(|| {
-            MoltError::Storage(format!(
-                "workspace {id} has no directory under {}",
-                root.display()
-            ))
-        })?;
+        let (_, dir) = self.require_workspace_dir(&id)?;
         molt_storage::seal_at_rest(&dir, &phrase)
             .map_err(molt_storage::StorageError::into_molt)?;
         if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
@@ -2112,13 +2105,7 @@ impl State {
                     .to_string(),
             ));
         }
-        let root = self.workspace_root();
-        let dir = molt_storage::find_workspace_dir(&root, &id).ok_or_else(|| {
-            MoltError::Storage(format!(
-                "workspace {id} has no directory under {}",
-                root.display()
-            ))
-        })?;
+        let (root, dir) = self.require_workspace_dir(&id)?;
         // S7: a fetched backup stub's "decrypt" IS the verified restore —
         // phrase → workspace key → read_export → hard chain verification →
         // materialize (replace trashes the stub only after the verify). The
@@ -2207,13 +2194,7 @@ impl State {
                 "an export is already running".to_string(),
             ));
         }
-        let root = self.workspace_root();
-        let Some(dir) = molt_storage::find_workspace_dir(&root, &id) else {
-            return Err(MoltError::Storage(format!(
-                "workspace {id} has no directory under {}",
-                root.display()
-            )));
-        };
+        let (root, dir) = self.require_workspace_dir(&id)?;
         // same rule as the S3 backup: the blob COPIES the directory, so the
         // writer's group-commit has to be forced out first — otherwise a
         // just-sent message can still be in its buffer and silently miss the
@@ -2259,8 +2240,7 @@ impl State {
                     error: format!("export task failed: {e}"),
                 },
             };
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            let _ = cmd_tx.send(crate::Envelope { cmd, reply }).await;
+            crate::send_internal(&cmd_tx, cmd).await;
         });
         Ok(Reply::Ack)
     }
@@ -2377,8 +2357,7 @@ impl State {
                     error: format!("export task failed: {e}"),
                 },
             };
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            let _ = cmd_tx.send(crate::Envelope { cmd, reply }).await;
+            crate::send_internal(&cmd_tx, cmd).await;
         });
         Ok(Reply::Ack)
     }

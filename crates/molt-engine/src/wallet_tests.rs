@@ -79,22 +79,7 @@ fn set_features_cannot_add_wallet() {
     assert!(!st.proposals.contains_key(&7), "the wire twin drops it");
     st.proposals.insert(
         8,
-        molt_core::ProposalRecord {
-            surface: Surface::Organization,
-            payload: add.clone(),
-            approvals: 0,
-            state: ProposalState::Proposed,
-            applied_at: 0,
-            declined_at: 0,
-            declined_by: String::new(),
-            decliners: Vec::new(),
-            voted: Vec::new(),
-            by: "b".to_string(),
-            superseded: false,
-            superseded_kind: None,
-            withdrawn: false,
-            wiki_rev: None,
-        },
+        molt_core::ProposalRecord::new(Surface::Organization, add.clone(), "b".to_string()),
     );
     assert!(matches!(st.cmd_approve(ProposalId(8), None), Err(MoltError::BadPayload(_))));
 

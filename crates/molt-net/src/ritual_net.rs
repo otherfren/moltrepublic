@@ -56,10 +56,7 @@ const ROLL_POLL: Duration = Duration::from_secs(1);
 /// secret behind [`envelope::h_tag`], set once at founding and delivered
 /// only inside the authenticated Welcome).
 pub fn mint_rotation_seed() -> Result<[u8; 32], NetError> {
-    let mut seed = [0u8; 32];
-    getrandom::getrandom(&mut seed)
-        .map_err(|e| NetError::Crypto(format!("os rng unavailable: {e}")))?;
-    Ok(seed)
+    crate::os_random()
 }
 
 /// The `h` tags the group subscription must cover at `now_secs`: the
@@ -600,16 +597,17 @@ impl GroupChannel {
         Ok((stamp, report))
     }
 
-    /// Subscribe kind-445 under the tags [`window_tags`] names right now —
-    /// the current window's, plus the adjacent one's inside the §4.4 skew
-    /// margin (ONE filter, both `#h` values).
-    pub async fn subscribe(&self) -> Result<GroupSub, NetError> {
-        let tags = window_tags(&self.rotation_seed, now_secs());
+    /// Place the live subscription over `tags` (`since` = the windows to keep).
+    async fn subscribe_group(
+        &self,
+        tags: Vec<String>,
+        since: Option<u64>,
+    ) -> Result<GroupSub, NetError> {
         let sub = self.subscribe_tags(&tags).await?;
         Ok(GroupSub {
             sub,
             tags,
-            since: None,
+            since,
             channel: self.clone(),
             deaf: None,
             retry_at: tokio::time::Instant::now(),
@@ -617,21 +615,18 @@ impl GroupChannel {
         })
     }
 
+    /// Subscribe kind-445 under the tags [`window_tags`] names right now —
+    /// the current window's, plus the adjacent one's inside the §4.4 skew
+    /// margin (ONE filter, both `#h` values).
+    pub async fn subscribe(&self) -> Result<GroupSub, NetError> {
+        self.subscribe_group(window_tags(&self.rotation_seed, now_secs()), None).await
+    }
+
     /// A live subscription that also KEEPS every window since `since_secs`
     /// (unix): a founding may run for days, and a frame published under an
     /// earlier day's tag must stay reachable across window rolls.
     pub async fn subscribe_from(&self, since_secs: u64) -> Result<GroupSub, NetError> {
-        let tags = ritual_tags(&self.rotation_seed, since_secs, now_secs());
-        let sub = self.subscribe_tags(&tags).await?;
-        Ok(GroupSub {
-            sub,
-            tags,
-            since: Some(since_secs),
-            channel: self.clone(),
-            deaf: None,
-            retry_at: tokio::time::Instant::now(),
-            retry_backoff: RETRY_INITIAL,
-        })
+        self.subscribe_group(ritual_tags(&self.rotation_seed, since_secs, now_secs()), Some(since_secs)).await
     }
 
     /// Subscribe the windows a returning member slept through — every `h` tag

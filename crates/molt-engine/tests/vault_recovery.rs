@@ -10,12 +10,12 @@
 use std::time::Duration;
 
 use molt_core::vault::{SecretText, VaultDepositState, VaultGrantState, VaultMyCheck, VaultView};
-use molt_core::{Command, ProposalId, Reply, Surface};
+use molt_core::{Command, Reply, Surface};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
 
 mod vault_support;
-use vault_support::{NAMES, copy_dir, engine, found_n_at, read_session, wait_for};
+use vault_support::{NAMES, copy_dir, engine, found_n_at, has_cut, proposed, read_session, read_text, reveal_seed, wait_for};
 
 async fn vault_view(w: &WalletHandle) -> VaultView {
     match w
@@ -40,13 +40,6 @@ async fn wait_vault(w: &WalletHandle, what: &str, pred: impl Fn(&VaultView) -> b
     }
 }
 
-fn proposed(r: Reply) -> ProposalId {
-    match r {
-        Reply::Proposed { id, .. } => id,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
 /// `a` deposits `text` under `n`, `b` approves; every seat holds it.
 async fn deposited(all: &[WalletHandle], text: &str) -> String {
     let cmd = Command::VaultSeal { name: "n".into(), kind: "text".into(), text: SecretText(text.into()) };
@@ -65,13 +58,6 @@ async fn deposited(all: &[WalletHandle], text: &str) -> String {
         sid = v.deposits.iter().find(|d| d.name == "n").expect("card").secret_id.clone();
     }
     sid
-}
-
-async fn has_cut(w: &WalletHandle) -> bool {
-    match w.execute(Command::ReadChain).await.expect("read chain") {
-        Reply::Chain { blocks, .. } => blocks.iter().any(|v| v.kind == "checkpoint"),
-        other => panic!("unexpected: {other:?}"),
-    }
 }
 
 /// `all[0]` proposes the cut; every seat co-signs (n-of-n) and applies it.
@@ -108,30 +94,6 @@ async fn wait_grant(w: &WalletHandle, gid: &str) {
         v.grants.iter().any(|g| g.grant_id == gid && g.state == VaultGrantState::Committed)
     })
     .await;
-}
-
-async fn read_text(w: &WalletHandle, sid: &str) -> String {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
-    loop {
-        match w.execute(Command::VaultRead { secret_id: sid.to_string() }).await {
-            Ok(Reply::VaultText { text, .. }) => return text.0,
-            Ok(Reply::VaultPending { have, need, .. }) => {
-                assert!(tokio::time::Instant::now() < deadline, "still {have} of {need}");
-            }
-            // the base or the payload may still be arriving
-            Err(e) => assert!(tokio::time::Instant::now() < deadline, "read: {e}"),
-            Ok(other) => panic!("unexpected: {other:?}"),
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-}
-
-async fn reveal_seed(w: &WalletHandle) -> String {
-    let id = read_session(w).await.active_workspace.clone();
-    match w.execute(Command::RevealSeed { id }).await.expect("reveal") {
-        Reply::Seed { seed } => seed,
-        other => panic!("unexpected: {other:?}"),
-    }
 }
 
 /// KEYSTONE §14.5: deposit, cut, `d` loses its device and recovers on a

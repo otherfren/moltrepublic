@@ -92,7 +92,7 @@ impl LogView {
     pub fn page(&self) -> Page {
         let all = self.matches();
         let total = all.len();
-        let page = self.page.min(self.pages() - 1);
+        let page = self.page.min(total.div_ceil(PAGE).max(1) - 1);
         let end = total.saturating_sub(page * PAGE);
         let start = end.saturating_sub(PAGE);
         let shown = &all[start..end];

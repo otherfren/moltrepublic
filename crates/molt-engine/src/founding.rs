@@ -826,12 +826,8 @@ fn spawn_founder_recv(
                 | invite::RitualMsg::RecoverRefused { .. }
                 | invite::RitualMsg::Welcome { .. } => continue,
             };
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            let Some(tx) = cmd_tx.upgrade() else {
+            if !crate::nostr_ritual::send_cmd(&cmd_tx, cmd).await {
                 return; // engine stopped — so do we
-            };
-            if tx.send(Envelope { cmd, reply }).await.is_err() {
-                return;
             }
         }
     });
@@ -914,12 +910,8 @@ pub(crate) fn spawn_coordinator_recv(
                 },
                 _ => continue,
             };
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            let Some(tx) = cmd_tx.upgrade() else {
+            if !crate::nostr_ritual::send_cmd(&cmd_tx, cmd).await {
                 return; // engine stopped — so do we
-            };
-            if tx.send(Envelope { cmd, reply }).await.is_err() {
-                return;
             }
         }
     });
@@ -2041,11 +2033,7 @@ mod ritual_ops {
                     n.net.clone(),
                     n.dialer.clone(),
                     n.relays.clone(),
-                    ritual
-                        .seats
-                        .iter()
-                        .filter_map(|s| s.identity.as_ref().map(|i| i.nostr_pk.clone()))
-                        .collect::<Vec<_>>(),
+                    ritual.anchored_nostr_pks(),
                 )
             };
             let chan = molt_net::ritual_net::GroupChannel::new(dialer, relays.clone(), seed);

@@ -17,7 +17,6 @@ use std::sync::Mutex;
 
 use molt_core::vault::{VaultOp, VAULT_PAYLOAD_MAX};
 use molt_core::{MessageId, MoltError, ProposalState, Reply, SessionScope, Surface};
-use molt_net::supervisor::StateStore as _;
 use serde_json::Value;
 
 /// How long the beat waits before the next attempt at one payload.
@@ -326,8 +325,7 @@ impl crate::State {
                 Some(bytes) => molt_core::Command::NetVaultPayloadFetched { hash, bytes, generation: Some(scope) },
                 None => molt_core::Command::NetVaultPayloadFailed { hash, generation: Some(scope) },
             };
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            let _ = cmd_tx.send(crate::Envelope { cmd, reply }).await;
+            crate::send_internal(&cmd_tx, cmd).await;
         });
         Some(task.abort_handle())
     }
@@ -414,12 +412,7 @@ impl crate::State {
         let Some(layout) = molt_net::file_plane::Manifest::layout_for(named.count()) else {
             return true;
         };
-        let ranges: Vec<(u32, u32)> = ranges
-            .iter()
-            .copied()
-            .filter(|(lo, hi)| lo <= hi && *hi <= layout.top)
-            .take(molt_net::piece_want::PIECE_WANT_MAX_RANGES)
-            .collect();
+        let ranges = crate::net::files::bounded_want_ranges(ranges, layout.top);
         if !ranges.is_empty() && self.vault_should_answer(from, id) {
             self.enqueue_vault_pieces(&named, ranges);
         }
@@ -461,10 +454,9 @@ impl crate::State {
     }
 
     fn enqueue_vault_pieces(&mut self, named: &NamedPayload, ranges: Vec<(u32, u32)>) {
-        let (Some(store), Some(nostr)) = (self.file_store(), self.nostr.as_ref()) else {
+        let Some(nostr) = self.nostr.as_ref() else {
             return;
         };
-        let waker = self.group_net.as_ref().map(|g| g.trickle.waker());
         let job = molt_core::PublishJob {
             series: named.series().to_string(),
             key: molt_net::file_plane::vault_payload_key(&nostr.rotation_seed, &named.hash).to_vec(),
@@ -481,12 +473,7 @@ impl crate::State {
             vault: Some(named.hash.clone()),
             expires_at: None,
         };
-        tokio::spawn(async move {
-            store.update(|s| molt_net::trickle::enqueue_publish(s, job)).await;
-            if let Some(w) = waker {
-                w.notify_one();
-            }
-        });
+        self.spawn_enqueue_publish(job);
     }
 }
 

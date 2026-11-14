@@ -214,6 +214,12 @@ pub(crate) fn when_label(lang: i32, ts: u64) -> String {
     when_label_at(lang, ts, chrono::Utc::now().timestamp())
 }
 
+/// A unix stamp as local time; `None` when it is out of range.
+fn local_time(ts: u64) -> Option<chrono::DateTime<chrono::Local>> {
+    let utc = chrono::DateTime::from_timestamp(i64::try_from(ts).ok()?, 0)?;
+    Some(utc.with_timezone(&chrono::Local))
+}
+
 /// The absolute half of [`when_label`]: `2026-06-02 13:37`, local time,
 /// no relative tail. A table CELL has one line and a fixed column - the
 /// "(~20 minutes ago)" tail only elides the date away. "" = no stamp.
@@ -221,29 +227,17 @@ pub(crate) fn stamp_label(ts: u64) -> String {
     if ts == 0 {
         return String::new();
     }
-    let Ok(secs) = i64::try_from(ts) else {
-        return String::new();
-    };
-    let Some(utc) = chrono::DateTime::from_timestamp(secs, 0) else {
-        return String::new();
-    };
-    utc.with_timezone(&chrono::Local)
-        .format("%Y-%m-%d %H:%M")
-        .to_string()
+    local_time(ts).map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default()
 }
 
 /// [`when_label`] against an explicit "now" (testable). The relative part
 /// renders in the ACTIVE language (a cached English "(~2 days ago)" was
 /// leaking into the German UI — user report 2026-07-18).
 pub(crate) fn when_label_at(lang: i32, ts: u64, now: i64) -> String {
-    let Ok(secs) = i64::try_from(ts) else {
+    let Some(local) = local_time(ts) else {
         return String::new();
     };
-    let Some(utc) = chrono::DateTime::from_timestamp(secs, 0) else {
-        return String::new();
-    };
-    let local = utc.with_timezone(&chrono::Local);
-    let ago = (now - secs).max(0);
+    let ago = (now - local.timestamp()).max(0);
     let de = lang == 1;
     let rel = if ago < 60 {
         if de { "gerade eben".to_string() } else { "just now".to_string() }
@@ -413,15 +407,7 @@ pub(crate) fn expires_label(lang: i32, now: u64, expires_ts: u64, available: boo
 
 /// The file's own date as a local calendar day, e.g. `"2026-07-01"`.
 pub(crate) fn file_date_label(ts: u64) -> String {
-    let Ok(secs) = i64::try_from(ts) else {
-        return String::new();
-    };
-    let Some(utc) = chrono::DateTime::from_timestamp(secs, 0) else {
-        return String::new();
-    };
-    utc.with_timezone(&chrono::Local)
-        .format("%Y-%m-%d")
-        .to_string()
+    local_time(ts).map(|t| t.format("%Y-%m-%d").to_string()).unwrap_or_default()
 }
 
 /// Localized surface label for the sidebar (0 = English, 1 = German) —

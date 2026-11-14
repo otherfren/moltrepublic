@@ -807,12 +807,17 @@ macro_rules! lexicon {
             pub(crate) fn de() -> Self {
                 Lexicon { $( $field: $de, )+ }
             }
+
+            /// The table for `lang` (0 = English, 1 = German).
+            pub(crate) fn of(lang: i32) -> Self {
+                if lang == 1 { Self::de() } else { Self::en() }
+            }
         }
 
         /// Push the localized string table for `lang` (0 = English,
         /// 1 = German) into the Slint `Strings` global.
         pub(crate) fn apply_strings(ui: &AppWindow, lang: i32) {
-            let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+            let l = Lexicon::of(lang);
             let s = ui.global::<Strings>();
             paste::paste! {
                 $( s.[<set_ $field>](l.$field.into()); )+

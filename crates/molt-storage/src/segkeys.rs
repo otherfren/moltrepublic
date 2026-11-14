@@ -143,10 +143,7 @@ impl SegmentKeyTable {
 
     /// Mint a fresh data key from the OS CSPRNG.
     pub(crate) fn fresh_dek() -> Result<[u8; 32], StorageError> {
-        let mut dek = [0u8; 32];
-        getrandom::getrandom(&mut dek)
-            .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
-        Ok(dek)
+        crate::os_random()
     }
 }
 

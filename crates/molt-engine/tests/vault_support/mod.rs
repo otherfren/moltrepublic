@@ -209,6 +209,23 @@ pub async fn vault_view(w: &WalletHandle) -> Option<molt_core::vault::VaultView>
     }
 }
 
+/// The wallet section of `read_state(wallet)`.
+pub async fn wallet(w: &WalletHandle) -> molt_core::wallet::WalletView {
+    match w.execute(Command::ReadState { surface: molt_core::Surface::Wallet, channel: None, view: None }).await {
+        Ok(Reply::State(s)) => *s.wallet.expect("wallet view"),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// The active workspace's recovery phrase, as `reveal_seed` serves it.
+pub async fn reveal_seed(w: &WalletHandle) -> String {
+    let id = read_session(w).await.active_workspace.clone();
+    match w.execute(Command::RevealSeed { id }).await.expect("reveal") {
+        Reply::Seed { seed } => seed,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 pub async fn wait_vault(
     w: &WalletHandle,
     what: &str,
@@ -291,7 +308,8 @@ pub async fn deposited(all: &[WalletHandle], text: &str) -> String {
     sid
 }
 
-async fn has_cut(w: &WalletHandle) -> bool {
+/// Whether the seat's chain holds a checkpoint block.
+pub async fn has_cut(w: &WalletHandle) -> bool {
     match w.execute(Command::ReadChain).await.expect("read chain") {
         Reply::Chain { blocks, .. } => blocks.iter().any(|v| v.kind == "checkpoint"),
         other => panic!("unexpected: {other:?}"),

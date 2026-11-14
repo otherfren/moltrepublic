@@ -211,10 +211,7 @@ pub enum Dialer {
 
 /// Mint a per-session random isolation prefix (8 bytes, hex).
 pub(crate) fn session_token() -> Result<String, NetError> {
-    let mut b = [0u8; 8];
-    getrandom::getrandom(&mut b)
-        .map_err(|e| NetError::Crypto(format!("os rng unavailable: {e}")))?;
-    Ok(hex::encode(b))
+    Ok(hex::encode(crate::os_random::<8>()?))
 }
 
 impl Dialer {

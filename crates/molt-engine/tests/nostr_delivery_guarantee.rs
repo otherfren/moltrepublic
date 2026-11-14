@@ -21,10 +21,10 @@
 
 mod common;
 
-use common::{engine, read_session};
+use common::{engine, read_chat, read_session};
 use std::time::Duration;
 
-use molt_core::{Command, Reply, SessionView};
+use molt_core::{Command, SessionView};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::prelude::*;
 use nostr_relay_builder::{LocalRelay, RelayBuilder};
@@ -45,21 +45,7 @@ async fn wait_for(
     what: &str,
     pred: impl Fn(&SessionView) -> bool,
 ) -> Box<SessionView> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        let s = read_session(w).await;
-        if pred(&s) {
-            return s;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for: {what}\nnotice={:?} create={:?} join={:?}",
-            s.notice,
-            s.create.run.log,
-            s.join.run.log
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    common::wait_for_secs(w, what, 60, pred).await
 }
 
 async fn adopt_relay(w: &WalletHandle, url: &str) {
@@ -84,21 +70,6 @@ async fn adopt_relay(w: &WalletHandle, url: &str) {
     w.execute(Command::RelayClearnetSession { unlock: true })
         .await
         .expect("session unlock");
-}
-
-async fn read_chat(w: &WalletHandle) -> Vec<serde_json::Value> {
-    match w
-        .execute(Command::ReadState {
-            surface: molt_core::Surface::Chat,
-            channel: None,
-            view: None,
-        })
-        .await
-        .expect("read chat")
-    {
-        Reply::State(s) => s.applied,
-        other => panic!("unexpected: {other:?}"),
-    }
 }
 
 async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, WalletHandle) {

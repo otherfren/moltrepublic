@@ -114,17 +114,30 @@ pub(crate) const READ_CAP_VAULT_PAYLOAD: u64 = 1024 * 1024;
 /// ceiling on a damaged or planted file.
 pub(crate) const READ_CAP_VAULT_BASE: u64 = 64 * 1024 * 1024;
 
-/// The ONE sanctioned whole-file read (L8): metadata-checked against the
-/// cap before the bytes are touched. An over-cap file surfaces as
-/// `InvalidData` so every existing "unreadable" error path applies.
-pub(crate) fn read_capped(path: &Path, cap: u64, what: &str) -> std::io::Result<Vec<u8>> {
-    let len = fs::metadata(path)?.len();
+/// The cap every bounded read enforces before the bytes are touched.
+fn within_cap(len: u64, cap: u64, what: &str) -> std::io::Result<()> {
     if len > cap {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("{what} is {len} bytes - beyond the {cap}-byte cap"),
         ));
     }
+    Ok(())
+}
+
+/// `N` bytes from the OS CSPRNG.
+pub(crate) fn os_random<const N: usize>() -> Result<[u8; N], StorageError> {
+    let mut out = [0u8; N];
+    getrandom::getrandom(&mut out)
+        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+    Ok(out)
+}
+
+/// The ONE sanctioned whole-file read (L8): metadata-checked against the
+/// cap before the bytes are touched. An over-cap file surfaces as
+/// `InvalidData` so every existing "unreadable" error path applies.
+pub(crate) fn read_capped(path: &Path, cap: u64, what: &str) -> std::io::Result<Vec<u8>> {
+    within_cap(fs::metadata(path)?.len(), cap, what)?;
     fs::read(path) // READ_CAPPED_HELPER
 }
 
@@ -132,12 +145,7 @@ pub(crate) fn read_capped(path: &Path, cap: u64, what: &str) -> std::io::Result<
 pub(crate) fn read_capped_open(file: File, cap: u64, what: &str) -> std::io::Result<Vec<u8>> {
     use std::io::Read as _;
     let len = file.metadata()?.len();
-    if len > cap {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("{what} is {len} bytes - beyond the {cap}-byte cap"),
-        ));
-    }
+    within_cap(len, cap, what)?;
     let mut out = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
     file.take(cap).read_to_end(&mut out)?;
     Ok(out)
@@ -176,13 +184,7 @@ impl ExportPin {
 
 /// [`read_capped`] for the two small TOML/text files.
 pub(crate) fn read_string_capped(path: &Path, cap: u64, what: &str) -> std::io::Result<String> {
-    let len = fs::metadata(path)?.len();
-    if len > cap {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("{what} is {len} bytes - beyond the {cap}-byte cap"),
-        ));
-    }
+    within_cap(fs::metadata(path)?.len(), cap, what)?;
     fs::read_to_string(path) // READ_CAPPED_HELPER
 }
 
@@ -331,9 +333,7 @@ impl StorageError {
 /// Monero posture (25-word/256-bit seeds) the wallet surface will need
 /// anyway. The full key hierarchy expands from this entropy via HKDF.
 pub fn generate_seed_phrase() -> Result<String, StorageError> {
-    let mut entropy = [0u8; 32];
-    getrandom::getrandom(&mut entropy)
-        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+    let entropy: [u8; 32] = crate::os_random()?;
     let m = bip39::Mnemonic::from_entropy(&entropy)
         .map_err(|e| StorageError::BadSeed(e.to_string()))?;
     Ok(m.to_string())
@@ -520,9 +520,7 @@ pub fn load_or_create_device_key(path: &Path) -> Result<[u8; 32], StorageError> 
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let mut key = [0u8; 32];
-            getrandom::getrandom(&mut key)
-                .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+            let key: [u8; 32] = crate::os_random()?;
             let mut opts = OpenOptions::new();
             opts.write(true).create_new(true);
             #[cfg(unix)]
@@ -551,9 +549,7 @@ pub fn load_or_create_device_key(path: &Path) -> Result<[u8; 32], StorageError> 
 /// shape of every device-sealed key blob (`keys/workspace.key`,
 /// `keys/seed.sealed`). The wrappers below only pick the AAD domain.
 fn seal_blob(key: &[u8; 32], aad: &[u8], msg: &[u8], what: &str) -> Result<Vec<u8>, StorageError> {
-    let mut nonce = [0u8; NONCE_LEN];
-    getrandom::getrandom(&mut nonce)
-        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+    let nonce: [u8; NONCE_LEN] = crate::os_random()?;
     let cipher = XChaCha20Poly1305::new(key.into());
     let ct = cipher
         .encrypt(XNonce::from_slice(&nonce), Payload { msg, aad })
@@ -766,15 +762,11 @@ fn genesis_from_snapshot(
     key: &[u8; 32],
     id: &[u8; 32],
 ) -> Option<EventEnvelope> {
-    let mut snaps = list_sorted(&ws_dir.join("snapshots"), ".msnap");
-    snaps.reverse();
-    for (at_seq, path) in snaps {
-        let Ok(snap) = read_snapshot(key, id, at_seq, &path) else {
-            continue;
-        };
-        return Some(genesis_envelope_of(snap, manifest));
-    }
-    None
+    list_sorted(&ws_dir.join("snapshots"), ".msnap")
+        .into_iter()
+        .rev()
+        .find_map(|(at_seq, path)| read_snapshot(key, id, at_seq, &path).ok())
+        .map(|snap| genesis_envelope_of(snap, manifest))
 }
 
 /// The genesis envelope a snapshot implies (every genesis-derived fact is
@@ -827,9 +819,7 @@ fn encode_frame(
     seq: u64,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, StorageError> {
-    let mut nonce = [0u8; NONCE_LEN];
-    getrandom::getrandom(&mut nonce)
-        .map_err(|e| StorageError::Crypto(format!("os rng unavailable: {e}")))?;
+    let nonce: [u8; NONCE_LEN] = crate::os_random()?;
     let cipher = XChaCha20Poly1305::new(key.into());
     let aad = frame_aad(id, segment, seq);
     let ct = cipher
@@ -1186,7 +1176,61 @@ fn remove_if_present(path: &Path) -> Result<(), StorageError> {
         Err(e) => Err(e.into()),
     }
 }
+
+/// [`remove_if_present`] for a named state file: a failure is
+/// `Corrupt("removing <what>: ..")`.
+fn remove_state_file(path: &Path, what: &str) -> Result<(), StorageError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(StorageError::Corrupt(format!("removing {what}: {e}"))),
+    }
+}
 const KANBAN_DRAFT_FILE: &str = "kanban_draft.json";
+
+/// Reconcile the one `<prefix><ext>` image file in `dir` with `image`:
+/// write the wanted bytes (atomic, skipped when identical), remove every
+/// other `<prefix>*` (an older extension, or all of them for `None`).
+fn reconcile_image(
+    dir: &Path,
+    prefix: &str,
+    what: &str,
+    image: Option<(String, Vec<u8>)>,
+) -> Result<(), StorageError> {
+    let want_name = image.as_ref().map(|(ext, _)| format!("{prefix}{ext}"));
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(prefix) && Some(&name) != want_name.as_ref() {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+    if let (Some(name), Some((_, bytes))) = (want_name, image) {
+        if read_capped(&dir.join(&name), READ_CAP_CONTENT, what).is_ok_and(|have| have == bytes) {
+            return Ok(()); // already materialized
+        }
+        write_atomic(dir, &name, &bytes, false)?;
+    }
+    Ok(())
+}
+
+/// Seal `bytes` as fixed-stride frames of one chunk each. An EMPTY input
+/// is still one (empty) frame: an empty base is still a base (a republic
+/// can ratify a cut with no documents left).
+fn encode_stride_frames(
+    key: &[u8; 32],
+    id: &[u8; 32],
+    segment: u64,
+    bytes: &[u8],
+) -> Result<Vec<u8>, StorageError> {
+    let mut out = Vec::with_capacity(bytes.len() + 128);
+    for (i, part) in bytes.chunks(WIKI_BASE_CHUNK).chain(bytes.is_empty().then_some(&[][..])).enumerate() {
+        let seq = u64::try_from(i).unwrap_or(u64::MAX);
+        out.extend_from_slice(&encode_frame(key, id, segment, seq, part)?);
+    }
+    Ok(out)
+}
 
 // ---------------------------------------------------------------------------
 // The LOCK
@@ -1598,24 +1642,7 @@ impl OpenedWorkspace {
     /// state: write the wanted bytes (atomic, skipped when identical),
     /// remove every other `logo.*`. `None` removes the logo entirely.
     pub fn set_logo(&mut self, logo: Option<(String, Vec<u8>)>) -> Result<(), StorageError> {
-        let want_name = logo.as_ref().map(|(ext, _)| format!("logo.{ext}"));
-        // drop stale logo files (an older extension, or all of them)
-        if let Ok(entries) = fs::read_dir(&self.dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("logo.") && Some(&name) != want_name.as_ref() {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
-        if let (Some(name), Some((_, bytes))) = (want_name, logo) {
-            let path = self.dir.join(&name);
-            if read_capped(&path, READ_CAP_CONTENT, "logo").is_ok_and(|have| have == bytes) {
-                return Ok(()); // already materialized
-            }
-            write_atomic(&self.dir, &name, &bytes, false)?;
-        }
-        Ok(())
+        reconcile_image(&self.dir, "logo.", "logo", logo)
     }
 
     /// The per-member twin of [`WorkspaceStore::set_logo`]: reconcile ONE
@@ -1632,25 +1659,7 @@ impl OpenedWorkspace {
         if stem.is_empty() || !stem.chars().all(|c| c.is_alphanumeric() || c == '-') {
             return Err(StorageError::BadFile(format!("bad avatar name: {stem}")));
         }
-        let prefix = format!("avatar-{stem}.");
-        let want_name = avatar.as_ref().map(|(ext, _)| format!("{prefix}{ext}"));
-        // drop this member's stale avatar files (an older extension, or all)
-        if let Ok(entries) = fs::read_dir(&self.dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with(&prefix) && Some(&name) != want_name.as_ref() {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
-        if let (Some(name), Some((_, bytes))) = (want_name, avatar) {
-            let path = self.dir.join(&name);
-            if read_capped(&path, READ_CAP_CONTENT, "avatar").is_ok_and(|have| have == bytes) {
-                return Ok(()); // already materialized
-            }
-            write_atomic(&self.dir, &name, &bytes, false)?;
-        }
-        Ok(())
+        reconcile_image(&self.dir, &format!("avatar-{stem}."), "avatar", avatar)
     }
 
     /// Persist new prefs for this workspace.
@@ -1811,36 +1820,28 @@ impl OpenedWorkspace {
 
     /// Rewrite the wiki draft (atomic, sealed); empty removes the file.
     pub fn write_wiki_draft(&self, draft: &str) -> Result<(), StorageError> {
+        let key = wiki_draft_key(&self.key, &self.id);
+        self.write_sealed_draft(WIKI_DRAFT_FILE, &key, WIKI_DRAFT_SEGMENT, draft)
+    }
+
+    fn write_sealed_draft(
+        &self,
+        file: &str,
+        key: &[u8; 32],
+        segment: u64,
+        draft: &str,
+    ) -> Result<(), StorageError> {
         if draft.is_empty() {
-            return remove_if_present(&self.dir.join(WIKI_DRAFT_FILE));
+            return remove_if_present(&self.dir.join(file));
         }
-        let frame = encode_frame(
-            &wiki_draft_key(&self.key, &self.id),
-            &self.id,
-            WIKI_DRAFT_SEGMENT,
-            0,
-            draft.as_bytes(),
-        )?;
-        write_atomic(&self.dir, WIKI_DRAFT_FILE, &frame, true)
+        let frame = encode_frame(key, &self.id, segment, 0, draft.as_bytes())?;
+        write_atomic(&self.dir, file, &frame, true)
     }
 
     /// Rewrite the basket (atomic, sealed); empty removes the file.
     pub fn write_kanban_draft(&self, draft: &str) -> Result<(), StorageError> {
-        if draft.is_empty() {
-            return match fs::remove_file(self.dir.join(KANBAN_DRAFT_FILE)) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(e) => Err(e.into()),
-            };
-        }
-        let frame = encode_frame(
-            &kanban_draft_key(&self.key, &self.id),
-            &self.id,
-            KANBAN_DRAFT_SEGMENT,
-            0,
-            draft.as_bytes(),
-        )?;
-        write_atomic(&self.dir, KANBAN_DRAFT_FILE, &frame, true)
+        let key = kanban_draft_key(&self.key, &self.id);
+        self.write_sealed_draft(KANBAN_DRAFT_FILE, &key, KANBAN_DRAFT_SEGMENT, draft)
     }
 
     /// Rewrite `kanban_wakes.json` (atomic, sealed).
@@ -1975,14 +1976,7 @@ impl OpenedWorkspace {
     /// still has it.
     pub fn write_wiki_base(&self, bytes: &[u8]) -> Result<(), StorageError> {
         let key = wiki_base_key(&self.key, &self.id);
-        let chunk = WIKI_BASE_CHUNK;
-        let mut out = Vec::with_capacity(bytes.len() + 128);
-        // an EMPTY base is still a base (a republic can ratify a cut with
-        // no documents left), so one empty frame is written for it
-        for (i, part) in bytes.chunks(chunk).chain(bytes.is_empty().then_some(&[][..])).enumerate() {
-            let seq = u64::try_from(i).unwrap_or(u64::MAX);
-            out.extend_from_slice(&encode_frame(&key, &self.id, WIKI_BASE_SEGMENT, seq, part)?);
-        }
+        let out = encode_stride_frames(&key, &self.id, WIKI_BASE_SEGMENT, bytes)?;
         write_atomic(&self.dir, "wiki_base.bin", &out, true)
     }
 
@@ -2025,11 +2019,7 @@ impl OpenedWorkspace {
     /// # Errors
     /// The file exists but cannot be removed.
     pub fn remove_wiki_base(&self) -> Result<(), StorageError> {
-        match fs::remove_file(self.dir.join("wiki_base.bin")) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(StorageError::Corrupt(format!("removing wiki_base.bin: {e}"))),
-        }
+        remove_state_file(&self.dir.join("wiki_base.bin"), "wiki_base.bin")
     }
 
     /// **The folded vault base** (vault plan S5, spec §9.3): the canonical
@@ -2040,11 +2030,7 @@ impl OpenedWorkspace {
     /// The write fails.
     pub fn write_vault_base(&self, bytes: &[u8]) -> Result<(), StorageError> {
         let key = vault_base_key(&self.key, &self.id);
-        let mut out = Vec::with_capacity(bytes.len() + 128);
-        for (i, part) in bytes.chunks(WIKI_BASE_CHUNK).chain(bytes.is_empty().then_some(&[][..])).enumerate() {
-            let seq = u64::try_from(i).unwrap_or(u64::MAX);
-            out.extend_from_slice(&encode_frame(&key, &self.id, VAULT_BASE_SEGMENT, seq, part)?);
-        }
+        let out = encode_stride_frames(&key, &self.id, VAULT_BASE_SEGMENT, bytes)?;
         write_atomic(&self.dir, "vault_base.bin", &out, true)
     }
 
@@ -2084,11 +2070,7 @@ impl OpenedWorkspace {
     /// # Errors
     /// The file exists but cannot be removed.
     pub fn remove_vault_base(&self) -> Result<(), StorageError> {
-        match fs::remove_file(self.dir.join("vault_base.bin")) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(StorageError::Corrupt(format!("removing vault_base.bin: {e}"))),
-        }
+        remove_state_file(&self.dir.join("vault_base.bin"), "vault_base.bin")
     }
 
     /// **A vault payload** (plan S3a, spec §9.2): the deposit's ciphertext,
@@ -2101,11 +2083,7 @@ impl OpenedWorkspace {
     pub fn write_vault_payload(&self, secret_id: &str, bytes: &[u8]) -> Result<(), StorageError> {
         let rel = vault_payload_rel(secret_id)?;
         let key = vault_payload_key(&self.key, secret_id);
-        let mut out = Vec::with_capacity(bytes.len() + 128);
-        for (i, part) in bytes.chunks(WIKI_BASE_CHUNK).chain(bytes.is_empty().then_some(&[][..])).enumerate() {
-            let seq = u64::try_from(i).unwrap_or(u64::MAX);
-            out.extend_from_slice(&encode_frame(&key, &self.id, VAULT_PAYLOAD_SEGMENT, seq, part)?);
-        }
+        let out = encode_stride_frames(&key, &self.id, VAULT_PAYLOAD_SEGMENT, bytes)?;
         fs::create_dir_all(self.dir.join(VAULT_DIR))?;
         write_atomic(&self.dir, &rel, &out, true)
     }
@@ -2148,11 +2126,7 @@ impl OpenedWorkspace {
     /// The file exists but cannot be removed.
     pub fn remove_vault_payload(&self, secret_id: &str) -> Result<(), StorageError> {
         let rel = vault_payload_rel(secret_id)?;
-        match fs::remove_file(self.dir.join(&rel)) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(StorageError::Corrupt(format!("removing {rel}: {e}"))),
-        }
+        remove_state_file(&self.dir.join(&rel), &rel)
     }
 
     /// The `secret_id`s whose payload this holder keeps, sorted.
@@ -3222,18 +3196,10 @@ pub(crate) fn decode_snapshot(
     at_seq: u64,
     data: &[u8],
 ) -> Result<WorkspaceSnapshot, StorageError> {
-    let (frames, torn) = split_frames(data);
-    if frames.len() != 1 || torn.is_some() {
-        return Err(StorageError::Corrupt("snapshot framing".to_string()));
-    }
-    let plaintext = decrypt_frame(
-        key,
-        id,
-        SNAPSHOT_SEGMENT,
-        at_seq,
-        frames[0].nonce,
-        frames[0].ciphertext,
-    )?;
+    let frame = single_frame(data)
+        .ok_or_else(|| StorageError::Corrupt("snapshot framing".to_string()))?;
+    let plaintext =
+        decrypt_frame(key, id, SNAPSHOT_SEGMENT, at_seq, frame.nonce, frame.ciphertext)?;
     let snap: WorkspaceSnapshot = serde_json::from_slice(&plaintext)
         .map_err(|e| StorageError::Corrupt(format!("snapshot decode: {e}")))?;
     if snap.at_seq != at_seq {
@@ -3654,6 +3620,29 @@ impl StorageHandle {
         self.transport_gate.clone()
     }
 
+    /// Queue `msg` without blocking; a full queue drops it with a warning.
+    /// Whether it was queued.
+    fn try_queue(&self, msg: WriterMsg, dropped: &'static str) -> bool {
+        match self.tx.try_send(msg) {
+            Ok(()) => true,
+            Err(mpsc::TrySendError::Full(_)) => {
+                tracing::warn!(dropped, "writer queue full");
+                false
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => false,
+        }
+    }
+
+    /// Send a message that carries a bool ack and wait for it; `false`
+    /// when the writer is gone (nothing reached the disk).
+    fn send_acked(&self, msg: impl FnOnce(mpsc::SyncSender<bool>) -> WriterMsg) -> bool {
+        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+        if self.tx.send(msg(ack_tx)).is_err() {
+            return false;
+        }
+        ack_rx.recv().unwrap_or(false)
+    }
+
     /// Enqueue one envelope. Returns `false` when the bounded queue was full
     /// (storage is lagging — the caller should surface that honestly); the
     /// envelope is still delivered, blocking until there is room.
@@ -3700,11 +3689,7 @@ impl StorageHandle {
     #[must_use]
     #[allow(clippy::missing_panics_doc)]
     pub fn flush_blocking(&self) -> bool {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        if self.tx.send(WriterMsg::Flush(ack_tx)).is_err() {
-            return false; // the writer is gone: nothing reached the disk
-        }
-        ack_rx.recv().unwrap_or(false)
+        self.send_acked(WriterMsg::Flush)
     }
 
     /// Flush, then pin the cut's files for an export. Call it ON THE
@@ -3778,13 +3763,7 @@ impl StorageHandle {
         &self,
         accepted: std::collections::BTreeMap<molt_core::MemberId, molt_core::AcceptedWindow>,
     ) {
-        match self.tx.try_send(WriterMsg::SaveAccepted(accepted)) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "accept-window save", "writer queue full");
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
-        }
+        let _ = self.try_queue(WriterMsg::SaveAccepted(accepted), "accept-window save");
     }
 
     /// Persist the purse statuses and view key into `transport.state`,
@@ -3794,59 +3773,29 @@ impl StorageHandle {
         status: std::collections::BTreeMap<molt_core::MemberId, molt_core::wallet::ShareStatus>,
         view: Option<molt_core::vault::SecretBytes>,
     ) {
-        match self.tx.try_send(WriterMsg::SaveWalletSeat(WalletSeat { status, view })) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "wallet seat save", "writer queue full");
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
-        }
+        let _ = self.try_queue(WriterMsg::SaveWalletSeat(WalletSeat { status, view }), "wallet seat save");
     }
 
     /// Persist the vault receipts into `transport.state`, touching nothing
     /// else.
     pub fn save_vault_status(&self, status: molt_core::vault::VaultStatusStore) {
-        match self.tx.try_send(WriterMsg::SaveVaultStatus(Box::new(status))) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "vault status save", "writer queue full");
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
-        }
+        let _ = self.try_queue(WriterMsg::SaveVaultStatus(Box::new(status)), "vault status save");
     }
 
     /// Persist the fired `task_start` keys (fire-and-forget like prefs: a
     /// lost save can only refire a start once).
     pub fn save_kanban_wakes(&self, keys: Vec<String>) {
-        match self.tx.try_send(WriterMsg::SaveKanbanWakes(keys)) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "kanban wakes save", "writer queue full");
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
-        }
+        let _ = self.try_queue(WriterMsg::SaveKanbanWakes(keys), "kanban wakes save");
     }
 
     /// Persist the kanban basket (fire-and-forget like the wakes).
     pub fn save_kanban_draft(&self, draft: String) {
-        match self.tx.try_send(WriterMsg::SaveKanbanDraft(draft)) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "kanban draft save", "writer queue full");
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
-        }
+        let _ = self.try_queue(WriterMsg::SaveKanbanDraft(draft), "kanban draft save");
     }
 
     /// Persist the wiki draft (fire-and-forget like the basket).
     pub fn save_wiki_draft(&self, draft: String) {
-        match self.tx.try_send(WriterMsg::SaveWikiDraft(draft)) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "wiki draft save", "writer queue full");
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
-        }
+        let _ = self.try_queue(WriterMsg::SaveWikiDraft(draft), "wiki draft save");
     }
 
     /// Upsert one piece fetch's job (`docs_archive/files/mirroring.md` §3.2) into
@@ -3854,60 +3803,30 @@ impl StorageHandle {
     /// synchronous, so a fetch task can save from its sink; a lost save
     /// only re-lands pieces the relay replays anyway.
     pub fn save_fetch_job(&self, job: molt_core::FetchJob) {
-        match self.tx.try_send(WriterMsg::SaveFetchJob(Box::new(job))) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "fetch job save", "writer queue full");
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
-        }
+        let _ = self.try_queue(WriterMsg::SaveFetchJob(Box::new(job)), "fetch job save");
     }
 
     /// Forget the fetch job of `series` (it completed or failed).
     pub fn remove_fetch_job(&self, series: &str) {
-        match self.tx.try_send(WriterMsg::RemoveFetchJob(series.to_string())) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "fetch job removal", "writer queue full");
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
-        }
+        let _ = self.try_queue(WriterMsg::RemoveFetchJob(series.to_string()), "fetch job removal");
     }
 
     /// Upsert one mirrored series' job (`docs_archive/files/mirroring.md` §3.3);
     /// fire-and-forget like [`Self::save_fetch_job`].
     pub fn save_mirror_job(&self, series: &str, job: molt_core::MirrorJob) {
-        match self.tx.try_send(WriterMsg::SaveMirrorJob(series.to_string(), Box::new(job))) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "mirror job save", "writer queue full");
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
-        }
+        let _ = self.try_queue(WriterMsg::SaveMirrorJob(series.to_string(), Box::new(job)), "mirror job save");
     }
 
     /// Forget the mirror job of `series`.
     pub fn remove_mirror_job(&self, series: &str) {
-        match self.tx.try_send(WriterMsg::RemoveMirrorJob(series.to_string())) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "mirror job removal", "writer queue full");
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
-        }
+        let _ = self.try_queue(WriterMsg::RemoveMirrorJob(series.to_string()), "mirror job removal");
     }
 
     /// A full writer queue drops the save with a warning: stale cursors
     /// only cost resends, which the peers' dedup absorbs — better than
     /// blocking the transport on a struggling disk.
     pub fn save_transport_state(&self, state: TransportState) {
-        match self.tx.try_send(WriterMsg::SaveTransport(Box::new(state))) {
-            Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "transport.state save", "writer queue full");
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => {}
-        }
+        let _ = self.try_queue(WriterMsg::SaveTransport(Box::new(state)), "transport.state save");
     }
 
     /// Merge the runtime crypto (MLS snapshot + queue creds) into the current
@@ -3950,20 +3869,14 @@ impl StorageHandle {
     /// window the resend heals), never a frozen actor (E7 review).
     pub fn merge_mls_async(&self, mls: Vec<u8>) -> bool {
         let (ack_tx, _ack_rx) = mpsc::sync_channel(1);
-        match self.tx.try_send(WriterMsg::MergeCrypto {
+        let msg = WriterMsg::MergeCrypto {
             mls: Some(mls),
             smp_queues: None,
             mesh: None,
             seal: false,
             ack: ack_tx,
-        }) {
-            Ok(()) => true,
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "live MLS merge", "writer queue full");
-                false
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => false,
-        }
+        };
+        self.try_queue(msg, "live MLS merge")
     }
 
     fn merge_crypto_blocking(
@@ -3976,21 +3889,7 @@ impl StorageHandle {
         if mls.is_none() && smp_queues.is_none() && mesh.is_none() {
             return true; // nothing asked for, nothing owed
         }
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        if self
-            .tx
-            .send(WriterMsg::MergeCrypto {
-                mls,
-                smp_queues,
-                mesh,
-                seal,
-                ack: ack_tx,
-            })
-            .is_err()
-        {
-            return false; // the writer is gone: nothing reached the disk
-        }
-        ack_rx.recv().unwrap_or(false)
+        self.send_acked(|ack| WriterMsg::MergeCrypto { mls, smp_queues, mesh, seal, ack })
     }
 
     /// Persist the whole persistent commit-block chain and BLOCK until it is
@@ -4006,50 +3905,26 @@ impl StorageHandle {
         blob: Option<molt_core::CheckpointState>,
         blocks: Vec<molt_core::ChainBlock>,
     ) -> bool {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        if self
-            .tx
-            .send(WriterMsg::PersistChain {
-                blob,
-                blocks,
-                ack: ack_tx,
-            })
-            .is_err()
-        {
-            return false; // the writer is gone: nothing reached the disk
-        }
-        ack_rx.recv().unwrap_or(false)
+        self.send_acked(|ack| WriterMsg::PersistChain { blob, blocks, ack })
     }
 
     /// Append a keys record and BLOCK until it is durable: the attestation
     /// may leave only after this returns `true` (wallet design I4).
     #[must_use]
     pub fn persist_wallet_keys_blocking(&self, record: Zeroizing<Vec<u8>>) -> bool {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        if self.tx.send(WriterMsg::PersistWalletKeys { record, ack: ack_tx }).is_err() {
-            return false;
-        }
-        ack_rx.recv().unwrap_or(false)
+        self.send_acked(|ack| WriterMsg::PersistWalletKeys { record, ack })
     }
 
     /// Prune the keys file to the purse's record, blocking until durable.
     #[must_use]
     pub fn prune_wallet_keys_blocking(&self, keep: Zeroizing<Vec<u8>>) -> bool {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        if self.tx.send(WriterMsg::PruneWalletKeys { keep, ack: ack_tx }).is_err() {
-            return false;
-        }
-        ack_rx.recv().unwrap_or(false)
+        self.send_acked(|ack| WriterMsg::PruneWalletKeys { keep, ack })
     }
 
     /// [`OpenedWorkspace::drop_wallet_keys`], blocking until durable.
     #[must_use]
     pub fn drop_wallet_keys_blocking(&self, drop: Vec<Zeroizing<Vec<u8>>>) -> bool {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        if self.tx.send(WriterMsg::DropWalletKeys { drop, ack: ack_tx }).is_err() {
-            return false;
-        }
-        ack_rx.recv().unwrap_or(false)
+        self.send_acked(|ack| WriterMsg::DropWalletKeys { drop, ack })
     }
 
     /// [`OpenedWorkspace::set_aside_wallet_keys`] on the writer thread.
@@ -4065,14 +3940,7 @@ impl StorageHandle {
     /// Persist the scanner's progress; `false` when nothing was queued.
     #[must_use]
     pub fn save_wallet_scan(&self, bytes: Zeroizing<Vec<u8>>) -> bool {
-        match self.tx.try_send(WriterMsg::SaveWalletScan(bytes)) {
-            Ok(()) => true,
-            Err(mpsc::TrySendError::Full(_)) => {
-                tracing::warn!(dropped = "wallet scan save", "writer queue full");
-                false
-            }
-            Err(mpsc::TrySendError::Disconnected(_)) => false,
-        }
+        self.try_queue(WriterMsg::SaveWalletScan(bytes), "wallet scan save")
     }
 
     /// K6: persist the folded wiki base (`None` drops it), acking when
@@ -4080,15 +3948,7 @@ impl StorageHandle {
     /// chain carries.
     #[must_use]
     pub fn persist_wiki_base_blocking(&self, bytes: Option<Vec<u8>>) -> bool {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        if self
-            .tx
-            .send(WriterMsg::PersistWikiBase { bytes, ack: ack_tx })
-            .is_err()
-        {
-            return false; // the writer is gone: nothing reached the disk
-        }
-        ack_rx.recv().unwrap_or(false)
+        self.send_acked(|ack| WriterMsg::PersistWikiBase { bytes, ack })
     }
 
     /// K6: one decrypted piece of the stored wiki base, for the trickle
@@ -4109,11 +3969,7 @@ impl StorageHandle {
     /// when durable.
     #[must_use]
     pub fn persist_vault_base_blocking(&self, bytes: Option<Vec<u8>>) -> bool {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        if self.tx.send(WriterMsg::PersistVaultBase { bytes, ack: ack_tx }).is_err() {
-            return false;
-        }
-        ack_rx.recv().unwrap_or(false)
+        self.send_acked(|ack| WriterMsg::PersistVaultBase { bytes, ack })
     }
 
     /// Vault S5: one decrypted piece of the stored vault base.
@@ -4129,12 +3985,8 @@ impl StorageHandle {
     /// acking when durable.
     #[must_use]
     pub fn persist_vault_payload_blocking(&self, secret_id: &str, bytes: Option<Vec<u8>>) -> bool {
-        let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        let msg = WriterMsg::PersistVaultPayload { secret_id: secret_id.to_string(), bytes, ack: ack_tx };
-        if self.tx.send(msg).is_err() {
-            return false;
-        }
-        ack_rx.recv().unwrap_or(false)
+        let secret_id = secret_id.to_string();
+        self.send_acked(|ack| WriterMsg::PersistVaultPayload { secret_id, bytes, ack })
     }
 
     /// Vault S3a: one decrypted piece of a held payload, for the trickle
@@ -5373,13 +5225,7 @@ mod tests {
 
         // the ghost is past its peer grace and no longer holds the log back;
         // the slow peer does — so the floor is ITS cursor, not the snapshot
-        let snap = WorkspaceSnapshot {
-            version: molt_core::STORAGE_VERSION,
-            at_seq,
-            state: molt_core::EngineStateDump::default(),
-            chain_height: None,
-        };
-        let out = handle.compact_blocking(snap, vec!["slowpoke".to_string()], ack_clock(0));
+        let out = handle.compact_blocking(snapshot_at(at_seq), vec!["slowpoke".to_string()], ack_clock(0));
         assert_eq!(out.floor, 4, "the floor stops at the slow peer's covered segment");
         assert_eq!(out.segments_dropped, 1, "only segment 1 is fully below it");
         handle.close(None);
@@ -5425,13 +5271,7 @@ mod tests {
         ws.write_transport_state(&ts).expect("transport state");
         let at_seq = ws.next_seq - 1;
         let handle = start_writer(ws);
-        let snap = WorkspaceSnapshot {
-            version: molt_core::STORAGE_VERSION,
-            at_seq,
-            state: molt_core::EngineStateDump::default(),
-            chain_height: None,
-        };
-        let out = handle.compact_blocking(snap, vec!["acker".to_string()], ack_clock(0));
+        let out = handle.compact_blocking(snapshot_at(at_seq), vec!["acker".to_string()], ack_clock(0));
         assert_eq!(
             out.floor, 4,
             "the ACKED floor gates the round (send cursor 13 would have dropped \
@@ -5571,13 +5411,7 @@ mod tests {
         ws.write_transport_state(&ts).expect("transport state");
         let at_seq = ws.next_seq - 1;
         let handle = start_writer(ws);
-        let snap = WorkspaceSnapshot {
-            version: molt_core::STORAGE_VERSION,
-            at_seq,
-            state: molt_core::EngineStateDump::default(),
-            chain_height: None,
-        };
-        let out = handle.compact_blocking(snap, vec!["fresh-peer".to_string()], ack_clock(0));
+        let out = handle.compact_blocking(snapshot_at(at_seq), vec!["fresh-peer".to_string()], ack_clock(0));
         assert_eq!(out, CompactionOutcome::default(), "nothing dropped, no floor");
         handle.close(None);
         assert!(
@@ -5643,14 +5477,8 @@ mod tests {
         ws.write_transport_state(&ts).expect("transport state");
         let at_seq = ws.next_seq - 1;
         let handle = start_writer(ws);
-        let snap = WorkspaceSnapshot {
-            version: molt_core::STORAGE_VERSION,
-            at_seq,
-            state: molt_core::EngineStateDump::default(),
-            chain_height: None,
-        };
         let out = handle.compact_blocking(
-            snap,
+            snapshot_at(at_seq),
             vec!["delivered".to_string(), "never-heard-from".to_string()],
             ack_clock(0),
         );
@@ -6476,14 +6304,8 @@ mod tests {
         let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
         let mut ws = create_workspace(&root, &seed, &founded(42)).expect("create");
         for at in [1u64, 2, 3] {
-            let snap = WorkspaceSnapshot {
-                version: STORAGE_VERSION,
-                at_seq: at,
-                state: molt_core::EngineStateDump::default(),
-                chain_height: None,
-            };
             // at_seq beyond the log is fine for this pruning-only test
-            ws.write_snapshot(&snap).expect("snapshot");
+            ws.write_snapshot(&snapshot_at(at)).expect("snapshot");
         }
         let files = list_sorted(&ws.dir().join("snapshots"), ".msnap");
         let nos: Vec<u64> = files.iter().map(|(n, _)| *n).collect();
@@ -6971,13 +6793,8 @@ mod tests {
         let mut ws = create_workspace(&root, &seed, &founded(42)).expect("create");
         ws.append(&chat(2, "only real event")).expect("append");
         ws.sync().expect("sync");
-        ws.write_snapshot(&WorkspaceSnapshot {
-            version: STORAGE_VERSION,
-            at_seq: 999, // claims history the log does not hold
-            state: molt_core::EngineStateDump::default(),
-            chain_height: None,
-        })
-        .expect("snapshot");
+        // at_seq 999 claims history the log does not hold
+        ws.write_snapshot(&snapshot_at(999)).expect("snapshot");
         let dir = ws.dir().to_path_buf();
         drop(ws);
 

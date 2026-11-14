@@ -12,7 +12,7 @@
 use std::time::{Duration, Instant};
 
 use molt_core::wallet::{WalletPhase, WalletView};
-use molt_core::{Command, Reply, Surface};
+use molt_core::Command;
 use molt_engine::WalletHandle;
 use molt_treasury::testing::any_address;
 use molt_treasury::Network;
@@ -20,7 +20,7 @@ use nostr_relay_builder::MockRelay;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 mod vault_support;
-use vault_support::{found_n_prepared, read_session};
+use vault_support::{found_n_prepared, read_session, wallet};
 
 const TO_PURSE: u64 = 5;
 const UNLOCK: u64 = 60;
@@ -50,13 +50,6 @@ async fn mine(port: u16, blocks: u64, address: &str) -> u64 {
         .await
         .expect("generateblocks");
     r["height"].as_u64().expect("height")
-}
-
-async fn wallet(w: &WalletHandle) -> WalletView {
-    match w.execute(Command::ReadState { surface: Surface::Wallet, channel: None, view: None }).await {
-        Ok(Reply::State(s)) => *s.wallet.expect("wallet view"),
-        other => panic!("unexpected: {other:?}"),
-    }
 }
 
 async fn wait_wallet(w: &WalletHandle, what: &str, pred: impl Fn(&WalletView) -> bool) -> WalletView {

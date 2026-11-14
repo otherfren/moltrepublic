@@ -4,36 +4,19 @@
 //! counts, last-wins per holder, the reveal verdicts and the re-seal.
 
 use super::*;
-use crate::chain::test_support::Builder;
+use crate::chain::test_support::{ctx_of, genesis_of, idx, op, Builder, SEATS};
 use crate::net::vault_payload::NamedPayload;
 use molt_core::vault::{
-    secret_id, VaultComplaintStatus, VaultComplaintView, VaultCtx, VaultDeposit, VaultDepositState,
+    secret_id, VaultComplaintStatus, VaultComplaintView, VaultDeposit, VaultDepositState,
     VaultDepositView, VaultOp,
 };
-use molt_core::{ChainBlock, ChainChange, MemberIdentity, Surface, TransportState};
+use molt_core::{ChainBlock, ChainChange, Surface, TransportState};
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
-
-const SEATS: [&str; 4] = ["a", "b", "c", "d"];
-
-fn idx(member: &str) -> usize {
-    SEATS.iter().position(|s| *s == member).expect("a seat")
-}
 
 fn seed_of(i: usize) -> [u8; 32] {
     let (entropy, npk, _) = Builder::seat_keys(i);
     *molt_vault::derive_vault_seed(&entropy, &npk, "id")
-}
-
-fn genesis_of(b: &Builder) -> (Vec<MemberIdentity>, Option<Vec<String>>) {
-    let ChainChange::Genesis { identities, features, .. } = &b.blocks[0].change else {
-        panic!("block 0 is not a genesis");
-    };
-    (identities.clone(), features.clone())
-}
-
-fn ctx_of(b: &Builder) -> VaultCtx {
-    crate::vault::ctx_from_founding(2, &genesis_of(b).0).expect("a v6 genesis")
 }
 
 fn seat(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
@@ -77,10 +60,6 @@ fn deposit_over(b: &Builder, depositor: &str, name: &str, text: &str, replaces: 
         rand_chacha::ChaCha20Rng::from_seed([7; 32])
     };
     molt_vault::build_deposit(&input, &seed_of(idx(depositor)), b.key(depositor), &mut rng).expect("built")
-}
-
-fn op(dep: &VaultDeposit) -> Value {
-    serde_json::to_value(VaultOp::Deposit(dep.clone())).expect("json")
 }
 
 /// A 2-of-4 vault republic with one committed deposit of `a`.
@@ -506,22 +485,7 @@ fn sent_receipts(st: &crate::State) -> Vec<String> {
 }
 
 fn pending_card(payload: Value, by: &str) -> molt_core::ProposalRecord {
-    molt_core::ProposalRecord {
-        surface: Surface::Vault,
-        payload,
-        approvals: 0,
-        state: ProposalState::Proposed,
-        applied_at: 0,
-        declined_at: 0,
-        declined_by: String::new(),
-        decliners: Vec::new(),
-        voted: Vec::new(),
-        by: by.to_string(),
-        superseded: false,
-        superseded_kind: None,
-        withdrawn: false,
-        wiki_rev: None,
-    }
+    molt_core::ProposalRecord::new(Surface::Vault, payload, by.to_string())
 }
 
 /// `c` holds a verified receipt of each of `n` pending deposits of `a`.

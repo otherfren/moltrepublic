@@ -132,6 +132,35 @@ pub async fn share(a: &WalletHandle, b: &WalletHandle, src: &std::path::Path) ->
     }
 }
 
+/// The seat's mirror view, as the engine serves it.
+pub async fn read_mirror(w: &WalletHandle) -> Box<molt_core::MirrorView> {
+    match w.execute(Command::ReadMirror).await.expect("read mirror") {
+        Reply::Mirror(v) => v,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Poll the mirror view until `pred` holds (30 s).
+pub async fn wait_mirror(w: &WalletHandle, what: &str, pred: impl Fn(&molt_core::MirrorView) -> bool) -> Box<molt_core::MirrorView> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let v = read_mirror(w).await;
+        if pred(&v) {
+            return v;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for: {what}; view={v:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The seat's uploads rows, as the engine serves them.
+pub async fn uploads(w: &WalletHandle) -> Vec<molt_core::UploadView> {
+    match w.execute(Command::ReadUploads).await.expect("uploads") {
+        Reply::Uploads { uploads } => uploads,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
 /// Persist `id` by the 2-of-2 vote: petra proposes, walter approves.
 pub async fn persist(a: &WalletHandle, b: &WalletHandle, id: molt_core::MessageId) {
     a.execute(Command::Propose {

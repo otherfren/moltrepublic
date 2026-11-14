@@ -24,7 +24,7 @@ use molt_net::{invite, msg_id, supervisor, Delivery, LoopbackTransport, SndQueue
 use tokio::sync::mpsc;
 
 use crate::founding::{next_framed_msg, RitualRuntime};
-use crate::{Envelope, State};
+use crate::State;
 
 /// How long a node waits for its peers' mesh announcements before giving up and
 /// entering without a direct mesh (best-effort bootstrap — see the join gating
@@ -380,8 +380,7 @@ impl State {
                         mls_snapshot,
                         generation: Some(generation),
                     };
-                    let (reply, _rx) = tokio::sync::oneshot::channel();
-                    let _ = cmd_tx.send(Envelope { cmd, reply }).await;
+                    crate::send_internal(&cmd_tx, cmd).await;
                 }
                 Err(e) => tracing::warn!(error = %e, "founder mesh bootstrap failed"),
             }

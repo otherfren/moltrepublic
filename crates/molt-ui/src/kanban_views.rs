@@ -102,7 +102,7 @@ pub(crate) fn dependencies(l: &Lexicon, feed: &KanbanFeed, filters: &BTreeSet<St
     let all = tasks(&feed.snap);
     let narrowed = filtering(filters);
     let matched = ids_of(&listed(&feed.snap, filters, true));
-    let deps = dependents(&all);
+    let deps = dependents(all);
     let spell = type_spellings(all.values().map(|t| s(t, "type")));
     let mut order = matched.clone();
     let mut visible: BTreeSet<String> = matched.iter().cloned().collect();
@@ -142,7 +142,7 @@ pub(crate) fn dependencies(l: &Lexicon, feed: &KanbanFeed, filters: &BTreeSet<St
         if open {
             opened.insert(id.clone());
         }
-        let (done, total) = *progress_of.entry(id.clone()).or_insert_with(|| progress(&all, &id));
+        let (done, total) = *progress_of.entry(id.clone()).or_insert_with(|| progress(all, &id));
         let (type_label, type_slot) = type_of(&spell, t);
         let also: Vec<String> = deps
             .get(&id)
@@ -187,7 +187,7 @@ pub(crate) fn dependencies(l: &Lexicon, feed: &KanbanFeed, filters: &BTreeSet<St
         }
     }
     let shown: Vec<String> = rows.iter().map(|r| r.id.to_string()).collect();
-    Deps { legend: legend(&all, &shown, filters), rows }
+    Deps { legend: legend(all, &shown, filters), rows }
 }
 
 // -- dates ----------------------------------------------------------------------
@@ -291,19 +291,22 @@ fn board_snap(board: Value) -> Option<molt_core::SurfaceSnapshot> {
 pub(crate) fn plan(l: &Lexicon, feed: &KanbanFeed, filters: &BTreeSet<String>, collapsed: &BTreeSet<String>) -> Plan {
     let all = tasks(&feed.snap);
     let kept = ids_of(&listed(&feed.snap, filters, true));
-    let keep: BTreeSet<&String> = kept.iter().collect();
-    let deps = dependents(&all);
+    let mut rank: BTreeMap<&str, usize> = BTreeMap::new();
+    for (i, id) in kept.iter().enumerate() {
+        rank.entry(id.as_str()).or_insert(i);
+    }
+    let deps = dependents(all);
     let spell = type_spellings(all.values().map(|t| s(t, "type")));
     let today = today_of(feed);
     let children = |id: &str| -> Vec<String> {
         let kids = all.get(id).map(|t| strs(t, "blocked_by")).unwrap_or_default();
-        let mut kids: Vec<String> = kids.into_iter().filter(|b| keep.contains(b)).collect();
+        let mut kids: Vec<String> = kids.into_iter().filter(|b| rank.contains_key(b.as_str())).collect();
         // priority order, as the board lists them
-        kids.sort_by_key(|k| kept.iter().position(|x| x == k));
+        kids.sort_by_key(|k| rank.get(k.as_str()).copied());
         kids
     };
     let tops: Vec<&String> =
-        kept.iter().filter(|id| !deps.get(*id).into_iter().flatten().any(|d| keep.contains(d))).collect();
+        kept.iter().filter(|id| !deps.get(*id).into_iter().flatten().any(|d| rank.contains_key(d.as_str()))).collect();
 
     // place each task once, depth first under its first visible parent
     let mut placed: BTreeSet<String> = BTreeSet::new();
@@ -333,9 +336,14 @@ pub(crate) fn plan(l: &Lexicon, feed: &KanbanFeed, filters: &BTreeSet<String>, c
     // the axis: every date and today, at least two weeks, bounded around today
     let mut lo = today;
     let mut hi = today;
+    let mut has_date: BTreeSet<&String> = BTreeSet::new();
     for id in &kept {
         let Some(t) = all.get(id) else { continue };
-        for (b, e, _) in axis_spans(t, today) {
+        let spans = axis_spans(t, today);
+        if !spans.is_empty() {
+            has_date.insert(id);
+        }
+        for (b, e, _) in spans {
             lo = lo.min(b.date());
             hi = hi.max(if e.time() == NaiveTime::MIN && e > b { e.date().pred_opt().unwrap_or(e.date()) } else { e.date() });
         }
@@ -352,9 +360,7 @@ pub(crate) fn plan(l: &Lexicon, feed: &KanbanFeed, filters: &BTreeSet<String>, c
     // a date beyond the bounded axis sits at its edge
     let x = |t: NaiveDateTime| -> f32 { ((t - start).num_seconds() as f64 / span_secs).clamp(0.0, 1.0) as f32 };
 
-    let dated = |tree: &Vec<(String, usize)>| {
-        tree.iter().any(|(id, _)| all.get(id).is_some_and(|t| !axis_spans(t, today).is_empty()))
-    };
+    let dated = |tree: &Vec<(String, usize)>| tree.iter().any(|(id, _)| has_date.contains(id));
     let (with, without): (Vec<_>, Vec<_>) = trees.into_iter().partition(dated);
     let mut out = Plan { today: x(midnight(today) + TimeDelta::hours(12)), ..Plan::default() };
     let mut row_of: BTreeMap<String, usize> = BTreeMap::new();
@@ -427,7 +433,7 @@ pub(crate) fn plan(l: &Lexicon, feed: &KanbanFeed, filters: &BTreeSet<String>, c
     }
     out.ticks = ticks(l, from, to, &x);
     let shown: Vec<String> = out.rows.iter().map(|r| r.id.to_string()).collect();
-    out.legend = legend(&all, &shown, filters);
+    out.legend = legend(all, &shown, filters);
     out
 }
 
@@ -578,7 +584,7 @@ pub(crate) fn calendar(l: &Lexicon, feed: &KanbanFeed, basket: &Basket, anchor: 
     let index = |d: NaiveDate| usize::try_from((d - first).num_days()).ok();
     let mut per_day: Vec<Vec<KbCalBlock>> = vec![Vec::new(); days.len()];
     for (shadow, (id, occ, w)) in real.into_iter().map(|o| (false, o)).chain(shadows.into_iter().map(|o| (true, o))) {
-        let source = if shadow { &staged_tasks } else { &all };
+        let source = if shadow { &staged_tasks } else { all };
         let Some(t) = source.get(&id) else { continue };
         let (type_label, slot) = type_of(&spell, t);
         let all_day = matches!(w, When::AllDay { .. });
@@ -668,7 +674,7 @@ pub(crate) fn calendar(l: &Lexicon, feed: &KanbanFeed, basket: &Basket, anchor: 
         out.blocks.extend(kept);
     }
     let ids: Vec<String> = out.blocks.iter().filter(|b| !b.shadow).map(|b| b.id.to_string()).collect();
-    out.legend = legend(&all, &ids, &BTreeSet::new());
+    out.legend = legend(all, &ids, &BTreeSet::new());
     let months = month_names_long(l);
     out.title = if week {
         format!("{} - {} {}", day_label(l, first), day_label(l, last), last.year())

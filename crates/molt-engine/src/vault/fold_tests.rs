@@ -3,35 +3,16 @@
 //! The vault cut, the held base and base-pending (plan stage S5).
 
 use super::*;
-use crate::chain::test_support::Builder;
+use crate::chain::test_support::{applied, ctx_of, genesis_of, grant_op, idx, op, Builder, SEATS};
 use crate::chain::Held;
 use crate::net::vault_payload::NamedPayload;
-use molt_core::vault::{
-    grant_id, secret_id, vault_base_canonical_bytes, SecretText, VaultCtx, VaultDeposit, VaultGrant,
-};
-use molt_core::{approval_bytes, ChainBlock, ChainChange, MemberIdentity, ProposalId, ProposalRecord, ProposalState};
+use molt_core::vault::{secret_id, vault_base_canonical_bytes, SecretText, VaultDeposit};
+use molt_core::{approval_bytes, ChainBlock, ChainChange, ProposalId, ProposalRecord};
 use serde_json::Value;
-
-const SEATS: [&str; 4] = ["a", "b", "c", "d"];
-
-fn idx(member: &str) -> usize {
-    SEATS.iter().position(|s| *s == member).expect("a seat")
-}
 
 fn seed_of(member: &str) -> [u8; 32] {
     let (entropy, npk, _) = Builder::seat_keys(idx(member));
     *molt_vault::derive_vault_seed(&entropy, &npk, "id")
-}
-
-fn genesis_of(b: &Builder) -> (Vec<MemberIdentity>, Option<Vec<String>>) {
-    let ChainChange::Genesis { identities, features, .. } = &b.blocks[0].change else {
-        panic!("block 0 is not a genesis");
-    };
-    (identities.clone(), features.clone())
-}
-
-fn ctx_of(b: &Builder) -> VaultCtx {
-    crate::vault::ctx_from_founding(2, &genesis_of(b).0).expect("a v6 genesis")
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -82,19 +63,6 @@ fn deposit_over(b: &Builder, depositor: &str, signer: &str, name: &str, text: &s
     };
     let mut rng = crate::vault::deposit::os_rng().expect("rng");
     molt_vault::build_deposit(&input, &seed_of(signer), b.key(signer), &mut rng).expect("built")
-}
-
-fn op(dep: &VaultDeposit) -> Value {
-    serde_json::to_value(VaultOp::Deposit(dep.clone())).expect("json")
-}
-
-fn grant_op(sid: &str, reader: &str, id: u64) -> Value {
-    let g = VaultGrant { grant_id: grant_id(sid, reader, id), secret_id: sid.to_string(), reader: reader.into() };
-    serde_json::to_value(VaultOp::Grant(g)).expect("json")
-}
-
-fn applied(proposal_id: u64, payload: Value) -> ChainChange {
-    ChainChange::Applied { proposal_id, surface: Surface::Vault, payload }
 }
 
 fn hold(st: &mut crate::State, b: &Builder, dep: &VaultDeposit, file: &[u8]) {
@@ -315,22 +283,7 @@ fn base_pending_is_a_typed_refusal_not_an_empty_list() {
     let (y, _) = deposit(&b, "c", "c", "y", "two");
     st.proposals.insert(
         60,
-        ProposalRecord {
-            surface: Surface::Vault,
-            payload: op(&y),
-            approvals: 0,
-            state: ProposalState::Proposed,
-            applied_at: 0,
-            declined_at: 0,
-            declined_by: String::new(),
-            decliners: Vec::new(),
-            voted: Vec::new(),
-            by: "c".to_string(),
-            superseded: false,
-            superseded_kind: None,
-            withdrawn: false,
-            wiki_rev: None,
-        },
+        ProposalRecord::new(Surface::Vault, op(&y), "c".to_string()),
     );
     pending(st.cmd_approve(ProposalId(60), None));
 }

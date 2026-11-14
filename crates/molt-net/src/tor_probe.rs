@@ -91,22 +91,22 @@ pub struct RungReport {
 /// THE ladder: map what the rungs observed onto the strongest claim that is
 /// actually supported — and no further. Pure and total.
 pub fn verdict(r: &RungReport) -> TorTest {
+    // every rung reports the proxy; an arm names only what it adds
+    let base = TorTest { proxy: r.proxy.clone(), ..TorTest::default() };
     match (&r.proxy_answered, &r.circuit) {
         // the end-to-end proof: a real relay, reached through Tor.
         (_, Some(Ok(ms))) => TorTest {
             state: TorTestState::Circuit,
-            detail: String::new(),
-            proxy: r.proxy.clone(),
             target: r.target.clone(),
             ms: *ms,
+            ..base
         },
         // a DEADLINE is not a refusal — say so separately.
         (_, Some(Err(why))) if why.starts_with(TIMEOUT_MARK) => TorTest {
             state: TorTestState::CircuitTimeout,
             detail: why.clone(),
-            proxy: r.proxy.clone(),
             target: r.target.clone(),
-            ms: 0,
+            ..base
         },
         // the dial through Tor failed. This does NOT single out Tor: the
         // relay may simply be down, firewalled or misconfigured, and the
@@ -114,17 +114,14 @@ pub fn verdict(r: &RungReport) -> TorTest {
         (_, Some(Err(why))) => TorTest {
             state: TorTestState::CircuitFailed,
             detail: why.clone(),
-            proxy: r.proxy.clone(),
             target: r.target.clone(),
-            ms: 0,
+            ..base
         },
         // nothing is listening at the SOCKS address.
         (Some(Err(why)), None) => TorTest {
             state: TorTestState::NoProxy,
             detail: why.clone(),
-            proxy: r.proxy.clone(),
-            target: String::new(),
-            ms: 0,
+            ..base
         },
         // a socket answered — and that is ALL that was established. With
         // the actor's gap in hand the detail names the ACTUAL cause; the
@@ -137,9 +134,7 @@ pub fn verdict(r: &RungReport) -> TorTest {
                          was reachable through Tor"
                     .to_string(),
             },
-            proxy: r.proxy.clone(),
-            target: String::new(),
-            ms: 0,
+            ..base
         },
         // no proxy to probe and nothing to dial: not a single rung ran.
         (None, None) => TorTest {
@@ -149,9 +144,7 @@ pub fn verdict(r: &RungReport) -> TorTest {
                 None => "no SOCKS proxy to probe and no relay this node may dial through Tor"
                     .to_string(),
             },
-            proxy: r.proxy.clone(),
-            target: String::new(),
-            ms: 0,
+            ..base
         },
     }
 }

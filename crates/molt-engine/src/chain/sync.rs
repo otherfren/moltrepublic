@@ -14,6 +14,15 @@ use super::*;
 /// enough that ~96 KiB frames cannot pin unbounded RAM.
 const CATCHUP_BUFFER_WINDOW: u64 = 4096;
 
+/// Hold a block buffer to [`CATCHUP_BUFFER_WINDOW`] entries by shedding
+/// the highest.
+fn shed_highest(buf: &mut std::collections::BTreeMap<u64, ChainBlock>) {
+    let cap = usize::try_from(CATCHUP_BUFFER_WINDOW).unwrap_or(usize::MAX);
+    while buf.len() > cap {
+        buf.pop_last();
+    }
+}
+
 /// How many `(height, hash)` samples a fork-aware catch-up request carries.
 const KNOWN_HEADS_MAX: usize = 16;
 
@@ -64,15 +73,7 @@ impl State {
                 // L3: headless too, the buffer is size-capped (no head to
                 // window against) — shed the highest, the re-serve re-earns
                 self.chain.pending_blocks.insert(block.height, block);
-                while self.chain.pending_blocks.len()
-                    > usize::try_from(CATCHUP_BUFFER_WINDOW).unwrap_or(usize::MAX)
-                {
-                    if let Some(top) = self.chain.pending_blocks.keys().next_back().copied() {
-                        self.chain.pending_blocks.remove(&top);
-                    } else {
-                        break;
-                    }
-                }
+                shed_highest(&mut self.chain.pending_blocks);
                 // WP4b: with a served blob stashed, the buffered block may
                 // be the missing anchor/suffix piece
                 self.try_adopt_from_blob();
@@ -116,13 +117,7 @@ impl State {
             }
             self.chain.pending_blocks.retain(|h, _| *h > head.height);
             self.chain.pending_blocks.insert(block.height, block);
-            while self.chain.pending_blocks.len() > usize::try_from(CATCHUP_BUFFER_WINDOW).unwrap_or(usize::MAX) {
-                if let Some(top) = self.chain.pending_blocks.keys().next_back().copied() {
-                    self.chain.pending_blocks.remove(&top);
-                } else {
-                    break;
-                }
-            }
+            shed_highest(&mut self.chain.pending_blocks);
             self.try_adopt_from_blob();
             self.request_catchup(head.height + 1);
         }
@@ -222,13 +217,7 @@ impl State {
     /// like the catch-up buffer, shedding the highest when full.
     fn stash_fork_candidate(&mut self, block: ChainBlock) {
         self.chain.fork_candidates.insert(block.height, block);
-        while self.chain.fork_candidates.len() > usize::try_from(CATCHUP_BUFFER_WINDOW).unwrap_or(usize::MAX) {
-            if let Some(top) = self.chain.fork_candidates.keys().next_back().copied() {
-                self.chain.fork_candidates.remove(&top);
-            } else {
-                break;
-            }
-        }
+        shed_highest(&mut self.chain.fork_candidates);
     }
 
     /// The deep tie-break (`docs_archive/chain/chain_reorg.md`): once the fork
@@ -322,12 +311,7 @@ impl State {
                 if kept.contains(proposal_id) {
                     continue;
                 }
-                let materialized = self.proposals.get(proposal_id).is_some_and(|p| p.by.is_empty());
-                if materialized {
-                    self.proposals.remove(proposal_id);
-                } else if let Some(p) = self.proposals.get_mut(proposal_id) {
-                    p.state = ProposalState::Proposed;
-                }
+                self.return_displaced_card(*proposal_id);
             }
         }
         self.vault_displaced(&dropped, &kept);
@@ -500,6 +484,24 @@ impl State {
         }
     }
 
+    /// The displaced proposal returns to pending and re-bases —
+    /// but ONLY a card with a deliberation behind it (a proposer
+    /// this holder learned via gossip). A record MATERIALIZED
+    /// from the now-displaced block (`ensure_applied_record`,
+    /// by == "") has no vote to return to here: flipping it open
+    /// would mint an unowned, unwithdrawable phantom card that
+    /// re-gossips forever and blocks auto-checkpoints. Drop it —
+    /// the holder returns to "never heard of it", and the WP2
+    /// re-serve restores the real card while the vote is open.
+    fn return_displaced_card(&mut self, proposal_id: u64) {
+        let materialized = self.proposals.get(&proposal_id).is_some_and(|p| p.by.is_empty());
+        if materialized {
+            self.proposals.remove(&proposal_id);
+        } else if let Some(p) = self.proposals.get_mut(&proposal_id) {
+            p.state = ProposalState::Proposed;
+        }
+    }
+
     /// Resolve a competing block at a slot we already filled: identical block →
     /// a duplicate broadcast, ignore; a different block at the tip with a
     /// smaller hash wins the single branch, so adopt it and re-base the
@@ -562,27 +564,10 @@ impl State {
                 self.chain.head = Some(head);
                 self.chain.head_moved_at = self.presence_now();
                 self.apply_chain_to_state();
-                // the displaced proposal returns to pending and re-bases —
-                // but ONLY a card with a deliberation behind it (a proposer
-                // this holder learned via gossip). A record MATERIALIZED
-                // from the now-displaced block (`ensure_applied_record`,
-                // by == "") has no vote to return to here: flipping it open
-                // would mint an unowned, unwithdrawable phantom card that
-                // re-gossips forever and blocks auto-checkpoints. Drop it —
-                // the holder returns to "never heard of it", and the WP2
-                // re-serve restores the real card while the vote is open.
                 if let Some(ChainChange::Applied { proposal_id, .. }) =
                     displaced.as_ref().map(|b| &b.change)
                 {
-                    let materialized = self
-                        .proposals
-                        .get(proposal_id)
-                        .is_some_and(|p| p.by.is_empty());
-                    if materialized {
-                        self.proposals.remove(proposal_id);
-                    } else if let Some(p) = self.proposals.get_mut(proposal_id) {
-                        p.state = ProposalState::Proposed;
-                    }
+                    self.return_displaced_card(*proposal_id);
                     // the displaced block was folded: the stamps above its
                     // height belong to the fold that just changed
                     self.forget_wiki_stamps();

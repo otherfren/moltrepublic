@@ -309,26 +309,7 @@ impl RelayRuntime {
     /// ride in the report, except a relay still busy [`PUBLISH_GRACE`] after
     /// the first accept - its attempt runs on and logs its own failure.
     pub async fn publish(&self, event: &Event) -> Result<PublishReport, NetError> {
-        if self.urls.is_empty() {
-            return Err(NetError::Unreachable(
-                "no dialable relay - the pool is empty or gated".into(),
-            ));
-        }
-        // the size budget gates BEFORE any relay sees the event: one relay
-        // accepting what another drops is the §7 wire-size cliff (a cursor
-        // advances past an event a smaller relay never stored)
-        let budget = self.size_budget.unwrap_or(DEFAULT_SIZE_BUDGET);
-        // NIP-11's cap bounds the WEBSOCKET MESSAGE, not the event JSON —
-        // measure what actually goes on the wire, `["EVENT",{…}]` framing
-        // included, or an event exactly at the cap ships a frame over it
-        // (review finding)
-        let size = u64::try_from(ClientMessage::event(event.clone()).as_json().len())
-            .unwrap_or(u64::MAX);
-        if size > budget {
-            return Err(NetError::Framing(format!(
-                "event of {size} bytes exceeds the smallest relay cap ({budget} bytes)"
-            )));
-        }
+        publish_gate(self.urls.is_empty(), self.size_budget, event)?;
         let timeouts = self.timeouts;
         let attempts = self
             .urls
@@ -1318,19 +1299,7 @@ impl PublishPool {
     /// connections — the same ≥1-OK semantics, grace and size gate as
     /// [`RelayRuntime::publish`].
     pub async fn publish(&self, event: &Event) -> Result<PublishReport, NetError> {
-        if self.conns.is_empty() {
-            return Err(NetError::Unreachable(
-                "no dialable relay - the pool is empty or gated".into(),
-            ));
-        }
-        let budget = self.size_budget.unwrap_or(DEFAULT_SIZE_BUDGET);
-        let size = u64::try_from(ClientMessage::event(event.clone()).as_json().len())
-            .unwrap_or(u64::MAX);
-        if size > budget {
-            return Err(NetError::Framing(format!(
-                "event of {size} bytes exceeds the smallest relay cap ({budget} bytes)"
-            )));
-        }
+        publish_gate(self.conns.is_empty(), self.size_budget, event)?;
         let timeouts = self.timeouts;
         let attempts = (0..self.conns.len())
             .map(|i| {
@@ -1516,6 +1485,31 @@ async fn gather_publish(
         });
     }
     finish_publish_report(report)
+}
+
+/// The gate both publish paths apply BEFORE any relay sees the event.
+fn publish_gate(no_relays: bool, size_budget: Option<u64>, event: &Event) -> Result<(), NetError> {
+    if no_relays {
+        return Err(NetError::Unreachable(
+            "no dialable relay - the pool is empty or gated".into(),
+        ));
+    }
+    // the size budget gates BEFORE any relay sees the event: one relay
+    // accepting what another drops is the §7 wire-size cliff (a cursor
+    // advances past an event a smaller relay never stored)
+    let budget = size_budget.unwrap_or(DEFAULT_SIZE_BUDGET);
+    // NIP-11's cap bounds the WEBSOCKET MESSAGE, not the event JSON —
+    // measure what actually goes on the wire, `["EVENT",{…}]` framing
+    // included, or an event exactly at the cap ships a frame over it
+    // (review finding)
+    let size = u64::try_from(ClientMessage::event(event.clone()).as_json().len())
+        .unwrap_or(u64::MAX);
+    if size > budget {
+        return Err(NetError::Framing(format!(
+            "event of {size} bytes exceeds the smallest relay cap ({budget} bytes)"
+        )));
+    }
+    Ok(())
 }
 
 /// The shared ≥1-OK reduction: log per-relay failures, fail typed when

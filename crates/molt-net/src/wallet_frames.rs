@@ -239,14 +239,6 @@ fn is_hex_any(s: &str) -> bool {
     s.len() % 2 == 0 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn framed<T: Serialize>(tag: &[u8], value: &T) -> Vec<u8> {
-    let mut out = tag.to_vec();
-    if let Ok(json) = serde_json::to_vec(value) {
-        out.extend_from_slice(&json);
-    }
-    out
-}
-
 fn parse<T: for<'de> Deserialize<'de>>(body: &[u8]) -> Result<T, WalletFrameError> {
     #[derive(Deserialize)]
     struct V {
@@ -295,16 +287,16 @@ impl WalletFrame {
     #[must_use]
     pub fn to_frame(&self) -> Vec<u8> {
         match self {
-            WalletFrame::Start(f) => framed(WALLET_START_TAG, f),
-            WalletFrame::Hint(f) => framed(WALLET_HINT_TAG, f),
-            WalletFrame::Ready(f) => framed(WALLET_READY_TAG, f),
-            WalletFrame::Round1(f) => framed(WALLET_R1_TAG, f),
-            WalletFrame::Round2(f) => framed(WALLET_R2_TAG, f),
-            WalletFrame::Attest(f) => framed(WALLET_ATTEST_TAG, f),
-            WalletFrame::Abort(f) => framed(WALLET_ABORT_TAG, f),
-            WalletFrame::Status(f) => framed(WALLET_STATUS_TAG, f),
-            WalletFrame::ViewAsk(f) => framed(WALLET_VIEW_ASK_TAG, f),
-            WalletFrame::ViewResp(f) => framed(WALLET_VIEW_RESP_TAG, f),
+            WalletFrame::Start(f) => crate::framed(WALLET_START_TAG, f),
+            WalletFrame::Hint(f) => crate::framed(WALLET_HINT_TAG, f),
+            WalletFrame::Ready(f) => crate::framed(WALLET_READY_TAG, f),
+            WalletFrame::Round1(f) => crate::framed(WALLET_R1_TAG, f),
+            WalletFrame::Round2(f) => crate::framed(WALLET_R2_TAG, f),
+            WalletFrame::Attest(f) => crate::framed(WALLET_ATTEST_TAG, f),
+            WalletFrame::Abort(f) => crate::framed(WALLET_ABORT_TAG, f),
+            WalletFrame::Status(f) => crate::framed(WALLET_STATUS_TAG, f),
+            WalletFrame::ViewAsk(f) => crate::framed(WALLET_VIEW_ASK_TAG, f),
+            WalletFrame::ViewResp(f) => crate::framed(WALLET_VIEW_RESP_TAG, f),
         }
     }
 

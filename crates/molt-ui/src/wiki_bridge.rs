@@ -1102,6 +1102,17 @@ fn sync_doc_face(s: &WikiState<'_>, w: &wiki::Wiki, id: wiki::DocId) {
     s.set_can_add_tags(w.can_add_tags());
 }
 
+/// The folded base as the bridge properties hold it. `loaded` tells an
+/// empty document from one whose bytes have not been fetched (§4.10).
+fn bridge_base(gs: &WikiState<'_>) -> (Vec<(String, Option<String>)>, u64) {
+    let base = gs
+        .get_base_docs()
+        .iter()
+        .map(|d| (d.path.to_string(), d.loaded.then(|| d.content.to_string())))
+        .collect();
+    (base, u64::try_from(gs.get_base_rev()).unwrap_or(0))
+}
+
 /// A callback ran: the model moved, so bump its generation and push the
 /// face. Every wiki verb is a mutation by construction, which makes this
 /// the ONE place the sync's "has anything changed" key has to be kept
@@ -1400,18 +1411,7 @@ pub(crate) fn wire_wiki(ui: &AppWindow) -> (Rc<RefCell<wiki::Wiki>>, Rc<RefCell<
             {
                 let mut w = m.borrow_mut();
                 let _ = w.restore_draft(&draft);
-                let gs = ui.global::<WikiState>();
-                let base: Vec<(String, Option<String>)> = gs
-                    .get_base_docs()
-                    .iter()
-                    .map(|d| {
-                        // `loaded` tells an empty document from one whose
-                        // bytes have not been fetched (§4.10)
-                        let content = d.loaded.then(|| d.content.to_string());
-                        (d.path.to_string(), content)
-                    })
-                    .collect();
-                let rev = u64::try_from(gs.get_base_rev()).unwrap_or(0);
+                let (base, rev) = bridge_base(&ui.global::<WikiState>());
                 w.set_base(&base, rev);
                 w.touch();
                 let mut f = la.borrow_mut();
@@ -1498,18 +1498,7 @@ pub(crate) fn wire_wiki(ui: &AppWindow) -> (Rc<RefCell<wiki::Wiki>>, Rc<RefCell<
         g.on_base_arrived(move || {
             let Some(ui) = weak.upgrade() else { return };
             {
-                let gs = ui.global::<WikiState>();
-                let base: Vec<(String, Option<String>)> = gs
-                    .get_base_docs()
-                    .iter()
-                    .map(|d| {
-                        // `loaded` tells an empty document from one whose
-                        // bytes have not been fetched (§4.10)
-                        let content = d.loaded.then(|| d.content.to_string());
-                        (d.path.to_string(), content)
-                    })
-                    .collect();
-                let rev = u64::try_from(gs.get_base_rev()).unwrap_or(0);
+                let (base, rev) = bridge_base(&ui.global::<WikiState>());
                 m.borrow_mut().set_base(&base, rev);
             }
             sync_after(&ui, &m, &la);
@@ -1911,7 +1900,7 @@ pub(crate) fn wiki_export_toast(lang: i32, ex: &molt_core::ExportState) -> Optio
     if ex.running || ex.result.is_empty() {
         return None;
     }
-    let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+    let l = Lexicon::of(lang);
     if let Some(reason) = ex.result.strip_prefix("error: ") {
         return Some((format!("⚠ {} {reason}", l.mem_ex_failed), true));
     }

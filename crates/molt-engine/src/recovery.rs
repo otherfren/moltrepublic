@@ -347,18 +347,16 @@ pub(crate) fn spawn_recovery_provisioning(
                 // for a link and must see the calm failed state, and the dead
                 // mint's ticket must be unregistered on the actor
                 tracing::warn!(%member, error = %e, "recovery-queue provisioning failed");
-                let (reply, _rx) = tokio::sync::oneshot::channel();
-                let _ = cmd_tx
-                    .send(Envelope {
-                        cmd: Command::NetRecoverLinkFailed {
-                            member,
-                            reason: e.to_string(),
-                            ticket,
-                            generation: Some(generation),
-                        },
-                        reply,
-                    })
-                    .await;
+                crate::send_internal(
+                    &cmd_tx,
+                    Command::NetRecoverLinkFailed {
+                        member,
+                        reason: e.to_string(),
+                        ticket,
+                        generation: Some(generation),
+                    },
+                )
+                .await;
                 return;
             }
         };
@@ -384,17 +382,15 @@ pub(crate) fn spawn_recovery_provisioning(
         }
         .render();
         // report the shareable link to the operator (GUI/MCP read it back)
-        let (reply, _rx) = tokio::sync::oneshot::channel();
-        let _ = cmd_tx
-            .send(Envelope {
-                cmd: Command::NetRecoverLinkReady {
-                    member: member.clone(),
-                    link: link.clone(),
-                    generation: Some(generation),
-                },
-                reply,
-            })
-            .await;
+        crate::send_internal(
+            &cmd_tx,
+            Command::NetRecoverLinkReady {
+                member: member.clone(),
+                link: link.clone(),
+                generation: Some(generation),
+            },
+        )
+        .await;
         // dev seam: hand the handover to a waiting second engine (test only)
         if let Some(sink) = sink {
             let _ = sink.send(RecoveryMaterial {
@@ -644,13 +640,7 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
         let Some(delivery) = received else {
             return Err("recovery reply queue closed before the welcome arrived".to_string());
         };
-        let Ok(plain) = molt_net::wrap::unwrap_block(&reply_wrap, &delivery.block) else {
-            delivery.ack.ack();
-            continue;
-        };
-        let outcome = reasm.push(&plain);
-        delivery.ack.ack();
-        let Ok(molt_net::chunk::PushOutcome::Complete(_, bytes)) = outcome else {
+        let Some(bytes) = crate::founding::take_delivery(&reply_wrap, &mut reasm, delivery) else {
             continue;
         };
         if let Ok(invite::RitualMsg::Welcome { welcome, chain }) =

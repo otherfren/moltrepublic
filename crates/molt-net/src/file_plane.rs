@@ -265,9 +265,26 @@ const TOP_STALL_QUIETS: u32 = 12;
 /// One derivation step away from K so the chat's key never seals bytes
 /// directly.
 pub fn outer_key(key: &[u8; 32]) -> [u8; 32] {
-    let hk = hkdf::Hkdf::<Sha256>::new(None, key);
+    hkdf32(key, b"molt-piece-outer-v2")
+}
+
+/// A run of concatenated sha256 hashes, split.
+fn hashes32(bytes: &[u8]) -> Vec<[u8; 32]> {
+    bytes
+        .chunks_exact(32)
+        .map(|h| {
+            let mut a = [0u8; 32];
+            a.copy_from_slice(h);
+            a
+        })
+        .collect()
+}
+
+/// `HKDF-SHA256(salt = none, ikm, info)` expanded to 32 bytes.
+fn hkdf32(ikm: &[u8; 32], info: &[u8]) -> [u8; 32] {
+    let hk = hkdf::Hkdf::<Sha256>::new(None, ikm);
     let mut out = [0u8; 32];
-    hk.expand(b"molt-piece-outer-v2", &mut out)
+    hk.expand(info, &mut out)
         .expect("32 bytes is within the HKDF-SHA256 expand limit");
     out
 }
@@ -288,14 +305,10 @@ pub fn outer_key(key: &[u8; 32]) -> [u8; 32] {
 /// seed - a member-compromise scenario in which the wiki is already in
 /// the attacker's hands.
 pub fn wiki_base_key(rotation_seed: &[u8; 32], commitment: &str) -> [u8; 32] {
-    let hk = hkdf::Hkdf::<Sha256>::new(None, rotation_seed);
     let mut info = Vec::with_capacity(18 + commitment.len());
     info.extend_from_slice(b"molt-wiki-base-v1");
     info.extend_from_slice(commitment.as_bytes());
-    let mut out = [0u8; 32];
-    hk.expand(&info, &mut out)
-        .expect("32 bytes is within the HKDF-SHA256 expand limit");
-    out
+    hkdf32(rotation_seed, &info)
 }
 
 /// The series id the folded base travels as: the first 16 bytes of its own
@@ -315,11 +328,7 @@ pub fn wiki_base_series(commitment: &str) -> Option<[u8; MSG_ID_LEN]> {
 /// Derived from the payload hash for the reason [`wiki_base_key`] is:
 /// every seat holds the payload and must seal the same pieces.
 pub fn vault_payload_key(rotation_seed: &[u8; 32], payload_hash: &str) -> [u8; 32] {
-    let hk = hkdf::Hkdf::<Sha256>::new(None, rotation_seed);
-    let mut out = [0u8; 32];
-    hk.expand(&molt_core::vault::payload_series_info(payload_hash), &mut out)
-        .expect("32 bytes is within the HKDF-SHA256 expand limit");
-    out
+    hkdf32(rotation_seed, &molt_core::vault::payload_series_info(payload_hash))
 }
 
 /// The series id a vault payload travels as: the head of
@@ -337,11 +346,7 @@ pub fn vault_payload_series(payload_hash: &str) -> [u8; MSG_ID_LEN] {
 /// the rotation seed, info = molt_core::vault::base_series_info(commitment))`,
 /// derived for the reason [`wiki_base_key`] is.
 pub fn vault_base_key(rotation_seed: &[u8; 32], commitment: &str) -> [u8; 32] {
-    let hk = hkdf::Hkdf::<Sha256>::new(None, rotation_seed);
-    let mut out = [0u8; 32];
-    hk.expand(&molt_core::vault::base_series_info(commitment), &mut out)
-        .expect("32 bytes is within the HKDF-SHA256 expand limit");
-    out
+    hkdf32(rotation_seed, &molt_core::vault::base_series_info(commitment))
 }
 
 /// The series id the folded vault base travels as: the head of
@@ -459,14 +464,7 @@ impl TopRecord {
         if bytes.len() != want || count != Manifest::piece_count_for(size) || count > MAX_SERIES_PIECES {
             return Err(NetError::Framing("top record geometry does not add up".into()));
         }
-        let chunk_hashes = bytes[MANIFEST_HEADER_LEN..]
-            .chunks_exact(32)
-            .map(|h| {
-                let mut a = [0u8; 32];
-                a.copy_from_slice(h);
-                a
-            })
-            .collect();
+        let chunk_hashes = hashes32(&bytes[MANIFEST_HEADER_LEN..]);
         Ok(TopRecord { count, size, chunk_hashes })
     }
 }
@@ -532,14 +530,7 @@ impl Manifest {
         if bytes.len() != want {
             return Err(NetError::Framing("manifest chunks do not add up to the count".into()));
         }
-        let hashes = bytes
-            .chunks_exact(32)
-            .map(|h| {
-                let mut a = [0u8; 32];
-                a.copy_from_slice(h);
-                a
-            })
-            .collect();
+        let hashes = hashes32(&bytes);
         Ok(Manifest { count: top.count, size: top.size, hashes })
     }
 }
