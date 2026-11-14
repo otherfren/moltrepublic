@@ -70,7 +70,7 @@ const RECOVER_BLOCK_WINDOW: u64 = 256;
 
 /// Send one engine-internal command through the weak handle. `false` = the
 /// engine is gone — the caller returns (its work is moot).
-async fn send_cmd(tx: &mpsc::WeakSender<Envelope>, cmd: Command) -> bool {
+pub(crate) async fn send_cmd(tx: &mpsc::WeakSender<Envelope>, cmd: Command) -> bool {
     let (reply, _rx) = tokio::sync::oneshot::channel();
     let Some(tx) = tx.upgrade() else {
         return false;

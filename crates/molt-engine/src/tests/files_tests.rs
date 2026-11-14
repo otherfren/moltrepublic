@@ -473,25 +473,10 @@ fn a_material_less_open_vote_does_not_block_a_current_re_propose() {
     });
     let env = st.make_env("peer-1".to_string(), molt_core::WorkspaceEvent::Chat(msg));
     st.apply(&env);
-    let stale = molt_core::ProposalRecord {
-        surface: Surface::Files,
-        payload: json!({
+    let stale = molt_core::ProposalRecord::new(Surface::Files, json!({
             "op": "persist", "id": id.to_string(), "by": "peer-1", "name": "v2.bin",
             "kind": "BIN", "size": 5, "checksum": "ab".repeat(32), "shared_ts": env.ts
-        }),
-        approvals: 0,
-        state: molt_core::ProposalState::Proposed,
-        applied_at: 0,
-        declined_at: 0,
-        declined_by: String::new(),
-        decliners: Vec::new(),
-        voted: Vec::new(),
-        by: "peer-2".to_string(),
-        superseded: false,
-        superseded_kind: None,
-        withdrawn: false,
-        wiki_rev: None,
-    };
+        }), "peer-2".to_string());
     st.proposals.insert(1, stale);
     let mut payload = json!({"op": "persist", "id": id.to_string()});
     st.prepare_files_proposal(&mut payload)

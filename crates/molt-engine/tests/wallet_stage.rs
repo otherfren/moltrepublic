@@ -15,7 +15,7 @@ use molt_net::monero_rpc::stub::{StubConfig, StubDaemon};
 use nostr_relay_builder::MockRelay;
 
 mod vault_support;
-use vault_support::{adopt_relay, engine, found_n_prepared, read_session, wait_for, NAMES};
+use vault_support::{adopt_relay, engine, found_n_prepared, read_session, reveal_seed, wait_for, wallet, NAMES};
 
 const DEADLINE: u64 = 30;
 
@@ -25,13 +25,6 @@ fn daemon_patch(d: &StubDaemon) -> serde_json::Value {
 
 async fn set_daemon(w: &WalletHandle, d: &StubDaemon) {
     w.execute(Command::PatchSettings { patch: daemon_patch(d) }).await.expect("daemon set");
-}
-
-async fn wallet(w: &WalletHandle) -> WalletView {
-    match w.execute(Command::ReadState { surface: Surface::Wallet, channel: None, view: None }).await {
-        Ok(Reply::State(s)) => *s.wallet.expect("wallet view"),
-        other => panic!("unexpected: {other:?}"),
-    }
 }
 
 async fn wait_wallet(w: &WalletHandle, what: &str, pred: impl Fn(&WalletView) -> bool) -> WalletView {
@@ -86,14 +79,6 @@ async fn founded(
         w.__wallet_deadline(DEADLINE);
     }
     (all, ds)
-}
-
-async fn reveal_seed(w: &WalletHandle) -> String {
-    let id = read_session(w).await.active_workspace.clone();
-    match w.execute(Command::RevealSeed { id }).await.expect("reveal") {
-        Reply::Seed { seed } => seed,
-        other => panic!("unexpected: {other:?}"),
-    }
 }
 
 /// `all[2]` ("c") loses its device and comes back from its phrase alone on

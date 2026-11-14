@@ -113,14 +113,7 @@ async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
     pace: Option<DownloadBounds>,
 ) -> Result<HttpResponse, HttpError> {
     // --- request ---
-    let mut req = format!("{method} {path_and_query} HTTP/1.1\r\n");
-    for (k, v) in headers {
-        req.push_str(&format!("{k}: {v}\r\n"));
-    }
-    if !body.is_empty() {
-        req.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    req.push_str("Connection: close\r\n\r\n");
+    let req = request_head(method, path_and_query, headers, body.len());
     let write = async {
         stream
             .write_all(req.as_bytes())
@@ -254,6 +247,25 @@ impl Completion {
     }
 }
 
+/// The request head: request line, the caller's headers, `Content-Length`
+/// for a non-empty body, `Connection: close`.
+fn request_head(
+    method: &str,
+    path_and_query: &str,
+    headers: &[(String, String)],
+    body_len: usize,
+) -> String {
+    let mut req = format!("{method} {path_and_query} HTTP/1.1\r\n");
+    for (k, v) in headers {
+        req.push_str(&format!("{k}: {v}\r\n"));
+    }
+    if body_len > 0 {
+        req.push_str(&format!("Content-Length: {body_len}\r\n"));
+    }
+    req.push_str("Connection: close\r\n\r\n");
+    req
+}
+
 fn too_large(max_response: usize) -> HttpError {
     HttpError(format!("http response exceeds {max_response} bytes"))
 }
@@ -290,14 +302,7 @@ pub async fn roundtrip_upload<S: AsyncRead + AsyncWrite + Unpin>(
     write_idle: Duration,
 ) -> Result<HttpResponse, HttpError> {
     // --- request head ---
-    let mut req = format!("{method} {path_and_query} HTTP/1.1\r\n");
-    for (k, v) in headers {
-        req.push_str(&format!("{k}: {v}\r\n"));
-    }
-    if !body.is_empty() {
-        req.push_str(&format!("Content-Length: {}\r\n", body.len()));
-    }
-    req.push_str("Connection: close\r\n\r\n");
+    let req = request_head(method, path_and_query, headers, body.len());
     write_all_idle(stream, req.as_bytes(), write_idle, "http write").await?;
 
     // --- body in bounded, individually idle-bounded slices ---
@@ -380,11 +385,7 @@ where
 {
     let idle = bounds.idle;
     // --- request (no body) ---
-    let mut req = format!("GET {path_and_query} HTTP/1.1\r\n");
-    for (k, v) in headers {
-        req.push_str(&format!("{k}: {v}\r\n"));
-    }
-    req.push_str("Connection: close\r\n\r\n");
+    let req = request_head("GET", path_and_query, headers, 0);
     let write = async {
         stream
             .write_all(req.as_bytes())

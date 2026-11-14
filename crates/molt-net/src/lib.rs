@@ -107,6 +107,23 @@ pub use wrap::{WrapKey, CHUNK_PLAIN_LEN};
 /// the guarantee simply stays inactive toward it (§4.8).
 pub const MESH_ACK_TAG: &[u8] = b"\x00molt-mesh-ack-v1";
 
+/// `N` bytes from the OS CSPRNG.
+pub(crate) fn os_random<const N: usize>() -> Result<[u8; N], NetError> {
+    let mut b = [0u8; N];
+    getrandom::getrandom(&mut b)
+        .map_err(|e| NetError::Crypto(format!("os rng unavailable: {e}")))?;
+    Ok(b)
+}
+
+/// A control frame: `tag ‖ JSON(value)`.
+pub(crate) fn framed<T: serde::Serialize>(tag: &[u8], value: &T) -> Vec<u8> {
+    let mut out = tag.to_vec();
+    if let Ok(json) = serde_json::to_vec(value) {
+        out.extend_from_slice(&json);
+    }
+    out
+}
+
 /// Everything that can go wrong between a queue and the engine.
 #[derive(Debug, thiserror::Error)]
 pub enum NetError {
@@ -150,10 +167,7 @@ pub struct QueueId(pub Vec<u8>);
 impl QueueId {
     /// A fresh 16-byte random id from the OS CSPRNG (loopback).
     pub fn fresh() -> Result<QueueId, NetError> {
-        let mut b = [0u8; 16];
-        getrandom::getrandom(&mut b)
-            .map_err(|e| NetError::Crypto(format!("os rng unavailable: {e}")))?;
-        Ok(QueueId(b.to_vec()))
+        Ok(QueueId(os_random::<16>()?.to_vec()))
     }
 
     /// Wrap a server-assigned id.

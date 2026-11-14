@@ -12,7 +12,7 @@
 
 mod common;
 
-use common::{engine, read_session};
+use common::{adopt_relay, engine, read_session};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,23 +45,6 @@ async fn wait_for(
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-}
-
-async fn adopt_relay(w: &WalletHandle, url: &str) {
-    w.execute(Command::RelayAdd { url: url.to_string() }).await.expect("relay add");
-    w.execute(Command::RelayConfirm { url: url.to_string(), accept_clearnet: true })
-        .await
-        .expect("relay confirm");
-    // B4: the confirmation lands on the PROBE's verdict, off-actor — an
-    // unusable relay never becomes a confirmed one
-    wait_for(w, "the relay probe to confirm the relay", 30, |s| {
-        s.settings
-            .relays
-            .iter()
-            .any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
-    })
-    .await;
-    w.execute(Command::RelayClearnetSession { unlock: true }).await.expect("unlock");
 }
 
 struct Cuttable {

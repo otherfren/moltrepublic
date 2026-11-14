@@ -792,10 +792,43 @@ where
 // Engine spawners (off-actor tasks feeding results back as commands)
 // ---------------------------------------------------------------------------
 
-/// Send one internal command back to the actor (fire-and-forget).
-async fn feed(cmd_tx: &mpsc::Sender<Envelope>, cmd: Command) {
-    let (reply, _rx) = tokio::sync::oneshot::channel();
-    let _ = cmd_tx.send(Envelope { cmd, reply }).await;
+/// A download's verdict as the command that reports it.
+fn file_verdict(id: MessageId, result: Result<String, String>, scope: u64) -> Command {
+    match result {
+        Ok(path) => Command::NetFileDone { id, path, generation: Some(scope) },
+        Err(reason) => Command::NetFileFailed { id, reason, generation: Some(scope) },
+    }
+}
+
+/// The fetch's `on_quiet` hook: ask the group for the missing ranges once
+/// the series has been quiet for `after()`, then every `repeat`. The clock
+/// starts here; `after` is read on every call.
+fn piece_asker(
+    id: MessageId,
+    scope: u64,
+    ask_tx: mpsc::Sender<Envelope>,
+    after: fn() -> Duration,
+    repeat: Duration,
+) -> impl FnMut(Vec<(u32, u32)>) -> bool + Send {
+    let started = tokio::time::Instant::now();
+    let mut last_ask: Option<tokio::time::Instant> = None;
+    move |missing| {
+        if missing.is_empty() {
+            return true;
+        }
+        let due = match last_ask {
+            None => started.elapsed() >= after(),
+            Some(at) => at.elapsed() >= repeat,
+        };
+        if due {
+            last_ask = Some(tokio::time::Instant::now());
+            crate::try_send_internal(
+                &ask_tx,
+                Command::NetPieceWantSend { id, ranges: missing, generation: Some(scope) },
+            );
+        }
+        true
+    }
 }
 
 /// What the share-hash pass learns about a file.
@@ -882,7 +915,7 @@ pub(crate) fn spawn_share_hash(
                 generation: Some(scope),
             },
         };
-        feed(&cmd_tx, cmd).await;
+        crate::send_internal(&cmd_tx, cmd).await;
     });
 }
 
@@ -935,9 +968,9 @@ pub(crate) fn spawn_file_fetch(
                 // signal — dropping one on a momentarily full queue is fine,
                 // and try_send keeps reports ORDERED (spawned sends could
                 // deliver a lower percent after a higher one)
-                let (reply, _rx) = tokio::sync::oneshot::channel();
-                let _ = progress_tx.try_send(Envelope {
-                    cmd: Command::NetFileProgress {
+                crate::try_send_internal(
+                    &progress_tx,
+                    Command::NetFileProgress {
                         id,
                         transferred,
                         total,
@@ -945,25 +978,12 @@ pub(crate) fn spawn_file_fetch(
                         of: 0,
                         generation: Some(scope),
                     },
-                    reply,
-                });
+                );
             }
         };
         let result = run_file_fetch(transport, group, target, dest, timeouts, announce, progress)
             .await;
-        let cmd = match result {
-            Ok(path) => Command::NetFileDone {
-                id,
-                path: path.display().to_string(),
-                generation: Some(scope),
-            },
-            Err(reason) => Command::NetFileFailed {
-                id,
-                reason,
-                generation: Some(scope),
-            },
-        };
-        feed(&cmd_tx, cmd).await;
+        crate::send_internal(&cmd_tx, file_verdict(id, result.map(|p| p.display().to_string()), scope)).await;
     });
 }
 
@@ -1028,11 +1048,7 @@ pub(crate) fn spawn_file_verdict(
     cmd_tx: mpsc::Sender<Envelope>,
 ) {
     tokio::spawn(async move {
-        let cmd = match result {
-            Ok(path) => Command::NetFileDone { id, path, generation: Some(scope) },
-            Err(reason) => Command::NetFileFailed { id, reason, generation: Some(scope) },
-        };
-        feed(&cmd_tx, cmd).await;
+        crate::send_internal(&cmd_tx, file_verdict(id, result, scope)).await;
     });
 }
 
@@ -1084,11 +1100,7 @@ pub(crate) fn spawn_nostr_fetch(
             .unwrap_or_else(|e| Err(format!("write task failed: {e}")))
         }
         .await;
-        let cmd = match result {
-            Ok(path) => Command::NetFileDone { id, path, generation: Some(scope) },
-            Err(reason) => Command::NetFileFailed { id, reason, generation: Some(scope) },
-        };
-        feed(&cmd_tx, cmd).await;
+        crate::send_internal(&cmd_tx, file_verdict(id, result, scope)).await;
     })
     .abort_handle()
 }
@@ -1144,7 +1156,7 @@ pub(crate) fn spawn_series_publish(
                 0
             }
         };
-        feed(
+        crate::send_internal(
             &cmd_tx,
             Command::NetFileSeriesPublished { id, at, generation: Some(scope) },
         )
@@ -1209,6 +1221,8 @@ struct MirrorSink<S: FetchJobStore> {
     key: [u8; 32],
     series: String,
     job: molt_core::MirrorJob,
+    /// The pieces `job` holds, counted once and kept in step with `mark`.
+    held_count: u32,
     store: S,
     cmd_tx: mpsc::Sender<Envelope>,
     id: MessageId,
@@ -1260,6 +1274,7 @@ impl<S: FetchJobStore> molt_net::file_plane::PieceSink for MirrorSink<S> {
             return;
         }
         self.job.mark(index);
+        self.held_count += 1;
         // what the folder holds: every stored piece is one sealed block,
         // padded and base64'd (the quota is disk, not plaintext)
         self.job.bytes = self.job.bytes.saturating_add(molt_net::trickle::PIECE_WIRE_BYTES);
@@ -1267,16 +1282,15 @@ impl<S: FetchJobStore> molt_net::file_plane::PieceSink for MirrorSink<S> {
         if self.since_persist >= HELD_PERSIST_EVERY || self.last_persist.elapsed() >= HELD_PERSIST_AFTER {
             self.persist();
         }
-        let (reply, _rx) = tokio::sync::oneshot::channel();
-        let _ = self.cmd_tx.try_send(Envelope {
-            cmd: Command::NetMirrorProgress {
+        crate::try_send_internal(
+            &self.cmd_tx,
+            Command::NetMirrorProgress {
                 id: self.id,
-                held: self.job.held_count(),
+                held: self.held_count,
                 bytes: self.job.bytes,
                 generation: Some(self.scope),
             },
-            reply,
-        });
+        );
     }
 }
 
@@ -1322,12 +1336,13 @@ pub(crate) fn spawn_mirror_fetch<S: FetchJobStore>(
                 root: Some(job.root.clone()),
                 content: None,
             };
-            let (count, started_at) = (job.count, job.started_at);
+            let (count, started_at, held_count) = (job.count, job.started_at, job.held_count());
             let mut sink = MirrorSink {
                 dir: dir.clone(),
                 key,
                 series: series.clone(),
                 job,
+                held_count,
                 store: store.clone(),
                 cmd_tx: cmd_tx.clone(),
                 id,
@@ -1335,27 +1350,7 @@ pub(crate) fn spawn_mirror_fetch<S: FetchJobStore>(
                 since_persist: 0,
                 last_persist: tokio::time::Instant::now(),
             };
-            let started = tokio::time::Instant::now();
-            let mut last_ask: Option<tokio::time::Instant> = None;
-            let ask_tx = cmd_tx.clone();
-            let mut on_quiet = move |missing: Vec<(u32, u32)>| -> bool {
-                if missing.is_empty() {
-                    return true;
-                }
-                let due = match last_ask {
-                    None => started.elapsed() >= piece_want_after(),
-                    Some(at) => at.elapsed() >= PIECE_WANT_REPEAT,
-                };
-                if due {
-                    last_ask = Some(tokio::time::Instant::now());
-                    let (reply, _rx) = tokio::sync::oneshot::channel();
-                    let _ = ask_tx.try_send(Envelope {
-                        cmd: Command::NetPieceWantSend { id, ranges: missing, generation: Some(scope) },
-                        reply,
-                    });
-                }
-                true
-            };
+            let mut on_quiet = piece_asker(id, scope, cmd_tx.clone(), piece_want_after, PIECE_WANT_REPEAT);
             let opts = molt_net::file_plane::FetchOpts {
                 quiet: molt_net::file_plane::FETCH_QUIET,
                 ceiling: None,
@@ -1392,7 +1387,7 @@ pub(crate) fn spawn_mirror_fetch<S: FetchJobStore>(
                 Command::NetMirrorDone { id, ok: false, reason, bytes: 0, generation: Some(scope) }
             }
         };
-        feed(&cmd_tx, cmd).await;
+        crate::send_internal(&cmd_tx, cmd).await;
     })
     .abort_handle()
 }
@@ -1499,10 +1494,10 @@ impl<S: FetchJobStore> molt_net::file_plane::PieceSink for FileSink<S> {
         }
         // every piece: at the trickle's pace the rate needs each sample
         let block = u64::try_from(molt_net::file_plane::PIECE_PAYLOAD_LEN).unwrap_or(0);
-        let (reply, _rx) = tokio::sync::oneshot::channel();
         // lossy and ordered, like the queue plane's progress
-        let _ = self.cmd_tx.try_send(Envelope {
-            cmd: Command::NetFileProgress {
+        crate::try_send_internal(
+            &self.cmd_tx,
+            Command::NetFileProgress {
                 id: self.id,
                 transferred: self.held_count.saturating_mul(block).min(self.job.size),
                 total: self.job.size,
@@ -1510,8 +1505,7 @@ impl<S: FetchJobStore> molt_net::file_plane::PieceSink for FileSink<S> {
                 of: self.job.count,
                 generation: Some(self.scope),
             },
-            reply,
-        });
+        );
     }
 }
 
@@ -1554,27 +1548,7 @@ pub(crate) fn spawn_nostr_fetch_v2<S: FetchJobStore>(
                     root: Some(job.root.clone()),
                     content: None,
                 };
-                let started = tokio::time::Instant::now();
-                let mut last_ask: Option<tokio::time::Instant> = None;
-                let ask_tx = cmd_tx.clone();
-                let mut on_quiet = move |missing: Vec<(u32, u32)>| -> bool {
-                    if missing.is_empty() {
-                        return true;
-                    }
-                    let due = match last_ask {
-                        None => started.elapsed() >= piece_want_after(),
-                        Some(at) => at.elapsed() >= PIECE_WANT_REPEAT,
-                    };
-                    if due {
-                        last_ask = Some(tokio::time::Instant::now());
-                        let (reply, _rx) = tokio::sync::oneshot::channel();
-                        let _ = ask_tx.try_send(Envelope {
-                            cmd: Command::NetPieceWantSend { id, ranges: missing, generation: Some(scope) },
-                            reply,
-                        });
-                    }
-                    true
-                };
+                let mut on_quiet = piece_asker(id, scope, cmd_tx.clone(), piece_want_after, PIECE_WANT_REPEAT);
                 let opts = molt_net::file_plane::FetchOpts {
                     quiet: molt_net::file_plane::FETCH_QUIET,
                     ceiling: None,
@@ -1598,7 +1572,7 @@ pub(crate) fn spawn_nostr_fetch_v2<S: FetchJobStore>(
                     }
                 };
                 drop(sink);
-                feed(&cmd_tx, Command::NetFileVerifying { id, generation: Some(scope) }).await;
+                crate::send_internal(&cmd_tx, Command::NetFileVerifying { id, generation: Some(scope) }).await;
                 let checksum = job.checksum.clone();
                 let landing_for_task = landing.clone();
                 // the size is the top record's, verified by root: whatever
@@ -1623,11 +1597,7 @@ pub(crate) fn spawn_nostr_fetch_v2<S: FetchJobStore>(
         if cancelled {
             return; // the actor already shows it; a retry may be running
         }
-        let cmd = match result {
-            Ok(path) => Command::NetFileDone { id, path, generation: Some(scope) },
-            Err(reason) => Command::NetFileFailed { id, reason, generation: Some(scope) },
-        };
-        feed(&cmd_tx, cmd).await;
+        crate::send_internal(&cmd_tx, file_verdict(id, result, scope)).await;
     })
     .abort_handle()
 }
@@ -1734,31 +1704,7 @@ fn spawn_derived_series_fetch(
 ) -> tokio::task::AbortHandle {
     tokio::spawn(async move {
         let mut sink: Vec<u8> = Vec::new();
-        let started = tokio::time::Instant::now();
-        let mut last_ask: Option<tokio::time::Instant> = None;
-        let ask_tx = cmd_tx.clone();
-        let mut on_quiet = move |missing: Vec<(u32, u32)>| -> bool {
-            if missing.is_empty() {
-                return true;
-            }
-            let due = match last_ask {
-                None => started.elapsed() >= WIKI_BASE_WANT_AFTER,
-                Some(at) => at.elapsed() >= WIKI_BASE_WANT_REPEAT,
-            };
-            if due {
-                last_ask = Some(tokio::time::Instant::now());
-                let (reply, _rx) = tokio::sync::oneshot::channel();
-                let _ = ask_tx.try_send(Envelope {
-                    cmd: Command::NetPieceWantSend {
-                        id,
-                        ranges: missing,
-                        generation: Some(scope),
-                    },
-                    reply,
-                });
-            }
-            true
-        };
+        let mut on_quiet = piece_asker(id, scope, cmd_tx.clone(), || WIKI_BASE_WANT_AFTER, WIKI_BASE_WANT_REPEAT);
         let opts = molt_net::file_plane::FetchOpts {
             quiet: molt_net::file_plane::FETCH_QUIET,
             ceiling: None,
@@ -1780,7 +1726,7 @@ fn spawn_derived_series_fetch(
             }
             Err(e) => Err(e.to_string()),
         });
-        feed(&cmd_tx, cmd).await;
+        crate::send_internal(&cmd_tx, cmd).await;
     })
     .abort_handle()
 }
@@ -1808,19 +1754,7 @@ pub(crate) fn spawn_local_copy(
         })
         .await
         .unwrap_or_else(|e| Err(format!("copy task failed: {e}")));
-        let cmd = match result {
-            Ok(path) => Command::NetFileDone {
-                id,
-                path: path.display().to_string(),
-                generation: Some(scope),
-            },
-            Err(reason) => Command::NetFileFailed {
-                id,
-                reason,
-                generation: Some(scope),
-            },
-        };
-        feed(&cmd_tx, cmd).await;
+        crate::send_internal(&cmd_tx, file_verdict(id, result.map(|p| p.display().to_string()), scope)).await;
     });
 }
 
@@ -1858,19 +1792,7 @@ pub(crate) fn spawn_mirror_assembly(
         })
         .await
         .unwrap_or_else(|e| Err(format!("mirror assembly failed: {e}")));
-        let cmd = match result {
-            Ok(path) => Command::NetFileDone {
-                id,
-                path: path.display().to_string(),
-                generation: Some(scope),
-            },
-            Err(reason) => Command::NetFileFailed {
-                id,
-                reason,
-                generation: Some(scope),
-            },
-        };
-        feed(&cmd_tx, cmd).await;
+        crate::send_internal(&cmd_tx, file_verdict(id, result.map(|p| p.display().to_string()), scope)).await;
     });
 }
 

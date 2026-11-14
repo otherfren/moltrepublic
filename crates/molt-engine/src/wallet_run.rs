@@ -1170,12 +1170,7 @@ impl State {
             .map(|(id, _)| *id)
             .collect();
         for id in dead {
-            if let Some(p) = self.proposals.get_mut(&id) {
-                p.state = ProposalState::Rejected;
-                p.superseded = true;
-                p.superseded_kind = Some(molt_core::SupersededKind::Conflict);
-            }
-            self.stash_voted(id);
+            self.supersede_as_conflict(id);
             self.chain.pending_sigs.remove(&id);
             self.purse.consent.remove(&id);
             tracing::info!(id, "wallet_card=superseded");

@@ -303,8 +303,16 @@ impl State {
     /// is what the vote said it is, an own share is available while this
     /// node still knows its path.
     pub(crate) fn share_identity(&self, id: &MessageId) -> Result<(ShareIdentity, bool), MoltError> {
+        self.share_identity_in(&self.files_state(), id)
+    }
+
+    /// [`Self::share_identity`] over a Files fold the caller already made.
+    pub(crate) fn share_identity_in(
+        &self,
+        states: &FilesState,
+        id: &MessageId,
+    ) -> Result<(ShareIdentity, bool), MoltError> {
         let live = self.chat_by_id(id).ok().and_then(|(_, msg)| live_share(msg));
-        let states = self.files_state();
         let block = states.get(id).map(FileState::identity);
         // a vote pinned the identity: a live message under that id counts
         // only while it IS that share - an id squatted after the original

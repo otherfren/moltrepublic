@@ -314,14 +314,16 @@ pub struct TabRow {
 /// The on-disk draft (`wiki_draft.json` via the engine — WP-D): the
 /// whole local layer, so tabs and undo survive a restart too.
 #[derive(serde::Serialize, serde::Deserialize)]
-struct Draft {
-    docs: Vec<Doc>,
-    folders: Vec<Folder>,
-    tabs: Vec<DocId>,
+struct Draft<'a> {
+    // borrowed on the way out (no copy of the held wiki per save), owned
+    // on the way back in
+    docs: std::borrow::Cow<'a, [Doc]>,
+    folders: std::borrow::Cow<'a, [Folder]>,
+    tabs: std::borrow::Cow<'a, [DocId]>,
     active: Option<DocId>,
     marked: Option<DocId>,
     next_id: DocId,
-    stack: Vec<Change>,
+    stack: std::borrow::Cow<'a, [Change]>,
     base_rev: u64,
 }
 
@@ -578,20 +580,8 @@ impl Wiki {
             tabs: first.into_iter().collect(),
             active: first,
             marked: first,
-            marked_folder: None,
-            editing: false,
-            renaming: None,
-            renaming_folder: None,
             next_id,
-            stack: Vec::new(),
-            base_rev: 0,
-            ont: OntologyDraft::default(),
-            relation_vocab: Vec::new(),
-            cursor: None,
-            vote_pending: None,
-            gen: 0,
-            files: FilePicker::default(),
-            in_flight: std::cell::RefCell::new(std::collections::BTreeSet::new()),
+            ..Wiki::empty()
         }
     }
 
@@ -674,12 +664,24 @@ impl Wiki {
             // lands is stale, and every path is askable again (F5)
             self.in_flight.get_mut().clear();
         }
+        // one pass over the docs instead of a scan per base path: the
+        // first doc on each base path, and the paths local drafts occupy.
+        // Neither moves below - a base path is only rewritten to itself,
+        // and docs are only appended.
+        let mut by_base: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut drafts: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (i, d) in self.docs.iter().enumerate() {
+            match &d.base {
+                Some(b) => {
+                    by_base.entry(b.path.clone()).or_insert(i);
+                }
+                None => {
+                    drafts.insert(d.path.clone());
+                }
+            }
+        }
         for (path, content) in base {
-            if let Some(d) = self
-                .docs
-                .iter_mut()
-                .find(|d| d.base.as_ref().is_some_and(|b| &b.path == path))
-            {
+            if let Some(d) = by_base.get(path).and_then(|&i| self.docs.get_mut(i)) {
                 let unedited = d.status() == Status::Unchanged;
                 let kept = if moved {
                     content.clone()
@@ -706,11 +708,12 @@ impl Wiki {
             // stays visible as Added next to nothing — the member decides
             // (rescue/rework), the base doc appears once the paths differ.
             // Deliberately NOT a silent overwrite of local work.
-            if self.docs.iter().any(|d| d.path == *path && d.base.is_none()) {
+            if drafts.contains(path) {
                 continue;
             }
             let id = self.next_id;
             self.next_id += 1;
+            by_base.insert(path.clone(), self.docs.len());
             self.docs.push(Doc {
                 id,
                 path: path.clone(),
@@ -728,14 +731,11 @@ impl Wiki {
         // docs whose base vanished: unedited ones leave (tabs closed),
         // edited ones stay as ADDED — their content is new against this
         // base and must not be lost
+        let live: std::collections::HashSet<&str> = base.iter().map(|(p, _)| p.as_str()).collect();
         let gone: Vec<(DocId, bool)> = self
             .docs
             .iter()
-            .filter(|d| {
-                d.base
-                    .as_ref()
-                    .is_some_and(|b| !base.iter().any(|(p, _)| p == &b.path))
-            })
+            .filter(|d| d.base.as_ref().is_some_and(|b| !live.contains(b.path.as_str())))
             .map(|d| (d.id, d.status() == Status::Unchanged || d.deleted))
             .collect();
         for (id, remove) in gone {
@@ -750,12 +750,14 @@ impl Wiki {
             }
         }
         // folders follow the surviving docs — the whole ancestor chain
-        let parents: Vec<String> = base
-            .iter()
-            .filter_map(|(path, _)| path.rsplit_once('/').map(|(f, _)| f.to_string()))
-            .collect();
-        for folder in parents {
-            self.ensure_folder_chain(&folder, false);
+        // (each distinct folder once, in first-seen order)
+        let mut seen = std::collections::HashSet::new();
+        for (path, _) in base {
+            if let Some((folder, _)) = path.rsplit_once('/') {
+                if seen.insert(folder) {
+                    self.ensure_folder_chain(folder, false);
+                }
+            }
         }
         let keep: Vec<String> = self
             .folders
@@ -846,15 +848,28 @@ impl Wiki {
     /// alphabetically. Deleted files stay listed (struck) — they are
     /// pending changes, not gone. A closed folder hides its whole subtree.
     pub fn nav_rows(&self) -> Vec<NavRow> {
+        let mut files: std::collections::HashMap<Option<&str>, Vec<&Doc>> = std::collections::HashMap::new();
+        for d in &self.docs {
+            files.entry(d.folder()).or_default().push(d);
+        }
+        for v in files.values_mut() {
+            v.sort_by(|a, b| a.name().cmp(b.name()));
+        }
         let mut rows = Vec::new();
-        self.push_level(None, 0, &mut rows);
-        for d in self.files_in(None) {
+        self.push_level(None, 0, &files, &mut rows);
+        for d in files.get(&None).into_iter().flatten() {
             rows.push(self.file_row(d, 0));
         }
         rows
     }
 
-    fn push_level(&self, parent: Option<&str>, depth: usize, rows: &mut Vec<NavRow>) {
+    fn push_level(
+        &self,
+        parent: Option<&str>,
+        depth: usize,
+        files: &std::collections::HashMap<Option<&str>, Vec<&Doc>>,
+        rows: &mut Vec<NavRow>,
+    ) {
         let mut children: Vec<&Folder> = self
             .folders
             .iter()
@@ -886,22 +901,12 @@ impl Wiki {
                 renaming: self.renaming_folder.as_deref() == Some(f.name.as_str()),
             });
             if f.open {
-                self.push_level(Some(&f.name), depth + 1, rows);
-                for d in self.files_in(Some(&f.name)) {
+                self.push_level(Some(&f.name), depth + 1, files, rows);
+                for d in files.get(&Some(f.name.as_str())).into_iter().flatten() {
                     rows.push(self.file_row(d, depth + 1));
                 }
             }
         }
-    }
-
-    fn files_in(&self, folder: Option<&str>) -> Vec<&Doc> {
-        let mut files: Vec<&Doc> = self
-            .docs
-            .iter()
-            .filter(|d| d.folder() == folder)
-            .collect();
-        files.sort_by(|a, b| a.name().cmp(b.name()));
-        files
     }
 
     fn file_row(&self, d: &Doc, depth: usize) -> NavRow {
@@ -1095,13 +1100,13 @@ impl Wiki {
             return String::new();
         }
         let draft = Draft {
-            docs: self.docs.clone(),
-            folders: self.folders.clone(),
-            tabs: self.tabs.clone(),
+            docs: std::borrow::Cow::Borrowed(&self.docs),
+            folders: std::borrow::Cow::Borrowed(&self.folders),
+            tabs: std::borrow::Cow::Borrowed(&self.tabs),
             active: self.active,
             marked: self.marked,
             next_id: self.next_id,
-            stack: self.stack.clone(),
+            stack: std::borrow::Cow::Borrowed(&self.stack),
             base_rev: self.base_rev,
         };
         serde_json::to_string(&draft).unwrap_or_default()
@@ -1117,13 +1122,13 @@ impl Wiki {
         let Ok(d) = serde_json::from_str::<Draft>(draft) else {
             return false;
         };
-        self.docs = d.docs;
-        self.folders = d.folders;
-        self.tabs = d.tabs;
+        self.docs = d.docs.into_owned();
+        self.folders = d.folders.into_owned();
+        self.tabs = d.tabs.into_owned();
         self.active = d.active;
         self.marked = d.marked;
         self.next_id = d.next_id;
-        self.stack = d.stack;
+        self.stack = d.stack.into_owned();
         self.base_rev = d.base_rev;
         self.editing = false;
         self.renaming = None;
@@ -1386,9 +1391,14 @@ impl Wiki {
 
     /// New folder: `new-folder-N`, a local pending change.
     pub fn new_folder(&mut self) -> String {
+        self.add_folder(None)
+    }
+
+    fn add_folder(&mut self, parent: Option<&str>) -> String {
+        let stem = parent.map(|p| format!("{p}/")).unwrap_or_default();
         let mut n = 1;
         let name = loop {
-            let candidate = format!("new-folder-{n}");
+            let candidate = format!("{stem}new-folder-{n}");
             if !self.folders.iter().any(|f| f.name == candidate) {
                 break candidate;
             }
@@ -1414,23 +1424,8 @@ impl Wiki {
         if parent.split('/').count() >= MAX_FOLDER_DEPTH {
             return Err("too deep".to_string());
         }
-        let mut n = 1;
-        let name = loop {
-            let candidate = format!("{parent}/new-folder-{n}");
-            if !self.folders.iter().any(|f| f.name == candidate) {
-                break candidate;
-            }
-            n += 1;
-        };
-        self.folders.push(Folder {
-            name: name.clone(),
-            open: true,
-            added: true,
-        });
+        let name = self.add_folder(Some(parent));
         self.open_chain(parent);
-        self.stack.push(Change::CreatedFolder { name: name.clone() });
-        self.renaming = None;
-        self.renaming_folder = Some(name.clone());
         Ok(name)
     }
 
@@ -1958,43 +1953,22 @@ impl Wiki {
     pub fn stack_rows(&self) -> Vec<StackRow> {
         self.stack
             .iter()
-            .map(|c| match c {
-                Change::Created { label, .. } => StackRow {
-                    kind: ChangeKind::Created,
-                    label: label.clone(),
-                },
-                Change::CreatedFolder { name } => StackRow {
-                    kind: ChangeKind::CreatedFolder,
-                    label: format!("{name}/"),
-                },
-                Change::Renamed { label, .. } => StackRow {
-                    kind: ChangeKind::Renamed,
-                    label: label.clone(),
-                },
-                Change::Moved { label, .. } => StackRow {
-                    kind: ChangeKind::Moved,
-                    label: label.clone(),
-                },
-                Change::DeletedDoc { label, .. } | Change::DeletedAdded { label, .. } => StackRow {
-                    kind: ChangeKind::Deleted,
-                    label: label.clone(),
-                },
-                Change::Edited { label, .. } => StackRow {
-                    kind: ChangeKind::Edited,
-                    label: label.clone(),
-                },
-                Change::RenamedFolder { label, .. } => StackRow {
-                    kind: ChangeKind::Renamed,
-                    label: label.clone(),
-                },
-                Change::MovedFolder { label, .. } => StackRow {
-                    kind: ChangeKind::Moved,
-                    label: label.clone(),
-                },
-                Change::DeletedFolder { label, .. } => StackRow {
-                    kind: ChangeKind::Deleted,
-                    label: label.clone(),
-                },
+            .map(|c| {
+                let (kind, label) = match c {
+                    Change::CreatedFolder { name } => (ChangeKind::CreatedFolder, format!("{name}/")),
+                    Change::Created { label, .. } => (ChangeKind::Created, label.clone()),
+                    Change::Renamed { label, .. } | Change::RenamedFolder { label, .. } => {
+                        (ChangeKind::Renamed, label.clone())
+                    }
+                    Change::Moved { label, .. } | Change::MovedFolder { label, .. } => {
+                        (ChangeKind::Moved, label.clone())
+                    }
+                    Change::DeletedDoc { label, .. }
+                    | Change::DeletedAdded { label, .. }
+                    | Change::DeletedFolder { label, .. } => (ChangeKind::Deleted, label.clone()),
+                    Change::Edited { label, .. } => (ChangeKind::Edited, label.clone()),
+                };
+                StackRow { kind, label }
             })
             .collect()
     }
@@ -2122,13 +2096,13 @@ impl Wiki {
         // returns under its base name, empty added ones go
         self.renaming_folder = None;
         self.marked_folder = None;
-        let referenced: Vec<String> = self
-            .docs
-            .iter()
-            .filter_map(|d| d.folder().map(String::from))
-            .collect();
-        self.folders
-            .retain(|f| referenced.iter().any(|r| *r == f.name || r.starts_with(&format!("{}/", f.name))));
+        let mut seen = std::collections::HashSet::new();
+        let referenced: Vec<String> =
+            self.docs.iter().filter_map(|d| d.folder()).filter(|f| seen.insert(*f)).map(String::from).collect();
+        self.folders.retain(|f| {
+            let prefix = format!("{}/", f.name);
+            referenced.iter().any(|r| *r == f.name || r.starts_with(&prefix))
+        });
         for r in referenced {
             self.ensure_folder_chain(&r, false);
         }
@@ -2399,19 +2373,15 @@ impl Wiki {
     /// when it is switched off again.
     pub fn link_relations(&self) -> Vec<(String, bool)> {
         let mut keys: Vec<String> = Vec::new();
-        for k in self.relation_vocab.iter().cloned() {
-            if !keys.contains(&k) {
-                keys.push(k);
-            }
-        }
-        for k in RELATIONS.iter().map(|k| (*k).to_string()) {
-            if !keys.contains(&k) {
-                keys.push(k);
-            }
-        }
-        for k in self.ont.extra.iter().chain(self.ont.on.iter()).cloned() {
-            if !keys.contains(&k) {
-                keys.push(k);
+        let offered = self
+            .relation_vocab
+            .iter()
+            .map(String::as_str)
+            .chain(RELATIONS)
+            .chain(self.ont.extra.iter().chain(&self.ont.on).map(String::as_str));
+        for k in offered {
+            if !keys.iter().any(|have| have == k) {
+                keys.push(k.to_string());
             }
         }
         keys.into_iter()
@@ -3621,20 +3591,7 @@ fn grew_by(
     key: &str,
     display: &str,
 ) -> bool {
-    let Some(after) = molt_engine::properties(doc).0 else {
-        return false;
-    };
-    if after.len() != before.len() + usize::from(!before.contains_key(key)) {
-        return false;
-    }
-    for (k, v) in before {
-        if k != key && after.get(k) != Some(v) {
-            return false;
-        }
-    }
-    let mut want = molt_engine::header_value_list(before.get(key));
-    want.push(serde_json::Value::String(display.to_string()));
-    molt_engine::header_value_list(after.get(key)) == want
+    grew_by_value(doc, before, key, &serde_json::Value::String(display.to_string()))
 }
 
 /// A document is open to a header when its ratified bytes are here and it

@@ -1092,6 +1092,24 @@ pub(crate) fn walk_chain(blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
     Ok(walk)
 }
 
+/// The ratified GROUP pool: the checkpoint summary's if there is one, else
+/// the genesis block's. Empty on a non-Nostr chain.
+pub(super) fn ratified_pool(
+    checkpoint: Option<&molt_core::CheckpointState>,
+    blocks: &[ChainBlock],
+) -> Vec<String> {
+    if let Some(blob) = checkpoint {
+        return blob.relays.clone();
+    }
+    blocks
+        .first()
+        .and_then(|b| match &b.change {
+            ChainChange::Genesis { relays, .. } => Some(relays.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// The chain-ratified relay pool as SERVED MATERIAL folds it: the blob's
 /// (else the genesis') pool plus every applied `set_relays` edit in the
 /// verified run — the recovery gate's authority. A Welcome minted after a
@@ -1103,16 +1121,7 @@ pub(crate) fn effective_relays_of_served(
     checkpoint: Option<&molt_core::CheckpointState>,
     blocks: &[ChainBlock],
 ) -> Vec<String> {
-    let mut pool = match checkpoint {
-        Some(blob) => blob.relays.clone(),
-        None => blocks
-            .first()
-            .and_then(|b| match &b.change {
-                ChainChange::Genesis { relays, .. } => Some(relays.clone()),
-                _ => None,
-            })
-            .unwrap_or_default(),
-    };
+    let mut pool = ratified_pool(checkpoint, blocks);
     for b in blocks {
         if let ChainChange::Applied { payload, .. } = &b.change {
             if payload.get("op").and_then(serde_json::Value::as_str) == Some("set_relays") {
@@ -1161,14 +1170,7 @@ pub(crate) fn verify_served(
             // the suffix rules recompute the blob's founding table to the
             // rid either way; an external anchor additionally pins WHICH
             // republic the caller expects
-            let rid_owned;
-            let rid = match expected_rid {
-                Some(r) => r,
-                None => {
-                    rid_owned = blob.republic_id.clone();
-                    rid_owned.as_str()
-                }
-            };
+            let rid = expected_rid.unwrap_or(blob.republic_id.as_str());
             // a served chain is checked without a base tree: a folded
             // cut inside the SUFFIX (rather than at the anchor) is
             // re-verified on the adopt path, which holds one
@@ -1218,8 +1220,7 @@ pub(crate) fn walk_suffix_chain(
     let Some((upto, state_hash, anchor_kind)) = CutKind::of(&anchor.change) else {
         return Err("suffix chain does not start with a checkpoint".to_string());
     };
-    let upto = &upto;
-    if blob.upto != *upto {
+    if blob.upto != upto {
         return Err("checkpoint blob does not cover the anchored upto".to_string());
     }
     if checkpoint_state_hash(blob) != state_hash {
@@ -1228,7 +1229,7 @@ pub(crate) fn walk_suffix_chain(
     // a checkpoint anchor can never be the genesis (height 0); the checked
     // subtraction also rejects an attacker-served height-0 anchor instead
     // of underflowing (overflow-checks=true → abort)
-    if anchor.height.checked_sub(1) != Some(*upto) {
+    if anchor.height.checked_sub(1) != Some(upto) {
         return Err(
             "checkpoint upto must be exactly the anchor height minus one".to_string(),
         );

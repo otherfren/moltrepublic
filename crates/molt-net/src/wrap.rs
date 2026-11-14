@@ -39,10 +39,7 @@ pub struct WrapKey([u8; 32]);
 impl WrapKey {
     /// A fresh key from the OS CSPRNG.
     pub fn fresh() -> Result<WrapKey, NetError> {
-        let mut k = [0u8; 32];
-        getrandom::getrandom(&mut k)
-            .map_err(|e| NetError::Crypto(format!("os rng unavailable: {e}")))?;
-        Ok(WrapKey(k))
+        Ok(WrapKey(crate::os_random()?))
     }
 
     /// Wrap an existing key (in-band key handover, tests).
@@ -74,9 +71,7 @@ pub fn wrap(key: &WrapKey, chunk_plain: &[u8]) -> Result<PaddedBlock, NetError> 
             chunk_plain.len()
         )));
     }
-    let mut nonce = [0u8; WRAP_NONCE_LEN];
-    getrandom::getrandom(&mut nonce)
-        .map_err(|e| NetError::Crypto(format!("os rng unavailable: {e}")))?;
+    let nonce: [u8; WRAP_NONCE_LEN] = crate::os_random()?;
     let cipher = XChaCha20Poly1305::new((&key.0).into());
     let ct = cipher
         .encrypt(

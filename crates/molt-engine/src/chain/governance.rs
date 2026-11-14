@@ -45,6 +45,18 @@ pub(crate) struct PendingApproval {
     pub verified: std::collections::BTreeSet<String>,
 }
 
+/// Whether `p` is the approval card of this membership change: the reserved
+/// op + member (never wearable via cmd_propose).
+fn is_membership_card(p: &molt_core::ProposalRecord, op: MembershipOp, member: &str) -> bool {
+    let want = match op {
+        MembershipOp::Restored => "restore_member",
+        MembershipOp::Joined => "add_member",
+    };
+    p.surface == Surface::Organization
+        && p.payload.get("op").and_then(serde_json::Value::as_str) == Some(want)
+        && p.payload.get("member").and_then(serde_json::Value::as_str) == Some(member)
+}
+
 impl State {
     /// A workspace whose governance runs through the chain (real m-of-n
     /// signatures) rather than the single-operator path.
@@ -106,14 +118,7 @@ impl State {
                 let ChainChange::Membership { op, member, .. } = change else {
                     return false;
                 };
-                let want = match op {
-                    MembershipOp::Restored => "restore_member",
-                    MembershipOp::Joined => "add_member",
-                };
-                p.surface == Surface::Organization
-                    && p.payload.get("op").and_then(serde_json::Value::as_str) == Some(want)
-                    && p.payload.get("member").and_then(serde_json::Value::as_str)
-                        == Some(member.as_str())
+                is_membership_card(p, *op, member)
             }
         }
     }
@@ -847,20 +852,10 @@ impl State {
         let ChainChange::Membership { op, member, .. } = sealed else {
             return;
         };
-        let want_op = match op {
-            MembershipOp::Restored => "restore_member",
-            MembershipOp::Joined => "add_member",
-        };
         let ids: Vec<u64> = self
             .proposals
             .iter()
-            .filter(|(_, p)| {
-                p.state == ProposalState::Proposed
-                    && p.surface == Surface::Organization
-                    && p.payload.get("op").and_then(serde_json::Value::as_str) == Some(want_op)
-                    && p.payload.get("member").and_then(serde_json::Value::as_str)
-                        == Some(member.as_str())
-            })
+            .filter(|(_, p)| p.state == ProposalState::Proposed && is_membership_card(p, *op, member))
             .map(|(id, _)| *id)
             .collect();
         for id in ids {
@@ -1145,22 +1140,7 @@ impl State {
         let mut inserted = false;
         self.proposals.entry(id).or_insert_with(|| {
             inserted = true;
-            molt_core::ProposalRecord {
-                surface,
-                payload,
-                approvals: 0,
-                state: ProposalState::Proposed,
-                applied_at: 0,
-                declined_at: 0,
-                declined_by: String::new(),
-                decliners: Vec::new(),
-                voted: Vec::new(),
-                by: by.to_string(),
-                superseded: false,
-                superseded_kind: None,
-                withdrawn: false,
-                wiki_rev: None,
-            }
+            molt_core::ProposalRecord::new(surface, payload, by.to_string())
         });
         if inserted && surface == Surface::Vault {
             self.after_vault_proposed(id);

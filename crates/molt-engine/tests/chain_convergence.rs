@@ -11,73 +11,12 @@
 
 mod common;
 
-use common::{adopt_relay, engine, read_session, wait_for};
+use common::{found_pair, wiki_docs};
 use std::time::Duration;
 
 use molt_core::{Command, ProposalState, Reply};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
-
-/// A real 2-of-2 republic over the relay: petra founds, walter joins.
-async fn found_pair(root: &std::path::Path, url: &str) -> (WalletHandle, WalletHandle) {
-    let a = engine(&root.join("founder"));
-    adopt_relay(&a, url).await;
-    a.execute(Command::CreateStart {
-        name: "Konvergenz".to_string(),
-        member: "petra".to_string(),
-        members: 2,
-        threshold: 2,
-        relays: Vec::new(),
-    })
-    .await
-    .expect("create start");
-    let s = wait_for(&a, "the seat link", |s| {
-        !s.create.seats.is_empty()
-            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
-    })
-    .await;
-    let link = s.create.seats[0].link.clone();
-    let b = engine(&root.join("member"));
-    adopt_relay(&b, url).await;
-    b.execute(Command::JoinStart {
-        invite: link,
-        member: "walter".to_string(),
-        relays: Vec::new(),
-    })
-    .await
-    .expect("join start");
-    wait_for(&a, "the join", |s| s.create.can_propose).await;
-    a.execute(Command::CreatePropose {
-        name: "Konvergenz".to_string(),
-        agenda: String::new(),
-        features: vec!["memory".to_string()],
-    })
-    .await
-    .expect("charter proposed");
-    {
-        let seed_ = read_session(&a).await.create.seed.clone();
-        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
-            .await
-            .expect("founder backup confirm");
-    }
-    wait_for(&b, "the charter", |s| s.join.awaiting_ratify).await;
-    b.execute(Command::JoinConfirmCharter).await.expect("ratify");
-    {
-        let seed_ = read_session(&b).await.join.seed.clone();
-        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
-            .await
-            .expect("joiner backup confirm");
-    }
-    wait_for(&a, "the seal", |s| s.create.run.outcome == 1).await;
-    a.execute(Command::CreateFinish).await.expect("create finish");
-    wait_for(&b, "the join seal", |s| s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()).await;
-    b.execute(Command::JoinFinish).await.expect("join finish");
-    wait_for(&b, "the joiner to enter", |s| {
-        s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
-    })
-    .await;
-    (a, b)
-}
 
 fn add_page(path: &str, text: &str) -> serde_json::Value {
     let patch = format!(
@@ -120,21 +59,6 @@ async fn diverged(w: &WalletHandle) -> usize {
     }
 }
 
-async fn wiki_docs(w: &WalletHandle) -> u64 {
-    match w
-        .execute(Command::ReadState {
-            surface: molt_core::Surface::Memory,
-            channel: None,
-            view: None,
-        })
-        .await
-        .expect("read memory")
-    {
-        Reply::State(s) => s.wiki_docs,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_bursts_end_on_one_chain() {
     let _ = tracing_subscriber::fmt()
@@ -148,7 +72,7 @@ async fn concurrent_bursts_end_on_one_chain() {
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
     let root = tmp.path().to_path_buf();
-    let (a, b) = found_pair(&root, &url).await;
+    let (a, b) = found_pair(&root, &[&url], "Konvergenz").await;
 
     // the burst: both seats propose four pages each, interleaved, at once
     const PAGES: usize = 4;

@@ -13,85 +13,12 @@
 
 mod common;
 
-use common::{adopt_relay, approve_op, engine, read_session, wait_for};
+use common::{approve_op, found_pair, read_session};
 use std::time::Duration;
 
 use molt_core::{Command, MemberView, Reply, Surface};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
-
-/// Found a real 2-of-2 republic over the relay; both engines end up entered.
-async fn found_pair(
-    root: &std::path::Path,
-    urls: &[&str],
-    name: &str,
-) -> (WalletHandle, WalletHandle) {
-    let a = engine(&root.join("founder"));
-    for url in urls {
-        adopt_relay(&a, url).await;
-    }
-    a.execute(Command::CreateStart {
-        name: name.to_string(),
-        member: "petra".to_string(),
-        threshold: 2,
-        members: 2,
-        relays: Vec::new(),
-    })
-    .await
-    .expect("create start");
-    let s = wait_for(&a, "the seat link to become joinable", |s| {
-        !s.create.seats.is_empty()
-            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
-    })
-    .await;
-    let link = s.create.seats[0].link.clone();
-
-    let b = engine(&root.join("member"));
-    for url in urls {
-        adopt_relay(&b, url).await;
-    }
-    b.execute(Command::JoinStart {
-        invite: link,
-        member: "walter".to_string(),
-        relays: Vec::new(),
-    })
-    .await
-    .expect("join starts");
-    wait_for(&a, "the founder to accept the join", |s| s.create.can_propose).await;
-    a.execute(Command::CreatePropose {
-        name: name.to_string(),
-        agenda: String::new(),
-        features: vec!["memory".to_string()],
-    })
-    .await
-    .expect("charter proposed");
-    {
-        let seed_ = read_session(&a).await.create.seed.clone();
-        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
-            .await
-            .expect("founder backup confirm");
-    }
-    wait_for(&b, "walter to see the charter", |s| s.join.awaiting_ratify).await;
-    b.execute(Command::JoinConfirmCharter).await.expect("ratify");
-    {
-        let seed_ = read_session(&b).await.join.seed.clone();
-        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
-            .await
-            .expect("joiner backup confirm");
-    }
-    wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
-    a.execute(Command::CreateFinish).await.expect("create finish");
-    wait_for(&b, "the join to seal", |s| {
-        s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
-    })
-    .await;
-    b.execute(Command::JoinFinish).await.expect("join finish");
-    wait_for(&b, "the joiner to enter", |s| {
-        s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
-    })
-    .await;
-    (a, b)
-}
 
 async fn members(w: &WalletHandle) -> Vec<MemberView> {
     match w.execute(Command::ReadMembers).await.expect("read members") {

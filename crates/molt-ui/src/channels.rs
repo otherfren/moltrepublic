@@ -288,7 +288,7 @@ pub(crate) fn update_known_proposals(
     known: &mut HashMap<u64, KnownProposal>,
     pending: &[ProposalView],
     declined: &[ProposalView],
-    applied: &HashMap<Surface, Vec<serde_json::Value>>,
+    applied: &HashMap<Surface, &[serde_json::Value]>,
 ) {
     for p in pending {
         known.insert(

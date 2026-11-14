@@ -3,6 +3,7 @@
 //! Unit tests of the vault payload plane (plan S3a).
 
 use super::*;
+use molt_net::supervisor::StateStore as _;
 use crate::chain::test_support::{chain_peer, Builder};
 use molt_core::vault::{SecretText, VaultDeposit};
 use molt_core::ChainChange;
@@ -79,22 +80,7 @@ fn mark_held(st: &mut crate::State, secret_id: &str) {
 fn pending(st: &mut crate::State, id: u64, payload: Value) {
     st.proposals.insert(
         id,
-        molt_core::ProposalRecord {
-            surface: Surface::Vault,
-            payload,
-            approvals: 0,
-            state: ProposalState::Proposed,
-            applied_at: 0,
-            declined_at: 0,
-            declined_by: String::new(),
-            decliners: Vec::new(),
-            voted: Vec::new(),
-            by: "a".to_string(),
-            superseded: false,
-            superseded_kind: None,
-            withdrawn: false,
-            wiki_rev: None,
-        },
+        molt_core::ProposalRecord::new(Surface::Vault, payload, "a".to_string()),
     );
 }
 

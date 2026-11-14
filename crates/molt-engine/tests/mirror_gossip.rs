@@ -10,31 +10,10 @@ mod common;
 mod file_support;
 
 use common::read_session;
-use file_support::{found_pair, pattern, share};
-use std::time::Duration;
+use file_support::{found_pair, pattern, read_mirror, share, uploads, wait_mirror};
 
-use molt_core::{Command, Reply};
-use molt_engine::WalletHandle;
+use molt_core::Command;
 use nostr_relay_builder::MockRelay;
-
-async fn read_mirror(w: &WalletHandle) -> Box<molt_core::MirrorView> {
-    match w.execute(Command::ReadMirror).await.expect("read mirror") {
-        Reply::Mirror(v) => v,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
-async fn wait_mirror(w: &WalletHandle, what: &str, pred: impl Fn(&molt_core::MirrorView) -> bool) -> Box<molt_core::MirrorView> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let v = read_mirror(w).await;
-        if pred(&v) {
-            return v;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for: {what}; view={v:?}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
 
 const THREE_GIB: u64 = 3 * 1024 * 1024 * 1024;
 
@@ -72,16 +51,10 @@ async fn a_declaration_and_a_whole_hold_reach_the_peer_and_persist() {
         v.files.iter().any(|f| f.id == id && f.holders == vec!["petra".to_string()] && f.of == 2)
     })
     .await;
-    let rows = match b.execute(Command::ReadUploads).await.expect("uploads") {
-        Reply::Uploads { uploads } => uploads,
-        other => panic!("unexpected: {other:?}"),
-    };
+    let rows = uploads(&b).await;
     let row = rows.iter().find(|u| u.id == id).expect("the share row");
     assert_eq!((row.mirrors, row.mirror_held, row.mirror_of), (1, 0, 2), "{row:?}");
-    let own = match a.execute(Command::ReadUploads).await.expect("uploads") {
-        Reply::Uploads { uploads } => uploads,
-        other => panic!("unexpected: {other:?}"),
-    };
+    let own = uploads(&a).await;
     let own_row = own.iter().find(|u| u.id == id).expect("the sharer's row");
     assert_eq!((own_row.mirrors, own_row.mirror_held, own_row.mirror_of), (1, 2, 2), "{own_row:?}");
 

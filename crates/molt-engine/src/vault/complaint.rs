@@ -106,12 +106,7 @@ fn on_polynomial(st: &crate::State, dep: &VaultDeposit, holder: &str, share: &mo
     let Some(ctx) = st.vault_ctx() else {
         return false;
     };
-    let Some(x) = ctx
-        .holders_in_genesis_order
-        .iter()
-        .position(|(n, _, _)| n == holder)
-        .and_then(|i| u8::try_from(i + 1).ok())
-    else {
+    let Some(x) = crate::vault::grant::seat_x(&ctx, holder) else {
         return false;
     };
     let commitments: Option<Vec<[u8; 32]>> = dep

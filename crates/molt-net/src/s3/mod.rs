@@ -317,33 +317,16 @@ impl S3Client {
             hex::encode(Sha256::digest(body))
         };
         let (path_and_query, wire_headers) = self.sign_wire("PUT", &path, &[], &payload_hash)?;
-        let stream = self.dial().await?;
-        let resp = match self.config.endpoint.scheme {
-            S3Scheme::Https => {
-                let mut tls = self.tls_handshake(stream).await?;
-                http::roundtrip_upload(
-                    &mut tls,
-                    "PUT",
-                    &path_and_query,
-                    &wire_headers,
-                    body,
-                    http::UPLOAD_IDLE_TIMEOUT,
-                )
-                .await?
-            }
-            S3Scheme::Http => {
-                let mut tcp = stream;
-                http::roundtrip_upload(
-                    &mut tcp,
-                    "PUT",
-                    &path_and_query,
-                    &wire_headers,
-                    body,
-                    http::UPLOAD_IDLE_TIMEOUT,
-                )
-                .await?
-            }
-        };
+        let mut stream = self.connect().await?;
+        let resp = http::roundtrip_upload(
+            &mut stream,
+            "PUT",
+            &path_and_query,
+            &wire_headers,
+            body,
+            http::UPLOAD_IDLE_TIMEOUT,
+        )
+        .await?;
         match resp.status {
             200..=299 => Ok(()),
             s => Err(self.status_error(s, &resp.body)),
@@ -429,17 +412,8 @@ impl S3Client {
         };
         let (path_and_query, wire_headers) =
             self.sign_wire(method, path, query, &payload_hash)?;
-        let stream = self.dial().await?;
-        match self.config.endpoint.scheme {
-            S3Scheme::Https => {
-                let mut tls = self.tls_handshake(stream).await?;
-                Ok(http::roundtrip(&mut tls, method, &path_and_query, &wire_headers, body, http::MAX_RESPONSE).await?)
-            }
-            S3Scheme::Http => {
-                let mut tcp = stream;
-                Ok(http::roundtrip(&mut tcp, method, &path_and_query, &wire_headers, body, http::MAX_RESPONSE).await?)
-            }
-        }
+        let mut stream = self.connect().await?;
+        Ok(http::roundtrip(&mut stream, method, &path_and_query, &wire_headers, body, http::MAX_RESPONSE).await?)
     }
 
     /// Download one object (`GET /bucket/key`), **streaming** the body into
@@ -464,35 +438,17 @@ impl S3Client {
         let path = self.object_path(key);
         let (path_and_query, wire_headers) =
             self.sign_wire("GET", &path, &[], sigv4::EMPTY_PAYLOAD_SHA256)?;
-        let stream = self.dial().await?;
-        let (status, bytes) = match self.config.endpoint.scheme {
-            S3Scheme::Https => {
-                let mut tls = self.tls_handshake(stream).await?;
-                http::roundtrip_download(
-                    &mut tls,
-                    &path_and_query,
-                    &wire_headers,
-                    out,
-                    max_bytes,
-                    http::DownloadBounds::PRODUCTION,
-                    progress,
-                )
-                .await?
-            }
-            S3Scheme::Http => {
-                let mut tcp = stream;
-                http::roundtrip_download(
-                    &mut tcp,
-                    &path_and_query,
-                    &wire_headers,
-                    out,
-                    max_bytes,
-                    http::DownloadBounds::PRODUCTION,
-                    progress,
-                )
-                .await?
-            }
-        };
+        let mut stream = self.connect().await?;
+        let (status, bytes) = http::roundtrip_download(
+            &mut stream,
+            &path_and_query,
+            &wire_headers,
+            out,
+            max_bytes,
+            http::DownloadBounds::PRODUCTION,
+            progress,
+        )
+        .await?;
         match status {
             200..=299 => Ok(bytes),
             // a 404 on an object GET means THIS key (the bucket-level 404
@@ -549,6 +505,17 @@ impl S3Client {
             path_and_query.push_str(&cq);
         }
         Ok((path_and_query, wire_headers))
+    }
+
+    /// Dial, then TLS for `https` - one stream type for every operation.
+    async fn connect(&self) -> Result<crate::relay_ws::MaybeTls, S3Error> {
+        let stream = self.dial().await?;
+        Ok(match self.config.endpoint.scheme {
+            S3Scheme::Https => {
+                crate::relay_ws::MaybeTls::Tls(Box::new(self.tls_handshake(stream).await?))
+            }
+            S3Scheme::Http => crate::relay_ws::MaybeTls::Plain(stream),
+        })
     }
 
     /// Dial the endpoint through the fail-closed dialer.

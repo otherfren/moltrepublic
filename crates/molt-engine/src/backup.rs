@@ -18,7 +18,7 @@
 
 use molt_core::{Command, MoltError, Reply, SessionScope, WorkspaceId};
 
-use crate::{now_secs, Envelope, State};
+use crate::{now_secs, State};
 
 /// The backup ticker period: the decide pass is cheap (a few manifest/prefs
 /// reads), so one pass a minute keeps `s3_interval_min` honest at its
@@ -84,13 +84,7 @@ impl State {
         // a per-minute notice would be spam, not honesty). The re-aging
         // above still ran, so emit if it moved a label.
         let s = &self.session.settings;
-        let config = molt_net::s3::S3Config::from_settings(
-            &s.s3_endpoint,
-            &s.s3_access_key,
-            &s.s3_secret_key,
-            &s.s3_bucket,
-            &s.s3_plaintext_confirmed,
-        );
+        let config = self.saved_s3_config();
         let config = match config {
             Ok(config) if !candidates.is_empty() => config,
             _ if molt_net::s3::S3Endpoint::parse(&s.s3_endpoint)
@@ -230,22 +224,9 @@ impl State {
                 "a backup of this workspace is already running".to_string(),
             ));
         }
-        let s = &self.session.settings;
-        let config = molt_net::s3::S3Config::from_settings(
-            &s.s3_endpoint,
-            &s.s3_access_key,
-            &s.s3_secret_key,
-            &s.s3_bucket,
-            &s.s3_plaintext_confirmed,
-        )
+        let config = self.saved_s3_config()
         .map_err(|e| MoltError::Settings(format!("backup target: {e}")))?;
-        let root = self.workspace_root();
-        let dir = molt_storage::find_workspace_dir(&root, &id).ok_or_else(|| {
-            MoltError::Storage(format!(
-                "workspace {id} has no directory under {}",
-                root.display()
-            ))
-        })?;
+        let (_, dir) = self.require_workspace_dir(&id)?;
         if let Some(reason) = backup_refusal_reason(&dir) {
             // a chainless (legacy) dir exports a blob restore always refuses
             // — refuse loudly here rather than upload a blob that only fails
@@ -287,14 +268,7 @@ impl State {
                 "workspace {id} already exists locally"
             )));
         }
-        let s = &self.session.settings;
-        let config = molt_net::s3::S3Config::from_settings(
-            &s.s3_endpoint,
-            &s.s3_access_key,
-            &s.s3_secret_key,
-            &s.s3_bucket,
-            &s.s3_plaintext_confirmed,
-        )
+        let config = self.saved_s3_config()
         .map_err(|e| MoltError::Settings(format!("backup target: {e}")))?;
         let dialer = self
             .dialer_for()
@@ -339,13 +313,7 @@ impl State {
                 Ok::<(), String>(())
             }
             .await;
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            let _ = cmd_tx
-                .send(crate::Envelope {
-                    cmd: done(id, outcome.err().unwrap_or_default()),
-                    reply,
-                })
-                .await;
+            crate::send_internal(&cmd_tx, done(id, outcome.err().unwrap_or_default())).await;
         });
         Ok(Reply::Ack)
     }
@@ -505,8 +473,7 @@ impl State {
                     hold: false,
                 },
             };
-            let (reply, _rx) = tokio::sync::oneshot::channel();
-            let _ = cmd_tx.send(Envelope { cmd, reply }).await;
+            crate::send_internal(&cmd_tx, cmd).await;
         });
     }
 

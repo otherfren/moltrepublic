@@ -695,14 +695,6 @@ fn record_json(op: &VaultOp) -> Vec<u8> {
     serde_json::to_vec(&v).expect("a serde_json::Value serializes")
 }
 
-fn put_u64(out: &mut Vec<u8>, n: usize) {
-    out.extend_from_slice(
-        &u64::try_from(n)
-            .expect("field exceeds the u32/u64 framing - ambiguous signed bytes are never written")
-            .to_le_bytes(),
-    );
-}
-
 /// What a vault cut commits to: deposits in `(depositor, name)` order,
 /// each followed by its grants in `grant_id` order; a record is the
 /// canonical JSON of its Applied op.
@@ -715,12 +707,12 @@ pub fn vault_base_canonical_bytes(base: &VaultBase) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(TAG_BASE.as_bytes());
     out.push(0);
-    put_u64(&mut out, deposits.len());
+    crate::put_count_u64(&mut out, deposits.len());
     for d in deposits {
         crate::put_bytes(&mut out, &record_json(&VaultOp::Deposit(d.deposit.clone())));
         let mut grants: Vec<&VaultBaseGrant> = d.grants.iter().collect();
         grants.sort_by(|a, b| a.grant.grant_id.cmp(&b.grant.grant_id));
-        put_u64(&mut out, grants.len());
+        crate::put_count_u64(&mut out, grants.len());
         for g in grants {
             out.extend_from_slice(&g.proposal_id.to_le_bytes());
             crate::put_bytes(&mut out, &record_json(&VaultOp::Grant(g.grant.clone())));
@@ -789,9 +781,10 @@ fn decode_record(raw: &[u8]) -> Result<VaultOp, String> {
     Ok(op)
 }
 
-struct Reader<'a> {
-    rest: &'a [u8],
-    at: usize,
+/// A cursor over the `put_bytes` / `put_count_u64` framing.
+pub(crate) struct Reader<'a> {
+    pub(crate) rest: &'a [u8],
+    pub(crate) at: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -802,12 +795,12 @@ impl<'a> Reader<'a> {
         Ok(slice)
     }
 
-    fn u64(&mut self, what: &str) -> Result<u64, String> {
+    pub(crate) fn u64(&mut self, what: &str) -> Result<u64, String> {
         let raw = self.take(8, what)?;
         Ok(u64::from_le_bytes(raw.try_into().map_err(|_| format!("{what} is truncated"))?))
     }
 
-    fn field(&mut self, what: &str) -> Result<&'a [u8], String> {
+    pub(crate) fn field(&mut self, what: &str) -> Result<&'a [u8], String> {
         let raw = self.take(4, what)?;
         let len = u32::from_le_bytes(raw.try_into().map_err(|_| format!("{what} is truncated"))?);
         self.take(usize::try_from(len).map_err(|_| format!("{what} overruns the stream"))?, what)

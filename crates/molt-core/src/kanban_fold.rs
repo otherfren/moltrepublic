@@ -1207,10 +1207,24 @@ pub fn kanban_precheck(
     payload: &Value,
     seats: &BTreeSet<String>,
 ) -> Result<(), PrecheckFault> {
+    kanban_apply(board, payload, seats).map(|_| ())
+}
+
+/// The board after a canonical changeset - what [`kanban_fold_one`] would
+/// leave - or the first reason it would void now.
+///
+/// # Errors
+/// The first void reason.
+pub fn kanban_apply(
+    board: &BoardState,
+    payload: &Value,
+    seats: &BTreeSet<String>,
+) -> Result<BoardState, PrecheckFault> {
+    let rev = board.rev.saturating_add(1);
     parse_changeset(payload, Door::Canonical)
         .map_err(Fault::from)
-        .and_then(|cs| apply_changeset(board, cs, board.rev.saturating_add(1), seats))
-        .map(|_| ())
+        .and_then(|cs| apply_changeset(board, cs, rev, seats))
+        .map(|tasks| BoardState { rev, tasks })
         .map_err(|f| PrecheckFault {
             reason: VoidReason(f.reason),
             task: f.task,

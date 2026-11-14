@@ -162,14 +162,6 @@ fn name_ok(s: &str) -> bool {
     !s.is_empty() && s.len() <= NAME_MAX
 }
 
-fn framed<T: Serialize>(tag: &[u8], value: &T) -> Vec<u8> {
-    let mut out = tag.to_vec();
-    if let Ok(json) = serde_json::to_vec(value) {
-        out.extend_from_slice(&json);
-    }
-    out
-}
-
 fn parse<T: for<'de> Deserialize<'de>>(body: &[u8]) -> Result<T, VaultFrameError> {
     // the version first, so a newer frame reads as a version, not as garbage
     #[derive(Deserialize)]
@@ -199,10 +191,10 @@ impl VaultFrame {
     #[must_use]
     pub fn to_frame(&self) -> Vec<u8> {
         match self {
-            VaultFrame::Receipt(f) => framed(VAULT_RECEIPT_TAG, f),
-            VaultFrame::Reveal(f) => framed(VAULT_REVEAL_TAG, f),
-            VaultFrame::Resp(f) => framed(VAULT_RESP_TAG, f),
-            VaultFrame::Ask(f) => framed(VAULT_ASK_TAG, f),
+            VaultFrame::Receipt(f) => crate::framed(VAULT_RECEIPT_TAG, f),
+            VaultFrame::Reveal(f) => crate::framed(VAULT_REVEAL_TAG, f),
+            VaultFrame::Resp(f) => crate::framed(VAULT_RESP_TAG, f),
+            VaultFrame::Ask(f) => crate::framed(VAULT_ASK_TAG, f),
         }
     }
 

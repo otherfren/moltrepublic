@@ -14,7 +14,7 @@
 
 mod common;
 
-use common::{adopt_relay, engine, read_session, spawn_solo, wait_for};
+use common::{adopt_relay, engine, read_session, spawn_solo, wait_for, wiki_docs};
 use std::time::Duration;
 
 use molt_core::{Command, Reply, Surface};
@@ -57,24 +57,6 @@ async fn propose_wiki(w: &WalletHandle, patch: &str) -> molt_core::ProposalId {
         .expect("propose the patch")
     {
         Reply::Proposed { id, .. } => id,
-        other => panic!("unexpected: {other:?}"),
-    }
-}
-
-/// How many documents the wiki base holds, as the engine serves it. The
-/// snapshot carries the count since 2026-09-05 (§4.10); the tree itself
-/// is the paged read's.
-async fn wiki_docs(w: &WalletHandle) -> u64 {
-    match w
-        .execute(Command::ReadState {
-            surface: Surface::Memory,
-            channel: None,
-            view: None,
-        })
-        .await
-        .expect("read memory")
-    {
-        Reply::State(s) => s.wiki_docs,
         other => panic!("unexpected: {other:?}"),
     }
 }

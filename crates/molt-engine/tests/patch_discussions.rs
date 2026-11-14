@@ -8,10 +8,14 @@
 //! decision. No patch channel is refused any more; an unknown referent
 //! stays writable too (chat-bus Q4). A vote carries its reasoning with
 //! it: `note` posts into the channel BEFORE the vote lands.
+//!
+//! The tests run on `common::spawn_solo` (threshold 1, no self-cosign): a
+//! proposal stays `Proposed` until this node votes, one `Approve` applies
+//! it, one `Decline` rejects it — every lifecycle state is reachable directly.
 
 mod common;
 
-use common::read_session;
+use common::{read_session, spawn_solo};
 use std::time::Duration;
 
 use molt_core::{
@@ -19,22 +23,6 @@ use molt_core::{
     SessionSettings, SessionView, Surface, SurfaceSnapshot,
 };
 use molt_engine::WalletHandle;
-
-/// A single-member group (threshold 1, no self-cosign): a proposal stays
-/// `Proposed` until this node votes, one `Approve` applies it, one
-/// `Decline` rejects it — every lifecycle state is reachable directly.
-fn solo() -> GroupConfig {
-    GroupConfig {
-        member: "me".to_string(),
-        members: vec!["me".to_string()],
-        threshold: 1,
-        self_cosign: false,
-    }
-}
-
-fn spawn_solo() -> WalletHandle {
-    molt_engine::spawn(solo(), SessionView::default())
-}
 
 async fn chat(w: &WalletHandle, body: &str, channel: ChannelRef) -> Result<Reply, MoltError> {
     w.execute(Command::Chat {

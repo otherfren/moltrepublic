@@ -10,76 +10,12 @@
 mod common;
 mod file_support;
 
-use common::{adopt_relay, read_session, wait_for};
-use file_support::{engine, pattern, persist};
+use file_support::{found_pair, pattern, persist, uploads};
 use std::time::Duration;
 
 use molt_core::{Command, Reply};
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
-
-/// Found a real 2-of-2 republic over the relay: petra (founder, the
-/// sharer) and walter (the mirroring seat).
-async fn found_pair(root: &std::path::Path, url: &str) -> (WalletHandle, WalletHandle) {
-    let a = engine(&root.join("founder"), &root.join("dl-a"));
-    adopt_relay(&a, url).await;
-    a.execute(Command::CreateStart {
-        name: "Bildarchiv".to_string(),
-        member: "petra".to_string(),
-        members: 2,
-        threshold: 2,
-        relays: Vec::new(),
-    })
-    .await
-    .expect("create start");
-    let s = wait_for(&a, "the seat link", |s| {
-        !s.create.seats.is_empty()
-            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
-    })
-    .await;
-    let link = s.create.seats[0].link.clone();
-
-    let b = engine(&root.join("member"), &root.join("dl-b"));
-    adopt_relay(&b, url).await;
-    b.execute(Command::JoinStart {
-        invite: link,
-        member: "walter".to_string(),
-        relays: Vec::new(),
-    })
-    .await
-    .expect("join start");
-    wait_for(&a, "the join", |s| s.create.can_propose).await;
-    a.execute(Command::CreatePropose {
-        name: "Bildarchiv".to_string(),
-        agenda: String::new(),
-        features: vec!["memory".to_string()],
-    })
-    .await
-    .expect("charter proposed");
-    {
-        let seed_ = read_session(&a).await.create.seed.clone();
-        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
-            .await
-            .expect("founder backup confirm");
-    }
-    wait_for(&b, "the charter", |s| s.join.awaiting_ratify).await;
-    b.execute(Command::JoinConfirmCharter).await.expect("ratify");
-    {
-        let seed_ = read_session(&b).await.join.seed.clone();
-        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
-            .await
-            .expect("joiner backup confirm");
-    }
-    wait_for(&a, "the seal", |s| s.create.run.outcome == 1).await;
-    a.execute(Command::CreateFinish).await.expect("create finish");
-    wait_for(&b, "the join seal", |s| s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()).await;
-    b.execute(Command::JoinFinish).await.expect("join finish");
-    wait_for(&b, "the joiner to enter", |s| {
-        s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
-    })
-    .await;
-    (a, b)
-}
 
 /// Share `src` from petra and return the share's id as walter sees it.
 async fn share(a: &WalletHandle, b: &WalletHandle, src: &std::path::Path) -> molt_core::MessageId {
@@ -110,13 +46,6 @@ async fn share(a: &WalletHandle, b: &WalletHandle, src: &std::path::Path) -> mol
         }
         assert!(tokio::time::Instant::now() < deadline, "the share never reached walter");
         tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-async fn uploads(w: &WalletHandle) -> Vec<molt_core::UploadView> {
-    match w.execute(Command::ReadUploads).await.expect("read uploads") {
-        Reply::Uploads { uploads } => uploads,
-        other => panic!("unexpected: {other:?}"),
     }
 }
 

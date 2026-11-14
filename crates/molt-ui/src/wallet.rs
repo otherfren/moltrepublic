@@ -14,14 +14,6 @@ use crate::{AppWindow, Purse, WalletSeatRow, WalletTxRow};
 /// Piconero per XMR.
 const PICO: u64 = 1_000_000_000_000;
 
-fn lex(lang: i32) -> Lexicon {
-    if lang == 1 {
-        Lexicon::de()
-    } else {
-        Lexicon::en()
-    }
-}
-
 /// `n` with its thousands grouped per locale.
 fn grouped(lang: i32, n: u64) -> String {
     let group = if lang == 1 { '.' } else { ',' };
@@ -77,7 +69,7 @@ fn part(done: u32, of: u32) -> f32 {
 
 /// The purse stage's line for `run`.
 pub(crate) fn stage_line(lang: i32, run: &WalletRunView) -> StageLine {
-    let l = lex(lang);
+    let l = Lexicon::of(lang);
     let count = format!("{}/{}", run.done, run.of);
     let quarter = |base: f32| base + 0.24 * part(run.done, run.of);
     let (text, progress) = match run.stage {
@@ -120,7 +112,7 @@ fn abort_reason(l: &Lexicon, reason: Option<&str>, missing: &[String]) -> String
 
 /// A purse vote's title (`None` = not one): the op stays wire-side.
 pub(crate) fn op_title(lang: i32, op: Option<&str>) -> Option<String> {
-    let l = lex(lang);
+    let l = Lexicon::of(lang);
     match op? {
         "wallet_init" => Some(l.wl_set_up.to_string()),
         "wallet_created" => Some(l.wl_seal_title.to_string()),
@@ -175,7 +167,7 @@ fn phase_index(phase: WalletPhase) -> i32 {
 /// Fill the `Purse` global from the engine's view (`None` = no open
 /// republic).
 pub(crate) fn apply_wallet(ui: &AppWindow, lang: i32, ws: &str, view: Option<&WalletView>) {
-    let l = lex(lang);
+    let l = Lexicon::of(lang);
     let empty = WalletView::default();
     let v = view.unwrap_or(&empty);
     let p = ui.global::<Purse>();
@@ -255,8 +247,8 @@ fn apply_run(ui: &AppWindow, lang: i32, ws: &str, v: &WalletView) {
     let can_start = run.is_none() && v.can_start;
     let line = match run {
         Some(r) => stage_line(lang, r),
-        None if can_start => StageLine { text: lex(lang).wl_not_running.to_string(), ..StageLine::default() },
-        None => StageLine { text: lex(lang).wl_waiting.to_string(), ..StageLine::default() },
+        None if can_start => StageLine { text: Lexicon::of(lang).wl_not_running.to_string(), ..StageLine::default() },
+        None => StageLine { text: Lexicon::of(lang).wl_waiting.to_string(), ..StageLine::default() },
     };
     let active = run.is_some_and(|r| r.stage != RunStage::Done);
     let asking = run.is_some_and(|r| r.needs_consent);
@@ -282,7 +274,7 @@ pub(crate) fn apply_node(ui: &AppWindow, lang: i32, settings: &molt_core::Sessio
     let p = ui.global::<Purse>();
     let url = settings.wallet_daemon_url.as_str();
     p.set_node(url.into());
-    p.set_node_line(if url.is_empty() { lex(lang).wl_no_node } else { url }.into());
+    p.set_node_line(if url.is_empty() { Lexicon::of(lang).wl_no_node } else { url }.into());
 }
 
 /// What a typed node leads to.
@@ -300,7 +292,7 @@ pub(crate) enum NodeStep {
 /// Classify a typed node by the relay host rule.
 pub(crate) fn node_step(lang: i32, url: &str) -> NodeStep {
     match molt_core::relay::daemon_kind(url.trim()) {
-        Err(_) => NodeStep::Bad(lex(lang).wl_bad_url.to_string()),
+        Err(_) => NodeStep::Bad(Lexicon::of(lang).wl_bad_url.to_string()),
         Ok((url, RelayKind::Onion)) => NodeStep::Take(url),
         Ok((url, RelayKind::Local)) => NodeStep::Confirm(url, 2),
         Ok((url, _)) if molt_core::relay::daemon_plaintext_clearnet(&url) => NodeStep::Confirm(url, 3),
@@ -341,7 +333,7 @@ impl PurseAct {
 
 /// What consenting to the purse means (design §3.3), one line each.
 pub(crate) fn consent_notes(lang: i32) -> String {
-    let l = lex(lang);
+    let l = Lexicon::of(lang);
     [l.wl_note_sees, l.wl_note_lost, l.wl_note_spend].join("\n")
 }
 

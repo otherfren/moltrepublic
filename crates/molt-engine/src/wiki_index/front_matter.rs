@@ -49,15 +49,22 @@ fn header_block(doc: &str) -> Result<Option<(&str, &str)>, ()> {
 /// author means by "title"; a whole wiki once listed every page under its
 /// first `##` (F2, mcp_agent_friction_2026-09-05.md).
 pub fn title(doc: &str) -> Option<String> {
-    let (props, _) = properties(doc);
+    title_of(&properties(doc).0.unwrap_or_default(), doc)
+}
+
+/// [`title`] for a caller that already parsed the header.
+pub(crate) fn title_of(props: &serde_json::Map<String, Value>, doc: &str) -> Option<String> {
+    header_title(props).or_else(|| first_heading(doc))
+}
+
+/// The header's `title` when it is a non-empty string.
+pub(crate) fn header_title(props: &serde_json::Map<String, Value>) -> Option<String> {
     props
-        .as_ref()
-        .and_then(|p| p.get("title"))
+        .get("title")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string)
-        .or_else(|| first_heading(doc))
 }
 
 /// The document's first ATX heading, header skipped. Display metadata.

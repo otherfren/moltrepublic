@@ -210,16 +210,7 @@ impl Builder {
     /// Commit a ratified wiki patch (a new document) — the Memory entries
     /// a folded cut collapses into one commitment (K6).
     pub(crate) fn commit_wiki(&mut self, proposal_id: u64, path: &str, body: &str, signers: &[&str]) {
-        let lines: Vec<&str> = body.split('\n').collect();
-        let mut patch = format!(
-            "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
-            lines.len()
-        );
-        for l in lines {
-            patch.push('+');
-            patch.push_str(l);
-            patch.push('\n');
-        }
+        let patch = wiki_add_lines(path, body);
         self.commit(
             ChainChange::Applied {
                 proposal_id,
@@ -385,11 +376,69 @@ pub(crate) fn consent_for(b: &Builder, member: &str, nostr_pk: &str) -> String {
     )
 }
 
+// --- vault fixtures (shared by the `vault::*_tests` files) -----------------
+
+/// The four seats of [`Builder::vault`]'s republic.
+pub(crate) const SEATS: [&str; 4] = ["a", "b", "c", "d"];
+
+/// The seat index of `member` in [`SEATS`].
+pub(crate) fn idx(member: &str) -> usize {
+    SEATS.iter().position(|s| *s == member).expect("a seat")
+}
+
+/// The identities and the feature selection `b`'s genesis ratified.
+pub(crate) fn genesis_of(b: &Builder) -> (Vec<molt_core::MemberIdentity>, Option<Vec<String>>) {
+    let ChainChange::Genesis { identities, features, .. } = &b.blocks[0].change else {
+        panic!("block 0 is not a genesis");
+    };
+    (identities.clone(), features.clone())
+}
+
+/// The vault context of `b`'s founding (2-of-n).
+pub(crate) fn ctx_of(b: &Builder) -> molt_core::vault::VaultCtx {
+    crate::vault::ctx_from_founding(2, &genesis_of(b).0).expect("a v6 genesis")
+}
+
+/// A deposit as the payload of its Vault card.
+pub(crate) fn op(dep: &molt_core::vault::VaultDeposit) -> serde_json::Value {
+    serde_json::to_value(molt_core::vault::VaultOp::Deposit(dep.clone())).expect("json")
+}
+
+/// A grant of `sid` to `reader` under proposal `id`, as the payload of its card.
+pub(crate) fn grant_op(sid: &str, reader: &str, id: u64) -> serde_json::Value {
+    let g = molt_core::vault::VaultGrant {
+        grant_id: molt_core::vault::grant_id(sid, reader, id),
+        secret_id: sid.to_string(),
+        reader: reader.into(),
+    };
+    serde_json::to_value(molt_core::vault::VaultOp::Grant(g)).expect("json")
+}
+
+/// The chain change that applies a Vault card.
+pub(crate) fn applied(proposal_id: u64, payload: serde_json::Value) -> ChainChange {
+    ChainChange::Applied { proposal_id, surface: Surface::Vault, payload }
+}
+
 /// A one-line page as a `wiki_patch` value: the add.
 pub(crate) fn wiki_add(path: &str, body: &str) -> String {
     format!(
         "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,1 @@\n+{body}\n"
     )
+}
+
+/// A page of any number of lines as a `wiki_patch` value: the add.
+pub(crate) fn wiki_add_lines(path: &str, body: &str) -> String {
+    let lines: Vec<&str> = body.split('\n').collect();
+    let mut patch = format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+        lines.len()
+    );
+    for l in lines {
+        patch.push('+');
+        patch.push_str(l);
+        patch.push('\n');
+    }
+    patch
 }
 
 /// A one-line page as a `wiki_patch` value: the edit of its line.

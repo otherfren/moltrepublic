@@ -203,7 +203,7 @@ fn set_relay_draft_rows(ui: &AppWindow, rows: &[String]) {
 /// field message and the gate can never disagree); the engine still
 /// re-validates and stays the authority.
 pub(crate) fn relay_add_check(lang: i32, raw: &str, pool: &[String]) -> Result<String, &'static str> {
-    let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+    let l = Lexicon::of(lang);
     match molt_core::relay::normalize_relay_url(raw) {
         Err(RelayUrlError::Scheme) => Err(l.rp_err_scheme),
         Err(RelayUrlError::Host) => Err(l.rp_err_host),

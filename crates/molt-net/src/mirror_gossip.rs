@@ -76,14 +76,6 @@ fn body_of<'a>(tag: &[u8], plaintext: &'a [u8]) -> Result<&'a [u8], MirrorFrameE
     Ok(body)
 }
 
-fn framed<T: Serialize>(tag: &[u8], value: &T) -> Vec<u8> {
-    let mut out = tag.to_vec();
-    if let Ok(json) = serde_json::to_vec(value) {
-        out.extend_from_slice(&json);
-    }
-    out
-}
-
 /// `by` mirrors (or not) with `quota` bytes; `rev` orders declarations
 /// (unix seconds of the change, last wins).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,7 +100,7 @@ impl MirrorDeclFrame {
     /// TAG ‖ JSON.
     #[must_use]
     pub fn to_frame(&self) -> Vec<u8> {
-        framed(MIRROR_DECL_TAG, self)
+        crate::framed(MIRROR_DECL_TAG, self)
     }
 
     /// The ONLY consumer.
@@ -183,7 +175,7 @@ impl MirrorStatusFrame {
     /// TAG ‖ JSON.
     #[must_use]
     pub fn to_frame(&self) -> Vec<u8> {
-        framed(MIRROR_STATUS_TAG, self)
+        crate::framed(MIRROR_STATUS_TAG, self)
     }
 
     /// The ONLY consumer.
@@ -222,7 +214,7 @@ impl MirrorWhoFrame {
     /// TAG ‖ JSON.
     #[must_use]
     pub fn to_frame(&self) -> Vec<u8> {
-        framed(MIRROR_WHO_TAG, self)
+        crate::framed(MIRROR_WHO_TAG, self)
     }
 
     /// The ONLY consumer.

@@ -309,26 +309,13 @@ impl State {
                         tracing::warn!(id = id.0, "replaying a Proposed whose id names another change");
                     }
                 }
-                self.proposals.entry(id.0).or_insert_with(|| ProposalRecord {
-                    surface: *surface,
-                    payload: payload.clone(),
-                    approvals: 0,
-                    state: ProposalState::Proposed,
-                    applied_at: 0,
-                    declined_at: 0,
-                    declined_by: MemberId::new(),
-                    decliners: Vec::new(),
-                voted: Vec::new(),
-                    // the recording envelope's author — the same value the
-                    // live wire path stamps (a WP2 re-serve re-wraps under
-                    // the serving peer, so both paths agree and replay
-                    // stays deterministic)
-                    by: env.by.clone(),
-                    superseded: false,
-                superseded_kind: None,
-                    withdrawn: false,
-                    wiki_rev: None,
-                });
+                // `by` is the recording envelope's author — the same value
+                // the live wire path stamps (a WP2 re-serve re-wraps under
+                // the serving peer, so both paths agree and replay stays
+                // deterministic)
+                self.proposals
+                    .entry(id.0)
+                    .or_insert_with(|| ProposalRecord::new(*surface, payload.clone(), env.by.clone()));
                 self.next_id = self.next_id.max(id.0.saturating_add(1));
                 let _ = self.register_parked_declines(id.0);
                 let _ = self.register_parked_withdrawal(id.0);
@@ -437,28 +424,13 @@ impl State {
                 // rebuilt from the log — and `proposal_change` refuses to
                 // resolve a membership record without it, so a half-restored
                 // state can never sign fabricated bytes.
-                self.proposals.entry(id.0).or_insert_with(|| ProposalRecord {
-                    surface: Surface::Organization,
-                    payload: serde_json::json!({
+                self.proposals.entry(id.0).or_insert_with(|| ProposalRecord::new(Surface::Organization, serde_json::json!({
                         "op": match op {
                             molt_core::MembershipOp::Restored => "restore_member",
                             molt_core::MembershipOp::Joined => "add_member",
                         },
                         "member": member,
-                    }),
-                    approvals: 0,
-                    state: ProposalState::Proposed,
-                    applied_at: 0,
-                    declined_at: 0,
-                    declined_by: MemberId::new(),
-                    decliners: Vec::new(),
-                voted: Vec::new(),
-                    by: env.by.clone(),
-                    superseded: false,
-                superseded_kind: None,
-                    withdrawn: false,
-                    wiki_rev: None,
-                });
+                    }), env.by.clone()));
                 // within the wire id window only: a pre-gate log entry (or a
                 // hostile replay) must not poison the counter on rebuild
                 if self.plausible_wire_id(id.0) {

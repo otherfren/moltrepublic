@@ -6,10 +6,10 @@
 
 mod common;
 
-use common::{adopt_relay, engine, read_session, wait_for};
+use common::{adopt_relay, engine, read_chat, read_session, wait_for};
 use std::time::Duration;
 
-use molt_core::{Command, Reply};
+use molt_core::Command;
 use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
 
@@ -84,22 +84,6 @@ async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, W
     })
     .await;
     (a, b)
-}
-
-/// Read the chat surface's applied rows.
-async fn read_chat(w: &WalletHandle) -> Vec<serde_json::Value> {
-    match w
-        .execute(Command::ReadState {
-            surface: molt_core::Surface::Chat,
-            channel: None,
-            view: None,
-        })
-        .await
-        .expect("read chat")
-    {
-        Reply::State(s) => s.applied,
-        other => panic!("unexpected: {other:?}"),
-    }
 }
 
 /// **N5.2 KEYSTONE** — two engines converge a chat message over one relay,

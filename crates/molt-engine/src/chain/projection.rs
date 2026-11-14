@@ -161,11 +161,11 @@ impl State {
     /// member from the same chain (the ledger, R3b).
     pub(crate) fn relay_splits(&self) -> Vec<(molt_core::MemberId, molt_core::MemberId)> {
         let roster = self.roster();
+        let pools: Vec<Vec<String>> = roster.iter().map(|m| self.member_relays(m)).collect();
         let mut out = Vec::new();
         for i in 0..roster.len() {
             for j in i + 1..roster.len() {
-                let a = self.member_relays(&roster[i]);
-                let b = self.member_relays(&roster[j]);
+                let (a, b) = (&pools[i], &pools[j]);
                 // no data is no verdict: a non-Nostr chain has no pools, and
                 // an empty side must not read as "split from everyone"
                 if a.is_empty() || b.is_empty() {
@@ -342,16 +342,7 @@ impl State {
     /// The ratified GROUP pool: the checkpoint summary's if this holder
     /// pruned, else the genesis block's. Empty on a non-Nostr chain.
     pub(crate) fn ratified_relays(&self) -> Vec<String> {
-        if let Some(blob) = &self.chain.checkpoint_blob {
-            return blob.relays.clone();
-        }
-        self.chain.blocks
-            .first()
-            .and_then(|b| match &b.change {
-                ChainChange::Genesis { relays, .. } => Some(relays.clone()),
-                _ => None,
-            })
-            .unwrap_or_default()
+        ratified_pool(self.chain.checkpoint_blob.as_ref(), &self.chain.blocks)
     }
 
     /// Fold ONE freshly-appended block into the projection.
@@ -440,20 +431,8 @@ impl State {
         self.proposals
             .entry(proposal_id)
             .or_insert_with(|| molt_core::ProposalRecord {
-                surface,
-                payload,
-                approvals: 0,
                 state: ProposalState::Applied,
-                applied_at: 0,
-                declined_at: 0,
-                declined_by: molt_core::MemberId::new(),
-                decliners: Vec::new(),
-                voted: Vec::new(),
-                by: molt_core::MemberId::new(),
-                superseded: false,
-                superseded_kind: None,
-                withdrawn: false,
-                wiki_rev: None,
+                ..molt_core::ProposalRecord::new(surface, payload, molt_core::MemberId::new())
             });
     }
 

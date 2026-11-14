@@ -61,6 +61,39 @@ fn want_repeat() -> std::time::Duration {
     std::time::Duration::from_millis(WANT_REPEAT_MS.load(std::sync::atomic::Ordering::SeqCst))
 }
 
+/// The job of one v2 share's piece fetch; `started_at` 0 is a stampless
+/// park.
+fn fetch_job(
+    target: &crate::transfer::FetchTarget,
+    dest: &crate::transfer::DestSpec,
+    key: [u8; 32],
+    started_at: u64,
+) -> molt_core::FetchJob {
+    molt_core::FetchJob {
+        series: target.id_hex.clone(),
+        key: key.to_vec(),
+        count: target.pieces,
+        size: target.size,
+        root: target.root.clone(),
+        checksum: target.checksum.clone(),
+        name: target.name.clone(),
+        dest: dest.explicit.clone(),
+        default_dir: dest.default_dir.clone(),
+        started_at,
+        held: Vec::new(),
+    }
+}
+
+/// A want's ranges bounded to the series' layout.
+pub(crate) fn bounded_want_ranges(ranges: &[(u32, u32)], top: u32) -> Vec<(u32, u32)> {
+    ranges
+        .iter()
+        .copied()
+        .filter(|(lo, hi)| lo <= hi && *hi <= top)
+        .take(molt_net::piece_want::PIECE_WANT_MAX_RANGES)
+        .collect()
+}
+
 impl State {
     pub(crate) fn effective_file_cap(&self) -> FileCap {
         match self.session.settings.file_cap_bytes {
@@ -139,22 +172,7 @@ impl State {
         // waiting has no deadline (`download_progress.md` §4.1): the park
         // persists as a stampless job, so a restart keeps waiting
         if let (Some(key), Some(store)) = (crate::files_state::decode_share_key(&target.key_b64), self.file_store()) {
-            crate::transfer::FetchJobStore::save_job(
-                &store,
-                molt_core::FetchJob {
-                    series: target.id_hex.clone(),
-                    key: key.to_vec(),
-                    count: target.pieces,
-                    size: target.size,
-                    root: target.root.clone(),
-                    checksum: target.checksum.clone(),
-                    name: target.name.clone(),
-                    dest: dest.explicit.clone(),
-                    default_dir: dest.default_dir.clone(),
-                    started_at: 0,
-                    held: Vec::new(),
-                },
-            );
+            crate::transfer::FetchJobStore::save_job(&store, fetch_job(&target, &dest, key, 0));
         }
         self.files.pending.insert(id, (target, dest));
         self.set_download_phase(id, molt_core::TransferPhase::Waiting);
@@ -217,20 +235,7 @@ impl State {
         // side uses too) fetches its piece series from the series start as
         // a resumable job; a legacy one the exporter-sealed chunk series
         if let Some(key) = crate::files_state::decode_share_key(&target.key_b64) {
-            let job = molt_core::FetchJob {
-                series: target.id_hex.clone(),
-                key: key.to_vec(),
-                count: target.pieces,
-                size: target.size,
-                root: target.root.clone(),
-                checksum: target.checksum.clone(),
-                name: target.name.clone(),
-                dest: dest.explicit.clone(),
-                default_dir: dest.default_dir.clone(),
-                started_at: at,
-                held: Vec::new(),
-            };
-            self.spawn_fetch_job(id, job);
+            self.spawn_fetch_job(id, fetch_job(&target, &dest, key, at));
             return;
         }
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
@@ -267,23 +272,17 @@ impl State {
     /// whole mirror answers for a persistent share.
     pub(super) fn serve_file_wanted(&mut self, id: MessageId) {
         let me = self.member();
-        if matches!(self.share_identity(&id), Ok((ident, _)) if ident.by != me) {
+        let Ok((ident, available)) = self.share_identity(&id) else {
+            return;
+        };
+        if ident.by != me {
             self.serve_file_wanted_from_mirror(id);
             return;
         }
-        let (is_mine, size, key_b64, root, pieces) = match self.share_identity(&id) {
-            Ok((ident, available)) => (
-                ident.by == me && available,
-                ident.size,
-                ident.key_b64,
-                ident.root,
-                ident.pieces,
-            ),
-            Err(_) => return,
-        };
-        if !is_mine || self.share_expired(&id) || self.files.serving.contains(&id) {
+        if !available || self.share_expired(&id) || self.files.serving.contains(&id) {
             return;
         }
+        let crate::files_state::ShareIdentity { size, key_b64, root, pieces, .. } = ident;
         tracing::info!(%id, "serve want");
         // the size is known here — an over-cap share must not cost a full
         // disk read per request only to be refused inside the publish
@@ -364,11 +363,7 @@ impl State {
         // §5.4: the publish is metered on the SAME persisted hourly budget
         // the resend rounds draw from — the store is how the consumption
         // lands in transport.state
-        let Some(store) = self
-            .active
-            .as_ref()
-            .map(|a| crate::net::FileStateStore::new(a.handle.clone()))
-        else {
+        let Some(store) = self.file_store() else {
             return;
         };
         // a legacy share seals under the CURRENT epoch only — publishing
@@ -540,6 +535,20 @@ impl State {
         self.record(env);
     }
 
+    /// Queue `job` for the trickle sender (off the actor), then wake it.
+    pub(crate) fn spawn_enqueue_publish(&self, job: molt_core::PublishJob) {
+        let Some(store) = self.file_store() else {
+            return;
+        };
+        let waker = self.group_net.as_ref().map(|g| g.trickle.waker());
+        tokio::spawn(async move {
+            store.update(|s| molt_net::trickle::enqueue_publish(s, job)).await;
+            if let Some(w) = waker {
+                w.notify_one();
+            }
+        });
+    }
+
     /// The store the file jobs persist through (the workspace's
     /// `transport.state`).
     pub(crate) fn file_store(&self) -> Option<crate::net::FileStateStore> {
@@ -659,11 +668,7 @@ impl State {
         let Some(layout) = molt_net::file_plane::Manifest::layout_for(ident.pieces) else {
             return Ok(Reply::Ack);
         };
-        let ranges: Vec<(u32, u32)> = ranges
-            .into_iter()
-            .filter(|(lo, hi)| lo <= hi && *hi <= layout.top)
-            .take(molt_net::piece_want::PIECE_WANT_MAX_RANGES)
-            .collect();
+        let ranges = bounded_want_ranges(&ranges, layout.top);
         if ranges.is_empty() {
             return Ok(Reply::Ack);
         }

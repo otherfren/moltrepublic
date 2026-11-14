@@ -158,14 +158,11 @@ pub(crate) fn strs(t: &Value, key: &str) -> Vec<String> {
         .collect()
 }
 
+static NO_TASKS: std::sync::LazyLock<Map<String, Value>> = std::sync::LazyLock::new(Map::new);
+
 /// The board read's tasks (`{id: task}`), empty without one.
-pub(crate) fn tasks(snap: &SurfaceSnapshot) -> Map<String, Value> {
-    snap.board
-        .as_ref()
-        .and_then(|b| b.get("tasks"))
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default()
+pub(crate) fn tasks(snap: &SurfaceSnapshot) -> &Map<String, Value> {
+    snap.board.as_ref().and_then(|b| b.get("tasks")).and_then(Value::as_object).unwrap_or(&NO_TASKS)
 }
 
 /// The column a state lands in: 0 to do, 1 in progress, 2 done.
@@ -446,14 +443,15 @@ pub(crate) struct Detail {
 }
 
 fn task_line(l: &Lexicon, all: &Map<String, Value>, id: &str) -> KbLine {
-    let t = all.get(id).cloned().unwrap_or(Value::Null);
+    let null = Value::Null;
+    let t = all.get(id).unwrap_or(&null);
     KbLine {
         key: id.into(),
         kind: "task".into(),
         glyph: String::new().into(),
-        text: format!("{} {}", short_id(id), s(&t, "title")).into(),
-        sub: shown_label(l, s(&t, "shown")).into(),
-        bad: s(&t, "shown") == "stuck" || s(&t, "state") == "fail",
+        text: format!("{} {}", short_id(id), s(t, "title")).into(),
+        sub: shown_label(l, s(t, "shown")).into(),
+        bad: s(t, "shown") == "stuck" || s(t, "state") == "fail",
     }
 }
 
@@ -511,15 +509,15 @@ pub(crate) fn detail(l: &Lexicon, feed: &KanbanFeed, basket: &Basket, id: &str) 
             vote_id: c.vote_id,
             staged: c.staged,
         },
-        blocked_by: strs(t, "blocked_by").iter().map(|b| task_line(l, &all, b)).collect(),
-        prereq_for: strs(t, "prerequisite_for").iter().map(|b| task_line(l, &all, b)).collect(),
+        blocked_by: strs(t, "blocked_by").iter().map(|b| task_line(l, all, b)).collect(),
+        prereq_for: strs(t, "prerequisite_for").iter().map(|b| task_line(l, all, b)).collect(),
         prereqs: full
             .get("prerequisites")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
             .map(|p| {
-                let mut line = task_line(l, &all, s(p, "id"));
+                let mut line = task_line(l, all, s(p, "id"));
                 let depth = p.get("depth").and_then(Value::as_u64).unwrap_or(1);
                 line.text = format!("{}{}", "  ".repeat(usize::try_from(depth.saturating_sub(1)).unwrap_or(0)), line.text).into();
                 line
@@ -960,7 +958,7 @@ pub(crate) fn mine(l: &Lexicon, lang: i32, feed: &KanbanFeed) -> (Vec<KbLine>, V
             !listed.contains(s(t, "id"))
                 && (strs(t, "assignees").contains(&feed.me) || s(t, "creator") == feed.me)
         })
-        .map(|t| task_line(l, &all, s(t, "id")))
+        .map(|t| task_line(l, all, s(t, "id")))
         .collect();
     (actions, rest)
 }

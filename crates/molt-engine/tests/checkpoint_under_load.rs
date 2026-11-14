@@ -26,15 +26,7 @@ async fn wait_for(
     what: &str,
     pred: impl Fn(&SessionView) -> bool,
 ) -> Box<SessionView> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-    loop {
-        let s = read_session(w).await;
-        if pred(&s) {
-            return s;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "timed out waiting for: {what}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
+    common::wait_for_secs(w, what, 60, pred).await
 }
 
 async fn adopt_relay(w: &WalletHandle, url: &str) {

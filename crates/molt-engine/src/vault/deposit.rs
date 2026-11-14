@@ -366,12 +366,7 @@ impl crate::State {
             }
         }
         for id in stale {
-            if let Some(p) = self.proposals.get_mut(&id) {
-                p.state = ProposalState::Rejected;
-                p.superseded = true;
-                p.superseded_kind = Some(molt_core::SupersededKind::Conflict);
-            }
-            self.stash_voted(id);
+            self.supersede_as_conflict(id);
             tracing::info!(id, "vault: card superseded by a replace");
         }
         for id in revived {

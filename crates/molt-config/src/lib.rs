@@ -1240,28 +1240,16 @@ pub fn salvage(text: &str) -> Settings {
         if let Some(v) = node.get("poke_wake_command").and_then(toml::Value::as_str) {
             s.poke_wake_command = v.to_string();
         }
-        if let Some(v) = node
-            .get("wake_min_interval_secs")
-            .and_then(toml::Value::as_integer)
-            .and_then(|v| u64::try_from(v).ok())
-        {
+        if let Some(v) = int_at::<u64>(node, "wake_min_interval_secs") {
             s.wake_min_interval_secs = wake_interval_or_default(v);
         }
         if let Some(v) = node.get("wake_on").and_then(toml::Value::as_array) {
             s.wake_on = known_wake_reasons(v.iter().filter_map(toml::Value::as_str));
         }
-        if let Some(v) = node
-            .get("task_wake_lead_min")
-            .and_then(toml::Value::as_integer)
-            .and_then(|v| u16::try_from(v).ok())
-        {
+        if let Some(v) = int_at::<u16>(node, "task_wake_lead_min") {
             s.task_wake_lead_min = wake_lead_or_default(v);
         }
-        if let Some(v) = node
-            .get("wake_timeout_secs")
-            .and_then(toml::Value::as_integer)
-            .and_then(|v| u64::try_from(v).ok())
-        {
+        if let Some(v) = int_at::<u64>(node, "wake_timeout_secs") {
             s.wake_timeout_secs = wake_timeout_or_default(v);
         }
         if let Some(b) = node.get("wake_chat_lines").and_then(toml::Value::as_bool) {
@@ -1304,25 +1292,13 @@ pub fn salvage(text: &str) -> Settings {
         if let Some(v) = storage.get("s3_bucket").and_then(toml::Value::as_str) {
             s.s3_bucket = v.to_string();
         }
-        if let Some(v) = storage
-            .get("s3_interval_min")
-            .and_then(toml::Value::as_integer)
-            .and_then(|p| u16::try_from(p).ok())
-        {
+        if let Some(v) = int_at::<u16>(storage, "s3_interval_min") {
             s.s3_interval_min = v;
         }
-        if let Some(v) = storage
-            .get("s3_keep_copies")
-            .and_then(toml::Value::as_integer)
-            .and_then(|p| u16::try_from(p).ok())
-        {
+        if let Some(v) = int_at::<u16>(storage, "s3_keep_copies") {
             s.s3_keep_copies = v;
         }
-        if let Some(v) = storage
-            .get("s3_max_bytes")
-            .and_then(toml::Value::as_integer)
-            .and_then(|p| u64::try_from(p).ok())
-        {
+        if let Some(v) = int_at::<u64>(storage, "s3_max_bytes") {
             s.s3_max_bytes = v;
         }
         if let Some(v) = storage.get("s3_plaintext_confirmed").and_then(toml::Value::as_str) {
@@ -1360,11 +1336,7 @@ pub fn salvage(text: &str) -> Settings {
                     s.tor_mode = mode.to_string();
                 }
             }
-            if let Some(port) = tor
-                .get("port")
-                .and_then(toml::Value::as_integer)
-                .and_then(|p| u16::try_from(p).ok())
-            {
+            if let Some(port) = int_at::<u16>(tor, "port") {
                 s.tor_port = port;
             }
         }
@@ -1408,11 +1380,7 @@ pub fn salvage(text: &str) -> Settings {
             .collect();
     }
     if let Some(mcp) = value.get("mcp") {
-        if let Some(port) = mcp
-            .get("port")
-            .and_then(toml::Value::as_integer)
-            .and_then(|p| u16::try_from(p).ok())
-        {
+        if let Some(port) = int_at::<u16>(mcp, "port") {
             s.mcp_port = port;
         }
         if let Some(allow) = mcp.get("allow").and_then(toml::Value::as_str) {
@@ -1590,15 +1558,7 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     set_str(node, "poke_wake_command", &settings.poke_wake_command);
     // off-default only, like `[files]`: an untouched file stays readable
     // by a build that predates the keys
-    if settings.wake_min_interval_secs == molt_core::default_wake_min_interval_secs() {
-        node.remove("wake_min_interval_secs");
-    } else {
-        set_int(
-            node,
-            "wake_min_interval_secs",
-            i64::try_from(settings.wake_min_interval_secs).unwrap_or(i64::MAX),
-        );
-    }
+    set_u64_off_default(node, "wake_min_interval_secs", settings.wake_min_interval_secs, molt_core::default_wake_min_interval_secs());
     if settings.wake_on == molt_core::default_wake_on() {
         node.remove("wake_on");
     } else {
@@ -1611,20 +1571,8 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
             set_item(node, "wake_on", toml_edit::value(arr));
         }
     }
-    if settings.task_wake_lead_min == molt_core::default_task_wake_lead_min() {
-        node.remove("task_wake_lead_min");
-    } else {
-        set_int(node, "task_wake_lead_min", i64::from(settings.task_wake_lead_min));
-    }
-    if settings.wake_timeout_secs == molt_core::default_wake_timeout_secs() {
-        node.remove("wake_timeout_secs");
-    } else {
-        set_int(
-            node,
-            "wake_timeout_secs",
-            i64::try_from(settings.wake_timeout_secs).unwrap_or(i64::MAX),
-        );
-    }
+    set_u64_off_default(node, "task_wake_lead_min", u64::from(settings.task_wake_lead_min), u64::from(molt_core::default_task_wake_lead_min()));
+    set_u64_off_default(node, "wake_timeout_secs", settings.wake_timeout_secs, molt_core::default_wake_timeout_secs());
     if settings.wake_chat_lines {
         node.remove("wake_chat_lines");
     } else {
@@ -1692,24 +1640,8 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     // denies unknown tables) still opens stays that way until the operator
     // actually changes the pace
     let files = table_at(doc.as_table_mut(), &["files"]);
-    if settings.mirror_publish_interval_secs == default_mirror_publish_interval_secs() {
-        files.remove("mirror_publish_interval_secs");
-    } else {
-        set_int(
-            files,
-            "mirror_publish_interval_secs",
-            i64::try_from(settings.mirror_publish_interval_secs).unwrap_or(i64::MAX),
-        );
-    }
-    if settings.mirror_daily_bytes == default_mirror_daily_bytes() {
-        files.remove("mirror_daily_bytes");
-    } else {
-        set_int(
-            files,
-            "mirror_daily_bytes",
-            i64::try_from(settings.mirror_daily_bytes).unwrap_or(i64::MAX),
-        );
-    }
+    set_u64_off_default(files, "mirror_publish_interval_secs", settings.mirror_publish_interval_secs, default_mirror_publish_interval_secs());
+    set_u64_off_default(files, "mirror_daily_bytes", settings.mirror_daily_bytes, default_mirror_daily_bytes());
     if files.is_empty() {
         doc.as_table_mut().remove("files");
     }
@@ -1893,6 +1825,20 @@ fn set_bool(t: &mut dyn toml_edit::TableLike, key: &str, v: bool) {
     if t.get(key).and_then(toml_edit::Item::as_bool) != Some(v) {
         set_item(t, key, toml_edit::value(v));
     }
+}
+
+/// `key = v`, or no key at all while `v` is the default.
+fn set_u64_off_default(t: &mut dyn toml_edit::TableLike, key: &str, v: u64, default: u64) {
+    if v == default {
+        t.remove(key);
+    } else {
+        set_int(t, key, i64::try_from(v).unwrap_or(i64::MAX));
+    }
+}
+
+/// An in-range integer at `key`; absent, mistyped or out of range is `None`.
+fn int_at<T: TryFrom<i64>>(t: &toml::Value, key: &str) -> Option<T> {
+    t.get(key).and_then(toml::Value::as_integer).and_then(|v| T::try_from(v).ok())
 }
 
 fn set_int(t: &mut dyn toml_edit::TableLike, key: &str, v: i64) {

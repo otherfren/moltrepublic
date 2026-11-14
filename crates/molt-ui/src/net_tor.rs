@@ -93,7 +93,7 @@ pub(crate) fn tor_verdict_copy_for(
     state: molt_core::TorTestState,
     session_locked: bool,
 ) -> &'static str {
-    let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+    let l = Lexicon::of(lang);
     use molt_core::TorTestState as S;
     match state {
         S::ProxyOnly if session_locked => l.tor_v_proxy_only_locked,
@@ -103,7 +103,7 @@ pub(crate) fn tor_verdict_copy_for(
 
 pub(crate) fn tor_verdict_copy(lang: i32, state: molt_core::TorTestState) -> &'static str {
     use molt_core::TorTestState as S;
-    let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+    let l = Lexicon::of(lang);
     match state {
         S::Idle => l.tor_v_idle,
         S::Testing => l.tor_v_testing,

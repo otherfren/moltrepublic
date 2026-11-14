@@ -83,11 +83,7 @@ impl Poke {
     /// TAG ‖ JSON — the ONLY producer of these bytes.
     #[must_use]
     pub fn to_frame(&self) -> Vec<u8> {
-        let mut out = POKE_TAG.to_vec();
-        if let Ok(json) = serde_json::to_vec(self) {
-            out.extend_from_slice(&json);
-        }
-        out
+        crate::framed(POKE_TAG, self)
     }
 
     /// The ONLY consumer. Bounds the input before serde sees it.

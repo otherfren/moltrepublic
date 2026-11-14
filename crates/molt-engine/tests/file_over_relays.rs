@@ -8,97 +8,13 @@
 //! a real 2-of-2 republic on an in-process relay.
 
 mod common;
+mod file_support;
 
-use common::{adopt_relay, read_session, wait_for};
+use file_support::found_pair;
 use std::time::Duration;
 
-use molt_core::{Command, GroupConfig, Reply, SessionSettings, SessionView};
-use molt_engine::WalletHandle;
+use molt_core::{Command, Reply};
 use nostr_relay_builder::MockRelay;
-
-fn engine(root: &std::path::Path, download_dir: &std::path::Path) -> WalletHandle {
-    let session = SessionView {
-        workspaces: Vec::new(),
-        settings: SessionSettings {
-            workspace_dir: root.display().to_string(),
-            download_dir: download_dir.display().to_string(),
-            // the trickle's production pace (15 s a piece) would outlast
-            // the deadline; one a second still trickles
-            mirror_publish_interval_secs: 1,
-            ..SessionSettings::default()
-        },
-        ..SessionView::default()
-    };
-    molt_engine::spawn_with_storage(GroupConfig::demo(), session)
-}
-
-/// Found a real 2-of-2 republic over the relay (the org_effective harness).
-async fn found_pair(root: &std::path::Path, url: &str) -> (WalletHandle, WalletHandle) {
-    let dl_a = root.join("dl-a");
-    let dl_b = root.join("dl-b");
-    let a = engine(&root.join("founder"), &dl_a);
-    adopt_relay(&a, url).await;
-    a.execute(Command::CreateStart {
-        name: "Datei Gilde".to_string(),
-        member: "petra".to_string(),
-        members: 2,
-        threshold: 2,
-        relays: Vec::new(),
-    })
-    .await
-    .expect("create start");
-    let s = wait_for(&a, "the seat link to become joinable", |s| {
-        !s.create.seats.is_empty()
-            && molt_engine::FoundingInvite::parse(&s.create.seats[0].link).is_ok()
-    })
-    .await;
-    let link = s.create.seats[0].link.clone();
-
-    let b = engine(&root.join("member"), &dl_b);
-    adopt_relay(&b, url).await;
-    b.execute(Command::JoinStart {
-        invite: link,
-        member: "walter".to_string(),
-        relays: Vec::new(),
-    })
-    .await
-    .expect("join start");
-    wait_for(&a, "the founder to accept the join", |s| s.create.can_propose).await;
-    a.execute(Command::CreatePropose {
-        name: "Datei Gilde".to_string(),
-        agenda: String::new(),
-        features: vec!["memory".to_string()],
-    })
-    .await
-    .expect("charter proposed");
-    // ❻½: the founder's phrase-backup confirmation (n-of-n gate)
-    {
-        let seed_ = read_session(&a).await.create.seed.clone();
-        a.execute(Command::ConfirmSeedBackup { phrase: seed_ })
-            .await
-            .expect("founder backup confirm");
-    }
-    wait_for(&b, "walter to see the charter", |s| s.join.awaiting_ratify).await;
-    b.execute(Command::JoinConfirmCharter).await.expect("ratify");
-    {
-        let seed_ = read_session(&b).await.join.seed.clone();
-        b.execute(Command::ConfirmSeedBackup { phrase: seed_ })
-            .await
-            .expect("joiner backup confirm");
-    }
-    wait_for(&a, "the founding to seal", |s| s.create.run.outcome == 1).await;
-    a.execute(Command::CreateFinish).await.expect("create finish");
-    wait_for(&b, "the join to seal", |s| {
-        s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()
-    })
-    .await;
-    b.execute(Command::JoinFinish).await.expect("join finish");
-    wait_for(&b, "the joiner to enter", |s| {
-        s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()
-    })
-    .await;
-    (a, b)
-}
 
 /// The whole story: petra shares (metadata only — nothing on the relay
 /// yet), walter downloads; the request triggers petra's lazy chunk-series

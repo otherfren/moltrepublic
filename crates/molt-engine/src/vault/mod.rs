@@ -332,22 +332,7 @@ mod tests {
     }
 
     fn card(payload: Value, by: &str) -> molt_core::ProposalRecord {
-        molt_core::ProposalRecord {
-            surface: Surface::Organization,
-            payload,
-            approvals: 0,
-            state: molt_core::ProposalState::Proposed,
-            applied_at: 0,
-            declined_at: 0,
-            declined_by: String::new(),
-            decliners: Vec::new(),
-            voted: Vec::new(),
-            by: by.to_string(),
-            superseded: false,
-            superseded_kind: None,
-            withdrawn: false,
-            wiki_rev: None,
-        }
+        molt_core::ProposalRecord::new(Surface::Organization, payload, by.to_string())
     }
 
     /// Propose, the wire and approve all give `want` for adding the vault

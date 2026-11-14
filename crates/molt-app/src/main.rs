@@ -181,7 +181,7 @@ fn main() -> anyhow::Result<()> {
     // a hand-written pool may contain entries ingest would refuse; they are
     // dropped rather than shown as relays, but never silently — the operator
     // must be able to find out why their line vanished
-    {
+    let relay_pool = {
         let raw: Vec<molt_core::relay::RelayEntry> = config
             .transport
             .nostr
@@ -270,7 +270,8 @@ fn main() -> anyhow::Result<()> {
             "for the full transport trace: RUST_LOG=molt_net=debug (dial, TLS, websocket, \
              subscription and NIP-42 stages)"
         );
-    }
+        kept
+    };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -337,18 +338,7 @@ fn main() -> anyhow::Result<()> {
             // decision above.
             // hand-written entries never ran ingest validation: normalize,
             // drop the unusable, collapse duplicates (relay_pool.md)
-            relays: molt_core::relay::sanitize_pool(
-                &config
-                    .transport
-                    .nostr
-                    .relay
-                    .iter()
-                    .map(|r| molt_core::relay::RelayEntry {
-                        url: r.url.clone(),
-                        confirmed: r.confirmed,
-                    })
-                    .collect::<Vec<_>>(),
-            ),
+            relays: relay_pool,
             // the flat view drops a daemon URL the host rule refuses
             wallet_daemon_url: {
                 if flat.wallet_daemon_url.is_empty() && !config.wallet.daemon_url.trim().is_empty() {

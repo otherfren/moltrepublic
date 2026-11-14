@@ -268,7 +268,7 @@ impl State {
         let today = now_t.date();
         let (scan, next) = {
             let cache = self.kanban_board();
-            let derived = molt_core::kanban_dates::derive(&cache.board, today);
+            let derived = self.kanban_derived(&cache, today);
             let scan = start_scan(&cache.board, &derived, &me, now_t, lead);
             (scan.due, scan.next_fire)
         };
@@ -337,7 +337,7 @@ impl State {
         if let Some(now) = crate::kanban::utc(self.presence_now()) {
             self.refresh_kanban_cache();
             let cache = self.kanban_board();
-            let derived = molt_core::kanban_dates::derive(&cache.board, now.date());
+            let derived = self.kanban_derived(&cache, now.date());
             out.extend(task_actions(
                 &cache.board,
                 &derived,

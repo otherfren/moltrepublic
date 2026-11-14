@@ -178,7 +178,7 @@ impl State {
         }
     }
 
-    fn kanban_derived<'a>(&self, cache: &'a KanbanCache, today: NaiveDate) -> Cow<'a, Derived> {
+    pub(crate) fn kanban_derived<'a>(&self, cache: &'a KanbanCache, today: NaiveDate) -> Cow<'a, Derived> {
         cache
             .derived_for(today)
             .map_or_else(|| Cow::Owned(derive(&cache.board, today)), Cow::Borrowed)

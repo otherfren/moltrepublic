@@ -810,6 +810,7 @@ pub(crate) struct SurfaceData {
     /// K6: bytes held / bytes committed while the folded base is fetched.
     pub(crate) wiki_base_pending: Option<(u64, u64)>,
 }
+#[derive(Default)]
 pub(crate) struct LogLineData {
     /// Stable message id, 32-char hex ("" on legacy entries without one —
     /// such rows must never offer id-requiring actions, see the `id != ""`
@@ -1180,11 +1181,8 @@ pub(crate) async fn gather_surfaces(
     // the gated surfaces' applied logs — the proposal cache resolves a
     // vanished proposal's fate against them (the applied values ARE the
     // raw proposal payloads, for the chain and the legacy path alike)
-    let applied_by_surface: HashMap<Surface, Vec<serde_json::Value>> = snaps
-        .iter()
-        .filter(|(sf, _)| *sf != Surface::Chat)
-        .map(|(sf, s)| (*sf, s.applied.clone()))
-        .collect();
+    let applied_by_surface: HashMap<Surface, &[serde_json::Value]> =
+        snaps.iter().filter(|(sf, _)| *sf != Surface::Chat).map(|(sf, s)| (*sf, s.applied.as_slice())).collect();
     let full_msgs = full_chat.as_ref().map(chat_messages).unwrap_or_default();
     // the engine enumerates the channels (P7): every distinct ref in the
     // log, `Group` always present — authoritative for the chat surface
@@ -1230,10 +1228,7 @@ pub(crate) async fn gather_surfaces(
         // …and here for the same reason: this is the chat pane's own
         // bookkeeping, and losing the mirror is worse than working from a
         // state some other panic left mid-update
-        let mut st = match chat_ui.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner(),
-        };
+        let mut st = chat_ui.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !st.is_current(my_gen) {
             // a newer selection/push owns the state — observing now would
             // mis-mark the fresh channel read, and the bundle is stale
@@ -1526,33 +1521,13 @@ pub(crate) fn surface_data(
             .iter()
             .enumerate()
             .map(|(i, _)| LogLineData {
-                id: String::new(),
-                lead: String::new(),
                 text: applied_titles[i].clone(),
-                when: String::new(),
                 quote: -1,
-                quote_id: String::new(),
-                system: false,
-                wake: false,
-                quote_label: String::new(),
-                quote_indent: 0,
-                deleted_by: String::new(),
                 first: true,
-                own: false,
-                alt: false,
-                mine_emoji: String::new(),
-                reactions: Vec::new(),
-                receipts: Vec::new(),
-                has_file: false,
-                file_name: String::new(),
-                file_meta: String::new(),
-                file_available: false,
                 // the id track is positionally parallel to `applied`; a
                 // pre-id peer's snapshot has an empty/short track → None
                 proposal_id: snap.applied_ids.get(i).copied().flatten(),
-                op: String::new(),
-                op_agent: false,
-                segs: Vec::new(),
+                ..LogLineData::default()
             })
             .collect()
     };
@@ -1981,7 +1956,7 @@ fn kanban_notes(lang: i32, p: &molt_core::ProposalView) -> (String, bool) {
         return (String::new(), false);
     }
     if let Some(reason) = &p.void {
-        let l = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+        let l = Lexicon::of(lang);
         return (format!("{}: {reason}", l.kb_void), true);
     }
     let bad = p.advisories.iter().any(|a| a.starts_with(molt_core::kanban_review::WOULD_VOID_PREFIX));
@@ -2122,7 +2097,7 @@ pub(crate) fn vault_title(
     view: &VaultView,
     replace: bool,
 ) -> Option<String> {
-    let lex = if lang == 1 { Lexicon::de() } else { Lexicon::en() };
+    let lex = Lexicon::of(lang);
     let s = |k: &str| v.get(k).and_then(serde_json::Value::as_str);
     match s("op")? {
         "deposit" if s("depositor").is_some() => {
@@ -2308,7 +2283,7 @@ fn vault_deposit_eq(a: &VaultDepositRow, b: &VaultDepositRow) -> bool {
 /// Fill the vault pane from the bundle's `VaultView` (on the UI thread);
 /// the rows patch in place.
 pub(crate) fn apply_vault(ui: &crate::AppWindow, b: &SurfacesBundle) {
-    let lex = if b.lang == 1 { Lexicon::de() } else { Lexicon::en() };
+    let lex = Lexicon::of(b.lang);
     let empty = VaultView::default();
     let v = b.vault.as_ref().unwrap_or(&empty);
     ui.set_vault_real(v.real);

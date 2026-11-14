@@ -9,26 +9,11 @@
 
 mod common;
 
-use common::{spawn_solo, still_building};
+use common::{spawn_solo, still_building, wiki_add as add};
 use std::time::Duration;
 
 use molt_core::{Command, MoltError, Reply, Surface};
 use molt_engine::WalletHandle;
-
-/// A git patch that creates one document.
-fn add(path: &str, content: &str) -> String {
-    let lines: Vec<&str> = content.lines().collect();
-    let mut patch = format!(
-        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
-        lines.len()
-    );
-    for l in lines {
-        patch.push('+');
-        patch.push_str(l);
-        patch.push('\n');
-    }
-    patch
-}
 
 /// Propose one wiki patch and approve it (the single-operator path).
 async fn write_doc(w: &WalletHandle, path: &str, content: &str) {

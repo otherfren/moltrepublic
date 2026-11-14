@@ -165,6 +165,19 @@ pub(crate) struct Envelope {
     pub(crate) reply: oneshot::Sender<Result<Reply, MoltError>>,
 }
 
+/// Send one engine-internal command back to the actor; nobody reads the
+/// reply.
+pub(crate) async fn send_internal(cmd_tx: &mpsc::Sender<Envelope>, cmd: Command) {
+    let (reply, _rx) = oneshot::channel();
+    let _ = cmd_tx.send(Envelope { cmd, reply }).await;
+}
+
+/// [`send_internal`] without waiting: a full queue drops the command.
+pub(crate) fn try_send_internal(cmd_tx: &mpsc::Sender<Envelope>, cmd: Command) {
+    let (reply, _rx) = oneshot::channel();
+    let _ = cmd_tx.try_send(Envelope { cmd, reply });
+}
+
 /// A cheap, cloneable handle to the running engine. This is the single object
 /// every frontend talks to; cloning it and driving it from two places (GUI and
 /// MCP) is exactly how the two operators stay co-equal.
@@ -658,6 +671,7 @@ pub(crate) struct NostrTransport {
 /// the send/link trouble pins that drive presence and health, and the last
 /// broadcast claim sheet. Active-workspace scope: `reset_workspace_state`
 /// clears every field.
+#[derive(Default)]
 pub(crate) struct DeliveryState {
     /// The last broadcast claim sheet published, so an unchanged one is not
     /// republished — full state means silence is the correct steady state.
@@ -721,6 +735,7 @@ pub(crate) struct DeliveryState {
 /// presence stamp and aging pass reads through (`State::presence_now`), and
 /// the poke cooldown. Active-workspace scope for the cooldowns;
 /// the clock seam outlives a workspace switch.
+#[derive(Default)]
 pub(crate) struct PresenceState {
     /// Per-sender cooldown for accepted pokes (`member → presence_now of the
     /// last reacted poke`): a poke inside the window is dropped quietly, so
@@ -844,6 +859,7 @@ pub(crate) type MirrorPages = (u64, u16, u64, std::collections::BTreeMap<u16, Ve
 /// change per open proposal) and the catch-up buffer. Rebuilt from the chain
 /// or the gossip, never trusted from elsewhere; `reset_workspace_state`
 /// clears it with the workspace.
+#[derive(Default)]
 pub(crate) struct ChainProjection {
     /// The republic's persistent commit-block chain — the converged, verified
     /// governance record (`docs_archive/chain/persistent_chain.md`). Block 0 is the
@@ -1607,20 +1623,7 @@ impl State {
             vault_grants: vault::grant::GrantRuntime::default(),
             group_net: None,
             group_mls_parked: None,
-            delivery: DeliveryState {
-                last_group_ack: None,
-                accepted: std::collections::BTreeMap::new(),
-                accepted_dirty: false,
-                accepted_saved_at: 0,
-                mls_persisted_at: 0,
-                ack_due: std::collections::HashMap::new(),
-                last_own_ackable: 0,
-                ordered_park: std::collections::HashMap::new(),
-                unreachable: std::collections::HashSet::new(),
-                link_down: std::collections::BTreeMap::new(),
-                send_stuck: std::collections::BTreeMap::new(),
-                last_mesh_out: 0,
-            },
+            delivery: DeliveryState::default(),
             recovery: RecoveryState {
                 inboxes: Vec::new(),
                 seat_inbox: None,
@@ -1638,45 +1641,8 @@ impl State {
                 ctx: None,
                 transport: std::sync::Arc::new(std::sync::Mutex::new(None)),
             },
-            chain: ChainProjection {
-                blocks: Vec::new(),
-                block_ts: HashMap::new(),
-                head: None,
-                walk: None,
-                pending_served_blob: None,
-                checkpoint_blob: None,
-                wiki_base: None,
-                vault_base: None,
-                vault_base_hash: None,
-                applied: HashMap::new(),
-                applied_sigs: HashMap::new(),
-                anchors: HashMap::new(),
-                member_relays: HashMap::new(),
-                split_noted: std::collections::HashSet::new(),
-                pool_adopt_base: None,
-                pending_sigs: HashMap::new(),
-                adoption_pending: false,
-                replay_held_at: HashMap::new(),
-                own_approvals: std::collections::BTreeSet::new(),
-                served_at: HashMap::new(),
-                refused_at: HashMap::new(),
-                pending_declines: HashMap::new(),
-                id_collisions: BTreeMap::new(),
-                diverged: BTreeMap::new(),
-                peer_heights: BTreeMap::new(),
-                seen_signing: BTreeMap::new(),
-                head_moved_at: 0,
-                seal_held: std::collections::BTreeSet::new(),
-                fork_candidates: BTreeMap::new(),
-                pending_withdrawals: HashMap::new(),
-                proposal_changes: HashMap::new(),
-                pending_blocks: std::collections::BTreeMap::new(),
-                catchup_from: None,
-            },
-            presence: PresenceState {
-                poke_at: std::collections::HashMap::new(),
-                clock_override: None,
-            },
+            chain: ChainProjection::default(),
+            presence: PresenceState::default(),
             wake: wake::WakeState::default(),
             kanban_draft: String::new(),
             wiki_draft: String::new(),
