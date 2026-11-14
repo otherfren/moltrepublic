@@ -71,6 +71,7 @@ fn chat_env(seq: u64, by: &str, body: &str) -> EventEnvelope {
             deleted_by: None,
             file: None,
             thread_op: None,
+            operator: None,
             read_by: std::collections::BTreeSet::new(),
         }),
     }

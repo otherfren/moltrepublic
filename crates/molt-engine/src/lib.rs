@@ -1502,6 +1502,9 @@ pub(crate) struct State {
     /// and re-hashes off the actor) TAKES it and sends from its task; the
     /// actor loop sends only while the slot is still occupied.
     pub(crate) deferred_reply: Option<oneshot::Sender<Result<Reply, MoltError>>>,
+    /// The operator a running [`Command::AsOperator`] names on the chat
+    /// message it posts.
+    pub(crate) chat_operator: Option<molt_core::ChatOperator>,
 }
 
 impl State {
@@ -1723,6 +1726,7 @@ impl State {
             store,
             boot_settings,
             deferred_reply: None,
+            chat_operator: None,
         }
     }
 
@@ -1802,6 +1806,7 @@ impl State {
     /// Dispatch one command to its module.
     fn handle(&mut self, cmd: Command) -> Result<Reply, MoltError> {
         match cmd {
+            Command::AsOperator { operator, inner } => self.cmd_as_operator(operator, *inner),
             // chat.rs
             Command::Chat {
                 body,

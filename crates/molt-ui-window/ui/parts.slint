@@ -5,7 +5,7 @@
 // (app.slint) composes these into the actual screens.
 
 import { Theme, Strings, SurfaceTab, ViewItem, LogLine, ReactionItem, ReceiptItem, MemberSync, ProposalRow, HintTip, PatchView, Poke, SeedRow } from "theme.slint";
-import { AppButton, AppField, AppArea, AppCheck, ScrollHint, HoverTip, DotLabel, WordChip } from "components.slint";
+import { AppButton, AppField, AppArea, AppCheck, ScrollHint, HoverTip, DotLabel, WordChip, CodeBlock } from "components.slint";
 
 // A large clickable option card used on the first-run choice screen. The
 // title is split into its hotkey letter (rendered underlined; the window
@@ -708,6 +708,30 @@ export component ChatRow inherits Rectangle {
                     font-weight: 700;
                 }
             }
+            // the seat's operator (issue #5): an unchecked label, an agent
+            // in its own colour
+            if root.line.op != "": Rectangle {
+                width: min(op-t.preferred-width, 160px);
+                op-t := Text {
+                    width: parent.width;
+                    overflow: elide;
+                    text: root.line.op;
+                    color: root.line.op-agent ? Theme.moved : Theme.dim;
+                    font-size: Theme.fs-cap;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                op-ta := TouchArea {
+                    property <int> tip;
+                    changed has-hover => {
+                        if (self.has-hover) {
+                            self.tip = HintTip.show(root.line.op-agent ? Strings.op-agent-tip : Strings.op-human-tip, self.absolute-position.x, self.absolute-position.y + self.height + 4px);
+                        } else {
+                            HintTip.hide(self.tip);
+                        }
+                    }
+                }
+            }
             Text {
                 text: root.line.when;
                 color: Theme.faint;
@@ -723,7 +747,27 @@ export component ChatRow inherits Rectangle {
         // emojis render in full colour; everything the emoji font lacks
         // falls back to the regular text font per glyph. A pure file share
         // has no body — the card below is the whole message.
-        if root.line.deleted-by == "" && !(root.line.has-file && root.line.text == ""): TextInput {
+        // a body with ``` fences: prose and monospace blocks in turn
+        if root.line.deleted-by == "" && root.line.segs.length > 0: VerticalLayout {
+            spacing: 4px;
+            for g in root.line.segs: VerticalLayout {
+                if !g.code: TextInput {
+                    text: g.text;
+                    read-only: true;
+                    single-line: false;
+                    wrap: word-wrap;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    font-family: "Twemoji Mozilla";
+                }
+                if g.code: CodeBlock {
+                    text: g.text;
+                    accessible-role: text;
+                    accessible-label: "chat-code";
+                }
+            }
+        }
+        if root.line.deleted-by == "" && root.line.segs.length == 0 && !(root.line.has-file && root.line.text == ""): TextInput {
             text: root.line.text;
             read-only: true;
             single-line: false;

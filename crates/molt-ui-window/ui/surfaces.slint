@@ -22,7 +22,7 @@
 // panes stay independently editable under scripts/dev-ui.sh hot-reload.
 
 import { Theme, Strings, HintTip, Kanban, KbCard, KbLine, KbPick, KbType, KbCheck, KbCalBlock, WikiState, WikiNavRow, WikiTabRow, WikiBlock, WikiSpan, WikiProp, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
-import { AppButton, AppField, AppArea, AppDropdown, ScrollHint, DotLabel, InsetWell } from "components.slint";
+import { AppButton, AppField, AppArea, AppDropdown, ScrollHint, DotLabel, InsetWell, CodeBlock } from "components.slint";
 
 // ---------------------------------------------------------------------------
 // shared chrome
@@ -1075,22 +1075,13 @@ component BrainBlockView inherits HorizontalLayout {
                 wrap: word-wrap;
             }
         }
-        if root.b.kind == 4: Rectangle {
-            background: Theme.bg;
-            border-radius: Theme.win95 ? 0px : 6px;
-            border-width: Theme.border-w;
-            border-color: Theme.line;
-            height: ct.preferred-height + 16px;
-            ct := Text {
-                x: 10px;
-                y: 8px;
-                width: parent.width - 20px;
-                text: root.b.text;
-                color: root.ghost ? root.ink : Theme.dim;
-                font-size: Theme.fs-editor - 2px;
-                font-italic: root.ghost;
-                wrap: word-wrap;
-            }
+        if root.b.kind == 4: CodeBlock {
+            text: root.b.text;
+            ink: root.ghost ? root.ink : Theme.dim;
+            font-size: Theme.fs-editor - 2px;
+            italic: root.ghost;
+            accessible-role: text;
+            accessible-label: "wiki-code";
         }
         // a pipe table: one framed grid - the header row on Theme.bg, a
         // rule between rows and columns, each cell wrapping in its column

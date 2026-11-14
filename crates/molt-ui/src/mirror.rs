@@ -39,7 +39,7 @@ use crate::surfaces::{
 use crate::wiki_bridge::{patch_view_sync, wiki_export_toast};
 use crate::{
     AppScreen, AppWindow, BackupRow, ChainRow, ChannelItem, LogLine, MemberRow, MemberSync,
-    PatchView, Poke, ProposalRow, ReactionItem, ReceiptItem, RecoverSeatRow, RelayItem, RelayPick,
+    PatchView, Poke, ChatSeg, ProposalRow, ReactionItem, ReceiptItem, RecoverSeatRow, RelayItem, RelayPick,
     RitualSeat, Strings, SurfaceTab, Theme, UploadRow, ViewItem, WikiState,
     WorkspaceItem,
 };
@@ -1246,6 +1246,14 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                             .proposal_id
                             .and_then(|i| i32::try_from(i).ok())
                             .unwrap_or(-1),
+                        op: l.op.as_str().into(),
+                        op_agent: l.op_agent,
+                        segs: ModelRc::new(VecModel::from(
+                            l.segs
+                                .iter()
+                                .map(|g| ChatSeg { text: g.text.as_str().into(), code: g.code })
+                                .collect::<Vec<_>>(),
+                        )),
                     }
                 })
                 .collect();

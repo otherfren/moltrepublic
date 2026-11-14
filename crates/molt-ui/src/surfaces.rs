@@ -809,6 +809,17 @@ pub(crate) struct LogLineData {
     /// rows, system lines and rows of unknown origin (legacy dumps): those
     /// must offer no jump (feedback honesty, like the `id != ""` guards).
     pub(crate) proposal_id: Option<u64>,
+    /// The seat's operator who wrote it ("" = not said), as shown.
+    pub(crate) op: String,
+    pub(crate) op_agent: bool,
+    /// The body split at ``` fences; empty = no fence.
+    pub(crate) segs: Vec<ChatSegData>,
+}
+/// One piece of a chat body: prose, or a fenced code block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ChatSegData {
+    pub(crate) text: String,
+    pub(crate) code: bool,
 }
 pub(crate) struct ReactionData {
     pub(crate) emoji: String,
@@ -1492,6 +1503,9 @@ pub(crate) fn surface_data(
                 // the id track is positionally parallel to `applied`; a
                 // pre-id peer's snapshot has an empty/short track → None
                 proposal_id: snap.applied_ids.get(i).copied().flatten(),
+                op: String::new(),
+                op_agent: false,
+                segs: Vec::new(),
             })
             .collect()
     };

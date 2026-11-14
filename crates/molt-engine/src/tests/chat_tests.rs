@@ -809,3 +809,50 @@ fn a_share_carries_its_series_v2_material() {
         }
     });
 }
+
+#[test]
+fn an_operator_names_the_message_it_posts_and_nothing_else() {
+    rt().block_on(async {
+        let cfg = GroupConfig { threshold: 1, self_cosign: false, ..GroupConfig::demo() };
+        let w = spawn(cfg, SessionView::default());
+        let claude = molt_core::ChatOperator { label: "Claude".into(), agent: true };
+        let as_op = |cmd: Command| Command::AsOperator { operator: claude.clone(), inner: Box::new(cmd) };
+        let chat = |body: &str| Command::Chat {
+            body: body.into(),
+            quote: None,
+            channel: molt_core::ChannelRef::default(),
+        };
+        w.execute(as_op(chat("from the agent"))).await.expect("chat as operator");
+        w.execute(chat("from the window")).await.expect("plain chat");
+        let pid = match w
+            .execute(Command::Propose { surface: Surface::Memory, payload: json!({"op":"add_note","title":"t"}) })
+            .await
+            .expect("propose")
+        {
+            Reply::Proposed { id, .. } => id,
+            other => panic!("unexpected: {other:?}"),
+        };
+        w.execute(as_op(Command::Approve { proposal: pid, note: Some("ok".into()) }))
+            .await
+            .expect("approve as operator");
+        let msgs: Vec<molt_core::ChatMessage> = read_surface(&w, Surface::Chat)
+            .await
+            .applied
+            .iter()
+            .map(|v| serde_json::from_value(v.clone()).expect("message"))
+            .collect();
+        let op_of = |body: &str| msgs.iter().find(|m| m.body == body).map(|m| m.operator.clone());
+        assert_eq!(op_of("from the agent"), Some(Some(claude.clone())));
+        assert_eq!(op_of("from the window"), Some(None), "the operator does not stick");
+        assert_eq!(op_of("ok"), Some(Some(claude.clone())), "a vote note names it too");
+
+        let read = Command::ReadState { surface: Surface::Chat, channel: None, view: None };
+        assert!(w.execute(as_op(read)).await.is_err(), "only commands that post");
+        assert!(w.execute(as_op(as_op(chat("x")))).await.is_err(), "no nesting");
+        let bad = Command::AsOperator {
+            operator: molt_core::ChatOperator { label: "x".repeat(33), agent: true },
+            inner: Box::new(chat("y")),
+        };
+        assert!(w.execute(bad).await.is_err(), "the label is checked");
+    });
+}

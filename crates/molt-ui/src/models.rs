@@ -126,10 +126,12 @@ fn wiki_row_eq(a: &WikiRow, b: &WikiRow) -> bool {
 pub(crate) fn log_line_eq(a: &LogLine, b: &LogLine) -> bool {
     models_eq(&a.reactions, &b.reactions)
         && models_eq(&a.receipts, &b.receipts)
+        && models_eq(&a.segs, &b.segs)
         && *b
             == LogLine {
                 reactions: b.reactions.clone(),
                 receipts: b.receipts.clone(),
+                segs: b.segs.clone(),
                 ..a.clone()
             }
 }

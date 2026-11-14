@@ -49,6 +49,9 @@ fn line(lead: &str, text: &str) -> LogLineData {
         file_meta: String::new(),
         file_available: false,
         proposal_id: None,
+        op: String::new(),
+        op_agent: false,
+        segs: Vec::new(),
     }
 }
 
@@ -420,4 +423,39 @@ fn a_pass_that_never_lands_leaves_the_post_for_the_next_one() {
 
     assert!(talk_feed(0, &old, None, &pending, "walter").land(&mut seen).is_none());
     assert!(talk_feed(0, &new, None, &pending, "walter").land(&mut seen).is_none(), "nothing was forgotten");
+}
+
+/// **A fenced block in a chat body renders as a code segment** (issue #4):
+/// a body without one keeps the plain path (no segments), the fence line
+/// and its language tag are not shown.
+#[test]
+fn fenced_blocks_split_a_chat_body_into_code_segments() {
+    assert!(chat_segments("plain\n    indented stays text").is_empty());
+    let segs = chat_segments("look:\n```text\n /\\_/\\\n( o.o )\n```\nnice `inline`");
+    let got: Vec<(&str, bool)> = segs.iter().map(|s| (s.text.as_str(), s.code)).collect();
+    assert_eq!(got, vec![("look:", false), (" /\\_/\\\n( o.o )", true), ("nice `inline`", false)]);
+    let open: Vec<(String, bool)> =
+        chat_segments("```\nunclosed\n  runs on").into_iter().map(|s| (s.text, s.code)).collect();
+    assert_eq!(open, vec![("unclosed\n  runs on".to_string(), true)]);
+    let quoted: Vec<bool> = chat_segments("> ```\n> x\n> ```").into_iter().map(|s| s.code).collect();
+    assert_eq!(quoted, vec![true], "no stray quote marker");
+}
+
+/// **The operator rides the line** (issue #5): the label as a peer may
+/// show it, the agent flag for the colour, "AI" for an unnamed agent.
+#[test]
+fn the_operator_label_rides_the_chat_line() {
+    let mut m = ChatMessage::text(MessageId([1; 16]), "mara", "hi", 1);
+    assert_eq!((chat_line(0, &m, "me", &[]).op.as_str(), chat_line(0, &m, "me", &[]).op_agent), ("", false));
+    m.operator = Some(molt_core::ChatOperator { label: "Claude\u{7}".into(), agent: true });
+    let l = chat_line(0, &m, "me", &[]);
+    assert_eq!((l.op.as_str(), l.op_agent), ("Claude", true));
+    m.operator = Some(molt_core::ChatOperator { label: String::new(), agent: true });
+    assert_eq!(chat_line(0, &m, "me", &[]).op, "AI");
+    assert_eq!(chat_line(1, &m, "me", &[]).op, "KI");
+    m.operator = Some(molt_core::ChatOperator { label: "Ana".into(), agent: false });
+    let l = chat_line(0, &m, "me", &[]);
+    assert_eq!((l.op.as_str(), l.op_agent), ("Ana", false));
+    m.kind = molt_core::ChatKind::System;
+    assert_eq!(chat_line(0, &m, "me", &[]).op, "", "a system line names no operator");
 }

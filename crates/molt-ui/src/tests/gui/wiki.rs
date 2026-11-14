@@ -3211,7 +3211,7 @@ fn no_block_runs_past_the_right_edge_of_the_preview() {
                 .next()
                 .expect("the body renders");
             let edge = body.absolute_position().x + body.size().width - 16.0;
-            let past = ["BrainBlockView", "LinkRun", "SpanFlow"]
+            let past = ["BrainBlockView", "LinkRun", "SpanFlow", "CodeBlock"]
                 .into_iter()
                 .flat_map(|t| i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, t))
                 .map(|e| e.absolute_position().x + e.size().width)
@@ -3222,4 +3222,21 @@ fn no_block_runs_past_the_right_edge_of_the_preview() {
         }
     }
     assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// **A wiki code block keeps its columns** (issue #3): monospace, no word
+/// wrap, a long line runs on inside the block instead of reflowing.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_wiki_code_block_does_not_wrap() {
+    let long = "x".repeat(400);
+    let (ui, _shown) = tagged_doc_window(&format!("# A\n\n```\n| a |\n{long}\n```\n"));
+    let block = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "wiki-code")
+        .next()
+        .expect("the code block");
+    let text = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "CodeBlock::cb-t")
+        .next()
+        .expect("the code text");
+    assert!(text.size().width > block.size().width, "the long line does not wrap");
+    assert!(block.size().height < 80.0, "two lines stay two lines: {}", block.size().height);
 }

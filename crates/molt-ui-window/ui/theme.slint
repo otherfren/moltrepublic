@@ -30,6 +30,12 @@ export struct ReceiptItem {
     read: bool, // true = they have confirmed reading (green); false = not yet (yellow)
 }
 
+// One piece of a chat body: prose, or a fenced code block.
+export struct ChatSeg {
+    text: string,
+    code: bool,
+}
+
 // One line in a surface's log: for chat, `lead` is the sender and `text` the
 // body; for gated surfaces `lead` is empty and `text` is the proposal summary.
 export struct LogLine {
@@ -54,7 +60,11 @@ export struct LogLine {
     file-meta: string, // rendered "1.2 MiB · PDF · 2026-07-01"
     file-available: bool, // still on the sharer's disk (false = removed)
     patch-id: int, // the proposal an applied row came from (-1 = unknown origin: chat rows, legacy dumps) — gates the 💬 jump into its discussion
+    op: string, // the seat's operator who wrote it ("" = not said)
+    op-agent: bool, // that operator is an AI agent
+    segs: [ChatSeg], // the body split at ``` fences (empty = no fence: `text` renders whole)
 }
+
 
 // One row of the Chain-History settings panel: a committed block of the
 // open republic (WP4b read_chain — the MCP tool serves the same view).
@@ -1748,6 +1758,9 @@ export global Strings {
     in property <string> toast-poked;
     in property <string> toast-poke-sent;
     in property <string> toast-talk-on;
+    in property <string> op-agent;
+    in property <string> op-agent-tip;
+    in property <string> op-human-tip;
     in property <string> set-s3-every;
     in property <string> set-s3-unit-min;
     in property <string> set-s3-keep;

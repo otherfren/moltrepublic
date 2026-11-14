@@ -986,6 +986,28 @@ fn opt_u32_arg(args: &Value, key: &str) -> Result<u32, String> {
     }
 }
 
+/// The `operator`/`agent` arguments of a posting tool (issue #5): absent
+/// both = `cmd` as is; else `cmd` wrapped, `agent` defaulting to true.
+fn with_operator(args: &Value, cmd: Command) -> Result<Command, String> {
+    let label = opt_str_arg(args, "operator")?;
+    let agent = match args.get("agent") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => return Err("argument `agent` must be true or false".to_string()),
+    };
+    if label.is_none() && agent.is_none() {
+        return Ok(cmd);
+    }
+    let operator = molt_core::ChatOperator { label: label.unwrap_or_default(), agent: agent.unwrap_or(true) };
+    Ok(Command::AsOperator { operator, inner: Box::new(cmd) })
+}
+
+/// The schema properties [`with_operator`] reads.
+fn operator_props(props: &mut Value) {
+    props["operator"] = json!({ "type": "string", "description": "optional: who at this seat writes - your name as an agent, at most 32 chars; shown beside the seat name" });
+    props["agent"] = json!({ "type": "boolean", "description": "optional: true (default) = an AI agent, false = a human; colours the label" });
+}
+
 /// An optional flag: absent or null = false, a non-boolean is a typo the
 /// caller has to hear about.
 fn opt_bool_arg(args: &Value, key: &str) -> Result<bool, String> {
@@ -1448,17 +1470,21 @@ pub fn tools() -> Vec<ToolDef> {
             name: "chat_send",
             command: "chat",
             scope: Scope::Seat,
-            description: "Post a message to the ungated chat. The reply names the message `id` (the handle for react_chat, delete_chat, mark_read and `quote`). Every message rides the republic's ONE broadcast stream and every member receives it; `channel` merely files it under a view of that stream - a tag, never a boundary or a room (it hides nothing and grants nothing). Kinds: {\"kind\":\"group\"} the all-hands default; {\"kind\":\"patch\",\"id\":N} discussion attached to proposal N; {\"kind\":\"topic\",\"name\":\"…\"} a free named topic, created by simply posting to it. Pass `quote` (the quoted message's 32-char hex id, from read_state) to reply - and quoting a message that lives in another channel is the cross-post idiom: the original stays where it is, the quote carries it across. A review remark on a proposal belongs in ITS patch channel (the `channel` every propose/approve reply names), not in the group - also after the vote decided. A reason for your own vote goes with it, as approve/decline `note`. A long exchange - agents talking among themselves above all - belongs in a topic, not the group: a topic ends as a whole after its window of silence (thread_close, thread_forget end it sooner). A closed topic refuses new messages.",
-            schema: || json!({
-                "type": "object",
-                "properties": {
-                    "body": { "type": "string" },
-                    "quote": { "type": "string", "description": "optional: the quoted message's id (32-char lowercase hex, from read_state)" },
-                    "channel": channel_schema("optional: the channel view this message files under (omit for the all-hands group)")
-                },
-                "required": ["body"]
-            }),
-            build: |args| Ok(Command::Chat {
+            description: "Post a message to the ungated chat. The reply names the message `id` (the handle for react_chat, delete_chat, mark_read and `quote`). Every message rides the republic's ONE broadcast stream and every member receives it; `channel` merely files it under a view of that stream - a tag, never a boundary or a room (it hides nothing and grants nothing). Kinds: {\"kind\":\"group\"} the all-hands default; {\"kind\":\"patch\",\"id\":N} discussion attached to proposal N; {\"kind\":\"topic\",\"name\":\"…\"} a free named topic, created by simply posting to it. Pass `quote` (the quoted message's 32-char hex id, from read_state) to reply - and quoting a message that lives in another channel is the cross-post idiom: the original stays where it is, the quote carries it across. A review remark on a proposal belongs in ITS patch channel (the `channel` every propose/approve reply names), not in the group - also after the vote decided. A reason for your own vote goes with it, as approve/decline `note`. A long exchange - agents talking among themselves above all - belongs in a topic, not the group: a topic ends as a whole after its window of silence (thread_close, thread_forget end it sooner). A closed topic refuses new messages. An agent passes `operator` (its name): members then see an agent wrote it - an unchecked label, not an identity.",
+            schema: || {
+                let mut v = json!({
+                    "type": "object",
+                    "properties": {
+                        "body": { "type": "string" },
+                        "quote": { "type": "string", "description": "optional: the quoted message's id (32-char lowercase hex, from read_state)" },
+                        "channel": channel_schema("optional: the channel view this message files under (omit for the all-hands group)")
+                    },
+                    "required": ["body"]
+                });
+                operator_props(&mut v["properties"]);
+                v
+            },
+            build: |args| with_operator(args, Command::Chat {
                 body: str_arg(args, "body")?,
                 quote: opt_id_arg(args, "quote")?,
                 channel: channel_arg(args)?.unwrap_or_default(),
@@ -1817,15 +1843,19 @@ pub fn tools() -> Vec<ToolDef> {
             command: "approve",
             scope: Scope::Seat,
             description: "Contribute THIS node's approval toward a pending proposal. On a chain-governed republic it is a real signature gossiped to the mesh (the block seals once m distinct members signed); elsewhere the node records at most its own single approval - it can never approve on behalf of other members. Pass `note` to post your reasoning into the proposal's discussion in the same call: it lands BEFORE the vote, so a tipping signature never leaves its reason behind. The reply is the record after the vote (state, approvals/threshold, `head`, `channel`); approving an already-applied proposal answers the same shape - a late approval is not an error, and its note still lands. `approvals` counts the signatures THIS node holds; the block may already be sealed on a peer - read_chain shows the head. `state: \"sealing\"` with `held_for_secs` means the threshold is reached here and the seal waits out one propagation round. Refused while the peers are ahead (status.chain_lag.peers_ahead > 0): the signature would be bound to a height the republic has left and every peer would drop it.",
-            schema: || json!({
-                "type": "object",
-                "properties": {
-                    "proposal_id": { "type": "integer" },
-                    "note": { "type": "string", "description": "optional: your reasoning, posted into the proposal's discussion before the vote" }
-                },
-                "required": ["proposal_id"]
-            }),
-            build: |args| Ok(Command::Approve {
+            schema: || {
+                let mut v = json!({
+                    "type": "object",
+                    "properties": {
+                        "proposal_id": { "type": "integer" },
+                        "note": { "type": "string", "description": "optional: your reasoning, posted into the proposal's discussion before the vote" }
+                    },
+                    "required": ["proposal_id"]
+                });
+                operator_props(&mut v["properties"]);
+                v
+            },
+            build: |args| with_operator(args, Command::Approve {
                 proposal: ProposalId(u64_arg(args, "proposal_id")?),
                 note: opt_str_arg(args, "note")?,
             }),
@@ -1835,15 +1865,19 @@ pub fn tools() -> Vec<ToolDef> {
             command: "decline",
             scope: Scope::Seat,
             description: "Cast this seat's vote AGAINST a pending proposal - ONE voice, not a veto: the proposal turns rejected for everyone only once approval can no longer reach the threshold (declines > n-m). One stance per member; declining after your own approve is allowed and is how a proposer signals retraction when withdraw is unavailable. Pass `note` to post the reason into the proposal's discussion in the same call: it lands BEFORE the vote. `approvals` counts the signatures THIS node holds; the block may already be sealed on a peer - read_chain shows the head. Refused while the peers are ahead (status.chain_lag.peers_ahead > 0), like approve.",
-            schema: || json!({
-                "type": "object",
-                "properties": {
-                    "proposal_id": { "type": "integer" },
-                    "note": { "type": "string", "description": "optional: your reasoning, posted into the proposal's discussion before the vote" }
-                },
-                "required": ["proposal_id"]
-            }),
-            build: |args| Ok(Command::Decline {
+            schema: || {
+                let mut v = json!({
+                    "type": "object",
+                    "properties": {
+                        "proposal_id": { "type": "integer" },
+                        "note": { "type": "string", "description": "optional: your reasoning, posted into the proposal's discussion before the vote" }
+                    },
+                    "required": ["proposal_id"]
+                });
+                operator_props(&mut v["properties"]);
+                v
+            },
+            build: |args| with_operator(args, Command::Decline {
                 proposal: ProposalId(u64_arg(args, "proposal_id")?),
                 note: opt_str_arg(args, "note")?,
             }),
@@ -1853,15 +1887,19 @@ pub fn tools() -> Vec<ToolDef> {
             command: "withdraw",
             scope: Scope::Seat,
             description: "Pull back a proposal THIS seat proposed (proposer only - anyone else is refused): it turns terminal on every node without forging any vote, and the card reads \"pulled back\". Only works while the vote is still pending. Pass `note` to post the reason into the proposal's discussion in the same call: it lands BEFORE the retraction. The reply is the record, like approve/decline.",
-            schema: || json!({
-                "type": "object",
-                "properties": {
-                    "proposal_id": { "type": "integer" },
-                    "note": { "type": "string", "description": "optional: your reasoning, posted into the proposal's discussion before the retraction" }
-                },
-                "required": ["proposal_id"]
-            }),
-            build: |args| Ok(Command::Withdraw {
+            schema: || {
+                let mut v = json!({
+                    "type": "object",
+                    "properties": {
+                        "proposal_id": { "type": "integer" },
+                        "note": { "type": "string", "description": "optional: your reasoning, posted into the proposal's discussion before the retraction" }
+                    },
+                    "required": ["proposal_id"]
+                });
+                operator_props(&mut v["properties"]);
+                v
+            },
+            build: |args| with_operator(args, Command::Withdraw {
                 proposal: ProposalId(u64_arg(args, "proposal_id")?),
                 note: opt_str_arg(args, "note")?,
             }),
@@ -3320,7 +3358,10 @@ pub(crate) mod tests {
         // hook; the value itself rides the settings surface as
         // `poke_wake_command` (ADR-0007), so this stays internal only
         // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 86] = [
+        const INTERNAL: [&str; 87] = [
+            // not a door of its own: chat_send/approve/decline/withdraw
+            // build it from their `operator`/`agent` arguments
+            "as_operator",
             // a referenced file's bytes off the local disk / mirror store
             // (wiki_files_and_images.md §3.3): the GUI's picture, an agent
             // gets download_file into its exchange folder
@@ -4145,6 +4186,35 @@ pub(crate) mod tests {
         let mut args = required_args(props, required);
         args.insert("wake_on".into(), json!([1, "kanban"]));
         assert!(build("save_settings", &Value::Object(args)).is_err());
+    }
+
+    #[test]
+    fn the_posting_tools_take_an_operator() {
+        let claude = molt_core::ChatOperator { label: "Claude".into(), agent: true };
+        for (tool, args) in [
+            ("chat_send", json!({ "body": "hi", "operator": "Claude" })),
+            ("approve", json!({ "proposal_id": 1, "operator": "Claude", "agent": true })),
+            ("decline", json!({ "proposal_id": 1, "operator": "Claude" })),
+            ("withdraw", json!({ "proposal_id": 1, "operator": "Claude" })),
+        ] {
+            let schema = (tool_named(tool).schema)();
+            assert_eq!(schema["properties"]["operator"]["type"], "string", "{tool}");
+            assert_eq!(schema["properties"]["agent"]["type"], "boolean", "{tool}");
+            match build(tool, &args).expect("builds") {
+                Command::AsOperator { operator, inner } => {
+                    assert_eq!(operator, claude, "{tool}: agent is the default");
+                    let tag = serde_json::to_value(&*inner).expect("json")["cmd"].clone();
+                    assert_eq!(tag, tool_named(tool).command, "{tool}");
+                }
+                other => panic!("{tool}: {other:?}"),
+            }
+        }
+        match build("chat_send", &json!({ "body": "hi", "operator": "Ana", "agent": false })).expect("builds") {
+            Command::AsOperator { operator, .. } => assert!(!operator.agent && operator.label == "Ana"),
+            other => panic!("{other:?}"),
+        }
+        assert!(matches!(build("chat_send", &json!({ "body": "hi" })), Ok(Command::Chat { .. })));
+        assert!(build("chat_send", &json!({ "body": "hi", "agent": "yes" })).is_err());
     }
 
     #[test]

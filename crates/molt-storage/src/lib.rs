@@ -4954,6 +4954,7 @@ mod tests {
                 deleted_by: None,
                 file: None,
                 thread_op: None,
+                operator: None,
             }),
         }
     }

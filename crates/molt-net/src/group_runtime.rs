@@ -1874,6 +1874,7 @@ mod tests {
                 deleted_by: None,
                 file: None,
                 thread_op: None,
+                operator: None,
                 read_by: std::collections::BTreeSet::new(),
             }),
         );

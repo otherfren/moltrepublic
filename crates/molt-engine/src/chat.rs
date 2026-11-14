@@ -18,7 +18,7 @@
 //! (`net/`) — on a session-only context that means the loopback demo
 //! mesh, whose peers answer through their own engines.
 
-use molt_core::{
+use molt_core::{Command, 
     ChannelRef, ChatKind, ChatMessage, Event, FileMeta, MemberId, MessageId, MoltError,
     Reply, WorkspaceEvent,
 };
@@ -98,6 +98,26 @@ impl State {
         Ok(Reply::Sent { id })
     }
 
+    /// Run a posting command with its message naming `operator`.
+    pub(crate) fn cmd_as_operator(
+        &mut self,
+        operator: molt_core::ChatOperator,
+        inner: Command,
+    ) -> Result<Reply, MoltError> {
+        if !matches!(
+            inner,
+            Command::Chat { .. } | Command::Approve { .. } | Command::Decline { .. } | Command::Withdraw { .. }
+        ) {
+            return Err(MoltError::BadPayload("operator: only chat, approve, decline, withdraw".into()));
+        }
+        let operator = molt_core::ChatOperator::checked(&operator.label, operator.agent)
+            .map_err(MoltError::BadPayload)?;
+        self.chat_operator = operator;
+        let res = self.handle(inner);
+        self.chat_operator = None;
+        res
+    }
+
     /// Build, record and announce one chat message; returns its minted id.
     pub(crate) fn post_message(
         &mut self,
@@ -143,6 +163,9 @@ impl State {
             .with_channel(channel)
             .with_kind(kind);
         msg.quote_id = quote_id;
+        if kind.is_user() {
+            msg.operator = self.chat_operator.clone();
+        }
         self.post_chat_message(from, msg);
         Ok(id)
     }

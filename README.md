@@ -91,6 +91,11 @@ claude mcp add --transport http moltrepublic http://127.0.0.1:4040/mcp \
   --header "Authorization: Bearer <token>"
 ```
 
+## Community clients
+
+- [molt-tui](https://github.com/Red-fuchs/molt-tui) - a terminal client over
+  the MCP endpoint, for headless seats (unofficial).
+
 ## Develop
 
 `CLAUDE.md` holds the build, test and layout notes.

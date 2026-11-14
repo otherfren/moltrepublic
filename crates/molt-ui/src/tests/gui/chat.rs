@@ -407,3 +407,87 @@ fn a_file_cards_click_carries_the_file_name() {
         "the chat card passes the file name beside the message id"
     );
 }
+
+/// **A fenced block renders in monospace and scrolls sideways; the wheel
+/// still scrolls the chat; the operator label names the agent** (issues
+/// #4, #5).
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_code_block_scrolls_sideways_and_the_chat_still_scrolls() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1400, 700));
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("chat".into());
+    ui.set_selected_view("today".into());
+    ui.set_selected_channel("group".into());
+    let mut log: Vec<LogLine> = (0..30)
+        .map(|i| LogLine { lead: "mara".into(), text: format!("line {i}").into(), quote: -1, first: true, patch_id: -1, ..LogLine::default() })
+        .collect();
+    let wide = format!("+{}+", "-".repeat(300));
+    log.push(LogLine {
+        id: "7b".repeat(16).into(),
+        lead: "walter".into(),
+        text: "art".into(),
+        quote: -1,
+        first: true,
+        patch_id: -1,
+        op: "Claude".into(),
+        op_agent: true,
+        segs: ModelRc::new(VecModel::from(vec![
+            ChatSeg { text: "art".into(), code: false },
+            ChatSeg { text: format!("{wide}\n| a |").into(), code: true },
+        ])),
+        ..LogLine::default()
+    });
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "chat".into(),
+        log: ModelRc::new(VecModel::from(log)),
+        ..SurfaceTab::default()
+    }])));
+    apply_strings(&ui, 0);
+    let _shown = show_headless(&ui);
+
+    let op = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "ChatRow::op-t")
+        .next()
+        .expect("the operator label");
+    assert!(op.size().width > 10.0, "the operator label shows");
+    let block = || {
+        i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "chat-code")
+            .next()
+            .expect("the code block")
+    };
+    let text = || {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "CodeBlock::cb-t")
+            .next()
+            .expect("the code text")
+    };
+    assert!(block().size().width < 1400.0, "the block keeps the card width");
+    assert!(text().size().width > block().size().width, "a long line does not wrap");
+    assert!(block().size().height < 80.0, "two lines, no word wrap: {}", block().size().height);
+
+    let wheel = |dx: f32, dy: f32| {
+        let b = block();
+        let at = slint::LogicalPosition::new(
+            b.absolute_position().x + 40.0,
+            b.absolute_position().y + b.size().height / 2.0,
+        );
+        ui.window().dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+        ui.window().dispatch_event(slint::platform::WindowEvent::PointerScrolled { position: at, delta_x: dx, delta_y: dy });
+        for _ in 0..40 {
+            i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(50));
+        }
+    };
+    // let the opening layout settle (the panes animate in)
+    i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(1000));
+    let inset = || text().absolute_position().x - block().absolute_position().x;
+    let (x0, y0) = (inset(), block().absolute_position().y);
+    wheel(-120.0, 0.0);
+    assert!(inset() < x0 - 50.0, "a sideways wheel scrolls the line: {x0} -> {}", inset());
+    wheel(0.0, 120.0);
+    // scrolled up far enough, the virtualized row is gone altogether
+    let moved = i_slint_backend_testing::ElementHandle::find_by_accessible_label(&ui, "chat-code")
+        .next()
+        .is_none_or(|b| (b.absolute_position().y - y0).abs() > 1.0);
+    assert!(moved, "a vertical wheel over the block still scrolls the chat");
+}

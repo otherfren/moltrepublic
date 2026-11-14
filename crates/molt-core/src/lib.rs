@@ -29,12 +29,14 @@ pub mod kanban_review;
 pub mod kanban_view;
 pub mod kanban_wake;
 pub mod log_tail;
+pub mod operator;
 pub mod relay;
 pub mod vault;
 pub mod wallet;
 pub mod wiki_fold;
 pub mod wiki_patch;
 pub mod wiki_refs;
+pub use operator::ChatOperator;
 pub use chain::{
     applied_lww_slot, approval_bytes, block_link_bytes, checkpoint_canonical_bytes, ChainBlock,
     ChainChange, CheckpointState, MembershipOp, GENESIS_PREV,
@@ -1620,6 +1622,7 @@ impl ChatMessage {
             deleted_by: None,
             file: None,
             thread_op: None,
+            operator: None,
         }
     }
 
@@ -1701,6 +1704,9 @@ pub struct ChatMessage {
     /// other message, so their bytes stay as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thread_op: Option<ThreadOp>,
+    /// Which operator of the seat wrote it (issue #5); `None` = not said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operator: Option<ChatOperator>,
 }
 
 // ---------------------------------------------------------------------------
@@ -4217,6 +4223,14 @@ pub enum Command {
         /// The channel this message files under (`Group` when omitted).
         #[serde(default)]
         channel: ChannelRef,
+    },
+    /// Run `cmd` (chat, approve, decline, withdraw) with the chat message
+    /// it posts naming its operator (issue #5).
+    AsOperator {
+        /// The operator to name.
+        operator: ChatOperator,
+        /// The wrapped command.
+        inner: Box<Command>,
     },
     /// Close a topic thread for every seat: a system line, no vote
     /// (`docs_archive/chat/chat_threads_lifecycle.md` D1).

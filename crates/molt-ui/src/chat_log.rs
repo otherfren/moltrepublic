@@ -12,7 +12,7 @@ use serde::Deserialize;
 use crate::labels::{file_date_label, file_size_label, when_label};
 use crate::channels::{KnownFate, KnownProposal};
 use crate::surfaces::{
-    display_title, one_line, LogLineData, ReactionData, ReceiptData, TalkLineData,
+    display_title, one_line, ChatSegData, LogLineData, ReactionData, ReceiptData, TalkLineData,
 };
 
 /// One quotable message, as the teaser renderer needs it — built over the
@@ -95,6 +95,19 @@ pub(crate) fn chat_line(lang: i32, m: &ChatMessage, me: &str, roster: &[String])
             }
         })
         .collect();
+    let (op, op_agent) = match &m.operator {
+        Some(o) if m.kind.is_user() => {
+            let label = o.shown_label();
+            let label = if label.is_empty() && o.agent {
+                let l = if lang == 1 { crate::i18n::Lexicon::de() } else { crate::i18n::Lexicon::en() };
+                l.op_agent.to_string()
+            } else {
+                label
+            };
+            (label, o.agent)
+        }
+        _ => (String::new(), false),
+    };
     // a shared file renders as a card: name plus "size · type · date"
     let (has_file, file_name, file_meta, file_available) = match &m.file {
         Some(f) => (
@@ -162,7 +175,55 @@ pub(crate) fn chat_line(lang: i32, m: &ChatMessage, me: &str, roster: &[String])
         file_name,
         file_meta,
         file_available,
+        op,
+        op_agent,
+        segs: if m.kind.is_user() { chat_segments(&m.body) } else { Vec::new() },
     }
+}
+
+/// The body split at ``` fences (issue #4); empty when it has none, so a
+/// plain message keeps its one selectable text. Fences only: an indented
+/// line stays prose, as it always was.
+pub(crate) fn chat_segments(body: &str) -> Vec<ChatSegData> {
+    use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
+    if !body.contains("```") && !body.contains("~~~") {
+        return Vec::new();
+    }
+    let mut segs = Vec::new();
+    let mut prose_from = 0;
+    let mut code: Option<String> = None;
+    let push_prose = |segs: &mut Vec<ChatSegData>, text: &str| {
+        let text = text.trim_matches('\n').trim_end();
+        // a fence inside a quote or a list leaves its markers behind
+        if !text.chars().all(|c| c.is_whitespace() || matches!(c, '>' | '-' | '*' | '+')) {
+            segs.push(ChatSegData { text: text.to_string(), code: false });
+        }
+    };
+    for (ev, range) in Parser::new(body).into_offset_iter() {
+        match ev {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
+                push_prose(&mut segs, &body[prose_from..range.start]);
+                prose_from = range.end;
+                code = Some(String::new());
+            }
+            Event::Text(t) if code.is_some() => {
+                if let Some(c) = code.as_mut() {
+                    c.push_str(&t);
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                if let Some(c) = code.take() {
+                    segs.push(ChatSegData { text: c.trim_end_matches('\n').to_string(), code: true });
+                }
+            }
+            _ => {}
+        }
+    }
+    if segs.iter().all(|s| !s.code) {
+        return Vec::new();
+    }
+    push_prose(&mut segs, &body[prose_from.min(body.len())..]);
+    segs
 }
 
 /// The whole-log pass over a chat: author-block zebra (the stripe flips
@@ -319,6 +380,9 @@ pub(crate) fn system_line_data(text: String) -> LogLineData {
         file_meta: String::new(),
         file_available: false,
         proposal_id: None,
+        op: String::new(),
+        op_agent: false,
+        segs: Vec::new(),
     }
 }
 

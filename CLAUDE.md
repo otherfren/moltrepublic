@@ -180,7 +180,8 @@ finding, the same as a bug.
   all on the surface (a stored workspace's phrase as a pull, `reveal_seed`;
   `read_session` only flags `has_seed`). What stays INTERNAL is only what would let a client
   speak AS someone else - `ui_publish` (the window) and every `net_*`
-  channel (the transport/ritual tasks). The four stored secrets
+  channel (the transport/ritual tasks) - plus `as_operator`, which the
+  posting tools build from their own arguments. The four stored secrets
   (`mcp_token`, `mcp_read_token`, `s3_secret_key`, `wallet_daemon_login`)
   stay write-only, and the read-only key never sees a phrase, a secret or
   the `wallet` surface.

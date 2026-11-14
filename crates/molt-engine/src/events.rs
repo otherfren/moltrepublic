@@ -963,6 +963,7 @@ mod tests {
                 deleted_by: None,
                 file: None,
                 thread_op: None,
+                operator: None,
             }
         };
         vec![
@@ -1752,6 +1753,7 @@ mod tests {
             deleted_by: None,
             file: None,
             thread_op: None,
+            operator: None,
         };
         let env = |seq: u64, m: &ChatMessage| EventEnvelope { prev_seq: 0,
             seq,

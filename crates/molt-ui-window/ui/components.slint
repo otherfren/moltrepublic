@@ -709,6 +709,54 @@ export component ScrollHint inherits Rectangle {
         : 0px);
 }
 
+// A fenced code block (chat and wiki): monospace, no wrap, so ASCII art
+// and tables keep their columns; a long line scrolls sideways.
+export component CodeBlock inherits Rectangle {
+    in property <string> text;
+    in property <length> font-size: Theme.fs-cap;
+    in property <color> ink: Theme.text;
+    in property <bool> italic: false;
+    property <bool> wide: cb-fl.viewport-width > cb-fl.width + 1px;
+    // the long line must not widen the host: the block takes the width
+    // it is given and scrolls inside it
+    min-width: 0px;
+    preferred-width: 0px;
+    background: Theme.bg;
+    border-radius: Theme.win95 ? 0px : 6px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    clip: true;
+    height: cb-t.preferred-height + 16px + (root.wide ? 6px : 0px);
+    cb-fl := Flickable {
+        width: 100%;
+        height: 100%;
+        viewport-width: max(self.width, cb-t.preferred-width + 20px);
+        viewport-height: self.height;
+        // read-only input: the code is selectable, Ctrl+C copies it
+        cb-t := TextInput {
+            x: 10px;
+            y: 8px;
+            text: root.text;
+            read-only: true;
+            single-line: false;
+            color: root.ink;
+            font-family: "monospace";
+            font-size: root.font-size;
+            font-italic: root.italic;
+            wrap: no-wrap;
+        }
+    }
+    if root.wide: Rectangle {
+        y: parent.height - 5px;
+        height: 3px;
+        x: (-cb-fl.viewport-x) / cb-fl.viewport-width * parent.width;
+        width: max(24px, cb-fl.width / cb-fl.viewport-width * parent.width);
+        border-radius: 1.5px;
+        background: Theme.faint;
+        opacity: 0.5;
+    }
+}
+
 // The one confirm-dialog skeleton every modal shares: dimmed scrim (click
 // dismisses), a centred dialog with title + body, an optional extra-content
 // slot (`@children`) and the Cancel/Confirm row. Escape handling stays with
