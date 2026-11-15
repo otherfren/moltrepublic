@@ -3477,6 +3477,10 @@ pub struct EngineStateDump {
     /// `Approved` frames, so a snapshot must carry it for the same reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub own_approvals: Vec<u64>,
+    /// Decided cards that did not apply and aged out with their
+    /// discussion: a late re-serve of one must not reopen the vote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_proposals: Vec<u64>,
 }
 
 /// One collected approval signature of an open proposal, as a snapshot

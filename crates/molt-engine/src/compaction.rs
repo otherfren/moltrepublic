@@ -93,6 +93,30 @@ impl State {
             .collect()
     }
 
+    /// Drop every decided card that did not apply (rejected, withdrawn,
+    /// superseded) and was decided before `cutoff` - the instant its
+    /// discussion goes too. An unstamped one starts its clock at `now`.
+    /// Returns how many went.
+    pub(crate) fn retire_decided_cards(&mut self, cutoff: u64, now: u64) -> usize {
+        let mut gone = Vec::new();
+        for (id, p) in &mut self.proposals {
+            if p.state != molt_core::ProposalState::Rejected {
+                continue;
+            }
+            if p.declined_at == 0 {
+                p.declined_at = now;
+            } else if p.declined_at < cutoff {
+                gone.push(*id);
+            }
+        }
+        for id in &gone {
+            self.proposals.remove(id);
+            self.chain.pending_sigs.remove(id);
+            self.retired.insert(*id);
+        }
+        gone.len()
+    }
+
     /// The ack-progress grace of a round at `now` (F4b).
     pub(crate) fn ack_clock(&self, now: u64) -> molt_storage::AckClock {
         ack_clock_for(self.org_effective().retention_days * 86_400, now)
@@ -231,13 +255,17 @@ impl State {
     /// round would lose the race against `Close` and silently never happen.
     pub(crate) fn compact_now(&mut self, now: u64, wait: bool) {
         let cutoff = self.compaction_cutoff(now);
+        let cards = self.retire_decided_cards(cutoff, now);
         let (dump, dropped) = match self.compact_chat_at(cutoff, now) {
             Some(trimmed) => trimmed,
             // F4b: once pruned, every beat runs the round, or a quiet
             // republic's ack clock would stop and a lurker pin the floor
-            None if self.chat_pruned => (self.dump(), 0),
+            None if self.chat_pruned || cards > 0 => (self.dump(), 0),
             None => return,
         };
+        if cards > 0 {
+            tracing::info!(cards, cutoff, "decided votes aged out");
+        }
         let holding_peers = self.peers_holding_the_log(now);
         let clock = self.ack_clock(now);
         let snapshot = WorkspaceSnapshot {
@@ -270,7 +298,7 @@ impl State {
         }
         // a dropped message must leave the readers' views now, not at the
         // next open — the session push is what makes them re-read
-        if dropped > 0 {
+        if dropped > 0 || cards > 0 {
             self.emit_session(molt_core::SessionScope::Full);
         }
     }
@@ -337,6 +365,41 @@ mod tests {
 
         // a second round with nothing eligible is a no-op
         assert!(st.compact_chat(1_000).is_none());
+    }
+
+    /// A decided card that did not apply (rejected, withdrawn, superseded)
+    /// goes at the same cutoff as its discussion; a late re-serve of it is
+    /// refused instead of reopening the vote. Open and applied cards stay.
+    #[test]
+    fn a_decided_card_goes_with_its_discussion_and_stays_gone() {
+        use molt_core::{ProposalState, Surface};
+        let mut st = plain_state();
+        let card = |state, declined_at| molt_core::ProposalRecord {
+            state,
+            declined_at,
+            ..molt_core::ProposalRecord::new(Surface::Memory, serde_json::json!({"op": "add_note", "title": "t"}), "petra".into())
+        };
+        st.proposals.insert(1, card(ProposalState::Rejected, 100));
+        st.proposals.insert(2, card(ProposalState::Rejected, 5_000));
+        st.proposals.insert(3, card(ProposalState::Proposed, 0));
+        st.proposals.insert(4, card(ProposalState::Applied, 0));
+        st.proposals.insert(5, card(ProposalState::Rejected, 0));
+        st.next_id = 6;
+        assert_eq!(st.retire_decided_cards(1_000, 2_000), 1);
+        let mut left: Vec<u64> = st.proposals.keys().copied().collect();
+        left.sort_unstable();
+        assert_eq!(left, vec![2, 3, 4, 5], "only the old decided card goes");
+        assert_eq!(st.proposals[&5].declined_at, 2_000, "an unstamped one starts its clock now");
+        assert_eq!(st.dump().retired_proposals, vec![1], "the snapshot remembers it");
+        let again = st.receive_proposed(1, Surface::Memory, serde_json::json!({"op": "add_note", "title": "t"}), "petra");
+        assert!(!again && !st.proposals.contains_key(&1), "a late re-serve does not reopen it");
+        assert!(!st.decline_would_shed(1, "petra"), "accepted, so it is acked and not resent");
+        assert_eq!(st.register_decline(1, "petra", 9_000, ""), crate::proposals::DeclineOutcome::Known, "no park");
+        assert_eq!(st.register_withdraw(1, "petra", 9_000), crate::proposals::WithdrawOutcome::Ignored, "no park");
+        assert!(!st.receive_approval(1, "petra", 1, "ab") && !st.chain.pending_sigs.contains_key(&1), "no vote kept");
+        let mut restored = plain_state();
+        restored.restore_dump(st.dump());
+        assert!(!restored.receive_proposed(1, Surface::Memory, serde_json::json!({"op": "add_note", "title": "t"}), "petra"));
     }
 
     /// Etappe 4 (§A.1 C4): the share record of a dropped message falls with

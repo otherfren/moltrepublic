@@ -593,6 +593,7 @@ impl State {
                 })
                 .collect(),
             own_approvals: self.chain.own_approvals.iter().copied().collect(),
+            retired_proposals: self.retired.iter().copied().collect(),
         }
     }
 
@@ -712,6 +713,7 @@ impl State {
             }
         }
         self.proposals = dump.proposals.into_iter().collect();
+        self.retired = dump.retired_proposals.into_iter().collect();
         // a store written before the block outranked the walk carries
         // verdicts on applied cards; an applied card carries none
         let healed = self
@@ -898,6 +900,7 @@ impl State {
             self.applied.insert(s, Vec::new());
         }
         self.proposals.clear();
+        self.retired.clear();
         self.next_id = 1;
         self.next_seq = 1;
     }

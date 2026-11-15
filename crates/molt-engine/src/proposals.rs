@@ -1279,6 +1279,9 @@ impl State {
     /// this node does not know yet PARKS the verdict (bounded, one slot
     /// per id — a withdraw has exactly one legitimate author).
     pub(crate) fn register_withdraw(&mut self, id: u64, by: &str, ts: u64) -> WithdrawOutcome {
+        if self.retired.contains(&id) {
+            return WithdrawOutcome::Ignored;
+        }
         let minter = self.minting_seat(id);
         let Some(p) = self.proposals.get_mut(&id) else {
             if id > self.next_id.saturating_add(PARKED_DECLINE_ID_WINDOW) {
@@ -1425,7 +1428,7 @@ impl State {
     /// garbage stays accept-and-drop (it must not ride resend forever),
     /// and an id already parked never sheds (the member dedup appends).
     pub(crate) fn decline_would_shed(&self, id: u64, by: &str) -> bool {
-        if !self.is_chain_governed() || self.proposals.contains_key(&id) {
+        if !self.is_chain_governed() || self.proposals.contains_key(&id) || self.retired.contains(&id) {
             return false;
         }
         if id > self.next_id.saturating_add(PARKED_DECLINE_ID_WINDOW) {
@@ -1450,6 +1453,9 @@ impl State {
         ts: u64,
         hash: &str,
     ) -> DeclineOutcome {
+        if self.retired.contains(&id) {
+            return DeclineOutcome::Known;
+        }
         let is_own = by == self.member();
         // W6: one decline kills the purse's init card where it lands
         let init_card = self

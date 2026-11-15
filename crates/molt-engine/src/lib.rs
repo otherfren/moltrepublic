@@ -1276,6 +1276,8 @@ pub(crate) struct State {
     /// ([`molt_core::ProposalRecord`]), so snapshots need no conversion.
     pub(crate) proposals: HashMap<u64, ProposalRecord>,
     pub(crate) next_id: u64,
+    /// Decided cards dropped with their discussion: never reopened.
+    pub(crate) retired: std::collections::BTreeSet<u64>,
     /// The next event seq (strictly monotonic per workspace; reset on close).
     pub(crate) next_seq: u64,
     /// Identity of the open workspace, from its genesis event (None = no
@@ -1611,6 +1613,7 @@ impl State {
             wiki_index_staging: std::sync::Arc::new(std::sync::Mutex::new(None)),
             proposals: HashMap::new(),
             next_id: 1,
+            retired: std::collections::BTreeSet::new(),
             next_seq: 1,
             replica: None,
             identity_sk: None,

@@ -184,6 +184,15 @@ Export-Include-Tabelle und der Import-Allowlist — ein Blob eines kompaktierten
 Workspaces hätte Segmente ohne ihre Schlüssel transportiert, also ein
 unentschlüsselbares Log auf genau dem Pfad, der zur Wiederherstellung da ist.
 
+**Entschiedene Karten (2026-11-15):** Eine abgelehnte, zurückgezogene oder
+überholte Karte fällt in derselben Runde und am selben Schnitt wie ihre
+Diskussion (Fenster + Karenz, Standard 14 Tage; konfiguriert über
+`set_chat_retention`). Eine Karte ohne Stempel (überholt, Altbestand) startet
+ihre Uhr beim ersten Lauf. Die ID bleibt als Grabstein im Snapshot
+(`retired_proposals`): ein später Re-Serve, eine Stimme oder ein Withdraw für
+sie wird angenommen und verworfen, nie geparkt und nie als offene Karte
+wiederbelebt. Angenommene Karten bleiben (Chain-Blöcke).
+
 **Offen / bewusst nicht gebaut:** F7 bleibt wie entschieden (alte S3-Kopien
 altern über `s3_keep_copies` aus, kein aktives Durchgreifen) — die Karenz ist
 in §A.3 als Restrisiko benannt und gehört noch in die Settings-Hilfe.

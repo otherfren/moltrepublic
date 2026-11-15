@@ -1068,6 +1068,11 @@ impl State {
             tracing::warn!(%id, "refusing a proposal with an implausible id");
             return false;
         }
+        // a decided card that aged out: a late re-serve must not reopen it
+        if self.retired.contains(&id) {
+            tracing::debug!(%id, "refusing a retired proposal");
+            return false;
+        }
         if is_base_entry_op(&payload) {
             tracing::warn!(%id, %by, "refusing a proposal with a reserved op");
             return false;
@@ -1161,7 +1166,7 @@ impl State {
     /// Inbound: a peer's signed approval (gossip). Collect + try to seal.
     /// `true` when it was dropped for a height beyond the next block.
     pub(crate) fn receive_approval(&mut self, id: u64, by: &str, height: u64, sig: &str) -> bool {
-        if sig.is_empty() {
+        if sig.is_empty() || self.retired.contains(&id) {
             return false;
         }
         // L3: an approval may OUTRUN its card (collected, displayed once it
