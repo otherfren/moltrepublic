@@ -3237,9 +3237,37 @@ impl TableBuild {
 /// fence, where a link is an example) and drop it when the markup left
 /// nothing behind - an image alone in its paragraph would otherwise
 /// leave an empty shell before and after itself.
+/// Code text with each tab run to the next fourth column: the renderer
+/// draws a tab as one narrow glyph, which skews every table.
+pub(crate) fn expand_tabs(code: &str) -> String {
+    if !code.contains('\t') {
+        return code.to_string();
+    }
+    let mut out = String::with_capacity(code.len());
+    let mut col = 0;
+    for c in code.chars() {
+        match c {
+            '\t' => {
+                let n = 4 - col % 4;
+                out.extend(std::iter::repeat(' ').take(n));
+                col += n;
+            }
+            '\n' => {
+                out.push(c);
+                col = 0;
+            }
+            _ => {
+                out.push(c);
+                col += 1;
+            }
+        }
+    }
+    out
+}
+
 fn finish_block(mut b: Block, out: &mut Vec<Block>) {
     if b.kind == 4 {
-        b.text = b.text.trim_end_matches('\n').to_string();
+        b.text = expand_tabs(b.text.trim_end_matches('\n'));
         b.spans = if b.text.is_empty() {
             Vec::new()
         } else {

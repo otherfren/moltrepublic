@@ -316,6 +316,20 @@ fn a_chat_read_answers_the_poke_through_every_door() {
 }
 
 #[test]
+fn a_repeated_line_folds_into_one_with_a_count() {
+    let b = republic();
+    let mut walter = seat("walter", &b, NOON);
+    walter.session.settings.wake_chat_lines = true;
+    assert!(walter.note_line("poked by mara"));
+    assert!(walter.note_line("wake: exit 0"));
+    assert!(walter.note_line("poked by mara"));
+    assert!(walter.note_line("poked by ivo"));
+    assert!(walter.note_line("poked by mara"));
+    let bodies: Vec<String> = walter.wake.lines.iter().map(|m| m.body.clone()).collect();
+    assert_eq!(bodies, ["wake: exit 0", "poked by ivo", "poked by mara (3x)"], "the newest moves last");
+}
+
+#[test]
 fn test_wake_runs_the_command_past_wake_on_and_reports_its_exit() {
     let mut s = crate::tests::plain_state();
     assert!(matches!(s.cmd_test_wake(None), Err(MoltError::Settings(_))), "no command");
@@ -716,7 +730,9 @@ fn the_switch_hides_the_wake_lines_past_ones_included() {
     settle(&mut s);
     assert!(chat_lines(&s, None).is_empty());
     s.session.settings.wake_chat_lines = true;
-    assert_eq!(chat_lines(&s, None).len(), 4, "hidden, not dropped");
+    let lines = chat_lines(&s, None);
+    assert_eq!(lines.len(), 2, "hidden, not dropped: {lines:?}");
+    assert!(lines.iter().all(|(_, body)| body.ends_with(" (2x)")), "{lines:?}");
 }
 
 #[test]

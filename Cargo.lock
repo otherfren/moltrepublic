@@ -5303,6 +5303,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "ttf-parser",
 ]
 
 [[package]]

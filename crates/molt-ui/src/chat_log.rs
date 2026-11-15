@@ -213,7 +213,8 @@ pub(crate) fn chat_segments(body: &str) -> Vec<ChatSegData> {
             }
             Event::End(TagEnd::CodeBlock) => {
                 if let Some(c) = code.take() {
-                    segs.push(ChatSegData { text: c.trim_end_matches('\n').to_string(), code: true });
+                    let text = crate::wiki::expand_tabs(c.trim_end_matches('\n'));
+                    segs.push(ChatSegData { text, code: true });
                 }
             }
             _ => {}

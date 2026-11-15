@@ -222,7 +222,13 @@ impl State {
         let Ok(id) = crate::chat::mint_message_id() else {
             return false;
         };
-        let line = ChatMessage::text(id, self.member(), body, crate::now_secs())
+        // a repeat folds into one line that moves to the bottom
+        let mut count = 1;
+        if let Some(i) = self.wake.lines.iter().rposition(|m| folded(&m.body).0 == body) {
+            count += folded(&self.wake.lines.remove(i).body).1;
+        }
+        let text = if count > 1 { format!("{body} ({count}x)") } else { body.to_string() };
+        let line = ChatMessage::text(id, self.member(), &text, crate::now_secs())
             .with_kind(ChatKind::Wake);
         self.wake.lines.push(line);
         if self.wake.lines.len() > LINES_KEEP {
@@ -529,6 +535,14 @@ impl Tail {
 /// The first second of the next UTC day.
 fn day_end(secs: u64) -> u64 {
     (secs / 86_400 + 1).saturating_mul(86_400)
+}
+
+/// A wake line's body split into its text and how often it occurred.
+fn folded(body: &str) -> (&str, u32) {
+    body.strip_suffix("x)")
+        .and_then(|b| b.rsplit_once(" ("))
+        .and_then(|(text, n)| n.parse().ok().filter(|n| *n > 1).map(|n| (text, n)))
+        .unwrap_or((body, 1))
 }
 
 /// Wait until the running wake ended (tests only).

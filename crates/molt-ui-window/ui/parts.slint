@@ -1383,7 +1383,7 @@ component CappedStateRow inherits HorizontalLayout {
                 text: root.value;
                 color: root.emphasized ? Theme.text : Theme.dim;
                 font-size: Theme.fs-cap;
-                font-family: root.mono ? "monospace" : "";
+                font-family: root.mono ? "DejaVu Sans Mono" : "";
                 wrap: word-wrap;
             }
         }
@@ -3175,7 +3175,7 @@ export component DiffViewer inherits Rectangle {
                     cell := Text {
                         visible: false;
                         text: "0";
-                        font-family: "monospace";
+                        font-family: "DejaVu Sans Mono";
                         font-size: Theme.fs-cap;
                     }
                     property <int> cols: cell.preferred-width > 0
@@ -3215,7 +3215,7 @@ export component DiffViewer inherits Rectangle {
                                     st := Text {
                                         text: s.text;
                                         color: root.seg-color(s.tone);
-                                        font-family: "monospace";
+                                        font-family: "DejaVu Sans Mono";
                                         font-size: Theme.fs-cap;
                                         vertical-alignment: center;
                                         height: 100%;

@@ -19,6 +19,7 @@
 // The colorful emoji font (Twemoji, borrowed from konkinwallet) — used for
 // the nav sub-view icons, the reaction pills and the emoji palette.
 import "assets/fonts/Twemoji.Mozilla.ttf";
+import "assets/fonts/DejaVuSansMono.ttf";
 
 import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ChatSeg, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, LogRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
 import {
@@ -975,13 +976,20 @@ component UploadsTable inherits Rectangle {
                     width: 70px * Theme.ui-scale;
                     clicked => { root.sort("checksum"); }
                 }
-                SortHeader {
-                    label: Strings.ou-col-download;
+                ou-h-status := SortHeader {
+                    label: Strings.ou-col-status;
                     active: root.sort-column == "download";
                     desc: !root.sort-ascending;
                     align: center;
-                    width: 150px * Theme.ui-scale;
+                    width: 110px * Theme.ui-scale;
                     clicked => { root.sort("download"); }
+                }
+                ou-h-dl := SortHeader {
+                    label: Strings.ou-col-download;
+                    active: false;
+                    desc: false;
+                    align: center;
+                    width: 100px * Theme.ui-scale;
                 }
                 if !root.persistent: SortHeader {
                     label: Strings.ou-col-expires;
@@ -1112,16 +1120,13 @@ component UploadsTable inherits Rectangle {
                             }
                         }
                     }
-                    // the download cell: the status word with two thin bars
-                    // (this download, the sharer sending), the tooltip says
-                    // which is which; offline shows the hint instead
-                    HorizontalLayout {
-                        width: 150px * Theme.ui-scale;
-                        alignment: center;
-                        spacing: 6px;
+                    // the status cell: the word with two thin bars (this
+                    // download, the sharer sending); the tooltip says which
+                    ou-r-status := Rectangle {
+                        width: 110px * Theme.ui-scale;
                         if u.status != "": ou-st := Rectangle {
-                            horizontal-stretch: 1;
-                            min-width: 60px * Theme.ui-scale;
+                            width: parent.width;
+                            height: parent.height;
                             VerticalLayout {
                                 alignment: center;
                                 spacing: 2px;
@@ -1170,43 +1175,51 @@ component UploadsTable inherits Rectangle {
                                 }
                             }
                         }
-                        if u.status-kind == 1: ou-cancel := AppButton {
-                            height: 24px * Theme.ui-scale;
-                            pad: 6px;
-                            y: (parent.height - self.height) / 2;
-                            label: "\u{00d7}";
-                            tooltip: Strings.ou-cancel;
-                            clicked => {
-                                root.cancel-download(u.id);
+                    }
+                    // the download cell: the button, cancel while it runs,
+                    // or the one word why there is none
+                    ou-r-dl := Rectangle {
+                        width: 100px * Theme.ui-scale;
+                        HorizontalLayout {
+                            alignment: center;
+                            if u.status-kind == 1: ou-cancel := AppButton {
+                                height: 24px * Theme.ui-scale;
+                                pad: 6px;
+                                y: (parent.height - self.height) / 2;
+                                label: "\u{00d7}";
+                                tooltip: Strings.ou-cancel;
+                                clicked => {
+                                    root.cancel-download(u.id);
+                                }
                             }
-                        }
-                        // §5.5: a relay-held or mirrored series downloads
-                        // WITHOUT a live sharer — the button follows the
-                        // fact; a gone or replaced share says its one word
-                        if (u.online || u.availability == "relay-held"
-                            || u.availability == "mirrored")
-                            && u.availability != "changed"
-                            && u.status-kind != 1: ou-dl := AppButton {
-                            height: 28px * Theme.ui-scale;
-                            pad: 10px;
-                            y: (parent.height - self.height) / 2;
-                            label: u.status-kind == 3 ? Strings.ou-retry : Strings.ou-download;
-                            enabled: u.available && u.id != "";
-                            clicked => {
-                                root.download(u.id, u.name);
+                            // §5.5: a relay-held or mirrored series downloads
+                            // WITHOUT a live sharer — the button follows the
+                            // fact; a gone or replaced share says its one word
+                            if (u.online || u.availability == "relay-held"
+                                || u.availability == "mirrored")
+                                && u.availability != "changed"
+                                && u.status-kind != 1: ou-dl := AppButton {
+                                height: 28px * Theme.ui-scale;
+                                pad: 10px;
+                                y: (parent.height - self.height) / 2;
+                                label: u.status-kind == 3 ? Strings.ou-retry : Strings.ou-download;
+                                enabled: u.available && u.id != "";
+                                clicked => {
+                                    root.download(u.id, u.name);
+                                }
                             }
-                        }
-                        if (u.availability == "changed"
-                            || (!u.online && u.availability != "relay-held"
-                                && u.availability != "mirrored"))
-                            && u.status-kind != 1: Text {
-                            text: u.availability == "gone" ? Strings.ou-gone
-                                : u.availability == "changed" ? Strings.ou-changed
-                                : Strings.ou-offline;
-                            color: Theme.faint;
-                            font-size: Theme.fs-cap;
-                            vertical-alignment: center;
-                            horizontal-alignment: center;
+                            if (u.availability == "changed"
+                                || (!u.online && u.availability != "relay-held"
+                                    && u.availability != "mirrored"))
+                                && u.status-kind != 1: Text {
+                                text: u.availability == "gone" ? Strings.ou-gone
+                                    : u.availability == "changed" ? Strings.ou-changed
+                                    : Strings.ou-offline;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                vertical-alignment: center;
+                                horizontal-alignment: center;
+                            }
                         }
                     }
                     if !root.persistent: Text {
@@ -4000,7 +4013,7 @@ export component AppWindow inherits Window {
                                 text: root.cw-log[root.cw-log.length - 1];
                                 color: Theme.dim;
                                 font-size: Theme.fs-cap;
-                                font-family: "monospace";
+                                font-family: "DejaVu Sans Mono";
                                 wrap: word-wrap;
                             }
                             if !root.cw-declined: HorizontalLayout {
@@ -8250,7 +8263,7 @@ export component AppWindow inherits Window {
                                 if root.wake-test-stderr != "": Text {
                                     text: root.wake-test-stderr;
                                     color: Theme.dim;
-                                    font-family: "monospace";
+                                    font-family: "DejaVu Sans Mono";
                                     font-size: Theme.fs-cap;
                                     wrap: word-wrap;
                                 }
@@ -9274,7 +9287,7 @@ export component AppWindow inherits Window {
                                 log-cell := Text {
                                     visible: false;
                                     text: "0";
-                                    font-family: "monospace";
+                                    font-family: "DejaVu Sans Mono";
                                     font-size: Theme.fs-cap;
                                 }
                                 property <int> cols: log-cell.preferred-width > 0
@@ -9318,7 +9331,7 @@ export component AppWindow inherits Window {
                                                 for s in r.segs: Text {
                                                     text: s.text;
                                                     color: log-view.tint(s.tone);
-                                                    font-family: "monospace";
+                                                    font-family: "DejaVu Sans Mono";
                                                     font-size: Theme.fs-cap;
                                                 }
                                             }
@@ -9335,7 +9348,7 @@ export component AppWindow inherits Window {
                                             read-only: true;
                                             single-line: false;
                                             wrap: no-wrap;
-                                            font-family: "monospace";
+                                            font-family: "DejaVu Sans Mono";
                                             font-size: Theme.fs-cap;
                                             color: transparent;
                                             selection-foreground-color: transparent;
@@ -10332,7 +10345,7 @@ export component AppWindow inherits Window {
             text: root.checksum-modal-hash;
             color: Theme.text;
             font-size: Theme.fs-body;
-            font-family: "monospace";
+            font-family: "DejaVu Sans Mono";
             wrap: char-wrap;
             preferred-width: 0px;
         }
@@ -11360,7 +11373,7 @@ export component AppWindow inherits Window {
                     y: 12px;
                     text: root.patch-view-text;
                     color: Theme.text;
-                    font-family: "monospace";
+                    font-family: "DejaVu Sans Mono";
                     font-size: Theme.fs-cap;
                 }
             }
@@ -11682,7 +11695,7 @@ export component AppWindow inherits Window {
                 width: parent.width - 20px;
                 text: root.recovery-link;
                 color: Theme.text;
-                font-family: "monospace";
+                font-family: "DejaVu Sans Mono";
                 font-size: Theme.fs-cap;
                 // one long unbreakable token — break anywhere, lose nothing
                 wrap: char-wrap;

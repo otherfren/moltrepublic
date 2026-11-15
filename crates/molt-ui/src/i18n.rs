@@ -1012,6 +1012,7 @@ lexicon! {
     ou_col_size: "Size", "Größe";
     ou_col_checksum: "Checksum", "Checksum";
     ou_col_download: "Download", "Download";
+    ou_col_status: "Status", "Status";
     ou_col_expires: "Expires in", "Läuft ab in";
     ou_col_persist: "Persist", "Dauerhaft";
     ou_col_unpersist: "Unpersist", "Befristen";

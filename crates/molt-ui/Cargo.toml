@@ -51,6 +51,8 @@ tempfile.workspace = true
 # display, so three chat bugs in a row were diagnosed by reasoning instead
 # of by evidence. This runs the real AppWindow with no window.
 i-slint-backend-testing = "1.17"
+# TEST-ONLY: proves the bundled code font gives every glyph one advance.
+ttf-parser = "0.25"
 # TEST-ONLY, and deliberately not a runtime dep: the link-dispatch tests
 # render their fixtures through the real invite/recovery handover types
 # instead of hand-writing link strings a format change would silently

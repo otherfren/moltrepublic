@@ -439,6 +439,16 @@ fn fenced_blocks_split_a_chat_body_into_code_segments() {
     assert_eq!(open, vec![("unclosed\n  runs on".to_string(), true)]);
     let quoted: Vec<bool> = chat_segments("> ```\n> x\n> ```").into_iter().map(|s| s.code).collect();
     assert_eq!(quoted, vec![true], "no stray quote marker");
+    let tabbed = chat_segments("```\na\tbc\td\n\tä\te\n```");
+    assert_eq!(tabbed[0].text, "a   bc  d\n    ä   e", "a tab runs to the next fourth column");
+}
+
+/// A wiki code block lines its tabs up the same way.
+#[test]
+fn a_wiki_code_block_expands_its_tabs() {
+    let blocks = crate::wiki::parse_blocks("```\nab\tc\n```\n");
+    let code: Vec<&str> = blocks.iter().filter(|b| b.kind == 4).map(|b| b.text.as_str()).collect();
+    assert_eq!(code, ["ab  c"]);
 }
 
 /// **The operator rides the line** (issue #5): the label as a peer may
@@ -458,4 +468,37 @@ fn the_operator_label_rides_the_chat_line() {
     assert_eq!((l.op.as_str(), l.op_agent), ("Ana", false));
     m.kind = molt_core::ChatKind::System;
     assert_eq!(chat_line(0, &m, "me", &[]).op, "", "a system line names no operator");
+}
+
+const CODE_FONT: &[u8] = include_bytes!("../../../molt-ui-window/ui/assets/fonts/DejaVuSansMono.ttf");
+
+/// ASCII art and tables need one advance for every glyph a code block may
+/// carry - a system "monospace" alias falls back to a proportional face.
+#[test]
+fn the_code_font_gives_every_glyph_one_width() {
+    let face = ttf_parser::Face::parse(CODE_FONT, 0).expect("font");
+    let wanted = (0x20u32..0x7f)
+        .chain(0x2500..=0x259f)
+        .chain(0xa0..=0xff)
+        .chain("€←↑→↓↔•…√∞≈≠≤≥".chars().map(u32::from));
+    let mut widths = std::collections::BTreeMap::new();
+    for c in wanted.filter_map(char::from_u32) {
+        let glyph = face.glyph_index(c).unwrap_or_else(|| panic!("no glyph for {c:?}"));
+        let w = face.glyph_hor_advance(glyph).expect("advance");
+        widths.entry(w).or_insert_with(Vec::new).push(c);
+    }
+    assert_eq!(widths.len(), 1, "advances: {widths:?}");
+}
+
+#[test]
+fn every_monospace_text_names_the_bundled_font() {
+    let ui = concat!(
+        include_str!("../../../molt-ui-window/ui/app.slint"),
+        include_str!("../../../molt-ui-window/ui/components.slint"),
+        include_str!("../../../molt-ui-window/ui/parts.slint"),
+        include_str!("../../../molt-ui-window/ui/surfaces.slint"),
+    );
+    assert!(ui.contains(r#"import "assets/fonts/DejaVuSansMono.ttf";"#), "the font is registered");
+    assert!(!ui.contains(r#"font-family: "monospace""#), "the alias resolves per machine");
+    assert!(ui.contains(r#"font-family: "DejaVu Sans Mono""#));
 }

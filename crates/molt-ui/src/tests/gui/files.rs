@@ -732,6 +732,49 @@ fn the_download_button_carries_the_rows_name_in_both_tables() {
 /// thin bars (this download, the sharer sending) filled to their share,
 /// a tooltip that says which is which, and a cancel button that hands
 /// the row's id over. A failed row offers Retry.
+/// Status (word, bars) and Download (the button) are two columns: a
+/// status beside the button used to squeeze the cell and shift the table.
+#[cfg(feature = "live-preview")]
+#[test]
+fn status_and_download_are_two_aligned_columns() {
+    i_slint_backend_testing::init_no_event_loop();
+    let row = |hex: &str, status: &str, kind: i32, own: f32| UploadRow {
+        id: hex.repeat(16).into(),
+        name: "karte.pdf".into(),
+        user: "walter".into(),
+        available: true,
+        online: true,
+        status: status.into(),
+        status_kind: kind,
+        dl_own: own,
+        dl_sharer: -1.0,
+        ..UploadRow::default()
+    };
+    let rows = vec![row("aa", "\u{2713}", 2, -1.0), row("bb", "", 0, -1.0), row("cc", "30 %", 1, 0.3)];
+    let (ui, _shown) = files_window(rows);
+    ui.window().set_size(slint::PhysicalSize::new(1700, 800));
+    let boxes = |id: &str| -> Vec<(f32, f32)> {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .filter(|e| e.size().width > 0.0)
+            .map(|e| (e.absolute_position().x, e.size().width))
+            .collect()
+    };
+    for (head, cell) in [("ou-h-status", "ou-r-status"), ("ou-h-dl", "ou-r-dl")] {
+        let header = boxes(&format!("UploadsTable::{head}"));
+        let cells = boxes(&format!("UploadsTable::{cell}"));
+        assert_eq!((header.len(), cells.len()), (1, 3), "{cell}");
+        for (x, w) in &cells {
+            assert!((x - header[0].0).abs() < 1.0 && (w - header[0].1).abs() < 1.0, "{cell} {x}/{w} vs {header:?}");
+        }
+    }
+    let status = boxes("UploadsTable::ou-h-status")[0];
+    let dl = boxes("UploadsTable::ou-h-dl")[0];
+    assert!(status.0 + status.1 <= dl.0, "status left of download");
+    for (x, w) in boxes("UploadsTable::ou-dl").into_iter().chain(boxes("UploadsTable::ou-cancel")) {
+        assert!(x >= dl.0 - 0.5 && x + w <= dl.0 + dl.1 + 0.5, "button {x}/{w} inside {dl:?}");
+    }
+}
+
 #[cfg(feature = "live-preview")]
 #[test]
 fn a_running_download_shows_two_bars_a_tip_and_a_cancel() {
