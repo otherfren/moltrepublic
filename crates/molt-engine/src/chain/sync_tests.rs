@@ -777,6 +777,25 @@ fn a_seat_the_republic_ran_past_reads_the_distance() {
     );
 }
 
+/// The status table: this seat's own head, the highest height a peer
+/// claimed, nothing for a peer that never claimed one, and the last
+/// height each seat signed.
+#[test]
+fn the_status_table_reads_each_seats_height() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "dora"]);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    let head = walter.chain.head.as_ref().expect("a head").height;
+    walter.note_peer_height("petra", head + 2);
+    let status = walter.status();
+    let seat = |m: &str| status.seats.iter().find(|s| s.member == m).expect("a row").clone();
+    assert_eq!(seat("walter").height, Some(head), "the own head");
+    assert_eq!(seat("petra").height, Some(head + 2), "the claim");
+    assert_eq!(seat("dora").height, None, "never claimed: unknown, not 0");
+    assert_eq!(seat("dora").signed, Some(1), "dora signed block 1");
+    assert_eq!(seat("walter").signed, Some(0), "walter signed only the genesis");
+}
+
 /// A seat never seen here, in a republic whose founding date this node
 /// does not know (a recovery from an older coordinator): silent, with an
 /// age of 0 = unknown - never "since the epoch".
@@ -813,9 +832,9 @@ fn a_vote_is_refused_while_the_peers_are_ahead() {
         "level with the republic, the vote counts"
     );
     walter.note_peer_height("petra", 3);
-    let err = walter
-        .cmd_decline(molt_core::ProposalId(7), None)
-        .expect_err("a lagging vote is refused");
+    let (res, logs) = crate::wake::tests::capture(|| walter.cmd_decline(molt_core::ProposalId(7), None));
+    let err = res.expect_err("a lagging vote is refused");
+    assert!(logs.contains("vote=refused_lagging") && logs.contains("peers_ahead="), "the error log keeps it: {logs}");
     assert!(
         matches!(err, molt_core::MoltError::ChainLagging { peers_ahead } if peers_ahead >= 2),
         "the refusal names the distance: {err:?}"
@@ -973,4 +992,16 @@ fn a_catch_up_adopts_only_the_relays_its_last_pool_keeps() {
     let pool: Vec<(String, bool)> =
         walter.session.settings.relays.iter().map(|r| (r.url.clone(), r.confirmed)).collect();
     assert_eq!(pool, vec![(kept, true)]);
+}
+
+/// A peer dropped this seat's vote: the toast goes, so the error log keeps it.
+#[test]
+fn a_refused_vote_lands_in_the_log() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    let (_, logs) = crate::wake::tests::capture(|| walter.cmd_net_vote_refused(molt_core::ProposalId(7), "petra", 303));
+    assert!(logs.contains("WARN"), "{logs}");
+    for field in ["vote=refused", "proposal=7", "peer=petra", "peer_head=303", "head=0"] {
+        assert!(logs.contains(field), "{field}: {logs}");
+    }
 }

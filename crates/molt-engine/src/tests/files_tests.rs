@@ -790,6 +790,25 @@ fn the_mirror_sweep_drops_a_deleted_job() {
     assert!(st.mirror_job_gone(&st.files_state(), &id.to_string()), "the delete drops it");
 }
 
+/// The status table counts per seat the PERSISTENT files it holds whole.
+#[test]
+fn the_status_counts_the_persistent_files_each_seat_holds_whole() {
+    let mut st = plain_state();
+    let me = st.member();
+    let peer = st.roster().into_iter().find(|m| *m != me).expect("a peer");
+    let (a, b, temp) = (molt_core::MessageId([1; 16]), molt_core::MessageId([2; 16]), molt_core::MessageId([3; 16]));
+    persisted_share(&mut st, a);
+    persisted_share(&mut st, b);
+    let hold = |id, held| molt_core::MirrorHold { id, held, of: 4 };
+    st.files.mirror.status.insert(peer.clone(), vec![hold(a, 4), hold(b, 3), hold(temp, 4)]);
+    let status = st.status();
+    assert_eq!(status.persistent_files, 2);
+    let seat = |m: &str| status.seats.iter().find(|s| s.member == m).expect("a row per seat").clone();
+    assert_eq!(seat(&peer).files, 1, "whole and persistent only");
+    assert_eq!(seat(&me).files, 0);
+    assert_eq!(status.seats.len(), status.members.len());
+}
+
 fn persisted_share(st: &mut State, id: molt_core::MessageId) {
     st.applied.entry(Surface::Files).or_default().push((None, json!({
         "op": "persist", "id": id.to_string(), "name": "contract.pdf", "kind": "PDF",

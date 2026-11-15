@@ -25,10 +25,11 @@ export TZ=UTC
 
 # --locked refuses to build if Cargo.lock and Cargo.toml have drifted.
 # The release carries the embedded Tor client (arti, opt-in feature) - the
-# one binary must run without a system Tor. Only the node binary is packed,
-# so only molt-app is built. ONE job: the window module's rustc alone peaks
-# near the box's memory (CLAUDE.md, "Build, test, run"); a second rustc
-# beside it is the OOM kill of 2026-09-08.
+# one binary must run without a system Tor. Only the node binary is built
+# (molt-app) and packed, beside COPYING and the bundled fonts' licences.
+# ONE job: the window module's rustc alone peaks near the box's memory
+# (CLAUDE.md, "Build, test, run"); a second rustc beside it is the OOM
+# kill of 2026-09-08.
 cargo build -j 1 -p molt-app --features embedded-tor --release --locked
 
 # Strip after the build → debug-info stays in target/debug for local use.
@@ -40,8 +41,10 @@ tar \
   --sort=name \
   --owner=0 --group=0 --numeric-owner \
   --mtime="@${SOURCE_DATE_EPOCH}" \
-  --no-acls --no-selinux --no-xattrs \
+  --no-acls --no-selinux --no-xattrs --mode=a+rX,u+w,go-w \
   -cf - -C target/release moltd \
+  -C "$REPO_ROOT" COPYING \
+  -C "$REPO_ROOT/crates/molt-ui-window/ui/assets/fonts" DejaVuSansMono.LICENSE Twemoji.Mozilla.LICENSE \
 | zstd -19 -f --no-progress -o dist/moltrepublic-linux-x86_64.tar.zst
 
 sha256sum dist/moltrepublic-linux-x86_64.tar.zst

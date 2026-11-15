@@ -974,6 +974,13 @@ lexicon! {
     enter_republic: "Enter republic", "Republik betreten";
     org_reachable: "reachable", "erreichbar";
     org_approvals: "Approvals", "Approvals";
+    os_seats: "Seats", "Sitze";
+    os_col_member: "Member", "Mitglied";
+    os_col_seen: "Seen", "Gesehen";
+    os_col_height: "Chain", "Chain";
+    os_col_height_tip: "Highest block height the seat reported; a quiet seat may be further", "Höchste Blockhöhe, die der Sitz gemeldet hat; ein stiller Sitz kann weiter sein";
+    os_col_signed: "Signed", "Signiert";
+    os_col_files: "Files held", "Dateien gehalten";
     oa_col_surface: "Surface", "Bereich";
     oa_pending: "Pending", "Offen";
     oa_denied: "Denied", "Abgelehnt";

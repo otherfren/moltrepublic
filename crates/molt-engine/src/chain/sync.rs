@@ -697,16 +697,7 @@ impl State {
         };
         let mut out: Vec<molt_core::StaleSigner> = Vec::new();
         for id in &head.identities {
-            let sealed = self
-                .chain
-                .blocks
-                .iter()
-                .filter(|b| b.sigs.iter().any(|a| a.member == id.member))
-                .map(|b| b.height)
-                .max()
-                .unwrap_or(0);
-            let seen = self.chain.seen_signing.get(&id.member).copied().unwrap_or(0);
-            let last = sealed.max(seen);
+            let last = self.last_signed(&id.member).unwrap_or(0);
             if last + STALE_AFTER_BLOCKS <= head.height {
                 out.push(molt_core::StaleSigner {
                     member: id.member.clone(),
@@ -715,6 +706,51 @@ impl State {
             }
         }
         out
+    }
+
+    /// The highest height `member` signed for: in a block this holder
+    /// keeps, or verified here before a seal.
+    pub(crate) fn last_signed(&self, member: &str) -> Option<u64> {
+        let sealed = self
+            .chain
+            .blocks
+            .iter()
+            .filter(|b| b.sigs.iter().any(|a| a.member == member))
+            .map(|b| b.height)
+            .max();
+        sealed.max(self.chain.seen_signing.get(member).copied())
+    }
+
+    /// Where each roster seat stands, as far as this node knows.
+    pub(crate) fn seat_syncs(&self, persistent: &std::collections::HashSet<molt_core::MessageId>) -> Vec<molt_core::SeatSync> {
+        let me = self.member();
+        let now = self.presence_now();
+        let holders = self.mirror_holders();
+        let governed = self.is_chain_governed();
+        self.roster()
+            .into_iter()
+            .map(|member| {
+                let own = member == me;
+                let height = if !governed {
+                    None
+                } else if own {
+                    self.chain.head.as_ref().map(|h| h.height)
+                } else {
+                    self.chain.peer_heights.get(&member).copied()
+                };
+                let files = holders
+                    .iter()
+                    .filter(|(id, who)| persistent.contains(id) && who.contains(&member))
+                    .count();
+                molt_core::SeatSync {
+                    last_seen: if own { now } else { self.member_last_seen(&member) },
+                    height,
+                    signed: if governed { self.last_signed(&member) } else { None },
+                    files: u32::try_from(files).unwrap_or(u32::MAX),
+                    member,
+                }
+            })
+            .collect()
     }
 
     /// A block from `from` that fits our chain: whatever it was on, it is

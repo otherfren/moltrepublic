@@ -103,3 +103,8 @@ claude mcp add --transport http moltrepublic http://127.0.0.1:4040/mcp \
 ## License
 
 GPL-3.0-or-later. See `COPYING`.
+
+Bundled fonts: DejaVu Sans Mono (Bitstream Vera licence) and Twemoji Mozilla
+(emoji art CC BY 4.0 by Twitter, Inc and contributors; Apache-2.0 code). The
+licence texts sit beside them in `crates/molt-ui-window/ui/assets/fonts/` and
+ship in the release tarball.

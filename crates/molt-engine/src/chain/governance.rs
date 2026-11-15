@@ -1255,6 +1255,8 @@ impl State {
         by: &str,
         head: u64,
     ) -> Result<molt_core::Reply, molt_core::MoltError> {
+        let own = self.chain.head.as_ref().map_or(0, |h| h.height);
+        tracing::warn!(proposal = proposal.0, peer = %by, peer_head = head, head = own, "vote=refused");
         self.session.notice = format!("vote-refused:{}:{by}:{head}", proposal.0);
         self.emit_session(crate::SessionScope::Full);
         Ok(molt_core::Reply::Ack)

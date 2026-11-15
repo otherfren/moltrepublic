@@ -8162,6 +8162,29 @@ pub struct StatusView {
     /// from. A partitioned seat shows up here, not there.
     #[serde(default)]
     pub chain_lag: ChainLag,
+    /// One row per roster seat: where it stands, as far as this node knows.
+    #[serde(default)]
+    pub seats: Vec<SeatSync>,
+    /// Persistent shares in the republic (what [`SeatSync::files`] counts of).
+    #[serde(default)]
+    pub persistent_files: u32,
+}
+
+/// One seat's standing as this node sees it (the Organization overview).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeatSync {
+    /// The member.
+    pub member: MemberId,
+    /// Last sighting, unix seconds ([`MemberInfo::NEVER`] = never seen);
+    /// the own seat is always now.
+    pub last_seen: u64,
+    /// Chain height: the own head, or the highest a peer claimed on the
+    /// wire - a quiet peer may be further along. `None` = never claimed.
+    pub height: Option<u64>,
+    /// Highest height this seat signed for, as far as this node saw.
+    pub signed: Option<u64>,
+    /// Persistent shares this seat holds whole.
+    pub files: u32,
 }
 
 /// How far this node trails its peers, and who has gone quiet (A5).

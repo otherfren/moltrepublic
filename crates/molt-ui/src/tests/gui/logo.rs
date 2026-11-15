@@ -244,3 +244,29 @@ fn the_card_previews_the_proposed_picture_in_its_shape() {
     let square = by_id(&ui, "ProposalCard::pi-view").expect("the inline preview renders");
     assert!((square.2 - square.3).abs() < 1.0, "{square:?}");
 }
+
+/// The seat table renders a row per seat, and the Chain header explains
+/// that a reported height is a floor.
+#[test]
+fn the_status_lists_every_seat_with_its_chain_height() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = status_window("Republic", None);
+    let row = |member: &str, height: &str| SeatRow {
+        member: member.into(),
+        seen: "just now".into(),
+        height: height.into(),
+        signed: "-".into(),
+        files: "0 / 2".into(),
+        ..SeatRow::default()
+    };
+    ui.set_org_seats(ModelRc::new(VecModel::from(vec![row("ana", "303"), row("bo", "305"), row("cy", "-")])));
+    let rows = Handle::find_by_element_id(&ui, "AppWindow::os-seat").filter(|e| e.size().width > 0.0).count();
+    assert_eq!(rows, 3, "one row per seat");
+    let tip = Handle::find_by_element_id(&ui, "AppWindow::os-h-height-ta").next().expect("the Chain header");
+    let at = slint::LogicalPosition::new(
+        tip.absolute_position().x + tip.size().width / 2.0,
+        tip.absolute_position().y + tip.size().height / 2.0,
+    );
+    ui.window().dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+    assert!(ui.global::<HintTip>().get_label().to_string().contains("quiet seat"));
+}

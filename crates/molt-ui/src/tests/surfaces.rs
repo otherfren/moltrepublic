@@ -1019,3 +1019,44 @@ fn only_a_pending_row_carries_the_discussion_preview() {
     assert_eq!(data.pending[0].talk.len(), 1);
     assert!(data.declined[0].talk.is_empty());
 }
+
+/// The Organization overview's seat table: where each seat stands.
+#[test]
+fn the_seat_table_reads_heights_files_and_presence() {
+    use crate::surfaces::{seat_rows, SeatRowData};
+    use molt_core::SeatSync;
+    let now = 1_800_000_000;
+    let seat = |member: &str, last_seen: u64, height: Option<u64>, signed: Option<u64>, files: u32| SeatSync {
+        member: member.into(),
+        last_seen,
+        height,
+        signed,
+        files,
+    };
+    let seats = vec![
+        seat("ana", now, Some(303), Some(300), 2),
+        seat("bo", now - 7_200, Some(305), None, 0),
+        seat("cy", 0, None, None, 1),
+    ];
+    let rows = seat_rows(&seats, 3, "ana", 0, now);
+    let row = |m: &str| rows.iter().find(|r| r.member == m).expect("a row").clone();
+    assert_eq!(
+        row("ana"),
+        SeatRowData {
+            member: "ana".into(),
+            me: true,
+            active: true,
+            seen: "just now".into(),
+            height: "303".into(),
+            ahead: false,
+            signed: "300".into(),
+            files: "2 / 3".into(),
+        }
+    );
+    let bo = row("bo");
+    assert_eq!((bo.active, bo.seen.as_str(), bo.height.as_str(), bo.ahead), (false, "2 h ago", "305", true));
+    assert_eq!((bo.signed.as_str(), bo.files.as_str()), ("-", "0 / 3"));
+    let cy = row("cy");
+    assert_eq!((cy.active, cy.height.as_str(), cy.files.as_str()), (false, "-", "1 / 3"));
+    assert_eq!(seat_rows(&seats, 0, "ana", 0, now)[0].files, "-", "no persistent file, nothing to count");
+}

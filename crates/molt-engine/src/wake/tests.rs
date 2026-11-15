@@ -515,7 +515,7 @@ fn chat_lines(s: &crate::State, channel: Option<&ChannelRef>) -> Vec<(String, St
         .collect()
 }
 
-fn capture<T>(run: impl FnOnce() -> T) -> (T, String) {
+pub(crate) fn capture<T>(run: impl FnOnce() -> T) -> (T, String) {
     #[derive(Clone, Default)]
     struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
     impl std::io::Write for Sink {

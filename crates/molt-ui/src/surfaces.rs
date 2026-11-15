@@ -251,6 +251,49 @@ pub(crate) struct OrgStats {
     pub(crate) mirror_quota: u64,
     pub(crate) mirror_used: u64,
     pub(crate) mirror_dir: String,
+    /// The seat table (engine `StatusView.seats`), rendered.
+    pub(crate) seats: Vec<SeatRowData>,
+}
+
+/// One rendered row of the Organization → Status seat table.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SeatRowData {
+    pub(crate) member: String,
+    pub(crate) me: bool,
+    /// Seen within [`molt_core::MemberInfo::ONLINE_SECS`].
+    pub(crate) active: bool,
+    pub(crate) seen: String,
+    pub(crate) height: String,
+    /// The seat claimed a height above this node's head.
+    pub(crate) ahead: bool,
+    pub(crate) signed: String,
+    pub(crate) files: String,
+}
+
+/// The seat table's rows: numbers as text, "-" where nothing is known.
+pub(crate) fn seat_rows(
+    seats: &[molt_core::SeatSync],
+    persistent: u32,
+    me: &str,
+    lang: i32,
+    now: u64,
+) -> Vec<SeatRowData> {
+    let dash = |v: Option<u64>| v.map_or_else(|| "-".to_string(), |n| n.to_string());
+    let head = seats.iter().find(|s| s.member == me).and_then(|s| s.height);
+    seats
+        .iter()
+        .map(|s| SeatRowData {
+            member: s.member.clone(),
+            me: s.member == me,
+            active: s.last_seen != molt_core::MemberInfo::NEVER
+                && now.saturating_sub(s.last_seen) <= molt_core::MemberInfo::ONLINE_SECS,
+            seen: seen_label(lang, now, s.last_seen, never_seen_label(lang)),
+            height: dash(s.height),
+            ahead: matches!((s.height, head), (Some(h), Some(own)) if h > own),
+            signed: dash(s.signed),
+            files: if persistent == 0 { "-".to_string() } else { format!("{} / {persistent}", s.files) },
+        })
+        .collect()
 }
 
 /// One rendered row of the Organization → Members table.
@@ -928,7 +971,7 @@ pub(crate) async fn gather_surfaces(
         Ok(Reply::Mirror(m)) => Some(m),
         _ => None,
     };
-    let (member, threshold_badge, org_stats) = match wallet.execute(Command::Status).await {
+    let (member, threshold_badge, mut org_stats, seat_src) = match wallet.execute(Command::Status).await {
         Ok(Reply::Status(s)) => (
             s.member,
             format!("{}-of-{}", s.threshold, s.members.len()),
@@ -957,7 +1000,10 @@ pub(crate) async fn gather_surfaces(
                 mirror_quota: mirror.as_ref().map_or(molt_core::MIRROR_QUOTA_DEFAULT, |m| m.quota),
                 mirror_used: mirror.as_ref().map_or(0, |m| m.used),
                 mirror_dir: mirror.as_ref().map(|m| m.dir.clone()).unwrap_or_default(),
+                // rendered once the language is known, below
+                seats: Vec::new(),
             },
+            (s.seats, s.persistent_files),
         ),
         _ => return None,
     };
@@ -981,6 +1027,7 @@ pub(crate) async fn gather_surfaces(
         ),
         _ => (String::new(), 0, false, false),
     };
+    org_stats.seats = seat_rows(&seat_src.0, seat_src.1, &member, lang, unix_now());
     // stamp this push BEFORE the surface reads: any selection change or
     // newer push from here on makes this pass stale, and a stale pass must
     // not land its bundle (concurrent pushes

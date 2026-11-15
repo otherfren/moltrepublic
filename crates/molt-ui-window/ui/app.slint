@@ -21,7 +21,7 @@
 import "assets/fonts/Twemoji.Mozilla.ttf";
 import "assets/fonts/DejaVuSansMono.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ChatSeg, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, LogRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ChatSeg, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, SeatRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, LogRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
@@ -1625,6 +1625,7 @@ export component AppWindow inherits Window {
     in property <int> org-total;
     // the status info panel: founding date label ("—" = unknown) and the
     in property <string> org-founded;
+    in property <[SeatRow]> org-seats;
     // whether the open workspace is a chain-governed republic — recovery
     // exists exactly there, so the Members table offers the per-member
     // "recovery link" action only then (never keyed on the member's
@@ -6676,6 +6677,123 @@ export component AppWindow inherits Window {
                                                         }
                                                     }
                                                 }
+                                            }
+                                        }
+                                    }
+                                }
+                                // where each seat stands: presence, the chain
+                                // height it reported, files it holds whole
+                                if root.org-seats.length > 0: HorizontalLayout {
+                                    alignment: start;
+                                    DetailGroup {
+                                        title: Strings.os-seats;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: Strings.os-col-member;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 150px * Theme.ui-scale;
+                                            }
+                                            Text {
+                                                text: Strings.os-col-seen;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 110px * Theme.ui-scale;
+                                            }
+                                            os-h-height := Rectangle {
+                                                width: 70px * Theme.ui-scale;
+                                                Text {
+                                                    width: 100%;
+                                                    text: Strings.os-col-height + " ⓘ";
+                                                    color: Theme.faint;
+                                                    font-size: Theme.fs-cap;
+                                                    horizontal-alignment: right;
+                                                }
+                                                os-h-height-ta := TouchArea {
+                                                    property <int> tip-gen;
+                                                    changed has-hover => {
+                                                        if (self.has-hover) {
+                                                            self.tip-gen = HintTip.show(Strings.os-col-height-tip,
+                                                                parent.absolute-position.x,
+                                                                parent.absolute-position.y + parent.height + 4px);
+                                                        } else {
+                                                            HintTip.hide(self.tip-gen);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Text {
+                                                text: Strings.os-col-signed;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 70px * Theme.ui-scale;
+                                                horizontal-alignment: right;
+                                            }
+                                            Text {
+                                                text: Strings.os-col-files;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                width: 110px * Theme.ui-scale;
+                                                horizontal-alignment: right;
+                                            }
+                                        }
+                                        Rectangle {
+                                            height: 1px;
+                                            background: Theme.line;
+                                        }
+                                        for seat in root.org-seats: os-seat := HorizontalLayout {
+                                            spacing: 8px;
+                                            HorizontalLayout {
+                                                width: 150px * Theme.ui-scale;
+                                                spacing: 6px;
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    Rectangle {
+                                                        width: 8px;
+                                                        height: 8px;
+                                                        border-radius: 4px;
+                                                        background: seat.active ? Theme.good : Theme.faint;
+                                                    }
+                                                }
+                                                Text {
+                                                    text: seat.member;
+                                                    color: seat.me ? Theme.accent : Theme.text;
+                                                    font-size: Theme.fs-body;
+                                                    overflow: elide;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                            Text {
+                                                text: seat.seen;
+                                                color: Theme.dim;
+                                                font-size: Theme.fs-cap;
+                                                width: 110px * Theme.ui-scale;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: seat.height;
+                                                color: seat.ahead ? Theme.warn : Theme.text;
+                                                font-size: Theme.fs-body;
+                                                width: 70px * Theme.ui-scale;
+                                                horizontal-alignment: right;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: seat.signed;
+                                                color: Theme.dim;
+                                                font-size: Theme.fs-body;
+                                                width: 70px * Theme.ui-scale;
+                                                horizontal-alignment: right;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: seat.files;
+                                                color: Theme.text;
+                                                font-size: Theme.fs-body;
+                                                width: 110px * Theme.ui-scale;
+                                                horizontal-alignment: right;
+                                                vertical-alignment: center;
                                             }
                                         }
                                     }

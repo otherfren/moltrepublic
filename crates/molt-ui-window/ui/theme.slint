@@ -379,6 +379,18 @@ export struct ViewItem {
     icon: string,
 }
 
+// One seat in the Organization overview: where it stands.
+export struct SeatRow {
+    member: string,
+    me: bool,
+    active: bool,
+    seen: string,
+    height: string,
+    ahead: bool,
+    signed: string,
+    files: string,
+}
+
 // One surface, with live counts and its log + pending proposals.
 export struct SurfaceTab {
     key: string,
@@ -1466,6 +1478,13 @@ export global Strings {
     // Organization → Status: the approvals table (per-surface governance
     // counts) and the logo/charter edit modals (real proposals)
     in property <string> org-approvals;
+    in property <string> os-seats;
+    in property <string> os-col-member;
+    in property <string> os-col-seen;
+    in property <string> os-col-height;
+    in property <string> os-col-height-tip;
+    in property <string> os-col-signed;
+    in property <string> os-col-files;
     in property <string> oa-col-surface;
     in property <string> oa-pending;
     in property <string> oa-denied;

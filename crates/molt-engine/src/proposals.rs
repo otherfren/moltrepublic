@@ -1017,6 +1017,7 @@ impl State {
     fn refuse_a_lagging_vote(&self) -> Result<(), MoltError> {
         let peers_ahead = self.chain_lag().peers_ahead;
         if peers_ahead > 0 {
+            tracing::warn!(peers_ahead, "vote=refused_lagging");
             return Err(MoltError::ChainLagging { peers_ahead });
         }
         Ok(())
@@ -4720,6 +4721,12 @@ impl State {
             })
             .collect();
         let eff = self.org_effective();
+        let persistent: std::collections::HashSet<molt_core::MessageId> = self
+            .files_state()
+            .into_iter()
+            .filter(|(_, s)| matches!(s, crate::files_state::FileState::Persistent(_)))
+            .map(|(id, _)| id)
+            .collect();
         StatusView {
             member: self.member(),
             members: roster,
@@ -4768,6 +4775,8 @@ impl State {
             image_budget: u64::try_from(member_image_budget(&me, &self.roster())).unwrap_or(0),
             // A5: distance and silence, beside the contradiction detector
             chain_lag: self.chain_lag(),
+            seats: self.seat_syncs(&persistent),
+            persistent_files: u32::try_from(persistent.len()).unwrap_or(u32::MAX),
         }
     }
 }

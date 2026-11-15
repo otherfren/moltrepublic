@@ -557,4 +557,4 @@ pub(crate) fn await_idle(s: &State) {
 
 mod check;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

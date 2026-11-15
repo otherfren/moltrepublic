@@ -1534,6 +1534,22 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         .map(|r| crate::LinkRelay { url: r.url.as_str().into(), picked: false, block: r.block, kind: r.kind })
         .collect();
     crate::models::sync_rows(&ui.get_rp_missing(), missing, |m| ui.set_rp_missing(m));
+    let seats: Vec<crate::SeatRow> = b
+        .org_stats
+        .seats
+        .iter()
+        .map(|s| crate::SeatRow {
+            member: s.member.as_str().into(),
+            me: s.me,
+            active: s.active,
+            seen: s.seen.as_str().into(),
+            height: s.height.as_str().into(),
+            ahead: s.ahead,
+            signed: s.signed.as_str().into(),
+            files: s.files.as_str().into(),
+        })
+        .collect();
+    crate::models::sync_rows(&ui.get_org_seats(), seats, |m| ui.set_org_seats(m));
     // the R6 pencil's draft prefill: the same pool, space-joined
     ui.set_org_relays_joined(b.org_stats.relays.join(" ").into());
     // mirroring §3.6: the switch, the quota in GB, the usage line, the folder
