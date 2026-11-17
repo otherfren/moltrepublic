@@ -166,5 +166,30 @@ so its data may be lost - the chain may not:
 
 ## 9. Open before an implementation plan
 
-- **Reference models**: per CLAUDE.md, look at existing task and planning
-  models before designing the payload.
+- None left in the model. §10 lists what the payload design takes from
+  reference models; the implementation plan starts there.
+
+## 10. Reference models (researched 2026-11-17)
+
+No library to adopt: each reference is its own store (Dolt, git refs,
+relays), and here the chain is the store. Only model ideas carry over.
+
+| reference | what it is | take | leave |
+|---|---|---|---|
+| Beads (`bd`) | git/Dolt-backed tracker for coding agents | "ready" derived from no open blockers - our derived in progress; only the `blocks` link gates | claiming (we plan assignees), priority, due/defer dates, the link zoo (`related`, `discovered-from`, `supersedes`) |
+| git-bug | issues as op-packs in git, folded on an empty state | delta ops, not snapshots (our fold already works so); wall-clock time only for display - backs the round-number axis | Lamport clocks (the chain orders) |
+| Radicle COBs | per-object change DAG, unsigned branches dropped | - | the DAG: our single threshold-signed chain is stricter |
+| NIP-34 | git issues on Nostr, status as separate events (open / resolved / closed / draft) | done ~ resolved, discarded ~ closed: the minimal terminal set holds up | interop: the board lives inside the MLS group, never public |
+| Taskwarrior | `depends` with derived `+BLOCKED` / `+BLOCKING` | blocked as a derived view, not a state (our waiting) | urgency score, dates |
+| Jira | epic -> story -> subtask, configurable workflows | - | moving between epics, subtasks, per-team workflows |
+
+Taken from the current Kanban code (`molt-core/src/kanban_fold.rs`),
+under a new op name:
+
+- a package is one changeset that applies whole or is void at fold - a
+  competing package accepted first can invalidate it after its vote;
+- element ids are 128 random bits minted at propose (core stays
+  RNG-free), with a package-local `ref` for elements the same package
+  creates;
+- the propose/canonical double door: lenient input at propose,
+  canonical bytes on the wire.
