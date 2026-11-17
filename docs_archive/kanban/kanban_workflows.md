@@ -1,6 +1,10 @@
 # Kanban - tasks, calendar and deadlines on the gated board
 
-**Status: specification of shipping behaviour, built 2026-10-09.**
+**Status: SUPERSEDED (2026-11-17).** Built 2026-10-09 but never
+released: the GUI marks Kanban "Work in Progress". The model is replaced
+by the Robo-Scrum concept, `docs/robo_scrum.md`; do not build new work
+from this document. It still describes the code in the tree until that
+concept replaces it.
 Revision 3 (2026-10-07, decisions 2026-10-08), every §11 question decided;
 §9 S1-S5 built. §12 lists what changed against revision 2.
 
