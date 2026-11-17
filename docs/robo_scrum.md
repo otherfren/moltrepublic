@@ -107,10 +107,14 @@ An epic's state is never voted; it follows from its children:
 ### 6.1 The package's timestamp
 
 Each member signs its own wall-clock time with its approval. The time of
-a planning round is the time of the **m-th signature**: the latest time
-among the m signatures the block is sealed with (the seal takes the m
-lowest-named signers, not the m earliest, so "m-th" means the latest of
-the sealed set). It is signed, durable, and the same on every node.
+a planning round is the **median** of the times in the sealed set (the m
+signers the block is sealed with; for an even m the lower middle). It is
+signed, durable, and the same on every node. The median, not the latest:
+with the latest, one signer with a skewed or lying clock moves the
+round; the median holds while fewer than half the sealed signers are off.
+
+Not built today: an attestation is `{member, sig}` over `republic_id ‖
+height ‖ change`, with no time in it (§9).
 
 ## 7. First view
 
@@ -126,6 +130,26 @@ Tasks as a level; dates, deadlines, calendar, recurrence; time or size
 estimates; explicit priority; a "ready for review" state; a dedicated
 review state machine; per-member kinds (person/agent).
 
+## 8a. The existing surface (decided 2026-11-17)
+
+Robo-Scrum keeps `Surface::Quests` and the `quests` wire key; the GUI
+label changes, the wire does not. The Kanban was never used in practice,
+so its data may be lost - the chain may not:
+
+- Applied `quests` blocks stay valid. `verify_chain` and the checkpoint
+  bytes never read a payload (a `quests` entry is archived whole, it has
+  no `applied_lww_slot`), so they are untouched.
+- The new fold reads only the new payload op and skips an old
+  `kanban_ops` changeset, without failing, without voiding a later block.
+- `Surface::Quests` stays in the frozen `CHECKPOINT_V7_SURFACES`; nothing
+  is added to or removed from that set.
+- The feature key `quests` stays; enabling it means Robo-Scrum.
+- Mixed builds: an older build drops a new-op proposal at ingest
+  (`kanban_wire_check`) and does not sign it; a new-op block sealed by
+  others it skips in its fold (`kanban_fold_one`: any op but `kanban_ops`
+  is `Skipped`), so its chain stays valid and its board just stays old.
+  The new op name must therefore differ from `kanban_ops`.
+
 ## 9. Open before an implementation plan
 
 - **planning -> ready for work**: is it part of the planning package, or
@@ -140,9 +164,11 @@ review state machine; per-member kinds (person/agent).
   stories?
 - **Wakes**: which board events wake a member (assigned, unblocked, asked
   to review, a package to vote on, "plan empty, work left")?
-- **The existing surface**: the current Kanban rides the `quests` wire
-  key and the frozen checkpoint group (`Surface::CHECKPOINT_V7_SURFACES`);
-  how the new model replaces it without breaking a republic that enabled
-  it.
+- **Signed approval time (§6.1)**: no attestation carries a time today.
+  Adding one changes the signed bytes of an `Applied` block, and
+  `verify_chain` is hard-reject: a build that predates it rejects the
+  whole chain. Either bind the time (a conditional layout, stranding older
+  builds at the first such block, like a new surface) or drop the clock
+  from the chart (x axis = round number).
 - **Reference models**: per CLAUDE.md, look at existing task and planning
   models before designing the payload.
