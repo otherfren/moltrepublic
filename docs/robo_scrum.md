@@ -35,6 +35,8 @@ Two kinds of element: **epic** and **story**. There are no tasks.
     only group.
 - **Story** - the unit of work. Belongs to exactly one leaf epic; a story
   without an epic does not exist.
+- **No moving** (decided 2026-11-17). A story stays in the epic it was
+  created in, so a leaf epic that holds stories never gets child epics.
 
 ### 2.1 Story fields
 
@@ -84,7 +86,9 @@ An epic's state is never voted; it follows from its children:
 
 - A blocking dependency may link any two elements: story-story,
   epic-epic, and across levels (story-epic, epic-story).
-- **No cycles.**
+- **No cycles.** Containment counts as an edge: a dependency between an
+  element and its own ancestor or descendant is refused as a cycle
+  (decided 2026-11-17).
 - A story cannot go **in progress** before every element it depends on is
   done. If epic B depends on epic A, no story anywhere under B starts
   before A is completely done.
@@ -128,6 +132,12 @@ An epic's state is never voted; it follows from its children:
   - y axis: two overlaid bars per round - in front the count of finished
     stories (done + discarded), behind it the total count of stories.
 
+## 7a. Wakes (decided 2026-11-17)
+
+The board wakes nobody. Members wake each other when they need votes,
+with the existing poke: a planning package is a vote, a review verdict
+is a vote. The current Kanban's `wake_trigger("kanban", ...)` goes.
+
 ## 8. Not in the concept
 
 Tasks as a level; a "ready for work" state; dates, deadlines, calendar,
@@ -156,13 +166,5 @@ so its data may be lost - the chain may not:
 
 ## 9. Open before an implementation plan
 
-- **Containment and dependencies**: a dependency between an element and
-  its own ancestor or descendant deadlocks (the epic waits for the story,
-  the story for the epic) - refuse it as a cycle?
-- **Moving and deleting epics**: may a package move a story to another
-  epic, or turn a leaf epic into an intermediate one while it holds
-  stories?
-- **Wakes**: which board events wake a member (assigned, unblocked, asked
-  to review, a package to vote on, "plan empty, work left")?
 - **Reference models**: per CLAUDE.md, look at existing task and planning
   models before designing the payload.
