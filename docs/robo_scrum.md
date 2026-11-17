@@ -90,11 +90,15 @@ An epic's state is never voted; it follows from its children:
   before A is completely done.
 - **Order comes from dependencies only.** There is no ranking or priority
   on top.
-- **A blocker cannot be discarded.** A verdict that would discard an
-  element something depends on is refused; the story stays in progress
-  until a planning round lifts or rewires the dependency. The same holds
-  for the last story of a blocking epic, whose discard would discard the
-  epic. Such cases are settled in the planning meeting.
+- **A blocker cannot be discarded.** A verdict or package that would
+  discard an element something depends on is refused. The same holds for
+  the last story of a blocking epic, whose discard would discard the
+  epic. A package may lift or rewire the dependency and discard in the
+  same vote (§6); the check runs on the state after the package.
+- **No falling back (decided 2026-11-17).** A package that would turn an
+  in-progress story back to waiting is refused: an open dependency added
+  to it or to an epic above it, or a new story under a done epic it
+  depends on.
 
 ## 6. Planning
 
@@ -104,37 +108,30 @@ An epic's state is never voted; it follows from its children:
   One package is one vote. It may:
   - create epics and stories and change existing ones,
   - add and remove dependencies,
-  - set assignee and reviewer per story.
+  - set assignee and reviewer per story,
+  - discard a waiting or in-progress story (decided 2026-11-17).
 - **When** to plan is up to the members. It makes sense once the planned
   stories are worked off and work remains.
 - **Retention**: no special rule. Planning threads and rejected packages
   age out after 14 days like every other discussion. An accepted package
   is a chain block. Whatever the members want kept goes into the wiki.
 
-### 6.1 The package's timestamp
-
-Each member signs its own wall-clock time with its approval. The time of
-a planning round is the **median** of the times in the sealed set (the m
-signers the block is sealed with; for an even m the lower middle). It is
-signed, durable, and the same on every node. The median, not the latest:
-with the latest, one signer with a skewed or lying clock moves the
-round; the median holds while fewer than half the sealed signers are off.
-
-Not built today: an attestation is `{member, sig}` over `republic_id ‖
-height ‖ change`, with no time in it (§9).
-
 ## 7. First view
 
 - The epic tree, the dependencies, and the state of every story.
 - A **burn-up chart**:
-  - x axis: the accepted planning rounds, at their timestamp (§6.1);
+  - x axis: the round number of the accepted planning packages (1, 2,
+    3, ...), no clock time (decided 2026-11-17). A signed time per round
+    would need a time in every attestation, which changes the signed
+    bytes of an `Applied` block and makes an older build reject the
+    chain;
   - y axis: two overlaid bars per round - in front the count of finished
     stories (done + discarded), behind it the total count of stories.
 
 ## 8. Not in the concept
 
-Tasks as a level; a "ready for work" state; dates, deadlines, calendar, recurrence; time or size
-estimates; explicit priority; a "ready for review" state; a dedicated
+Tasks as a level; a "ready for work" state; dates, deadlines, calendar,
+recurrence; clock time on the burn-up; time or size estimates; explicit priority; a "ready for review" state; a dedicated
 review state machine; per-member kinds (person/agent).
 
 ## 8a. The existing surface (decided 2026-11-17)
@@ -159,11 +156,6 @@ so its data may be lost - the chain may not:
 
 ## 9. Open before an implementation plan
 
-- **A new blocker on a running story**: in progress is derived, so a
-  package that adds an open dependency to an in-progress story turns it
-  back to waiting. Allow that, or refuse such a dependency?
-- **Discarding outside review**: may a planning package discard a story
-  waiting or in progress?
 - **Containment and dependencies**: a dependency between an element and
   its own ancestor or descendant deadlocks (the epic waits for the story,
   the story for the epic) - refuse it as a cycle?
@@ -172,11 +164,5 @@ so its data may be lost - the chain may not:
   stories?
 - **Wakes**: which board events wake a member (assigned, unblocked, asked
   to review, a package to vote on, "plan empty, work left")?
-- **Signed approval time (§6.1)**: no attestation carries a time today.
-  Adding one changes the signed bytes of an `Applied` block, and
-  `verify_chain` is hard-reject: a build that predates it rejects the
-  whole chain. Either bind the time (a conditional layout, stranding older
-  builds at the first such block, like a new surface) or drop the clock
-  from the chart (x axis = round number).
 - **Reference models**: per CLAUDE.md, look at existing task and planning
   models before designing the payload.
