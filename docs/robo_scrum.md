@@ -64,6 +64,18 @@ planning -> ready for work -> in progress -> done
   or discarded - and the group votes on it.
 - **discarded is final.** Rework is a new story.
 
+### 3.1 Automatic transitions (decided 2026-11-17)
+
+The accepted planning package is the group's decision; what follows from
+it mechanically needs no second human vote. Each node's engine signs such
+a transition by itself once its checks hold - still m-of-n on the chain,
+only without waiting for people (the pattern of
+`docs_archive/ritual/recovery_auto_approval.md`):
+
+- **in progress**: auto-signed when the proposer is the story's assignee,
+  the story is ready for work, and every element it depends on is done.
+- A review verdict (done / discarded) is never automatic.
+
 ## 4. Derived epic state
 
 An epic's state is never voted; it follows from its children:
