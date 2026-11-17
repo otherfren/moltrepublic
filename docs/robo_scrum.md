@@ -4,7 +4,7 @@
 concept session with the user. It replaces the model of the current
 Kanban (`docs_archive/kanban/kanban_workflows.md`, labelled "Work in
 Progress" in the GUI); nothing here is designed against that code. The
-model is decided; the implementation plan is next (§10).
+model is decided; the implementation plan is next (§12).
 
 ## 1. Idea
 
@@ -52,28 +52,55 @@ Two kinds of element: **epic** and **story**. There are no tasks.
 
 Acceptance criteria, out of scope and preconditions exist on stories only.
 
-## 3. Story lifecycle
+## 3. Sprints (decided 2026-11-17)
+
+```
+planning vote --accepted--> sprint runs --every story reviewed--> sprint closed
+      ^                                                               |
+      +------------------- backlog not empty -------------------------+
+```
+
+- **Planning vote.** A sprint starts with an accepted planning package.
+  The members discuss under that vote; there is no separate planning
+  thread.
+- **Selection.** The package names which stories go into the sprint. It
+  may create new ones; a story it does not select stays in the backlog.
+- **Closing.** A sprint is closed once every story in it is done or
+  discarded, or was taken back to the backlog by a change vote (§5).
+  Derived, never voted.
+- **No overlap.** A planning vote is valid only while no sprint is open:
+  refused at propose, void at fold. Sprints are numbered 1, 2, 3 in
+  chain order.
+- **Next sprint.** Once a sprint is closed and the backlog (or new work)
+  holds something, any member proposes the next planning vote.
+
+## 4. Story lifecycle
 
 ```
 waiting -> in progress -> done
                       \-> discarded
 ```
 
-- **waiting**: the story is in an accepted package, but an element it
-  depends on is not done yet. Blocked is not a state of its own: an
-  unfinished prerequisite is what waiting means.
-- **in progress**: derived, never voted (decided 2026-11-17). A story is
-  in progress as soon as its package is accepted and every element it
-  depends on is done. The accepted package is the group's decision; what
-  follows from it mechanically needs no second vote and no block - every
-  node computes it identically from the chain.
+- **waiting**: in the backlog, or in the sprint with a prerequisite not
+  done yet. Blocked is not a state of its own; the view tells "backlog"
+  from "blocked in the sprint".
+- **in progress**: derived, never voted. A story is in progress while it
+  is in the open sprint and every element it depends on is done; a
+  story in the sprint whose prerequisite finishes moves on by itself.
 - **Review**: the assignee tells the reviewer the work is ready (there is
   no "ready for review" state). The reviewer proposes the verdict - done
-  or discarded - and the group votes on it. A verdict is the only voted
-  story transition.
+  or discarded - and the group votes on it.
 - **discarded is final.** Rework is a new story.
 
-## 4. Derived epic state
+## 5. Change votes (decided 2026-11-17)
+
+The group may change a story at any time, also mid-sprint: any member
+proposes a change vote that edits it, reassigns assignee or reviewer,
+takes it out of the sprint or into the open one, or discards it. A
+change vote never opens a sprint. So there are three kinds of vote:
+planning (opens a sprint), review verdict, change.
+
+## 6. Derived epic state
 
 An epic's state is never voted; it follows from its children:
 
@@ -82,69 +109,67 @@ An epic's state is never voted; it follows from its children:
 - every child terminal and at least one done -> **done**;
 - otherwise open.
 
-## 5. Dependencies
+## 7. Dependencies
 
 - A blocking dependency may link any two elements: story-story,
   epic-epic, and across levels (story-epic, epic-story).
 - **No cycles.** Containment counts as an edge: a dependency between an
-  element and its own ancestor or descendant is refused as a cycle
-  (decided 2026-11-17).
-- A story cannot go **in progress** before every element it depends on is
-  done. If epic B depends on epic A, no story anywhere under B starts
-  before A is completely done.
+  element and its own ancestor or descendant is refused as a cycle.
+- A story cannot be **in progress** before every element it depends on
+  is done. If epic B depends on epic A, no story anywhere under B starts
+  before A is completely done. A story and its prerequisite may sit in
+  the same sprint; the dependent one waits there.
 - **Order comes from dependencies only.** There is no ranking or priority
   on top.
-- **A blocker cannot be discarded.** A verdict or package that would
+- **A blocker cannot be discarded.** A verdict or vote that would
   discard an element something depends on is refused. The same holds for
   the last story of a blocking epic, whose discard would discard the
-  epic. A package may lift or rewire the dependency and discard in the
-  same vote (§6); the check runs on the state after the package.
-- **No falling back (decided 2026-11-17).** A package that would turn an
-  in-progress story back to waiting is refused: an open dependency added
-  to it or to an epic above it, or a new story under a done epic it
-  depends on.
+  epic. A planning or change vote may lift or rewire the dependency and
+  discard in the same vote; the check runs on the state after it.
+- A planning or change vote may add a dependency to an in-progress
+  story; it goes back to waiting. (Supersedes the earlier "no falling
+  back": the group decides it explicitly.)
 
-## 6. Planning
+## 8. Planning and change packages
 
-- **Planning meeting**: a chat thread with its own tag. Agents may open
-  one. The group discusses there what comes next.
-- **Planning package**: any member may propose one, several may compete.
-  One package is one vote. It may:
+- Any member may propose one, several may compete. One package is one
+  vote. It may:
   - create epics and stories and change existing ones,
   - add and remove dependencies,
   - set assignee and reviewer per story,
-  - discard a waiting or in-progress story (decided 2026-11-17).
-- **When** to plan is up to the members. It makes sense once the planned
-  stories are worked off and work remains.
-- **Retention**: no special rule. Planning threads and rejected packages
+  - move stories between backlog and sprint,
+  - discard a story.
+- **Retention**: no special rule. Rejected packages and their discussion
   age out after 14 days like every other discussion. An accepted package
   is a chain block. Whatever the members want kept goes into the wiki.
 
-## 7. First view
+## 9. First view
 
-- The epic tree, the dependencies, and the state of every story.
+- The sprint: its stories and their state; the backlog; the epic tree
+  and the dependencies.
 - A **burn-up chart**:
-  - x axis: the round number of the accepted planning packages (1, 2,
-    3, ...), no clock time (decided 2026-11-17). A signed time per round
-    would need a time in every attestation, which changes the signed
-    bytes of an `Applied` block and makes an older build reject the
-    chain;
-  - y axis: two overlaid bars per round - in front the count of finished
-    stories (done + discarded), behind it the total count of stories.
+  - x axis: the sprint number (1, 2, 3, ...), no clock time. A signed
+    time per sprint would need a time in every attestation, which changes
+    the signed bytes of an `Applied` block and makes an older build
+    reject the chain;
+  - y axis: two overlaid bars per sprint - in front the count of
+    finished stories (done + discarded), behind it the total count of
+    stories.
 
-## 7a. Wakes (decided 2026-11-17)
+## 9a. Wakes
 
 The board wakes nobody. Members wake each other when they need votes,
-with the existing poke: a planning package is a vote, a review verdict
-is a vote. The current Kanban's `wake_trigger("kanban", ...)` goes.
+with the existing poke: planning, review and change are all votes. The
+current Kanban's `wake_trigger("kanban", ...)` goes.
 
-## 8. Not in the concept
+## 10. Not in the concept
 
 Tasks as a level; a "ready for work" state; dates, deadlines, calendar,
-recurrence; clock time on the burn-up; time or size estimates; explicit priority; a "ready for review" state; a dedicated
-review state machine; per-member kinds (person/agent).
+recurrence; timeboxed sprints; clock time on the burn-up; time or size
+estimates; explicit priority; a "ready for review" state; a dedicated
+review state machine; a separate planning thread; per-member kinds (person/agent).
 
-## 8a. The existing surface (decided 2026-11-17)
+## 10a. The existing surface (decided 2026-11-17)
 
 Robo-Scrum keeps `Surface::Quests` and the `quests` wire key; the GUI
 label changes, the wire does not. The Kanban was never used in practice,
@@ -164,12 +189,12 @@ so its data may be lost - the chain may not:
   is `Skipped`), so its chain stays valid and its board just stays old.
   The new op name must therefore differ from `kanban_ops`.
 
-## 9. Open before an implementation plan
+## 11. Open before an implementation plan
 
-- None left in the model. §10 lists what the payload design takes from
+- None left in the model. §12 lists what the payload design takes from
   reference models; the implementation plan starts there.
 
-## 10. Reference models (researched 2026-11-17)
+## 12. Reference models (researched 2026-11-17)
 
 No library to adopt: each reference is its own store (Dolt, git refs,
 relays), and here the chain is the store. Only model ideas carry over.
@@ -177,7 +202,7 @@ relays), and here the chain is the store. Only model ideas carry over.
 | reference | what it is | take | leave |
 |---|---|---|---|
 | Beads (`bd`) | git/Dolt-backed tracker for coding agents | "ready" derived from no open blockers - our derived in progress; only the `blocks` link gates | claiming (we plan assignees), priority, due/defer dates, the link zoo (`related`, `discovered-from`, `supersedes`) |
-| git-bug | issues as op-packs in git, folded on an empty state | delta ops, not snapshots (our fold already works so); wall-clock time only for display - backs the round-number axis | Lamport clocks (the chain orders) |
+| git-bug | issues as op-packs in git, folded on an empty state | delta ops, not snapshots (our fold already works so); wall-clock time only for display - backs the sprint-number axis | Lamport clocks (the chain orders) |
 | Radicle COBs | per-object change DAG, unsigned branches dropped | - | the DAG: our single threshold-signed chain is stricter |
 | NIP-34 | git issues on Nostr, status as separate events (open / resolved / closed / draft) | done ~ resolved, discarded ~ closed: the minimal terminal set holds up | interop: the board lives inside the MLS group, never public |
 | Taskwarrior | `depends` with derived `+BLOCKED` / `+BLOCKING` | blocked as a derived view, not a state (our waiting) | urgency score, dates |

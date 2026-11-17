@@ -136,7 +136,19 @@ header { display: grid; gap: 14px; }
 .sw.vote { border-top: 2px dashed var(--vote); }
 
 /* votes */
-.votes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.votes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.flow svg { min-width: 680px; }
+.fx rect { stroke-width: 1.5; }
+.fx-vote rect { fill: var(--vote-soft); stroke: var(--vote); }
+.fx-run rect { fill: var(--run-soft); stroke: var(--run); }
+.fx-done rect { fill: var(--done-soft); stroke: var(--done); }
+.fx-ch rect { fill: var(--panel); stroke: var(--vote); stroke-dasharray: 5 4; }
+.fx .t { font: 700 16px var(--f-display); fill: var(--ink); }
+.fx .s { font: 400 12px var(--f-body); fill: var(--muted); }
+.fx-ch .s { fill: var(--vote); font-weight: 500; }
+.edge.loop { stroke: var(--accent); stroke-width: 2; }
+.elabel.loop { fill: var(--accent); font-weight: 500; }
+.arrowhead.loop { fill: var(--accent); }
 .vote {
   border: 1px solid var(--vote); background: var(--vote-soft); border-radius: 10px;
   padding: 16px 18px; display: grid; gap: 6px; align-content: start;
@@ -182,6 +194,7 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
 
 @media (max-width: 760px) {
   .principles, .two, .votes, .rules { grid-template-columns: minmax(0, 1fr); }
+  .flow svg { min-width: 620px; }
   .wrap { padding-block: 24px 48px; }
 }
 </style>
@@ -203,18 +216,71 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
 
   <section class="panel">
     <div class="head">
-      <span class="eyebrow">Die zwei Abstimmungen</span>
-      <h2>Abgestimmt wird nur über Pläne und Urteile</h2>
+      <span class="eyebrow">Ablauf</span>
+      <h2>Ein Sprint: planen, arbeiten, prüfen, weiter</h2>
+      <p>Sprints haben keine Dauer. Ein Sprint endet, wenn jede seiner Stories beendet ist. Sprints überlappen nie.</p>
+    </div>
+    <div class="diagram flow">
+      <svg viewBox="0 0 940 262" role="img" aria-label="Planungs-Vote, Sprint läuft, Review-Votes, Sprint zu; solange das Backlog etwas hat, folgt der nächste Planungs-Vote">
+        <defs>
+          <marker id="ahl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead loop" d="M0 0L10 5L0 10z"/></marker>
+        </defs>
+        <g class="fx fx-ch"><rect x="250" y="6" width="430" height="30" rx="15"/><text class="s" x="465" y="26" text-anchor="middle">Änderungs-Vote jederzeit: ändern, umbesetzen, verwerfen, raus/rein</text></g>
+        <path class="edge vote" d="M345 36 V54" marker-end="url(#ahv)"/>
+        <path class="edge vote" d="M585 36 V54" marker-end="url(#ahv)"/>
+
+        <g class="fx fx-vote"><rect x="10" y="56" width="190" height="84" rx="10"/>
+          <text class="t" x="105" y="84" text-anchor="middle">Planungs-Vote</text>
+          <text class="s" x="105" y="106" text-anchor="middle">wählt Stories für den Sprint</text>
+          <text class="s" x="105" y="124" text-anchor="middle">Diskussion unter dem Vote</text></g>
+        <g class="fx fx-run"><rect x="250" y="56" width="190" height="84" rx="10"/>
+          <text class="t" x="345" y="84" text-anchor="middle">Sprint läuft</text>
+          <text class="s" x="345" y="106" text-anchor="middle">frei: in progress</text>
+          <text class="s" x="345" y="124" text-anchor="middle">abhängig: waiting</text></g>
+        <g class="fx fx-vote"><rect x="490" y="56" width="190" height="84" rx="10"/>
+          <text class="t" x="585" y="84" text-anchor="middle">Review-Votes</text>
+          <text class="s" x="585" y="106" text-anchor="middle">eins je Story</text>
+          <text class="s" x="585" y="124" text-anchor="middle">done oder discarded</text></g>
+        <g class="fx fx-done"><rect x="730" y="56" width="200" height="84" rx="10"/>
+          <text class="t" x="830" y="84" text-anchor="middle">Sprint zu</text>
+          <text class="s" x="830" y="106" text-anchor="middle">alle Stories beendet</text>
+          <text class="s" x="830" y="124" text-anchor="middle">abgeleitet, kein Vote</text></g>
+
+        <path class="edge" d="M200 98 H248" marker-end="url(#ah)"/>
+        <path class="edge" d="M440 98 H488" marker-end="url(#ah)"/>
+        <path class="edge" d="M680 98 H728" marker-end="url(#ah)"/>
+
+        <path class="edge loop" d="M830 140 V206 H105 V142" marker-end="url(#ahl)"/>
+        <text class="elabel loop" x="468" y="198" text-anchor="middle">Backlog hat noch etwas: nächster Sprint</text>
+        <text class="elabel" x="830" y="236" text-anchor="middle">Backlog leer: fertig</text>
+        <path class="edge" d="M830 206 V218" />
+        <text class="elabel" x="105" y="236" text-anchor="middle">Sprint-Nr. +1</text>
+      </svg>
+    </div>
+    <div class="legend">
+      <span><i class="sw vote"></i>m-of-n-Vote</span>
+      <span><i class="sw"></i>folgt von selbst</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="head">
+      <span class="eyebrow">Die drei Abstimmungen</span>
+      <h2>Abgestimmt wird über Pläne, Urteile und Änderungen</h2>
       <p>Alles andere leitet jeder Knoten selbst aus der Chain ab.</p>
     </div>
     <div class="votes">
       <div class="vote">
-        <h3>Planungspaket</h3>
-        <p>Legt Epics und Stories an oder ändert sie, setzt Abhängigkeiten, Assignee und Reviewer, darf Stories verwerfen. Jedes Mitglied darf eins vorschlagen, mehrere dürfen konkurrieren. Ein Paket ist ein Vote und gilt ganz oder gar nicht.</p>
+        <h3>Planungs-Vote</h3>
+        <p>Öffnet den Sprint. Wählt Stories aus dem Backlog, legt neue an, setzt Abhängigkeiten, Assignee und Reviewer. Die Mitglieder diskutieren unter dem Vote. Nur zulässig, wenn kein Sprint offen ist.</p>
       </div>
       <div class="vote">
-        <h3>Review-Urteil</h3>
-        <p>Der Assignee sagt dem Reviewer, dass die Arbeit fertig ist. Der Reviewer schlägt <b>done</b> oder <b>discarded</b> vor, die Gruppe stimmt ab. Es gibt keinen Zustand "ready for review".</p>
+        <h3>Review-Vote</h3>
+        <p>Der Assignee sagt dem Reviewer, dass die Arbeit fertig ist. Der Reviewer schlägt <b>done</b> oder <b>discarded</b> vor, die Gruppe stimmt ab.</p>
+      </div>
+      <div class="vote">
+        <h3>Änderungs-Vote</h3>
+        <p>Jederzeit, auch mitten im Sprint: Story ändern, neu zuweisen, aus dem Sprint nehmen oder hinein, verwerfen. Öffnet nie einen Sprint.</p>
       </div>
     </div>
   </section>
@@ -276,8 +342,9 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
           <path class="edge vote" d="M320 111 C360 111 360 163 398 163" marker-end="url(#ahv)"/>
           <text class="elabel vote" x="366" y="80" text-anchor="middle">Review</text>
           <text class="elabel vote" x="366" y="134" text-anchor="middle">Review</text>
-          <text class="elabel" x="62" y="146" text-anchor="middle">Voraussetzung offen</text>
-          <text class="elabel" x="255" y="146" text-anchor="middle">alle erledigt</text>
+          <text class="elabel" x="62" y="146" text-anchor="middle">Backlog oder</text>
+          <text class="elabel" x="62" y="160" text-anchor="middle">blockiert im Sprint</text>
+          <text class="elabel" x="255" y="146" text-anchor="middle">im Sprint, frei</text>
           <text class="elabel" x="456" y="204" text-anchor="middle">endgültig</text>
         </svg>
       </div>
@@ -286,8 +353,8 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
         <span><i class="sw vote"></i>m-of-n-Vote</span>
       </div>
       <ul class="facts">
-        <li><b>waiting</b>: im angenommenen Paket, aber eine Voraussetzung ist offen. "Blockiert" ist kein eigener Zustand.</li>
-        <li><b>in progress</b> beginnt von selbst, sobald alle Voraussetzungen erledigt sind. Kein Vote, kein Block.</li>
+        <li><b>waiting</b>: im Backlog, oder im Sprint mit offener Voraussetzung. "Blockiert" ist kein eigener Zustand.</li>
+        <li><b>in progress</b> folgt von selbst: im offenen Sprint und alle Voraussetzungen erledigt. Kein Vote, kein Block.</li>
         <li><b>discarded</b> ist endgültig. Nacharbeit ist eine neue Story.</li>
       </ul>
     </section>
@@ -323,8 +390,8 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
         <li><b>Keine Zyklen</b><span>Auch nicht zum eigenen Vorfahren oder Nachfahren.</span></li>
         <li><b>Epic sperrt alles darunter</b><span>Hängt Epic B an Epic A, startet keine Story unter B, bevor A ganz erledigt ist.</span></li>
         <li><b>Keine Priorität</b><span>Kein Ranking zusätzlich zu den Abhängigkeiten.</span></li>
-        <li><b>Blocker bleiben</b><span>Was etwas blockiert, kann nicht verworfen werden. Ein Paket darf umhängen und im selben Vote verwerfen.</span></li>
-        <li><b>Kein Zurückfallen</b><span>Ein Paket, das eine laufende Story zurück auf waiting setzen würde, wird abgelehnt.</span></li>
+        <li><b>Blocker bleiben</b><span>Was etwas blockiert, kann nicht verworfen werden. Ein Vote darf umhängen und im selben Zug verwerfen.</span></li>
+        <li><b>Ketten im Sprint</b><span>Story und Voraussetzung dürfen im selben Sprint liegen. Die abhängige wartet dort.</span></li>
       </ul>
     </section>
   </div>
@@ -332,10 +399,10 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
   <section class="panel chart">
     <div class="head">
       <span class="eyebrow">Erste Ansicht</span>
-      <h2>Burn-up nach Planungsrunde</h2>
-      <p>x-Achse: Nummer der angenommenen Planungsrunde, keine Uhrzeit. Vorn die abgeschlossenen Stories (done + discarded), dahinter alle Stories.</p>
+      <h2>Burn-up nach Sprint</h2>
+      <p>x-Achse: Sprint-Nummer, keine Uhrzeit. Vorn die abgeschlossenen Stories (done + discarded), dahinter alle Stories.</p>
     </div>
-    <svg viewBox="0 0 560 230" role="img" aria-label="Beispiel-Burn-up über fünf Runden">
+    <svg viewBox="0 0 560 230" role="img" aria-label="Beispiel-Burn-up über fünf Sprints">
       <g class="grid">
         <line x1="44" x2="548" y1="190" y2="190"/>
         <line x1="44" x2="548" y1="145" y2="145"/>
@@ -364,7 +431,7 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
         <rect class="bar-done" x="476" y="55" width="36" height="135"/>
       </g>
       <g class="axis">
-        <text x="94" y="210" text-anchor="middle">Runde 1</text>
+        <text x="94" y="210" text-anchor="middle">Sprint 1</text>
         <text x="194" y="210" text-anchor="middle">2</text>
         <text x="294" y="210" text-anchor="middle">3</text>
         <text x="394" y="210" text-anchor="middle">4</text>
@@ -380,14 +447,13 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
 
   <section class="panel">
     <div class="head">
-      <span class="eyebrow">Planung &amp; Wecken</span>
-      <h2>Wann geplant wird, entscheiden die Mitglieder</h2>
+      <span class="eyebrow">Spielregeln</span>
+      <h2>Wecken, Aufbewahrung, Konkurrenz</h2>
     </div>
     <ul class="facts">
-      <li><b>Planungsmeeting</b>: ein Chat-Thread mit eigenem Tag. Auch Agenten dürfen eins eröffnen.</li>
       <li><b>Wecken</b>: Das Board weckt niemanden. Mitglieder wecken sich gegenseitig, wenn sie Stimmen brauchen.</li>
-      <li><b>Aufbewahrung</b>: Threads und abgelehnte Pakete verfallen nach 14 Tagen. Ein angenommenes Paket ist ein Chain-Block. Was bleiben soll, kommt ins Wiki.</li>
-      <li><b>Konkurrenz</b>: Wird ein anderes Paket zuerst angenommen, kann ein später angenommenes ungültig werden. Dann wird neu geplant.</li>
+      <li><b>Aufbewahrung</b>: Abgelehnte Votes und ihre Diskussion verfallen nach 14 Tagen. Ein angenommener Vote ist ein Chain-Block. Was bleiben soll, kommt ins Wiki.</li>
+      <li><b>Konkurrenz</b>: Mehrere Planungs-Votes dürfen konkurrieren. Der zuerst angenommene öffnet den Sprint, die anderen werden ungültig.</li>
     </ul>
   </section>
 
@@ -397,7 +463,7 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
       <h2>Nicht im Konzept</h2>
     </div>
     <div class="nope">
-      <span>Tasks</span><span>Termine</span><span>Fristen</span><span>Kalender</span><span>Wiederholung</span>
+      <span>Tasks</span><span>Sprint-Dauer</span><span>eigener Planungs-Thread</span><span>Termine</span><span>Fristen</span><span>Kalender</span><span>Wiederholung</span>
       <span>Schätzungen</span><span>Priorität</span><span>ready for work</span><span>ready for review</span>
       <span>Uhrzeit im Burn-up</span><span>Verschieben zwischen Epics</span><span>Mensch/Agent-Typen</span>
     </div>
