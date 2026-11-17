@@ -53,28 +53,22 @@ Acceptance criteria, out of scope and preconditions exist on stories only.
 ## 3. Story lifecycle
 
 ```
-planning -> ready for work -> in progress -> done
-                                         \-> discarded
+planning -> in progress -> done
+                       \-> discarded
 ```
 
-- Every transition is an m-of-n vote.
-- **in progress**: only the story's assignee proposes it.
+- **planning**: the story is in an accepted package, but an element it
+  depends on is not done yet.
+- **in progress**: derived, never voted (decided 2026-11-17). A story is
+  in progress as soon as its package is accepted and every element it
+  depends on is done. The accepted package is the group's decision; what
+  follows from it mechanically needs no second vote and no block - every
+  node computes it identically from the chain.
 - **Review**: the assignee tells the reviewer the work is ready (there is
   no "ready for review" state). The reviewer proposes the verdict - done
-  or discarded - and the group votes on it.
+  or discarded - and the group votes on it. A verdict is the only voted
+  story transition.
 - **discarded is final.** Rework is a new story.
-
-### 3.1 Automatic transitions (decided 2026-11-17)
-
-The accepted planning package is the group's decision; what follows from
-it mechanically needs no second human vote. Each node's engine signs such
-a transition by itself once its checks hold - still m-of-n on the chain,
-only without waiting for people (the pattern of
-`docs_archive/ritual/recovery_auto_approval.md`):
-
-- **in progress**: auto-signed when the proposer is the story's assignee,
-  the story is ready for work, and every element it depends on is done.
-- A review verdict (done / discarded) is never automatic.
 
 ## 4. Derived epic state
 
@@ -138,7 +132,7 @@ height ‖ change`, with no time in it (§9).
 
 ## 8. Not in the concept
 
-Tasks as a level; dates, deadlines, calendar, recurrence; time or size
+Tasks as a level; a "ready for work" state; dates, deadlines, calendar, recurrence; time or size
 estimates; explicit priority; a "ready for review" state; a dedicated
 review state machine; per-member kinds (person/agent).
 
@@ -164,10 +158,11 @@ so its data may be lost - the chain may not:
 
 ## 9. Open before an implementation plan
 
-- **planning -> ready for work**: is it part of the planning package, or
-  a vote of its own?
+- **A new blocker on a running story**: in progress is derived, so a
+  package that adds an open dependency to an in-progress story turns it
+  back to planning. Allow that, or refuse such a dependency?
 - **Discarding outside review**: may a planning package discard a story
-  in planning, ready for work or in progress?
+  in planning or in progress?
 - **Containment and dependencies**: a dependency between an element and
   its own ancestor or descendant deadlocks (the epic waits for the story,
   the story for the epic) - refuse it as a cycle?
