@@ -53,12 +53,13 @@ Acceptance criteria, out of scope and preconditions exist on stories only.
 ## 3. Story lifecycle
 
 ```
-planning -> in progress -> done
-                       \-> discarded
+waiting -> in progress -> done
+                      \-> discarded
 ```
 
-- **planning**: the story is in an accepted package, but an element it
-  depends on is not done yet.
+- **waiting**: the story is in an accepted package, but an element it
+  depends on is not done yet. Blocked is not a state of its own: an
+  unfinished prerequisite is what waiting means.
 - **in progress**: derived, never voted (decided 2026-11-17). A story is
   in progress as soon as its package is accepted and every element it
   depends on is done. The accepted package is the group's decision; what
@@ -160,9 +161,9 @@ so its data may be lost - the chain may not:
 
 - **A new blocker on a running story**: in progress is derived, so a
   package that adds an open dependency to an in-progress story turns it
-  back to planning. Allow that, or refuse such a dependency?
+  back to waiting. Allow that, or refuse such a dependency?
 - **Discarding outside review**: may a planning package discard a story
-  in planning or in progress?
+  waiting or in progress?
 - **Containment and dependencies**: a dependency between an element and
   its own ancestor or descendant deadlocks (the epic waits for the story,
   the story for the epic) - refuse it as a cycle?
