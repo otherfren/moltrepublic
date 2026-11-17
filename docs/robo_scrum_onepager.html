@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Robo-Scrum</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one column of numbered-free panels; principles row, then the two diagrams side by side, then rules, then chart */
+:root {
+  --bg: #f3f5f7;
+  --panel: #ffffff;
+  --ink: #16202b;
+  --muted: #5b6876;
+  --line: #d6dde4;
+  --accent: #1f5fbf;
+  --accent-soft: #e3ecf9;
+  --wait: #b7791f;
+  --wait-soft: #fbf0dc;
+  --run: #1f5fbf;
+  --run-soft: #e3ecf9;
+  --done: #23794a;
+  --done-soft: #def2e6;
+  --drop: #6b7480;
+  --drop-soft: #e8ebef;
+  --vote: #8a3ab9;
+  --vote-soft: #f1e5f8;
+  --f-display: "Bricolage Grotesque", "Space Grotesk", system-ui, sans-serif;
+  --f-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f151c; --panel: #17202a; --ink: #e6ebf0; --muted: #98a5b3; --line: #2a3644;
+    --accent: #6fa3f0; --accent-soft: #1b2d47;
+    --wait: #e2a94e; --wait-soft: #3a2c14; --run: #6fa3f0; --run-soft: #1b2d47;
+    --done: #5cc38a; --done-soft: #15382a; --drop: #8d97a3; --drop-soft: #262f39;
+    --vote: #c58ae8; --vote-soft: #33213f;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f151c; --panel: #17202a; --ink: #e6ebf0; --muted: #98a5b3; --line: #2a3644;
+  --accent: #6fa3f0; --accent-soft: #1b2d47;
+  --wait: #e2a94e; --wait-soft: #3a2c14; --run: #6fa3f0; --run-soft: #1b2d47;
+  --done: #5cc38a; --done-soft: #15382a; --drop: #8d97a3; --drop-soft: #262f39;
+  --vote: #c58ae8; --vote-soft: #33213f;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 15px/1.55 var(--f-body);
+}
+.wrap {
+  max-width: 1080px; margin: 0 auto;
+  padding-block: 40px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 28px;
+}
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; margin: 0; }
+h1 { font-size: clamp(2.4rem, 6vw, 3.6rem); line-height: 1.02; letter-spacing: -0.02em; }
+h2 { font-size: 1.35rem; letter-spacing: -0.01em; }
+h3 { font-size: 1.05rem; }
+p { margin: 0; }
+code, .mono { font-family: var(--f-mono); font-size: 0.86em; }
+.eyebrow {
+  font: 500 0.72rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.12em;
+  color: var(--muted);
+}
+.lede { font-size: 1.12rem; color: var(--muted); max-width: 62ch; }
+.lede strong { color: var(--ink); font-weight: 600; }
+header { display: grid; gap: 14px; }
+.status {
+  display: inline-flex; gap: 8px; align-items: center; justify-self: start;
+  font: 500 0.75rem/1 var(--f-mono); color: var(--wait);
+  background: var(--wait-soft); padding: 6px 10px; border-radius: 999px;
+}
+
+/* principles */
+.principles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.pr {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 18px 18px 20px; display: grid; gap: 6px; align-content: start;
+}
+.pr .big { font: 700 1.6rem/1.1 var(--f-display); color: var(--accent); }
+.pr p { color: var(--muted); font-size: 0.92rem; }
+
+.panel {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+  padding: 22px; display: grid; gap: 16px; min-width: 0;
+}
+.panel > .head { display: grid; gap: 4px; }
+.panel > .head p { color: var(--muted); font-size: 0.92rem; }
+.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 20px; }
+
+/* tree */
+.tree, .tree ul { list-style: none; margin: 0; padding: 0; }
+.tree ul { padding-left: 22px; border-left: 1px dashed var(--line); margin-left: 9px; }
+.tree li { position: relative; padding: 4px 0; }
+.tree ul > li::before {
+  content: ""; position: absolute; left: -22px; top: 17px; width: 16px; border-top: 1px dashed var(--line);
+}
+.node { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tag {
+  font: 500 0.68rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.08em;
+  padding: 4px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted);
+}
+.tag.epic { color: var(--accent); border-color: var(--accent); }
+.tag.story { color: var(--ink); background: var(--bg); }
+.note { font-size: 0.82rem; color: var(--muted); }
+.facts { display: grid; gap: 6px; font-size: 0.9rem; padding: 0; margin: 0; list-style: none; }
+.facts li { padding-left: 16px; position: relative; }
+.facts li::before { content: ""; position: absolute; left: 2px; top: 0.62em; width: 6px; height: 6px; border-radius: 2px; background: var(--accent); }
+
+/* lifecycle */
+.diagram { overflow-x: auto; }
+.diagram svg { display: block; width: 100%; min-width: 460px; height: auto; }
+.st-wait rect { fill: var(--wait-soft); stroke: var(--wait); }
+.st-run rect { fill: var(--run-soft); stroke: var(--run); }
+.st-done rect { fill: var(--done-soft); stroke: var(--done); }
+.st-drop rect { fill: var(--drop-soft); stroke: var(--drop); }
+.st-wait text { fill: var(--wait); } .st-run text { fill: var(--run); }
+.st-done text { fill: var(--done); } .st-drop text { fill: var(--drop); }
+.st text.n { font: 700 15px var(--f-display); }
+.edge { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+.edge.vote { stroke: var(--vote); stroke-dasharray: 5 4; }
+.elabel { font: 500 11px var(--f-mono); fill: var(--muted); }
+.elabel.vote { fill: var(--vote); }
+.arrowhead { fill: var(--muted); } .arrowhead.vote { fill: var(--vote); }
+.legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 0.85rem; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 22px; height: 0; border-top: 2px solid var(--muted); }
+.sw.vote { border-top: 2px dashed var(--vote); }
+
+/* votes */
+.votes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.vote {
+  border: 1px solid var(--vote); background: var(--vote-soft); border-radius: 10px;
+  padding: 16px 18px; display: grid; gap: 6px; align-content: start;
+}
+.vote h3 { color: var(--vote); }
+.vote p { font-size: 0.9rem; }
+.callout { font: 600 1.05rem/1.4 var(--f-display); }
+
+/* story card */
+.card {
+  border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: 0.88rem;
+}
+.card .title { padding: 12px 14px; font-weight: 600; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.card dl { margin: 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); }
+.card dt, .card dd { margin: 0; padding: 7px 14px; border-bottom: 1px solid var(--line); }
+.card dt { color: var(--muted); font: 500 0.72rem/1.9 var(--f-mono); text-transform: uppercase; letter-spacing: 0.06em; }
+.card dl > :nth-last-child(-n+2) { border-bottom: 0; }
+.pill { font: 500 0.7rem/1 var(--f-mono); padding: 4px 7px; border-radius: 999px; }
+.pill.run { background: var(--run-soft); color: var(--run); }
+.pill.no { background: var(--drop-soft); color: var(--drop); }
+
+/* rules */
+.rules { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 24px; padding: 0; margin: 0; list-style: none; }
+.rules li { display: grid; gap: 2px; padding-top: 10px; border-top: 1px solid var(--line); }
+.rules b { font-weight: 600; }
+.rules span { color: var(--muted); font-size: 0.9rem; }
+
+/* chart */
+.chart svg { display: block; width: 100%; height: auto; }
+.grid line { stroke: var(--line); }
+.axis text { font: 400 11px var(--f-mono); fill: var(--muted); }
+.bar-total { fill: var(--line); }
+.bar-done { fill: var(--accent); }
+.example { font: 500 0.7rem/1 var(--f-mono); color: var(--muted); border: 1px dashed var(--line); padding: 4px 7px; border-radius: 4px; justify-self: start; }
+
+/* not in concept */
+.nope { display: flex; flex-wrap: wrap; gap: 8px; }
+.nope span {
+  font-size: 0.85rem; color: var(--muted); text-decoration: line-through; text-decoration-color: var(--drop);
+  border: 1px solid var(--line); padding: 5px 10px; border-radius: 999px; background: var(--panel);
+}
+footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-width: 75ch; }
+
+@media (max-width: 760px) {
+  .principles, .two, .votes, .rules { grid-template-columns: minmax(0, 1fr); }
+  .wrap { padding-block: 24px 48px; }
+}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <span class="status">Konzept · nicht gebaut · Stand 17.11.2026</span>
+    <h1>Robo-Scrum</h1>
+    <p class="lede">Planen für eine Republik aus Menschen und Agenten. Behalten wird, was eine Gruppe zum gemeinsamen Planen braucht: <strong>Epics, Stories, Abhängigkeiten, wer macht was, wer prüft wen.</strong> Alles, was an der Uhr hängt, fällt weg.</p>
+  </header>
+
+  <section class="principles" aria-label="Grundsätze">
+    <div class="pr"><span class="eyebrow">Grundsatz</span><span class="big">Alles m-of-n</span><p>Jede Änderung am Board ist ein Vorschlag mit Schwellen-Zustimmung auf der Chain. Keine Ausnahme, kein leichterer Weg.</p></div>
+    <div class="pr"><span class="eyebrow">Grundsatz</span><span class="big">Keine Zeit</span><p>Keine Termine, Fristen, Kalender, Schätzungen. Arbeit läuft so schnell sie kann. Warten heißt: Abhängigkeit.</p></div>
+    <div class="pr"><span class="eyebrow">Grundsatz</span><span class="big">Nur Mitglieder</span><p>Das Board weiß nicht, ob ein Mitglied Mensch, Agent oder beides ist.</p></div>
+  </section>
+
+  <section class="panel">
+    <div class="head">
+      <span class="eyebrow">Die zwei Abstimmungen</span>
+      <h2>Abgestimmt wird nur über Pläne und Urteile</h2>
+      <p>Alles andere leitet jeder Knoten selbst aus der Chain ab.</p>
+    </div>
+    <div class="votes">
+      <div class="vote">
+        <h3>Planungspaket</h3>
+        <p>Legt Epics und Stories an oder ändert sie, setzt Abhängigkeiten, Assignee und Reviewer, darf Stories verwerfen. Jedes Mitglied darf eins vorschlagen, mehrere dürfen konkurrieren. Ein Paket ist ein Vote und gilt ganz oder gar nicht.</p>
+      </div>
+      <div class="vote">
+        <h3>Review-Urteil</h3>
+        <p>Der Assignee sagt dem Reviewer, dass die Arbeit fertig ist. Der Reviewer schlägt <b>done</b> oder <b>discarded</b> vor, die Gruppe stimmt ab. Es gibt keinen Zustand "ready for review".</p>
+      </div>
+    </div>
+  </section>
+
+  <div class="two">
+    <section class="panel">
+      <div class="head">
+        <span class="eyebrow">Hierarchie</span>
+        <h2>Zwei Elemente: Epic und Story</h2>
+      </div>
+      <ul class="tree" aria-label="Beispielbaum">
+        <li><span class="node"><span class="tag epic">Root-Epic</span> Republik</span>
+          <ul>
+            <li><span class="node"><span class="tag epic">Epic</span> Treffen organisieren</span>
+              <ul>
+                <li><span class="node"><span class="tag epic">Blatt-Epic</span> Ort</span>
+                  <ul>
+                    <li><span class="node"><span class="tag story">Story</span> Raum reservieren</span></li>
+                    <li><span class="node"><span class="tag story">Story</span> Anreise beschreiben</span></li>
+                  </ul>
+                </li>
+              </ul>
+            </li>
+            <li><span class="node"><span class="tag epic">Blatt-Epic</span> Website</span>
+              <ul>
+                <li><span class="node"><span class="tag story">Story</span> Startseite schreiben</span></li>
+              </ul>
+            </li>
+          </ul>
+        </li>
+      </ul>
+      <p class="note">Beispielinhalt.</p>
+      <ul class="facts">
+        <li>Epics verschachteln sich, es gibt genau ein Root-Epic.</li>
+        <li>Nur Blatt-Epics halten Stories. Keine Tasks.</li>
+        <li>Eine Story bleibt in ihrem Epic, Verschieben gibt es nicht.</li>
+        <li>Der Zustand eines Epics wird nie abgestimmt, er folgt aus den Kindern.</li>
+      </ul>
+    </section>
+
+    <section class="panel">
+      <div class="head">
+        <span class="eyebrow">Lebenszyklus einer Story</span>
+        <h2>Vier Zustände, ein Vote</h2>
+      </div>
+      <div class="diagram">
+        <svg viewBox="0 0 520 210" role="img" aria-label="waiting geht automatisch nach in progress, von dort per Review-Vote nach done oder discarded">
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0L10 5L0 10z"/></marker>
+            <marker id="ahv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead vote" d="M0 0L10 5L0 10z"/></marker>
+          </defs>
+          <g class="st st-wait"><rect x="6" y="80" width="112" height="46" rx="8" stroke-width="1.5"/><text class="n" x="62" y="108" text-anchor="middle">waiting</text></g>
+          <g class="st st-run"><rect x="190" y="80" width="130" height="46" rx="8" stroke-width="1.5"/><text class="n" x="255" y="108" text-anchor="middle">in progress</text></g>
+          <g class="st st-done"><rect x="400" y="20" width="112" height="46" rx="8" stroke-width="1.5"/><text class="n" x="456" y="48" text-anchor="middle">done</text></g>
+          <g class="st st-drop"><rect x="400" y="140" width="112" height="46" rx="8" stroke-width="1.5"/><text class="n" x="456" y="168" text-anchor="middle">discarded</text></g>
+          <path class="edge" d="M118 103 H188" marker-end="url(#ah)"/>
+          <text class="elabel" x="153" y="94" text-anchor="middle">auto</text>
+          <path class="edge vote" d="M320 95 C360 95 360 43 398 43" marker-end="url(#ahv)"/>
+          <path class="edge vote" d="M320 111 C360 111 360 163 398 163" marker-end="url(#ahv)"/>
+          <text class="elabel vote" x="366" y="80" text-anchor="middle">Review</text>
+          <text class="elabel vote" x="366" y="134" text-anchor="middle">Review</text>
+          <text class="elabel" x="62" y="146" text-anchor="middle">Voraussetzung offen</text>
+          <text class="elabel" x="255" y="146" text-anchor="middle">alle erledigt</text>
+          <text class="elabel" x="456" y="204" text-anchor="middle">endgültig</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i class="sw"></i>abgeleitet, kein Vote</span>
+        <span><i class="sw vote"></i>m-of-n-Vote</span>
+      </div>
+      <ul class="facts">
+        <li><b>waiting</b>: im angenommenen Paket, aber eine Voraussetzung ist offen. "Blockiert" ist kein eigener Zustand.</li>
+        <li><b>in progress</b> beginnt von selbst, sobald alle Voraussetzungen erledigt sind. Kein Vote, kein Block.</li>
+        <li><b>discarded</b> ist endgültig. Nacharbeit ist eine neue Story.</li>
+      </ul>
+    </section>
+  </div>
+
+  <div class="two">
+    <section class="panel">
+      <div class="head">
+        <span class="eyebrow">Story-Felder</span>
+        <h2>Was eine Story trägt</h2>
+      </div>
+      <div class="card">
+        <div class="title">Raum reservieren <span class="pill run">in progress</span></div>
+        <dl>
+          <dt>Abnahme</dt><dd>Bestätigung des Raums liegt im Wiki</dd>
+          <dt>Nicht Teil</dt><dd>Catering</dd>
+          <dt>Vorbedingung</dt><dd>Teilnehmerzahl steht fest</dd>
+          <dt>Menschen&shy;aufgabe</dt><dd><span class="pill no">ja</span> eine Person muss es tun, nicht prüfbar</dd>
+          <dt>Assignee</dt><dd>genau ein Mitglied</dd>
+          <dt>Reviewer</dt><dd>genau ein Mitglied, nie der Assignee</dd>
+        </dl>
+      </div>
+      <p class="note">Beispielinhalt. Abnahme, Nicht-Teil und Vorbedingung gibt es nur an Stories.</p>
+    </section>
+
+    <section class="panel">
+      <div class="head">
+        <span class="eyebrow">Abhängigkeiten</span>
+        <h2>Reihenfolge entsteht nur aus Abhängigkeiten</h2>
+      </div>
+      <ul class="rules">
+        <li><b>Zwischen allem</b><span>Story-Story, Epic-Epic und über Ebenen hinweg.</span></li>
+        <li><b>Keine Zyklen</b><span>Auch nicht zum eigenen Vorfahren oder Nachfahren.</span></li>
+        <li><b>Epic sperrt alles darunter</b><span>Hängt Epic B an Epic A, startet keine Story unter B, bevor A ganz erledigt ist.</span></li>
+        <li><b>Keine Priorität</b><span>Kein Ranking zusätzlich zu den Abhängigkeiten.</span></li>
+        <li><b>Blocker bleiben</b><span>Was etwas blockiert, kann nicht verworfen werden. Ein Paket darf umhängen und im selben Vote verwerfen.</span></li>
+        <li><b>Kein Zurückfallen</b><span>Ein Paket, das eine laufende Story zurück auf waiting setzen würde, wird abgelehnt.</span></li>
+      </ul>
+    </section>
+  </div>
+
+  <section class="panel chart">
+    <div class="head">
+      <span class="eyebrow">Erste Ansicht</span>
+      <h2>Burn-up nach Planungsrunde</h2>
+      <p>x-Achse: Nummer der angenommenen Planungsrunde, keine Uhrzeit. Vorn die abgeschlossenen Stories (done + discarded), dahinter alle Stories.</p>
+    </div>
+    <svg viewBox="0 0 560 230" role="img" aria-label="Beispiel-Burn-up über fünf Runden">
+      <g class="grid">
+        <line x1="44" x2="548" y1="190" y2="190"/>
+        <line x1="44" x2="548" y1="145" y2="145"/>
+        <line x1="44" x2="548" y1="100" y2="100"/>
+        <line x1="44" x2="548" y1="55" y2="55"/>
+        <line x1="44" x2="548" y1="10" y2="10"/>
+      </g>
+      <g class="axis">
+        <text x="36" y="194" text-anchor="end">0</text>
+        <text x="36" y="149" text-anchor="end">5</text>
+        <text x="36" y="104" text-anchor="end">10</text>
+        <text x="36" y="59" text-anchor="end">15</text>
+        <text x="36" y="14" text-anchor="end">20</text>
+      </g>
+      <!-- scale: 9px per story, baseline 190; slots of 100px from x=44 -->
+      <g>
+        <rect class="bar-total" x="64" y="118" width="60" height="72"/>
+        <rect class="bar-done" x="76" y="190" width="36" height="0"/>
+        <rect class="bar-total" x="164" y="82" width="60" height="108"/>
+        <rect class="bar-done" x="176" y="163" width="36" height="27"/>
+        <rect class="bar-total" x="264" y="82" width="60" height="108"/>
+        <rect class="bar-done" x="276" y="127" width="36" height="63"/>
+        <rect class="bar-total" x="364" y="37" width="60" height="153"/>
+        <rect class="bar-done" x="376" y="100" width="36" height="90"/>
+        <rect class="bar-total" x="464" y="19" width="60" height="171"/>
+        <rect class="bar-done" x="476" y="55" width="36" height="135"/>
+      </g>
+      <g class="axis">
+        <text x="94" y="210" text-anchor="middle">Runde 1</text>
+        <text x="194" y="210" text-anchor="middle">2</text>
+        <text x="294" y="210" text-anchor="middle">3</text>
+        <text x="394" y="210" text-anchor="middle">4</text>
+        <text x="494" y="210" text-anchor="middle">5</text>
+      </g>
+    </svg>
+    <div class="legend">
+      <span><i class="sw" style="border-top:8px solid var(--accent);width:14px"></i>abgeschlossen</span>
+      <span><i class="sw" style="border-top:8px solid var(--line);width:14px"></i>alle Stories</span>
+      <span class="example">Beispieldaten</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="head">
+      <span class="eyebrow">Planung &amp; Wecken</span>
+      <h2>Wann geplant wird, entscheiden die Mitglieder</h2>
+    </div>
+    <ul class="facts">
+      <li><b>Planungsmeeting</b>: ein Chat-Thread mit eigenem Tag. Auch Agenten dürfen eins eröffnen.</li>
+      <li><b>Wecken</b>: Das Board weckt niemanden. Mitglieder wecken sich gegenseitig, wenn sie Stimmen brauchen.</li>
+      <li><b>Aufbewahrung</b>: Threads und abgelehnte Pakete verfallen nach 14 Tagen. Ein angenommenes Paket ist ein Chain-Block. Was bleiben soll, kommt ins Wiki.</li>
+      <li><b>Konkurrenz</b>: Wird ein anderes Paket zuerst angenommen, kann ein später angenommenes ungültig werden. Dann wird neu geplant.</li>
+    </ul>
+  </section>
+
+  <section class="panel">
+    <div class="head">
+      <span class="eyebrow">Bewusst weggelassen</span>
+      <h2>Nicht im Konzept</h2>
+    </div>
+    <div class="nope">
+      <span>Tasks</span><span>Termine</span><span>Fristen</span><span>Kalender</span><span>Wiederholung</span>
+      <span>Schätzungen</span><span>Priorität</span><span>ready for work</span><span>ready for review</span>
+      <span>Uhrzeit im Burn-up</span><span>Verschieben zwischen Epics</span><span>Mensch/Agent-Typen</span>
+    </div>
+  </section>
+
+  <footer>
+    <p><b>Kompatibel:</b> Robo-Scrum übernimmt die Fläche und den Wire-Key <code>quests</code> des alten Kanbans. Die alten Daten dürfen verloren gehen, die Chain bleibt gültig. Ältere Builds überspringen neue Blöcke.</p>
+    <p>Quelle: <code>docs/robo_scrum.md</code></p>
+  </footer>
+</div>
+</body>
+</html>
