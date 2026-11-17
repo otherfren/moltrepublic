@@ -205,7 +205,7 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
   <header>
     <span class="status">Konzept · nicht gebaut · Stand 17.11.2026</span>
     <h1>Robo-Scrum</h1>
-    <p class="lede">Planen für eine Republik aus Menschen und Agenten. Behalten wird, was eine Gruppe zum gemeinsamen Planen braucht: <strong>Epics, Stories, Abhängigkeiten, wer macht was, wer prüft wen.</strong> Alles, was an der Uhr hängt, fällt weg.</p>
+    <p class="lede">Planen für eine Republik aus Menschen und Agenten. Behalten wird, was eine Gruppe zum gemeinsamen Planen braucht: <strong>Epics, Stories, Abhängigkeiten, wer macht was, wer prüft wen.</strong> Gearbeitet wird in Sprints ohne Dauer. Alles, was an der Uhr hängt, fällt weg.</p>
   </header>
 
   <section class="principles" aria-label="Grundsätze">
@@ -324,7 +324,7 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
     <section class="panel">
       <div class="head">
         <span class="eyebrow">Lebenszyklus einer Story</span>
-        <h2>Vier Zustände, ein Vote</h2>
+        <h2>Vier Zustände, nur Votes beenden</h2>
       </div>
       <div class="diagram">
         <svg viewBox="0 0 520 210" role="img" aria-label="waiting geht automatisch nach in progress, von dort per Review-Vote nach done oder discarded">
@@ -342,9 +342,11 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
           <path class="edge vote" d="M320 111 C360 111 360 163 398 163" marker-end="url(#ahv)"/>
           <text class="elabel vote" x="366" y="80" text-anchor="middle">Review</text>
           <text class="elabel vote" x="366" y="134" text-anchor="middle">Review</text>
-          <text class="elabel" x="62" y="146" text-anchor="middle">Backlog oder</text>
-          <text class="elabel" x="62" y="160" text-anchor="middle">blockiert im Sprint</text>
-          <text class="elabel" x="255" y="146" text-anchor="middle">im Sprint, frei</text>
+          <text class="elabel" x="62" y="58" text-anchor="middle">Backlog oder</text>
+          <text class="elabel" x="62" y="72" text-anchor="middle">blockiert im Sprint</text>
+          <text class="elabel" x="255" y="72" text-anchor="middle">im Sprint, frei</text>
+          <path class="edge vote" d="M62 126 V178 H398" marker-end="url(#ahv)"/>
+          <text class="elabel vote" x="230" y="172" text-anchor="middle">Änderung</text>
           <text class="elabel" x="456" y="204" text-anchor="middle">endgültig</text>
         </svg>
       </div>
@@ -355,6 +357,7 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
       <ul class="facts">
         <li><b>waiting</b>: im Backlog, oder im Sprint mit offener Voraussetzung. "Blockiert" ist kein eigener Zustand.</li>
         <li><b>in progress</b> folgt von selbst: im offenen Sprint und alle Voraussetzungen erledigt. Kein Vote, kein Block.</li>
+        <li><b>Änderungs-Vote</b>: kann jede offene Story verwerfen oder zurück ins Backlog legen. Eine so verworfene Story braucht kein Review.</li>
         <li><b>discarded</b> ist endgültig. Nacharbeit ist eine neue Story.</li>
       </ul>
     </section>
