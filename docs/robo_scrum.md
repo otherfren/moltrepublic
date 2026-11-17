@@ -67,7 +67,8 @@ planning vote --accepted--> sprint runs --every story reviewed--> sprint closed
   may create new ones; a story it does not select stays in the backlog.
 - **Closing.** A sprint is closed once every story in it is done or
   discarded, or was taken back to the backlog by a change vote (§5).
-  Derived, never voted.
+  Derived, never voted. Every sprint story gets a review vote except one
+  the group discarded by a change vote.
 - **No overlap.** A planning vote is valid only while no sprint is open:
   refused at propose, void at fold. Sprints are numbered 1, 2, 3 in
   chain order.
