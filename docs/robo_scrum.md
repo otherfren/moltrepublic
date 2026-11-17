@@ -3,8 +3,8 @@
 **Status: CONCEPT, open work, not built (2026-11-17).** Decisions from a
 concept session with the user. It replaces the model of the current
 Kanban (`docs_archive/kanban/kanban_workflows.md`, labelled "Work in
-Progress" in the GUI); nothing here is designed against that code. No
-implementation plan yet - §9 lists what must be decided before one.
+Progress" in the GUI); nothing here is designed against that code. The
+model is decided; the implementation plan is next (§10).
 
 ## 1. Idea
 
