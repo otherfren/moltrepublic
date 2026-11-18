@@ -203,8 +203,7 @@ fn the_native_token_is_fresh_each_time() {
     assert_ne!(one, two);
 }
 
-/// A picked file comes back as its bytes, a missing one as an error; a
-/// file the engine wrote here is read in place with its version stamp.
+/// A picked file comes back as its bytes, a missing one as an error.
 #[test]
 fn the_native_platform_reads_files_as_bytes() {
     let platform = crate::platform::platform();
@@ -215,10 +214,6 @@ fn the_native_platform_reads_files_as_bytes() {
     let rt = rt();
     assert_eq!(rt.block_on(platform.read_file(name.clone())).expect("read"), b"one");
     assert!(rt.block_on(platform.read_file(format!("{name}.missing"))).is_err());
-    assert_eq!(platform.local_bytes(&name).as_deref(), Some(&b"one"[..]));
-    assert_eq!(platform.local_stamp(&name).map(|(len, _)| len), Some(3));
-    assert_eq!(platform.local_bytes(&format!("{name}.missing")), None);
-    assert_eq!(platform.local_stamp(&format!("{name}.missing")), None);
 }
 
 /// A burst of alerts plays once: the next one is due 400 ms later.

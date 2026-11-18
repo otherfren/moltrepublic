@@ -248,6 +248,13 @@ allowed:
 * **`set_wake_command`** stays the GUI's direct door only because the value
   itself is on the settings surface (`poke_wake_command` in
   `patch_settings` / `save_settings`) — a second door, not a boundary.
+* **The byte doors** (`upload_begin`, `upload_chunk`, `upload_abort`,
+  `share_upload`, `read_file_bytes`, `read_image_bytes`,
+  `read_export_bytes`) carry file content for a frontend that holds bytes
+  and no host path. An agent runs on the host and has the path forms
+  (`share_file`, `download_file`, `export_workspace`, the picture a view
+  names), and bulk bytes do not fit the 1 MiB line - so they are no tools.
+  None of them names a path ("The byte doors" below).
 * **The read-only key** (`[mcp].read_token`) admits the wiki and file READ
   tools and nothing else, and every reply it gets is stripped of `seed`,
   `mcp_token`, `mcp_read_token`, `s3_secret_key`, `wallet_daemon_login` and
@@ -326,7 +333,9 @@ carrying the serde contract, opened by the same live seat key.
 | the key is re-checked per frame, per reply, and before an event that can follow a rotation | `session.rs::serve` |
 | a command runs only if it is a tool's command or on `WEB_DOOR` | `gate.rs` |
 | the door cannot empty its own seat key | `gate.rs::refusal` |
-| frames are bounded at 1 MiB, a byte read at 64 MiB, replies' bytes go in 256 KiB chunks | `server.rs`, `session.rs` |
+| frames are bounded at 1 MiB, a transfer at 64 MiB either way, bytes go in 256 KiB chunks | `server.rs`, `session.rs`, `molt_core::wire` |
+| an upload's bytes ride one chunk frame behind their command; a frame that is not exactly that ends the session | `session.rs::fill_chunk` |
+| an upload is its session's; the session's end drops what it did not share | `session.rs::session_refusal`, `run` |
 | the bundle is a fixed list, read once from a private directory | `server.rs::load_bundle` |
 
 Stronger than the line protocol in one place: rotation closes a SILENT
@@ -336,6 +345,62 @@ cleartext, and a non-loopback use is an SSH tunnel.
 
 Known and accepted: a local process can hold the 64 session slots with
 silent sockets, ten seconds at a time.
+
+### The byte doors
+
+A browser holds a file's bytes, never a host path, so file content has
+its own commands (`docs/web_gui.md` §7). They are `INTERNAL` for MCP and
+on `WEB_DOOR`; the native window may use them too. **None takes a path**,
+so none reaches further than the path commands a seat already has:
+
+| Command | Addressed by | Refuses |
+|---|---|---|
+| `upload_begin` | a file NAME (one path component) and a size | a separator, `.`/`..`, a control character; over 64 MiB; a ninth open upload; a full store |
+| `upload_chunk` | the upload's id, an offset | an unknown id; any offset but the next; over 256 KiB; more bytes than declared; `last` anywhere but the end |
+| `upload_abort` | the upload's id | an unknown id; an upload already shared |
+| `share_upload` | the upload's id | an upload that is not whole; then every rule of `share_file` |
+| `read_file_bytes` | a share's message id | an unknown, deleted or expired share; bytes not on this device; a checksum mismatch |
+| `read_image_bytes` | the `image` value a view carries | anything that is not the open workspace's current logo or member picture, materialized in its directory |
+| `read_export_bytes` | nothing: the last export of this run | no finished export |
+
+- **The upload store** is `<workspace>/uploads/<id>/<name>`
+  (`molt-engine/src/upload_store.rs`). The id is 128 random bits minted
+  by the engine; no command builds a path from client text. What the
+  store deletes is decided the same way: a share's source is the store's
+  only as exactly `<store>/<minted id>/<name>`, compared by component, so
+  a path with `..` is never the store's; and `share_file` refuses a path
+  under `<workspace>/uploads`, so a by-path share cannot claim (or lose)
+  a stored upload (review 2026-11-18). Quota: 64 MiB
+  per upload, 8 open uploads, 1 GiB per workspace (open uploads at their
+  declared size plus every shared one). `file_cap_bytes` applies at the
+  share, as for `share_file`.
+- **Lifetime.** A shared upload is the share's source file and leaves the
+  disk with the share: `remove_file`, a deleted message, a delete vote,
+  the expiry (swept every 10 minutes). A share whose hash fails drops
+  its upload at once. An upload nobody touched for 15 minutes is dropped
+  (a share restarts that window); a closing workspace drops every open one; what a
+  crash left is removed at the next open. The store is not exported or
+  backed up (an export names `uploads/` as left out), like any other
+  share's source file.
+- **A picture proposal** (`set_image`, `set_member_image`) takes `upload`
+  as a third source beside `path` and `bytes_b64`; the upload is consumed
+  and, like a path, never signed.
+- **`read_image_bytes` compares its key.** On a session-only workspace a
+  picture's reference is the display value somebody proposed - a member
+  can propose any string - so the key is matched against the current
+  pictures AND must lie in the workspace directory before it is opened.
+  The file is read BEHIND the storage writer (one flush): a picture is
+  materialized off the actor, and a read right after its change applied
+  must not answer the file as it was before. Both windows show pictures
+  through this read (2026-11-18), so the native one no longer opens a
+  view's `image` value as a path either.
+- **Every read is capped** by the caller and clamped to 64 MiB at the
+  door; a larger file keeps the path flow.
+- **On the web door** an upload is its session's: another session's id
+  is `unknown upload` for chunk, abort, share and picture proposal, and a
+  refused chunk's bytes are still taken off the wire. A session's end
+  aborts what it did not share - also an upload whose `upload_begin` was
+  still unanswered when the socket closed.
 
 ## Co-equality audit: what the GUI can do vs. what a bot can do
 

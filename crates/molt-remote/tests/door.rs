@@ -412,8 +412,8 @@ async fn the_shipped_client_core_speaks_to_the_door() {
     // two commands at once, answered to their own waiters
     let (f1, mut r1) = p.request(Command::ReadSession);
     let (f2, mut r2) = p.request(Command::UiPublish { snapshot: Default::default() });
-    ws.send(Message::text(f1)).await.expect("send");
-    ws.send(Message::text(f2)).await.expect("send");
+    ws.send(Message::text(f1.expect("a frame").text)).await.expect("send");
+    ws.send(Message::text(f2.expect("a frame").text)).await.expect("send");
     while p.open_requests() > 0 {
         pump(&mut ws, &mut p, &mut notices, |_| true).await;
         match next(&mut ws).await {

@@ -80,6 +80,9 @@ molt-net.workspace = true
 # loopback and the shipped client over a tokio WebSocket.
 molt-remote.workspace = true
 tokio-tungstenite.workspace = true
+# TEST-ONLY: two real engines found a republic over an in-process relay,
+# one of them driven through the web door (as molt-engine's own tests do).
+nostr-relay-builder.workspace = true
 # TEST-ONLY: the skill modal shows the text MCP serves (the shipped GUI
 # takes it from molt-core).
 molt-mcp.workspace = true

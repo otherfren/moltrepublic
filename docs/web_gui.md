@@ -7,7 +7,13 @@ measured (§8.4, 2026-11-18); its populated-content half is open. W1 and
 W2's client and spawner seams are built, its pure helpers sit in core,
 link classification is an engine read (§6.4), and the platform seam is
 built on the native side with paste asynchronous (§6.3); what still ties
-`molt-ui` to native is two modules (2026-11-18, §6.7, §10).
+`molt-ui` to native is two modules (2026-11-18, §6.7, §10). W4 is built
+(2026-11-18, §5.1, §7): the upload store, chunked upload frames, reads
+by share id, picture key and last export, and the window on them - a
+republic was founded, joined and chatted in with the founder driven
+through the door, a file went up from bytes and came down byte for byte,
+and pictures show through `read_image_bytes` in both windows. Open
+before a browser runs it: W0 (d), the rest of §6.5, W5 and W6.
 
 ## 1. Goal
 
@@ -210,15 +216,25 @@ shapes pinned by test.
   three `&'static str` payloads became `Cow<'static, str>`, so there is
   no twin type to drift and `localize_error` is unchanged. A test walks
   every variant through a round trip.
-- **Bytes, both directions, always chunked**: bounded binary frames
-  `le64 id ‖ le64 offset ‖ flags ‖ bytes` (flag 1 = last chunk), so neither
-  side holds a whole file in one frame. The engine has no default file
-  cap (`file_cap_bytes: None`), so the web door carries its own absolute
-  per-transfer ceiling (64 MiB) and chunk bound (256 KiB), with
-  `file_cap_bytes` on top when set; a read's caller-supplied `cap` is
-  clamped to the ceiling. A file over it shows as `too large for the
-  browser`; the server-path flow remains for those. A dropped socket
-  deletes its partial upload.
+- **Bytes, both directions, always chunked** (built 2026-11-18): bounded
+  binary frames `le64 id ‖ le64 offset ‖ flags ‖ bytes` (flag 1 = last
+  chunk), so neither side holds a whole file in one frame. Server to
+  client: the bytes of a `Reply::UploadBytes` follow their reply as
+  chunks under the reply's id. Client to server: each chunk is its own
+  `upload_chunk` command whose JSON carries no bytes, followed by exactly
+  one chunk frame with that command's id, offset and last flag; each is
+  answered by `upload_progress`, which is the backpressure. A frame that
+  is not exactly the announced one closes 4400. The bounds live in
+  `molt_core::wire`: `MAX_TRANSFER` 64 MiB per transfer either way (the
+  engine has no default file cap), `CHUNK` 256 KiB; a read's
+  caller-supplied `cap` is clamped to the ceiling. `file_cap_bytes`
+  applies at `share_upload`, as for `share_file`; `upload_begin` enforces
+  only the 64 MiB ceiling and the store quota (a node with
+  `file_cap_bytes = 0` accepts the upload and refuses the share). A file
+  over the ceiling shows as `too large for the browser`; the server-path
+  flow remains for those. An upload belongs to the session that began
+  it; a session's end aborts what it did not share, including an upload
+  whose `upload_begin` was still unanswered when the socket closed.
 - **Frame bounds**: the socket is built with an explicit
   `WebSocketConfig` (never tungstenite's 64 MiB default; `relay_ws.rs` is
   the model): 1 MiB per frame (the MCP line bound), replies' bytes in
@@ -234,9 +250,11 @@ executes only if its outer `cmd` tag is
 
 - the command of a seat-scope tool in `molt_mcp::tools()`, or
 - on `WEB_DOOR`, a production const in `molt-remote`:
-  `read_upload_bytes`, `set_wake_command`, and the byte-door and
-  commands of §7 where they are not MCP tools (the link read of §6.4
-  is a tool, `classify_link`).
+  `read_upload_bytes`, `set_wake_command`, and the byte doors of §7
+  (`upload_begin`, `upload_chunk`, `upload_abort`, `share_upload`,
+  `read_file_bytes`, `read_image_bytes`, `read_export_bytes`), none of
+  which is an MCP tool (the link read of §6.4 is a tool,
+  `classify_link`, so it needs no entry).
 
 Everything else is refused before execution. `as_operator` is refused;
 should a wrapper command ever be allowed, the gate must recurse into its
@@ -245,7 +263,11 @@ inner command.
 A test in the style of the co-equality test pins it: tools and `WEB_DOOR`
 are disjoint; every `Command::variant_names()` entry is either allowed or
 on `INTERNAL` minus `WEB_DOOR`; every command `molt-ui` issues is allowed.
-A new `Command` breaks the test until it is classified.
+A new `Command` breaks the test until it is classified. Until the window
+used them, the seven byte doors sat on a pinned list in that test; it
+is gone (2026-11-18): the scan covers `molt-ui` and `molt-ui-kit` (the
+upload steps are constructed in the kit), and a web door the GUI never
+uses fails the test again.
 
 **Scope is ADR-0007: a tab holding the seat token operates the machine.**
 Reachable by design: host posture through `patch_settings` (rotating or
@@ -402,10 +424,12 @@ nothing was installed, so `moltd` changes nothing.
   native implementation: `pick_file` answers what NAMES the file (its
   path natively), `read_file` gives its bytes, `save_file` takes a name
   and bytes and answers where they went (a download on the web),
-  `pick_save` and `pick_folder` answer a path for the engine and are
-  `None` where there are no engine-side paths, `local_bytes` /
-  `local_stamp` read a file the engine wrote on this machine (avatar,
-  logo). The wake-skill save keeps its refusal to write through a link
+  `pick_save` and `pick_folder` answer a path for an engine on this
+  machine and are `None` where there are no such paths. What follows the
+  last `/` or `\` of a `pick_file` answer is the file's name (a browser's
+  answer has no directory). `local_bytes` / `local_stamp` left the trait
+  (2026-11-18): pictures are read through the engine on both targets
+  (§7). The wake-skill save keeps its refusal to write through a link
   (`Save::refuse_link`). The mirror-folder dialog now seeds its start
   directory like the workspace one (tilde expanded, only when it exists).
 - **Clocks**: no `Instant`, `SystemTime` or `Utc::now` in shared code.
@@ -452,9 +476,14 @@ Open:
   gets `wasm32_web_time` so the diff timeout is real there. If a browser
   refuses `readText()` from a Slint click (W0/W5 check), the web hides
   the paste buttons and relies on Ctrl+V into the focused input.
-- on the web `pick_file`'s answer is not a server path: the chat share
-  (`ShareFile{path}`) and the download destination (`pick_save`) need
-  the byte doors (W4), as do the avatar and logo reads.
+- built (2026-11-18, §7): behind the web door the chat share, the
+  download and the export hand bytes to and from the platform, so a
+  `pick_file` answer need not be a server path and `pick_save` may be
+  `None`. For W5: `read_file` should refuse a file over the 64 MiB
+  ceiling before it reads it into memory (the shared code checks after
+  the read), and `save_file` is called outside a click - phase two of a
+  download arrives on an engine event, an export after polling - which
+  a browser must be checked to allow.
 
 ### 6.4 Synchronous callbacks and link classification
 
@@ -595,28 +624,83 @@ wasm32-unknown-unknown --features molt-ui/live-preview`, type check
 only): 18 errors, 17 of them inside `native.rs` (5 `tokio`, 5 `arboard`,
 4 `rfd`, 2 `molt-config`, 1 `molt-storage`) and 1 `molt-engine` in
 `engine.rs`. Everything else type-checks for wasm32 (22 before the
-platform seam, 27 before §6.4; unchanged after the lint pass).
+platform seam, 27 before §6.4; unchanged after the lint pass and after
+the window's byte flows of §7, whose module type-checks for wasm32).
 chrono's `Local` compiles and fails at run time, so the compiler does
 not count it.
 
 ## 7. Files as bytes
 
-New byte doors are `Command`s, classified in the gate test, chunked and
-capped per §5.1.
+The byte doors are `Command`s, classified in the gate test, chunked and
+capped per §5.1. Engine, door, client and the window's use of them are
+built (2026-11-18; rules in `docs_archive/security/mcp-security.md`,
+"The byte doors").
 
-| Feature | Today | Web |
-|---|---|---|
-| Share a chat file | `ShareFile{path}` | chunked upload into an engine-owned per-workspace store; the share points at that file |
-| Download a chat file | `DownloadFile{dest}` | two phases: the existing `DownloadFile` into the server's download dir with its `FileTransfer` progress, then a chunked read by id and a browser download |
-| Avatar and logo display | `std::fs::read(path)` in the mirror | bytes by the key the view already carries |
-| Set avatar, logo, wiki image | read a picked local path | upload bytes |
-| Wiki inline images | `ReadUploadBytes` | unchanged, chunked |
-| Workspace export, wake skill export | write to a path | bytes to a browser download; the server-path form stays |
-| Wiki export | `WikiExport{dest}` writes a directory tree | typed server path only (`wiki_export_plan.md` decided "plain files, no archive"); a browser download is out of v1 |
-| Mirror dir, workspace dir, download dir | folder picker | typed server path; browse buttons hidden |
+**One flow per feature, one fork in it** (`molt-ui/src/bytes.rs`): an
+engine in this process shares the window's disk, so content crosses as a
+path; one behind the door gets bytes. The fork is `Engine::is_remote`,
+not the target: a native window on a remote engine takes the byte side
+too, which is what the tests run.
 
-- The upload store is durable state, not temp handling: it lives for the
-  share's life, is deleted on `RemoveFile`/expiry, and has a stated quota.
+| Feature | Engine in this process | Engine behind the door | Decision |
+|---|---|---|---|
+| Share a chat file | `ShareFile{path}` | the platform reads the picked file, `upload_begin` / `upload_chunk` into `<workspace>/uploads/<id>/<name>`, then `share_upload` | native KEEPS the path: hashed in place, no copy into the store, no 64 MiB ceiling |
+| Download a chat file | save dialog, then `DownloadFile{dest}` | two phases: `DownloadFile` into the server's download dir with its `FileTransfer` progress row, then `read_file_bytes` by the share's id and the platform's file save. A share the server already holds (own, downloaded, mirrored) skips phase one | native KEEPS the path: the engine writes where the user points, no ceiling, no second copy |
+| Avatar and logo display | `read_image_bytes` | `read_image_bytes` | BOTH moved: the mirror's `std::fs::read` on the UI thread and the two platform methods behind it are gone, and a republic that is not stored no longer has a proposed display value opened as a path |
+| Set avatar, logo | picked file read through the platform, checked and fitted in the window, `bytes_b64` in the proposal | the same, the fitted bytes as an upload and `upload` in the proposal | one flow, the CARRIER forks: inline works without a stored workspace and is what the engine always took; behind the door a text frame holds 1 MiB |
+| Wiki image | a chat share referenced from the page | the same share flow as above | nothing of its own |
+| Wiki inline images | `ReadUploadBytes` | unchanged, chunked | - |
+| Workspace export | typed path, `ExportWorkspace` | a BARE NAME: `export_workspace`, the session's export state polled until it is not running, `read_export_bytes`, the platform's file save. A typed path stays a server path; "bare" is the engine's own reading (`molt_core::is_bare_name`, one predicate for both sides) | native KEEPS the path. Behind the door the dialog's default is the bare name |
+| Wake skill export | the window holds the text and saves it through the platform's file save (since W3) | the same | no door, nothing forked |
+| Wiki export | `WikiExport{dest}` writes a directory tree | typed server path only (`wiki_export_plan.md` decided "plain files, no archive"); a browser download is out of v1 | - |
+| Mirror dir, workspace dir, download dir | folder picker beside the typed field | typed server path; browse buttons hidden | - |
+
+- **Pictures on display.** The gather pass reads each picture through
+  `read_image_bytes` once and keeps the bytes (`bytes::hold_pictures`);
+  the apply decodes. A replaced picture keeps its file name, so the
+  cache key is the `image` value plus a hash over the applied picture
+  changes of the Organization log (`pictures_version`), which the
+  snapshot already carries. A picture the engine REFUSED (a republic
+  that is not stored names a display value, never a file) is remembered
+  under that key and not asked for again until the pictures change
+  (2026-11-18, review fix: it cost one round trip per picture per
+  surfaces pass); a read that failed otherwise - a dropped connection, a
+  file that is not there - is asked for again on the next pass. The engine reads
+  the file behind its storage writer, so the read that follows an
+  applied change sees the new file
+  (`a_picture_read_waits_for_the_writer`).
+- **Phase two of a download** hangs on the mirror's one event stream:
+  the window notes the share it asked for (`ChatUiState::to_user`), and
+  the `FileTransfer` done event for it starts the read and the save;
+  the engine-path toast is replaced by the save's own. A failed or
+  cancelled fetch forgets the note. The note is per workspace and per
+  window: after a switch or a reconnect the fetch still finishes on the
+  server, and the next click hands the file over in one step.
+- **What stays on the server**: phase one's file in the download dir and
+  a bare-name export's blob there. Nothing removes them; the export note
+  names the path.
+- **The download dir** has no window control (`cfg-download-dir` only
+  round-trips the settings draft) and none was added: phase one uses the
+  configured folder.
+- **Refusals** show as `Too large for the browser (64 MiB at most).`
+  (lexicon `toast_too_large_web`, checked in the window before an upload
+  and before a read) and, for the store's own (`no stored workspace is
+  open`, `8 uploads already open`, the store full), as the engine's line
+  with a German rendering.
+- The upload store is durable state, not temp handling: a shared upload
+  lives for the share's life and is deleted on `RemoveFile`, a deleted
+  message, a delete vote and the expiry; a failed share drops its upload
+  at once; an upload idle for 15 minutes or left by a closed workspace
+  or a crash is removed. Quota: 64 MiB per upload, 8 open uploads, 1 GiB
+  per workspace. It needs a workspace on disk and is not part of an
+  export or a backup.
+- The store deletes only a directory it minted
+  (`<store>/<minted id>/<name>`, compared by component), and
+  `share_file` refuses a path under `<workspace>/uploads`.
+- After an accepted `share_upload` the upload id is spent for the
+  session. If the share then fails (session notice
+  `share-failed:<name>:<reason>`), the upload is gone and the file must
+  be shared again.
 - An offline sharer makes phase one of a download wait without deadline,
   as today; the web shows the same progress row.
 - **Built (2026-11-18): server paths are typed.** The mirror folder was
@@ -631,23 +715,45 @@ capped per §5.1.
   workspace-folder dialog, wiki export dialog - and leaves the typed
   form; `apply_remote_startup` clears it for any window behind the web
   door, so `molt-web` needs no line for it past the first session (it
-  may set it before). Pins: `tests/gui/files.rs`
+  may set it before). The export dialog reads the same property for its
+  default target. Pins: `tests/gui/files.rs`
   (`the_mirror_folder_is_typed_and_applied`,
   `one_property_hides_every_folder_dialog_button`,
   `a_typed_mirror_folder_reaches_the_engine_and_comes_back`) and the
   startup test in `tests/gui/remote.rs`.
-- Checked in the same pass: the workspace folder and the wiki export
-  target already had a typed field beside their button. The download
-  dir has NO window control (`cfg-download-dir` only round-trips the
-  settings draft; a download asks per file through `pick_save`), so
-  nothing was added. Open for W4: whether the web's two-phase download
-  wants a visible download-dir field.
 - A typed path that names the folder already in use in another spelling
   (`~/x` for its expansion) is stored, but the view does not change, so
   the draft keeps its spelling and Apply stays lit.
-- The native window may keep its path flow or move to the same doors; W4
-  decides per door by what removes the most duplicated code. No door
-  accepts a server path from the browser that MCP would not accept.
+- No door accepts a server path from the browser that MCP would not
+  accept.
+
+Pins (`crates/molt-ui/src/tests/gui/remote.rs`, two real engines over an
+in-process relay, each behind a real web door):
+`a_file_shared_from_bytes_arrives_and_downloads_byte_identical` (300 KiB
+up from bytes, both phases down, the own and the already fetched share
+in one step, an unreadable pick), `a_picture_set_from_bytes_through_the_web_door_shows`
+(the window's own callbacks; a replaced picture; a logo over 1 MiB; the
+carrier fork), `an_export_comes_to_the_user_through_the_web_door`,
+`the_engine_in_this_process_shares_and_downloads_by_path`; the key and
+name rules in `tests/images.rs`. NOT covered, as for every window read:
+the `invoke_from_event_loop` hops (the toasts, the mirror's
+`FileTransfer` arm that calls phase two) and the share, download and
+export click closures themselves, which only pick and call into
+`bytes.rs`.
+
+Open:
+
+- stored uploads do not travel in an export or a backup (a product
+  decision, not taken);
+- a republic that is not stored has no upload store, so behind the door
+  it can neither share a file nor set a picture;
+- a picture proposal the engine refuses after its upload went up leaves
+  that upload in the store until the idle sweep (15 minutes) or the
+  session's end; eight such refusals in that time fill the open-upload
+  quota;
+- the Organization snapshot carries every applied picture's bytes on
+  each surfaces read (it did before; over a socket it is weight W5
+  should measure).
 
 ## 8. Build and pipeline
 
@@ -786,7 +892,8 @@ Stated in the page's help and the README:
 - paste needs the browser's paste gesture or a clipboard permission;
 - no folder pickers; server directories are typed;
 - no wiki export download (server path only);
-- files over the web ceiling go through the server-path flow;
+- files over the web ceiling (64 MiB per file through the browser) go
+  through the server-path flow; uploads need a workspace on disk;
 - no screen reader support (Slint renders its own text);
 - IME and mobile keyboards are weak; the layout needs 990 px width;
 - `Ctrl+W` and `Tab` are the browser's: the wiki tab-close and
@@ -820,14 +927,19 @@ Each stage is test-first, reviewed, and lands green on master on its own.
   wiring with the bundle-directory trust check
   (`crates/molt-app/tests/web_door.rs`); ADR-0008 and the
   `mcp-security.md` section; the client's sans-IO protocol core in
-  `molt-ui-kit` (wasm-clean), tested against the real door. Open: the
-  client handle and its adapters (W2 native, W5 web); upload chunks (with
-  W4); the 90 ms tick measurement; found/join/chat over the socket. Red tests first: the gate test;
+  `molt-ui-kit` (wasm-clean), tested against the real door. Also done
+  (2026-11-18): binary upload chunk frames in `molt-remote` (server) and
+  `molt-ui-kit` (protocol + client); found, join and chat between two
+  engines with the founder driven through the door, and the run-event
+  load measured (§11;
+  `a_republic_is_founded_joined_and_chatted_in_through_the_web_door`,
+  `crates/molt-ui/src/tests/gui/remote.rs`). Open: the web adapter of
+  the client handle (W5). Red tests first: the gate test;
   foreign Origin, Origin with another port than Host, Origin `null`,
   Host `evil.example`, Host `127.0.0.1.evil.example`, tunnel port
   accepted; a silent subscribed session closed 4401 on rotation with no
   event after it; oversized hello; lag. Proof: found, join and chat
-  against a real engine over the socket. Measures the 90 ms run tick.
+  against a real engine over the socket.
 - **W2 Client and spawner seams** in `molt-ui`, native. Done
   (2026-11-18): the client seam - `molt-ui` holds an `Engine` (the
   engine's own handle or `molt-ui-kit`'s `RemoteHandle`), and the window
@@ -839,9 +951,9 @@ Each stage is test-first, reviewed, and lands green on master on its own.
   (§6.6), and the native-only dependencies target-gated with the rest
   listed and pinned (§6.7); the link read - `classify_link`, a verdict
   Rust sets, a stale answer dropped, `joinable` on the seat rows (§6.4).
-  Open: the rest of the secret draft (§6.5) and the rest of the named
-  test set below (the link read and the startup inputs run through a
-  real door; found, join, chat and settings save do not yet). Proof: the GUI
+  Found, join and chat run through a real door since W4
+  (2026-11-18), the settings save with its secrets since W2.
+  Open: the rest of the secret draft (§6.5). Proof: the GUI
   suite, plus a new named test set - a real `molt-remote` on loopback and
   a window whose `Ctx` holds the remote client with the mirror running
   (found, join, chat, settings save with secrets intact).
@@ -854,7 +966,30 @@ Each stage is test-first, reviewed, and lands green on master on its own.
   property that hides every folder dialog button (§7); the
   `clippy.toml` lint in both crates, live-preview clippy at 0 with it
   on (§8.3). Open: the web implementation (W5).
-- **W4 Byte doors** on engine, gate classification and native GUI.
+- **W4 Byte doors.** Done (2026-11-18). Engine, door and client:
+  the engine's upload store (`<workspace>/uploads/<id>/<name>`; 64 MiB
+  per upload, 8 open, 1 GiB per workspace; idle 15 minutes; dropped on
+  `remove_file`, delete, expiry, a failed share and close) and the
+  seven byte-door commands - `upload_begin`, `upload_chunk`,
+  `upload_abort`, `share_upload`, `read_file_bytes`, `read_image_bytes`,
+  `read_export_bytes` - `INTERNAL` for MCP and on `WEB_DOOR`; `upload`
+  as a picture-proposal source; upload chunk frames and session-owned
+  uploads in `molt-remote`; the chunk frame and the `upload` helper in
+  `molt-ui-kit`; red tests first for path traversal, quota, oversize,
+  unknown and foreign id, out-of-order offsets and an abandoned upload
+  (`crates/molt-engine/src/upload_store.rs`,
+  `crates/molt-engine/src/tests/upload_store_tests.rs`,
+  `crates/molt-remote/tests/byte_doors.rs`); spec in
+  `docs_archive/security/mcp-security.md`, "The byte doors", and
+  ADR-0008. The window (`molt-ui/src/bytes.rs`, §7 with the decision
+  per door): share from bytes, the two-phase download, pictures shown
+  through `read_image_bytes` on both targets (read behind the engine's
+  storage writer), pictures set through an upload, the export as a
+  download, the refusal strings; the gate test's pinned list is empty
+  and gone. Proof: two real engines, each behind a real door
+  (`crates/molt-ui/src/tests/gui/remote.rs`). Open: what §7 lists
+  (uploads in an export, a republic that is not stored, snapshot
+  weight) and the browser half of the platform calls (W5).
 - **W5 `molt-web`**: the cdylib, the socket adapter, the web platform
   impl, `index.html` with the token prompt, key rebinding, font decision,
   the graph test; first full browser run.
@@ -872,9 +1007,18 @@ Each stage is test-first, reviewed, and lands green on master on its own.
   the host (§5.2). Mitigated by the shared live seat key, the
   fail-closed gate, loopback-only binding, Origin/Host checks, the
   trusted-bundle rule; it is the part that gets the security review.
-- **The 90 ms run tick** drives ~11 `ReadSession` replies per second over
-  the socket during a ritual. Measured in W1; if heavy, the server
-  coalesces run-scoped events per connection.
+- **The 90 ms run tick** no longer exists: the engine's simulated
+  run progress went, and run-scoped session events are emitted on real
+  ritual progress only. Measured 2026-11-18 over a real web door on
+  loopback, a real 2-of-2 founding against an in-process relay, the
+  founder's every command through the socket: the whole ritual pushed
+  14 session events through the door in 0.4 s (4 run-scoped, 10 full;
+  the busiest second held all of them), one `ReadSession` reply is
+  2.9 KB and takes 1.4 ms round trip (debug build; the test prints the
+  numbers and asserts none of them). No server-side
+  coalescing was added; nothing here needs it. A full event still
+  makes the mirror re-read the surfaces (about 15 commands); a flood of
+  those is bounded by the per-connection queue and `lag` (§5.1).
 - **Single-threaded browser**: image decode and diffs block the UI
   thread (W5 measures).
 - **Drift**: std or tokio calls creeping back into shared `molt-ui` code.

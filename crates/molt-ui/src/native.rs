@@ -258,16 +258,6 @@ impl Platform for NativePlatform {
                 .map(|path| Some(path.display().to_string()))
         })
     }
-
-    fn local_bytes(&self, path: &str) -> Option<Vec<u8>> {
-        std::fs::read(path).ok()
-    }
-
-    fn local_stamp(&self, path: &str) -> Option<(u64, u128)> {
-        let meta = std::fs::metadata(path).ok()?;
-        let stamp = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
-        Some((meta.len(), stamp))
-    }
 }
 
 /// The in-process engine's event stream.

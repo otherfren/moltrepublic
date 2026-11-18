@@ -886,6 +886,7 @@ impl State {
         self.compacted_at = 0;
         self.parked.clear();
         self.files.share_paths.clear();
+        self.uploads.clear();
         self.files.share_stamps.clear();
         self.files.downloads.clear();
         self.files.dl_samples.clear();

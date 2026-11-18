@@ -127,7 +127,10 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
     match e {
         E::UnknownProposal(id) => format!("Unbekannter Vorschlag #{}", id.0),
         E::NotGated(sf) => format!("{} ist ungated - nichts vorzuschlagen", sf.as_str()),
-        E::BadPayload(t) => format!("Ungültige Payload: {t}"),
+        E::BadPayload(t) => match upload_refusal_de(t) {
+            Some(de) => de.to_string(),
+            None => format!("Ungültige Payload: {t}"),
+        },
         E::IndexBuilding { done, total } => {
             format!("Der Wiki-Index wird gebaut ({done} von {total} Dokumenten)")
         }
@@ -205,6 +208,21 @@ fn handle_err_de(t: &str) -> &str {
     } else {
         t
     }
+}
+
+/// The upload store's refusals a user can meet through the web door
+/// (`docs/web_gui.md` §7), in German; the rest ride verbatim.
+fn upload_refusal_de(t: &str) -> Option<&'static str> {
+    let t = t.strip_prefix("upload: ")?;
+    Some(match t {
+        "no stored workspace is open" => "Upload: kein gespeicherter Workspace offen",
+        "8 uploads already open" => "Upload: schon 8 Uploads offen",
+        "already shared" => "Upload: schon geteilt",
+        "unknown id" => "Upload: unbekannt",
+        _ if t.starts_with("the store is full") => "Upload: der Upload-Speicher ist voll",
+        _ if t.contains(" over the ") => Lexicon::de().toast_too_large_web,
+        _ => return None,
+    })
 }
 
 /// The one way an engine error becomes toast copy: ⚠ + the localized
@@ -1449,6 +1467,7 @@ lexicon! {
     mv_file_gone: "File no longer available - its owner deleted it.", "Datei nicht mehr verfügbar - der Besitzer hat sie gelöscht.";
     toast_dl_done: "Saved:", "Gespeichert:";
     toast_dl_failed: "Download failed:", "Download fehlgeschlagen:";
+    toast_too_large_web: "Too large for the browser (64 MiB at most).", "Zu groß für den Browser (höchstens 64 MiB).";
     toast_file_removed: "Local file deleted - the share is no longer available.", "Lokale Datei gelöscht - die Freigabe ist nicht mehr verfügbar.";
     dm_title: "Delete message?", "Nachricht löschen?";
     dm_body: "The text disappears for everyone and only a deletion notice remains - a replicated tombstone addressed by message id, kept in the event log.", "Der Text verschwindet für alle, nur ein Lösch-Hinweis bleibt - ein replizierter Tombstone, per Nachrichten-ID adressiert und im Event-Log gehalten.";

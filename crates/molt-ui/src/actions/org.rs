@@ -195,7 +195,6 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                     let read = crate::platform::platform().read_file(path.clone()).await;
                     let payload = match read {
                         Ok(bytes) => {
-                            use base64::Engine as _;
                             // WP3 pre-check with the REAL preview decoder:
                             // instant, localized feedback instead of an
                             // engine-error round-trip. The engine's co-equal
@@ -214,19 +213,16 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                                 });
                                 return;
                             }
-                            let name = std::path::Path::new(&path)
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| path.clone());
+                            let name = crate::bytes::file_name(&path).to_string();
                             // no baked display title: the op is the
                             // language-neutral placeholder every UI
                             // translates at render time (display_title)
-                            serde_json::json!({
-                                "op": "set_image",
-                                "value": name,
-                                "bytes_b64":
-                                    base64::engine::general_purpose::STANDARD.encode(bytes),
-                            })
+                            let mut payload = serde_json::json!({ "op": "set_image", "value": name });
+                            if let Err(e) = crate::bytes::attach_picture(&w, &mut payload, &name, bytes).await {
+                                toast_byte_error(weak, e);
+                                return;
+                            }
+                            payload
                         }
                         _ => {
                             toast_unreadable(weak, path);
@@ -327,20 +323,22 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                     }
                     None => return,
                 };
-                use base64::Engine as _;
                 // the name must match the bytes: the engine derives the
                 // avatar file's extension from this display value
-                let stem = std::path::Path::new(&path)
+                let stem = std::path::Path::new(crate::bytes::file_name(&path))
                     .file_stem()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| member.clone());
-                let payload = serde_json::json!({
+                let name = format!("{stem}.{}", fitted.ext);
+                let mut payload = serde_json::json!({
                     "op": "set_member_image",
                     "member": member,
-                    "value": format!("{stem}.{}", fitted.ext),
-                    "bytes_b64":
-                        base64::engine::general_purpose::STANDARD.encode(fitted.bytes),
+                    "value": name,
                 });
+                if let Err(e) = crate::bytes::attach_picture(&w, &mut payload, &name, fitted.bytes).await {
+                    toast_byte_error(weak, e);
+                    return;
+                }
                 // the confirmation belongs to the OUTCOME: the engine's own
                 // gates (square, budget, the seat) still run after this
                 propose_org(w, weak, payload).await;
@@ -479,6 +477,15 @@ fn toast_unreadable(weak: slint::Weak<AppWindow>, path: String) {
                 ui.global::<Strings>().get_toast_file_unreadable()
             );
             ui.invoke_show_toast_error(msg.into());
+        }
+    });
+}
+
+/// Toast why a picture did not reach the engine.
+fn toast_byte_error(weak: slint::Weak<AppWindow>, e: crate::bytes::ByteError) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(ui) = weak.upgrade() {
+            ui.invoke_show_toast_error(crate::bytes::byte_error_toast(&ui, &e));
         }
     });
 }

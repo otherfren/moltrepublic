@@ -51,6 +51,12 @@ impl Engine {
         }
     }
 
+    /// Whether the engine runs elsewhere: its paths are then not this
+    /// machine's, and file content crosses as bytes (`docs/web_gui.md` §7).
+    pub(crate) fn is_remote(&self) -> bool {
+        matches!(self, Engine::Remote(_))
+    }
+
     /// The engine's events. A remote engine has ONE stream per connection.
     pub(crate) fn subscribe(&self) -> Events {
         match self {

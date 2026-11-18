@@ -8,15 +8,25 @@
 use std::collections::BTreeMap;
 
 use futures_channel::oneshot;
-use molt_core::wire::{Caps, Chunk, ClientFrame, ServerFrame, WIRE_VERSION};
+use molt_core::wire::{Caps, Chunk, ClientFrame, ServerFrame, CHUNK, WIRE_VERSION};
 use molt_core::{Command, Event, MoltError, Reply};
 
 /// What a command answers with.
 pub type Answer = Result<Reply, MoltError>;
 
-/// The most bytes one reply may assemble; the server's ceiling
-/// (`molt-remote`) is the same number.
+/// The most bytes one reply may assemble: [`molt_core::wire::MAX_TRANSFER`]
+/// (pinned equal by test), the ceiling the server and the engine keep.
 pub const MAX_TRANSFER: usize = 64 * 1024 * 1024;
+
+/// What one request puts on the wire.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outbound {
+    /// The command frame.
+    pub text: String,
+    /// The chunk frame that follows it: an upload's bytes travel beside
+    /// their command, never inside its JSON.
+    pub binary: Option<Vec<u8>>,
+}
 
 /// Something the server said that is not a reply.
 #[derive(Debug)]
@@ -78,18 +88,34 @@ impl Protocol {
         self.waiting.len() + self.assembling.len()
     }
 
-    /// Register a command: the frame to send, and where its answer lands.
-    pub fn request(&mut self, cmd: Command) -> (String, oneshot::Receiver<Answer>) {
+    /// Register a command: what to send, and where its answer lands.
+    /// `None` when the command was answered here and nothing is sent.
+    pub fn request(&mut self, cmd: Command) -> (Option<Outbound>, oneshot::Receiver<Answer>) {
         let (tx, rx) = oneshot::channel();
         (self.request_into(cmd, tx), rx)
     }
 
     /// The same, answering into a waiter the caller already holds.
-    pub fn request_into(&mut self, cmd: Command, waiter: oneshot::Sender<Answer>) -> String {
+    pub fn request_into(&mut self, mut cmd: Command, waiter: oneshot::Sender<Answer>) -> Option<Outbound> {
+        // an upload's bytes leave the command and follow it as one chunk
+        let chunk = match &mut cmd {
+            Command::UploadChunk { offset, bytes, last, .. } => {
+                if bytes.len() > CHUNK {
+                    // the server would end the whole connection over it
+                    let refused = MoltError::BadPayload(format!("upload: a chunk is {CHUNK} bytes at most"));
+                    drop(waiter.send(Err(refused)));
+                    return None;
+                }
+                Some((*offset, *last, std::mem::take(bytes)))
+            }
+            _ => None,
+        };
         self.next_id += 1;
         let id = self.next_id;
         self.waiting.insert(id, waiter);
-        encode(&ClientFrame::Cmd { id, cmd: Box::new(cmd) })
+        let text = encode(&ClientFrame::Cmd { id, cmd: Box::new(cmd) });
+        let binary = chunk.map(|(offset, last, data)| Chunk { id, offset, last, data: &data }.encode());
+        Some(Outbound { text, binary })
     }
 
     /// A text frame arrived.
@@ -170,7 +196,8 @@ mod tests {
         p
     }
 
-    fn id_of(frame: &str) -> u64 {
+    fn id_of(out: &Option<Outbound>) -> u64 {
+        let frame = &out.as_ref().expect("a frame to send").text;
         match serde_json::from_str(frame).expect("a client frame") {
             ClientFrame::Cmd { id, .. } => id,
             ClientFrame::Hello { .. } => panic!("not a command"),
@@ -219,6 +246,57 @@ mod tests {
         p.on_binary(&Chunk { id, offset: 2, last: true, data: b"e" }.encode()).expect("ok");
         assert!(matches!(r.try_recv(), Ok(Some(Ok(Reply::UploadBytes { bytes }))) if bytes == b"one"));
         assert_eq!(p.open_requests(), 0);
+    }
+
+    /// The upload direction mirrors the reply direction: the command
+    /// frame carries no bytes, one chunk frame with the command's id does.
+    #[test]
+    fn an_upload_chunk_goes_out_as_a_command_and_one_chunk_frame() {
+        let mut p = welcomed();
+        let cmd = Command::UploadChunk { upload: "u".into(), offset: 5, bytes: b"abc".to_vec(), last: true };
+        let (out, _r) = p.request(cmd);
+        let id = id_of(&out);
+        let out = out.expect("sent");
+        match serde_json::from_str(&out.text).expect("a client frame") {
+            ClientFrame::Cmd { cmd, .. } => match *cmd {
+                Command::UploadChunk { upload, offset: 5, bytes, last: true } => {
+                    assert_eq!(upload, "u");
+                    assert!(bytes.is_empty(), "the bytes are not in the JSON");
+                }
+                other => panic!("unexpected: {other:?}"),
+            },
+            ClientFrame::Hello { .. } => panic!("not a command"),
+        }
+        let frame = out.binary.expect("a chunk frame");
+        assert_eq!(Chunk::decode(&frame), Some(Chunk { id, offset: 5, last: true, data: b"abc" }));
+
+        // an empty last chunk (a zero-byte file) still has its frame
+        let (out, _r) = p.request(Command::UploadChunk { upload: "u".into(), offset: 0, bytes: Vec::new(), last: true });
+        let frame = out.expect("sent").binary.expect("a chunk frame");
+        assert!(Chunk::decode(&frame).is_some_and(|c| c.last && c.data.is_empty()));
+
+        // every other command is its text frame alone
+        let (out, _r) = p.request(Command::UploadBegin { name: "a".into(), size: 3 });
+        assert_eq!(out.expect("sent").binary, None);
+    }
+
+    /// The server ends a connection over an oversized chunk, so the
+    /// client never sends one: the caller is told, nothing leaves.
+    #[test]
+    fn an_oversized_chunk_is_answered_here_and_not_sent() {
+        let mut p = welcomed();
+        let fat = Command::UploadChunk { upload: "u".into(), offset: 0, bytes: vec![0; CHUNK + 1], last: false };
+        let (out, mut r) = p.request(fat);
+        assert_eq!(out, None);
+        assert!(matches!(r.try_recv(), Ok(Some(Err(MoltError::BadPayload(_))))));
+        assert_eq!(p.open_requests(), 0);
+        let full = Command::UploadChunk { upload: "u".into(), offset: 0, bytes: vec![0; CHUNK], last: false };
+        assert!(p.request(full).0.is_some(), "the bound itself is fine");
+    }
+
+    #[test]
+    fn the_ceiling_is_the_wires() {
+        assert_eq!(u64::try_from(MAX_TRANSFER).ok(), Some(molt_core::wire::MAX_TRANSFER));
     }
 
     #[test]

@@ -18,7 +18,7 @@ use crate::i18n::{
     apply_strings, localize_headline, localize_log_line, localize_net_reason,
     localize_recover_failed, localize_recover_note, localize_s3_verdict,
 };
-use crate::images::{image_from_bytes, logo_needs_reload, AVATARS, LOGO_KEY};
+use crate::images::{image_from_bytes, AVATARS, LOGO_KEY};
 use crate::labels::{
     backup_when_label, charter_columns, file_size_label, chain_diverged_copy, genesis_undelivered_copy, vote_refused_copy, from_screen,
     never_seen_label, orphan_remote_label, seat_state_label, seen_label, short_hex_id, size_label,
@@ -1439,18 +1439,15 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         b.members
             .iter()
             .map(|m| {
-                // the picture rode the applied proposal, so the engine
-                // materialized the file on every device; decode by CONTENT
-                // (the name's extension comes from a peer-supplied value)
-                let avatar = (!m.image.is_empty())
-                    .then(|| {
-                        cache.get(&m.image_key, |_| {
-                            crate::platform::platform()
-                                .local_bytes(&m.image)
-                                .and_then(|b| image_from_bytes(&b))
-                        })
-                    })
-                    .flatten();
+                // the picture rode the applied proposal and the engine
+                // holds it on every device; the gather pass read it.
+                // Decode by CONTENT (the name's extension comes from a
+                // peer-supplied value). A picture that did not read is not
+                // remembered: the next pass asks again
+                let avatar = m
+                    .image_bytes
+                    .as_ref()
+                    .and_then(|bytes| cache.get(&m.image_key, |_| image_from_bytes(bytes)));
                 MemberRow {
                     name: m.name.as_str().into(),
                     id: m.id.as_str().into(),
@@ -1590,23 +1587,20 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         ui.set_org_mirror_dir_draft(dir.into());
     }
 
-    // the republic's image: (re)load the picture only when the file
-    // reference changes. The bytes rode the applied set_image proposal, so
-    // the engine materializes the logo file on EVERY device; decode by
-    // CONTENT (image_from_bytes) — the reference's extension comes from a
-    // peer-supplied display value and must not decide the format. On a
-    // session-only workspace the reference is no local file — the read
-    // fails quietly and the placeholder mark stays.
-    if let Some(key) = logo_needs_reload(
-        &LOGO_KEY.with_borrow(std::clone::Clone::clone),
-        &b.org_stats.image,
-    ) {
-        LOGO_KEY.with_borrow_mut(|k| *k = key);
+    // the republic's image: decode the picture only when it changes. The
+    // bytes rode the applied set_image proposal, so the engine holds the
+    // logo on EVERY device and the gather pass read it; decode by CONTENT
+    // (image_from_bytes) - the reference's extension comes from a
+    // peer-supplied display value and must not decide the format. A
+    // republic that is not stored has no picture to read: the placeholder
+    // mark stays, and the key stays empty so a later read still lands.
+    if ui.get_org_img_path().as_str() != b.org_stats.image {
         ui.set_org_img_path(b.org_stats.image.as_str().into());
-        let loaded = (!b.org_stats.image.is_empty())
-            .then(|| crate::platform::platform().local_bytes(&b.org_stats.image))
-            .flatten()
-            .and_then(|bytes| image_from_bytes(&bytes));
+    }
+    let key = b.org_stats.image_bytes.as_ref().map_or("", |_| b.org_stats.image_key.as_str());
+    if LOGO_KEY.with_borrow(|shown| shown != key) {
+        LOGO_KEY.with_borrow_mut(|k| *k = key.to_string());
+        let loaded = b.org_stats.image_bytes.as_ref().and_then(|bytes| image_from_bytes(bytes));
         ui.set_org_img_set(loaded.is_some());
         ui.set_org_img(loaded.unwrap_or_default());
     }
@@ -1639,6 +1633,8 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
         last_settings,
         chat_ui,
     } = ctx.clone();
+    // phase two of a download to the user starts from inside the task
+    let tasks = spawner.clone();
     spawner.spawn(async move {
         let mut rx = w.subscribe();
         push_session(&w, &weak, &last_settings, SessionScope::Full, &chat_ui).await;
@@ -1735,6 +1731,20 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
                     push_surfaces(&w, &weak, &chat_ui).await;
                 }
                 Ok(Event::FileTransfer { id, phase }) => {
+                    // a share this window asked a remote engine to fetch
+                    // for the user: it is on the engine's disk now, and
+                    // phase two brings it here (`docs/web_gui.md` §7). The
+                    // save's own toast replaces the engine-path one
+                    let to_user = crate::bytes::transfer_ended(&chat_ui, id, &phase);
+                    let handed = to_user.is_some();
+                    if let Some(name) = to_user {
+                        let (w, weak) = (w.clone(), weak.clone());
+                        tasks.spawn(async move {
+                            let platform = crate::platform::platform();
+                            let outcome = crate::bytes::finish_download(&w, platform, id, name).await;
+                            crate::bytes::toast_handed_later(weak, outcome);
+                        });
+                    }
                     let weak2 = weak.clone();
                     let _ = slint::invoke_from_event_loop(move || {
                         let Some(ui) = weak2.upgrade() else { return };
@@ -1742,6 +1752,7 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
                         crate::wiki_bridge::transfer_touched(&ui, id);
                         let st = ui.global::<Strings>();
                         match &phase {
+                            molt_core::TransferPhase::Done { .. } if handed => {}
                             molt_core::TransferPhase::Done { path } => {
                                 ui.invoke_show_toast(
                                     format!("{} {path}", st.get_toast_dl_done()).into(),

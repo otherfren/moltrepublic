@@ -176,12 +176,6 @@ impl molt_ui_kit::platform::Platform for Board {
     fn save_file(&self, _save: molt_ui_kit::platform::Save) -> molt_ui_kit::platform::Task<std::io::Result<Option<String>>> {
         Box::pin(async { Ok(None) })
     }
-    fn local_bytes(&self, _path: &str) -> Option<Vec<u8>> {
-        None
-    }
-    fn local_stamp(&self, _path: &str) -> Option<(u64, u128)> {
-        None
-    }
 }
 
 /// The paste callback asks the platform it was wired with and hands the

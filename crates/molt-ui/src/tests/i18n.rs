@@ -187,6 +187,20 @@ fn engine_errors_render_in_the_active_language() {
     assert!(super::localize_error(1, &e).contains("versiegelt"));
 }
 
+/// The upload store's refusals a user meets behind the web door read
+/// German; one the window does not know rides verbatim.
+#[test]
+fn upload_refusals_render_in_german() {
+    let de = |t: &str| super::localize_error(1, &molt_core::MoltError::BadPayload(t.to_string()));
+    assert_eq!(de("upload: no stored workspace is open"), "Upload: kein gespeicherter Workspace offen");
+    assert_eq!(de("upload: 8 uploads already open"), "Upload: schon 8 Uploads offen");
+    assert_eq!(de("upload: the store is full (1073741824 bytes)"), "Upload: der Upload-Speicher ist voll");
+    assert_eq!(de("upload: 70000000 bytes over the 67108864 limit"), super::Lexicon::de().toast_too_large_web);
+    assert_eq!(de("upload: offset 3, expected 0"), "Ungültige Payload: upload: offset 3, expected 0");
+    let e = molt_core::MoltError::BadPayload("upload: 8 uploads already open".to_string());
+    assert_eq!(super::localize_error(0, &e), e.to_string(), "EN = engine Display");
+}
+
 /// The handle charset refusal (audit #20) reads German on both doors.
 #[test]
 fn the_handle_charset_refusal_renders_in_german() {

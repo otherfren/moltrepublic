@@ -16,6 +16,14 @@ use crate::{Command, Event, MoltError, Reply};
 /// window to keep.
 pub const WIRE_VERSION: u32 = 1;
 
+/// The most bytes one transfer carries, either way. The engine has no
+/// default file cap, so the byte doors carry this one; a larger file
+/// takes the server-path flow.
+pub const MAX_TRANSFER: u64 = 64 * 1024 * 1024;
+
+/// The most bytes one [`Chunk`] carries.
+pub const CHUNK: usize = 256 * 1024;
+
 /// Client to server.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -253,6 +261,39 @@ mod tests {
         let shown = format!("{:?}", ClientFrame::Cmd { id: 1, cmd: Box::new(patch) });
         assert!(!shown.contains("sekrit"), "{shown}");
         assert!(shown.contains("patch_settings"), "{shown}");
+    }
+
+    /// The byte doors' shapes and bounds are the protocol too.
+    #[test]
+    fn byte_door_shapes_are_pinned() {
+        assert_eq!(MAX_TRANSFER, 64 * 1024 * 1024);
+        assert_eq!(CHUNK, 256 * 1024);
+        // a full chunk frame stays under the socket's 1 MiB frame bound
+        let full = Chunk { id: 1, offset: 0, last: false, data: &vec![0u8; CHUNK] }.encode();
+        assert!(full.len() < 1024 * 1024);
+
+        // the command frame of a chunk carries no bytes: they ride a `Chunk`
+        let chunk: Command =
+            serde_json::from_str(r#"{"cmd":"upload_chunk","upload":"u","offset":3}"#).expect("a chunk command");
+        assert!(matches!(chunk, Command::UploadChunk { ref bytes, offset: 3, last: false, .. } if bytes.is_empty()));
+        let begin = Command::UploadBegin { name: "a.bin".into(), size: 3 };
+        assert_eq!(serde_json::to_string(&begin).expect("json"), r#"{"cmd":"upload_begin","name":"a.bin","size":3}"#);
+        let progress = Reply::UploadProgress { upload: "u".into(), received: 1, size: 3, done: false };
+        assert_eq!(
+            serde_json::to_string(&progress).expect("json"),
+            r#"{"reply":"upload_progress","upload":"u","received":1,"size":3,"done":false}"#
+        );
+        for door in [
+            "upload_begin",
+            "upload_chunk",
+            "upload_abort",
+            "share_upload",
+            "read_file_bytes",
+            "read_image_bytes",
+            "read_export_bytes",
+        ] {
+            assert!(crate::INTERNAL.contains(&door), "{door} is no MCP tool");
+        }
     }
 
     #[test]

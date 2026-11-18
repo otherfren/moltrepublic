@@ -1676,6 +1676,8 @@ impl State {
         // that replayed as mine and still available — this node keeps
         // serving downloads across restarts
         self.adopt_share_paths();
+        // what a crash or a close left in the upload store goes now
+        self.sweep_upload_store();
         self.resume_file_jobs(&transport_state);
         self.wallet_load_seat(&transport_state);
         self.wallet_on_open(wallet_records);
@@ -2649,7 +2651,7 @@ fn keep_stored_secrets(target: &mut SessionSettings, stored: &SessionSettings) {
 /// is an accident of the launch, not a place anybody chose.
 fn resolve_host_path(dest: &str, download_dir: &str) -> Result<String, MoltError> {
     let dest = dest.trim();
-    if is_bare_name(dest) {
+    if molt_core::is_bare_name(dest) {
         return Ok(molt_storage::expand_tilde(download_dir)
             .join(dest)
             .to_string_lossy()
@@ -2661,18 +2663,6 @@ fn resolve_host_path(dest: &str, download_dir: &str) -> Result<String, MoltError
     Err(MoltError::BadPayload(
         "a destination is a bare name in the download directory or an absolute path".to_string(),
     ))
-}
-
-/// One path component and nothing else — the exchange-folder form of a
-/// destination.
-fn is_bare_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains('\0')
-        && name.len() <= 255
 }
 
 fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {

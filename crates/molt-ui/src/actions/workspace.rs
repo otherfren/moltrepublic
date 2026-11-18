@@ -115,6 +115,19 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {
         let cx = ctx.clone();
         ui.on_export_workspace(move |id, dest, passphrase| {
+            // a bare name behind the web door: the blob lands in the
+            // engine's download folder, and the window brings it to the
+            // user (`docs/web_gui.md` §7). A path stays the engine's.
+            if cx.wallet.is_remote() && crate::bytes::is_bare_name(dest.as_str()) {
+                let (w, weak) = (cx.wallet.clone(), cx.weak.clone());
+                let (id, name, passphrase) = (id.to_string(), dest.to_string(), passphrase.to_string());
+                cx.spawn(async move {
+                    let platform = crate::platform::platform();
+                    let outcome = crate::bytes::export_to_user(&w, platform, id, name, passphrase).await;
+                    crate::bytes::toast_handed_later(weak, outcome);
+                });
+                return;
+            }
             cx.issue(
                 Command::ExportWorkspace {
                     id: id.to_string(),

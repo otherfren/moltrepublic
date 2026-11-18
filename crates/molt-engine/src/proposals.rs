@@ -609,8 +609,9 @@ impl State {
         self.propose_payload(surface, payload)
     }
 
-    /// A picture proposal names ONE source (`path` on this host, or
-    /// `bytes_b64`) and always gets a display name. One that must be read
+    /// A picture proposal names ONE source (`path` on this host,
+    /// `bytes_b64`, or `upload` - a whole upload of the store, consumed
+    /// here) and always gets a display name. One that must be read
     /// or downscaled finishes off the actor and re-enters as a plain
     /// `Propose` carrying the fitted bytes; `Some` = deferred that way.
     fn prepare_image_proposal(
@@ -638,23 +639,36 @@ impl State {
             .and_then(|o| o.remove("path"))
             .and_then(|p| p.as_str().map(|p| p.trim().to_string()))
             .filter(|p| !p.is_empty());
+        // removed like the path: an upload id is never signed
+        let upload = payload
+            .as_object_mut()
+            .and_then(|o| o.remove("upload"))
+            .and_then(|u| u.as_str().map(str::to_string))
+            .filter(|u| !u.is_empty());
         let has_b64 = payload
             .get("bytes_b64")
             .and_then(Value::as_str)
             .is_some_and(|b| !b.is_empty());
-        let file = match (path, has_b64) {
-            (Some(_), true) => {
+        if usize::from(path.is_some()) + usize::from(upload.is_some()) + usize::from(has_b64) > 1 {
+            return Err(MoltError::BadPayload(
+                "`path`, `upload` and `bytes_b64` are alternatives - give one".into(),
+            ));
+        }
+        // the directory of a consumed upload: removed once it is read
+        let mut spent: Option<std::path::PathBuf> = None;
+        let file = match (path, upload, has_b64) {
+            (None, None, false) => {
                 return Err(MoltError::BadPayload(
-                    "`path` and `bytes_b64` are alternatives - give one".into(),
+                    "the image is missing - give `path`, `upload` or `bytes_b64`".into(),
                 ))
             }
-            (None, false) => {
-                return Err(MoltError::BadPayload(
-                    "the image is missing - give `path` or `bytes_b64`".into(),
-                ))
+            (Some(p), _, _) => Some(molt_storage::expand_tilde(&self.host_path(&p)?)),
+            (None, Some(u), _) => {
+                let (file, dir) = self.uploads.take_whole(&u)?;
+                spent = Some(dir);
+                Some(file)
             }
-            (Some(p), false) => Some(molt_storage::expand_tilde(&self.host_path(&p)?)),
-            (None, true) => None,
+            (None, None, true) => None,
         };
         let bytes = if file.is_none() { image_bytes(payload) } else { None };
         let named = payload
@@ -680,6 +694,9 @@ impl State {
             return Err(MoltError::Engine("the engine is shutting down".into()));
         };
         let Some(reply) = self.deferred_reply.take() else {
+            if let Some(dir) = spent {
+                crate::upload_store::prune(&dir);
+            }
             // no operator to answer later: the plain path refuses the size
             return match file {
                 Some(_) => Err(MoltError::Engine("propose: no reply channel".into())),
@@ -693,7 +710,13 @@ impl State {
             let fitted = tokio::task::spawn_blocking(move || {
                 use base64::Engine as _;
                 let source = match file {
-                    Some(f) => crate::image_fit::read_source(&f)?,
+                    Some(f) => {
+                        let read = crate::image_fit::read_source(&f);
+                        if let Some(dir) = spent {
+                            crate::upload_store::prune(&dir);
+                        }
+                        read?
+                    }
                     None => bytes.unwrap_or_default(),
                 };
                 let out = crate::image_fit::fit_image(&source, budget)?;

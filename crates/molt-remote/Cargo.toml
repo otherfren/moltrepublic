@@ -39,3 +39,4 @@ bytes = "1"
 tempfile.workspace = true
 # the client the browser ships: the door is tested against it, not a look-alike
 molt-ui-kit.workspace = true
+futures-channel.workspace = true

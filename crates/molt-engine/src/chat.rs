@@ -354,11 +354,41 @@ impl State {
         }
         // a bare name is the exchange folder's; any absolute path the
         // node's user can read is fair game on both surfaces (ADR-0007)
-        let path = self.host_path(&path)?;
-        let p = std::path::PathBuf::from(&path);
+        let path = std::path::PathBuf::from(self.host_path(&path)?);
+        // a stored upload is its share's and leaves the disk with it: a
+        // second share by path would lose its source to the first
+        if self.upload_store().is_ok_and(|store| path.starts_with(store)) {
+            return Err(MoltError::BadPayload(
+                "the upload store is not a share source".into(),
+            ));
+        }
+        self.share_checked(path, channel)
+    }
+
+    /// Share the file at `p` (a path this node resolved itself):
+    /// [`State::cmd_share_file`] behind its path rule, and
+    /// [`State::cmd_share_upload`] with the store's file.
+    pub(crate) fn share_source(
+        &mut self,
+        p: std::path::PathBuf,
+        channel: ChannelRef,
+    ) -> Result<Reply, MoltError> {
+        self.ensure_demo_net();
+        let channel = channel.normalized().map_err(MoltError::BadPayload)?;
+        self.refuse_closed_thread(&channel)?;
+        self.share_checked(p, channel)
+    }
+
+    /// The share itself; `channel` is normalized and open.
+    fn share_checked(
+        &mut self,
+        p: std::path::PathBuf,
+        channel: ChannelRef,
+    ) -> Result<Reply, MoltError> {
         if p.file_name().is_none() {
             return Err(MoltError::BadPayload(format!(
-                "{path:?} has no file name component"
+                "{:?} has no file name component",
+                p.display().to_string()
             )));
         }
         // file_cap_bytes = 0 turns sharing off on every transport (FP4);
@@ -444,8 +474,11 @@ impl State {
         &mut self,
         name: String,
         reason: String,
+        id: MessageId,
     ) -> Result<Reply, MoltError> {
         tracing::warn!(%name, %reason, "sharing a file failed");
+        // an upload behind the share goes: nobody holds its id any more
+        self.uploads.share_failed(&id);
         self.session.notice = format!("share-failed:{name}:{reason}");
         self.note_mirror_holds_changed(crate::now_secs());
         self.emit_session(molt_core::SessionScope::Full);
@@ -728,6 +761,8 @@ impl State {
     /// Remember one of MY shares' local source path — runtime map + the
     /// per-workspace prefs sidecar (survives restarts; never wire/log).
     fn remember_share_path(&mut self, id: MessageId, path: &str, modified: u64) {
+        // an upload that became this share is the share's file from here on
+        self.uploads.shared(&id);
         self.files.share_paths.insert(id, std::path::PathBuf::from(path));
         self.files.share_stamps.insert(id, modified);
         if let Some(active) = &mut self.active {
@@ -745,7 +780,10 @@ impl State {
 
     /// Forget a share's source path (share removed).
     pub(crate) fn forget_share_path(&mut self, id: &MessageId) {
-        self.files.share_paths.remove(id);
+        // a share out of the upload store takes its bytes with it
+        if let Some(path) = self.files.share_paths.remove(id) {
+            self.drop_stored_share(&path);
+        }
         self.files.share_stamps.remove(id);
         if let Some(active) = &mut self.active {
             let stamp = active.prefs.shared_file_mtimes.remove(&id.to_string()).is_some();

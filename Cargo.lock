@@ -5234,6 +5234,7 @@ name = "molt-remote"
 version = "0.0.17"
 dependencies = [
  "bytes",
+ "futures-channel",
  "futures-util",
  "http",
  "http-body-util",
@@ -5320,6 +5321,7 @@ dependencies = [
  "molt-ui-kit",
  "molt-ui-window",
  "molt-vault",
+ "nostr-relay-builder",
  "paste",
  "pulldown-cmark",
  "qrcode",

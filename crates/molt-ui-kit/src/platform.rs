@@ -67,11 +67,12 @@ pub trait Platform: Send + Sync + 'static {
     fn pick_folder(&self, start: String) -> Task<Option<String>>;
 
     /// Ask for a file to open. The answer NAMES the file for
-    /// [`Platform::read_file`]: its path where there are paths.
+    /// [`Platform::read_file`]: its path where there are paths. Whatever
+    /// follows its last `/` or `\` is the file's own name.
     fn pick_file(&self, pick: FilePick) -> Task<Option<String>>;
 
-    /// Ask where the ENGINE should write a file offered as `name`. `None`:
-    /// cancelled, or a platform whose files are not the engine's.
+    /// Ask where an engine on THIS machine should write a file offered as
+    /// `name`. `None`: cancelled, or a platform with no such paths.
     fn pick_save(&self, name: String) -> Task<Option<String>>;
 
     /// The bytes of a file [`Platform::pick_file`] named.
@@ -80,14 +81,6 @@ pub trait Platform: Send + Sync + 'static {
     /// Hand `save` to the user. `Ok(Some(where))` names where it went,
     /// `Ok(None)` is a cancelled dialog.
     fn save_file(&self, save: Save) -> Task<std::io::Result<Option<String>>>;
-
-    /// A file the engine wrote on THIS machine (an avatar, the logo), read
-    /// in place. `None`: unreadable, or the engine is elsewhere.
-    fn local_bytes(&self, path: &str) -> Option<Vec<u8>>;
-
-    /// What tells one version of such a file from the next: its length
-    /// and its modification time in nanoseconds.
-    fn local_stamp(&self, path: &str) -> Option<(u64, u128)>;
 }
 
 static INSTALLED: OnceLock<Box<dyn Platform>> = OnceLock::new();
@@ -141,12 +134,6 @@ mod tests {
         }
         fn save_file(&self, _save: Save) -> Task<std::io::Result<Option<String>>> {
             Box::pin(async { Ok(None) })
-        }
-        fn local_bytes(&self, _path: &str) -> Option<Vec<u8>> {
-            None
-        }
-        fn local_stamp(&self, _path: &str) -> Option<(u64, u128)> {
-            None
         }
     }
 

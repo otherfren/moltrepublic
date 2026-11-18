@@ -4776,7 +4776,9 @@ export component AppWindow inherits Window {
                                     icon-set: true;
                                     label: Strings.ow-export;
                                     clicked => {
-                                        root.backup-path = "~/Backups/" + root.open-name + ".molt.enc";
+                                        // behind the web door a bare name comes to the
+                                        // user as a download; a path stays the server's
+                                        root.backup-path = (root.folder-browse ? "~/Backups/" : "") + root.open-name + ".molt.enc";
                                         // never inherit a passphrase from a
                                         // previous (possibly other-workspace)
                                         // modal session

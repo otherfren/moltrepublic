@@ -36,6 +36,15 @@ is `execute` + `subscribe`.
   and `Origin` must be the page this listener served (the cross-site
   hijack guard). The token rides the first frame, never a URL, header or
   cookie, and the page keeps it in memory only.
+- **Bytes, never paths (2026-11-18).** File content crosses as chunked
+  bytes through its own commands - an upload into an engine-owned
+  per-workspace store, reads by share id, by a view's picture key, or of
+  the last export. No byte door takes a path, so none adds reach over
+  the path commands; each is bounded (256 KiB a chunk, 64 MiB a transfer,
+  1 GiB a store) and an upload belongs to the session that began it
+  (`mcp-security.md`, "The byte doors"). The store deletes only a
+  directory it minted itself: ownership is never read off a client's
+  path, and `share_file` refuses a path under the store.
 - **A push channel dies with its key.** The key is re-checked on every
   inbound frame, before every reply, and before any event that can follow
   a rotation.
@@ -46,6 +55,9 @@ is `execute` + `subscribe`.
 
 ## Consequences
 
+- The engine holds uploaded files for a share's life: disk the node's
+  user did not place there, bounded by the store's quota and removed
+  with the share.
 - Two doors to keep in step: a new `Command` must be classified for both
   (the co-equality test and the gate test go red until it is).
 - The wire has no compatibility promise: the bundle is served by the same

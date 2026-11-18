@@ -174,19 +174,21 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 .ok()
                 .map(|s| s.selected.clone())
                 .unwrap_or_default();
-            // the native picker runs async (XDG portal) off the UI thread;
-            // the engine derives the metadata + real sha256 from this path
-            // and posts the share when hashing completes
+            // the picker runs async (XDG portal, or the browser's own) off
+            // the UI thread. The engine in this process derives the
+            // metadata + real sha256 from the picked path and posts the
+            // share when hashing completes; one behind the web door is
+            // handed the bytes (`crate::bytes`)
             cx.spawn(async move {
+                let platform = crate::platform::platform();
                 let pick = molt_ui_kit::platform::FilePick::default();
-                let Some(path) = crate::platform::platform().pick_file(pick).await else {
+                let Some(file) = platform.pick_file(pick).await else {
                     return; // cancelled
                 };
-                let cmd = Command::ShareFile { path, channel };
-                if let Err(e) = w.execute(cmd).await {
+                if let Err(e) = crate::bytes::share_picked(&w, platform, file, channel).await {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
-                            ui.invoke_show_toast_error(error_toast(&ui, &e));
+                            ui.invoke_show_toast_error(crate::bytes::byte_error_toast(&ui, &e));
                         }
                     });
                 }
@@ -202,21 +204,16 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             };
             let w = cx.wallet.clone();
             let weak = cx.weak.clone();
+            let chat_ui = cx.chat_ui.clone();
             // save-dialog per download (product decision): the user picks
             // the destination, then the engine fetches peer-to-peer;
-            // completion/failure surfaces via Event::FileTransfer
+            // completion/failure surfaces via Event::FileTransfer. Behind
+            // the web door the engine fetches onto its own disk and the
+            // bytes follow through the door (`crate::bytes::download`)
             cx.spawn(async move {
-                let Some(dest) = crate::platform::platform().pick_save(name.to_string()).await else {
-                    return; // cancelled
-                };
-                let cmd = Command::DownloadFile { id, dest: Some(dest) };
-                if let Err(e) = w.execute(cmd).await {
-                    let _ = slint::invoke_from_event_loop(move || {
-                        if let Some(ui) = weak.upgrade() {
-                            ui.invoke_show_toast_error(error_toast(&ui, &e));
-                        }
-                    });
-                }
+                let platform = crate::platform::platform();
+                let outcome = crate::bytes::download(&w, platform, &chat_ui, id, name.to_string()).await;
+                crate::bytes::toast_handed_later(weak, outcome);
             });
         });
     }

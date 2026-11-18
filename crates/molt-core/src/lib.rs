@@ -1295,6 +1295,19 @@ fn file_available_default() -> bool {
     true
 }
 
+/// One path component and nothing else: the form of a destination the
+/// engine places in its download directory. The engine and a window that
+/// fetches such a file back decide by this one reading.
+pub fn is_bare_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+        && name.len() <= 255
+}
+
 /// The display type of a shared file, from its extension (proper MIME
 /// sniffing can come with the transport; the label is presentation).
 pub fn file_kind_label(name: &str) -> String {
@@ -4600,6 +4613,72 @@ pub enum Command {
         /// Refuse anything larger before reading (bytes).
         cap: u64,
     },
+    /// Start an upload into the open workspace's upload store
+    /// (`docs_archive/security/mcp-security.md`, "The byte doors"): the
+    /// way a frontend that holds BYTES and no host path shares a file.
+    /// Answers [`Reply::UploadProgress`] with the id every later step names.
+    /// INTERNAL: an agent on the host shares by path.
+    UploadBegin {
+        /// The file's name: ONE path component, never a path.
+        name: String,
+        /// The exact byte length; [`wire::MAX_TRANSFER`] at most.
+        size: u64,
+    },
+    /// The next bytes of an upload, in order; at most [`wire::CHUNK`].
+    /// The web door carries `bytes` in a binary frame (`wire::Chunk`).
+    UploadChunk {
+        /// The id [`Command::UploadBegin`] answered.
+        upload: String,
+        /// Where `bytes` start; must equal what the store has received.
+        offset: u64,
+        /// The bytes.
+        #[serde(default)]
+        bytes: Vec<u8>,
+        /// No chunk follows: `offset + bytes` must equal the size.
+        #[serde(default)]
+        last: bool,
+    },
+    /// Drop an upload that was not shared: its bytes leave the store.
+    UploadAbort {
+        /// The id [`Command::UploadBegin`] answered.
+        upload: String,
+    },
+    /// Share a finished upload into the chat: [`Command::ShareFile`] with
+    /// the store's file as the source. The file leaves the store with the
+    /// share (`remove_file`, a delete, the expiry).
+    ShareUpload {
+        /// The id [`Command::UploadBegin`] answered.
+        upload: String,
+        /// The channel view the share files under.
+        channel: ChannelRef,
+    },
+    /// Read a share's bytes by its message id from the best LOCAL source
+    /// (the own share, the verified download, the mirror), re-hashed
+    /// against the share's checksum: phase two of a download whose phase
+    /// one is [`Command::DownloadFile`]. INTERNAL: an agent reads the
+    /// exchange folder.
+    ReadFileBytes {
+        /// The share message's stable id.
+        id: MessageId,
+        /// Refuse anything larger before reading (bytes).
+        cap: u64,
+    },
+    /// Read the republic's logo or a member's picture. `key` is the
+    /// `image` value a view carries ([`StatusView::image`],
+    /// [`MemberView::image`]); it is COMPARED against the open
+    /// workspace's current pictures and never resolved as a path.
+    ReadImageBytes {
+        /// The view's `image` value.
+        key: String,
+        /// Refuse anything larger before reading (bytes).
+        cap: u64,
+    },
+    /// Read the blob the last [`Command::ExportWorkspace`] of this run
+    /// wrote ([`SessionView::export`], `result == "ok"`). Names no path.
+    ReadExportBytes {
+        /// Refuse anything larger before reading (bytes).
+        cap: u64,
+    },
     /// Read who mirrors what (`docs_archive/files/mirroring.md` §3.4): this seat's
     /// switch and quota, every member's declaration, per share the holders.
     ReadMirror,
@@ -6200,6 +6279,9 @@ pub enum Command {
         name: String,
         /// The honest reason.
         reason: String,
+        /// The id the share was promised ([`MessageId::NIL`]: none).
+        #[serde(default)]
+        id: MessageId,
         /// Workspace-net incarnation (stale task results are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -6664,7 +6746,7 @@ pub const NODE_POSTURE_KEYS: [&str; 14] = [
 /// operator may send one unless its door names it - MCP refuses them all
 /// (the co-equality test in `molt-mcp` pins tools + this list = every
 /// variant), the web door allows a named few (`docs/web_gui.md` §5.2).
-pub const INTERNAL: [&str; 87] = [
+pub const INTERNAL: [&str; 94] = [
     // not a door of its own: chat_send/approve/decline/withdraw
     // build it from their `operator`/`agent` arguments
     "as_operator",
@@ -6805,6 +6887,18 @@ pub const INTERNAL: [&str; 87] = [
     "set_wake_command",
     "reload_settings",
     "config_notice",
+    // the byte doors of a frontend that holds bytes and no host path
+    // (the browser window, ADR-0008). An agent runs on the host: it
+    // shares by path (share_file), reads its downloads and exports in
+    // the exchange folder and a picture at the path the view names -
+    // and bulk bytes do not fit the 1 MiB MCP line.
+    "upload_begin",
+    "upload_chunk",
+    "upload_abort",
+    "share_upload",
+    "read_file_bytes",
+    "read_image_bytes",
+    "read_export_bytes",
 ];
 
 impl Command {
@@ -7238,10 +7332,27 @@ pub enum Reply {
         /// Whether, and how, the bytes are on this device.
         local: LocalCopy,
     },
-    /// A referenced file's verified bytes ([`Command::ReadUploadBytes`]).
+    /// Bulk bytes: a referenced file ([`Command::ReadUploadBytes`], its
+    /// sha256 equals the requested checksum), a share
+    /// ([`Command::ReadFileBytes`]), a picture
+    /// ([`Command::ReadImageBytes`]) or an export
+    /// ([`Command::ReadExportBytes`]). The web door sends them as chunks.
     UploadBytes {
-        /// The bytes; their sha256 equals the requested checksum.
+        /// The bytes.
         bytes: Vec<u8>,
+    },
+    /// Where an upload stands ([`Command::UploadBegin`],
+    /// [`Command::UploadChunk`]).
+    UploadProgress {
+        /// The upload's id.
+        upload: String,
+        /// Bytes the store holds.
+        received: u64,
+        /// The declared size.
+        size: u64,
+        /// The file is whole and on disk.
+        #[serde(default)]
+        done: bool,
     },
     /// The log's newest entries, newest LAST ([`Command::ReadLog`]).
     Log {
@@ -10335,5 +10446,21 @@ mod tests {
         let life = thread_lives([&old, &close, &within], WEEK).remove("a").expect("t");
         assert_eq!(life.closed_by.as_deref(), Some("anna"));
         assert_eq!(life.since, 100);
+    }
+}
+
+#[cfg(test)]
+mod bare_name_tests {
+    use super::is_bare_name;
+
+    #[test]
+    fn a_bare_name_is_one_path_component() {
+        for name in ["a.enc", "~a.enc", "a b", ".hidden"] {
+            assert!(is_bare_name(name), "{name:?}");
+        }
+        let long = "a".repeat(256);
+        for name in ["", ".", "..", "~/a", "/a", "d/a", "d\\a", "a\0", long.as_str()] {
+            assert!(!is_bare_name(name), "{name:?}");
+        }
     }
 }

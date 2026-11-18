@@ -255,55 +255,83 @@ fn undecodable_bytes_never_reach_the_proposal() {
 }
 
 /// A seat that REPLACES its picture keeps the same file name
-/// (`avatar-<stem>.<ext>`), so a path-only cache key would keep
-/// showing the old face until the app restarts. The key carries the
-/// file's identity, not just its name.
-/// The republic's picture must survive a REPLACEMENT: same file name,
-/// new content. A path compare says "unchanged" and the window keeps the
-/// old logo until a restart - the bug this rule replaced.
+/// (`avatar-<stem>.<ext>`, `logo.<ext>`), so a name-only cache key would
+/// keep showing the old picture until the app restarts. The key moves
+/// with the applied picture changes instead.
 #[test]
-fn a_replaced_logo_forces_a_reload_although_its_path_is_unchanged() {
-    let tmp = tempfile::tempdir().expect("tmp");
-    let logo = tmp.path().join("logo.png");
-    let path = logo.display().to_string();
-    std::fs::write(&logo, noisy_png(8, 8)).expect("write the first logo");
+fn a_replaced_picture_moves_its_key_although_its_name_is_unchanged() {
+    use crate::bytes::{picture_key, pictures_version};
+    let set = |bytes: &str| serde_json::json!({ "op": "set_image", "value": "logo.png", "bytes_b64": bytes });
+    let first = pictures_version(&[set("AAAA")]);
+    assert_eq!(first, pictures_version(&[set("AAAA")]), "an unchanged log keys the same");
+    let replaced = pictures_version(&[set("AAAA"), set("BBBB")]);
+    assert_ne!(first, replaced, "a replaced picture must not show the old decode");
+    assert_ne!(picture_key("/w/logo.png", first), picture_key("/w/logo.png", replaced));
+    assert!(picture_key("/w/logo.png", first).starts_with("/w/logo.png"), "the key still names the picture");
 
-    let first = super::logo_needs_reload("", &path).expect("a first picture always loads");
-    assert_eq!(
-        super::logo_needs_reload(&first, &path),
-        None,
-        "an unchanged picture must not be decoded again on every push"
-    );
+    // a member's picture counts, another change of the log does not
+    let face = serde_json::json!({ "op": "set_member_image", "member": "ana", "value": "a.png", "bytes_b64": "CCCC" });
+    assert_ne!(first, pictures_version(&[set("AAAA"), face]));
+    let other = serde_json::json!({ "op": "set_name", "value": "Chess Club" });
+    assert_eq!(first, pictures_version(&[set("AAAA"), other]), "pictures are not read again for a rename");
+    let removed = serde_json::json!({ "op": "remove_image" });
+    assert_ne!(first, pictures_version(&[set("AAAA"), removed]));
 
-    std::fs::write(&logo, noisy_png(16, 16)).expect("replace the logo");
-    let second = super::logo_needs_reload(&first, &path)
-        .expect("a replaced picture must reload behind its unchanged path");
-    assert_ne!(first, second, "the key moves with the content");
-
-    assert_eq!(
-        super::logo_needs_reload("", ""),
-        None,
-        "a republic without a picture never reloads one"
-    );
+    assert_eq!(picture_key("", first), "", "no picture, no key");
 }
 
+/// What a picker answered names the file after its last separator, of
+/// either kind; an export target without one is a bare name.
 #[test]
-fn the_avatar_cache_key_moves_when_the_file_content_does() {
-    let tmp = tempfile::tempdir().expect("tmp");
-    let path = tmp.path().join("avatar-walter.png");
-    std::fs::write(&path, noisy_png(8, 8)).expect("write");
-    let p = path.display().to_string();
-    let first = avatar_cache_key(&p);
-    assert!(first.starts_with(&p), "the key still names the file: {first}");
-    assert_eq!(first, avatar_cache_key(&p), "an untouched file keys the same");
-    // the same NAME, a different picture
-    std::fs::write(&path, noisy_png(16, 16)).expect("rewrite");
-    assert_ne!(
-        first,
-        avatar_cache_key(&p),
-        "a replaced picture must invalidate the cached decode"
-    );
-    assert_eq!(avatar_cache_key(""), "", "no picture, no key");
+fn a_picked_file_is_named_after_its_last_separator() {
+    use crate::bytes::{file_name, is_bare_name};
+    assert_eq!(file_name("/home/u/face.png"), "face.png");
+    assert_eq!(file_name("C:\\pics\\face.png"), "face.png");
+    assert_eq!(file_name("face.png"), "face.png");
+    assert!(is_bare_name("club.molt.enc"));
+    // the engine's own reading: no separator, so its download folder
+    assert!(is_bare_name("~club.molt.enc"));
+    for path in ["", "~/club.molt.enc", "/srv/club.molt.enc", "backups/club.molt.enc", "C:\\club.molt.enc"] {
+        assert!(!is_bare_name(path), "{path:?}");
+    }
+}
+
+/// A republic that is not stored names pictures the engine refuses to
+/// open; every surfaces pass asking again would be a round trip per
+/// picture per event. A refusal is remembered until the pictures change;
+/// a read that failed otherwise (a dropped connection) is asked again.
+#[test]
+fn a_refused_picture_is_asked_for_once_per_state_of_the_pictures() {
+    use crate::bytes::{hold_with, picture_key};
+    use molt_core::MoltError;
+    let rt = tokio::runtime::Builder::new_current_thread().build().expect("runtime");
+    let chat_ui = std::sync::Arc::new(std::sync::Mutex::new(crate::surfaces::ChatUiState::default()));
+    let asked = std::cell::RefCell::new(Vec::<String>::new());
+    let read = |image: String| {
+        asked.borrow_mut().push(image.clone());
+        async move {
+            match image.as_str() {
+                "refused.png" => Err(MoltError::BadPayload("unknown image".into())),
+                "lost.png" => Err(MoltError::Engine("connection closed".into())),
+                _ => Ok(vec![1, 2, 3]),
+            }
+        }
+    };
+    let wanted = |version: u64| -> Vec<(String, String)> {
+        ["refused.png", "lost.png", "a.png"].iter().map(|i| (picture_key(i, version), (*i).to_string())).collect()
+    };
+    let count = |image: &str| asked.borrow().iter().filter(|a| *a == image).count();
+
+    let held = rt.block_on(hold_with(&chat_ui, &wanted(1), read));
+    assert_eq!(held.len(), 1, "only the picture that read is held");
+    assert!(held.contains_key(&picture_key("a.png", 1)));
+    rt.block_on(hold_with(&chat_ui, &wanted(1), read));
+    assert_eq!(count("a.png"), 1);
+    assert_eq!(count("refused.png"), 1, "the refusal is remembered");
+    assert_eq!(count("lost.png"), 2, "a read that failed is asked again");
+
+    rt.block_on(hold_with(&chat_ui, &wanted(2), read));
+    assert_eq!(count("refused.png"), 2, "the pictures changed: asked again");
 }
 
 /// `sync_rows` rewrites EVERY row on EVERY mirror push, so a decode

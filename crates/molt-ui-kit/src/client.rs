@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use futures_channel::{mpsc, oneshot};
 use futures_util::future::{select, Either};
 use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt};
+use molt_core::wire::CHUNK;
 use molt_core::{Command, Event, MoltError, Reply};
 
 use crate::protocol::{Answer, Broken, Notice, Protocol};
@@ -47,6 +48,11 @@ impl RemoteHandle {
         rx.await.unwrap_or_else(|_| Err(gone()))
     }
 
+    /// [`upload`] through this connection.
+    pub async fn upload(&self, name: &str, bytes: &[u8]) -> Result<String, MoltError> {
+        upload(|cmd| self.execute(cmd), name, bytes).await
+    }
+
     /// What the server said in its welcome; `None` until it has. A
     /// command is only answered after it, so whoever holds a reply may
     /// rely on this being there.
@@ -61,6 +67,43 @@ impl RemoteHandle {
     pub fn subscribe(&self) -> RemoteEvents {
         let taken = self.notices.lock().ok().and_then(|mut slot| slot.take());
         RemoteEvents { notices: taken }
+    }
+}
+
+/// Put `bytes` into the engine's upload store under `name` and answer
+/// the upload's id (`share_upload` and a picture proposal take it). One
+/// chunk at a time, each awaited: the engine takes them in order only. A
+/// failed chunk drops the upload. `execute` is the engine the caller
+/// holds - a remote one or the native handle, the commands are the same.
+pub async fn upload<F, Fut>(execute: F, name: &str, bytes: &[u8]) -> Result<String, MoltError>
+where
+    F: Fn(Command) -> Fut,
+    Fut: std::future::Future<Output = Result<Reply, MoltError>>,
+{
+    let unexpected = || MoltError::Engine("upload: unexpected reply".into());
+    let size = u64::try_from(bytes.len()).map_err(|_| unexpected())?;
+    let Reply::UploadProgress { upload, .. } = execute(Command::UploadBegin { name: name.to_string(), size }).await? else {
+        return Err(unexpected());
+    };
+    let mut offset = 0usize;
+    loop {
+        let end = offset.saturating_add(CHUNK).min(bytes.len());
+        let last = end == bytes.len();
+        let chunk = Command::UploadChunk {
+            upload: upload.clone(),
+            offset: u64::try_from(offset).map_err(|_| unexpected())?,
+            bytes: bytes[offset..end].to_vec(),
+            last,
+        };
+        if let Err(e) = execute(chunk).await {
+            // best effort: the engine also drops an upload nobody finishes
+            drop(execute(Command::UploadAbort { upload }).await);
+            return Err(e);
+        }
+        if last {
+            return Ok(upload);
+        }
+        offset = end;
     }
 }
 
@@ -186,9 +229,15 @@ impl Pump {
                     },
                     Step::Request(Some(request)) => {
                         let (cmd, waiter) = *request;
-                        let frame = protocol.request_into(cmd, waiter);
-                        if outgoing.send(Wire::Text(frame)).await.is_err() {
+                        // `None`: answered without the server
+                        let Some(out) = protocol.request_into(cmd, waiter) else { continue };
+                        if outgoing.send(Wire::Text(out.text)).await.is_err() {
                             return Ended::Closed;
+                        }
+                        if let Some(chunk) = out.binary {
+                            if outgoing.send(Wire::Binary(chunk)).await.is_err() {
+                                return Ended::Closed;
+                            }
                         }
                     }
                 }
@@ -229,6 +278,12 @@ mod tests {
             match self.from_client.next().await.expect("a frame") {
                 Wire::Text(t) => serde_json::from_str(&t).expect("a client frame"),
                 Wire::Binary(_) => panic!("unexpected bytes"),
+            }
+        }
+        async fn heard_bytes(&mut self) -> Vec<u8> {
+            match self.from_client.next().await.expect("a frame") {
+                Wire::Binary(b) => b,
+                Wire::Text(t) => panic!("unexpected text: {t}"),
             }
         }
         fn welcome(&self) {
@@ -359,6 +414,77 @@ mod tests {
         assert_eq!(ended, Ended::Closed);
         assert_eq!(block_on(events.recv()).err(), Some(NoEvent::Closed));
         assert!(matches!(block_on(handle.execute(Command::ReadSession)), Err(MoltError::Engine(_))), "no hang after the end");
+    }
+
+    /// An upload over the pump: begun, then chunk by chunk in order -
+    /// each a command frame and its chunk frame - and the bytes that
+    /// arrive are the bytes that left.
+    #[test]
+    fn an_upload_goes_out_as_ordered_chunk_frames() {
+        let (handle, mut server, _welcome, pump) = rig();
+        let bytes: Vec<u8> = (0..=u8::MAX).cycle().take(CHUNK + 10).collect();
+        run(pump, async {
+            let sent = handle.upload("a.bin", &bytes);
+            let server_side = async {
+                server.heard().await; // hello
+                server.welcome();
+                let ClientFrame::Cmd { id, cmd } = server.heard().await else { panic!("a command") };
+                let total = u64::try_from(bytes.len()).expect("small");
+                assert!(matches!(*cmd, Command::UploadBegin { ref name, size } if name == "a.bin" && size == total));
+                let upload = |received: usize, done| Reply::UploadProgress {
+                    upload: "u1".into(),
+                    received: u64::try_from(received).expect("small"),
+                    size: total,
+                    done,
+                };
+                server.say(&ServerFrame::Reply { id, result: Ok(Box::new(upload(0, false))) });
+                let mut got = Vec::new();
+                loop {
+                    let ClientFrame::Cmd { id, cmd } = server.heard().await else { panic!("a command") };
+                    let Command::UploadChunk { upload: of, offset, bytes: inline, last } = *cmd else { panic!("a chunk") };
+                    assert_eq!(of, "u1");
+                    assert!(inline.is_empty());
+                    let frame = server.heard_bytes().await;
+                    let chunk = molt_core::wire::Chunk::decode(&frame).expect("a chunk frame");
+                    assert_eq!((chunk.id, chunk.offset, chunk.last), (id, offset, last));
+                    assert_eq!(usize::try_from(offset).ok(), Some(got.len()), "in order");
+                    assert!(chunk.data.len() <= CHUNK);
+                    got.extend_from_slice(chunk.data);
+                    server.say(&ServerFrame::Reply { id, result: Ok(Box::new(upload(got.len(), last))) });
+                    if last {
+                        return got;
+                    }
+                }
+            };
+            let (sent, got) = futures_util::future::join(sent, server_side).await;
+            assert_eq!(sent.expect("uploaded"), "u1");
+            assert_eq!(got, bytes);
+        });
+    }
+
+    /// A refused chunk ends the upload: the caller hears the refusal and
+    /// the store is told to drop what it has.
+    #[test]
+    fn a_refused_chunk_aborts_the_upload() {
+        let (handle, mut server, _welcome, pump) = rig();
+        run(pump, async {
+            let sent = handle.upload("a.bin", b"abc");
+            let server_side = async {
+                server.heard().await;
+                server.welcome();
+                let ClientFrame::Cmd { id, .. } = server.heard().await else { panic!("a command") };
+                let begun = Reply::UploadProgress { upload: "u1".into(), received: 0, size: 3, done: false };
+                server.say(&ServerFrame::Reply { id, result: Ok(Box::new(begun)) });
+                let ClientFrame::Cmd { id, .. } = server.heard().await else { panic!("a command") };
+                server.heard_bytes().await;
+                server.say(&ServerFrame::Reply { id, result: Err(MoltError::BadPayload("upload: no".into())) });
+                let ClientFrame::Cmd { id, cmd } = server.heard().await else { panic!("a command") };
+                assert!(matches!(*cmd, Command::UploadAbort { ref upload } if upload == "u1"));
+                server.say(&ServerFrame::Reply { id, result: Ok(Box::new(Reply::Ack)) });
+            };
+            let (sent, ()) = futures_util::future::join(sent, server_side).await;
+            assert!(matches!(sent, Err(MoltError::BadPayload(_))));
+        });
     }
 
     #[test]

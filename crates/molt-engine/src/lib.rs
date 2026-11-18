@@ -60,6 +60,7 @@ mod session;
 mod threads;
 mod transfer;
 mod upload_refs;
+mod upload_store;
 mod vault;
 mod wake;
 mod wallet;
@@ -1225,6 +1226,8 @@ pub(crate) struct State {
     /// Wire decision lines: the id lookup and the lines held until decided.
     pub(crate) decision_lines: net::DecisionLines,
     pub(crate) files: FilePlane,
+    /// The open uploads of the open workspace (`upload_store.rs`).
+    pub(crate) uploads: upload_store::Uploads,
     /// The GUI's last published rendering claim (`gui_over_mcp.md`):
     /// written only by `Command::UiPublish` (the window's live mirror),
     /// read back over `read_ui_state`. `None` = no window published yet.
@@ -1597,6 +1600,7 @@ impl State {
                 mirror_pages: HashMap::new(),
                 mirror_failed: HashMap::new(),
             },
+            uploads: upload_store::Uploads::default(),
             ui_state: None,
             applied,
             wiki_cache: None,
@@ -1926,12 +1930,13 @@ impl State {
             Command::NetFileShareFailed {
                 name,
                 reason,
+                id,
                 generation,
             } => {
                 if !self.net_scope_current(generation) {
                     return Ok(Reply::Ack);
                 }
-                self.cmd_net_file_share_failed(name, reason)
+                self.cmd_net_file_share_failed(name, reason, id)
             }
             Command::NetFileRequestReady { id, ct, generation } => {
                 if !self.net_scope_current(generation) {
@@ -2064,6 +2069,15 @@ impl State {
             Command::ReadUploads => Ok(Reply::Uploads { uploads: self.uploads_view() }),
             Command::ResolveUpload { checksum } => self.cmd_resolve_upload(&checksum),
             Command::ReadUploadBytes { checksum, cap } => self.cmd_read_upload_bytes(checksum, cap),
+            Command::UploadBegin { name, size } => self.cmd_upload_begin(name, size),
+            Command::UploadChunk { upload, offset, bytes, last } => {
+                self.cmd_upload_chunk(upload, offset, bytes, last)
+            }
+            Command::UploadAbort { upload } => self.cmd_upload_abort(upload),
+            Command::ShareUpload { upload, channel } => self.cmd_share_upload(upload, channel),
+            Command::ReadFileBytes { id, cap } => self.cmd_read_file_bytes(id, cap),
+            Command::ReadImageBytes { key, cap } => self.cmd_read_image_bytes(key, cap),
+            Command::ReadExportBytes { cap } => self.cmd_read_export_bytes(cap),
             Command::UiPublish { snapshot } => {
                 self.ui_state = Some(snapshot);
                 Ok(Reply::Ack)

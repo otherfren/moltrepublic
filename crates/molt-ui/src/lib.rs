@@ -45,6 +45,9 @@
 //!   native half of the platform seam.
 //! - `platform` — the door to that seam: clipboard, alert, clocks, sleep,
 //!   random token and files (`docs/web_gui.md` §6.3).
+//! - `bytes` — file content to and from the engine: by path for the
+//!   engine in this process, through the byte doors for one behind the
+//!   web door (`docs/web_gui.md` §7).
 //! - `models` — the one in-place `VecModel` patch (`sync_model`).
 //! - `images`, `labels`, `i18n`, `alerts`, `net_tor` — pictures, rendered
 //!   prose, localization, alert sounds, the anonymity panel.
@@ -65,6 +68,7 @@ pub use native::Spawner;
 mod actions;
 mod alerts;
 mod app;
+mod bytes;
 mod channels;
 mod chat_log;
 mod download_status;

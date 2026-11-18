@@ -9,12 +9,24 @@ use molt_core::Command;
 
 /// Commands MCP keeps internal that the browser window needs: the GUI's
 /// own doors. Everything else on `molt_core::INTERNAL` stays shut.
-pub const WEB_DOOR: [&str; 2] = [
+pub const WEB_DOOR: [&str; 9] = [
     // a referenced file's bytes for an inline picture
     "read_upload_bytes",
     // the settings form's direct door for the wake hook; the same value
     // rides `patch_settings` (ADR-0007), so this adds no reach
     "set_wake_command",
+    // the byte doors (`docs/web_gui.md` §7): a browser holds bytes and no
+    // host path. None of them takes a path - an upload is addressed by
+    // an id the engine minted, a read by a share id, a view's picture
+    // key or nothing at all - so they add no reach over `share_file`,
+    // `download_file` and `export_workspace`, which take any path
+    "upload_begin",
+    "upload_chunk",
+    "upload_abort",
+    "share_upload",
+    "read_file_bytes",
+    "read_image_bytes",
+    "read_export_bytes",
 ];
 
 /// The allow-list: every MCP tool's command plus [`WEB_DOOR`].
@@ -152,8 +164,9 @@ mod tests {
     }
 
     /// The GUI must be able to do everything it does: every `Command::X`
-    /// `molt-ui` constructs is admitted, except the window's own publish
-    /// (the browser does not publish, §5.5).
+    /// `molt-ui` and its client crate `molt-ui-kit` construct is admitted,
+    /// except the window's own publish (the browser does not publish,
+    /// §5.5). And no web door stands open that the GUI does not use.
     #[test]
     fn every_command_the_gui_issues_is_admitted() {
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -171,9 +184,11 @@ mod tests {
         let squash = |s: &str| s.replace('_', "").to_lowercase();
         let by_squashed: std::collections::BTreeMap<String, &str> =
             Command::variant_names().iter().map(|n| (squash(n), *n)).collect();
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../molt-ui/src");
         let mut files = Vec::new();
-        walk(&src, &mut files);
+        // the kit holds the upload helper: the three upload steps are its
+        for krate in ["molt-ui", "molt-ui-kit"] {
+            walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(krate).join("src"), &mut files);
+        }
         let gate = Gate::new();
         let mut seen = BTreeSet::new();
         for f in files {
@@ -190,7 +205,7 @@ mod tests {
         }
         assert!(seen.len() > 90, "the scan found only {} commands", seen.len());
         for door in WEB_DOOR {
-            assert!(seen.contains(door), "{door} is a web door the GUI never uses");
+            assert!(seen.contains(door), "{door}: a web door the GUI never uses");
         }
         for name in seen {
             if name != "ui_publish" {
