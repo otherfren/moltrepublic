@@ -200,7 +200,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
 /// A create/join refusal: the handle charset rule in German, anything
 /// else carried through.
 fn handle_err_de(t: &str) -> &str {
-    if t == molt_engine::HANDLE_CHARSET_REFUSAL {
+    if t == molt_core::HANDLE_CHARSET_REFUSAL {
         "Name nur aus ASCII und ä ö ü ß"
     } else {
         t
@@ -779,12 +779,12 @@ pub(crate) static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
 ];
 
 /// The agent skill in the UI language, placeholders unfilled
-/// ([`molt_mcp::fill_wake_skill`]); English is the text MCP serves.
+/// ([`molt_core::kanban_wake::fill_wake_skill`]); English is the text MCP serves.
 pub(crate) fn wake_skill(lang: i32) -> &'static str {
     if lang == 1 {
         include_str!("wake_skill_de.md")
     } else {
-        molt_mcp::WAKE_SKILL
+        molt_core::kanban_wake::WAKE_SKILL
     }
 }
 
@@ -1040,6 +1040,7 @@ lexicon! {
     ou_mirror_quota: "Quota (GB)", "Quota (GB)";
     ou_mirror_apply: "Apply", "Übernehmen";
     ou_mirror_browse: "Folder...", "Ordner...";
+    ou_mirror_dir_ph: "Default folder", "Standardordner";
     ou_mirror_of: "of", "von";
     ou_copy: "Copy", "Kopieren";
     ou_gone: "gone", "weg";
@@ -1238,7 +1239,7 @@ lexicon! {
     chain_empty: "No chain - this workspace is not chain-governed.", "Keine Chain - dieser Workspace ist nicht chain-regiert.";
     set_ws_choose: "Choose folder…", "Ordner auswählen…";
     set_ws_dir_title: "Choose workspace folder", "Workspace-Ordner auswählen";
-    set_ws_dir_body: "Path of the folder that holds your workspaces - browse via the file dialog or type it directly.", "Pfad des Ordners, der deine Workspaces enthält - per Datei-Dialog auswählen oder direkt eintippen.";
+    set_ws_dir_body: "Path of the folder that holds your workspaces.", "Pfad des Ordners, der deine Workspaces enthält.";
     set_ws_dir_browse: "Browse…", "Durchsuchen…";
     set_ws_found_one: "workspace found in this folder", "Workspace in diesem Ordner gefunden";
     set_ws_found_many: "workspaces found in this folder", "Workspaces in diesem Ordner gefunden";

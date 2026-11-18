@@ -437,8 +437,10 @@ fn the_type_column_header_lines_up_with_its_cells() {
     }
 }
 
-/// The mirror row above the Persistent table: switch, quota field, both
-/// buttons and the two texts sit on ONE centre line at every font size.
+/// The mirror row above the Persistent table, two lines since the folder
+/// became a typed field: switch, quota field, its Apply and the usage on
+/// the first, the folder field with its two buttons on the second. Each
+/// line's controls sit on ONE centre line at every font size.
 /// A fixed-height child of a HorizontalLayout hangs at the top edge
 /// unless it centres itself (reported 2026-09-04: "some centred, some
 /// stuck to the top").
@@ -465,22 +467,159 @@ fn the_mirror_row_controls_share_one_centre_line() {
     };
     for font in [14.0_f32, 20.0, 28.0] {
         ui.global::<Theme>().set_fs_app(font);
-        let row = centre("AppWindow::ou-mirror-row");
-        for id in [
-            "AppWindow::ou-mirror-check",
-            "AppWindow::ou-mirror-field",
-            "AppWindow::ou-mirror-apply",
-            "AppWindow::ou-mirror-used",
-            "AppWindow::ou-mirror-dir",
-            "AppWindow::ou-mirror-browse",
-        ] {
-            let c = centre(id);
-            assert!(
-                (c - row).abs() < 1.0,
-                "font {font}: {id} centres at {c}, the row at {row}"
-            );
+        let lines: [&[&str]; 2] = [
+            &[
+                "AppWindow::ou-mirror-check",
+                "AppWindow::ou-mirror-field",
+                "AppWindow::ou-mirror-apply",
+                "AppWindow::ou-mirror-used",
+            ],
+            &[
+                "AppWindow::ou-mirror-dir",
+                "AppWindow::ou-mirror-dir-apply",
+                "AppWindow::ou-mirror-browse",
+            ],
+        ];
+        for line in lines {
+            let first = centre(line[0]);
+            for id in line {
+                let c = centre(id);
+                assert!(
+                    (c - first).abs() < 1.0,
+                    "font {font}: {id} centres at {c}, its line at {first}"
+                );
+            }
         }
+        assert!(
+            centre(lines[1][0]) > centre(lines[0][0]),
+            "font {font}: the folder line sits under the switch line"
+        );
     }
+}
+
+/// The mirror folder is a typed path with its own Apply (`docs/web_gui.md`
+/// §7): a browser has no folder dialog, so the field is the form on both
+/// targets. Apply waits for a change, then hands over exactly the draft.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_mirror_folder_is_typed_and_applied() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = files_window(Vec::new());
+    ui.set_selected_view("persistent".into());
+    ui.set_org_mirror_dir("/srv/a".into());
+    ui.set_org_mirror_dir_draft("/srv/a".into());
+    let asked: std::rc::Rc<std::cell::RefCell<Vec<String>>> = std::rc::Rc::default();
+    let sink = asked.clone();
+    ui.on_set_mirror_dir(move |path| sink.borrow_mut().push(path.to_string()));
+    let find = |id: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id).find(|e| e.size().height > 0.0)
+    };
+    let field = find("AppWindow::ou-mirror-dir").expect("the folder field");
+    assert!(field.size().width >= 200.0, "the path has room: {}", field.size().width);
+
+    let apply = find("AppWindow::ou-mirror-dir-apply").expect("the folder's Apply");
+    click(&ui, &apply);
+    assert!(asked.borrow().is_empty(), "nothing to apply while the draft is the stored folder");
+
+    // Enter in the field is the same door, behind the same wait
+    click(&ui, &field);
+    press(&ui, slint::platform::Key::Return);
+    assert!(asked.borrow().is_empty(), "Enter on the stored folder asks nothing");
+
+    ui.set_org_mirror_dir_draft("/srv/b".into());
+    click(&ui, &apply);
+    assert_eq!(*asked.borrow(), ["/srv/b"], "Apply hands over the draft");
+
+    ui.set_org_mirror_dir_draft("/srv/c".into());
+    click(&ui, &field);
+    press(&ui, slint::platform::Key::Return);
+    assert_eq!(*asked.borrow(), ["/srv/b", "/srv/c"], "Enter hands over the draft once");
+}
+
+/// One property takes every folder dialog button off the window - the
+/// mirror folder, the workspace folder, the wiki export target - and
+/// leaves each typed form in place (`docs/web_gui.md` §7): the web build
+/// sets it, since its paths are the server's.
+#[cfg(feature = "live-preview")]
+#[test]
+fn one_property_hides_every_folder_dialog_button() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = files_window(Vec::new());
+    ui.set_selected_view("persistent".into());
+    ui.set_ws_dir_modal_open(true);
+    let shown = |id: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id).any(|e| e.size().height > 0.0)
+    };
+    assert!(ui.get_folder_browse(), "a native window offers the dialogs");
+    for id in ["AppWindow::ou-mirror-browse", "AppWindow::wsd-browse"] {
+        assert!(shown(id), "{id} is offered");
+    }
+    ui.set_ws_dir_modal_open(false);
+    ui.set_mem_export_open(true);
+    assert!(shown("AppWindow::mex-browse"), "the export dialog offers it");
+
+    ui.set_folder_browse(false);
+    assert!(!shown("AppWindow::mex-browse"), "the export dialog's button is gone");
+    assert!(shown("AppWindow::mex-field"), "its typed path stays");
+    ui.set_mem_export_open(false);
+    ui.set_ws_dir_modal_open(true);
+    assert!(!shown("AppWindow::wsd-browse"), "the workspace dialog's button is gone");
+    assert!(shown("AppWindow::wsd-field"), "its typed path stays");
+    assert!(!shown("AppWindow::ou-mirror-browse"), "the mirror row's button is gone");
+    for id in ["AppWindow::ou-mirror-dir", "AppWindow::ou-mirror-dir-apply"] {
+        assert!(shown(id), "{id} stays");
+    }
+}
+
+/// A typed mirror folder reaches the engine through the window's own
+/// wiring and comes back as the stored folder; a later push leaves a
+/// draft in mid-edit alone.
+#[test]
+fn a_typed_mirror_folder_reaches_the_engine_and_comes_back() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let root = tmp.path().join("workspaces");
+    let (ws, _) = workspace_on_disk(&root, 1, &["me"], "");
+    drop(ws);
+    let (w, _) = node_with_chat(&root);
+    let ui = AppWindow::new().expect("headless window");
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    let last: Arc<Mutex<Option<SessionSettings>>> = Arc::new(Mutex::new(None));
+    let cx = crate::app::Ctx {
+        spawner: rt.handle().clone().into(),
+        wallet: w.clone().into(),
+        weak: ui.as_weak(),
+        last_settings: last.clone(),
+        chat_ui: chat_ui.clone(),
+    };
+    crate::actions::org::wire(&ui, &cx);
+    let typed = tmp.path().join("typed mirror").display().to_string();
+
+    rt.block_on(async {
+        let id = molt_storage::scan_workspaces(&root).first().map(|e| e.info().id).expect("the workspace is on disk");
+        w.execute(Command::OpenWorkspace { id }).await.expect("the stored workspace opens");
+        mirror(&w, &ui, &last, &chat_ui).await;
+        let default = ui.get_org_mirror_dir().to_string();
+        assert!(!default.is_empty(), "the default folder is shown");
+        assert_eq!(ui.get_org_mirror_dir_draft().as_str(), default, "the draft starts as the stored folder");
+
+        ui.invoke_set_mirror_dir(typed.as_str().into());
+        for _ in 0..200 {
+            mirror(&w, &ui, &last, &chat_ui).await;
+            if ui.get_org_mirror_dir().as_str() == typed {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(ui.get_org_mirror_dir().as_str(), typed, "the engine stores the typed folder");
+        assert_eq!(ui.get_org_mirror_dir_draft().as_str(), typed, "a stored change resets the draft");
+
+        ui.set_org_mirror_dir_draft("/half/typed".into());
+        mirror(&w, &ui, &last, &chat_ui).await;
+        assert_eq!(ui.get_org_mirror_dir_draft().as_str(), "/half/typed", "a push leaves the edit alone");
+    });
 }
 
 /// Mirroring §3.6 on the Persistent table: the own share counts as one

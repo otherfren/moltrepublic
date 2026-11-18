@@ -88,6 +88,7 @@ NO_BARE_SCAN_FILES = {
     "crates/molt-engine/src/chat.rs": "the vote-wake keystone's wiki patch fixtures",
     "crates/molt-mcp/tests/tool_reads.rs": "wiki_get's path argument in the tool tests",
     "crates/molt-engine/src/wiki_index/graph.rs": "link-graph fixtures are wiki paths",
+    "crates/molt-core/src/wiki_links.rs": "the body-link parser's fixtures are wiki paths",
     "crates/molt-engine/src/wiki_index/search.rs": "search fixtures are wiki paths",
     "crates/molt-engine/src/chain/wiki_base.rs": "the fold keystone's fixtures are wiki paths",
     "crates/molt-mcp/src/lib.rs": "the proposal-presentation test's sample patch names wiki paths",

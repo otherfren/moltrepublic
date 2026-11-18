@@ -15,6 +15,15 @@ export enum AppScreen {
     main,      // placeholder main view (surfaces land in Phase B)
 }
 
+// The field a paste button fills. Rust sets exactly the named one when
+// the clipboard answers; two of them hold a recovery phrase.
+export enum PasteTarget {
+    rw-seed,          // the restore wizard's phrase
+    rv-link,          // the (re)join link
+    bk-restore-seed,  // the backup-restore dialog's phrase
+    decrypt-phrase,   // the seal/unseal dialog's phrase
+}
+
 // One emoji reaction tally on a chat message; `mine` marks the emoji the
 // local member picked (accent-highlighted pill, click to un-react).
 export struct ReactionItem {
@@ -358,11 +367,13 @@ export struct BackupRow {
     last-min: int, // machine sort key for the last-backup column (max = never)
 }
 
-// What the Restore wizard's ONE link field is holding. Filled by Rust via
-// the pure `classify-link` callback (`molt_ui::link_kind`), which asks the
-// engine's own two parsers - so the panel and the flow it starts can never
-// disagree about what the link is.
+// What the Restore wizard's ONE link field is holding: the engine's answer
+// to `classify_link` (its own two parsers), set by Rust - so the panel and
+// the flow it starts can never disagree about what the link is.
 export struct LinkPreview {
+    // the field's text this verdict is for; a verdict for any other text
+    // counts as kind 0
+    link: string,
     // 0 = nothing usable (empty, junk, or a preview link with no transport
     // handover), 1 = a founding invite (join), 2 = a recovery link
     kind: int,
@@ -1541,6 +1552,7 @@ export global Strings {
     in property <string> ou-mirror-quota;
     in property <string> ou-mirror-apply;
     in property <string> ou-mirror-browse;
+    in property <string> ou-mirror-dir-ph;
     in property <string> ou-mirror-of;
     in property <string> ou-copy;
     in property <string> ou-download;

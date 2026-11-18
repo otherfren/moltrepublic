@@ -8,37 +8,18 @@ use std::sync::{Arc, Mutex};
 
 use molt_core::{Command, SessionSettings};
 use crate::engine::Engine;
-use tokio::runtime::Handle;
+use crate::native::Spawner;
 
 use crate::alerts::{sound_index, sound_name};
 use crate::i18n::error_toast;
 use crate::net_tor::{mode_index, mode_name, net_index, net_name};
 use crate::AppWindow;
 
-/// The directory the workspace-folder browse dialog should start in, given
-/// the modal's hand-editable draft: the draft — its leading `~` expanded the
-/// same way the engine resolves the setting (`molt_storage::expand_tilde`,
-/// so the config default "~/…" starts at the real folder) — when it names an
-/// existing directory, otherwise `None`: an empty draft or a typo must not
-/// derail the dialog (rfd then opens at its platform default). Runs a stat —
-/// call it off the UI thread (the draft may point at a slow mount).
-pub(crate) fn browse_start_dir(draft: &str) -> Option<std::path::PathBuf> {
-    let path = molt_storage::expand_tilde(draft);
-    path.is_dir().then_some(path)
-}
-
-/// Pick a folder using the draft's existing directory, without blocking the UI.
-/// Cancellation returns `None`.
+/// Pick a folder, starting at the hand-editable draft when that names an
+/// existing directory, without blocking the UI. `None`: cancelled, or a
+/// platform without folder dialogs.
 pub(crate) async fn pick_folder(draft: String) -> Option<String> {
-    let start_dir = tokio::task::spawn_blocking(move || browse_start_dir(&draft))
-        .await
-        .ok()
-        .flatten();
-    let mut picker = rfd::AsyncFileDialog::new();
-    if let Some(dir) = start_dir {
-        picker = picker.set_directory(dir);
-    }
-    picker.pick_folder().await.map(|folder| folder.path().display().to_string())
+    crate::platform::platform().pick_folder(draft).await
 }
 
 /// Does the settings form hold unsaved edits against `stored`?
@@ -240,7 +221,7 @@ fn posture_of_draft(draft: &SessionSettings, shown: &SessionSettings) -> molt_co
 
 /// [`save_draft`] fire-and-forget, an error as a toast.
 pub(crate) fn issue_draft(
-    rt: &Handle,
+    spawner: &Spawner,
     wallet: &Engine,
     weak: &slint::Weak<AppWindow>,
     wake: String,
@@ -249,7 +230,7 @@ pub(crate) fn issue_draft(
 ) {
     let w = wallet.clone();
     let weak = weak.clone();
-    rt.spawn(async move {
+    spawner.spawn(async move {
         if let Err(e) = save_draft(&w, wake, settings, &shown).await {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {

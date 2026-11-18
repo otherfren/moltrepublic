@@ -177,14 +177,12 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             // the native picker runs async (XDG portal) off the UI thread;
             // the engine derives the metadata + real sha256 from this path
             // and posts the share when hashing completes
-            cx.rt.spawn(async move {
-                let Some(file) = rfd::AsyncFileDialog::new().pick_file().await else {
+            cx.spawn(async move {
+                let pick = molt_ui_kit::platform::FilePick::default();
+                let Some(path) = crate::platform::platform().pick_file(pick).await else {
                     return; // cancelled
                 };
-                let cmd = Command::ShareFile {
-                    path: file.path().display().to_string(),
-                    channel,
-                };
+                let cmd = Command::ShareFile { path, channel };
                 if let Err(e) = w.execute(cmd).await {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
@@ -207,18 +205,11 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             // save-dialog per download (product decision): the user picks
             // the destination, then the engine fetches peer-to-peer;
             // completion/failure surfaces via Event::FileTransfer
-            cx.rt.spawn(async move {
-                let mut picker = rfd::AsyncFileDialog::new();
-                if !name.is_empty() {
-                    picker = picker.set_file_name(name.as_str());
-                }
-                let Some(dest) = picker.save_file().await else {
+            cx.spawn(async move {
+                let Some(dest) = crate::platform::platform().pick_save(name.to_string()).await else {
                     return; // cancelled
                 };
-                let cmd = Command::DownloadFile {
-                    id,
-                    dest: Some(dest.path().display().to_string()),
-                };
+                let cmd = Command::DownloadFile { id, dest: Some(dest) };
                 if let Err(e) = w.execute(cmd).await {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {

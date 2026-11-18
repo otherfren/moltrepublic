@@ -81,7 +81,7 @@ impl KanbanUi {
 #[derive(Default)]
 pub(crate) struct DraftSaver {
     issued: AtomicU64,
-    written: tokio::sync::Mutex<u64>,
+    written: futures_util::lock::Mutex<u64>,
 }
 
 impl DraftSaver {
@@ -400,7 +400,7 @@ fn save_basket(ctx: &Ctx) {
     let draft = with(|st| st.basket.to_draft());
     let generation = SAVER.next();
     let w = ctx.wallet.clone();
-    ctx.rt.spawn(async move {
+    ctx.spawn(async move {
         SAVER
             .save(generation, || async move {
                 let _ = w.execute(Command::KanbanDraftSave { draft }).await;
@@ -606,7 +606,7 @@ fn propose(ui: &AppWindow, ctx: &Ctx) {
     let w = ctx.wallet.clone();
     let weak = ctx.weak.clone();
     let cx = ctx.clone();
-    ctx.rt.spawn(async move {
+    ctx.spawn(async move {
         let outcome = w.execute(Command::Propose { surface: Surface::Quests, payload }).await;
         let _ = slint::invoke_from_event_loop(move || {
             let ok = outcome.is_ok();
@@ -926,7 +926,7 @@ thread_local! {
 
 /// Organization › Status shows the UTC time (§2.3).
 pub(crate) fn start_clock(ui: &AppWindow) {
-    let tick = |ui: &AppWindow| ui.set_org_utc_now(utc_clock(chrono::Utc::now().naive_utc()).into());
+    let tick = |ui: &AppWindow| ui.set_org_utc_now(utc_clock(crate::platform::utc_now().naive_utc()).into());
     tick(ui);
     let weak = ui.as_weak();
     CLOCK.with(|t| {
@@ -953,7 +953,7 @@ fn start_actions_timer(ctx: &Ctx) {
             }
             let w = cx.wallet.clone();
             let weak = cx.weak.clone();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 let Ok(Reply::Actions { actions }) = w.execute(Command::ReadActions).await else {
                     return;
                 };
@@ -991,12 +991,12 @@ fn list_of(st: &mut KanbanUi, which: i32) -> &mut Vec<String> {
 /// The agent skill as the modal shows it: the UI language's text with
 /// this node's MCP port and config path filled in.
 pub(crate) fn skill_text(lang: i32, sv: &molt_core::SessionView) -> String {
-    molt_mcp::fill_wake_skill(crate::i18n::wake_skill(lang), sv.settings.mcp_port, &sv.config_path)
+    molt_core::kanban_wake::fill_wake_skill(crate::i18n::wake_skill(lang), sv.settings.mcp_port, &sv.config_path)
 }
 
 /// The Agent tab's buttons, the skill text and the chat's wake-line switch.
 fn wire_settings(ui: &AppWindow, ctx: &Ctx) {
-    ui.set_skill_text(molt_mcp::fill_wake_skill(crate::i18n::wake_skill(0), 0, "").into());
+    ui.set_skill_text(molt_core::kanban_wake::fill_wake_skill(crate::i18n::wake_skill(0), 0, "").into());
     {
         // the text in the field, saved or not
         let cx = ctx.clone();
@@ -1011,37 +1011,34 @@ fn wire_settings(ui: &AppWindow, ctx: &Ctx) {
         });
     }
     let weak = ui.as_weak();
-    let rt = ctx.rt.clone();
+    let cx = ctx.clone();
     ui.on_skill_save(move || {
         let Some(text) = weak.upgrade().map(|ui| ui.get_skill_text().to_string()) else {
             return;
         };
         let weak = weak.clone();
-        rt.spawn_blocking(move || {
-            let Some(path) = rfd::FileDialog::new().set_file_name(molt_mcp::WAKE_SKILL_FILE).save_file() else {
-                return;
+        cx.spawn(async move {
+            // a link at the destination is refused, never followed
+            let save = molt_ui_kit::platform::Save {
+                name: molt_core::kanban_wake::WAKE_SKILL_FILE.to_string(),
+                bytes: text.into_bytes(),
+                refuse_link: true,
             };
-            let outcome = write_skill(&path, &text);
+            let outcome = match crate::platform::platform().save_file(save).await {
+                Ok(None) => return, // cancelled
+                Ok(Some(dest)) => Ok(dest),
+                Err(e) => Err(e),
+            };
             let _ = slint::invoke_from_event_loop(move || {
                 let Some(ui) = weak.upgrade() else { return };
                 match outcome {
-                    Ok(path) => {
+                    Ok(dest) => {
                         let saved = ui.global::<Strings>().get_skill_saved();
-                        ui.invoke_show_toast(format!("{saved} {}", path.display()).into());
+                        ui.invoke_show_toast(format!("{saved} {dest}").into());
                     }
-                    Err(e) => ui.invoke_show_toast_error(format!("{}: {e}", molt_mcp::WAKE_SKILL_FILE).into()),
+                    Err(e) => ui.invoke_show_toast_error(format!("{}: {e}", molt_core::kanban_wake::WAKE_SKILL_FILE).into()),
                 }
             });
         });
     });
-}
-
-/// The skill at the path the save dialog returned (it asked before
-/// replacing a file); a link there is refused, never followed.
-pub(crate) fn write_skill(path: &std::path::Path, text: &str) -> std::io::Result<std::path::PathBuf> {
-    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "a link"));
-    }
-    std::fs::write(path, text)?;
-    Ok(path.to_path_buf())
 }

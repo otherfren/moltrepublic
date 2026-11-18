@@ -465,6 +465,9 @@ pub(crate) struct ChatUiState {
     pub(crate) link: String,
     pub(crate) link_relays: Vec<String>,
     pub(crate) link_relays_off: std::collections::BTreeSet<String>,
+    /// The last link read failed and has been reported; cleared by the
+    /// next answer, so an outage toasts once.
+    pub(crate) link_read_failed: bool,
     /// This node's pool and clearnet switch, as last mirrored.
     pub(crate) link_pool: Vec<molt_core::relay::RelayEntry>,
     pub(crate) link_clearnet: bool,
@@ -1078,7 +1081,7 @@ pub(crate) async fn gather_surfaces(
             .collect(),
         _ => Vec::new(),
     };
-    let upload_now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+    let upload_now = crate::platform::platform().unix_now();
     let uploads: Vec<UploadRowData> = match wallet.execute(Command::ReadUploads).await {
         Ok(Reply::Uploads { uploads: rows }) => rows
             .into_iter()
@@ -1214,7 +1217,7 @@ pub(crate) async fn gather_surfaces(
             .execute(Command::MarkChannelRead { channel: selected.clone(), up_to: String::new() })
             .await;
     }
-    let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+    let now = crate::platform::platform().unix_now();
     // the Chain-History settings panel: every committed block, newest
     // first (co-equal read — the MCP read_chain tool serves the same)
     let chain_rows: Vec<molt_core::ChainBlockView> = match wallet.execute(Command::ReadChain).await

@@ -17,12 +17,18 @@ const SEAT: &str = "seat-key";
 /// A founded republic with chat in it, behind a web door.
 fn node(rt: &tokio::runtime::Runtime, root: &std::path::Path) -> (WalletHandle, u16) {
     let (w, _) = node_with_chat(root);
+    let port = door(rt, &w, root, molt_core::wire::Caps::default());
+    (w, port)
+}
+
+/// Found a republic on `w` and open a web door onto it.
+fn door(rt: &tokio::runtime::Runtime, w: &WalletHandle, root: &std::path::Path, caps: molt_core::wire::Caps) -> u16 {
     let web = root.join("web");
     std::fs::create_dir_all(&web).expect("web dir");
     for f in ["index.html", "molt_web.js", "molt_web_bg.wasm"] {
         std::fs::write(web.join(f), "x").expect("bundle file");
     }
-    let port = rt.block_on(async {
+    rt.block_on(async {
         w.execute(Command::CreateStart {
             name: "DevTest".to_string(),
             member: "walter".to_string(),
@@ -42,14 +48,13 @@ fn node(rt: &tokio::runtime::Runtime, root: &std::path::Path) -> (WalletHandle, 
         let port = listener.local_addr().expect("addr").port();
         let door = molt_remote::WebDoor {
             build: "test".into(),
-            caps: molt_core::wire::Caps::default(),
+            caps,
             dir: web,
             pre_auth: std::time::Duration::from_secs(10),
         };
         tokio::spawn(molt_remote::serve(listener, w.clone(), door));
         port
-    });
-    (w, port)
+    })
 }
 
 /// Connect the shipped client to the door: the engine handle a browser
@@ -108,6 +113,70 @@ fn a_window_behind_the_web_door_mirrors_like_a_native_one() {
     assert_eq!(web.get_surfaces().row_count(), native.get_surfaces().row_count());
     assert_eq!(web.get_screen(), native.get_screen());
     assert_eq!(web.get_lang_index(), native.get_lang_index());
+}
+
+/// **§6.6.** A window behind the door has no process inputs: the
+/// embedded-Tor row follows the server's welcome and the settings footer
+/// the engine's own config path.
+#[test]
+fn a_window_behind_the_web_door_takes_its_startup_inputs_from_the_server() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let session = SessionView {
+        config_path: "/srv/molt/config.toml".to_string(),
+        settings: SessionSettings { workspace_dir: tmp.path().display().to_string(), ..SessionSettings::default() },
+        ..SessionView::default()
+    };
+    let w = molt_engine::spawn_with_storage(GroupConfig::demo(), session);
+    let port = door(&rt, &w, tmp.path(), molt_core::wire::Caps { embedded_tor: true });
+
+    // the mirror's session landing, called directly: the headless backend
+    // never drains `invoke_from_event_loop` (see `mirror`)
+    let land = |engine: &Engine, ui: &AppWindow, chat: &Arc<Mutex<ChatUiState>>| {
+        let Ok(Reply::Session(sv)) = rt.block_on(engine.execute(Command::ReadSession)) else { panic!("a session") };
+        crate::mirror::land_session(ui, engine, &sv, true, None, chat);
+    };
+    let (web, _, chat) = window();
+    assert_eq!(web.get_tor_mode_enabled().iter().collect::<Vec<_>>(), [true, false, true], "the window's default");
+    let engine = rt.block_on(connect(port));
+    land(&engine, &web, &chat);
+
+    assert_eq!(web.get_tor_mode_enabled().iter().collect::<Vec<_>>(), [true, true, true]);
+    assert_eq!((web.get_config_dir().as_str(), web.get_config_file().as_str()), ("/srv/molt/", "config.toml"));
+    assert!(!web.get_folder_browse(), "its paths are the server's: no folder dialog");
+
+    // the native window keeps what `run_app` was handed
+    let (native, _, n_chat) = window();
+    native.set_config_dir("/elsewhere/".into());
+    land(&Engine::from(w.clone()), &native, &n_chat);
+    assert_eq!(native.get_tor_mode_enabled().iter().collect::<Vec<_>>(), [true, false, true]);
+    assert_eq!(native.get_config_dir().as_str(), "/elsewhere/");
+    assert!(native.get_folder_browse(), "a native window keeps its folder dialogs");
+}
+
+/// The footer split reads the SERVER's path: either separator, the
+/// directory keeping its own.
+#[test]
+fn a_config_path_splits_at_its_last_separator() {
+    let split = |p| crate::app::config_location(p);
+    assert_eq!(split("/srv/molt/config.toml"), ("/srv/molt/".to_string(), "config.toml".to_string()));
+    assert_eq!(split("C:\\molt\\config.toml"), ("C:\\molt\\".to_string(), "config.toml".to_string()));
+    assert_eq!(split("config.toml"), (String::new(), "config.toml".to_string()));
+    assert_eq!(split(""), (String::new(), String::new()));
+}
+
+/// The native footer splits its OWN path as this target does: on Unix a
+/// backslash belongs to the file name.
+#[cfg(unix)]
+#[test]
+fn a_local_config_path_splits_as_this_target_does() {
+    let split = |p: &str| crate::app::local_config_location(std::path::Path::new(p));
+    assert_eq!(split("/home/u/my\\cfg.toml"), ("/home/u/".to_string(), "my\\cfg.toml".to_string()));
+    assert_eq!(split("/srv/molt/config.toml"), ("/srv/molt/".to_string(), "config.toml".to_string()));
+    assert_eq!(split("/config.toml"), ("/".to_string(), "config.toml".to_string()));
+    assert_eq!(split("config.toml"), (String::new(), "config.toml".to_string()));
 }
 
 /// A command issued through the door lands in the one engine, and its
@@ -181,4 +250,23 @@ fn a_save_through_the_web_door_keeps_the_stored_secrets() {
         assert_eq!(stored.settings.s3_secret_key, "new-secret");
         assert_eq!(stored.settings.mcp_token, SEAT);
     });
+}
+
+/// **§6.4.** The link read is the same engine read behind the door: the
+/// gate admits it and the verdict crosses the wire whole.
+#[test]
+fn the_link_read_answers_through_the_web_door() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (w, port) = node(&rt, tmp.path());
+    let engine = rt.block_on(connect(port));
+    let link = super::link_read::invite_link();
+    let read = |e: &Engine, l: &str| rt.block_on(crate::actions::ritual::read_link(e, l.to_string())).expect("a verdict");
+
+    let remote = read(&engine, &link);
+    assert_eq!((remote.kind, remote.link.as_str(), remote.who.as_str()), (1, link.as_str(), "walter"));
+    assert_eq!(remote.relays, ["ws://127.0.0.1:7777"]);
+    assert_eq!(remote, read(&Engine::from(w), &link), "the same answer as the engine's own handle");
+    assert_eq!(read(&engine, "hello").kind, 0);
 }

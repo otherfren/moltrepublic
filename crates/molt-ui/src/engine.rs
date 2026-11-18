@@ -5,9 +5,9 @@
 //! it has.
 
 use molt_core::{Command, Event, MoltError, Reply};
+use crate::native::EngineEvents;
 use molt_engine::WalletHandle;
 use molt_ui_kit::client::{RemoteEvents, RemoteHandle};
-use tokio::sync::broadcast::error::RecvError;
 
 pub(crate) use molt_ui_kit::client::NoEvent;
 
@@ -41,10 +41,20 @@ impl Engine {
         }
     }
 
+    /// What the process serving a REMOTE engine said about itself in its
+    /// welcome (`docs/web_gui.md` §6.6). `None` for the engine in this
+    /// process (`run_app` is handed those facts) and before the welcome.
+    pub(crate) fn remote_caps(&self) -> Option<molt_core::wire::Caps> {
+        match self {
+            Engine::Native(_) => None,
+            Engine::Remote(h) => h.welcome().map(|w| w.caps),
+        }
+    }
+
     /// The engine's events. A remote engine has ONE stream per connection.
     pub(crate) fn subscribe(&self) -> Events {
         match self {
-            Engine::Native(h) => Events::Native(h.subscribe()),
+            Engine::Native(h) => Events::Native(EngineEvents(h.subscribe())),
             Engine::Remote(h) => Events::Remote(h.subscribe()),
         }
     }
@@ -52,7 +62,7 @@ impl Engine {
 
 /// The engine's event stream.
 pub(crate) enum Events {
-    Native(tokio::sync::broadcast::Receiver<Event>),
+    Native(EngineEvents),
     Remote(RemoteEvents),
 }
 
@@ -60,10 +70,7 @@ impl Events {
     /// The next event; `Lagged` means "re-read everything".
     pub(crate) async fn recv(&mut self) -> Result<Event, NoEvent> {
         match self {
-            Events::Native(rx) => rx.recv().await.map_err(|e| match e {
-                RecvError::Lagged(_) => NoEvent::Lagged,
-                RecvError::Closed => NoEvent::Closed,
-            }),
+            Events::Native(rx) => rx.recv().await,
             Events::Remote(rx) => rx.recv().await,
         }
     }

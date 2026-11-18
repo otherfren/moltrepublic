@@ -5,7 +5,9 @@
 //! confirm the backup, cancel, finish) - tools on both surfaces, co-equal
 //! with MCP.
 
-use molt_core::Command;
+use std::sync::Mutex;
+
+use molt_core::{Command, LinkView, MoltError, Reply};
 use slint::ComponentHandle;
 
 use crate::i18n::error_toast;
@@ -13,8 +15,6 @@ use crate::app::Ctx;
 use crate::{AppWindow, LinkPreview, LinkRelay, RelayPick, SeedRow, SeedWord, Strings};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
-    // The join preview: the same molt-core invite parser the engine's join
-    // run uses, so the preview and the run can never disagree.
     // The create wizard's live folder preview: the same molt-core slug
     // rule the storage layer builds the real directory name from, so the
     // preview and the disk can never disagree. The trailing short id is
@@ -32,37 +32,8 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     });
 
     {
-        // the Restore wizard's one link field: which of the two flows is
-        // this link for? Pure, so the panel re-reads it
-        // on every keystroke without any state to keep in sync. The link's
-        // relays are the relay panel's business (`rw-link-changed`).
-        ui.on_classify_link(move |s| {
-            match link_kind(&s) {
-                LinkKind::Invite { republic, inviter } => LinkPreview {
-                    kind: 1,
-                    republic: republic.into(),
-                    who: inviter.into(),
-                },
-                LinkKind::Recovery { republic, member } => LinkPreview {
-                    kind: 2,
-                    republic: republic.into(),
-                    who: member.into(),
-                },
-                LinkKind::Unrecognized => LinkPreview::default(),
-            }
-        });
-    }
-
-    {
         let cx = ctx.clone();
-        ui.on_rw_link_changed(move |link| {
-            let relays = link_relays(&link);
-            let Ok(mut st) = cx.chat_ui.lock() else { return };
-            st.set_link(link.trim(), relays);
-            if let Some(ui) = cx.weak.upgrade() {
-                push_link_rows(&ui, &st);
-            }
-        });
+        ui.on_rw_link_changed(move |link| link_changed(&cx, &link));
         let cx = ctx.clone();
         ui.on_rw_relay_toggle(move |idx| {
             let Ok(mut st) = cx.chat_ui.lock() else { return };
@@ -221,7 +192,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 member: member.to_string(),
                 relays,
             };
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 if let Err(e) = w.execute(cmd).await {
                     let _ = slint::invoke_from_event_loop(move || {
                         if let Some(ui) = weak.upgrade() {
@@ -312,61 +283,90 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
 }
 
 
-/// What a `molt://…` link in the Restore wizard's one link field turns out
-/// to be — the whole of the Join/Restore merge (`docs_archive/ui/welcome_rework.md`).
-///
-/// The two shapes are unambiguous by prefix and both already have a parser in
-/// `molt-engine`; the panel just asks which one it is holding, because that
-/// decides which FIELD is required and which existing command a click issues.
-/// No new engine surface: `join_start` and `recover_start` stay exactly the
-/// co-equal tools they were.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LinkKind {
-    /// A founding invite (`molt://invite/…`) — needs a NAME, mints its own
-    /// recovery phrase, runs `Command::JoinStart`.
-    Invite {
-        /// The republic's display name, for the panel's confirmation line.
-        republic: String,
-        /// Who minted the link.
-        inviter: String,
-    },
-    /// A recovery link (`molt://recover/…`) — names its own seat, needs the
-    /// PHRASE, runs `Command::RecoverStart`.
-    Recovery {
-        /// The republic's display name.
-        republic: String,
-        /// The seat coming back; the name field shows this read-only.
-        member: String,
-    },
-    /// Empty, malformed, or actionable-looking but missing its transport
-    /// handover (a preview-only link nothing can be done with).
-    Unrecognized,
+/// The link field changed: the old verdict and its relays go NOW, before
+/// the engine is asked - Continue arms on the verdict, and an answer
+/// takes a round trip.
+fn link_changed(cx: &Ctx, field: &str) {
+    let link = field.trim().to_string();
+    if let Some(ui) = cx.weak.upgrade() {
+        // blank text is never read: it is judged here, as no link
+        let blank = if link.is_empty() { field } else { "" };
+        ui.set_rv_verdict(LinkPreview { link: blank.into(), ..LinkPreview::default() });
+        let Ok(mut st) = cx.chat_ui.lock() else { return };
+        st.set_link(&link, Vec::new());
+        push_link_rows(&ui, &st);
+    }
+    if link.is_empty() {
+        return;
+    }
+    let (engine, weak, chat_ui) = (cx.wallet.clone(), cx.weak.clone(), cx.chat_ui.clone());
+    let sent = link.clone();
+    cx.spawn(async move {
+        let answer = read_link(&engine, link).await;
+        let _ = slint::invoke_from_event_loop(move || {
+            let Some(ui) = weak.upgrade() else { return };
+            match answer {
+                Ok(view) => land_link(&ui, &chat_ui, view),
+                Err(e) => link_failed(&ui, &chat_ui, &sent, &e),
+            }
+        });
+    });
 }
 
-/// Classify a pasted link. Empty input is [`LinkKind::Unrecognized`] like any
-/// other unusable value — the panel simply stays unarmed rather than
-/// complaining at someone who has not typed anything yet.
-#[must_use]
-pub fn link_kind(link: &str) -> LinkKind {
-    let trimmed = link.trim();
-    if trimmed.is_empty() {
-        return LinkKind::Unrecognized;
+/// The read for `link` failed: one toast per outage, and none for a link
+/// the field no longer holds. The panel stays unjudged.
+pub(crate) fn link_failed(ui: &AppWindow, chat_ui: &Mutex<crate::surfaces::ChatUiState>, link: &str, e: &MoltError) {
+    if ui.get_rv_link().trim() != link {
+        return;
     }
-    // both parsers reject a link whose handover is missing or damaged, which
-    // is what keeps a preview-only link from arming a flow that cannot run
-    if let Ok(inv) = molt_engine::FoundingInvite::parse(trimmed) {
-        return LinkKind::Invite {
-            republic: inv.info.republic,
-            inviter: inv.info.inviter,
-        };
+    let Ok(mut st) = chat_ui.lock() else { return };
+    if !std::mem::replace(&mut st.link_read_failed, true) {
+        ui.invoke_show_toast_error(error_toast(ui, e));
     }
-    if let Some(rec) = molt_engine::RecoveryInvite::parse(trimmed) {
-        return LinkKind::Recovery {
-            republic: rec.republic,
-            member: rec.member,
-        };
+}
+
+/// The engine's verdict on `link` (`Command::ClassifyLink`): its own two
+/// invite parsers, so the panel and the run cannot disagree.
+pub(crate) async fn read_link(engine: &crate::engine::Engine, link: String) -> Result<LinkView, MoltError> {
+    match engine.execute(Command::ClassifyLink { link }).await? {
+        Reply::Link(view) => Ok(view),
+        _ => Ok(LinkView::default()),
     }
-    LinkKind::Unrecognized
+}
+
+/// Show a verdict in the link panel - only one for the link the field
+/// still holds: a late answer must never arm join or recover.
+pub(crate) fn land_link(ui: &AppWindow, chat_ui: &Mutex<crate::surfaces::ChatUiState>, view: LinkView) {
+    let shown = ui.get_rv_link();
+    if shown.trim() != view.link {
+        return;
+    }
+    let Ok(mut st) = chat_ui.lock() else { return };
+    st.link_read_failed = false;
+    st.set_link(&view.link, view.relays);
+    push_link_rows(ui, &st);
+    ui.set_rv_verdict(LinkPreview {
+        link: shown,
+        kind: match view.kind {
+            1 => 1,
+            2 => 2,
+            _ => 0,
+        },
+        republic: view.republic.into(),
+        who: view.who.into(),
+    });
+}
+
+/// Whether `word` is a BIP-39 English list word, exactly as the engine's
+/// phrase parser reads it (no case folding). The list is the `bip39`
+/// crate's, the one storage parses a phrase with.
+fn phrase_word_known(word: &str) -> bool {
+    bip39::Language::English.find_word(word).is_some()
+}
+
+/// Whether some BIP-39 English word starts with `prefix`.
+fn phrase_word_prefix(prefix: &str) -> bool {
+    !bip39::Language::English.words_by_prefix(prefix).is_empty()
 }
 
 /// The rejoin phrase area's chips: each typed word numbered and toned by the
@@ -380,9 +380,9 @@ pub(crate) fn seed_word_rows(text: &str) -> Vec<Vec<(i32, String, i32)>> {
         .iter()
         .enumerate()
         .map(|(i, w)| {
-            let tone = if molt_storage::phrase_word_known(w) {
+            let tone = if phrase_word_known(w) {
                 1
-            } else if typing && i == last && molt_storage::phrase_word_prefix(w) {
+            } else if typing && i == last && phrase_word_prefix(w) {
                 0
             } else {
                 2
@@ -407,17 +407,6 @@ pub(crate) fn charter_features(ui: &AppWindow) -> Vec<String> {
         .filter(|(on, _)| *on)
         .map(|(_, key)| key.to_string())
         .collect()
-}
-
-/// The relays a join or recovery link names; empty for anything else.
-fn link_relays(link: &str) -> Vec<String> {
-    let link = link.trim();
-    if let Ok(inv) = molt_engine::FoundingInvite::parse(link) {
-        return inv.handover.relays;
-    }
-    molt_engine::RecoveryInvite::parse(link)
-        .and_then(|inv| inv.handover.map(|h| h.relays))
-        .unwrap_or_default()
 }
 
 fn adopt_link_rows(cx: &Ctx, keep: impl Fn(&crate::surfaces::LinkRelayRow) -> bool) {

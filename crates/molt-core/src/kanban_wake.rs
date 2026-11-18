@@ -13,6 +13,25 @@ use crate::kanban_dates::{Derived, Shown};
 use crate::kanban_fold::{BoardState, TaskId, TaskState};
 use crate::{MemberId, Surface};
 
+/// The agent skill (`kanban_workflows.md` §6.2): the step-by-step guide to
+/// a safe wake script. The `wake_skill` read serves it, the GUI shows it;
+/// both fill the node's port and config path in ([`fill_wake_skill`]).
+pub const WAKE_SKILL: &str = include_str!("wake_skill.md");
+
+/// The file name a saved skill is offered under.
+pub const WAKE_SKILL_FILE: &str = "moltrepublic-wake-skill.md";
+
+/// `skill` with the node's MCP port and config path in place of their
+/// placeholders; an unknown one (`0`, `""`) reads as the default.
+#[must_use]
+pub fn fill_wake_skill(skill: &str, mcp_port: u16, config_path: &str) -> String {
+    let port = if mcp_port == 0 { 4040 } else { mcp_port };
+    let path = if config_path.is_empty() { "config.toml" } else { config_path };
+    skill
+        .replace("{{MCP_PORT}}", &port.to_string())
+        .replace("{{CONFIG_PATH}}", path)
+}
+
 /// Every reason a trigger may wake a seat, in `[node] wake_on` spelling.
 pub const WAKE_REASONS: [&str; 4] = ["poked", "vote_pending", "kanban", "task_start"];
 

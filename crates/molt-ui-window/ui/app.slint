@@ -21,7 +21,7 @@
 import "assets/fonts/Twemoji.Mozilla.ttf";
 import "assets/fonts/DejaVuSansMono.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ChatSeg, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, SeatRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, LogRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, PasteTarget, SurfaceTab, ViewItem, LogLine, ChatSeg, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, SeatRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, LogRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
@@ -1578,6 +1578,12 @@ export component AppWindow inherits Window {
     in property <string> org-mirror-used;
     in property <bool> org-mirror-over: false;
     in property <string> org-mirror-dir;
+    // the folder as typed: reset from Rust only when the stored folder
+    // changes, so a push mid-edit never clobbers it (docs/web_gui.md §7)
+    in-out property <string> org-mirror-dir-draft;
+    // false where a path names the SERVER's disk (the web build): every
+    // folder dialog button goes, the typed forms stay
+    in property <bool> folder-browse: true;
     // the tables' presentation state (sorting/filtering runs in Rust over
     // the mirrored rows and lives in the UI-local state there — these echo
     // it back so the headers render the ▲/▼ arrow and the filter box
@@ -1595,9 +1601,11 @@ export component AppWindow inherits Window {
     // the three Shared Files votes, by the share's chat message id
     callback persist-upload(string);
     callback delete-upload(string);
-    // the mirror switch + quota (GB text) and the folder picker
+    // the mirror switch + quota (GB text) and the folder dialog
     callback set-mirror(bool, string);
     callback pick-mirror-dir();
+    // the typed mirror folder, applied ("" = the default folder)
+    callback set-mirror-dir(string);
     callback unpersist-upload(string);
     // the checksum modal: the file name and its full sha256
     in-out property <bool> checksum-modal-open: false;
@@ -1701,7 +1709,8 @@ export component AppWindow inherits Window {
     property <bool> decrypt-seal: false;
     property <string> decrypt-id;
     property <string> decrypt-name;
-    property <string> decrypt-phrase;
+    // in-out for the paste alone: Rust fills it, nothing mirrors it
+    in-out property <string> decrypt-phrase;
     callback close-workspace();
     // restore verbs (engine-backed: real fetch + decrypt + chain-verify;
     // args: way, target, secret — the recovery phrase / export passphrase)
@@ -1741,14 +1750,9 @@ export component AppWindow inherits Window {
     callback set-fonts(int, int, int);
     // copy a text (seed / invite link) into the system clipboard, in Rust
     callback copy-text(string);
-    // read the system clipboard (for the paste buttons), handled in Rust
-    pure callback paste-clipboard() -> string;
-    // parse an invite link for the join preview — the same molt-core parser
-    // the engine uses, so preview and run can never disagree
-    // the Restore wizard's one link field: is this an invite or a recovery
-    // link? The answer decides which FIELD is required and which command the
-    // continue button issues (`docs_archive/ui/welcome_rework.md`).
-    pure callback classify-link(string) -> LinkPreview;
+    // a paste button: Rust reads the system clipboard and sets exactly
+    // the named field when the text arrives (a browser answers later)
+    callback paste-clipboard(PasteTarget);
     // live folder preview for the create wizard: (workspace dir, typed
     // name) → the on-disk path, from the same molt-core slug rule the
     // storage layer uses ("" while the name is empty)
@@ -1818,6 +1822,7 @@ export component AppWindow inherits Window {
         HintTip.label = "";
     }
     changed screen => {
+        root.paste-opening += 1;
         // a view switch can unmount a hovered HintTip writer without a
         // hover-out — never carry a hint across screens
         HintTip.label = "";
@@ -2130,7 +2135,7 @@ export component AppWindow inherits Window {
     // join: the local invite draft + its live preview (parsed by the same
     // molt-core parser the engine runs) …
     property <string> jw-invite;
-    property <string> jw-member;
+    in-out property <string> jw-member;
     // optimistic start latch (the cw-proposed twin): the join button dies on
     // the FIRST click, before the engine round-trip flips jw-step. Cleared in
     // Rust when the round-trip refuses (retry stays possible) or the join is
@@ -2181,7 +2186,14 @@ export component AppWindow inherits Window {
     // helpers the panel drives from it. Both flows already exist as co-equal
     // commands (join-start / recover-start); what the merge changes is only
     // which of them a click issues.
-    property <LinkPreview> rv-kind: root.classify-link(root.rv-link);
+    // The engine's last answer for the link field (Rust-owned): is this an
+    // invite or a recovery link? It decides which FIELD is required and
+    // which command Continue issues (`docs_archive/ui/welcome_rework.md`).
+    in property <LinkPreview> rv-verdict;
+    // an answer for another text than the field holds is no answer yet
+    out property <bool> rv-judged: root.rv-verdict.link == root.rv-link;
+    out property <LinkPreview> rv-kind: root.rv-judged ? root.rv-verdict : root.rv-none;
+    property <LinkPreview> rv-none;
     // one changeset kind (0 created · 1 folder · 2 renamed · 3 moved ·
     // 4 deleted · 5 edited) → its glyph and its tone, named once
     pure function cs-glyph(kind: int) -> string {
@@ -2198,7 +2210,7 @@ export component AppWindow inherits Window {
             : Theme.warn;
     }
 
-    pure function link-armed() -> bool {
+    public pure function link-armed() -> bool {
         // a run in flight owns the screen: a second start can only be
         // refused, and a button that can only fail reads as a broken UI.
         // jw-starting covers the click-to-round-trip window run-active
@@ -2327,7 +2339,8 @@ export component AppWindow inherits Window {
     in property <int> rv-have;
     in property <int> rv-need;
 
-    property <string> rw-seed;
+    // in-out for the paste alone: Rust fills it, nothing mirrors it
+    in-out property <string> rw-seed;
     // restore: chosen backup file + picker modal (continues gate themselves
     // on the inputs, so there are no attempted-validation flags)
     // s3 way: WHICH backup — the workspace-id pseudonym from the settings
@@ -2345,7 +2358,28 @@ export component AppWindow inherits Window {
     // needs none: joining mints one and shows it once. Asking for it on the
     // first screen made the join look impossible to anyone who did not have
     // a phrase yet - which is everyone a founding invite is meant for.
-    property <int> rw-phase: 0;
+    // in-out for the paste guard and its tests alone; Rust never steers it
+    in-out property <int> rw-phase: 0;
+    // a paste lands only in a field that is on show (`land_paste`)
+    out property <bool> rw-seed-on-show: root.screen == AppScreen.restore && root.rw-step == 0 && root.rw-phase == 1;
+    out property <bool> rv-link-on-show: root.screen == AppScreen.restore && root.rw-step == 0 && root.rw-phase == 0;
+    // one number per opening of a field a paste can fill: every open,
+    // close and wizard step moves it, so a late clipboard answer is told
+    // from the opening it was asked in (the dialogs serve every
+    // workspace and every backup row)
+    out property <int> paste-opening: 0;
+    changed rw-phase => {
+        root.paste-opening += 1;
+    }
+    changed rw-step => {
+        root.paste-opening += 1;
+    }
+    changed bk-restore-open => {
+        root.paste-opening += 1;
+    }
+    changed decrypt-modal-open => {
+        root.paste-opening += 1;
+    }
     // WHICH wizard this screen is running: "link" = (Re)Join / Recovery,
     // "s3" = restore from a backup. One screen, two errands, chosen at the
     // door - they share the phrase step and nothing else, and mixing them
@@ -5116,7 +5150,7 @@ export component AppWindow inherits Window {
                 // STEP 2 - the recovery phrase, asked only once we know a
                 // way in that needs it. A join never lands here. Back and
                 // Continue live in the wizard footer.
-                if root.rw-step == 0 && root.rw-phase == 1: VerticalLayout {
+                if root.rw-seed-on-show: VerticalLayout {
                     spacing: 12px;
                     RestoreWay {
                         title: Strings.rw-seed;
@@ -5141,7 +5175,7 @@ export component AppWindow inherits Window {
                                 icon-set: true;
                                 label: Strings.rw-paste;
                                 clicked => {
-                                    root.rw-seed = root.paste-clipboard();
+                                    root.paste-clipboard(PasteTarget.rw-seed);
                                 }
                             }
                         }
@@ -5218,7 +5252,7 @@ export component AppWindow inherits Window {
 
                 // STEP 1 - which way in. Continue lives in the wizard
                 // footer.
-                if root.rw-step == 0 && root.rw-phase == 0: VerticalLayout {
+                if root.rv-link-on-show: VerticalLayout {
                     spacing: 12px;
 
                 // The one way in that starts from a link somebody sent you.
@@ -5261,7 +5295,7 @@ export component AppWindow inherits Window {
                             icon-set: true;
                             label: Strings.rw-paste;
                             clicked => {
-                                root.rv-link = root.paste-clipboard();
+                                root.paste-clipboard(PasteTarget.rv-link);
                             }
                         }
                     }
@@ -5340,7 +5374,7 @@ export component AppWindow inherits Window {
                     // what the link turned out to be, and what it still
                     // wants. One line, and only once there is a link to
                     // say anything about.
-                    if root.rv-link != "": DotLabel {
+                    if root.rv-link != "" && root.rv-judged: DotLabel {
                         tone: root.rv-kind.kind == 0 ? Theme.bad : Theme.good;
                         label: root.rv-kind.kind == 1
                             ? "\{Strings.rw-link-join} \{root.rv-kind.republic} · \{root.rv-kind.who}"
@@ -7367,71 +7401,93 @@ export component AppWindow inherits Window {
                                 border-radius: Theme.win95 ? 0px : 8px;
                                 border-width: Theme.border-w;
                                 border-color: Theme.line;
-                                HorizontalLayout {
+                                VerticalLayout {
                                     padding: 10px;
-                                    spacing: 14px;
-                                    alignment: start;
-                                    // a fixed-height child of a HorizontalLayout hangs at
-                                    // the top edge: a centring column wraps each one
-                                    VerticalLayout {
-                                        alignment: center;
-                                        ou-mirror-check := AppCheck {
-                                            label: Strings.ou-mirror-switch;
-                                            checked: root.org-mirror-on;
-                                            toggled(on) => {
-                                                root.set-mirror(on, root.org-mirror-quota);
+                                    spacing: 8px;
+                                    HorizontalLayout {
+                                        spacing: 14px;
+                                        alignment: start;
+                                        // a fixed-height child of a HorizontalLayout hangs at
+                                        // the top edge: a centring column wraps each one
+                                        VerticalLayout {
+                                            alignment: center;
+                                            ou-mirror-check := AppCheck {
+                                                label: Strings.ou-mirror-switch;
+                                                checked: root.org-mirror-on;
+                                                toggled(on) => {
+                                                    root.set-mirror(on, root.org-mirror-quota);
+                                                }
                                             }
                                         }
-                                    }
-                                    Text {
-                                        text: Strings.ou-mirror-quota;
-                                        color: Theme.text;
-                                        font-size: Theme.fs-body;
-                                        vertical-alignment: center;
-                                    }
-                                    VerticalLayout {
-                                        alignment: center;
-                                        ou-mirror-field := AppField {
-                                            width: 80px * Theme.ui-scale;
-                                            numeric: true;
-                                            text <=> root.org-mirror-quota;
-                                            placeholder: "1";
+                                        Text {
+                                            text: Strings.ou-mirror-quota;
+                                            color: Theme.text;
+                                            font-size: Theme.fs-body;
+                                            vertical-alignment: center;
                                         }
-                                    }
-                                    VerticalLayout {
-                                        alignment: center;
-                                        ou-mirror-apply := AppButton {
-                                            height: 28px * Theme.ui-scale;
-                                            pad: 10px;
-                                            label: Strings.ou-mirror-apply;
-                                            clicked => {
-                                                root.set-mirror(root.org-mirror-on, root.org-mirror-quota);
+                                        VerticalLayout {
+                                            alignment: center;
+                                            ou-mirror-field := AppField {
+                                                width: 80px * Theme.ui-scale;
+                                                numeric: true;
+                                                text <=> root.org-mirror-quota;
+                                                placeholder: "1";
                                             }
                                         }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            ou-mirror-apply := AppButton {
+                                                height: 28px * Theme.ui-scale;
+                                                pad: 10px;
+                                                label: Strings.ou-mirror-apply;
+                                                clicked => {
+                                                    root.set-mirror(root.org-mirror-on, root.org-mirror-quota);
+                                                }
+                                            }
+                                        }
+                                        ou-mirror-used := Text {
+                                            text: root.org-mirror-used;
+                                            color: root.org-mirror-over ? Theme.warn : Theme.dim;
+                                            font-size: Theme.fs-cap;
+                                            vertical-alignment: center;
+                                        }
                                     }
-                                    ou-mirror-used := Text {
-                                        text: root.org-mirror-used;
-                                        color: root.org-mirror-over ? Theme.warn : Theme.dim;
-                                        font-size: Theme.fs-cap;
-                                        vertical-alignment: center;
-                                    }
-                                    ou-mirror-dir := Text {
-                                        text: root.org-mirror-dir;
-                                        color: Theme.faint;
-                                        font-size: Theme.fs-cap;
-                                        vertical-alignment: center;
-                                        horizontal-stretch: 1;
-                                        preferred-width: 0px;
-                                        overflow: elide;
-                                    }
-                                    VerticalLayout {
-                                        alignment: center;
-                                        ou-mirror-browse := AppButton {
-                                            height: 28px * Theme.ui-scale;
-                                            pad: 10px;
-                                            label: Strings.ou-mirror-browse;
-                                            clicked => {
-                                                root.pick-mirror-dir();
+                                    // the folder on its own line: a typed path with
+                                    // Apply on every target, the dialog button only
+                                    // where the path is this machine's
+                                    HorizontalLayout {
+                                        spacing: 8px;
+                                        ou-mirror-dir := AppField {
+                                            horizontal-stretch: 1;
+                                            text <=> root.org-mirror-dir-draft;
+                                            placeholder: Strings.ou-mirror-dir-ph;
+                                            accepted => {
+                                                if root.org-mirror-dir-draft != root.org-mirror-dir {
+                                                    root.set-mirror-dir(root.org-mirror-dir-draft);
+                                                }
+                                            }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            ou-mirror-dir-apply := AppButton {
+                                                height: 28px * Theme.ui-scale;
+                                                pad: 10px;
+                                                label: Strings.ou-mirror-apply;
+                                                enabled: root.org-mirror-dir-draft != root.org-mirror-dir;
+                                                clicked => {
+                                                    root.set-mirror-dir(root.org-mirror-dir-draft);
+                                                }
+                                            }
+                                        }
+                                        if root.folder-browse: VerticalLayout {
+                                            alignment: center;
+                                            ou-mirror-browse := AppButton {
+                                                height: 28px * Theme.ui-scale;
+                                                pad: 10px;
+                                                label: Strings.ou-mirror-browse;
+                                                clicked => {
+                                                    root.pick-mirror-dir();
+                                                }
                                             }
                                         }
                                     }
@@ -10008,7 +10064,7 @@ export component AppWindow inherits Window {
                 icon-set: true;
                 label: Strings.rw-paste;
                 clicked => {
-                    root.bk-restore-seed = root.paste-clipboard();
+                    root.paste-clipboard(PasteTarget.bk-restore-seed);
                 }
             }
         }
@@ -10410,7 +10466,7 @@ export component AppWindow inherits Window {
                 icon-set: true;
                 label: Strings.rw-paste;
                 clicked => {
-                    root.decrypt-phrase = root.paste-clipboard();
+                    root.paste-clipboard(PasteTarget.decrypt-phrase);
                 }
             }
         }
@@ -11645,9 +11701,9 @@ export component AppWindow inherits Window {
     }
 
     // =================================================================
-    // Folder picker for the settings workspace tab: browse via the real
-    // (rfd) dialog or edit the path by hand; Select commits the draft
-    // into the workspace-dir config field.
+    // Folder picker for the settings workspace tab: edit the path by
+    // hand or, where folder-browse is on, browse via the real (rfd)
+    // dialog; Select commits the draft into the workspace-dir config field.
     // =================================================================
     if root.ws-dir-modal-open: wsd-dlg := ConfirmModal {
         dialog-width: 440px;
@@ -11665,7 +11721,7 @@ export component AppWindow inherits Window {
         }
         HorizontalLayout {
             spacing: 8px;
-            AppField {
+            wsd-field := AppField {
                 text <=> root.ws-dir-draft;
                 placeholder: "~/.moltrepublic/workspaces";
                 horizontal-stretch: 1;
@@ -11676,7 +11732,7 @@ export component AppWindow inherits Window {
                     wsd-dlg.confirm-from-field();
                 }
             }
-            AppButton {
+            if root.folder-browse: wsd-browse := AppButton {
                 height: 38px * Theme.ui-scale;
                 pad: 10px;
                 icon: @image-url("assets/folder.svg");
@@ -11712,7 +11768,7 @@ export component AppWindow inherits Window {
         }
         HorizontalLayout {
             spacing: 8px;
-            AppField {
+            mex-field := AppField {
                 text <=> root.mem-export-dir;
                 placeholder: "~/wiki-export";
                 horizontal-stretch: 1;
@@ -11723,7 +11779,7 @@ export component AppWindow inherits Window {
                     mex-dlg.confirm-from-field();
                 }
             }
-            AppButton {
+            if root.folder-browse: mex-browse := AppButton {
                 height: 38px * Theme.ui-scale;
                 pad: 10px;
                 icon: @image-url("assets/folder.svg");

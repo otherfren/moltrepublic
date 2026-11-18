@@ -37,7 +37,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             ui.set_relay_error("".into());
             let w = cx.wallet.clone();
             let weak = ui.as_weak();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 let res = w
                     .execute(Command::RelayAdd {
                         url: url.to_string(),
@@ -241,7 +241,7 @@ fn adopt_missing(cx: &Ctx, keep: impl Fn(&crate::surfaces::LinkRelayRow) -> bool
 pub(crate) fn adopt_relays(cx: &Ctx, plan: AdoptPlan) {
     let w = cx.wallet.clone();
     let weak = cx.weak.clone();
-    cx.rt.spawn(async move {
+    cx.spawn(async move {
         let mut res = Ok(());
         for url in plan.onion.iter().chain(&plan.exposed) {
             // the mirrored pool can lag: a relay already there is adopted

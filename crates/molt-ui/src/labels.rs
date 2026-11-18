@@ -73,7 +73,7 @@ pub(crate) fn never_seen_label(lang: i32) -> &'static str {
 
 /// Unix seconds now — the UI-side render clock for relative age labels.
 pub(crate) fn unix_now() -> u64 {
-    u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0)
+    crate::platform::platform().unix_now()
 }
 
 /// Render the human sync-status line from the machine fields — prose is
@@ -211,7 +211,7 @@ pub(crate) fn proposal_dropped_copy(lang: i32, rest: &str) -> String {
 /// Render a chat timestamp as `2026-06-02 13:37 (~20 minutes ago)` in the
 /// local timezone. The relative part refreshes with every surfaces push.
 pub(crate) fn when_label(lang: i32, ts: u64) -> String {
-    when_label_at(lang, ts, chrono::Utc::now().timestamp())
+    when_label_at(lang, ts, crate::platform::utc_now().timestamp())
 }
 
 /// A unix stamp as local time; `None` when it is out of range.

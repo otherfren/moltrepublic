@@ -14,17 +14,13 @@ fn the_link_panel_lists_the_links_relays_and_acts_per_row() {
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
     ui.set_screen(AppScreen::Restore);
     apply_strings(&ui, 0);
-    ui.on_classify_link(|_| LinkPreview {
-        kind: 2,
-        republic: "R".into(),
-        who: "w".into(),
-    });
     let row = |url: &str, picked, block, kind| LinkRelay { url: url.into(), picked, block, kind };
     ui.set_rw_relays(ModelRc::new(VecModel::from(vec![
         row("wss://a.example", true, 0, 1),
         row("wss://b.example", false, 1, 1),
     ])));
     ui.set_rv_link("molt://recover/x".into());
+    ui.set_rv_verdict(LinkPreview { link: "molt://recover/x".into(), kind: 2, republic: "R".into(), who: "w".into() });
     let toggled = std::rc::Rc::new(std::cell::Cell::new(-1));
     let t = toggled.clone();
     ui.on_rw_relay_toggle(move |i| t.set(i));
@@ -60,7 +56,6 @@ fn adopt_all_goes_through_one_warning_for_every_exposed_relay() {
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
     ui.set_screen(AppScreen::Restore);
     apply_strings(&ui, 0);
-    ui.on_classify_link(|_| LinkPreview { kind: 1, republic: "R".into(), who: "w".into() });
     let row = |url: &str, block, kind| LinkRelay { url: url.into(), picked: block == 0, block, kind };
     ui.set_rw_relays(ModelRc::new(VecModel::from(vec![
         row("wss://b.example", 1, 1),
@@ -68,6 +63,7 @@ fn adopt_all_goes_through_one_warning_for_every_exposed_relay() {
     ])));
     ui.set_rw_relay_blocked(2);
     ui.set_rv_link("molt://invite/x".into());
+    ui.set_rv_verdict(LinkPreview { link: "molt://invite/x".into(), kind: 1, republic: "R".into(), who: "w".into() });
     let all = std::rc::Rc::new(std::cell::Cell::new(false));
     let a = all.clone();
     ui.on_rw_relay_adopt_all(move || a.set(true));
@@ -147,7 +143,6 @@ fn the_relay_row_hint_is_not_clipped_by_the_list() {
     ui.window().set_size(slint::PhysicalSize::new(1400, 900));
     ui.set_screen(AppScreen::Restore);
     apply_strings(&ui, 0);
-    ui.on_classify_link(|_| LinkPreview { kind: 1, republic: "R".into(), who: "w".into() });
     ui.set_rw_relays(ModelRc::new(VecModel::from(vec![LinkRelay {
         url: "wss://b.example".into(),
         picked: false,
@@ -155,6 +150,7 @@ fn the_relay_row_hint_is_not_clipped_by_the_list() {
         kind: 1,
     }])));
     ui.set_rv_link("molt://invite/x".into());
+    ui.set_rv_verdict(LinkPreview { link: "molt://invite/x".into(), kind: 1, republic: "R".into(), who: "w".into() });
     let _shown = show_headless(&ui);
     let button = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "AppWindow::rw-relay-check")
         .next()

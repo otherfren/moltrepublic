@@ -306,7 +306,7 @@ pub enum StorageError {
     BadFile(String),
     /// The purse's keys file does not authenticate: no export may drop
     /// the share silently (wallet design W5).
-    #[error("wallet_keys.state is damaged")]
+    #[error("{}", molt_core::WALLET_KEYS_DAMAGED)]
     WalletKeysDamaged,
     /// An intact keys file is never set aside.
     #[error("wallet_keys.state is intact")]
@@ -345,17 +345,6 @@ pub fn seed_entropy(phrase: &str) -> Result<Vec<u8>, StorageError> {
     let m = bip39::Mnemonic::parse_normalized(phrase.trim())
         .map_err(|e| StorageError::BadSeed(e.to_string()))?;
     Ok(m.to_entropy())
-}
-
-/// Whether `word` is a BIP-39 English list word, exactly as the phrase
-/// parser will read it (no case folding).
-pub fn phrase_word_known(word: &str) -> bool {
-    bip39::Language::English.find_word(word).is_some()
-}
-
-/// Whether some BIP-39 English word starts with `prefix`.
-pub fn phrase_word_prefix(prefix: &str) -> bool {
-    !bip39::Language::English.words_by_prefix(prefix).is_empty()
 }
 
 /// HKDF-SHA256: 32 bytes from `(ikm, tag || context)`.
@@ -4618,17 +4607,6 @@ mod tests {
     use molt_core::{ChatMessage, MemberId, MemberIdentity};
     use std::collections::BTreeMap;
 
-    /// The rejoin phrase area tones each word by the BIP-39 list: a list
-    /// word, a word still being typed toward one, or neither.
-    #[test]
-    fn phrase_words_follow_the_bip39_list() {
-        assert!(phrase_word_known("abandon"));
-        assert!(!phrase_word_known("abandonx"));
-        assert!(!phrase_word_known("Abandon"), "the engine parses lowercase only");
-        assert!(phrase_word_prefix("aband"));
-        assert!(!phrase_word_prefix("xyzq"));
-    }
-
     fn ids() -> Vec<MemberIdentity> {
         vec![
             MemberIdentity {
@@ -5896,6 +5874,9 @@ mod tests {
         // over the cap is damage too: the export refuses it, so the way out must take it
         File::create(&path).expect("plant").set_len(READ_CAP_STATE + 1).expect("sparse");
         assert!(matches!(ws.read_wallet_keys(), Err(StorageError::WalletKeysDamaged)));
+        // the text every frontend recognises the fault by
+        assert_eq!(StorageError::WalletKeysDamaged.to_string(), molt_core::WALLET_KEYS_DAMAGED);
+        assert_eq!(molt_core::WALLET_KEYS_DAMAGED, "wallet_keys.state is damaged");
         assert!(ws.set_aside_wallet_keys().expect("over the cap"));
     }
 

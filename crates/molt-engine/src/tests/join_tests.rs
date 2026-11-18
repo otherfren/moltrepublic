@@ -413,3 +413,123 @@ fn navigating_to_join_without_a_join_lands_on_the_link_entry() {
         }
     });
 }
+
+/// A recovery link with its relay handover, rendered by the engine.
+fn recovery_link_with_handover() -> String {
+    crate::recovery::RecoveryInvite {
+        consent_anchor: None,
+        republic: "Chess Club".to_string(),
+        member: "petra".to_string(),
+        ticket: "c".repeat(64),
+        server: String::new(),
+        queue_id: String::new(),
+        wrap: String::new(),
+        republic_id: "d".repeat(64),
+        handover: Some(molt_net::invite::RecoveryHandoverV2 {
+            consent_anchor: None,
+            identity_pk: String::new(),
+            ticket: "c".repeat(64),
+            npub: molt_net::nostr_identity(b"petra-entropy", "ticket-petra").1,
+            relays: vec!["ws://127.0.0.1:7777".to_string()],
+            republic_id: "d".repeat(64),
+        }),
+    }
+    .render()
+}
+
+fn classify(st: &State, link: &str) -> molt_core::LinkView {
+    match st.cmd_classify_link(link) {
+        Reply::Link(v) => v,
+        other => panic!("a link verdict: {other:?}"),
+    }
+}
+
+/// One read tells a join from a recovery, with the names and relays the
+/// panel shows, and echoes the link it judged.
+#[test]
+fn classify_link_tells_a_join_from_a_recovery() {
+    let st = plain_state();
+    let invite = joinable_link();
+    assert_eq!(
+        classify(&st, &format!("  {invite}\n")),
+        molt_core::LinkView {
+            link: invite.clone(),
+            kind: 1,
+            republic: "R".to_string(),
+            who: "walter".to_string(),
+            relays: vec!["wss://no-such-relay.invalid".to_string()],
+        },
+        "an invite, echoed trimmed"
+    );
+    let recovery = recovery_link_with_handover();
+    assert_eq!(
+        classify(&st, &recovery),
+        molt_core::LinkView {
+            link: recovery.clone(),
+            kind: 2,
+            republic: "Chess Club".to_string(),
+            who: "petra".to_string(),
+            relays: vec!["ws://127.0.0.1:7777".to_string()],
+        }
+    );
+}
+
+/// A link nothing can be done with is kind 0: a preview without its
+/// handover, a damaged handover, junk. It names nothing and no relay.
+#[test]
+fn classify_link_arms_nothing_for_a_link_that_cannot_act() {
+    let st = plain_state();
+    let full = joinable_link();
+    let preview = "molt://invite/Chess-Club/2of3/walter/k9x2m4q7aa".to_string();
+    let damaged_invite = format!("{}zz", full);
+    let damaged_recovery = format!("{}zz", recovery_link_with_handover());
+    for junk in [
+        preview.as_str(),
+        damaged_invite.as_str(),
+        damaged_recovery.as_str(),
+        "",
+        "   ",
+        "hello",
+        "molt://",
+        "molt://invite/",
+        "molt://recover/",
+        "https://example.com",
+    ] {
+        assert_eq!(
+            classify(&st, junk),
+            molt_core::LinkView { link: junk.trim().to_string(), ..molt_core::LinkView::default() },
+            "junk: {junk:?}"
+        );
+    }
+}
+
+/// The read is a real command: it answers on a node with nothing open.
+#[test]
+fn classify_link_is_a_stateless_read() {
+    rt().block_on(async {
+        let w = spawn(GroupConfig::demo(), SessionView::default());
+        let before = read_session(&w).await;
+        match w.execute(Command::ClassifyLink { link: joinable_link() }).await.expect("a read") {
+            Reply::Link(v) => assert_eq!(v.kind, 1),
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert_eq!(read_session(&w).await, before, "nothing started, nothing stored");
+    });
+}
+
+/// A seat row says whether its link can be joined with, so no frontend
+/// parses the link again.
+#[test]
+fn a_founding_seat_row_says_whether_its_link_is_joinable() {
+    let mut st = plain_state();
+    st.session.create.seats = vec![molt_core::RitualSeatView::default(); 2];
+    st.cmd_net_ritual_link_ready(0, joinable_link(), None).expect("ready");
+    st.cmd_net_ritual_link_ready(1, "molt://invite/Chess-Club/2of3/walter/k9x2m4q7aa".to_string(), None)
+        .expect("ready");
+    let joinable: Vec<bool> = st.session.create.seats.iter().map(|s| s.joinable).collect();
+    assert_eq!(joinable, [true, false]);
+    // an older engine's row reads as not joinable
+    let old: molt_core::RitualSeatView =
+        serde_json::from_str(r#"{"link":"x","member":"","state":0}"#).expect("an older row");
+    assert!(!old.joinable);
+}

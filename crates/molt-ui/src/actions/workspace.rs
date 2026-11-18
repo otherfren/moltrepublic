@@ -72,7 +72,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
         ui.on_reveal_seed(move |id| {
             let w = cx.wallet.clone();
             let weak = cx.weak.clone();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 let outcome = w.execute(Command::RevealSeed { id: id.to_string() }).await;
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };

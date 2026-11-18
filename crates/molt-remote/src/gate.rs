@@ -126,6 +126,8 @@ mod tests {
     fn a_command_value_is_judged_by_its_variant() {
         let gate = Gate::new();
         assert!(gate.admits(&Command::ReadSession));
+        // the window's link read is an MCP tool, so the door has it
+        assert!(gate.admits(&Command::ClassifyLink { link: String::new() }));
         assert!(!gate.admits(&Command::UiPublish { snapshot: Default::default() }));
     }
 

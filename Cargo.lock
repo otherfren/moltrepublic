@@ -5128,6 +5128,7 @@ dependencies = [
  "thiserror 1.0.69",
  "unicase",
  "url",
+ "yaml-rust2",
  "zeroize",
 ]
 
@@ -5147,7 +5148,6 @@ dependencies = [
  "molt-treasury",
  "molt-vault",
  "nostr-relay-builder",
- "pulldown-cmark",
  "rand_chacha 0.3.1",
  "rustix 1.1.4",
  "serde",
@@ -5158,7 +5158,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
- "yaml-rust2",
  "zeroize",
 ]
 
@@ -5305,6 +5304,7 @@ version = "0.0.17"
 dependencies = [
  "arboard",
  "base64 0.22.1",
+ "bip39",
  "chrono",
  "futures-channel",
  "futures-util",

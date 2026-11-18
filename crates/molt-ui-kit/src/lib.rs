@@ -3,4 +3,5 @@
 //! depends on `molt-core` only, and nothing below `molt-ui` depends on it.
 
 pub mod client;
+pub mod platform;
 pub mod protocol;

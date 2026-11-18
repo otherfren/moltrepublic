@@ -2193,6 +2193,7 @@ impl State {
             Command::CloseWorkspace => self.cmd_close_workspace(),
             Command::DeleteWorkspace { id } => self.cmd_delete_workspace(id),
             Command::RevealSeed { id } => self.cmd_reveal_seed(&id),
+            Command::ClassifyLink { link } => Ok(self.cmd_classify_link(&link)),
             Command::EncryptWorkspace { id, phrase } => self.cmd_encrypt_workspace(id, phrase),
             Command::DecryptWorkspace { id, phrase } => self.cmd_decrypt_workspace(id, phrase),
             Command::SetWorkspaceBackup { id, enabled } => {

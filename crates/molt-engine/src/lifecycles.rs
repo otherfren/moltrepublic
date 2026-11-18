@@ -848,6 +848,7 @@ impl State {
         let seats = links
             .into_iter()
             .map(|link| molt_core::RitualSeatView {
+                joinable: crate::FoundingInvite::parse(&link).is_ok(),
                 link,
                 member: String::new(),
                 state: 0,

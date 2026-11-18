@@ -236,15 +236,10 @@ pub(crate) fn avatar_cache_key(path: &str) -> String {
     if path.is_empty() {
         return String::new();
     }
-    let Ok(meta) = std::fs::metadata(path) else {
+    let Some((len, stamp)) = crate::platform::platform().local_stamp(path) else {
         return path.to_string();
     };
-    let stamp = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
-    format!("{path}|{}|{stamp}", meta.len())
+    format!("{path}|{len}|{stamp}")
 }
 
 /// Whether the republic's picture must be decoded again, and under which

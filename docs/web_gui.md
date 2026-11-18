@@ -3,7 +3,11 @@
 **Status: PLAN, not built (2026-11-17).** Decisions D1-D4 are the user's
 (2026-11-17). The plan was reviewed against the code the same day (four
 lenses, 29 findings, all folded in). Stage W0's compile and first browser load are
-measured (§8.4, 2026-11-18); its populated-content half is open.
+measured (§8.4, 2026-11-18); its populated-content half is open. W1 and
+W2's client and spawner seams are built, its pure helpers sit in core,
+link classification is an engine read (§6.4), and the platform seam is
+built on the native side with paste asynchronous (§6.3); what still ties
+`molt-ui` to native is two modules (2026-11-18, §6.7, §10).
 
 ## 1. Goal
 
@@ -37,13 +41,17 @@ running any engine crate in the browser.
 - **`molt-ui` is not wasm-clean today**, for three reasons:
   1. hard deps on `molt-engine`, `molt-storage`, `molt-config`, `molt-mcp`,
      mostly for pure helpers: wiki front-matter and links, invite parsing
-     (NOT pure, §6.4), the phrase wordlist, `random_token`, the wake skill
+     (NOT pure; an engine read since 2026-11-18, §6.4), the phrase wordlist, `random_token`, the wake skill
      text, the handle charset refusal, the wallet-keys-damaged string.
      `expand_tilde` is used only to seed the native folder dialog and
-     stays native-only;
+     stays native-only (2026-11-18: the pure helpers moved to core and
+     `molt-mcp` left the dependency list; what is left is in §6.7);
   2. a multi-thread tokio `Handle` in `run_app`, ~45 `rt.spawn` /
      7 `spawn_blocking` sites, 47 `invoke_from_event_loop`, plus
-     `tokio::sync::{oneshot, Mutex}` and one `tokio::time::sleep`;
+     `tokio::sync::{oneshot, Mutex}` and one `tokio::time::sleep`
+     (2026-11-18: all of it behind `Ctx::spawn` and `native.rs`, §6.2);
+     the OS use of point 3 went behind the platform seam the same day
+     (§6.3);
   3. native OS use: `rfd` (7 sites, one of them the blocking form),
      `arboard` (3 callbacks, one a synchronous paste), `std::fs` (9 sites,
      among them avatar and logo reads from engine-side paths), the alert
@@ -118,11 +126,14 @@ wasm32:  core -> ui-kit -> ui -> web          (ui-window beside ui, slint only)
 ```
 
 - **`molt-core`** gains the wire frames (§5.1, built) and the pure
-  helpers `molt-ui` needs, with today's owners re-exporting so one source
-  stays: the wiki front-matter and link helpers (core gains `yaml-rust2`,
-  default features off, pure Rust, no I/O), `HANDLE_CHARSET_REFUSAL`, the
-  wallet-keys-damaged message as a const `StorageError`'s Display uses,
-  `WAKE_SKILL` / `WAKE_SKILL_FILE` / `fill_wake_skill`, and the hoisted
+  helpers `molt-ui` needs (built 2026-11-18), with the former owners
+  re-exporting so one source stays: the wiki header parser and emitter
+  (`wiki_front_matter`; core gains `yaml-rust2`, default features off,
+  pure Rust, no I/O) and the body-link parser (`wiki_links`), both still
+  reachable as `molt_engine::…`; `HANDLE_CHARSET_REFUSAL`;
+  `WALLET_KEYS_DAMAGED`, the const `StorageError`'s Display uses;
+  `kanban_wake::{WAKE_SKILL, WAKE_SKILL_FILE, fill_wake_skill}` with the
+  skill text beside them, re-exported by `molt-mcp`; and the hoisted
   `INTERNAL` list beside `Command::variant_names()` (with its per-entry
   rationale comments; the co-equality test consumes it from there).
 - **`molt-ui-kit`** (new, wasm-clean, depends on core only, nothing below
@@ -136,10 +147,12 @@ wasm32:  core -> ui-kit -> ui -> web          (ui-window beside ui, slint only)
   key, constant-time, false on an empty key, seat scope only) and for
   `tools()`. `molt-app` hands it `cfg!(feature = "embedded-tor")` at
   listener start, as it does `run_app`.
-- **`molt-ui`**: engine/storage/config/mcp/tokio/arboard become
-  `cfg(not(target_arch = "wasm32"))` dependencies used only by the native
-  client, spawner and platform impls; shared code uses no `tokio::` path.
-  The wordlist lookup is two `bip39` calls made directly. Native
+- **`molt-ui`**: engine/storage/config/tokio/arboard are
+  `cfg(not(target_arch = "wasm32"))` dependencies (done 2026-11-18;
+  `molt-mcp` is a dev-dependency only; `rfd` joined the gated set with
+  §6.3), used only by `native.rs` and the native arm of `engine.rs`
+  (§6.7); shared code uses no `tokio::` path and no OS call.
+  The wordlist lookup is two `bip39` calls made directly (done). Native
   behaviour stays byte for byte except where §6 says otherwise (paste,
   link classification, the secret draft).
 - **`molt-web`** (new, `cdylib`): `#![cfg(target_arch = "wasm32")]` with
@@ -222,7 +235,8 @@ executes only if its outer `cmd` tag is
 - the command of a seat-scope tool in `molt_mcp::tools()`, or
 - on `WEB_DOOR`, a production const in `molt-remote`:
   `read_upload_bytes`, `set_wake_command`, and the byte-door and
-  link-read commands of §6.4/§7 where they are not MCP tools.
+  commands of §7 where they are not MCP tools (the link read of §6.4
+  is a tool, `classify_link`).
 
 Everything else is refused before execution. `as_operator` is refused;
 should a wrapper command ever be allowed, the gate must recurse into its
@@ -334,64 +348,167 @@ today). No cfg-split bounds.
 
 ### 6.2 Spawner and shared primitives
 
-`Ctx::spawn(future: Send)` replaces `rt.spawn`: tokio on native,
-`slint::spawn_local` on the web. Shared code uses no tokio: the two
-oneshots in `mirror.rs` move to `futures-channel` (a new workspace line),
-the kanban `DraftSaver` mutex becomes a std mutex or a runtime-neutral
-async lock, the one `sleep` goes through the platform seam.
-`spawn_blocking` sites become platform calls (file reads) or inline work
-(image decode - W5 measures whether large images need chunking on the one
-browser thread).
+**Built (2026-11-18), native side.** `Ctx::spawn(future: Send +
+'static)` is the one place the window starts a future; it forwards to a
+`Spawner` (`molt-ui/src/native.rs`: the tokio handle; on the web a unit
+type over `slint::spawn_local`, same method, no call site changes).
+`run_app` takes `impl Into<Spawner>`, so `moltd` still passes its handle.
+Shared code names no tokio - a test scans the sources for it
+(`tests/gui/spawner.rs`, which also pins that a spawned future runs to
+completion):
+
+- the two oneshots in `mirror.rs` are `futures-channel`, the kanban
+  `DraftSaver` lock is `futures_util::lock::Mutex` (runtime-neutral; the
+  generation check, not lock fairness, keeps an older save from landing
+  late);
+- `native.rs` holds what is left: `off_thread` (image fit and decode -
+  inline on the one browser thread, W5 measures whether large images
+  need chunking) and the in-process engine's event receiver; the file
+  reads, the save-as write and `sleep` went on into the platform seam
+  (§6.3);
+- the wake-skill save dialog moved from the blocking `rfd::FileDialog`
+  to the async form, like every other dialog.
+
+Open: the web `Spawner` and the wasm twin of `native.rs` (W5); the
+`cfg(not(target_arch = "wasm32"))` on the module and on the tokio
+dependency lands with them. The direct `std::fs` / `std::thread` lines
+that stayed in shared code went behind the platform seam (§6.3), and the
+`clippy.toml` lint holds the rule by resolved path (§8.3).
 
 ### 6.3 Platform
 
-One trait for what the OS did: clipboard copy and paste, play the alert,
-wall clock, monotonic clock, sleep, random token, folder pick (native
-only; fills a typed draft). Native impl is today's code; the web impl
-uses web-sys (`navigator.clipboard`, WebAudio, `web_time`,
-`crypto.getRandomValues`). chrono gets `wasmbind` on wasm32.
+**Built (2026-11-18), native side.** One trait for what the OS did,
+`molt_ui_kit::platform::Platform`: clipboard copy and paste, play the
+alert, wall clock (`unix_now`), monotonic clock, sleep, random token,
+folder pick, and the files (below). It sits in `molt-ui-kit` because that
+crate is wasm-clean and both `molt-ui` and the later `molt-web` depend on
+it; `molt-web` installs its implementation with
+`molt_ui_kit::platform::install` before the window starts. The native
+implementation is `NativePlatform` in `molt-ui/src/native.rs` - the code
+that was spread over `app.rs`, `alerts.rs`, `settings.rs` and the action
+modules, moved - and is what `molt-ui`'s `platform()` falls back to when
+nothing was installed, so `moltd` changes nothing.
 
-- **File pick and save: take `rfd`** on both targets through
-  `AsyncFileDialog` (name + bytes in, bytes out as a download on the
-  web). The blocking `rfd::FileDialog` site in `actions/kanban.rs` moves
-  to the async form. Per-target features: `xdg-portal` + `async-std`
-  native, none on wasm32. No hand-written `<input type=file>`.
-- **Clock inside the diff**: `patchview.rs` arms its deadline with
-  `Instant::now()`; it moves to `similar`'s own
-  `TextDiff::configure().timeout(..)`, and the wasm build enables
-  `similar`'s `wasm32_web_time` feature so the timeout is real.
-- **Paste becomes asynchronous on both targets** - a `.slint` interface
-  change: `paste-clipboard(target)` with no return value, `target` an
-  enum over the four fields (`rw-seed`, `rv-link`, `bk-restore-seed`,
-  `decrypt-phrase`); Rust sets exactly that property when the text
-  arrives. Two of the four are recovery phrases, so a headless GUI test
-  pins that the text lands in the named field and no other. If a browser
+- **Every future the trait returns is `Send`** (`Task<T>`), so the
+  window's shared code keeps one bound on both targets. A browser
+  implementation runs its `!Send` JS futures on its one thread and
+  answers through a channel.
+- **One slot per process**, not a field of `Ctx`: the clock is read in
+  free functions far from any callback (`labels.rs`, `surfaces.rs`). The
+  clipboard wiring takes its platform as an argument
+  (`actions/clipboard.rs::wire_with`), so a test hands it a fake and
+  never touches the user's clipboard.
+- **Files** go through `rfd::AsyncFileDialog`, now named only in the
+  native implementation: `pick_file` answers what NAMES the file (its
+  path natively), `read_file` gives its bytes, `save_file` takes a name
+  and bytes and answers where they went (a download on the web),
+  `pick_save` and `pick_folder` answer a path for the engine and are
+  `None` where there are no engine-side paths, `local_bytes` /
+  `local_stamp` read a file the engine wrote on this machine (avatar,
+  logo). The wake-skill save keeps its refusal to write through a link
+  (`Save::refuse_link`). The mirror-folder dialog now seeds its start
+  directory like the workspace one (tilde expanded, only when it exists).
+- **Clocks**: no `Instant`, `SystemTime` or `Utc::now` in shared code.
+  The alert debounce and the wiki draft's age are `Duration`s on the
+  monotonic clock. `patchview.rs` uses `similar`'s own
+  `TextDiff::configure().timeout(..)`.
+- **Alert**: the debounce and the pure-Rust WAV (`alerts::alert_wav`)
+  stay shared; the platform plays it (native: the cached file and the
+  system player, as before).
+- **Paste is asynchronous on both targets** - a `.slint` interface
+  change: `callback paste-clipboard(PasteTarget)` with no return value,
+  `PasteTarget` an enum over the four fields (`rw-seed`, `rv-link`,
+  `bk-restore-seed`, `decrypt-phrase`). Rust (`land_paste`) sets exactly
+  that property when the text arrives, and only in the opening the paste
+  was asked from: a browser may answer late, and a phrase must not wait
+  in a closed dialog nor land in the next one (the phrase dialogs serve
+  every workspace and every backup row). Two checks: the field is on
+  show now (`rw-seed-on-show` / `rv-link-on-show` - screen, run state and
+  wizard step - or the dialog's open flag), and the window's
+  `paste-opening` still reads what it read at the click; every open,
+  close, screen change and wizard step moves that counter. `rw-seed` and
+  `decrypt-phrase` became `in-out` for this; nothing mirrors them
+  (`rw-phase` is `in-out` for the tests alone).
+- A test pins that shared code names none of them
+  (`the_os_sites_outside_native_are_the_listed_ones`,
+  `tests/gui/spawner.rs`): the last line, `current_dir` in `run_app`,
+  moved to `native::absolute` (2026-11-18). The `clippy.toml` lint
+  (§8.3) holds the same rule by resolved path.
+
+Pins: `crates/molt-ui/src/tests/gui/paste.rs` (the text lands in the
+named field and in no other; a field that left the screen gets nothing,
+nor does one reopened or on another wizard step since the click;
+each of the four buttons names its own field, by real clicks; the
+callback reads the platform it was wired with),
+`crates/molt-ui/src/tests/gui/spawner.rs` (the native clocks, token and
+file reads; the debounce; the WAV; the scan). NOT covered, as for every
+window read: the `invoke_from_event_loop` hop in front of `land_paste`.
+
+Open:
+
+- the web implementation (W5: `navigator.clipboard`, WebAudio,
+  `web_time`, `crypto.getRandomValues`, `rfd`'s wasm backend with no
+  features); chrono gets `wasmbind` on wasm32 for `Local`; `similar`
+  gets `wasm32_web_time` so the diff timeout is real there. If a browser
   refuses `readText()` from a Slint click (W0/W5 check), the web hides
   the paste buttons and relies on Ctrl+V into the focused input.
+- on the web `pick_file`'s answer is not a server path: the chat share
+  (`ShareFile{path}`) and the download destination (`pick_save`) need
+  the byte doors (W4), as do the avatar and logo reads.
 
 ### 6.4 Synchronous callbacks and link classification
 
 `seed-matches`, `seed-rows`, `vt-*` and `folder-preview` (a string format
 over `molt_core::slugify`) are pure and stay local.
 
-**`classify-link` cannot stay local.** `FoundingInvite::parse` /
-`RecoveryInvite::parse` end in molt-net's handover decoders, which
-validate the npub through `canonical_nostr_pk` on the C `secp256k1`
-(ADR-0002). Moving that to core would drag the C library into the wasm
-build; a second, weaker parser is what CLAUDE.md forbids. So
-classification becomes a stateless engine read (a new command returning
-kind, republic, who and relays; an MCP tool or classified) on BOTH
-targets:
+**Built (2026-11-18).** `classify-link` could not stay local.
+`FoundingInvite::parse` / `RecoveryInvite::parse` end in molt-net's
+handover decoders, which validate the npub through `canonical_nostr_pk`
+on the C `secp256k1` (ADR-0002). Moving that to core would drag the C
+library into the wasm build; a second, weaker parser is what CLAUDE.md
+forbids. So classification is a stateless engine read on BOTH targets:
 
-- `rv-kind` becomes a property Rust sets; the `pure callback
-  classify-link` goes away;
-- Rust resets `rv-kind` to kind 0 synchronously when the link changes,
-  before sending the read, and applies a reply only if the link it echoes
-  is still current - the join/recover buttons arm on `rv-kind`, so a
-  stale answer must never arm them;
-- the seat rows gain an additive `#[serde(default)]` `joinable` flag in
-  `SessionView` instead of the re-parse in the mirror;
-- the existing tests (a damaged handover arms nothing) stay the pin.
+- `Command::ClassifyLink { link }` answers `Reply::Link(LinkView)`: the
+  trimmed link echoed, `kind` (0 nothing usable, 1 invite, 2 recovery),
+  `republic`, `who` and the link's `relays`. The handler
+  (`cmd_classify_link`) calls the two parsers and nothing else. It is an
+  MCP tool, `classify_link`, seat scope: an agent about to call
+  `join_start` or `recover_start` gets the same pre-check, and the read
+  tells a caller nothing it did not hand in. A tool is admitted by the
+  gate as such, so it needs no `WEB_DOOR` entry. The wake script denies
+  it with the other ritual tools.
+- The window holds the answer in `rv-verdict`, a property Rust sets;
+  the `pure callback classify-link` is gone. `LinkPreview` carries the
+  field text it is for, and the window derives `rv-kind` from it: a
+  verdict for any other text than the field holds reads as kind 0. That
+  comparison is a binding, so it holds in the gap before Slint's
+  deferred `changed rv-link` handler runs.
+- Rust (`actions/ritual.rs`) clears the verdict and the link's relay
+  rows in the change handler, before it sends the read, and
+  `land_link` drops an answer whose echo is not the field's trimmed
+  text. An unknown `kind` lands as 0. While a read is out the panel
+  shows no verdict line at all (not "unrecognized"). Blank text is
+  never read: the handler judges it itself, as no link, so the line
+  shows at once.
+- A failed read (`link_failed`) leaves the panel unjudged and toasts
+  once per outage; a failure for a link the field has left is dropped.
+  OPEN: nothing re-sends the read when a door connection returns - the
+  client seam has no reconnect yet, so the user edits the field.
+- Seat rows carry `joinable` (`RitualSeatView`, `#[serde(default)]`),
+  set by the engine wherever it sets the link; the mirror shows a link
+  to copy only then.
+- `molt-ui` no longer names the invite parsers (§6.7).
+
+Pins: `crates/molt-engine/src/tests/join_tests.rs` (`classify_link_*`,
+the seat flag), `crates/molt-ui/src/tests/gui/link_read.rs` (join vs
+recovery, a link that cannot act arms nothing - both through a real
+engine - `a_stale_verdict_never_arms_the_panel`,
+`a_blank_link_is_judged_without_a_read` and
+`a_failed_read_toasts_once_and_arms_nothing`),
+`the_link_read_answers_through_the_web_door`
+(`crates/molt-ui/src/tests/gui/remote.rs`). NOT covered, as for every
+window read: the `invoke_from_event_loop` hop between the reply and
+`land_link`, which the headless backend never drains.
 
 ### 6.5 Write-only secrets in the settings form
 
@@ -423,9 +540,64 @@ web door itself - revoke the read key and wipe the S3 secret.**
 
 ### 6.6 Startup inputs
 
-`embedded_tor_available` comes from `welcome.caps`; the config dir and
-file come from `SessionView.config_path` (already absolute engine-side;
-there is no `current_dir` in a browser). Native keeps passing both.
+**Built (2026-11-18).** `embedded_tor_available` comes from
+`welcome.caps`; the config dir and file come from
+`SessionView.config_path` (already absolute engine-side; there is no
+`current_dir` in a browser). Native keeps passing both.
+
+- `RemoteHandle::welcome()` holds the server's welcome for every clone of
+  the handle; `Engine::remote_caps()` is `None` for the engine in this
+  process.
+- The mirror's session landing (`mirror::land_session`) applies both for
+  a remote engine on every full session push: a reply is in hand by then,
+  so the welcome has arrived. It is handed the ENGINE and reads the
+  welcome itself, so a caller cannot leave it out. A native window is
+  never touched by it.
+- The SERVER's path is split by string on `/` or `\` (`config_location`),
+  not `Path`: its separator is not the browser's. Native absolutizes
+  with `current_dir` first, as before, and splits its own path with
+  `Path` (`local_config_location`; on Unix a backslash is a file-name
+  character).
+- Pinned by `a_window_behind_the_web_door_takes_its_startup_inputs_from_the_server`
+  (`tests/gui/remote.rs`), which calls `land_session` directly. NOT
+  covered: the `invoke_from_event_loop` hop in `push_session` that calls
+  it - the headless backend never drains that queue, the same limit every
+  mirror test has.
+
+Open (W5): what `run_app`'s web twin is handed in place of the two
+arguments; until the first session lands the footer is empty and the
+embedded row shows the window's default (greyed).
+
+### 6.7 What still ties `molt-ui` to native (2026-11-18)
+
+Two modules, outside `src/tests/`: `native.rs` (the spawner, off-thread
+work and `NativePlatform`) and the `Native` arm of `engine.rs`. Pinned by
+`the_higher_crate_uses_outside_native_are_the_listed_ones` and
+`the_os_sites_outside_native_are_the_listed_ones`
+(`tests/gui/spawner.rs`); the lists only shrink, and the second is
+empty. `clippy.toml` (§8.3) allows the listed calls in `native.rs`
+alone.
+
+| What | Where | Purpose | Goes with |
+|---|---|---|---|
+| `molt-engine` | `engine.rs` | `WalletHandle`, the in-process engine | W5 (cfg on the `Native` arm) |
+| `molt-storage`, `molt-config`, `tokio`, `arboard`, `rfd` | `native.rs` | `expand_tilde`, `random_token`, the runtime, the clipboard, the dialogs | W5 (cfg on the module, a wasm twin for the spawner and `off_thread`) |
+| `std::fs`, `std::thread`, `std::process`, `std::env`, `Instant`, `SystemTime` | `native.rs` | file reads and writes, the alert player, the clocks, `absolute` for the native config path | W5 (same cfg) |
+| `native::absolute` | `app.rs` (`run_app`) | absolutizes the native config path | W5 (native-only entry) |
+| chrono `Local` | `labels.rs` | local time display | W5 (`wasmbind` on wasm32) |
+
+Not in `molt-ui` at all: `molt-net` (dev-dependency), `molt-mcp`
+(dev-dependency since 2026-11-18), no audio crate (the alert runs a
+system player).
+
+Measured 2026-11-18 (`cargo check -p molt-ui --target
+wasm32-unknown-unknown --features molt-ui/live-preview`, type check
+only): 18 errors, 17 of them inside `native.rs` (5 `tokio`, 5 `arboard`,
+4 `rfd`, 2 `molt-config`, 1 `molt-storage`) and 1 `molt-engine` in
+`engine.rs`. Everything else type-checks for wasm32 (22 before the
+platform seam, 27 before §6.4; unchanged after the lint pass).
+chrono's `Local` compiles and fails at run time, so the compiler does
+not count it.
 
 ## 7. Files as bytes
 
@@ -447,10 +619,32 @@ capped per §5.1.
   share's life, is deleted on `RemoveFile`/expiry, and has a stated quota.
 - An offline sharer makes phase one of a download wait without deadline,
   as today; the web shows the same progress row.
-- The mirror folder is today a read-only label plus a picker-only button;
-  it gains a typed draft and apply on both targets (W3, a `.slint`
-  change, existing `SetMirrorDir`). Whether the download dir has any
-  window control at all is checked in the same pass.
+- **Built (2026-11-18): server paths are typed.** The mirror folder was
+  a read-only label plus a picker-only button; it is a field with its
+  own Apply on a second line of the mirror row (`org-mirror-dir-draft`,
+  `set-mirror-dir(string)`, the existing `SetMirrorDir`; an empty path
+  is the default folder, and the engine refuses one that is neither
+  absolute nor `~`-led, on every surface -
+  `mirror_worker.rs::a_relative_mirror_folder_is_refused`). The draft follows the stored folder only when
+  that changes, like the quota. One window property, `folder-browse`
+  (default true), takes every folder dialog button away - mirror row,
+  workspace-folder dialog, wiki export dialog - and leaves the typed
+  form; `apply_remote_startup` clears it for any window behind the web
+  door, so `molt-web` needs no line for it past the first session (it
+  may set it before). Pins: `tests/gui/files.rs`
+  (`the_mirror_folder_is_typed_and_applied`,
+  `one_property_hides_every_folder_dialog_button`,
+  `a_typed_mirror_folder_reaches_the_engine_and_comes_back`) and the
+  startup test in `tests/gui/remote.rs`.
+- Checked in the same pass: the workspace folder and the wiki export
+  target already had a typed field beside their button. The download
+  dir has NO window control (`cfg-download-dir` only round-trips the
+  settings draft; a download asks per file through `pick_save`), so
+  nothing was added. Open for W4: whether the web's two-phase download
+  wants a visible download-dir field.
+- A typed path that names the folder already in use in another spelling
+  (`~/x` for its expansion) is stored, but the view does not change, so
+  the draft keeps its spelling and Apply stays lit.
 - The native window may keep its path flow or move to the same doors; W4
   decides per door by what removes the most duplicated code. No door
   accepts a server path from the browser that MCP would not accept.
@@ -514,6 +708,17 @@ web.
   the `std::fs` functions in use, `tokio::time::*`,
   `tokio::task::spawn_blocking`); the native platform module is the one
   `#[allow]`. It runs in the existing live-preview clippy.
+  **Built (2026-11-18).** The list also names `std::thread::sleep`, the
+  `std::env` reads, the `std::path::Path` stat methods, chrono's
+  `Utc::now` / `Local::now`, the tokio spawn and runtime entry points,
+  `arboard::Clipboard::new` and the `rfd` dialog constructors. The two
+  files are identical (a test compares them); paths of crates one of the
+  two does not depend on carry `allow-invalid`. In `molt-ui` the allow
+  sits on `mod native;`, on `mod tests;` (test code only) and on the
+  native `pickerprobe` example; `molt-ui-kit` needs none. A lint reads
+  resolved calls, not types or imports: `use tokio::...` in shared code
+  is still caught by the source scan (`tests/gui/spawner.rs`), which
+  stays.
 - The graph test of §4.
 - A wasm check of `molt-ui` against the generated window module would
   cost ~11 GiB. The live-preview stubs type-check on wasm32 (§8.4), so
@@ -627,13 +832,28 @@ Each stage is test-first, reviewed, and lands green on master on its own.
   (2026-11-18): the client seam - `molt-ui` holds an `Engine` (the
   engine's own handle or `molt-ui-kit`'s `RemoteHandle`), and the window
   mirrors through a real web door like a native one
-  (`crates/molt-ui/src/tests/gui/remote.rs`). Open: everything below. Helpers move to
-  core. The secret draft (§6.5) and link read (§6.4). Proof: the GUI
+  (`crates/molt-ui/src/tests/gui/remote.rs`); the spawner seam -
+  `Ctx::spawn` over `native.rs`, no tokio in shared code (§6.2,
+  `crates/molt-ui/src/tests/gui/spawner.rs`); the pure helpers in core,
+  the wordlist straight from `bip39`, the startup inputs from the server
+  (§6.6), and the native-only dependencies target-gated with the rest
+  listed and pinned (§6.7); the link read - `classify_link`, a verdict
+  Rust sets, a stale answer dropped, `joinable` on the seat rows (§6.4).
+  Open: the rest of the secret draft (§6.5) and the rest of the named
+  test set below (the link read and the startup inputs run through a
+  real door; found, join, chat and settings save do not yet). Proof: the GUI
   suite, plus a new named test set - a real `molt-remote` on loopback and
   a window whose `Ctx` holds the remote client with the mirror running
   (found, join, chat, settings save with secrets intact).
-- **W3 Platform seam**: clipboard with async paste, rfd async everywhere,
-  alert, clocks, sleep, token; the mirror-folder draft; the clippy lint.
+- **W3 Platform seam.** Done (2026-11-18), native side: the trait in
+  `molt-ui-kit` and `NativePlatform` behind it - clipboard with
+  asynchronous paste (`paste-clipboard(PasteTarget)`), the alert, both
+  clocks, sleep, the token, folder pick, and the files as names and
+  bytes through `rfd`'s async dialogs; no OS call is left in shared code
+  (§6.3, §6.7); the mirror folder as a typed draft with Apply and one
+  property that hides every folder dialog button (§7); the
+  `clippy.toml` lint in both crates, live-preview clippy at 0 with it
+  on (§8.3). Open: the web implementation (W5).
 - **W4 Byte doors** on engine, gate classification and native GUI.
 - **W5 `molt-web`**: the cdylib, the socket adapter, the web platform
   impl, `index.html` with the token prompt, key rebinding, font decision,

@@ -19,6 +19,7 @@ mod files;
 mod founding_fold;
 mod kanban;
 mod layout;
+mod link_read;
 #[cfg(feature = "live-preview")]
 mod link_relays;
 #[cfg(feature = "live-preview")]
@@ -28,6 +29,7 @@ mod logo;
 mod mirror;
 #[cfg(feature = "live-preview")]
 mod modals;
+mod paste;
 mod poke;
 mod recovery_backup;
 mod remote;
@@ -36,6 +38,7 @@ mod ritual_log;
 mod s3_plaintext;
 mod seed_confirm;
 mod snapshot;
+mod spawner;
 mod tab_order;
 mod vault;
 #[cfg(feature = "live-preview")]

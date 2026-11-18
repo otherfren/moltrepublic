@@ -174,7 +174,7 @@ fn char_diff_row(old: &str, new: &str) -> Row {
         };
     }
     let diff = TextDiff::configure()
-        .deadline(std::time::Instant::now() + std::time::Duration::from_millis(CHAR_DIFF_DEADLINE_MS))
+        .timeout(std::time::Duration::from_millis(CHAR_DIFF_DEADLINE_MS))
         .diff_chars(old, new);
     let mut segs: Vec<Seg> = Vec::new();
     for change in diff.iter_all_changes() {

@@ -200,8 +200,9 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             let Some(ui) = cx.weak.upgrade() else { return };
             let Some(cmd) = seal_command(&ui) else { return };
             seal_issued(&ui);
-            let cx = cx.clone();
-            cx.rt.clone().spawn(async move {
+            let task = cx.clone();
+            cx.spawn(async move {
+                let cx = task;
                 let outcome = cx.wallet.execute(cmd).await;
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = cx.weak.upgrade() else { return };
@@ -232,9 +233,10 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             if let Some(ui) = cx.weak.upgrade() {
                 ui.invoke_select_view("vault".into(), "unsealed".into());
             }
-            let cx = cx.clone();
+            let task = cx.clone();
             let id = id.to_string();
-            cx.rt.clone().spawn(async move {
+            cx.spawn(async move {
+                let cx = task;
                 run_read(&cx.wallet, &cx.weak, id).await;
             });
         });

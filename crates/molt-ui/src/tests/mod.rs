@@ -15,7 +15,6 @@ mod labels;
 mod mirror;
 mod net_tor;
 mod relays;
-mod ritual;
 mod seed_words;
 mod settings;
 mod surfaces;

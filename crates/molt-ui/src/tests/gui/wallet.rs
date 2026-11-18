@@ -622,7 +622,7 @@ fn the_node_flow_reaches_the_engine() {
     let ui = AppWindow::new().expect("headless window");
     apply_strings(&ui, 0);
     let cx = Ctx {
-        rt: rt.handle().clone(),
+        spawner: rt.handle().clone().into(),
         wallet: w.clone().into(),
         weak: ui.as_weak(),
         last_settings: Arc::new(Mutex::new(None)),

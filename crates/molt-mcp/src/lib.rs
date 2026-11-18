@@ -85,23 +85,10 @@ written with wiki_edit - structured edits, refused at the call with a reason; \
 propose op wiki_patch is the raw form for a caller that already holds a patch, \
 and both become the same changeset vote.";
 
-/// The agent skill (`kanban_workflows.md` §6.2): the step-by-step guide to
-/// a safe wake script. The `wake_skill` read serves it, the GUI shows it;
-/// both fill the node's port and config path in ([`fill_wake_skill`]).
-pub const WAKE_SKILL: &str = include_str!("wake_skill.md");
-
-/// The file name a saved skill is offered under.
-pub const WAKE_SKILL_FILE: &str = "moltrepublic-wake-skill.md";
-
-/// `skill` with the node's MCP port and config path in place of their
-/// placeholders; an unknown one (`0`, `""`) reads as the default.
-pub fn fill_wake_skill(skill: &str, mcp_port: u16, config_path: &str) -> String {
-    let port = if mcp_port == 0 { 4040 } else { mcp_port };
-    let path = if config_path.is_empty() { "config.toml" } else { config_path };
-    skill
-        .replace("{{MCP_PORT}}", &port.to_string())
-        .replace("{{CONFIG_PATH}}", path)
-}
+/// The agent skill, its file name and the placeholder fill
+/// (`kanban_workflows.md` §6.2). They live in core, pure, so the GUI
+/// shows the text the `wake_skill` read serves.
+pub use molt_core::kanban_wake::{fill_wake_skill, WAKE_SKILL, WAKE_SKILL_FILE};
 
 /// Serve the MCP protocol over stdin/stdout (the standard headless transport).
 /// stdio is inherently local — the agent host spawns the process — so it needs
@@ -1578,7 +1565,7 @@ pub fn tools() -> Vec<ToolDef> {
             description: "Where this seat keeps the mirrored pieces of the OPEN republic (\"\" restores the default folder). The series folders move with it; a folder already at the target stays and its pieces are re-checked.",
             schema: || json!({
                 "type": "object",
-                "properties": { "path": { "type": "string", "description": "the folder (~ expanded); \"\" = the default" } },
+                "properties": { "path": { "type": "string", "description": "the folder, absolute or ~-led; \"\" = the default" } },
                 "required": ["path"]
             }),
             build: |args| Ok(Command::SetMirrorDir { path: str_arg(args, "path")? }),
@@ -2966,6 +2953,22 @@ pub fn tools() -> Vec<ToolDef> {
             }),
             build: |args| Ok(Command::RevealSeed {
                 id: str_arg(args, "id")?,
+            }),
+        },
+        ToolDef {
+            name: "classify_link",
+            command: "classify_link",
+            scope: Scope::Seat,
+            description: "Say what a molt:// link is before acting on it. kind 1 = a founding invite (join_start), 2 = a recovery link (recover_start), 0 = nothing usable (junk, or no valid transport handover). Also the republic, `who` (invite: who minted it; recovery: the seat coming back) and the relays the link names. Stateless: nothing is started or stored.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "link": { "type": "string", "description": "the molt://invite/... or molt://recover/... link" }
+                },
+                "required": ["link"]
+            }),
+            build: |args| Ok(Command::ClassifyLink {
+                link: str_arg(args, "link")?,
             }),
         },
         ToolDef {

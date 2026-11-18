@@ -328,7 +328,7 @@ pub(crate) fn build_ui_snapshot(ui: &AppWindow) -> molt_core::UiSnapshot {
 /// publish half of `gui_over_mcp.md`, run at the end of every mirror pass
 /// (what it publishes is what it just rendered).
 async fn publish_ui_state(wallet: &Engine, weak: &slint::Weak<AppWindow>) {
-    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (tx, rx) = futures_channel::oneshot::channel();
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
@@ -398,20 +398,39 @@ pub(crate) async fn push_session(
     };
     let weak2 = weak.clone();
     let weak = weak.clone();
+    let engine = wallet.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
-            // Draft protection: a settings change arriving while the user has
-            // unsaved edits open (an external config reload, an MCP save) must
-            // not wipe what they typed. The notice/leave-guard tells them; the
-            // draft stays until they Save or discard.
-            let editing = ui.get_screen() == AppScreen::Settings
-                && prev.is_some_and(|p| settings_draft_differs(&p, &ui));
-            apply_session(&ui, &sv, changed && !editing, &chat_ui_for_apply);
+            land_session(&ui, &engine, &sv, changed, prev, &chat_ui_for_apply);
         }
     });
     // gui_over_mcp.md: publish what this pass rendered (queued behind the
     // apply above on the event loop, so the claim is post-render)
     publish_ui_state(wallet, &weak2).await;
+}
+
+/// One session snapshot onto the window, as the mirror lands it. An
+/// `engine` behind the web door brings its server's welcome
+/// (`docs/web_gui.md` §6.6) - read HERE, so no caller can leave it out; a
+/// reply is in hand, so it has arrived. `prev` is the settings applied
+/// before.
+pub(crate) fn land_session(
+    ui: &AppWindow,
+    engine: &Engine,
+    sv: &SessionView,
+    changed: bool,
+    prev: Option<SessionSettings>,
+    chat_ui: &Arc<Mutex<ChatUiState>>,
+) {
+    if let Some(caps) = engine.remote_caps() {
+        crate::app::apply_remote_startup(ui, caps, &sv.config_path);
+    }
+    // Draft protection: a settings change arriving while the user has
+    // unsaved edits open (an external config reload, an MCP save) must
+    // not wipe what they typed. The notice/leave-guard tells them; the
+    // draft stays until they Save or discard.
+    let editing = ui.get_screen() == AppScreen::Settings && prev.is_some_and(|p| settings_draft_differs(&p, ui));
+    apply_session(ui, sv, changed && !editing, chat_ui);
 }
 
 /// Render one session snapshot into the window: screen, language (and strings),
@@ -549,9 +568,9 @@ pub(crate) fn apply_session(
         };
         // W5: a fresh export of the open republic refused over a damaged
         // key part file offers to set it aside (the set-aside acts there only)
-        let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+        let damaged = molt_core::WALLET_KEYS_DAMAGED;
         if failed
-            && ex.result.ends_with(&damaged)
+            && ex.result.ends_with(damaged)
             && ex.workspace == sv.active_workspace
             && ui.get_export_note() != note.as_str()
         {
@@ -688,7 +707,7 @@ pub(crate) fn apply_session(
         } else if let Some(err) = sv.notice.strip_prefix("backup-failed:") {
             // W5: a damaged key part file holds every backup until set
             // aside; the open republic's asks below, a closed one is named
-            if err == molt_storage::StorageError::WalletKeysDamaged.to_string() {
+            if err == molt_core::WALLET_KEYS_DAMAGED {
                 let names = crate::wallet::damaged_elsewhere(sv);
                 if !names.is_empty() {
                     ui.invoke_show_toast_error(
@@ -866,7 +885,7 @@ fn apply_relays(ui: &AppWindow, sv: &SessionView) {
 /// Mirror the three engine-run lifecycles (the engine ticks them at 90 ms;
 /// a `SessionChanged` with a run scope re-renders ONLY this, so the rest of
 /// the window keeps its focus/scroll state untouched).
-fn apply_runs(ui: &AppWindow, sv: &SessionView) {
+pub(crate) fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     let lang = i32::from(sv.language == "de");
     // restore
     ui.set_rw_step(i32::from(sv.restore.run.step));
@@ -916,7 +935,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
             // only offer the link once it is genuinely joinable (carries the
             // transport handover); until the queue is provisioned it is a
             // non-joinable preview, so show nothing to copy yet
-            let detail = if molt_engine::FoundingInvite::parse(&s.link).is_ok() {
+            let detail = if s.joinable {
                 s.link.clone()
             } else {
                 String::new()
@@ -1426,8 +1445,8 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
                 let avatar = (!m.image.is_empty())
                     .then(|| {
                         cache.get(&m.image_key, |_| {
-                            std::fs::read(&m.image)
-                                .ok()
+                            crate::platform::platform()
+                                .local_bytes(&m.image)
                                 .and_then(|b| image_from_bytes(&b))
                         })
                     })
@@ -1563,7 +1582,13 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         .into(),
     );
     ui.set_org_mirror_over(b.org_stats.mirror_used >= b.org_stats.mirror_quota);
-    ui.set_org_mirror_dir(b.org_stats.mirror_dir.as_str().into());
+    // the typed folder follows the stored one only when that changes: a
+    // push mid-edit leaves the draft alone
+    let dir = b.org_stats.mirror_dir.as_str();
+    if ui.get_org_mirror_dir().as_str() != dir {
+        ui.set_org_mirror_dir(dir.into());
+        ui.set_org_mirror_dir_draft(dir.into());
+    }
 
     // the republic's image: (re)load the picture only when the file
     // reference changes. The bytes rode the applied set_image proposal, so
@@ -1579,7 +1604,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         LOGO_KEY.with_borrow_mut(|k| *k = key);
         ui.set_org_img_path(b.org_stats.image.as_str().into());
         let loaded = (!b.org_stats.image.is_empty())
-            .then(|| std::fs::read(&b.org_stats.image).ok())
+            .then(|| crate::platform::platform().local_bytes(&b.org_stats.image))
             .flatten()
             .and_then(|bytes| image_from_bytes(&bytes));
         ui.set_org_img_set(loaded.is_some());
@@ -1608,13 +1633,13 @@ fn mine_count(label: String, key: &str, b: &SurfacesBundle) -> String {
 /// state: a lagged receiver simply re-reads everything.
 pub(crate) fn spawn_mirror(ctx: &Ctx) {
     let Ctx {
-        rt,
+        spawner,
         wallet: w,
         weak,
         last_settings,
         chat_ui,
     } = ctx.clone();
-    rt.spawn(async move {
+    spawner.spawn(async move {
         let mut rx = w.subscribe();
         push_session(&w, &weak, &last_settings, SessionScope::Full, &chat_ui).await;
         push_surfaces(&w, &weak, &chat_ui).await;
@@ -1766,7 +1791,7 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
 
 /// Re-run a vault read the Unsealed view is waiting on.
 async fn reread_vault(wallet: &Engine, weak: &slint::Weak<AppWindow>, secret_id: String) {
-    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (tx, rx) = futures_channel::oneshot::channel();
     let weak2 = weak.clone();
     let id = secret_id.clone();
     let _ = slint::invoke_from_event_loop(move || {

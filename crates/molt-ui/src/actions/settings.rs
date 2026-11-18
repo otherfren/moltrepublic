@@ -78,7 +78,7 @@ fn wire_log(ui: &AppWindow, ctx: &Ctx) {
             let w = cx.wallet.clone();
             let weak = cx.weak.clone();
             let view = view.clone();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 let outcome = w.execute(log_request(level)).await;
                 let _ = slint::invoke_from_event_loop(move || {
                     let Some(ui) = weak.upgrade() else { return };
@@ -248,7 +248,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 let leave = (then == S3_THEN_SAVE_LEAVE).then(|| to_screen(ui.get_settings_return()));
                 (draft(&ui, &cx), crate::settings::stored_settings(&cx.last_settings), leave)
             });
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 if let Err(e) = w.execute(ack).await {
                     let _ = weak.upgrade_in_event_loop(move |ui| ui.invoke_show_toast_error(error_toast(&ui, &e)));
                     return;
@@ -448,7 +448,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 .upgrade()
                 .map(|ui| ui.get_ws_dir_draft().to_string())
                 .unwrap_or_default();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 let Some(path) = pick_folder(draft).await else {
                     return; // cancelled
                 };
@@ -500,7 +500,7 @@ fn save_and_leave_now(ui: &AppWindow, cx: &Ctx) {
     let w = cx.wallet.clone();
     let weak = ui.as_weak();
     let shown = crate::settings::stored_settings(&cx.last_settings);
-    cx.rt.spawn(async move { save_then(&w, &weak, wake, settings, &shown, leave).await });
+    cx.spawn(async move { save_then(&w, &weak, wake, settings, &shown, leave).await });
 }
 
 async fn save_then(
@@ -542,7 +542,7 @@ fn rotate(cx: &Ctx, set: fn(&AppWindow, slint::SharedString)) {
     };
     // a failed mint leaves the OLD token in place: overwriting it with ""
     // would silently disable MCP authentication on save
-    let Ok(token) = molt_config::random_token() else {
+    let Some(token) = crate::platform::platform().random_token() else {
         ui.invoke_show_toast_error(Strings::get(&ui).get_set_token_failed());
         return;
     };

@@ -40,6 +40,11 @@
 //! - `chat_log`, `channels` — the chat pane's rows and the chat bus's
 //!   channels + proposal cache.
 //! - `settings` — the settings draft (read/apply/dirty/save).
+//! - `native` — the one module that names tokio and the operating
+//!   system: the spawner behind `Ctx::spawn`, off-thread work, and the
+//!   native half of the platform seam.
+//! - `platform` — the door to that seam: clipboard, alert, clocks, sleep,
+//!   random token and files (`docs/web_gui.md` §6.3).
 //! - `models` — the one in-place `VecModel` patch (`sync_model`).
 //! - `images`, `labels`, `i18n`, `alerts`, `net_tor` — pictures, rendered
 //!   prose, localization, alert sounds, the anonymity panel.
@@ -53,10 +58,9 @@
 // if the module were still injected here.
 pub use molt_ui_window::*;
 
-/// The Restore wizard's one link field: which flow a pasted link arms.
-pub use actions::ritual::{link_kind, LinkKind};
 pub use app::run_app;
 pub use engine::Engine;
+pub use native::Spawner;
 
 mod actions;
 mod alerts;
@@ -73,13 +77,20 @@ mod labels;
 mod log_view;
 mod mirror;
 mod models;
+// the one module the OS and runtime calls of `clippy.toml` are allowed in
+// (`docs/web_gui.md` §8.3)
+#[allow(clippy::disallowed_methods)]
+mod native;
 mod net_tor;
 mod patchview;
+mod platform;
 mod settings;
 mod surfaces;
 mod wallet;
 mod wiki;
 mod wiki_bridge;
 
+// tests set up files, runtimes and waits of their own; they never ship
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests;

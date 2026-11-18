@@ -666,7 +666,7 @@ local node posture, saved to `config.toml`, never governance:
 
 - The wake group is its own Settings tab, "Agent".
 - `WAKE_SKILL` is a step-by-step guide to BUILD the wake script
-  (`crates/molt-mcp/src/wake_skill.md`; German twin
+  (`crates/molt-core/src/wake_skill.md`; German twin
   `crates/molt-ui/src/wake_skill_de.md`, picked by the UI language). Both
   doors fill in the node's MCP port and config path. The modal saves the
   shown text under a suggested file name. The draft below is the first

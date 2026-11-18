@@ -5,7 +5,7 @@
 //! owns no socket; one pump task does, so a browser's `!Send` WebSocket
 //! never leaks into the GUI's futures.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use futures_channel::{mpsc, oneshot};
 use futures_util::future::{select, Either};
@@ -31,6 +31,7 @@ type Request = (Command, oneshot::Sender<Answer>);
 pub struct RemoteHandle {
     requests: mpsc::UnboundedSender<Request>,
     notices: Arc<Mutex<Option<mpsc::UnboundedReceiver<Notice>>>>,
+    welcome: Arc<OnceLock<Welcome>>,
 }
 
 /// The connection is gone: what a command answers then.
@@ -44,6 +45,14 @@ impl RemoteHandle {
         let (tx, rx) = oneshot::channel();
         self.requests.unbounded_send((cmd, tx)).map_err(|_| gone())?;
         rx.await.unwrap_or_else(|_| Err(gone()))
+    }
+
+    /// What the server said in its welcome; `None` until it has. A
+    /// command is only answered after it, so whoever holds a reply may
+    /// rely on this being there.
+    #[must_use]
+    pub fn welcome(&self) -> Option<Welcome> {
+        self.welcome.get().cloned()
     }
 
     /// The server's notices. There is ONE stream per connection (the GUI
@@ -107,6 +116,7 @@ pub enum Ended {
 pub struct Pump {
     requests: mpsc::UnboundedReceiver<Request>,
     notices: mpsc::UnboundedSender<Notice>,
+    welcome: Arc<OnceLock<Welcome>>,
 }
 
 /// A handle and the pump that serves it. Nothing happens until the pump
@@ -115,8 +125,10 @@ pub struct Pump {
 pub fn remote() -> (RemoteHandle, Pump) {
     let (req_tx, req_rx) = mpsc::unbounded();
     let (note_tx, note_rx) = mpsc::unbounded();
-    let handle = RemoteHandle { requests: req_tx, notices: Arc::new(Mutex::new(Some(note_rx))) };
-    (handle, Pump { requests: req_rx, notices: note_tx })
+    let welcome = Arc::new(OnceLock::new());
+    let handle =
+        RemoteHandle { requests: req_tx, notices: Arc::new(Mutex::new(Some(note_rx))), welcome: welcome.clone() };
+    (handle, Pump { requests: req_rx, notices: note_tx, welcome })
 }
 
 impl Pump {
@@ -161,8 +173,12 @@ impl Pump {
                         Err(broken) => return Ended::Broken(broken),
                         Ok(None) => {}
                         Ok(Some(Notice::Welcome { build, caps })) => {
+                            // the handle first: a waiter woken by `welcomed`
+                            // already reads it there
+                            let welcome = Welcome { build, caps };
+                            drop(self.welcome.set(welcome.clone()));
                             if let Some(w) = welcomed.take() {
-                                drop(w.send(Welcome { build, caps }));
+                                drop(w.send(welcome));
                             }
                         }
                         // a GUI that stopped listening is not this task's problem
@@ -274,6 +290,22 @@ mod tests {
             server.welcome();
             let w = welcome.await.expect("welcomed");
             assert_eq!((w.build.as_str(), w.caps.embedded_tor), ("7", true));
+        });
+    }
+
+    /// The handle knows the welcome too: the window reads the server's
+    /// caps from the engine it holds (`docs/web_gui.md` §6.6).
+    #[test]
+    fn the_handle_holds_the_welcome_once_it_arrived() {
+        let (handle, mut server, welcome, pump) = rig();
+        assert_eq!(handle.welcome(), None, "nothing before the server spoke");
+        let twin = handle.clone();
+        run(pump, async {
+            server.heard().await;
+            server.welcome();
+            let w = welcome.await.expect("welcomed");
+            assert_eq!(handle.welcome(), Some(w.clone()));
+            assert_eq!(twin.welcome(), Some(w), "every clone reads the one connection");
         });
     }
 

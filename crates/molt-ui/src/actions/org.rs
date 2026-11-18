@@ -122,18 +122,17 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 .upgrade()
                 .map(|ui| ui.get_org_mirror_dir().to_string())
                 .unwrap_or_default();
-            cx.rt.spawn(async move {
-                let mut picker = rfd::AsyncFileDialog::new();
-                if !start.is_empty() {
-                    picker = picker.set_directory(start);
-                }
-                let Some(folder) = picker.pick_folder().await else {
+            cx.spawn(async move {
+                let Some(path) = crate::settings::pick_folder(start).await else {
                     return; // cancelled
                 };
-                cx2.issue(Command::SetMirrorDir {
-                    path: folder.path().display().to_string(),
-                });
+                cx2.issue(Command::SetMirrorDir { path });
             });
+        });
+        // the same folder, typed: the form a browser has ("" = the default)
+        let cx = ctx.clone();
+        ui.on_set_mirror_dir(move |path| {
+            cx.issue(Command::SetMirrorDir { path: path.to_string() });
         });
     }
 
@@ -192,14 +191,10 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 let w = cx.wallet.clone();
                 let weak = cx.weak.clone();
                 let path = value.to_string();
-                cx.rt.spawn(async move {
-                    let read = tokio::task::spawn_blocking({
-                        let path = path.clone();
-                        move || std::fs::read(&path)
-                    })
-                    .await;
+                cx.spawn(async move {
+                    let read = crate::platform::platform().read_file(path.clone()).await;
                     let payload = match read {
-                        Ok(Ok(bytes)) => {
+                        Ok(bytes) => {
                             use base64::Engine as _;
                             // WP3 pre-check with the REAL preview decoder:
                             // instant, localized feedback instead of an
@@ -309,22 +304,16 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             let weak = cx.weak.clone();
             let member = member.to_string();
             let path = value.to_string();
-            cx.rt.spawn(async move {
-                let read = tokio::task::spawn_blocking({
-                    let path = path.clone();
-                    move || std::fs::read(&path)
-                })
-                .await;
-                let Ok(Ok(bytes)) = read else {
+            cx.spawn(async move {
+                let Ok(bytes) = crate::platform::platform().read_file(path.clone()).await else {
                     toast_unreadable(weak, path);
                     return;
                 };
                 // the crop/downscale is CPU work on a picture up to 8192²
-                let fitted =
-                    tokio::task::spawn_blocking(move || fit_member_image(&bytes, budget)).await;
+                let fitted = crate::native::off_thread(move || fit_member_image(&bytes, budget)).await;
                 let fitted = match fitted {
-                    Ok(Ok(fitted)) => fitted,
-                    Ok(Err(why)) => {
+                    Some(Ok(fitted)) => fitted,
+                    Some(Err(why)) => {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade() {
                                 let s = ui.global::<Strings>();
@@ -336,7 +325,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                         });
                         return;
                     }
-                    Err(_) => return,
+                    None => return,
                 };
                 use base64::Engine as _;
                 // the name must match the bytes: the engine derives the
@@ -423,22 +412,11 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             };
             let saved_prefix = ui.global::<Strings>().get_toast_dl_done();
             let weak = cx.weak.clone();
-            cx.rt.spawn(async move {
-                let Some(dest) = rfd::AsyncFileDialog::new()
-                    .set_file_name(name.as_str())
-                    .save_file()
-                    .await
-                else {
-                    return; // cancelled
-                };
-                let path = dest.path().to_path_buf();
-                let write = tokio::task::spawn_blocking(move || {
-                    std::fs::write(&path, &bytes).map(|()| path)
-                })
-                .await;
-                let msg = match write {
-                    Ok(Ok(path)) => (format!("{saved_prefix} {}", path.display()), true),
-                    Ok(Err(e)) => (format!("⚠ {e}"), false),
+            cx.spawn(async move {
+                let save = molt_ui_kit::platform::Save { name: name.to_string(), bytes, refuse_link: false };
+                let msg = match crate::platform::platform().save_file(save).await {
+                    Ok(Some(dest)) => (format!("{saved_prefix} {dest}"), true),
+                    Ok(None) => return, // cancelled
                     Err(e) => (format!("⚠ {e}"), false),
                 };
                 let _ = slint::invoke_from_event_loop(move || {
@@ -529,20 +507,19 @@ async fn propose_org(
     });
 }
 
-/// The native image picker (async XDG portal); only the picked path
-/// reaches `set`.
+/// The image picker; only what NAMES the picked file (its path on a
+/// native window) reaches `set`, and the platform reads it from there.
 fn pick_image(cx: &Ctx, set: fn(&AppWindow, slint::SharedString)) {
     let weak = cx.weak.clone();
-    cx.rt.spawn(async move {
-        let picker = rfd::AsyncFileDialog::new()
-            // no "svg" (L1, 2026-08-16): the engine refuses SVG proposals -
-            // offering a format the vote will bounce is a trap, and a
-            // square check on a vector is meaningless
-            .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
-        let Some(file) = picker.pick_file().await else {
+    cx.spawn(async move {
+        // no "svg" (L1, 2026-08-16): the engine refuses SVG proposals -
+        // offering a format the vote will bounce is a trap, and a
+        // square check on a vector is meaningless
+        let image = ["png", "jpg", "jpeg", "webp", "gif", "bmp"].map(String::from).to_vec();
+        let pick = molt_ui_kit::platform::FilePick { filter: Some(("Image".to_string(), image)) };
+        let Some(path) = crate::platform::platform().pick_file(pick).await else {
             return; // cancelled
         };
-        let path = file.path().display().to_string();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 set(&ui, path.into());

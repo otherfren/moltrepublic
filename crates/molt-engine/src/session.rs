@@ -1994,6 +1994,23 @@ impl State {
         molt_storage::read_sealed_seed(&root, &dir, id).filter(|s| !s.is_empty())
     }
 
+    /// What a pasted link is: the two invite parsers' verdict, nothing
+    /// started and nothing stored.
+    pub(crate) fn cmd_classify_link(&self, link: &str) -> Reply {
+        let link = link.trim();
+        // both parsers reject a missing or damaged handover: a preview
+        // link must not arm a flow that cannot run
+        let (kind, republic, who, relays) = if let Ok(inv) = crate::FoundingInvite::parse(link) {
+            (1, inv.info.republic, inv.info.inviter, inv.handover.relays)
+        } else if let Some(rec) = crate::recovery::RecoveryInvite::parse(link) {
+            let relays = rec.handover.map(|h| h.relays).unwrap_or_default();
+            (2, rec.republic, rec.member, relays)
+        } else {
+            (0, String::new(), String::new(), Vec::new())
+        };
+        Reply::Link(molt_core::LinkView { link: link.to_string(), kind, republic, who, relays })
+    }
+
     pub(crate) fn cmd_reveal_seed(&self, id: &WorkspaceId) -> Result<Reply, MoltError> {
         if !self.session.workspaces.iter().any(|w| w.id == *id) {
             return Err(MoltError::UnknownWorkspace(id.clone()));

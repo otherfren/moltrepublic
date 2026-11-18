@@ -34,6 +34,8 @@ pub mod relay;
 pub mod vault;
 pub mod wallet;
 pub mod wiki_fold;
+pub mod wiki_front_matter;
+pub mod wiki_links;
 pub mod wiki_patch;
 pub mod wiki_refs;
 pub mod wire;
@@ -3710,6 +3712,29 @@ impl RunCore {
     }
 }
 
+/// What a pasted link is ([`Command::ClassifyLink`]): the verdict of the
+/// engine's own invite parsers, so a preview and the run it starts cannot
+/// disagree.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkView {
+    /// The link as asked, trimmed: a late answer is told from a current
+    /// one by this echo.
+    pub link: String,
+    /// 0 = nothing usable (empty, junk, or no valid transport handover),
+    /// 1 = a founding invite (`join_start`), 2 = a recovery link
+    /// (`recover_start`).
+    pub kind: u8,
+    /// The republic's display name; empty for kind 0.
+    #[serde(default)]
+    pub republic: String,
+    /// Invite: who minted it. Recovery: the seat coming back.
+    #[serde(default)]
+    pub who: String,
+    /// The relays the link names.
+    #[serde(default)]
+    pub relays: Vec<String>,
+}
+
 /// One row of the founding ritual's member list (transport concept §3.3):
 /// an invite that turns into a sealed member.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3717,6 +3742,10 @@ pub struct RitualSeatView {
     /// The one-time `molt://invite/…` link (ephemeral — dies with the
     /// ritual).
     pub link: String,
+    /// Whether `link` can be joined with: it carries a valid transport
+    /// handover (the engine's own parser said so). A preview link is not.
+    #[serde(default)]
+    pub joinable: bool,
     /// The member's display name; empty until they activated the link.
     pub member: String,
     /// 0 = waiting for activation, 1 = key received (awaiting seal),
@@ -5014,6 +5043,12 @@ pub enum Command {
     RevealSeed {
         /// The workspace id ([`WorkspaceInfo::id`]).
         id: WorkspaceId,
+    },
+    /// What a link is ([`Reply::Link`]): a founding invite, a recovery
+    /// link, or nothing usable. Stateless - nothing is started or stored.
+    ClassifyLink {
+        /// The pasted link.
+        link: String,
     },
     /// Export a workspace as ONE encrypted `.molt.enc` blob file
     /// (`molt-export-v1`): manifest, encrypted history, the threshold-signed
@@ -6429,7 +6464,8 @@ pub enum Command {
     /// (`prefs.mirror_dir`; "" = the default folder). Any-path on the
     /// host, and a tool on both surfaces (ADR-0007).
     SetMirrorDir {
-        /// The folder, `~` allowed; "" restores the default.
+        /// The folder, absolute or `~`-led (a relative one is refused);
+        /// "" restores the default.
         path: String,
     },
     /// INTERNAL (A6): a peer told this node that a vote it cast was dropped
@@ -7219,6 +7255,8 @@ pub enum Reply {
         /// The phrase, space-separated words.
         seed: String,
     },
+    /// What a link is ([`Command::ClassifyLink`]).
+    Link(LinkView),
     /// The whole shared session state (boxed: it is by far the largest reply).
     Session(Box<SessionView>),
     /// The persistent chain as display views (the Chain-History read),
@@ -8883,6 +8921,14 @@ pub enum MoltError {
     #[error("refused: {0}")]
     Refused(std::borrow::Cow<'static, str>),
 }
+
+/// The refusal of a new handle outside ASCII + ä ö ü ß. The engine says
+/// it and the GUI keys its German rendering on it, so it is one constant.
+pub const HANDLE_CHARSET_REFUSAL: &str = "the handle may contain only ASCII and ä ö ü ß";
+
+/// What a purse keys file that does not authenticate reads as: storage's
+/// error text, which the GUI recognises in a backup row and a toast.
+pub const WALLET_KEYS_DAMAGED: &str = "wallet_keys.state is damaged";
 
 #[cfg(test)]
 mod tests {

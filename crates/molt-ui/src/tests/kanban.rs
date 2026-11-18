@@ -566,10 +566,10 @@ fn a_refused_basket_keeps_a_row_per_act() {
 #[cfg(unix)]
 #[test]
 fn the_skill_file_carries_the_shown_text_and_follows_no_link() {
-    use crate::actions::kanban::write_skill;
-    assert_eq!(molt_mcp::WAKE_SKILL_FILE, "moltrepublic-wake-skill.md");
+    let write_skill = |path: &std::path::Path, text: &str| crate::native::write_saved(path, text.as_bytes(), true);
+    assert_eq!(molt_core::kanban_wake::WAKE_SKILL_FILE, "moltrepublic-wake-skill.md");
     let tmp = tempfile::tempdir().expect("tmp");
-    let path = tmp.path().join(molt_mcp::WAKE_SKILL_FILE);
+    let path = tmp.path().join(molt_core::kanban_wake::WAKE_SKILL_FILE);
     write_skill(&path, "shown").expect("a fresh file");
     assert_eq!(std::fs::read_to_string(&path).expect("read"), "shown");
     write_skill(&path, "again").expect("the dialog asked before replacing");
@@ -579,4 +579,7 @@ fn the_skill_file_carries_the_shown_text_and_follows_no_link() {
     std::os::unix::fs::symlink(&target, &link).expect("link");
     assert!(write_skill(&link, "shown").is_err());
     assert!(!target.exists(), "the link was not followed");
+    // a save that did not ask for the refusal writes where the dialog said
+    crate::native::write_saved(&link, b"picture", false).expect("through the link");
+    assert_eq!(std::fs::read(&target).expect("read"), b"picture");
 }

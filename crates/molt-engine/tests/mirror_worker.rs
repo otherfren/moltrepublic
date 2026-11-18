@@ -90,3 +90,39 @@ async fn a_quota_too_small_stops_the_worker_with_one_notice() {
     a.execute(Command::CloseWorkspace).await.expect("close a");
     b.execute(Command::CloseWorkspace).await.expect("close b");
 }
+
+/// The mirror folder is a typed path on both surfaces: one that is
+/// neither absolute nor `~`-led would resolve against the node's working
+/// directory, a different folder after every restart from elsewhere. It
+/// is refused and the stored folder stays; "" still restores the default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relative_mirror_folder_is_refused() {
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root = tmp.path().join("workspaces");
+    let (a, b) = found_pair(&root, &url).await;
+    let default = read_mirror(&b).await.dir.clone();
+    assert!(std::path::Path::new(&default).is_absolute(), "{default}");
+
+    for path in ["mirror", "srv/b", "./m", "  rel  ", "~x/m"] {
+        let err = b
+            .execute(Command::SetMirrorDir { path: path.to_string() })
+            .await
+            .expect_err("a relative folder is refused");
+        assert!(err.to_string().contains("not an absolute path"), "{path}: {err}");
+        assert_eq!(read_mirror(&b).await.dir, default, "{path}: the stored folder stays");
+    }
+
+    let typed = tmp.path().join("typed");
+    b.execute(Command::SetMirrorDir { path: format!("  {}  ", typed.display()) })
+        .await
+        .expect("an absolute folder is taken");
+    assert_eq!(read_mirror(&b).await.dir, typed.display().to_string());
+    b.execute(Command::SetMirrorDir { path: "~/m".to_string() }).await.expect("a home folder is taken");
+    b.execute(Command::SetMirrorDir { path: String::new() }).await.expect("the default comes back");
+    assert_eq!(read_mirror(&b).await.dir, default);
+
+    a.execute(Command::CloseWorkspace).await.expect("close a");
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+}

@@ -323,7 +323,7 @@ fn the_export_dialog_issues_the_command_with_the_picked_path_and_the_proof_flag(
 
     let ui = AppWindow::new().expect("headless window");
     let cx = Ctx {
-        rt: rt.handle().clone(),
+        spawner: rt.handle().clone().into(),
         wallet: w.clone().into(),
         weak: ui.as_weak(),
         last_settings: Arc::new(Mutex::new(None)),
@@ -2750,7 +2750,7 @@ fn a_vote_over_unfetched_bytes_is_queued_and_fires_on_arrival() {
     apply_strings(&ui, 0);
     let (model, last) = wire_wiki(&ui);
     let cx = Ctx {
-        rt: rt.handle().clone(),
+        spawner: rt.handle().clone().into(),
         wallet: w.clone().into(),
         weak: ui.as_weak(),
         last_settings: Arc::new(Mutex::new(None)),
