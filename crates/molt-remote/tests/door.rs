@@ -45,6 +45,7 @@ async fn node_with(seat: &str, pre_auth: Duration) -> Node {
         caps: Caps { embedded_tor: true },
         dir: dir.path().to_path_buf(),
         pre_auth,
+        stall: Duration::from_secs(30),
     };
     tokio::spawn(serve(listener, handle.clone(), door));
     Node { port, handle, _dir: dir }
@@ -101,7 +102,7 @@ fn close_code(m: &Message) -> Option<u16> {
 }
 
 async fn hello(ws: &mut Ws, token: &str) {
-    send(ws, &ClientFrame::Hello { v: WIRE_VERSION, token: token.into() }).await;
+    send(ws, &ClientFrame::Hello { v: WIRE_VERSION, token: token.into(), packed: false }).await;
 }
 
 async fn welcomed(n: &Node) -> Ws {
@@ -178,7 +179,7 @@ async fn a_command_before_hello_or_a_wrong_version_is_closed() {
     assert_eq!(close_code(&next(&mut ws).await), Some(4401));
 
     let mut ws = open(&n).await;
-    send(&mut ws, &ClientFrame::Hello { v: WIRE_VERSION + 1, token: SEAT.into() }).await;
+    send(&mut ws, &ClientFrame::Hello { v: WIRE_VERSION + 1, token: SEAT.into(), packed: false }).await;
     assert_eq!(close_code(&next(&mut ws).await), Some(4400));
 }
 
@@ -412,6 +413,7 @@ async fn an_untrusted_bundle_directory_opens_no_door() {
         caps: Caps::default(),
         dir: dir.to_path_buf(),
         pre_auth: Duration::from_secs(1),
+        stall: Duration::from_secs(30),
     };
     let fill = |dir: &std::path::Path| {
         for f in molt_remote::BUNDLE_FILES {
@@ -483,7 +485,7 @@ async fn the_shipped_client_core_speaks_to_the_door() {
         while !done(notices) {
             match next(ws).await {
                 Message::Text(t) => notices.extend(p.on_text(t.as_str()).expect("a sound frame")),
-                Message::Binary(b) => p.on_binary(&b).expect("a sound chunk"),
+                Message::Binary(b) => notices.extend(p.on_binary(&b).expect("a sound chunk")),
                 other => panic!("unexpected {other:?}"),
             }
         }
@@ -501,6 +503,8 @@ async fn the_shipped_client_core_speaks_to_the_door() {
         pump(&mut ws, &mut p, &mut notices, |_| true).await;
         match next(&mut ws).await {
             Message::Text(t) => notices.extend(p.on_text(t.as_str()).expect("a sound frame")),
+            // the shipped hello asks for packed frames: a large reply is one
+            Message::Binary(b) => notices.extend(p.on_binary(&b).expect("a sound chunk")),
             other => panic!("unexpected {other:?}"),
         }
     }

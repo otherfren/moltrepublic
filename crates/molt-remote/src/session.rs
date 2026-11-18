@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! One authenticated WebSocket session (`docs/web_gui.md` §5.1-5.3):
 //! hello, then commands in, replies and events out, until the socket or
-//! the key ends.
+//! the key ends. A large frame goes out packed to a client that asked
+//! (§5.6).
 
 use std::time::Duration;
 
@@ -11,7 +12,8 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::BTreeSet;
 
 use molt_core::wire::{
-    Chunk, ClientFrame, ServerFrame, CHUNK, CLOSE_PROTOCOL, CLOSE_UNAUTHORIZED, MAX_TRANSFER, WIRE_VERSION,
+    Chunk, ClientFrame, ServerFrame, CHUNK, CLOSE_PROTOCOL, CLOSE_UNAUTHORIZED, MAX_TRANSFER, MAX_UNPACKED, PACK_MIN,
+    WIRE_VERSION,
 };
 use molt_core::{Command, Event, MoltError, Reply, SessionScope};
 use molt_engine::WalletHandle;
@@ -30,8 +32,9 @@ const MAX_HELLO: usize = 4096;
 /// Commands one session may have at the engine at once; past it the
 /// socket is not read, which is the backpressure.
 const IN_FLIGHT: usize = 32;
-/// A client that takes longer than this to accept one frame is gone.
-const WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// From this size on a frame is deflated on a blocking thread, not on
+/// the session's own.
+const PACK_INLINE: usize = 64 * 1024;
 
 /// A command still at the engine when its session ends is given this
 /// long to answer, so an upload it opened is not left without an owner.
@@ -46,6 +49,17 @@ type InFlight = FuturesUnordered<BoxFuture<'static, Answer>>;
 /// Why a session ended; the close code the client sees.
 struct End(Option<u16>);
 
+/// What a welcomed session writes with.
+struct Out<'a> {
+    handle: &'a WalletHandle,
+    /// The key the session presented, re-checked for as long as it lives.
+    token: &'a str,
+    /// Its client reads packed frames.
+    packs: bool,
+    /// How many packed frames it was sent.
+    packed: u64,
+}
+
 pub(crate) async fn run<S>(mut ws: Ws<S>, handle: &WalletHandle, gate: &Gate, door: &WebDoor)
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -54,10 +68,11 @@ where
     // the check is then an event this session sees, and dies on
     let events = handle.subscribe();
     let End(code) = match authenticate(&mut ws, handle, door).await {
-        Ok(token) => {
+        Ok((token, packed)) => {
             let mut uploads = BTreeSet::new();
             let mut in_flight = InFlight::new();
-            let end = serve(&mut ws, handle, gate, &token, events, &mut uploads, &mut in_flight).await;
+            let mut out = Out { handle, token: &token, packs: packed, packed: 0 };
+            let end = serve(&mut ws, gate, events, &mut uploads, &mut in_flight, &mut out).await;
             // the engine runs what was sent whether or not anyone reads
             // the answer: an upload begun on the way out is this session's too
             while let Ok(Some((_, spent, result))) = tokio::time::timeout(SETTLE_TIMEOUT, in_flight.next()).await {
@@ -74,13 +89,15 @@ where
     };
     if let Some(code) = code {
         let frame = CloseFrame { code: CloseCode::from(code), reason: "".into() };
-        let _ = tokio::time::timeout(WRITE_TIMEOUT, ws.close(Some(frame))).await;
+        // the one write with a total: nothing may hold a finished session
+        let _ = tokio::time::timeout(door.stall, ws.close(Some(frame))).await;
     }
 }
 
 /// The first frame must be a hello carrying the live seat key. Returns the
-/// key the session presented, to be re-checked for as long as it lives.
-async fn authenticate<S>(ws: &mut Ws<S>, handle: &WalletHandle, door: &WebDoor) -> Result<String, End>
+/// key the session presented, to be re-checked for as long as it lives,
+/// and whether its client reads packed frames.
+async fn authenticate<S>(ws: &mut Ws<S>, handle: &WalletHandle, door: &WebDoor) -> Result<(String, bool), End>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -90,7 +107,7 @@ where
         Ok(None | Some(Err(_))) => return Err(End(None)),
         _ => return Err(denied),
     };
-    let Ok(ClientFrame::Hello { v, token }) = serde_json::from_str(first.as_str()) else {
+    let Ok(ClientFrame::Hello { v, token, packed }) = serde_json::from_str(first.as_str()) else {
         return Err(denied);
     };
     if v != WIRE_VERSION {
@@ -101,8 +118,12 @@ where
         return Err(denied);
     }
     let welcome = ServerFrame::Welcome { v: WIRE_VERSION, build: door.build.clone(), caps: door.caps.clone() };
-    send(ws, &welcome).await?;
-    Ok(token)
+    // the welcome is small: a text frame for every client
+    let Ok(welcome) = serde_json::to_string(&welcome) else {
+        return Err(End(Some(CLOSE_PROTOCOL)));
+    };
+    write(ws, Message::text(welcome)).await?;
+    Ok((token, packed))
 }
 
 /// An `upload_chunk` command whose bytes are the next frame.
@@ -180,16 +201,16 @@ fn fill_chunk(parked: Parked, frame: &[u8]) -> Result<Option<(u64, Box<Command>)
 
 async fn serve<S>(
     ws: &mut Ws<S>,
-    handle: &WalletHandle,
     gate: &Gate,
-    token: &str,
     mut events: tokio::sync::broadcast::Receiver<Event>,
     uploads: &mut BTreeSet<String>,
     in_flight: &mut InFlight,
+    out: &mut Out<'_>,
 ) -> End
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let (handle, token) = (out.handle, out.token);
     let mut parked: Option<Parked> = None;
     loop {
         tokio::select! {
@@ -234,7 +255,7 @@ where
                             parked = Some(Parked { id, cmd: None });
                         }
                         let refused = ServerFrame::Reply { id, result: Err(MoltError::Refused(why.into())) };
-                        if let Err(end) = send(ws, &refused).await {
+                        if let Err(end) = send(ws, out, &refused).await {
                             return end;
                         }
                         continue;
@@ -262,7 +283,7 @@ where
                     return End(Some(CLOSE_UNAUTHORIZED));
                 }
                 note_upload(uploads, &result, spent);
-                if let Err(end) = send_reply(ws, id, result).await {
+                if let Err(end) = send_reply(ws, out, id, result).await {
                     return end;
                 }
             }
@@ -285,7 +306,7 @@ where
                     }
                     Err(RecvError::Closed) => return End(None),
                 };
-                if let Err(end) = send(ws, &frame).await {
+                if let Err(end) = send(ws, out, &frame).await {
                     return end;
                 }
             }
@@ -295,7 +316,7 @@ where
 
 /// A reply; one that carries bulk bytes sends them after it as chunks, so
 /// no frame holds a whole file as a JSON number array.
-async fn send_reply<S>(ws: &mut Ws<S>, id: u64, result: Result<Reply, MoltError>) -> Result<(), End>
+async fn send_reply<S>(ws: &mut Ws<S>, out: &mut Out<'_>, id: u64, result: Result<Reply, MoltError>) -> Result<(), End>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -303,47 +324,95 @@ where
         Ok(Reply::UploadBytes { bytes }) => (Ok(Reply::UploadBytes { bytes: Vec::new() }), Some(bytes)),
         other => (other, None),
     };
-    send(ws, &ServerFrame::Reply { id, result: result.map(Box::new) }).await?;
-    if let Some(bytes) = bytes {
-        // encoded one at a time: never a second copy of the whole file
-        for frame in chunks(id, &bytes) {
-            write(ws, Message::binary(frame)).await?;
+    send(ws, out, &ServerFrame::Reply { id, result: result.map(Box::new) }).await?;
+    match bytes {
+        Some(bytes) => write_chunks(ws, out, id, &bytes, false).await,
+        None => Ok(()),
+    }
+}
+
+/// `bytes` onto the socket as chunk frames, encoded one at a time (never
+/// a second copy of the whole). Each chunk waits for the socket, so on a
+/// slow link a transfer takes minutes: from the second chunk on the key
+/// is checked first, and a transfer stops with its key.
+async fn write_chunks<S>(ws: &mut Ws<S>, out: &Out<'_>, id: u64, bytes: &[u8], packed: bool) -> Result<(), End>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    for (i, frame) in chunks(id, bytes, packed).enumerate() {
+        if i > 0 && !molt_mcp::seat_token_matches(out.handle, out.token).await {
+            return Err(End(Some(CLOSE_UNAUTHORIZED)));
         }
+        write(ws, Message::binary(frame)).await?;
     }
     Ok(())
 }
 
 /// `bytes` as chunk frames; always at least one, the last one flagged.
-fn chunks(id: u64, bytes: &[u8]) -> impl Iterator<Item = Vec<u8>> + '_ {
+/// `packed`: the bytes are a deflated text frame.
+fn chunks(id: u64, bytes: &[u8], packed: bool) -> impl Iterator<Item = Vec<u8>> + '_ {
     // an empty reply is still one (empty, last) chunk
     let count = bytes.len().div_ceil(CHUNK).max(1);
     let mut offset = 0u64;
     (0..count).map(move |i| {
         let data = bytes.chunks(CHUNK).nth(i).unwrap_or_default();
-        let frame = Chunk { id, offset, last: i + 1 == count, data }.encode();
+        let chunk = Chunk { id, offset, last: i + 1 == count, data };
         offset += u64::try_from(data.len()).unwrap_or(u64::MAX);
-        frame
+        if packed {
+            chunk.encode_packed()
+        } else {
+            chunk.encode()
+        }
     })
 }
 
-async fn send<S>(ws: &mut Ws<S>, frame: &ServerFrame) -> Result<(), End>
+/// `text` deflated, if it is in the size window and got smaller; the text
+/// comes back either way. `None`: the blocking pool is gone, and the
+/// process with it.
+async fn packed(text: String) -> Option<(String, Option<Vec<u8>>)> {
+    if !(PACK_MIN..=MAX_UNPACKED).contains(&text.len()) {
+        return Some((text, None));
+    }
+    let deflate = |text: String| {
+        let packed = crate::pack::deflate(text.as_bytes()).ok().filter(|p| p.len() < text.len());
+        (text, packed)
+    };
+    if text.len() < PACK_INLINE {
+        return Some(deflate(text));
+    }
+    // megabytes of JSON: off the runtime's threads
+    tokio::task::spawn_blocking(move || deflate(text)).await.ok()
+}
+
+async fn send<S>(ws: &mut Ws<S>, out: &mut Out<'_>, frame: &ServerFrame) -> Result<(), End>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let Ok(text) = serde_json::to_string(frame) else {
         return Err(End(Some(CLOSE_PROTOCOL)));
     };
-    write(ws, Message::text(text)).await
+    if !out.packs {
+        return write(ws, Message::text(text)).await;
+    }
+    match packed(text).await {
+        Some((_, Some(bytes))) => {
+            out.packed += 1;
+            // back to back: the client holds one packed frame at a time
+            write_chunks(ws, out, out.packed, &bytes, true).await
+        }
+        Some((text, None)) => write(ws, Message::text(text)).await,
+        None => Err(End(None)),
+    }
 }
 
+/// One frame onto the socket. No timeout here: the socket itself drops a
+/// peer that takes nothing for the door's stall time (`server.rs`), and a
+/// peer that keeps reading may take as long as its link needs.
 async fn write<S>(ws: &mut Ws<S>, message: Message) -> Result<(), End>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    match tokio::time::timeout(WRITE_TIMEOUT, ws.send(message)).await {
-        Ok(Ok(())) => Ok(()),
-        _ => Err(End(None)),
-    }
+    ws.send(message).await.map_err(|_| End(None))
 }
 
 #[cfg(test)]
@@ -423,7 +492,7 @@ mod tests {
     #[test]
     fn bytes_split_into_bounded_chunks_that_reassemble() {
         let bytes: Vec<u8> = (0..=u8::MAX).cycle().take(2 * CHUNK + 5).collect();
-        let frames: Vec<_> = chunks(9, &bytes).collect();
+        let frames: Vec<_> = chunks(9, &bytes, false).collect();
         assert_eq!(frames.len(), 3);
         let mut back = Vec::new();
         for (i, f) in frames.iter().enumerate() {
@@ -437,12 +506,82 @@ mod tests {
         assert_eq!(back, bytes);
     }
 
+    /// A frame is packed only inside the size window, and only if that
+    /// made it smaller. (Only for a client that asked: `slow_link.rs`.)
+    #[tokio::test]
+    async fn only_a_frame_in_the_window_that_shrinks_is_packed() {
+        use std::io::Read;
+        let large = "one two ".repeat(PACK_INLINE / 4);
+        assert!(large.len() > PACK_INLINE, "the blocking-thread path");
+        let (text, bytes) = packed(large.clone()).await.expect("answered");
+        let bytes = bytes.expect("packed");
+        assert_eq!(text, large, "the text comes back");
+        assert!(bytes.len() * 10 < large.len());
+        let mut back = String::new();
+        flate2::read::DeflateDecoder::new(bytes.as_slice()).read_to_string(&mut back).expect("raw deflate");
+        assert_eq!(back, large);
+
+        let at = |len: usize| "a".repeat(len);
+        assert!(packed(at(PACK_MIN - 1)).await.expect("answered").1.is_none(), "a small frame stays as it is");
+        assert!(packed(at(PACK_MIN)).await.expect("answered").1.is_some(), "the window opens at PACK_MIN");
+        // what deflate cannot shrink goes out as it is
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let noise: String = (0..PACK_MIN * 2)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                char::from_u32(0x4e00 + u32::try_from(x % 20_000).expect("small")).expect("a char")
+            })
+            .collect();
+        let (text, bytes) = packed(noise.clone()).await.expect("answered");
+        assert_eq!(text, noise);
+        assert!(bytes.is_none_or(|b| b.len() < noise.len()), "never a larger frame");
+    }
+
+    /// A security property, not a tuning choice (`docs/web_gui.md` §5.6
+    /// C): with one deflate stream per connection the second frame below
+    /// would be a few bytes naming the first, and a frame's length would
+    /// tell what an earlier one held.
+    #[tokio::test]
+    async fn every_packed_frame_is_its_own_stream() {
+        use std::io::Read;
+        let mut x = 0x2545_F491_4F6C_DD1Du64;
+        let text: String = (0..PACK_MIN * 8)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                char::from(b'a' + u8::try_from(x % 16).expect("small"))
+            })
+            .collect();
+        let first = packed(text.clone()).await.expect("answered").1.expect("packed");
+        let second = packed(text.clone()).await.expect("answered").1.expect("packed");
+        assert_eq!(second, first, "the same text packs the same, whatever went before");
+        let mut back = String::new();
+        flate2::read::DeflateDecoder::new(second.as_slice()).read_to_string(&mut back).expect("inflates alone");
+        assert_eq!(back, text);
+    }
+
+    #[test]
+    fn a_packed_frame_splits_into_flagged_chunks() {
+        let bytes = vec![5u8; CHUNK + 1];
+        let frames: Vec<_> = chunks(4, &bytes, true).collect();
+        assert_eq!(frames.len(), 2);
+        for (i, f) in frames.iter().enumerate() {
+            assert!(Chunk::decode(f).is_none(), "not a chunk of bytes");
+            let (c, packed) = Chunk::decode_any(f).expect("a chunk");
+            assert!(packed);
+            assert_eq!((c.id, c.last), (4, i == 1));
+        }
+    }
+
     #[test]
     fn an_exact_multiple_and_an_empty_reply_end_with_a_last_chunk() {
-        let frames: Vec<_> = chunks(1, &vec![7u8; CHUNK]).collect();
+        let frames: Vec<_> = chunks(1, &vec![7u8; CHUNK], false).collect();
         assert_eq!(frames.len(), 1);
         assert!(Chunk::decode(&frames[0]).expect("a chunk").last);
-        let frames: Vec<_> = chunks(1, &[]).collect();
+        let frames: Vec<_> = chunks(1, &[], false).collect();
         assert_eq!(frames.len(), 1);
         let c = Chunk::decode(&frames[0]).expect("a chunk");
         assert!(c.last && c.data.is_empty());

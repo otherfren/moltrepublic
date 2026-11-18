@@ -328,6 +328,10 @@ pub(crate) fn build_ui_snapshot(ui: &AppWindow) -> molt_core::UiSnapshot {
 /// publish half of `gui_over_mcp.md`, run at the end of every mirror pass
 /// (what it publishes is what it just rendered).
 async fn publish_ui_state(wallet: &Engine, weak: &slint::Weak<AppWindow>) {
+    if wallet.is_remote() {
+        // nothing to build: see `publish_snapshot`
+        return;
+    }
     let (tx, rx) = futures_channel::oneshot::channel();
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
@@ -336,8 +340,19 @@ async fn publish_ui_state(wallet: &Engine, weak: &slint::Weak<AppWindow>) {
         }
     });
     if let Ok(snapshot) = rx.await {
-        let _ = wallet.execute(Command::UiPublish { snapshot }).await;
+        publish_snapshot(wallet, snapshot).await;
     }
+}
+
+/// Hand one snapshot to the engine - the engine in this process only.
+/// The slot is the native window's (`docs/web_gui.md` §5.5): a window
+/// behind the web door does not publish, and the door refuses the command
+/// anyway, so sending it bought one refusal in the node's log per pass.
+pub(crate) async fn publish_snapshot(wallet: &Engine, snapshot: molt_core::UiSnapshot) {
+    if wallet.is_remote() {
+        return;
+    }
+    let _ = wallet.execute(Command::UiPublish { snapshot }).await;
 }
 
 /// Read the shared session and push it into the Slint properties on the UI

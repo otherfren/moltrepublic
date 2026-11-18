@@ -337,6 +337,11 @@ carrying the serde contract, opened by the same live seat key.
 | an upload's bytes ride one chunk frame behind their command; a frame that is not exactly that ends the session | `session.rs::fill_chunk` |
 | an upload is its session's; the session's end drops what it did not share | `session.rs::session_refusal`, `run` |
 | the bundle is a fixed list (`BUNDLE_FILES`), read once from a private directory | `server.rs::load_bundle` |
+| a file is served in the smallest coding the request offers (gzip, brotli), encoded once at start | `server.rs::Served`, `Offer` |
+| a connection that takes nothing of what is written to it for 30 s is dropped; a slow one is not (a stall, never a total; the grain is the 32 KiB send buffer the door sets, a floor of 1 to 2 KB/s) | `server.rs::serve_with`, `WebDoor::stall`, `SEND_BUFFER` |
+| each packed frame is its own deflate stream: no compression context is shared between frames | `pack.rs::deflate`, `session.rs::packed` |
+| a large frame is packed only for a client whose hello asked; the client stops inflating at 64 MiB | `session.rs::send`, `molt-ui-kit` `protocol.rs::unpack` |
+| a transfer in chunks stops with its key: re-checked before every chunk after the first | `session.rs::write_chunks` |
 
 Stronger than the line protocol in one place: rotation closes a SILENT
 session, because the socket is a push channel. Same as MCP everywhere
@@ -344,7 +349,15 @@ else - the seat token operates the machine (above), the wire is
 cleartext, and a non-loopback use is an SSH tunnel.
 
 Known and accepted: a local process can hold the 64 session slots with
-silent sockets, ten seconds at a time.
+silent sockets, ten seconds at a time; and one that reads a few KB/s
+keeps a connection slot (256) for as long as it does.
+
+Compression and secrets: a packed frame is compressed alone, so its
+length cannot be steered by another frame's content. A reply that
+carries a local secret must not share a frame with peer-written text
+(none does today), and the frames must never share one deflate stream:
+that would make a member's chat line a length probe for anyone reading
+sizes on an SSH tunnel.
 
 ### The byte doors
 

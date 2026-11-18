@@ -2,7 +2,8 @@
 //! The web door's wire (`docs/web_gui.md` §5.1): the frames a browser GUI
 //! and `moltd` exchange over one WebSocket. JSON text frames carry the
 //! contract ([`Command`], [`Reply`], [`Event`], [`MoltError`]) as it
-//! already serializes; binary frames carry bulk bytes in bounded chunks.
+//! already serializes; binary frames carry bulk bytes in bounded chunks,
+//! and a large text frame deflated, for a client that asked (§5.6).
 //!
 //! Types and codecs only - no socket, no gate. Which commands a client may
 //! send is the server's decision (`INTERNAL` below is its input).
@@ -24,6 +25,14 @@ pub const MAX_TRANSFER: u64 = 64 * 1024 * 1024;
 /// The most bytes one [`Chunk`] carries.
 pub const CHUNK: usize = 256 * 1024;
 
+/// A server frame whose JSON is shorter than this is never packed.
+pub const PACK_MIN: usize = 1024;
+
+/// The most text one packed frame may inflate to. The client stops
+/// inflating there (a small frame must not be able to ask for the tab's
+/// whole memory); the server sends anything larger unpacked.
+pub const MAX_UNPACKED: usize = 64 * 1024 * 1024;
+
 /// The close code for a key that is missing, wrong, or no longer the
 /// seat key.
 pub const CLOSE_UNAUTHORIZED: u16 = 4401;
@@ -41,6 +50,12 @@ pub enum ClientFrame {
         v: u32,
         /// The seat token. Never in a URL, a header or a cookie.
         token: String,
+        /// The client reads packed frames ([`Chunk::encode_packed`]).
+        /// Additive: left out when false, so a client that cannot is
+        /// the hello it always was, and a server that predates the
+        /// field ignores it and never packs.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        packed: bool,
     },
     /// One command; the reply echoes `id`.
     Cmd {
@@ -101,7 +116,11 @@ pub enum ServerFrame {
 }
 
 /// A binary frame: `le64 id ‖ le64 offset ‖ flags ‖ bytes`. `id` is the
-/// request the bytes belong to; `last` closes the transfer.
+/// request the bytes belong to; `last` (flag bit 1) closes the transfer.
+///
+/// Server to client only, flag bit 2 marks a PACKED frame: the transfer
+/// is one text frame, raw-deflated, and `id` counts the connection's
+/// packed frames instead of naming a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Chunk<'a> {
     /// The request these bytes belong to.
@@ -115,31 +134,54 @@ pub struct Chunk<'a> {
 }
 
 const CHUNK_HEADER: usize = 17;
+const FLAG_LAST: u8 = 1;
+const FLAG_PACKED: u8 = 2;
 
 impl<'a> Chunk<'a> {
     /// The frame bytes.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
+        self.encode_flagged(0)
+    }
+
+    /// The frame bytes of a chunk of a packed text frame.
+    #[must_use]
+    pub fn encode_packed(&self) -> Vec<u8> {
+        self.encode_flagged(FLAG_PACKED)
+    }
+
+    fn encode_flagged(&self, flags: u8) -> Vec<u8> {
         let mut out = Vec::with_capacity(CHUNK_HEADER + self.data.len());
         out.extend_from_slice(&self.id.to_le_bytes());
         out.extend_from_slice(&self.offset.to_le_bytes());
-        out.push(u8::from(self.last));
+        out.push(flags | if self.last { FLAG_LAST } else { 0 });
         out.extend_from_slice(self.data);
         out
     }
 
-    /// Parse a frame; `None` for a short header or an unknown flag.
+    /// Parse a frame of bytes; `None` for a short header, an unknown
+    /// flag, or a packed frame (only a client that asked reads those).
     #[must_use]
     pub fn decode(frame: &'a [u8]) -> Option<Self> {
+        match Self::decode_any(frame)? {
+            (chunk, false) => Some(chunk),
+            (_, true) => None,
+        }
+    }
+
+    /// Parse a frame of either kind: the chunk, and whether it is a
+    /// piece of a packed text frame. `None` for a short header or an
+    /// unknown flag.
+    #[must_use]
+    pub fn decode_any(frame: &'a [u8]) -> Option<(Self, bool)> {
         let (head, data) = frame.split_at_checked(CHUNK_HEADER)?;
         let id = u64::from_le_bytes(head[0..8].try_into().ok()?);
         let offset = u64::from_le_bytes(head[8..16].try_into().ok()?);
-        let last = match head[16] {
-            0 => false,
-            1 => true,
-            _ => return None,
-        };
-        Some(Chunk { id, offset, last, data })
+        let flags = head[16];
+        if flags & !(FLAG_LAST | FLAG_PACKED) != 0 {
+            return None;
+        }
+        Some((Chunk { id, offset, last: flags & FLAG_LAST != 0, data }, flags & FLAG_PACKED != 0))
     }
 }
 
@@ -231,8 +273,10 @@ mod tests {
     /// deliberate version bump.
     #[test]
     fn frame_shapes_are_pinned() {
-        let hello = ClientFrame::Hello { v: WIRE_VERSION, token: "t".into() };
+        let hello = ClientFrame::Hello { v: WIRE_VERSION, token: "t".into(), packed: false };
         assert_eq!(serde_json::to_string(&hello).expect("json"), r#"{"hello":{"v":1,"token":"t"}}"#);
+        let hello = ClientFrame::Hello { v: WIRE_VERSION, token: "t".into(), packed: true };
+        assert_eq!(serde_json::to_string(&hello).expect("json"), r#"{"hello":{"v":1,"token":"t","packed":true}}"#);
 
         let cmd: ClientFrame =
             serde_json::from_str(r#"{"cmd":{"id":4,"cmd":{"cmd":"read_session"}}}"#).expect("a command frame");
@@ -262,7 +306,7 @@ mod tests {
 
     #[test]
     fn a_frame_never_prints_a_secret() {
-        let hello = ClientFrame::Hello { v: 1, token: "sekrit".into() };
+        let hello = ClientFrame::Hello { v: 1, token: "sekrit".into(), packed: true };
         assert!(!format!("{hello:?}").contains("sekrit"));
         let patch = Command::PatchSettings { patch: serde_json::json!({ "mcp_token": "sekrit" }) };
         let shown = format!("{:?}", ClientFrame::Cmd { id: 1, cmd: Box::new(patch) });
@@ -317,7 +361,63 @@ mod tests {
     fn a_malformed_chunk_is_refused() {
         assert_eq!(Chunk::decode(&[0u8; 16]), None, "short header");
         let mut frame = Chunk { id: 1, offset: 0, last: false, data: b"x" }.encode();
-        frame[16] = 2;
+        frame[16] = 4;
         assert_eq!(Chunk::decode(&frame), None, "unknown flag");
+        assert_eq!(Chunk::decode_any(&frame), None, "unknown flag");
+        assert_eq!(Chunk::decode_any(&[0u8; 16]), None, "short header");
+    }
+
+    /// A packed chunk is its own kind: the lenient decoder names it, the
+    /// strict one (the server's, and every client's before packed frames
+    /// existed) refuses it.
+    #[test]
+    fn a_packed_chunk_is_told_apart() {
+        let c = Chunk { id: 3, offset: 9, last: true, data: b"zz" };
+        let packed = c.encode_packed();
+        assert_eq!(packed[16], 3, "last and packed");
+        assert_eq!(Chunk::decode_any(&packed), Some((c, true)));
+        assert_eq!(Chunk::decode(&packed), None);
+        assert_eq!(Chunk::decode_any(&c.encode()), Some((c, false)));
+        let open = Chunk { last: false, ..c };
+        assert_eq!(open.encode_packed()[16], 2);
+        assert_eq!(Chunk::decode_any(&open.encode_packed()), Some((open, true)));
+    }
+
+    /// **Old and new hello (`docs/web_gui.md` §5.6).** The field is
+    /// additive both ways: a hello without it reads as "cannot unpack",
+    /// and the hello type as it was before the field reads a hello that
+    /// carries it - so neither pairing needs a version bump.
+    #[test]
+    fn the_packed_hello_is_additive_both_ways() {
+        assert_eq!(WIRE_VERSION, 1, "packed frames did not move the version");
+        let old: ClientFrame = serde_json::from_str(r#"{"hello":{"v":1,"token":"t"}}"#).expect("an old hello");
+        assert!(matches!(old, ClientFrame::Hello { v: 1, packed: false, .. }));
+        let new: ClientFrame =
+            serde_json::from_str(r#"{"hello":{"v":1,"token":"t","packed":true}}"#).expect("a new hello");
+        assert!(matches!(new, ClientFrame::Hello { v: 1, packed: true, .. }));
+
+        /// The client frames exactly as a server before the field read them.
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum OldClientFrame {
+            Hello {
+                v: u32,
+                token: String,
+            },
+            #[allow(dead_code)]
+            Cmd {
+                id: u64,
+                cmd: Box<Command>,
+            },
+        }
+        let seen: OldClientFrame =
+            serde_json::from_str(r#"{"hello":{"v":1,"token":"t","packed":true}}"#).expect("an old server reads it");
+        assert!(matches!(seen, OldClientFrame::Hello { v: 1, ref token } if token == "t"));
+    }
+
+    #[test]
+    fn the_packed_bounds_are_pinned() {
+        assert_eq!(PACK_MIN, 1024);
+        assert_eq!(u64::try_from(MAX_UNPACKED).ok(), Some(MAX_TRANSFER), "one ceiling, packed or not");
     }
 }

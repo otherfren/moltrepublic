@@ -78,7 +78,13 @@ async fn node() -> Node {
     }
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("addr").port();
-    let door = WebDoor { build: "9.9.9".into(), caps: Caps::default(), dir: bundle, pre_auth: Duration::from_secs(10) };
+    let door = WebDoor {
+        build: "9.9.9".into(),
+        caps: Caps::default(),
+        dir: bundle,
+        pre_auth: Duration::from_secs(10),
+        stall: Duration::from_secs(30),
+    };
     tokio::spawn(serve(listener, handle.clone(), door));
     Node { port, handle, store: dir.join("uploads"), _tmp: tmp }
 }
@@ -121,7 +127,7 @@ fn close_code(m: &Message) -> Option<u16> {
 /// A welcomed raw session: the frames are written by hand.
 async fn welcomed(n: &Node) -> Ws {
     let mut ws = open(n).await;
-    let hello = ClientFrame::Hello { v: WIRE_VERSION, token: SEAT.into() };
+    let hello = ClientFrame::Hello { v: WIRE_VERSION, token: SEAT.into(), packed: false };
     ws.send(Message::text(serde_json::to_string(&hello).expect("json"))).await.expect("hello");
     match next(&mut ws).await {
         Message::Text(t) => assert!(t.as_str().contains("welcome"), "{t}"),

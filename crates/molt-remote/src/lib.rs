@@ -5,6 +5,7 @@
 
 pub mod gate;
 pub mod origin;
+mod pack;
 mod server;
 mod session;
 

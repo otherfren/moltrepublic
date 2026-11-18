@@ -407,6 +407,8 @@ fn main() -> anyhow::Result<()> {
             caps: molt_core::wire::Caps { embedded_tor: cfg!(feature = "embedded-tor") },
             dir: config.web.bundle_dir(&std::path::absolute(&config_path).unwrap_or_else(|_| config_path.clone())),
             pre_auth: std::time::Duration::from_secs(10),
+            // a stall, never a total: a slow link is served, a dead one dropped
+            stall: std::time::Duration::from_secs(30),
         };
         let handle = wallet.clone();
         rt.spawn(async move {

@@ -50,7 +50,13 @@ async fn open_door(w: &WalletHandle, root: &std::path::Path, caps: molt_core::wi
     w.execute(Command::PatchSettings { patch: serde_json::json!({ "mcp_token": SEAT }) }).await.expect("a seat key");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("addr").port();
-    let door = molt_remote::WebDoor { build: "test".into(), caps, dir: web, pre_auth: std::time::Duration::from_secs(10) };
+    let door = molt_remote::WebDoor {
+        build: "test".into(),
+        caps,
+        dir: web,
+        pre_auth: std::time::Duration::from_secs(10),
+        stall: std::time::Duration::from_secs(30),
+    };
     tokio::spawn(molt_remote::serve(listener, w.clone(), door));
     port
 }
@@ -141,6 +147,57 @@ fn a_window_behind_the_web_door_mirrors_like_a_native_one() {
     assert_eq!(web.get_surfaces().row_count(), native.get_surfaces().row_count());
     assert_eq!(web.get_screen(), native.get_screen());
     assert_eq!(web.get_lang_index(), native.get_lang_index());
+}
+
+/// **§5.5.** The engine has one snapshot slot and it is the native
+/// window's: a window behind the door publishes nothing. The door would
+/// refuse it anyway, once per mirror pass, as a warning in the node's
+/// log - so the command must not even cross.
+#[test]
+fn a_window_behind_the_web_door_does_not_publish() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (w, port) = node(&rt, tmp.path());
+    let (web, _, _) = window();
+
+    // the shipped client on a socket whose outgoing frames are kept
+    let sent = Arc::new(Mutex::new(Vec::<String>::new()));
+    let engine = rt.block_on(async {
+        let (incoming, outgoing) = dial(port).await.expect("the door");
+        let kept = sent.clone();
+        let outgoing = outgoing.with(move |wire: Wire| {
+            if let Wire::Text(text) = &wire {
+                kept.lock().expect("sent").push(text.clone());
+            }
+            futures_util::future::ready(Ok::<_, tokio_tungstenite::tungstenite::Error>(wire))
+        });
+        let (handle, pump) = remote();
+        let (welcomed, welcome) = futures_channel::oneshot::channel();
+        tokio::spawn(async move { pump.run(SEAT, incoming, Box::pin(outgoing), welcomed).await });
+        welcome.await.expect("welcomed");
+        Engine::from(handle)
+    });
+
+    // the generation in the engine's snapshot slot; 0 while it is empty
+    let generation = |w: &WalletHandle| match rt.block_on(w.execute(Command::ReadUiState)) {
+        Ok(Reply::UiState { snapshot }) => snapshot.map_or(0, |s| s.generation),
+        other => panic!("unexpected: {other:?}"),
+    };
+    let before = generation(&w);
+    rt.block_on(crate::mirror::publish_snapshot(&engine, crate::mirror::build_ui_snapshot(&web)));
+    // a command after it: whatever was sent before has crossed by now
+    rt.block_on(engine.execute(Command::ReadSession)).expect("a session");
+    let frames = sent.lock().expect("sent").clone();
+    assert!(frames.iter().any(|f| f.contains("read_session")), "the socket is the recorded one");
+    assert!(!frames.iter().any(|f| f.contains("ui_publish")), "a remote window sent ui_publish");
+    assert_eq!(generation(&w), before, "the engine's slot is untouched");
+
+    // the native window still publishes: gui_over_mcp reads it
+    let native = Engine::from(w.clone());
+    rt.block_on(crate::mirror::publish_snapshot(&native, crate::mirror::build_ui_snapshot(&web)));
+    assert!(generation(&w) > before, "the native window's snapshot landed");
 }
 
 /// **§6.6.** A window behind the door has no process inputs: the

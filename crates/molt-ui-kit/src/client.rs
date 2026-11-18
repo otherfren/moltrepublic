@@ -389,42 +389,44 @@ impl Pump {
                 };
                 match step {
                     Step::Frame(None) | Step::Request(None) => return Ended::Closed,
-                    Step::Frame(Some(Wire::Binary(bytes))) => {
-                        if let Err(broken) = protocol.on_binary(&bytes) {
-                            return Ended::Broken(broken);
+                    Step::Frame(Some(wire)) => {
+                        // a packed frame's last piece says what a text frame says
+                        let said = match wire {
+                            Wire::Binary(bytes) => protocol.on_binary(&bytes),
+                            Wire::Text(text) => protocol.on_text(&text),
+                        };
+                        match said {
+                            Err(broken) => return Ended::Broken(broken),
+                            Ok(None) => {}
+                            Ok(Some(Notice::Welcome { build, caps })) => {
+                                // the key was taken, whatever build answers
+                                if let Some((tell, new)) = self.rotating.take() {
+                                    let _ = tell.send(new);
+                                }
+                                // before `protocol.welcomed()` is read again:
+                                // no request leaves the queue for another build
+                                if self.build.as_deref().is_some_and(|only| only != build) {
+                                    return Ended::Version;
+                                }
+                                // the handle first: whoever `heard` wakes
+                                // already reads it there
+                                let welcome = Welcome { build, caps };
+                                drop(self.welcome.set(welcome.clone()));
+                                // events were missed between two connections
+                                if std::mem::replace(&mut self.served, true) {
+                                    drop(self.notices.unbounded_send(Notice::Lag));
+                                }
+                                heard(Signal::Welcomed(welcome));
+                            }
+                            // a GUI that stopped listening is not this task's problem
+                            Ok(Some(notice)) => {
+                                if matches!(notice, Notice::Lag) {
+                                    heard(Signal::Lagged);
+                                }
+                                drop(self.notices.unbounded_send(notice));
+                            }
                         }
                     }
-                    Step::Frame(Some(Wire::Text(text))) => match protocol.on_text(&text) {
-                        Err(broken) => return Ended::Broken(broken),
-                        Ok(None) => {}
-                        Ok(Some(Notice::Welcome { build, caps })) => {
-                            // the key was taken, whatever build answers
-                            if let Some((tell, new)) = self.rotating.take() {
-                                let _ = tell.send(new);
-                            }
-                            // before `protocol.welcomed()` is read again:
-                            // no request leaves the queue for another build
-                            if self.build.as_deref().is_some_and(|only| only != build) {
-                                return Ended::Version;
-                            }
-                            // the handle first: whoever `heard` wakes
-                            // already reads it there
-                            let welcome = Welcome { build, caps };
-                            drop(self.welcome.set(welcome.clone()));
-                            // events were missed between two connections
-                            if std::mem::replace(&mut self.served, true) {
-                                drop(self.notices.unbounded_send(Notice::Lag));
-                            }
-                            heard(Signal::Welcomed(welcome));
-                        }
-                        // a GUI that stopped listening is not this task's problem
-                        Ok(Some(notice)) => {
-                            if matches!(notice, Notice::Lag) {
-                                heard(Signal::Lagged);
-                            }
-                            drop(self.notices.unbounded_send(notice));
-                        }
-                    },
                     Step::Request(Some(request)) => {
                         let (cmd, waiter) = *request;
                         // `None`: answered without the server
@@ -981,6 +983,80 @@ mod tests {
             assert!(matches!(answer, Ok(Reply::Ack)));
         });
         assert_eq!(lag, 1, "the server's lag is told to the driver");
+    }
+
+    /// Raw deflate, as the door packs a frame.
+    fn deflated(text: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(3));
+        e.write_all(text).expect("deflate");
+        e.finish().expect("deflate")
+    }
+
+    impl Server {
+        /// Say `frame` packed, in pieces.
+        fn say_packed(&self, seq: u64, frame: &ServerFrame) {
+            let packed = deflated(serde_json::to_string(frame).expect("json").as_bytes());
+            let pieces: Vec<&[u8]> = packed.chunks(64).collect();
+            let mut offset = 0u64;
+            for (i, data) in pieces.iter().enumerate() {
+                let chunk = molt_core::wire::Chunk { id: seq, offset, last: i + 1 == pieces.len(), data };
+                self.to_client.unbounded_send(Wire::Binary(chunk.encode_packed())).expect("open");
+                offset += u64::try_from(data.len()).expect("small");
+            }
+        }
+    }
+
+    /// The pump asks for packed frames and serves what arrives in them
+    /// exactly like text: a reply to its caller, an event and a lag to
+    /// the subscriber and the driver.
+    #[test]
+    fn packed_frames_are_served_like_text_frames() {
+        let (handle, mut pump) = remote();
+        let (mut servers, dial) = dialer(1);
+        let mut server = servers.pop().expect("one");
+        let mut events = handle.subscribe();
+        let mut lag = 0;
+        let serving = pump.serve("tok", dial, |s| lag += usize::from(s == Signal::Lagged));
+        run(serving, async {
+            let hello = server.heard().await;
+            assert!(matches!(hello, ClientFrame::Hello { packed: true, .. }), "the client says it can unpack");
+            server.welcome();
+            let asked = handle.execute(Command::ReadSession);
+            let server_side = async {
+                let ClientFrame::Cmd { id, .. } = server.heard().await else { panic!("a command") };
+                let e = Event::SessionChanged { scope: molt_core::SessionScope::Full };
+                server.say_packed(1, &ServerFrame::Event(Box::new(e)));
+                server.say_packed(2, &ServerFrame::Lag);
+                let big = MoltError::Engine("word ".repeat(2000));
+                server.say_packed(3, &ServerFrame::Reply { id, result: Err(big) });
+            };
+            let (answer, ()) = futures_util::future::join(asked, server_side).await;
+            assert!(matches!(answer, Err(MoltError::Engine(t)) if t.len() == 10_000));
+            assert!(matches!(events.recv().await, Ok(Event::SessionChanged { .. })));
+            assert_eq!(events.recv().await.err(), Some(NoEvent::Lagged));
+        });
+        assert_eq!(lag, 1, "a packed lag is told to the driver too");
+    }
+
+    /// A frame that inflates past the ceiling ends the connection: the
+    /// tab is not asked for the memory.
+    #[test]
+    fn a_packed_frame_over_the_ceiling_ends_the_connection() {
+        let (handle, mut server, _welcome, pump) = rig();
+        let asked = handle.execute(Command::ReadSession);
+        let story = async {
+            server.heard().await;
+            server.welcome();
+            server.heard().await;
+            let bomb = deflated(&vec![0u8; molt_core::wire::MAX_UNPACKED + 1]);
+            let chunk = molt_core::wire::Chunk { id: 1, offset: 0, last: true, data: &bomb };
+            server.to_client.unbounded_send(Wire::Binary(chunk.encode_packed())).expect("open");
+            server
+        };
+        let (answer, ended, _server) = block_on(futures_util::future::join3(asked, pump, story));
+        assert_eq!(ended, Ended::Broken(Broken("packed frame over the ceiling")));
+        assert!(answer.as_ref().is_err_and(is_gone), "whoever waited is answered");
     }
 
     #[test]

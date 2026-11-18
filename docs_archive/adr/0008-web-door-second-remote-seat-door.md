@@ -46,8 +46,13 @@ is `execute` + `subscribe`.
   directory it minted itself: ownership is never read off a client's
   path, and `share_file` refuses a path under the store.
 - **A push channel dies with its key.** The key is re-checked on every
-  inbound frame, before every reply, and before any event that can follow
-  a rotation.
+  inbound frame, before every reply, before any event that can follow
+  a rotation, and between the chunks of a transfer already on its way.
+- **A slow reader is served, a dead one dropped (2026-11-18).** No
+  write has a total: a connection is dropped when it takes nothing for
+  the stall time, so a tunnel at a few KB/s gets its files and replies
+  whole (the door's own small send buffer keeps the timer that fine). The bundle goes out compressed and large frames packed, both
+  by request only (`docs/web_gui.md` §5.6).
 - **The bundle is trusted like the binary.** The token is typed into the
   served page, so the bundle directory must be private (no symlink, no
   foreign owner, not group- or world-writable) or no port opens. `[web]`

@@ -35,6 +35,9 @@ What each stage built (W0 (a)-(b) 2026-11-17, the rest 2026-11-18):
   door's list by
   `the_release_script_packs_exactly_what_the_door_serves`
   (`crates/molt-remote/tests/door.rs`).
+- After W6, from a real node on a slow link (2026-11-18): stall
+  timeouts in place of totals, the bundle served compressed, large
+  frames packed (§5.6). Not yet run in a browser.
 
 ## 1. Goal
 
@@ -281,6 +284,7 @@ One WebSocket, JSON text frames for control, binary frames for bulk bytes.
 
 ```
 client -> server   {"hello": {"v": 1, "token": "..."}}                first frame only
+                   {"hello": {"v": 1, "token": "...", "packed": true}}  a client that unpacks (§5.6)
 server -> client   {"welcome": {"v": 1, "build": "0.0.18",
                                 "caps": {"embedded_tor": true}}}       or close 4401
 client -> server   {"cmd": {"id": n, "cmd": { ...Command... }}}
@@ -294,6 +298,9 @@ Built: `molt_core::wire` (`ClientFrame`, `ServerFrame`, `Caps`, `Chunk`),
 shapes pinned by test.
 
 - Requests are answered out of order; `id` correlates.
+- A server frame of 1 KiB or more goes to a client that said `packed`
+  as binary chunk frames holding its deflated text (§5.6); to any other
+  client every frame is the text frame shown here.
 - `lag` maps `broadcast::RecvError::Lagged` and a slow socket alike onto
   the mirror's existing full re-read. The server never buffers events
   without bound: a full per-connection queue drops events and sets `lag`.
@@ -420,10 +427,14 @@ browser never raises (2026-11-18; no control to hide).
   matched on the raw request target, no directory walking; the bytes are read ONCE at start (§5.4), so nothing
   on disk is followed per request. A `Sec-Fetch-Site: cross-site` request
   is refused and files carry `Cross-Origin-Resource-Policy: same-origin`,
-  so another site cannot probe for a running node. One HTTP exchange has
-  60 s in total. Headers: CSP `default-src 'self'; script-src
+  so another site cannot probe for a running node. A file goes out in
+  the smallest content coding the request offers (gzip or brotli, made
+  once at start) with `Vary: Accept-Encoding`; a connection that takes
+  nothing of its answer for 30 s is dropped, one that reads slowly is
+  not (§5.6). Headers: CSP `default-src 'self'; script-src
   'self' 'wasm-unsafe-eval'; frame-ancestors 'none'`,
-  `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`.
+  `X-Content-Type-Options: nosniff`. The page is `Cache-Control:
+  no-store`; its files are `no-cache` with an `ETag` (§5.6).
 - The page keeps the token in memory only and asks on every load.
 - The `ring_free_guard` must stay green.
 
@@ -443,8 +454,208 @@ door") and its decision in
 ### 5.5 `UiPublish`
 
 The engine has one snapshot slot, read by `read_ui_state` (test
-instrumentation for `gui_walk.py`). The browser does not publish. Driving
-the web GUI over MCP would be its own change.
+instrumentation for `gui_walk.py`). The browser does not publish: a
+window on a remote engine skips the publish at its source
+(`mirror.rs::publish_snapshot`, pinned by test), so the door's refusal of
+`ui_publish` is never exercised by its own page. Before 2026-11-18 the
+remote window sent it after every mirror pass and the node logged one
+refusal per pass. Driving the web GUI over MCP would be its own change.
+
+### 5.6 A slow link (2026-11-18)
+
+Measured on a real node behind an SSH tunnel over a lossy path (about
+35 KB/s server to browser, RTT 150 ms): the 62 MB module was cut off by
+the 60 s total on an HTTP exchange, a 16.8 MB `read_state` reply could
+never pass the 30 s total on one frame, and nothing was compressed. The
+window never filled. Three changes, none of which moves a door rule (the
+bind, Origin/Host, the gate and the bundle trust are untouched).
+
+**A. A timeout measures a stall, never a total.** The accepted TCP
+socket is wrapped once in `tokio_io_timeout::TimeoutWriter`
+(`WebDoor::stall`, 30 s in `moltd`): its timer starts when a write finds
+the send buffer full and restarts when the kernel takes more. hyper's
+upgrade hands the same socket on, so one wrapper covers a static file's
+body and every WebSocket frame. A client that keeps reading is not cut
+off; one that takes nothing for `stall` loses its connection, its
+session slot and whatever was buffered for it.
+
+The timer's grain is the send buffer, not a byte: Linux reports a full
+socket writable again only once about a third of its buffer is free,
+and a kernel-tuned buffer on loopback is megabytes (`tcp_wmem` max
+4 MiB here), a third of which the 35 KB/s tunnel does not take in
+30 s. So every accepted socket gets `SO_SNDBUF` = 32 KiB
+(`server.rs::SEND_BUFFER`, set through `socket2`, tokio's own socket
+layer; a socket that refuses it is not served). Loopback has no round
+trip a large buffer would cover. Measured with the 500 ms test timeout
+against a reader with a 16 KiB receive buffer: 50 KiB per stall is
+served, 25 KiB is not, at 8, 16 and 32 KiB alike (a 64 KiB buffer fails
+at 50 and passes at 150; untuned, 150 KiB per stall is cut after
+2.4 of 6 MB). At 30 s that is a floor between 0.8 and 1.7 KB/s; the
+tunnel takes about 1 MB per stall. Below the floor a steady reader is
+dropped like a stopped one. The buffer also caps what an unread
+connection pins in the kernel (256 slots at 64 KiB accounted, where
+autotuning allowed 4 MiB each). The two
+totals (`HTTP_EXCHANGE`, `WRITE_TIMEOUT`) are gone. What they also
+bounded and what bounds it now: a request that never arrives and an idle
+keep-alive connection end at hyper's header read timeout (pinned by
+test); the close frame at a session's end keeps a total of `stall`.
+Accepted: a local process that reads just above that floor holds a
+connection slot for as long as it likes (256 slots; a page of another
+site gets a 403 without a body and cannot).
+
+- Crate: `tokio-io-timeout` 1.2 (pin-project-lite and tokio only; its
+  write timer is exactly this one, read and checked in its source). The
+  alternative was a hand-written `AsyncWrite` wrapper with the same
+  timer; nothing already in the graph offered it. Checked by mutation:
+  with the timer off, both stopped-reader tests fail.
+- A large reply still crosses as bounded frames only when it is packed
+  (C). Unpacked it stays the one text frame it was: a client that did
+  not ask for packed frames can reassemble nothing else, and the stall
+  timer makes one large frame deliverable.
+- While one reply is being written the session reads nothing and
+  forwards nothing; on a slow link the event queue overflows meanwhile
+  and the client is told `lag` (§12 C).
+
+**B. The bundle is served compressed.** Each file is encoded ONCE at
+start, beside its identity bytes, and a request's `Accept-Encoding`
+picks: the smallest coding it offers (for the module that is brotli;
+for a short text it can be gzip), else identity. Every bundle answer
+carries `Vary: Accept-Encoding`; `Content-Length` is the served body's.
+A coding that is not smaller than the file is not kept (so not served).
+`q=0` refuses a coding; the weights do not rank; `*` is not read as an
+offer. The header is split by hand (comma list, optional `;q=`): no
+crate in the graph parses it, and `tower-http`, the usual answer,
+compresses per request or serves precompressed files from a directory
+it walks, against the read-once rule. A misread costs a larger
+download, never a door rule.
+
+Measured on the release module (65,176,616 bytes, this box, one thread,
+release build of the two encoders):
+
+| coding | bytes | encode | extra RSS | at 35 KB/s |
+|---|---|---|---|---|
+| identity | 65,176,616 | - | - | 31 min |
+| gzip 1 | 15,143,058 | 0.16 s | 15 MB | 7.2 min |
+| gzip 6 | 12,804,091 | 1.26 s | 14 MB | 6.1 min |
+| gzip 9 | 12,772,449 | 2.24 s | 13 MB | 6.1 min |
+| brotli 4, window 22 | 11,723,523 | 0.39 s | 49 MB | 5.6 min |
+| brotli 5, window 22 | 10,390,141 | 0.82 s | 54 MB | 4.9 min |
+| brotli 9, window 22 | 10,053,098 | 2.84 s | 87 MB | 4.8 min |
+| brotli 10, window 22 | 9,182,243 | 30.2 s | 131 MB | 4.4 min |
+| brotli 11, window 22 | 8,760,849 | 73.3 s | 126 MB | 4.2 min |
+| brotli 11, window 24 | 8,643,264 | 78.3 s | 258 MB | 4.1 min |
+| zstd -19 (C, reference) | 9,458,996 | 6.9 s | - | 4.5 min |
+
+Decided: **both, gzip 6 and brotli 5 (window 22).** Brotli 5 is smaller
+AND faster than gzip 6 here, but browsers offer `br` only where the
+transport is opaque: Chromium on https and on localhost, Firefox on
+https (from their documented behaviour, not checked against the door
+yet: §12 A.1). gzip is what every browser offers on plain http, so it
+is the floor and brotli the gain where offered. Above quality 5 the curve is
+flat until 10, which costs half a minute of start on this box (more on
+the 4-core server) for 12 %. zstd is left: the pure-Rust encoder
+(`ruzstd`) has only its fast levels, and the C library is against the
+pure-Rust posture.
+
+- Crates: `flate2` on `miniz_oxide` (pure Rust, both already in the
+  graph through `png`) and `brotli` 9 (pure Rust, the encoder Dropbox
+  maintains; native only, not in the wasm graph).
+- Cost at start: the bundle is read and encoded on a blocking thread
+  before the door serves, gzip and brotli of a file side by side. From
+  the encoders' own times above that is about 1.3 s wall on this box;
+  `moltd` itself was not timed in a release build. An unoptimized build
+  takes 5.9 s and 9.6 s for the same two. The node's start does not
+  wait: the door is its own task. Held for the process's life: 65.2 +
+  12.8 + 10.4 = 88 MB instead of 65 MB.
+- Kept by the browser, asked for every time (2026-11-18): the page's
+  files carry `Cache-Control: no-cache` and an `ETag` (a hash of the
+  file, one per coding); a matching `If-None-Match` is answered 304
+  without a body. `index.html` stays `no-store`. The files hold no key
+  and no republic data, and a kept one is revalidated before each use.
+
+**C. Large frames cross packed.** tokio-tungstenite 0.26.2 (the version
+in `Cargo.lock`) has no permessage-deflate: tungstenite treats a set
+RSV1 bit as a protocol error and negotiates no extension. So it is done
+one layer up, in the frames the client already reassembles.
+
+- Negotiated in the hello: `{"hello": {"v": 1, "token": "...",
+  "packed": true}}`. The field is additive (`#[serde(default)]`, left
+  out when false, so the legacy hello keeps its bytes) and
+  `WIRE_VERSION` stays 1. **Old client, new server:** no `packed`, the
+  server never packs; every frame is what it was. **New client, old
+  server:** the old hello type ignores the unknown field (pinned by a
+  test against the old shape), the client asked for something that
+  never comes and reads text frames as before. Neither pairing needs
+  the `version` path; that one still ends a different build at its
+  welcome (§5.1).
+- A server frame (reply, event, `lag`) whose JSON is at least
+  `PACK_MIN` (1 KiB) and at most `MAX_UNPACKED` (64 MiB) is deflated
+  (raw deflate, level 3) and, if that is smaller, sent as binary chunk
+  frames with flag bit 2 set: `le64 seq ‖ le64 offset ‖ flags ‖ bytes`,
+  256 KiB a chunk, `seq` the connection's count of packed frames. All
+  chunks of one packed frame are sent back to back. From the second
+  chunk of any transfer on (packed frame or byte read) the key is
+  re-checked before the chunk is written: a reply that takes minutes
+  to cross stops with close 4401 when its key is rotated. One unpacked
+  text frame cannot be stopped midway; it is finished or stalls out. Anything else is
+  the text frame it always was. Commands are not packed (they are
+  small; an upload's bytes are binary already).
+- The client (`molt-ui-kit`'s `Protocol::on_binary`) collects a packed
+  frame through the same chunk checks as a byte read (in order, at most
+  64 MiB on the wire), inflates it and reads the result as the text
+  frame it stands for. A strict `Chunk::decode` (the server's, and an
+  old client's) refuses flag bit 2.
+- **The bomb bound:** inflating stops at `MAX_UNPACKED` = 64 MiB of
+  text; one byte more ends the connection as a broken protocol
+  (`packed frame over the ceiling`), pinned by test with 65 MiB of
+  zeros, under 128 KiB on the wire. Deflate tops out near 1000:1, so without it
+  64 MiB of wire could ask for 64 GiB. The largest reply measured is
+  16.8 MB. A reply over the bound is sent unpacked, as before.
+- Crate: `flate2` again, decoder side in `molt-ui-kit`: `miniz_oxide`
+  is already in the wasm graph (through `png`), so the bundle grows by
+  no new crate. Brotli on the socket was left: on JSON it is no better
+  (below), its encoder wants 30 to 50 MB a reply, and its decoder would
+  be new in the wasm graph.
+- **No shared context, by design.** Each packed frame is its own
+  deflate stream (`pack::deflate` builds a fresh encoder; pinned by
+  `session.rs::every_packed_frame_is_its_own_stream`), so a frame's
+  length says nothing about another frame's content. Keep it so: one
+  stream per connection would turn a member's chat text into a length
+  probe (CRIME/BREACH) against whatever shares the stream, for anyone
+  reading sizes on a tunnel. For the same reason a reply carrying a
+  local secret must not share a frame with peer-written content.
+  Today none does: the token only travels in the hello, which is never
+  packed, the stored secrets are write-only, and the bundle's codings
+  cover public files.
+
+Measured on synthetic chat-surface JSON (invented words, seven invented
+names, ids and timestamps as the real shape has them), this box, one
+thread:
+
+| coding | 6.0 MB reply | encode | 16.8 MB reply | encode | inflate |
+|---|---|---|---|---|---|
+| deflate 1 | 1.89 MB (3.17) | 0.02 s | 5.30 MB | 0.05 s | 0.03 s |
+| deflate 3 | 1.45 MB (4.13) | 0.06 s | 4.07 MB | 0.16 s | 0.03 s |
+| deflate 6 | 1.33 MB (4.51) | 0.20 s | 3.73 MB | 0.52 s | 0.02 s |
+| deflate 9 | 1.32 MB (4.54) | 0.26 s | 3.70 MB | 0.69 s | 0.02 s |
+| brotli 4 | 1.39 MB (4.31) | 0.06 s | 3.98 MB | 0.16 s | 0.02 s |
+| brotli 5 | 1.37 MB (4.39) | 0.12 s | 3.84 MB | 0.35 s | 0.02 s |
+
+Level 3: the door cannot tell a tunnel from a local browser, and a
+local one pays the CPU for nothing; level 6 costs three times the CPU
+for 9 % fewer bytes. At 35 KB/s the 16.8 MB reply takes about 2 min
+packed instead of 8, by these ratios; the real replies were not
+re-measured (6 MB took 41 s through `ssh -C`, which is zlib 6).
+Encoding runs on a blocking thread from 64 KiB up.
+
+Tests: `crates/molt-remote/tests/slow_link.rs` (a real engine, real
+loopback sockets, a 500 ms stall timeout: a throttled reader gets a
+12 MB reply and a 12 MB file whole, one at 150 KiB per stall a 6 MB
+file, a stopped one is dropped, an idle
+HTTP connection is closed, each coding, old and new hello, a rotation
+mid-reply), `molt-ui-kit` (`protocol.rs`, `client.rs`: packed frames
+through the shipped client, the bomb bound), `molt-core` (`wire.rs`:
+the hello both ways against the old frame type).
 
 ## 6. Making `molt-ui` target-generic
 
@@ -1345,7 +1556,12 @@ entry here; nothing is open that is not named here.
      inside the wiki editor (§9);
    - right-click menus, colour emoji, popups, a real GPU (§9);
    - the web `Spawner` (`slint::spawn_local`, detached) under a real
-     event loop (§6.2).
+     event loop (§6.2);
+   - the slow link (§5.6): which `Accept-Encoding` each browser sends
+     to `http://localhost` and that it decodes what comes back, the
+     module streaming-compiled from a coded answer, the window filling
+     from packed frames, and the same through the SSH tunnel the
+     numbers came from. Nothing of §5.6 has run in a browser.
 2. **W0 (d) measurements**: the populated window (main screen, about 500
    chat rows with colour emoji, a popup, a context menu) for frame time,
    tab memory and fonts against the 990 px layout; thin LTO and
@@ -1367,6 +1583,8 @@ entry here; nothing is open that is not named here.
 
 ### B. Decisions not taken
 
+- brotli 10 or 11 for the module, made off the start path or shipped
+  precompressed in the tarball: 8.8 MB instead of 10.4 MB (§5.6).
 - The font: Inter as it falls out, or a bundled proportional font (§9).
 - Whether the paste buttons stay behind the door (§6.3, §9); decided
   after A.1.
@@ -1390,6 +1608,25 @@ entry here; nothing is open that is not named here.
   window-scale build). Left to the user.
 
 ### C. Known gaps in what is built
+
+- **The window re-reads a whole surface on every change** (measured
+  2026-11-18 on a real node: one `read_state` reply of 6.0 MB for one
+  surface, 16.8 MB for another). At 35 KB/s that is 3 and 8 minutes a
+  reply as plain text and, by the ratios of §5.6, still about 40 s and
+  2 min packed - for every chat line. While such a reply is written the
+  session forwards no events; the queue overflows, the client is told
+  `lag` and re-reads everything again. §5.6 makes the window fill; it
+  does not make it usable on that link. An incremental read (a cursor
+  or a delta per surface) is its own design.
+- The first page load after an install fetches the module: 10.4 MB as
+  brotli, 12.8 MB as gzip, 5 to 6 minutes at 35 KB/s. Later loads
+  revalidate it (§5.6); not yet seen in a browser.
+- A local process that reads a few KB/s holds a connection slot for as
+  long as it likes; the totals that ended it are gone (§5.6).
+- The stall floor (about 1 to 2 KB/s at 30 s) is measured on loopback
+  with a 500 ms timeout, not through a real tunnel (§5.6).
+- `moltd`'s own start with the real bundle was not timed in a release
+  build, and nothing of §5.6 ran against the real node (§5.6).
 
 - The link read is not re-sent when a door connection returns; the user
   edits the field (§6.4).
@@ -1436,4 +1673,7 @@ entry here; nothing is open that is not named here.
 
 A non-loopback bind or TLS (D2, its own ADR), per-connection view state
 (§3), a web door for the read key (§5.3), driving the web GUI over MCP
-(§5.5), a browser download of the wiki export (§7), `wasm-opt` (§8.2).
+(§5.5; the browser window sends no `ui_publish`, which the door refuses
+by design - until 2026-11-18 it did, one WARN per mirror pass in the
+node's log), a browser download of the wiki export (§7), `wasm-opt`
+(§8.2).

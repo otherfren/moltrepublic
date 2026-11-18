@@ -34,6 +34,14 @@ hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 http = "1"
 http-body-util = "0.1"
 bytes = "1"
+# a slow link (docs/web_gui.md §5.6): packed frames, the bundle's codings,
+# and the stall timeout on the socket itself
+flate2.workspace = true
+brotli.workspace = true
+tokio-io-timeout.workspace = true
+socket2.workspace = true
+sha2.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
