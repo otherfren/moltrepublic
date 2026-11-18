@@ -10,7 +10,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use molt_core::{Command, SessionSettings};
-use molt_engine::WalletHandle;
+use crate::engine::Engine;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use tokio::runtime::Handle;
 
@@ -34,11 +34,12 @@ use crate::{actions, AppWindow};
 /// when the window closes, or an error if the GUI cannot start (e.g. no display)
 /// — in which case the caller falls back to headless.
 pub fn run_app(
-    wallet: WalletHandle,
+    wallet: impl Into<Engine>,
     rt: Handle,
     config_path: PathBuf,
     embedded_tor_available: bool,
 ) -> Result<(), slint::PlatformError> {
+    let wallet: Engine = wallet.into();
     let ui = AppWindow::new()?;
     // the settings footer shows the full config.toml location: directory
     // greyed, file name in text color. Absolutize a relative discovery path
@@ -197,7 +198,7 @@ pub fn run_app(
 #[derive(Clone)]
 pub(crate) struct Ctx {
     pub(crate) rt: Handle,
-    pub(crate) wallet: WalletHandle,
+    pub(crate) wallet: Engine,
     pub(crate) weak: slint::Weak<AppWindow>,
     pub(crate) last_settings: Arc<Mutex<Option<SessionSettings>>>,
     pub(crate) chat_ui: Arc<Mutex<ChatUiState>>,
@@ -216,7 +217,8 @@ impl Ctx {
 
     /// [`issue_draft`]: the settings draft through its three doors.
     pub(crate) fn issue_draft(&self, wake: String, settings: SessionSettings) {
-        issue_draft(&self.rt, &self.wallet, &self.weak, wake, settings);
+        let shown = crate::settings::stored_settings(&self.last_settings);
+        issue_draft(&self.rt, &self.wallet, &self.weak, wake, settings, shown);
     }
 
     /// Re-read and re-push the surfaces after a UI-local change the engine
@@ -237,7 +239,7 @@ impl Ctx {
 /// The confirmation belongs to the outcome, not to the intent.
 fn issue_then_toast(
     rt: &Handle,
-    wallet: &WalletHandle,
+    wallet: &Engine,
     weak: &slint::Weak<AppWindow>,
     cmd: Command,
     toast: String,
@@ -259,7 +261,7 @@ fn issue_then_toast(
 /// Fire a command on the shared handle; the resulting event drives the
 /// live-mirror, so callers do not await a reply — but an engine error is
 /// surfaced as a toast instead of vanishing silently.
-fn issue(rt: &Handle, wallet: &WalletHandle, weak: &slint::Weak<AppWindow>, cmd: Command) {
+fn issue(rt: &Handle, wallet: &Engine, weak: &slint::Weak<AppWindow>, cmd: Command) {
     let w = wallet.clone();
     let weak = weak.clone();
     rt.spawn(async move {

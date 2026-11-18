@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use molt_core::{ChannelRef, Command, ProposalView, Reply, Surface, SurfaceSnapshot};
-use molt_engine::WalletHandle;
+use crate::engine::Engine;
 use slint::{ModelRc, VecModel};
 
 use crate::channels::{
@@ -965,7 +965,7 @@ pub(crate) struct ProposalRowData {
 /// Deliberately free of the window: every decision this layer makes lives
 /// here, so a test can make them without a display (`gui_tests`).
 pub(crate) async fn gather_surfaces(
-    wallet: &WalletHandle,
+    wallet: &Engine,
     chat_ui: &Arc<Mutex<ChatUiState>>,
 ) -> Option<(u64, SurfacesBundle)> {
     let mirror = match wallet.execute(Command::ReadMirror).await {

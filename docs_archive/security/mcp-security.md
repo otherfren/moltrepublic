@@ -311,6 +311,32 @@ ERROR only unless asked for everything; the read runs off the actor
 The writer is non-blocking: a line reaches the file within moments, and the
 shutdown paths flush it; a hard kill or an abort can lose the last ones.
 
+## The web door (ADR-0008)
+
+A second remote door onto the seat, for the browser GUI
+(`docs/web_gui.md` §5; `crates/molt-remote`). Not MCP: a WebSocket
+carrying the serde contract, opened by the same live seat key.
+
+| Rule | Where |
+|---|---|
+| off unless `[web] port` is set; `127.0.0.1` only, no bind key | `molt_config::WebConfig`, `serve_loopback` |
+| nothing is served while the seat key is empty (503, the page included) | `server.rs::route` |
+| `Host` is a canonical loopback name, `Origin` the served page | `origin.rs` |
+| the token is the first frame; 10 s deadline; seat scope only, the read key gets no door | `session.rs::authenticate`, `molt_mcp::seat_token_matches` |
+| the key is re-checked per frame, per reply, and before an event that can follow a rotation | `session.rs::serve` |
+| a command runs only if it is a tool's command or on `WEB_DOOR` | `gate.rs` |
+| the door cannot empty its own seat key | `gate.rs::refusal` |
+| frames are bounded at 1 MiB, a byte read at 64 MiB, replies' bytes go in 256 KiB chunks | `server.rs`, `session.rs` |
+| the bundle is a fixed list, read once from a private directory | `server.rs::load_bundle` |
+
+Stronger than the line protocol in one place: rotation closes a SILENT
+session, because the socket is a push channel. Same as MCP everywhere
+else - the seat token operates the machine (above), the wire is
+cleartext, and a non-loopback use is an SSH tunnel.
+
+Known and accepted: a local process can hold the 64 session slots with
+silent sockets, ten seconds at a time.
+
 ## Co-equality audit: what the GUI can do vs. what a bot can do
 
 The rule is: **every state-changing action the GUI offers maps to one MCP

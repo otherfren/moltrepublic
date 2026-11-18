@@ -623,7 +623,7 @@ fn the_node_flow_reaches_the_engine() {
     apply_strings(&ui, 0);
     let cx = Ctx {
         rt: rt.handle().clone(),
-        wallet: w.clone(),
+        wallet: w.clone().into(),
         weak: ui.as_weak(),
         last_settings: Arc::new(Mutex::new(None)),
         chat_ui: Arc::new(Mutex::new(ChatUiState::default())),

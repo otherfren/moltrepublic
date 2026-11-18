@@ -17,6 +17,8 @@
 #   molt-treasury the purse's crypto: PedPoP DKG, view key, standard address, attestations - pure functions, no I/O, core + the Monero stack only
 #   molt-engine  the wallet-core actor: single owning task, WalletHandle
 #   molt-mcp     MCP frontend (the headless operator; stdio or tcp)
+#   molt-remote  the web door: the browser GUI's loopback WebSocket onto the same command set
+#   molt-ui-kit  what the GUI needs on every target: the remote client's protocol core (wasm-clean, core only)
 #   molt-ui-window  the Slint-compiled window (own crate: the ~400k-line
 #                   generated module recompiles only on .slint changes)
 #   molt-ui      Slint GUI frontend logic (the live-mirror operator)
@@ -38,6 +40,8 @@ members = [
     "crates/molt-treasury",
     "crates/molt-engine",
     "crates/molt-mcp",
+    "crates/molt-remote",
+    "crates/molt-ui-kit",
     "crates/molt-ui-window",
     "crates/molt-ui",
     "crates/molt-app",
@@ -56,6 +60,8 @@ molt-vault   = { path = "crates/molt-vault" }
 molt-treasury = { path = "crates/molt-treasury" }
 molt-engine  = { path = "crates/molt-engine" }
 molt-mcp     = { path = "crates/molt-mcp" }
+molt-remote  = { path = "crates/molt-remote" }
+molt-ui-kit  = { path = "crates/molt-ui-kit" }
 molt-ui-window = { path = "crates/molt-ui-window" }
 molt-ui      = { path = "crates/molt-ui" }
 
@@ -92,6 +98,7 @@ tokio-socks        = "0.5"    # SOCKS5h client (Tor dialing, per-host isolation 
 # rustls-rustcrypto config over the T4 DialStream, so ring stays out of the graph
 tokio-tungstenite  = { version = "0.26", default-features = false, features = ["handshake"] }
 futures-util       = { version = "0.3", default-features = false, features = ["sink"] }
+futures-channel    = { version = "0.3", default-features = false, features = ["std", "sink"] }   # runtime-neutral channels for the remote client (tokio and wasm)
 httparse           = "1"      # NIP-11 response-head parsing (already in the tree via tungstenite)
 # the vault (molt-vault, docs_archive/vault/vault_build_plan.md 1.2): vsss-rs 5 and
 # hpke 0.13 ride the curve25519-dalek 4 / RustCrypto generation OpenMLS

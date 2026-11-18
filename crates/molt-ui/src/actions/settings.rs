@@ -246,7 +246,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             // the draft as confirmed; the save rides the same task as the ack
             let save = matches!(then, S3_THEN_SAVE | S3_THEN_SAVE_LEAVE).then(|| {
                 let leave = (then == S3_THEN_SAVE_LEAVE).then(|| to_screen(ui.get_settings_return()));
-                (draft(&ui, &cx), leave)
+                (draft(&ui, &cx), crate::settings::stored_settings(&cx.last_settings), leave)
             });
             cx.rt.spawn(async move {
                 if let Err(e) = w.execute(ack).await {
@@ -256,8 +256,8 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 if let Some(cmd) = next {
                     let _ = w.execute(cmd).await;
                 }
-                if let Some(((wake, settings), leave)) = save {
-                    save_then(&w, &weak, wake, settings, leave).await;
+                if let Some(((wake, settings), shown, leave)) = save {
+                    save_then(&w, &weak, wake, settings, &shown, leave).await;
                 }
             });
         });
@@ -499,17 +499,19 @@ fn save_and_leave_now(ui: &AppWindow, cx: &Ctx) {
     let leave = Some(to_screen(ui.get_settings_return()));
     let w = cx.wallet.clone();
     let weak = ui.as_weak();
-    cx.rt.spawn(async move { save_then(&w, &weak, wake, settings, leave).await });
+    let shown = crate::settings::stored_settings(&cx.last_settings);
+    cx.rt.spawn(async move { save_then(&w, &weak, wake, settings, &shown, leave).await });
 }
 
 async fn save_then(
-    w: &molt_engine::WalletHandle,
+    w: &crate::engine::Engine,
     weak: &slint::Weak<AppWindow>,
     wake: String,
     settings: molt_core::SessionSettings,
+    shown: &molt_core::SessionSettings,
     leave: Option<molt_core::Screen>,
 ) {
-    match save_draft(w, wake, settings).await {
+    match save_draft(w, wake, settings, shown).await {
         Ok(()) => {
             if let Some(screen) = leave {
                 let _ = w.execute(Command::Navigate { screen }).await;

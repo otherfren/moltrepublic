@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use molt_core::relay::{RelayBlock, RelayKind, RelayStatus};
 use molt_core::{Command, Event, Reply, SessionScope, SessionSettings, SessionView, Surface};
-use molt_engine::WalletHandle;
+use crate::engine::Engine;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use tokio::sync::broadcast::error::RecvError;
+use crate::engine::NoEvent;
 
 use crate::alerts::alert_unless_own;
 use crate::app::Ctx;
@@ -327,7 +327,7 @@ pub(crate) fn build_ui_snapshot(ui: &AppWindow) -> molt_core::UiSnapshot {
 /// Build the snapshot on the UI thread and hand it to the engine — the
 /// publish half of `gui_over_mcp.md`, run at the end of every mirror pass
 /// (what it publishes is what it just rendered).
-async fn publish_ui_state(wallet: &WalletHandle, weak: &slint::Weak<AppWindow>) {
+async fn publish_ui_state(wallet: &Engine, weak: &slint::Weak<AppWindow>) {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
@@ -344,7 +344,7 @@ async fn publish_ui_state(wallet: &WalletHandle, weak: &slint::Weak<AppWindow>) 
 /// thread. `last_settings` remembers the previously applied settings so the
 /// draft form is only refreshed when they really changed.
 pub(crate) async fn push_session(
-    wallet: &WalletHandle,
+    wallet: &Engine,
     weak: &slint::Weak<AppWindow>,
     last_settings: &Arc<Mutex<Option<SessionSettings>>>,
     scope: SessionScope,
@@ -1068,7 +1068,7 @@ fn sync_log_tones(current: &ModelRc<i32>, log: &[String], set: impl FnOnce(Model
 /// pass is still current — and it needs no window and no event loop. What
 /// stays here is the hop onto the UI thread, which is Slint's own.
 pub(crate) async fn push_surfaces(
-    wallet: &WalletHandle,
+    wallet: &Engine,
     weak: &slint::Weak<AppWindow>,
     chat_ui: &Arc<Mutex<ChatUiState>>,
 ) {
@@ -1754,18 +1754,18 @@ pub(crate) fn spawn_mirror(ctx: &Ctx) {
                     publish_ui_state(&w, &weak).await;
                 }
                 Ok(_) => push_surfaces(&w, &weak, &chat_ui).await,
-                Err(RecvError::Lagged(_)) => {
+                Err(NoEvent::Lagged) => {
                     push_session(&w, &weak, &last_settings, SessionScope::Full, &chat_ui).await;
                     push_surfaces(&w, &weak, &chat_ui).await;
                 }
-                Err(RecvError::Closed) => break,
+                Err(NoEvent::Closed) => break,
             }
         }
     });
 }
 
 /// Re-run a vault read the Unsealed view is waiting on.
-async fn reread_vault(wallet: &WalletHandle, weak: &slint::Weak<AppWindow>, secret_id: String) {
+async fn reread_vault(wallet: &Engine, weak: &slint::Weak<AppWindow>, secret_id: String) {
     let (tx, rx) = tokio::sync::oneshot::channel();
     let weak2 = weak.clone();
     let id = secret_id.clone();

@@ -408,6 +408,17 @@ async fn live_tokens(handle: &WalletHandle) -> Option<Credentials> {
     }
 }
 
+/// Whether `given` is the seat key the running session holds right now -
+/// the web door's check (`docs/web_gui.md` §5.3). Seat scope only: the
+/// read key never matches. An empty seat key matches nobody, and an
+/// engine that does not answer admits nobody.
+pub async fn seat_token_matches(handle: &WalletHandle, given: &str) -> bool {
+    match live_tokens(handle).await {
+        Some(live) => live.scope_for(given) == Some(Scope::Seat),
+        None => false,
+    }
+}
+
 impl Credentials {
     /// The scope a presented key admits. Neither branch tells a prober
     /// WHICH key it guessed: a guess of a given length runs exactly one
@@ -1451,9 +1462,9 @@ pub struct ToolDef {
     /// a default: a new tool has to decide, and the Read set is pinned by
     /// a test — a forgotten one cannot silently land in the read scope.
     pub scope: Scope,
-    /// snake_case name of the [`Command`] variant this tool drives; only
-    /// the `co_equality` test reads it — it is the audit trail.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// snake_case name of the [`Command`] variant this tool drives: the
+    /// `co_equality` test's audit trail, and the web door's allow-list
+    /// (`molt-remote`).
     pub command: &'static str,
     /// The operator-facing tool description.
     pub description: &'static str,
@@ -3309,197 +3320,7 @@ pub(crate) mod tests {
     /// on the documented internal list (see docs_archive/security/mcp-security.md).
     #[test]
     fn co_equality_every_command_is_a_tool_or_documented_internal() {
-        // engine-internal: the run tickers are the engine's own clock;
-        // net_delivered / net_peer_seen / net_send_failed and the founding
-        // ritual's net_join_requested / net_seal_signed are the node's own
-        // transport/ritual tasks speaking (exposing them would let an agent
-        // forge network peers or ritual members);
-        // net_test_s3_result is the node's own S3 probe reporting back
-        // (net_test_s3 is the tool); net_list_backups_result is the node's
-        // own bucket-listing task reporting back (net_list_backups is the
-        // tool — an agent must not be able to forge bucket contents);
-        // net_ritual_link_ready / net_ritual_failed are the off-actor
-        // provisioning task reporting a seat's real link or a provisioning
-        // failure; net_recover_link_failed is the recovery-mint provisioning
-        // task reporting its failure (recover_invite_start is the tool; the
-        // outcome — link or failure — rides the session notice);
-        // net_join_sealed / net_join_failed are the off-actor join
-        // task reporting back; net_recover_sealed / net_recover_failed are the
-        // off-actor rejoin task reporting back (recover_start is the tool);
-        // net_recover_announced is the recovery recv loop delivering a
-        // rejoiner's mesh announce and net_mesh_extended is the node's own
-        // off-actor mesh-extension task reporting its assembled link — both
-        // the node's own transport tasks speaking, not agent-forgeable;
-        // reload_settings / config_notice are the config
-        // watcher's mirror path — an agent that wants a reload edits via
-        // save_settings (see docs_archive/security/mcp-security.md)
-        // net_mesh_announced is a member's post-founding mesh handover reaching
-        // the founder over the star; net_mesh_ready is the founder's off-actor
-        // bootstrap task reporting the assembled mesh — both are the node's own
-        // transport tasks speaking, not agent-forgeable.
-        // net_export_done / net_export_failed are the off-actor export task
-        // reporting its real outcome (export_workspace is the tool; an agent
-        // must not be able to forge an export success or failure).
-        // backup_tick is the backup ticker's own heartbeat; net_backup_done /
-        // net_backup_failed are the off-actor backup task reporting its real
-        // outcome (backup_now / set_workspace_backup are the tools; an agent
-        // must not be able to forge a backup stamp or failure).
-        // net_restore_progress / net_restore_staged / net_restore_failed are
-        // the off-actor restore task reporting real progress and its staged/
-        // failed outcome (restore_start is the tool; the staged blob itself
-        // rides an engine-internal slot and the HANDLER re-verifies the
-        // chain, so even a forged internal command cannot materialize an
-        // unverified workspace). RestoreTick is gone: there is no simulated
-        // restore progress anymore.
-        // net_poked is the transport handing over an MLS-AUTHENTICATED poke
-        // (poke is the tool; an agent must not be able to forge a nudge that
-        // claims to come from another member).
-        // set_wake_command is the GUI's DIRECT door for the local shell
-        // hook; the value itself rides the settings surface as
-        // `poke_wake_command` (ADR-0007), so this stays internal only
-        // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 87] = [
-            // not a door of its own: chat_send/approve/decline/withdraw
-            // build it from their `operator`/`agent` arguments
-            "as_operator",
-            // a referenced file's bytes off the local disk / mirror store
-            // (wiki_files_and_images.md §3.3): the GUI's picture, an agent
-            // gets download_file into its exchange folder
-            "read_upload_bytes",
-            // ui_publish is the WINDOW reporting what it renders — an
-            // agent must not be able to forge what the GUI claims to show
-            // (gui_over_mcp.md); reads go through read_ui_state.
-            "ui_publish",
-            "net_test_s3_result",
-            // net_test_tor_result is the off-actor Tor probe reporting its
-            // real verdict (net_test_tor is the tool; an agent must not be
-            // able to forge a "Tor works" answer for the operator).
-            "net_test_tor_result",
-            "net_presence_tick",
-            "net_delivery_tick",
-            "net_list_backups_result",
-            "backup_tick",
-            "net_backup_done",
-            "net_backup_failed",
-            "net_backup_fetched",
-            "net_restore_progress",
-            // the recovery COORDINATOR's vote report toward the waiting
-            // rejoiner (display data; an agent must not be able to forge
-            // who approved a re-admission)
-            "net_recover_progress",
-            "net_restore_staged",
-            "net_restore_failed",
-            "net_export_done",
-            "net_export_failed",
-            // the off-actor WIKI export task reporting its real outcome
-            // (wiki_export is the tool; an agent must not be able to forge
-            // an export success, least of all one that claims a proof
-            // bundle was written)
-            "net_wiki_export_done",
-            "net_wiki_export_failed",
-            // the off-actor wiki INDEX build reporting its own result: an
-            // agent must not be able to hand this node an index
-            "net_wiki_index_ready",
-            // K6: the folded wiki base arriving off the actor. Never a
-            // tool - a forged base would replace the republic's knowledge
-            // (the bytes are checked against the chain's commitment, so
-            // the worst case is noise, but it stays an engine channel).
-            "net_wiki_base_fetched",
-            "net_wiki_base_failed",
-            "net_file_shared",
-            "net_file_share_failed",
-            "net_file_request_ready",
-            "net_file_progress",
-            "net_file_verifying",
-            "net_file_done",
-            "net_file_failed",
-            // the sharer's off-actor lazy series publish reporting its
-            // stamp (relay file plane) — an agent must not forge one
-            "net_file_series_published",
-            // a PieceWanted control frame landing (the transport speaks), and
-            // the running fetch asking the actor to send one (mirroring §3.2)
-            "net_piece_wanted",
-            "net_piece_want_send",
-            // the mirror gossip landing (the transport speaks; an agent must
-            // not forge another seat's declaration or holdings)
-            "net_mirror_decl",
-            "net_mirror_status",
-            "net_mirror_who",
-            // the mirror worker's own fetch reporting (mirroring §3.3)
-            "net_mirror_progress",
-            "net_mirror_done",
-            // the vault's file-plane fetches reporting (the bytes are checked
-            // against the chain) and the vault control frames landing: an
-            // agent must not forge a payload, a base, another seat's receipt,
-            // reveal or answer, or a reader's ask
-            "net_vault_payload_fetched",
-            "net_vault_payload_failed",
-            "net_vault_base_fetched",
-            "net_vault_base_failed",
-            "net_vault_receipt",
-            "net_vault_reveal",
-            "net_vault_resp",
-            "net_vault_ask",
-            // the purse's off-actor daemon probe and scanner reporting, and
-            // its control frames landing: an agent must not forge a daemon
-            // height, a balance, another seat's run frame, key part status
-            // or view key answer
-            "net_wallet_probe",
-            "net_wallet_frame",
-            "net_wallet_scan",
-            "net_wallet_status",
-            "net_wallet_view_answer",
-            "net_delivered",
-            "net_peer_seen",
-            "net_peer_rekeyed",
-            "net_send_failed",
-            "net_link_up",
-            "net_link_down",
-            "net_send_ok",
-            "net_join_requested",
-            "net_seal_signed",
-            // a member's ❻½ backup attestation (founder ingest) — an agent
-            // must not be able to forge another seat's confirmation
-            "net_backup_confirmed",
-
-            "net_recover_requested",
-            "net_recover_link_ready",
-            "net_recover_link_failed",
-            "net_ritual_link_ready",
-            "net_ritual_failed",
-            // the publish task reporting its real per-relay outcome: an MCP
-            // agent must not be able to forge a relay result and thereby fail
-            // (or fake) a founding leg
-            "net_ritual_published",
-            // a task reporting a transport CONDITION (not an operator
-            // decision): an MCP agent must not be able to write lines into a
-            // founding or join log
-            "net_ritual_note",
-            "net_join_note",
-            "net_recover_note",
-            // the relay probe's verdict: an agent must not be able to forge
-            // one and thereby confirm a dead relay
-            "net_relay_probed",
-            "net_join_sealed",
-            "net_join_failed",
-            "net_recover_sealed",
-            "net_recover_failed",
-            "net_recover_announced",
-            "net_mesh_extended",
-            "net_join_accepted",
-            "net_join_charter_proposed",
-            "net_join_declined",
-            "net_mesh_announced",
-            "net_mesh_ready",
-            "net_poked",
-            // A6: a peer telling this seat that a vote it cast was dropped
-            // for the wrong height - a transport CONDITION, not a decision.
-            // An agent that could forge it would fake a partition.
-            "net_vote_refused",
-            "set_wake_command",
-            "reload_settings",
-            "config_notice",
-        ];
+        use molt_core::INTERNAL;
         // …and a tool BUILDS the command its label names (review F9): a
         // copy-pasted ToolDef with a stale `command:` would otherwise pass
         // this audit while executing a different verb. Built from a
@@ -3543,6 +3364,26 @@ pub(crate) mod tests {
             covered, expected,
             "the MCP tool catalogue drifted from the command set"
         );
+    }
+
+    /// The web door's check: the live seat key and nothing else - not the
+    /// read key, not an empty key, and a rotation counts at once.
+    #[tokio::test]
+    async fn seat_token_matches_only_the_live_seat_key() {
+        let mut sv = SessionView::default();
+        sv.settings.mcp_token = "seat-key".to_string();
+        sv.settings.mcp_read_token = "read-key".to_string();
+        let h = molt_engine::spawn(GroupConfig::demo(), sv);
+        assert!(seat_token_matches(&h, "seat-key").await);
+        assert!(!seat_token_matches(&h, "read-key").await, "the read key gets no seat door");
+        assert!(!seat_token_matches(&h, "").await);
+        assert!(!seat_token_matches(&h, "seat-kez").await);
+        h.execute(Command::PatchSettings { patch: json!({ "mcp_token": "rotated" }) }).await.expect("rotates");
+        assert!(!seat_token_matches(&h, "seat-key").await, "the old key dies with the rotation");
+        assert!(seat_token_matches(&h, "rotated").await);
+
+        let off = molt_engine::spawn(GroupConfig::demo(), SessionView::default());
+        assert!(!seat_token_matches(&off, "").await, "no key, no door");
     }
 
     /// The vault tools are seat tools: the read-only key never reaches a

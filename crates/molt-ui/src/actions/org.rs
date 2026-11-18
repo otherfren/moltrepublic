@@ -507,7 +507,7 @@ fn toast_unreadable(weak: slint::Weak<AppWindow>, path: String) {
 
 /// Propose `payload` on the organization surface and toast the OUTCOME.
 async fn propose_org(
-    w: molt_engine::WalletHandle,
+    w: crate::engine::Engine,
     weak: slint::Weak<AppWindow>,
     payload: serde_json::Value,
 ) {

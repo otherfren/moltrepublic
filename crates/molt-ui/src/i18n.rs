@@ -172,7 +172,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::Recover(t) => format!("Recovery: {t}"),
         E::Poke(t) => format!(
             "Anstupsen: {}",
-            match *t {
+            match &**t {
                 "not enabled" => "nicht aktiviert",
                 "cannot poke yourself" => "nicht dich selbst",
                 "unknown member" => "unbekanntes Mitglied",
@@ -181,7 +181,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         ),
         E::WikiExport(t) => format!(
             "Wiki-Export: {}",
-            match *t {
+            match &**t {
                 "a target directory is required" => "Zielordner fehlt",
                 "an export is already running" => "läuft bereits",
                 "the wiki is empty" => "Wiki ist leer",
@@ -193,6 +193,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
             }
         ),
         E::Engine(t) => format!("Engine: {t}"),
+        E::Refused(t) => format!("Abgelehnt: {t}"),
     }
 }
 

@@ -175,7 +175,7 @@ pub(crate) fn wire_local(ui: &AppWindow) {
 
 /// Run one read on the engine and render its reply on the UI thread.
 pub(crate) async fn run_read(
-    wallet: &molt_engine::WalletHandle,
+    wallet: &crate::engine::Engine,
     weak: &slint::Weak<AppWindow>,
     secret_id: String,
 ) {

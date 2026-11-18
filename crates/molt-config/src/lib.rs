@@ -50,6 +50,36 @@ pub struct Config {
     /// The purse's daemon (`[wallet]`).
     #[serde(default)]
     pub wallet: WalletConfig,
+    /// The web door (`[web]`).
+    #[serde(default)]
+    pub web: WebConfig,
+}
+
+/// The web door (`[web]`, `docs/web_gui.md` §5.3): the browser GUI's
+/// loopback listener. Start-time config only - not a setting, not on any
+/// remote surface. Never written by the node, so a file without it still
+/// opens on a build that predates it.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebConfig {
+    /// The loopback port; absent = no web door.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// The bundle directory; "" = `web/` beside the config file.
+    #[serde(default)]
+    pub dir: String,
+}
+
+impl WebConfig {
+    /// The bundle directory for a config at `config_path`.
+    #[must_use]
+    pub fn bundle_dir(&self, config_path: &std::path::Path) -> std::path::PathBuf {
+        if self.dir.is_empty() {
+            config_path.parent().unwrap_or_else(|| std::path::Path::new(".")).join("web")
+        } else {
+            std::path::PathBuf::from(&self.dir)
+        }
+    }
 }
 
 /// The purse's Monero daemon (`[wallet]`). Written only off its defaults,
@@ -1062,6 +1092,12 @@ token = {mcp_token}
 # A second key admitting only the READ tools: set it in the GUI (Settings > MCP)
 # or over MCP (patch_settings {{"mcp_read_token": "..."}}, "" revokes); it is
 # written here as read_token. Absent = off.
+
+# The browser GUI (loopback only; remote use via an SSH tunnel). Off unless
+# a port is set. The page asks for the [mcp] token. dir = the unpacked web
+# bundle; default: web/ beside this file.
+# [web]
+# port = 4042
 
 [transport.anonymity]
 # network = "tor" | "none" (default "none" = clearnet). "tor" routes
@@ -2135,6 +2171,23 @@ mod tests {
         let s = Settings::from(&strict);
         assert_eq!(s.wake_min_interval_secs, 300);
         assert!(s.wake_on.is_empty());
+    }
+
+    /// The web door is off unless a port is set, and a rendered config
+    /// never turns it on.
+    #[test]
+    fn the_web_door_is_opt_in() {
+        let rendered = render(&Settings::default());
+        let config = parse(&rendered).expect("the template parses");
+        assert_eq!(config.web.port, None);
+        assert_eq!(
+            config.web.bundle_dir(std::path::Path::new("/etc/molt/config.toml")),
+            std::path::PathBuf::from("/etc/molt/web")
+        );
+        let on = parse(&format!("{rendered}\n[web]\nport = 4042\ndir = \"/srv/web\"\n")).expect("parses");
+        assert_eq!(on.web.port, Some(4042));
+        assert_eq!(on.web.bundle_dir(std::path::Path::new("/x/c.toml")), std::path::PathBuf::from("/srv/web"));
+        assert!(parse(&format!("{rendered}\n[web]\nbind = \"0.0.0.0\"\n")).is_err(), "no bind key: loopback only");
     }
 
     /// ADR-0007: the operator's agent may set the command over MCP.

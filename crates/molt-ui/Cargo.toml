@@ -24,6 +24,8 @@ molt-config.workspace = true
 # the workspace-dir draft exactly like the engine does
 molt-storage.workspace = true
 molt-engine.workspace = true
+# the remote engine handle (the web door's client); the native window holds the engine's own
+molt-ui-kit.workspace = true
 # the agent skill text the Settings modal shows (one source, §6.2)
 molt-mcp.workspace = true
 tokio.workspace = true
@@ -59,5 +61,11 @@ ttf-parser = "0.25"
 # invalidate. Layering-legal (net sits below engine, which molt-ui already
 # depends on); the shipped GUI still talks to the engine only.
 molt-net.workspace = true
+# TEST-ONLY: the window against a REMOTE engine - a real web door on
+# loopback and the shipped client over a tokio WebSocket.
+molt-remote.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+futures-channel.workspace = true
 # TEST-ONLY: the vault fixtures derive each seat's real vault key.
 molt-vault.workspace = true

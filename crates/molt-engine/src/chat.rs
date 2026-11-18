@@ -1017,14 +1017,14 @@ impl State {
     /// the TARGET's live ingest reacts — behind that node's own opt-in.
     pub(crate) fn cmd_poke(&mut self, member: MemberId) -> Result<Reply, MoltError> {
         if !self.session.settings.poke_enabled {
-            return Err(MoltError::Poke("not enabled"));
+            return Err(MoltError::Poke("not enabled".into()));
         }
         let from = self.member();
         if member == from {
-            return Err(MoltError::Poke("cannot poke yourself"));
+            return Err(MoltError::Poke("cannot poke yourself".into()));
         }
         if !self.roster().contains(&member) {
-            return Err(MoltError::Poke("unknown member"));
+            return Err(MoltError::Poke("unknown member".into()));
         }
         self.send_poke(&from, &member)?;
         if self.note_line(&format!("poked {member}")) {
@@ -1054,10 +1054,10 @@ impl State {
         }
         // queue mesh (the test transport): straight onto the target's leg
         let Some(net) = self.net.as_ref() else {
-            return Err(MoltError::Poke("no transport"));
+            return Err(MoltError::Poke("no transport".into()));
         };
         let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
-            return Err(MoltError::Poke("no transport"));
+            return Err(MoltError::Poke("no transport".into()));
         };
         let Some(peer) = net
             .mesh()
@@ -1065,7 +1065,7 @@ impl State {
             .filter_map(molt_net::PeerLink::from_mesh)
             .find(|p| p.member == *to)
         else {
-            return Err(MoltError::Poke("no link to that member"));
+            return Err(MoltError::Poke("no link to that member".into()));
         };
         tokio::spawn(Self::send_ping(transport, group, peer, poke.to_frame()));
         Ok(())
@@ -2004,20 +2004,20 @@ mod tests {
         let err = st
             .cmd_poke("peer-1".to_string())
             .expect_err("poking is an explicit opt-in");
-        assert!(matches!(err, MoltError::Poke("not enabled")), "{err:?}");
+        assert!(matches!(&err, MoltError::Poke(r) if r == "not enabled"), "{err:?}");
 
         st.session.settings.poke_enabled = true;
         assert!(
             matches!(
                 st.cmd_poke("me".to_string()),
-                Err(MoltError::Poke("cannot poke yourself"))
+                Err(MoltError::Poke(r)) if r == "cannot poke yourself"
             ),
             "self-poke is refused"
         );
         assert!(
             matches!(
                 st.cmd_poke("nobody".to_string()),
-                Err(MoltError::Poke("unknown member"))
+                Err(MoltError::Poke(r)) if r == "unknown member"
             ),
             "a poke needs a roster member"
         );
@@ -2027,7 +2027,7 @@ mod tests {
         assert!(
             matches!(
                 st.cmd_poke("peer-1".to_string()),
-                Err(MoltError::Poke("no transport"))
+                Err(MoltError::Poke(r)) if r == "no transport"
             ),
             "a poke without a transport is refused, not silently swallowed"
         );

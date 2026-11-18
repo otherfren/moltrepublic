@@ -30,6 +30,7 @@ mod mirror;
 mod modals;
 mod poke;
 mod recovery_backup;
+mod remote;
 mod ritual_log;
 #[cfg(feature = "live-preview")]
 mod s3_plaintext;
@@ -441,6 +442,17 @@ fn chain_workspace_with(
 /// business, not this layer's.
 async fn mirror(
     w: &WalletHandle,
+    ui: &AppWindow,
+    last: &Arc<Mutex<Option<SessionSettings>>>,
+    chat_ui: &Arc<Mutex<ChatUiState>>,
+) {
+    mirror_engine(&crate::engine::Engine::from(w.clone()), ui, last, chat_ui).await;
+}
+
+/// [`mirror`] for whichever engine the window holds - the in-process one
+/// or one behind the web door.
+async fn mirror_engine(
+    w: &crate::engine::Engine,
     ui: &AppWindow,
     last: &Arc<Mutex<Option<SessionSettings>>>,
     chat_ui: &Arc<Mutex<ChatUiState>>,

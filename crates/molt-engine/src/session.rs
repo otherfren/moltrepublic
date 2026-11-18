@@ -2305,23 +2305,23 @@ impl State {
         self.require_feature(Surface::Memory)?;
         let dest = dest.trim();
         if dest.is_empty() {
-            return Err(MoltError::WikiExport("a target directory is required"));
+            return Err(MoltError::WikiExport("a target directory is required".into()));
         }
         if self.session.wiki_export.running {
-            return Err(MoltError::WikiExport("an export is already running"));
+            return Err(MoltError::WikiExport("an export is already running".into()));
         }
         // the wiki IS the open workspace's state: no workspace open, no tree
         let tree = self.wiki_tree()?;
         if tree.is_empty() {
-            return Err(MoltError::WikiExport("the wiki is empty"));
+            return Err(MoltError::WikiExport("the wiki is empty".into()));
         }
         let bundle = if proof {
             if !self.is_chain_governed() {
-                return Err(MoltError::WikiExport("proof needs chain governance"));
+                return Err(MoltError::WikiExport("proof needs chain governance".into()));
             }
             Some(
                 crate::wiki_export::bundle_from_chain(&self.chain.blocks)
-                    .ok_or(MoltError::WikiExport("proof needs the genesis block"))?,
+                    .ok_or(MoltError::WikiExport("proof needs the genesis block".into()))?,
             )
         } else {
             None

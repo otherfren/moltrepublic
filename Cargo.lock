@@ -5090,6 +5090,7 @@ dependencies = [
  "molt-engine",
  "molt-mcp",
  "molt-net",
+ "molt-remote",
  "molt-storage",
  "molt-ui",
  "serde_json",
@@ -5230,6 +5231,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "molt-remote"
+version = "0.0.17"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "molt-core",
+ "molt-engine",
+ "molt-mcp",
+ "molt-ui-kit",
+ "rustix 1.1.4",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "molt-storage"
 version = "0.0.17"
 dependencies = [
@@ -5282,6 +5306,8 @@ dependencies = [
  "arboard",
  "base64 0.22.1",
  "chrono",
+ "futures-channel",
+ "futures-util",
  "i-slint-backend-testing",
  "image",
  "molt-config",
@@ -5289,7 +5315,9 @@ dependencies = [
  "molt-engine",
  "molt-mcp",
  "molt-net",
+ "molt-remote",
  "molt-storage",
+ "molt-ui-kit",
  "molt-ui-window",
  "molt-vault",
  "paste",
@@ -5302,8 +5330,19 @@ dependencies = [
  "slint",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "ttf-parser",
+]
+
+[[package]]
+name = "molt-ui-kit"
+version = "0.0.17"
+dependencies = [
+ "futures-channel",
+ "futures-util",
+ "molt-core",
+ "serde_json",
 ]
 
 [[package]]

@@ -238,7 +238,7 @@ impl crate::State {
         Err(if mock {
             MoltError::Vault(VaultRefusal::NoVault)
         } else {
-            MoltError::FeatureDisabled(Surface::Vault.as_str())
+            MoltError::FeatureDisabled(Surface::Vault.as_str().into())
         })
     }
 

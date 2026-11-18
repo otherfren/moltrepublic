@@ -23,7 +23,7 @@
 //! The GUI is a **live-mirror of the engine's shared session**, not a holder of
 //! its own state. Every action (navigate, switch language, save settings, finish
 //! a wizard) is turned into a [`molt_core::Command`] on the shared
-//! [`WalletHandle`]; a background task re-reads the session on each
+//! [`Engine`]; a background task re-reads the session on each
 //! [`molt_core::Event::SessionChanged`] and pushes it back into the Slint
 //! properties. An MCP agent issuing the *same* commands drives this *same* state,
 //! so the GUI and the MCP operator are co-equal — exactly as for the surfaces.
@@ -56,6 +56,7 @@ pub use molt_ui_window::*;
 /// The Restore wizard's one link field: which flow a pasted link arms.
 pub use actions::ritual::{link_kind, LinkKind};
 pub use app::run_app;
+pub use engine::Engine;
 
 mod actions;
 mod alerts;
@@ -63,6 +64,7 @@ mod app;
 mod channels;
 mod chat_log;
 mod download_status;
+mod engine;
 mod i18n;
 mod images;
 mod kanban;

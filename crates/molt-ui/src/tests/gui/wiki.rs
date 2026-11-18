@@ -324,7 +324,7 @@ fn the_export_dialog_issues_the_command_with_the_picked_path_and_the_proof_flag(
     let ui = AppWindow::new().expect("headless window");
     let cx = Ctx {
         rt: rt.handle().clone(),
-        wallet: w.clone(),
+        wallet: w.clone().into(),
         weak: ui.as_weak(),
         last_settings: Arc::new(Mutex::new(None)),
         chat_ui: Arc::new(Mutex::new(ChatUiState::default())),
@@ -423,7 +423,7 @@ fn the_wiki_export_refusals_render_in_german() {
         "proof needs chain governance",
         "proof needs the genesis block",
     ] {
-        let e = molt_core::MoltError::WikiExport(phrase);
+        let e = molt_core::MoltError::WikiExport(phrase.into());
         let de = super::localize_error(1, &e);
         assert!(de.starts_with("Wiki-Export: "), "{de}");
         assert!(!de.contains(phrase), "phrase without a German arm: {de}");
@@ -2751,7 +2751,7 @@ fn a_vote_over_unfetched_bytes_is_queued_and_fires_on_arrival() {
     let (model, last) = wire_wiki(&ui);
     let cx = Ctx {
         rt: rt.handle().clone(),
-        wallet: w.clone(),
+        wallet: w.clone().into(),
         weak: ui.as_weak(),
         last_settings: Arc::new(Mutex::new(None)),
         chat_ui: Arc::new(Mutex::new(ChatUiState::default())),

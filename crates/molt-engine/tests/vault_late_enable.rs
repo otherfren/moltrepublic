@@ -31,7 +31,7 @@ async fn assert_hidden(w: &WalletHandle) {
         .execute(Command::VaultSeal { name: "n".into(), kind: "text".into(), text: SecretText("one".into()) })
         .await;
     match r {
-        Err(e @ MoltError::FeatureDisabled("vault")) => assert_eq!(e.to_string(), "vault: not enabled"),
+        Err(e @ MoltError::FeatureDisabled(_)) => assert_eq!(e.to_string(), "vault: not enabled"),
         other => panic!("expected `vault: not enabled`, got {other:?}"),
     }
 }

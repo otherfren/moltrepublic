@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "molt-remote"
+description = "The web door: the browser GUI's WebSocket onto the one command set (docs/web_gui.md)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+molt-core.workspace = true
+# the tool catalogue (what a seat may send) and the live seat-key check
+molt-mcp.workspace = true
+# Origin and Host are parsed by the parser browsers use, never by hand
+url.workspace = true
+# the engine handle the door drives - held, never reached into
+molt-engine.workspace = true
+tokio.workspace = true
+# the bundle directory's owner check (the page takes the seat token)
+rustix = { workspace = true, features = ["process"] }
+serde_json.workspace = true
+tracing.workspace = true
+# the WebSocket itself; the HTTP side is hyper, as in molt-mcp. No new
+# server framework: the upgrade is hyper's, the accept key tungstenite's.
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+
+[dev-dependencies]
+tempfile.workspace = true
+# the client the browser ships: the door is tested against it, not a look-alike
+molt-ui-kit.workspace = true

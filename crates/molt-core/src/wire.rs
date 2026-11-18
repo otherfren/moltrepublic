@@ -1,0 +1,275 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+//! The web door's wire (`docs/web_gui.md` §5.1): the frames a browser GUI
+//! and `moltd` exchange over one WebSocket. JSON text frames carry the
+//! contract ([`Command`], [`Reply`], [`Event`], [`MoltError`]) as it
+//! already serializes; binary frames carry bulk bytes in bounded chunks.
+//!
+//! Types and codecs only - no socket, no gate. Which commands a client may
+//! send is the server's decision (`INTERNAL` below is its input).
+
+use serde::{Deserialize, Serialize};
+
+use crate::{Command, Event, MoltError, Reply};
+
+/// The frame layout version. Client and server must agree exactly; the
+/// bundle is served by the same `moltd`, so there is no compatibility
+/// window to keep.
+pub const WIRE_VERSION: u32 = 1;
+
+/// Client to server.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClientFrame {
+    /// The first frame, and only the first: the seat token.
+    Hello {
+        /// [`WIRE_VERSION`].
+        v: u32,
+        /// The seat token. Never in a URL, a header or a cookie.
+        token: String,
+    },
+    /// One command; the reply echoes `id`.
+    Cmd {
+        /// Chosen by the client, unique among its open requests.
+        id: u64,
+        /// The command.
+        cmd: Box<Command>,
+    },
+}
+
+/// No secret reaches a log line: not the token, and not a command's
+/// payload (a settings patch carries keys, a recover a phrase).
+impl std::fmt::Debug for ClientFrame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClientFrame::Hello { v, .. } => f.debug_struct("Hello").field("v", v).finish_non_exhaustive(),
+            ClientFrame::Cmd { id, cmd } => {
+                let name: &'static str = (&**cmd).into();
+                f.debug_struct("Cmd").field("id", id).field("cmd", &name).finish_non_exhaustive()
+            }
+        }
+    }
+}
+
+/// What the serving process tells a client about itself, once.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Caps {
+    /// The binary was built with the embedded Tor client.
+    #[serde(default)]
+    pub embedded_tor: bool,
+}
+
+/// Server to client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerFrame {
+    /// The answer to an accepted `Hello`.
+    Welcome {
+        /// [`WIRE_VERSION`].
+        v: u32,
+        /// The server's version; a bundle of another version reloads.
+        build: String,
+        /// Process facts the engine does not know.
+        #[serde(default)]
+        caps: Caps,
+    },
+    /// The answer to one `Cmd`. Replies may arrive out of order.
+    Reply {
+        /// The request's id.
+        id: u64,
+        /// What the engine answered.
+        result: Result<Box<Reply>, MoltError>,
+    },
+    /// An engine event. Events are invalidations; a client re-reads.
+    Event(Box<Event>),
+    /// Events were dropped for this client: re-read everything.
+    Lag,
+}
+
+/// A binary frame: `le64 id ‖ le64 offset ‖ flags ‖ bytes`. `id` is the
+/// request the bytes belong to; `last` closes the transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chunk<'a> {
+    /// The request these bytes belong to.
+    pub id: u64,
+    /// Where `data` starts in the whole transfer.
+    pub offset: u64,
+    /// No chunk follows.
+    pub last: bool,
+    /// The bytes; may be empty on the last chunk.
+    pub data: &'a [u8],
+}
+
+const CHUNK_HEADER: usize = 17;
+
+impl<'a> Chunk<'a> {
+    /// The frame bytes.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(CHUNK_HEADER + self.data.len());
+        out.extend_from_slice(&self.id.to_le_bytes());
+        out.extend_from_slice(&self.offset.to_le_bytes());
+        out.push(u8::from(self.last));
+        out.extend_from_slice(self.data);
+        out
+    }
+
+    /// Parse a frame; `None` for a short header or an unknown flag.
+    #[must_use]
+    pub fn decode(frame: &'a [u8]) -> Option<Self> {
+        let (head, data) = frame.split_at_checked(CHUNK_HEADER)?;
+        let id = u64::from_le_bytes(head[0..8].try_into().ok()?);
+        let offset = u64::from_le_bytes(head[8..16].try_into().ok()?);
+        let last = match head[16] {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        Some(Chunk { id, offset, last, data })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{vault::VaultRefusal, wallet::WalletRefusal, MessageId, ProposalId, ProposalState, Surface};
+
+    /// One of every `MoltError` variant.
+    fn every_error() -> Vec<MoltError> {
+        use MoltError as E;
+        let p = ProposalId(7);
+        let m = MessageId([9u8; 16]);
+        vec![
+            E::UnknownProposal(p),
+            E::NotGated(Surface::Chat),
+            E::BadPayload("x".into()),
+            E::FeatureDisabled("vault".into()),
+            E::AlreadyTerminal(p, ProposalState::Applied),
+            E::NotTheProposer(p),
+            E::AlreadyApproved(p),
+            E::AlreadyDeclined(p),
+            E::Settings("x".into()),
+            E::UnknownWorkspace("w".into()),
+            E::WorkspaceBusy("w".into()),
+            E::WorkspaceEncrypted("w".into()),
+            E::Storage("x".into()),
+            E::UnknownView(Surface::Chat, "v".into()),
+            E::UnknownMessage(m),
+            E::CannotSign("x".into()),
+            E::UnknownThread("t".into()),
+            E::ThreadClosed("t".into()),
+            E::NoFile(m),
+            E::FileUnavailable(m),
+            E::FileExpired(m),
+            E::FileDeleted(m),
+            E::NotYourFile(m),
+            E::NotYourMessage(m),
+            E::Restore("x".into()),
+            E::Create("x".into()),
+            E::Join("x".into()),
+            E::Recover("x".into()),
+            E::Poke("not enabled".into()),
+            E::WikiExport("the wiki is empty".into()),
+            E::WikiBasePending { have: 1, size: 2, want: "c".into() },
+            E::VaultBasePending { have: 1, size: 2, want: "c".into() },
+            E::Vault(VaultRefusal::Bounds),
+            E::Wallet(WalletRefusal::Held(Box::new(WalletRefusal::NotYet))),
+            E::IndexBuilding { done: 1, total: 2 },
+            E::ChainLagging { peers_ahead: 3 },
+            E::Engine("x".into()),
+            E::Refused("not allowed here".into()),
+        ]
+    }
+
+    /// An error crosses the wire as itself: same variant, same payload,
+    /// same text. The GUI localizes on the variant, so a flattened string
+    /// would lose the German copy.
+    #[test]
+    fn every_error_variant_round_trips() {
+        let all = every_error();
+        let mut seen: Vec<&'static str> = all.iter().map(<&'static str>::from).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        let mut expected = <MoltError as strum::VariantNames>::VARIANTS.to_vec();
+        expected.sort_unstable();
+        assert_eq!(seen, expected, "every_error() misses a variant");
+        for e in all {
+            let json = serde_json::to_string(&e).expect("serializes");
+            let back: MoltError = serde_json::from_str(&json).expect("deserializes");
+            assert_eq!(format!("{back:?}"), format!("{e:?}"), "{json}");
+            assert_eq!(back.to_string(), e.to_string(), "{json}");
+        }
+    }
+
+    /// The internal list names real commands, each once - a typo there
+    /// would silently open or close a door.
+    #[test]
+    fn the_internal_list_names_real_commands_once() {
+        let names = Command::variant_names();
+        let mut seen = std::collections::BTreeSet::new();
+        for n in crate::INTERNAL {
+            assert!(names.contains(&n), "{n} is not a command");
+            assert!(seen.insert(n), "{n} is listed twice");
+        }
+    }
+
+    /// The frame shapes are the protocol: pinned, so a rename is a
+    /// deliberate version bump.
+    #[test]
+    fn frame_shapes_are_pinned() {
+        let hello = ClientFrame::Hello { v: WIRE_VERSION, token: "t".into() };
+        assert_eq!(serde_json::to_string(&hello).expect("json"), r#"{"hello":{"v":1,"token":"t"}}"#);
+
+        let cmd: ClientFrame =
+            serde_json::from_str(r#"{"cmd":{"id":4,"cmd":{"cmd":"read_session"}}}"#).expect("a command frame");
+        assert!(matches!(cmd, ClientFrame::Cmd { id: 4, ref cmd } if matches!(**cmd, Command::ReadSession)));
+
+        let welcome = ServerFrame::Welcome { v: 1, build: "0.0.1".into(), caps: Caps { embedded_tor: true } };
+        assert_eq!(
+            serde_json::to_string(&welcome).expect("json"),
+            r#"{"welcome":{"v":1,"build":"0.0.1","caps":{"embedded_tor":true}}}"#
+        );
+
+        let ok = ServerFrame::Reply { id: 4, result: Ok(Box::new(Reply::Ack)) };
+        assert_eq!(serde_json::to_string(&ok).expect("json"), r#"{"reply":{"id":4,"result":{"Ok":{"reply":"ack"}}}}"#);
+
+        let err = ServerFrame::Reply { id: 5, result: Err(MoltError::Engine("gone".into())) };
+        assert_eq!(serde_json::to_string(&err).expect("json"), r#"{"reply":{"id":5,"result":{"Err":{"engine":"gone"}}}}"#);
+
+        assert_eq!(serde_json::to_string(&ServerFrame::Lag).expect("json"), r#""lag""#);
+    }
+
+    /// A welcome from a server that knows no caps still parses.
+    #[test]
+    fn welcome_without_caps_parses() {
+        let w: ServerFrame = serde_json::from_str(r#"{"welcome":{"v":1,"build":"x"}}"#).expect("parses");
+        assert!(matches!(w, ServerFrame::Welcome { caps, .. } if caps == Caps::default()));
+    }
+
+    #[test]
+    fn a_frame_never_prints_a_secret() {
+        let hello = ClientFrame::Hello { v: 1, token: "sekrit".into() };
+        assert!(!format!("{hello:?}").contains("sekrit"));
+        let patch = Command::PatchSettings { patch: serde_json::json!({ "mcp_token": "sekrit" }) };
+        let shown = format!("{:?}", ClientFrame::Cmd { id: 1, cmd: Box::new(patch) });
+        assert!(!shown.contains("sekrit"), "{shown}");
+        assert!(shown.contains("patch_settings"), "{shown}");
+    }
+
+    #[test]
+    fn a_chunk_round_trips() {
+        let c = Chunk { id: u64::MAX - 1, offset: 1 << 40, last: true, data: b"one" };
+        let frame = c.encode();
+        assert_eq!(frame.len(), 17 + 3);
+        assert_eq!(Chunk::decode(&frame), Some(c));
+        let empty = Chunk { id: 1, offset: 0, last: false, data: b"" };
+        assert_eq!(Chunk::decode(&empty.encode()), Some(empty));
+    }
+
+    #[test]
+    fn a_malformed_chunk_is_refused() {
+        assert_eq!(Chunk::decode(&[0u8; 16]), None, "short header");
+        let mut frame = Chunk { id: 1, offset: 0, last: false, data: b"x" }.encode();
+        frame[16] = 2;
+        assert_eq!(Chunk::decode(&frame), None, "unknown flag");
+    }
+}
