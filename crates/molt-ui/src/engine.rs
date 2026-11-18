@@ -5,21 +5,25 @@
 //! it has.
 
 use molt_core::{Command, Event, MoltError, Reply};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::native::EngineEvents;
+#[cfg(not(target_arch = "wasm32"))]
 use molt_engine::WalletHandle;
-use molt_ui_kit::client::{RemoteEvents, RemoteHandle};
+use molt_ui_kit::client::{NotRotated, RemoteEvents, RemoteHandle};
 
 pub(crate) use molt_ui_kit::client::NoEvent;
 
 /// The GUI's engine handle.
 #[derive(Clone)]
 pub enum Engine {
-    /// The engine in this process.
+    /// The engine in this process. A browser build has none.
+    #[cfg(not(target_arch = "wasm32"))]
     Native(WalletHandle),
     /// An engine behind the web door.
     Remote(RemoteHandle),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<WalletHandle> for Engine {
     fn from(handle: WalletHandle) -> Self {
         Engine::Native(handle)
@@ -36,8 +40,22 @@ impl Engine {
     /// Run one command.
     pub async fn execute(&self, cmd: Command) -> Result<Reply, MoltError> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Engine::Native(h) => h.execute(cmd).await,
             Engine::Remote(h) => h.execute(cmd).await,
+        }
+    }
+
+    /// Make `key` the seat key. Behind the web door the server then
+    /// closes every session of the old key, this one included; the
+    /// connection follows onto `key`, and the key the server welcomes
+    /// next is the answer (`docs/web_gui.md` §6.5).
+    pub(crate) async fn rotate_seat(&self, key: String) -> Result<(), NotRotated> {
+        let write = Command::PatchSettings { patch: serde_json::json!({ "mcp_token": key }) };
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            Engine::Native(h) => h.execute(write).await.map(drop).map_err(NotRotated::Refused),
+            Engine::Remote(h) => h.rotate(write, key).await,
         }
     }
 
@@ -46,6 +64,7 @@ impl Engine {
     /// process (`run_app` is handed those facts) and before the welcome.
     pub(crate) fn remote_caps(&self) -> Option<molt_core::wire::Caps> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Engine::Native(_) => None,
             Engine::Remote(h) => h.welcome().map(|w| w.caps),
         }
@@ -60,6 +79,7 @@ impl Engine {
     /// The engine's events. A remote engine has ONE stream per connection.
     pub(crate) fn subscribe(&self) -> Events {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Engine::Native(h) => Events::Native(EngineEvents(h.subscribe())),
             Engine::Remote(h) => Events::Remote(h.subscribe()),
         }
@@ -68,6 +88,7 @@ impl Engine {
 
 /// The engine's event stream.
 pub(crate) enum Events {
+    #[cfg(not(target_arch = "wasm32"))]
     Native(EngineEvents),
     Remote(RemoteEvents),
 }
@@ -76,6 +97,7 @@ impl Events {
     /// The next event; `Lagged` means "re-read everything".
     pub(crate) async fn recv(&mut self) -> Result<Event, NoEvent> {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Events::Native(rx) => rx.recv().await,
             Events::Remote(rx) => rx.recv().await,
         }

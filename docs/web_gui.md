@@ -1,19 +1,40 @@
 # Web GUI: the Slint window in a browser (WASM + WebGL)
 
-**Status: PLAN, not built (2026-11-17).** Decisions D1-D4 are the user's
-(2026-11-17). The plan was reviewed against the code the same day (four
-lenses, 29 findings, all folded in). Stage W0's compile and first browser load are
-measured (§8.4, 2026-11-18); its populated-content half is open. W1 and
-W2's client and spawner seams are built, its pure helpers sit in core,
-link classification is an engine read (§6.4), and the platform seam is
-built on the native side with paste asynchronous (§6.3); what still ties
-`molt-ui` to native is two modules (2026-11-18, §6.7, §10). W4 is built
-(2026-11-18, §5.1, §7): the upload store, chunked upload frames, reads
-by share id, picture key and last export, and the window on them - a
-republic was founded, joined and chatted in with the founder driven
-through the door, a file went up from bytes and came down byte for byte,
-and pictures show through `read_image_bytes` in both windows. Open
-before a browser runs it: W0 (d), the rest of §6.5, W5 and W6.
+**Status: BUILT on branch `web-ui-slint`, first headless Chromium run
+done, the browser checks of §12 mostly open (2026-11-18).** Stages W1-W6 are built and tested natively; the browser
+side is type-checked for wasm32 against the stub window, and the real
+bundle was built through the release script twice at one commit with the
+same hash (§8.4). Only headless Chromium has loaded that bundle (§12 A.0),
+the branch is not on master, and the native window build has not run with these changes.
+**Everything still open is in §12, and only there**; a section's own
+"Open" notes give the detail behind an entry.
+
+Decisions D1-D4 are the user's (2026-11-17). The plan was reviewed
+against the code the same day (four lenses, 29 findings, all folded in).
+What each stage built (W0 (a)-(b) 2026-11-17, the rest 2026-11-18):
+
+- W0 (a)-(c): the wasm32 compile and a first browser load of the bare
+  window module, measured (§8.4). (d) is open.
+- W1: the wire and the web door (§5), ADR-0008.
+- W2: the client and spawner seams, the pure helpers in core, link
+  classification as an engine read (§6.1, §6.2, §6.4, §6.6).
+- W3: the platform seam with asynchronous paste, typed server paths, the
+  `clippy.toml` lint (§6.3, §7, §8.3). What ties `molt-ui` to native is
+  two cfg-gated modules (§6.7).
+- W4: the upload store, chunked upload frames, reads by share id,
+  picture key and last export, and the window on them (§5.1, §7). A
+  republic was founded, joined and chatted in with the founder driven
+  through the door; a file went up from bytes and came down byte for
+  byte.
+- W5: `molt-web` - socket adapter, browser platform, entry, the page
+  with its key prompt and reconnect, the window sized from the viewport,
+  the web form's keys (§4, §6.3, §6.5, §9).
+- W6: profile, script with a check-only mode and its test, toolchain
+  target, build doc, service file, README (§8.1, §8.2); the script's
+  names, its bind step and its tar line are held to the crate and to the
+  door's list by
+  `the_release_script_packs_exactly_what_the_door_serves`
+  (`crates/molt-remote/tests/door.rs`).
 
 ## 1. Goal
 
@@ -161,11 +182,71 @@ wasm32:  core -> ui-kit -> ui -> web          (ui-window beside ui, slint only)
   The wordlist lookup is two `bip39` calls made directly (done). Native
   behaviour stays byte for byte except where §6 says otherwise (paste,
   link classification, the secret draft).
-- **`molt-web`** (new, `cdylib`): `#![cfg(target_arch = "wasm32")]` with
-  every dependency under the wasm32 target table, so a native workspace
-  build sees an empty crate. Holds the `#[wasm_bindgen(start)]` entry, the
-  web-sys socket adapter over the kit's protocol core, the browser
-  platform impl and `index.html`.
+- **`molt-web`** (built 2026-11-18, `cdylib` + `rlib`): every dependency
+  sits under the wasm32 target table, so a native workspace build sees a
+  crate with no dependencies - a plain member, not kept out by
+  `default-members`: resolver 2 ignores another target's dependencies,
+  so no native feature set or unit hash moves, and a test pins that its
+  native graph is itself alone. Its wasm32 modules: the entry
+  (`start.rs`), the socket adapter over the kit's pump (`socket.rs`) and
+  the browser platform (`platform.rs`). One module compiles everywhere
+  and is tested natively, `rules.rs`: what the page decides without a
+  browser (why a connection ended, the socket URL, the start language,
+  how a picked file is named, the size check, the key's shape). The
+  `rlib` is there so those tests and the graph test build.
+  - **Entry**: `start(token, notify)`, a `#[wasm_bindgen]` export the
+    page calls once it holds the key - not `#[wasm_bindgen(start)]`,
+    because the key comes from the page's prompt (§5.3). It installs the
+    platform and a panic hook (the panic goes to the console), dials
+    `ws(s)://<the page's host>/ws`, and runs the window
+    (`molt_ui::run_remote`), which does not return: winit leaves by
+    throwing, and the page must expect that. `notify` hears one word:
+    `ready` on every welcome, `lag` when the server dropped events (a
+    passing note), and when a connection ended for good one of `version`
+    (the server's build is not the
+    bundle's - decided inside the pump at the welcome,
+    `Pump::only_build`, so no queued command crosses; pinned by
+    `another_build_ends_the_connection_before_a_command_crosses`), `refused` (close
+    4401), `protocol` (close 4400 or a frame the client cannot read;
+    both codes are `molt_core::wire` constants the door closes with,
+    and a test holds the page rules' copies to them),
+    `closed`. A second call is refused.
+  - **Reconnect inside one page load** (built 2026-11-18): the pump
+    outlives its connection (`Pump::serve` in `molt-ui-kit`). After
+    `refused`, `protocol` or `closed` the page asks for the key again
+    and calls `reconnect(token)`; the same window goes on, and the
+    first welcome of a later connection reads as lag, so the mirror
+    re-reads everything. A command open or queued when a connection
+    ends is answered with an error, never kept for the next one. Only
+    `version` needs a reload: the page reloads once by itself (a fixed
+    `#reloaded` marker in the address is the "once") and shows the
+    mismatch if it stands.
+  - **Sizing** (built 2026-11-18, not yet seen in a browser): the page
+    sets no size on the canvas. `run_remote` hands the entry a `Sizer`;
+    `start` sizes the window to `innerWidth` x `innerHeight` before the
+    loop starts and on every `resize`, through Slint's own
+    `Window::set_size` - which is what writes the canvas's inline size
+    (winit's `request_inner_size`). The window's 990 px minimum still
+    holds, so a narrower viewport scrolls.
+  - **Socket**: `gloo-net`'s `WebSocket` (the rustwasm wrapper: a
+    futures `Stream` + `Sink` over the browser socket, `websocket`
+    feature only) instead of hand-written event closures; the adapter
+    maps its messages onto the pump's `Wire` and keeps the close code.
+    New in the lockfile: `gloo-net`, `gloo-utils` (wasm32 only).
+  - **The page** (built 2026-11-18, `crates/molt-web/page/`):
+    `index.html`, `page.js`, `page.css` - three files because the
+    door's content policy admits nothing inline. The key prompt (a
+    password field, cleared the moment it is read; no storage, cookie
+    or address ever holds the key), the reason a connection ended, the
+    prompt again to reconnect, a passing line on `lag`, and the limits
+    of §9 as a fold-out. Its labels come from `molt-ui`'s `i18n.rs`
+    (`page_text`, English and German by the browser's language) through
+    the `page_text` export, so the page carries no text of its own. It
+    also styles `rfd`'s file overlay, whose own inline style sheet the
+    policy drops (§6.3). `crates/molt-web/tests/page.rs` reads the three
+    files as text and holds those rules; the door's list is held to the
+    directory by `the_door_serves_exactly_what_the_page_ships`
+    (`crates/molt-remote/tests/door.rs`). No browser has loaded it.
 
 Workspace rules for the new members:
 
@@ -174,12 +255,20 @@ Workspace rules for the new members:
   feature unification would rebuild the window module, the trap CLAUDE.md
   records for the solo native window build);
 - no crate adds a slint feature on any target;
-- `wasm-bindgen = "=0.2.126"` is pinned in `[workspace.dependencies]`, so
-  a Slint bump that moves it fails loudly and the CLI pin moves with it;
-- a graph test modelled on `ring_free_guard.rs`: `cargo tree -p molt-web
-  --target wasm32-unknown-unknown -e no-dev -i <pkg>` is empty for
-  `molt-engine`, `molt-storage`, `molt-config`, `molt-net`, `molt-mcp`,
-  `tokio`, `arboard`.
+- `wasm-bindgen = "=0.2.126"` is pinned in `[workspace.dependencies]`
+  (done 2026-11-18), so a Slint bump that moves it fails loudly and the
+  CLI pin moves with it; a test holds the pin exact and the lockfile at
+  that one version;
+- a graph test modelled on `ring_free_guard.rs`
+  (`crates/molt-web/tests/graph.rs`, built 2026-11-18): the package set
+  of `cargo tree -p molt-web --target wasm32-unknown-unknown -e no-dev`
+  holds none of `molt-engine`, `molt-net`, `molt-storage`, `molt-mcp`,
+  `molt-remote`, `molt-config`, `molt-vault`, `molt-treasury`,
+  `molt-app`, `tokio`, `arboard`, `secp256k1`, `secp256k1-sys`,
+  `libsqlite3-sys`, `ring` - and does hold the window crates, so a
+  listing that went blind fails too. It reads the whole forward graph
+  instead of `-i <pkg>`: an inverse query for a name with two versions
+  in the lockfile errors with empty output and would pass blind.
 
 The engine actor is unchanged. `molt-remote` holds a `WalletHandle` like
 MCP does and never touches engine state directly.
@@ -279,7 +368,9 @@ validation. The seat token is the boundary; the loopback bind and the
 Origin/Host check only limit who can present it. The "web door" ADR
 ratifies exactly this.
 
-The window's quit is not a `Command`; the web build hides the control.
+The window's quit is not a `Command`, and a tab cannot reach it: the
+quit dialog opens only on the window manager's close request, which a
+browser never raises (2026-11-18; no control to hide).
 
 ### 5.3 Auth and the listener
 
@@ -324,8 +415,9 @@ The window's quit is not a `Command`; the web build hides the control.
   time. Static requests are unauthenticated by design, short-lived
   (header read timeout, no long keep-alive) and cannot exhaust the
   session slots.
-- Static files: a fixed file list matched on the raw request target, no
-  directory walking; the bytes are read ONCE at start (§5.4), so nothing
+- Static files: a fixed file list (`index.html`, `page.js`, `page.css`,
+  `molt_web.js`, `molt_web_bg.wasm`; `molt_remote::BUNDLE_FILES`)
+  matched on the raw request target, no directory walking; the bytes are read ONCE at start (§5.4), so nothing
   on disk is followed per request. A `Sec-Fetch-Site: cross-site` request
   is refused and files carry `Cross-Origin-Resource-Policy: same-origin`,
   so another site cannot probe for a running node. One HTTP exchange has
@@ -341,7 +433,8 @@ The seat token is typed into whatever `[web] dir` serves. `moltd` refuses
 to open the web listener (one log line, the node stays up) if the
 directory or a listed file is a symlink, group- or world-writable, or
 owned by anyone but `moltd`'s user or root (built: `load_bundle`). The default `[web] dir` is `web/` beside the
-config file, where the web tarball is unpacked - never a shared location.
+config file, where the web tarball is unpacked - never a shared location. The
+directory is made with `mkdir -m 755 web` (§8.2), not a bare `mkdir`.
 
 The door's rules are in `docs_archive/security/mcp-security.md` ("The web
 door") and its decision in
@@ -391,9 +484,16 @@ completion):
 - the wake-skill save dialog moved from the blocking `rfd::FileDialog`
   to the async form, like every other dialog.
 
-Open: the web `Spawner` and the wasm twin of `native.rs` (W5); the
-`cfg(not(target_arch = "wasm32"))` on the module and on the tokio
-dependency lands with them. The direct `std::fs` / `std::thread` lines
+**Built (2026-11-18), browser side.** `molt-ui/src/web.rs` is the twin:
+`Spawner` is a unit type over `slint::spawn_local` (the join handle is
+dropped, which detaches), `off_thread` runs the work inline and always
+answers. `native.rs` and the `Native` arm of `Engine` are
+`cfg(not(target_arch = "wasm32"))`; shared code takes `Spawner` and
+`off_thread` from `crate::platform`, which re-exports this target's.
+The tests compile `web.rs` natively; its `spawn` is only type-checked
+there (the headless backend has no event loop) and has not run in a
+browser. Image fit and decode therefore block the one browser thread;
+whether large pictures need chunking is unmeasured. The direct `std::fs` / `std::thread` lines
 that stayed in shared code went behind the platform seam (§6.3), and the
 `clippy.toml` lint holds the rule by resolved path (§8.3).
 
@@ -468,22 +568,54 @@ callback reads the platform it was wired with),
 file reads; the debounce; the WAV; the scan). NOT covered, as for every
 window read: the `invoke_from_event_loop` hop in front of `land_paste`.
 
+**Built (2026-11-18), browser side** - `molt-web/src/platform.rs`,
+type-checked for wasm32, NOT yet run in a browser:
+
+- every call runs its JS future on the page's thread and answers
+  through a channel, so the trait's futures stay `Send`; the audio
+  context and the picked files are thread-locals;
+- clipboard: `navigator.clipboard.writeText` / `readText`, the read
+  started inside the click; a refusal reads as "nothing to paste", and
+  `copy` answers whether the write got there (the key dialog of §6.5
+  waits for it; every other Copy button drops the answer);
+- alert: the shared WAV decoded from memory through WebAudio
+  (`decodeAudioData`), so no `blob:` URL the page's CSP would have to
+  allow; no sound is silent, not an error;
+- clocks: `web_time`; sleep: `gloo-timers`; the key: 24 bytes from
+  `crypto.getRandomValues` (getrandom's `js` feature) as hex, the shape
+  `moltd` mints (pinned against `molt_config::random_token`);
+- files: `rfd`'s wasm backend. A pick is kept by number (eight at most)
+  and named `<n>/<name>`; `read_file` takes it once, MEASURES it first
+  and answers `molt_ui_kit::platform::too_large()` over 64 MiB - which
+  the shared code shows as `too large for the browser`, not as an
+  unreadable file, for a share and for both picture reads (one helper,
+  `bytes::read_picked`; `a_file_the_platform_refuses_unread_is_too_large`),
+  and a file that does not read is named without its pick number -
+  then reads through `Blob.arrayBuffer()`. `save_file` is rfd's download
+  overlay: a link the user clicks, so it holds when the bytes arrive
+  long after the click that asked. `pick_folder` and `pick_save` are
+  `None`. `rfd` needs its `xdg-portal` and `async-std` features on
+  wasm32 too (its build script demands a backend there; both are inert);
+- chrono has `wasmbind` and `similar` has `wasm32_web_time` on wasm32
+  (`molt-ui`'s wasm32 dependency table).
+
 Open:
 
-- the web implementation (W5: `navigator.clipboard`, WebAudio,
-  `web_time`, `crypto.getRandomValues`, `rfd`'s wasm backend with no
-  features); chrono gets `wasmbind` on wasm32 for `Local`; `similar`
-  gets `wasm32_web_time` so the diff timeout is real there. If a browser
-  refuses `readText()` from a Slint click (W0/W5 check), the web hides
-  the paste buttons and relies on Ctrl+V into the focused input.
+- the first browser run. To check there: `readText()` from a Slint
+  click (else the web hides the paste buttons and relies on Ctrl+V);
+  the file input's `click()` from a spawned task; **rfd's overlay
+  against the door's CSP** - it styles itself with an inline `<style>`,
+  which `default-src 'self'` blocks, so the overlay would show unstyled
+  until the CSP carries that style's hash or the page styles
+  `#rfd-overlay` itself; a cancelled rfd dialog never answers (its
+  promise is dropped unresolved), so the task behind it stays parked;
 - built (2026-11-18, §7): behind the web door the chat share, the
   download and the export hand bytes to and from the platform, so a
   `pick_file` answer need not be a server path and `pick_save` may be
-  `None`. For W5: `read_file` should refuse a file over the 64 MiB
-  ceiling before it reads it into memory (the shared code checks after
-  the read), and `save_file` is called outside a click - phase two of a
-  download arrives on an engine event, an export after polling - which
-  a browser must be checked to allow.
+  `None`. The browser's `read_file` refuses a file over the 64 MiB
+  ceiling before it reads it (above). `save_file` is called outside a
+  click - phase two of a download arrives on an engine event, an export
+  after polling - which a browser must be checked to allow (§12).
 
 ### 6.4 Synchronous callbacks and link classification
 
@@ -521,8 +653,10 @@ forbids. So classification is a stateless engine read on BOTH targets:
   shows at once.
 - A failed read (`link_failed`) leaves the panel unjudged and toasts
   once per outage; a failure for a link the field has left is dropped.
-  OPEN: nothing re-sends the read when a door connection returns - the
-  client seam has no reconnect yet, so the user edits the field.
+  OPEN: nothing re-sends the read when a door connection returns. The
+  client reconnects since 2026-11-18 (§4) and the mirror re-reads, but
+  the link field's verdict is not part of that pass, so the user edits
+  the field.
 - Seat rows carry `joinable` (`RitualSeatView`, `#[serde(default)]`),
   set by the engine wherever it sets the link; the mirror shows a link
   to copy only then.
@@ -554,18 +688,86 @@ web door itself - revoke the read key and wipe the S3 secret.**
   secret only when the draft differs from it; untouched goes as `None`
   on both targets (in the native window an untouched secret equals the
   stored one, so nothing changes there). Pinned by a GUI test through a
-  real web door. Still open for W5: a web form cannot CLEAR a secret this
-  way (empty equals what it was shown), so revoking the read key and
-  removing the S3 secret need their own explicit actions there.
+  real web door.
 - The web door refuses an empty `mcp_token`, so a client bug cannot close
-  its own listener.
-- **Rotate** on the web: the page mints the key through the platform
-  seam, shows it with a copy step BEFORE issuing the write, then
-  reconnects with the new key after the server closes the session. A
-  failed write keeps the old key.
-- The web form cannot show a stored key (stated in §9).
-- Pinned test-first in W2: Save, Save & continue and read-key Revoke
-  through the remote client leave the stored secrets as they should be.
+  its own listener (`the_door_cannot_empty_its_own_seat_key`,
+  `crates/molt-remote/tests/door.rs`).
+
+**Built (2026-11-18): the web form.** One window property, `web`, set
+for every window behind the door (`open_remote` before the first frame,
+`apply_remote_startup` with the first session); a native window never
+has it and behaves as before.
+
+- **No stored key is shown.** The two wells, the peek and the copy
+  buttons are gone; a line says so (`set_keys_hidden`). The read key's
+  button reads `Issue or rotate` and Revoke is always live: the form
+  cannot know whether one is stored.
+- **Clearing is an action.** An empty field equals what the form was
+  shown, so it cannot mean "remove". Revoke writes
+  `patch_settings {mcp_read_token: ""}` by itself; the S3 tab gets
+  `Remove stored secret`, which writes `{s3_secret_key: ""}`. Each
+  touches that one value.
+- **Rotate shows the key first.** The key is minted through the platform
+  seam and goes on show in a dialog (`key-new`); nothing is written.
+  Cancel, Escape and the scrim discard the key. Apply takes it off the
+  window and writes `patch_settings` with that one key. The native
+  window keeps its one step (mint, into the draft, save).
+- **Apply waits for a copy that worked** (review fix, 2026-11-18).
+  `Platform::copy` answers whether the text reached the clipboard; the
+  Copy button (`copy-new-key`) arms Apply only on `true`
+  (`land_key_copy`, for the key still on show). A refused clipboard
+  says so (`key_copy_failed`) and leaves Apply dead. The key is drawn
+  by a read-only input (`KeyWell`), so it can be selected by hand -
+  Slint's web backend serves the browser's own `copy` event from the
+  focused input's selection, which needs no clipboard permission - and
+  the whole key selected arms Apply too. Neither gate proves the key
+  was kept; both are a deliberate step.
+- **The connection follows the seat key.** The write goes out as
+  `RemoteHandle::rotate` (`molt-ui-kit`): it notes the new key, and when
+  the server closes the session (§5.3) `Pump::serve` dials again with
+  it. A refused write forgets the key.
+- **The next welcome is the answer** (review fix, 2026-11-18). The door
+  never answers the write that kills its own session's key: it checks
+  the session's key before every reply and closes with 4401 (§5.3). So
+  `rotate` resolves from the reconnect: the new key welcomed is
+  `set_key_applied`; the new key refused and the old one welcomed is
+  `set_key_kept` (the write never landed); neither welcomed, or no
+  connection to be had, is `set_key_unsure` (`NotRotated`,
+  `land_new_key`). Other tabs end as `refused` and ask.
+
+Pins: `crates/molt-ui-kit/src/client.rs`
+(`a_rotated_key_moves_the_connection_onto_the_new_key`,
+`an_answered_rotation_is_applied_and_followed`,
+`a_refused_rotation_keeps_the_old_key`,
+`a_rotation_the_server_never_took_falls_back_to_the_old_key`,
+`a_rotation_no_key_is_welcomed_after_stays_open`,
+`a_rotation_with_no_way_back_stays_open`,
+`a_rotation_is_answered_when_its_pump_is_gone`,
+`a_pump_serves_again_after_its_connection_ended`; the fake server hangs
+up without answering the write, as the door does) and, through a real
+door, `crates/molt-ui/src/tests/gui/remote.rs`
+(`a_rotation_behind_the_web_door_shows_the_key_first_and_reconnects_with_it`,
+`the_read_key_is_issued_behind_the_web_door_without_touching_the_seat_key`,
+`the_web_form_revokes_the_read_key_and_removes_the_s3_secret`,
+`a_native_window_rotates_in_one_step`,
+`the_web_form_states_that_stored_keys_are_not_shown`,
+`a_rotation_through_the_web_door_answers_applied`,
+`a_rotation_s_outcome_is_told_as_it_ended`,
+`the_new_key_dialog_arms_apply_only_on_a_copy_that_worked`,
+`a_copy_answer_arms_only_the_key_it_copied`). NOT covered: the
+`invoke_from_event_loop` hop between an answer and its landing
+(`land_new_key`, `land_key_copy` are called directly), and the real
+clipboard route (a test must not touch the user's clipboard).
+
+Open:
+
+- to check in the first browser run: that `writeText` from a canvas
+  click is allowed, and that Ctrl+C on the selected key reaches the
+  browser's `copy` event.
+- with the key input focused, Enter does not press Apply (the input
+  holds the keys); Apply is clicked.
+- the form still cannot say whether a read key or an S3 secret is
+  stored; a flag in the session view would be its own change.
 
 ### 6.6 Startup inputs
 
@@ -593,41 +795,43 @@ web door itself - revoke the read key and wipe the S3 secret.**
   it - the headless backend never drains that queue, the same limit every
   mirror test has.
 
-Open (W5): what `run_app`'s web twin is handed in place of the two
-arguments; until the first session lands the footer is empty and the
-embedded row shows the window's default (greyed).
+**Built (2026-11-18): the web entry.** `molt_ui::run_remote(engine,
+spawner, lang, opened)` is `run_app`'s twin and takes neither argument: the
+config location and the embedded row arrive with the first session, as
+above. It labels the window in `lang` at once (the browser's language,
+until the session names the node's), clears `folder-browse` and sets
+`web` (§6.5) before the first frame, and hands `opened` the window's
+`Sizer` (§4); `run_app` itself is native only. Both share
+`wire_window`. Pinned by
+`the_web_entry_opens_a_window_on_the_remote_engine`
+(`tests/gui/remote.rs`: labelled, no folder dialog, a callback reaches
+the engine behind a real door). Until the first session lands the
+footer is empty and the embedded row shows the window's default
+(greyed).
 
-### 6.7 What still ties `molt-ui` to native (2026-11-18)
+### 6.7 What ties `molt-ui` to native (2026-11-18)
 
-Two modules, outside `src/tests/`: `native.rs` (the spawner, off-thread
-work and `NativePlatform`) and the `Native` arm of `engine.rs`. Pinned by
+Nothing a browser build compiles. Two places name what a browser cannot
+have, both `cfg(not(target_arch = "wasm32"))`: `native.rs` (the tokio
+spawner, off-thread work, `NativePlatform`, `absolute`) and the `Native`
+arm of `engine.rs` with `run_app`. `web.rs` is the browser's twin of the
+first (§6.2). Pinned by
 `the_higher_crate_uses_outside_native_are_the_listed_ones` and
 `the_os_sites_outside_native_are_the_listed_ones`
-(`tests/gui/spawner.rs`); the lists only shrink, and the second is
-empty. `clippy.toml` (§8.3) allows the listed calls in `native.rs`
-alone.
-
-| What | Where | Purpose | Goes with |
-|---|---|---|---|
-| `molt-engine` | `engine.rs` | `WalletHandle`, the in-process engine | W5 (cfg on the `Native` arm) |
-| `molt-storage`, `molt-config`, `tokio`, `arboard`, `rfd` | `native.rs` | `expand_tilde`, `random_token`, the runtime, the clipboard, the dialogs | W5 (cfg on the module, a wasm twin for the spawner and `off_thread`) |
-| `std::fs`, `std::thread`, `std::process`, `std::env`, `Instant`, `SystemTime` | `native.rs` | file reads and writes, the alert player, the clocks, `absolute` for the native config path | W5 (same cfg) |
-| `native::absolute` | `app.rs` (`run_app`) | absolutizes the native config path | W5 (native-only entry) |
-| chrono `Local` | `labels.rs` | local time display | W5 (`wasmbind` on wasm32) |
+(`tests/gui/spawner.rs`) and by the `clippy.toml` lint (§8.3), which
+allows the listed calls in `native.rs` alone.
 
 Not in `molt-ui` at all: `molt-net` (dev-dependency), `molt-mcp`
 (dev-dependency since 2026-11-18), no audio crate (the alert runs a
-system player).
+system player natively, WebAudio in `molt-web`).
 
-Measured 2026-11-18 (`cargo check -p molt-ui --target
-wasm32-unknown-unknown --features molt-ui/live-preview`, type check
-only): 18 errors, 17 of them inside `native.rs` (5 `tokio`, 5 `arboard`,
-4 `rfd`, 2 `molt-config`, 1 `molt-storage`) and 1 `molt-engine` in
-`engine.rs`. Everything else type-checks for wasm32 (22 before the
-platform seam, 27 before §6.4; unchanged after the lint pass and after
-the window's byte flows of §7, whose module type-checks for wasm32).
-chrono's `Local` compiles and fails at run time, so the compiler does
-not count it.
+Measured 2026-11-18: `SLINT_LIVE_PREVIEW=1 cargo check -p molt-web
+--features live-preview --target wasm32-unknown-unknown` passes with no
+error and no warning, and so does clippy in the same form (18 errors
+before the cfg, 22 before the platform seam, 27 before §6.4). That is a
+type check against the stub window; what compiles and fails at run time
+is the lint's and the graph test's business, and a real run is W5's
+open half.
 
 ## 7. Files as bytes
 
@@ -763,9 +967,10 @@ Open:
 [profile.release-web]
 inherits = "release"          # panic = "abort", codegen-units = 1, overflow-checks
 lto = "off"                   # whole-profile only; measured with off, thin is unmeasured
-# strip: "none" is inherited and the binutils post-step does not apply to
-#        wasm; W0 picks `strip = true` or wasm-bindgen
-#        --remove-name-section --remove-producers-section
+# strip: "none" is inherited; the script strips the bundle's copy with
+#        wasm-bindgen --remove-name-section --remove-producers-section
+#        (decided 2026-11-18: the pinned CLI does it, the unstripped
+#        module stays in the target dir)
 [profile.release-web.package.molt-ui-window]
 opt-level = "s"               # measured, §8.4
 codegen-units = 16            # measured: 26 GiB instead of 32, 11 min instead of 27
@@ -777,12 +982,34 @@ indices only; an unstripped `.wasm` is kept locally, as the native build
 keeps its debug info. Artefact:
 `target/wasm32-unknown-unknown/release-web/molt_web.wasm`.
 
+Built 2026-11-18 in the root `Cargo.toml`. The §8.4 figures were taken
+with `strip = true`; with the wasm-bindgen strip the
+module is 65.2 MB (§8.4, measured 2026-11-18).
+
 ### 8.2 Script
 
-`scripts/build-release-web.sh`, its own entry point: the native script is
-the third-party verification recipe and must not start needing wasm
-tools or a second window-scale compile. The releaser runs native, then
-web.
+Built (2026-11-18). `scripts/build-release-web.sh`, its own entry point:
+the native script is the third-party verification recipe and must not
+start needing wasm tools or a second window-scale compile. The releaser
+runs native, then web.
+
+`--check-only` validates rustc against `rust-toolchain.toml`, the wasm32
+target, the CLI version, GNU tar, the profile, the page and licences and
+reports memory and a busy target dir, without compiling. The target dir
+is remapped as well, so a `CARGO_TARGET_DIR` outside the tree gives the
+same bytes; the registry and git remaps follow the effective cargo home
+(`${CARGO_HOME:-$HOME/.cargo}`), not a fixed `$HOME/.cargo`. The bundle
+is staged in `<target>/wasm32-unknown-unknown/release-web/web-bundle`.
+`scripts/test-build-release-web.sh` tests the script against stub tools.
+The busy check covers this target dir only (cargo, rustc, rustdoc,
+clippy-driver by command line, cwd or `CARGO_TARGET_DIR`); a
+window-scale build on another target dir is not seen. Low memory is a
+warning, not a refusal.
+
+Install, beside the config file:
+`mkdir -m 755 web && tar --zstd -xf moltrepublic-web.tar.zst -C web` -
+never a bare `mkdir web`: the door refuses a group- or world-writable
+bundle directory (§5.4) and a umask of 002 would produce one.
 
 - `rust-toolchain.toml` gains `targets = ["wasm32-unknown-unknown"]`.
 - Same `SOURCE_DATE_EPOCH`, path remaps, `LC_ALL`, `TZ`, `--locked`.
@@ -793,7 +1020,8 @@ web.
   release-web`, then `wasm-bindgen --target web --no-typescript`, the CLI
   version checked against `Cargo.lock` (mismatch fails and prints the
   `cargo install --locked wasm-bindgen-cli --version =X` line).
-- Deterministic tar of `index.html`, the `.js`, the `.wasm`, `COPYING`
+- Deterministic tar of the page (`index.html`, `page.js`, `page.css`
+  from `crates/molt-web/page/`), the glue `.js`, the `.wasm`, `COPYING`
   and the font licences into `dist/moltrepublic-web.tar.zst`, then its
   `sha256sum`.
 - No `wasm-opt` in v1: one more unpinned tool in the envelope. Revisit
@@ -830,10 +1058,13 @@ web.
   cost ~11 GiB. The live-preview stubs type-check on wasm32 (§8.4), so
   they are the stub window: `SLINT_LIVE_PREVIEW=1 cargo check -p molt-web
   --features live-preview --target wasm32-unknown-unknown` in its own
-  cache dir (`target/dev-ui-wasm`) becomes a `dev-ui.sh` mode and the
-  per-change compile of all wasm-cfg code. `molt-web` carries a dev-only
-  `live-preview` passthrough like `molt-app`'s; it is check-only, the
-  stubs cannot run in a browser.
+  cache dir (`target/dev-ui-wasm`) is a `dev-ui.sh` mode (built
+  2026-11-18: `scripts/dev-ui.sh wasm`; about 20 s after an edit, 2 s
+  warm) and the per-change compile of all wasm-cfg code. `molt-web`
+  carries a dev-only `live-preview` passthrough like `molt-app`'s; it is
+  check-only, the stubs cannot run in a browser. The same invocation
+  with `clippy` in place of `check` is the only lint the wasm-cfg code
+  gets.
 
 ### 8.4 Measured (2026-11-17, this box)
 
@@ -863,9 +1094,20 @@ web.
     peak **26.0 GiB**, `.wasm` 58.9 MB (8.2 MB at `zstd -19`). 5.6 GiB
     less memory and 2.5x faster for 18 % more bytes (5 % compressed) -
     the candidate for `release-web`; its byte reproducibility across two
-    builds is checked in W6.
+    builds held on this box (2026-11-18, below); a second machine or
+    checkout path is still open.
+  - **the real crate through the script** (2026-11-18,
+    `scripts/build-release-web.sh`, `molt-web` in `release-web`, `-j 1`,
+    `wasm-bindgen-cli 0.2.126`): 17m40s cold, 16m24s with the host side
+    cached; the window rustc peaked at **26.1 GiB** (RSS + swap) both
+    times. Bound `.wasm` 65.2 MB (9.5 MB at `zstd -19`), unstripped
+    105.7 MB, glue 111 KB, tarball 9.5 MB. Two builds of one commit,
+    the wasm profile dir deleted in between: the same SHA-256 for the
+    tarball and for the unstripped module. No host path in the module.
+    The glue exports what `page.js` imports. Not loaded in a browser.
   - the canvas took the window's preferred 1060x720, not the viewport;
-    W5 sizes it from CSS.
+    W5 sizes it from the window, not from CSS (§4, built 2026-11-18,
+    still to be seen in a browser).
   - 2026-11-18, with the English string table set: the welcome screen
     renders with its labels in headless Chromium (100 % and 110 %
     zoom) and in desktop Firefox. **A CSS stretch on the canvas
@@ -884,20 +1126,27 @@ RAM + swap for the window rustc (16 codegen units; ~32 GiB with one). Run the sp
 
 ## 9. What the browser cannot do
 
-Stated in the page's help and the README:
+Stated in the page's help (built 2026-11-18, `page_text` in
+`molt-ui/src/i18n.rs`) and the README (W6):
 
-- no quit (close the tab);
+- no quit (close the tab; nothing in the window offers one, §5.2);
 - tabs and the native window show the same screen (one shared session);
 - stored API keys cannot be shown, only replaced;
-- paste needs the browser's paste gesture or a clipboard permission;
+- paste needs the browser's paste gesture or a clipboard permission
+  (the paste buttons stay: the read starts inside the click, §6.3;
+  whether a browser honours that from a Slint click is unchecked);
 - no folder pickers; server directories are typed;
 - no wiki export download (server path only);
 - files over the web ceiling (64 MiB per file through the browser) go
   through the server-path flow; uploads need a workspace on disk;
 - no screen reader support (Slint renders its own text);
 - IME and mobile keyboards are weak; the layout needs 990 px width;
-- `Ctrl+W` and `Tab` are the browser's: the wiki tab-close and
-  edit/preview toggle get alternative bindings on the web;
+- `Ctrl+W` and `Tab` are the browser's: behind the door the wiki closes
+  a tab on `F4` and flips edit and preview on `F2` (built 2026-11-18;
+  the two tooltips name `F2` there;
+  `the_wiki_keys_have_browser_safe_twins_behind_the_door`). The native
+  keys stay bound, so a browser that does pass `Tab` to the canvas
+  still works;
 - proportional text renders in Inter unless a proportional font is
   bundled; the 990 px minimum was tuned against DejaVu Sans Bold and is
   re-checked in W0/W5;
@@ -906,14 +1155,16 @@ Stated in the page's help and the README:
 
 ## 10. Stages
 
-Each stage is test-first, reviewed, and lands green on master on its own.
+Each stage is test-first and reviewed. They sit on the branch
+`web-ui-slint`, one commit series; landing on master is open (§12). What
+a stage left open is in §12, not here.
 
 - **W0 Measure and load.**
   (a) done: target, pinned CLI, minimal window end to end (§8.4).
   (b) done: the live-preview stubs type-check on wasm32 (§8.4).
   (c) done: the real window module compiles for wasm32 and loads in a
   browser (§8.4). The spike lives in `target/w0-spike` (ignored).
-  (d) open: the same spike with hand-set strings and models (main screen,
+  (d) open (§12): the same spike with hand-set strings and models (main screen,
   ~500 chat rows with colour emoji, a popup and a context menu reachable)
   for frame time, tab memory, fonts against the 990 px layout, context
   menu, emoji, popups and `readText()` from a click; thin LTO and
@@ -933,8 +1184,9 @@ Each stage is test-first, reviewed, and lands green on master on its own.
   engines with the founder driven through the door, and the run-event
   load measured (§11;
   `a_republic_is_founded_joined_and_chatted_in_through_the_web_door`,
-  `crates/molt-ui/src/tests/gui/remote.rs`). Open: the web adapter of
-  the client handle (W5). Red tests first: the gate test;
+  `crates/molt-ui/src/tests/gui/remote.rs`); the web adapter of the
+  client handle (`molt-web/src/socket.rs`, type-checked, not yet run in
+  a browser). Red tests first: the gate test;
   foreign Origin, Origin with another port than Host, Origin `null`,
   Host `evil.example`, Host `127.0.0.1.evil.example`, tunnel port
   accepted; a silent subscribed session closed 4401 on rotation with no
@@ -952,8 +1204,9 @@ Each stage is test-first, reviewed, and lands green on master on its own.
   listed and pinned (§6.7); the link read - `classify_link`, a verdict
   Rust sets, a stale answer dropped, `joinable` on the seat rows (§6.4).
   Found, join and chat run through a real door since W4
-  (2026-11-18), the settings save with its secrets since W2.
-  Open: the rest of the secret draft (§6.5). Proof: the GUI
+  (2026-11-18), the settings save with its secrets since W2; the rest
+  of the secret draft - clearing and rotating behind the door - came
+  with W5 (2026-11-18, §6.5). Proof: the GUI
   suite, plus a new named test set - a real `molt-remote` on loopback and
   a window whose `Ctx` holds the remote client with the mirror running
   (found, join, chat, settings save with secrets intact).
@@ -965,7 +1218,8 @@ Each stage is test-first, reviewed, and lands green on master on its own.
   (§6.3, §6.7); the mirror folder as a typed draft with Apply and one
   property that hides every folder dialog button (§7); the
   `clippy.toml` lint in both crates, live-preview clippy at 0 with it
-  on (§8.3). Open: the web implementation (W5).
+  on (§8.3). The web implementation is written and type-checked
+  (2026-11-18, §6.3); its browser run is W5's open half.
 - **W4 Byte doors.** Done (2026-11-18). Engine, door and client:
   the engine's upload store (`<workspace>/uploads/<id>/<name>`; 64 MiB
   per upload, 8 open, 1 GiB per workspace; idle 15 minutes; dropped on
@@ -987,22 +1241,53 @@ Each stage is test-first, reviewed, and lands green on master on its own.
   storage writer), pictures set through an upload, the export as a
   download, the refusal strings; the gate test's pinned list is empty
   and gone. Proof: two real engines, each behind a real door
-  (`crates/molt-ui/src/tests/gui/remote.rs`). Open: what §7 lists
-  (uploads in an export, a republic that is not stored, snapshot
-  weight) and the browser half of the platform calls (W5).
-- **W5 `molt-web`**: the cdylib, the socket adapter, the web platform
-  impl, `index.html` with the token prompt, key rebinding, font decision,
-  the graph test; first full browser run.
-- **W6 Pipeline**: profile, `build-release-web.sh`, reproducibility doc,
-  service file, README, landing page link. This doc moves to
-  `docs_archive/ui/` as the spec.
+  (`crates/molt-ui/src/tests/gui/remote.rs`).
+- **W5 `molt-web`.** Built (2026-11-18), NOT yet run in a browser:
+  everything is type-checked for wasm32 with the stub window and tested
+  natively where a native test can reach it. Part 1: the crate (`cdylib` +
+  `rlib`, a plain workspace member with wasm32-only dependencies, §4);
+  the entry `start(token, notify)`; the socket adapter on `gloo-net`
+  under the kit's pump; the browser platform (§6.3); the web `Spawner`
+  and `off_thread` in `molt-ui/src/web.rs` with `native.rs` and
+  `Engine::Native` gated (§6.2, §6.7); `molt_ui::run_remote` (§6.6);
+  chrono `wasmbind` and similar `wasm32_web_time`; the `live-preview`
+  passthrough and `scripts/dev-ui.sh wasm` (§8.3); the graph test and
+  the exact `wasm-bindgen` pin (§4). Part 2: the page (`index.html`,
+  `page.js`, `page.css`, on the door's list) with the key prompt, the
+  close reasons, reconnect inside one page load and the limits of §9;
+  the window sized from the viewport through Slint's own sizing; a
+  panic hook; and the web-only behaviour behind the window's `web`
+  property - no stored key shown, a key shown before it is written,
+  revoke and remove as actions, the connection following a rotated seat
+  key, `F2` and `F4` for the wiki (§4, §6.5, §9).
+- **W6 Pipeline.** Done (2026-11-18): `[profile.release-web]`, the
+  wasm32 target in `rust-toolchain.toml`, `scripts/build-release-web.sh`
+  with `--check-only` and its test, the web section of
+  `docs_archive/build/reproducible-builds.md`, the `[web]` lines in
+  `scripts/moltd.service` and the README; the first real build of
+  `molt-web` through the script, its measured size and the two-build
+  reproducibility check on one host (§8.4). Verified against the real
+  crate (2026-11-18): package, lib and artefact names, the page
+  directory, the five bundle files against `molt_remote::BUNDLE_FILES`,
+  the CLI check against `Cargo.lock`, the `live-preview` passthrough
+  (`scripts/dev-ui.sh wasm`), `bash -n` on both scripts and
+  `--check-only` (exit 0); a test now holds the script's names, bind
+  step and tar line to the crate and the door
+  (`crates/molt-remote/tests/door.rs`). The landing
+  page lists no downloads and was left as is.
+
+This doc moves to `docs_archive/ui/` once all four items of §12 A are
+done AND every entry of §12 B, C and D is closed or moved to its own doc
+under `docs/`. Finishing the browser run and W0 (d) alone does not
+archive it.
 
 ## 11. Risks
 
-- **The wasm window compile may not fit this box, or the browser may not
-  take the module** (W0). Levers: `opt-level = "s"` for the window crate,
-  LTO off for the whole web profile, more swap; shrinking the module is
-  the weak lever.
+- **The wasm window compile needs about 26 GiB** of RAM + swap (§8.4);
+  it fits this box only with swap, and the module grows with the window.
+  Levers: `opt-level = "s"` for the window crate, LTO off for the whole
+  web profile, more swap; shrinking the module is the weak lever. The
+  bare module loaded in a browser (W0); the real bundle has not (§12).
 - **A second remote door**, and a tab holding the token is a shell on
   the host (§5.2). Mitigated by the shared live seat key, the
   fail-closed gate, loopback-only binding, Origin/Host checks, the
@@ -1024,3 +1309,131 @@ Each stage is test-first, reviewed, and lands green on master on its own.
 - **Drift**: std or tokio calls creeping back into shared `molt-ui` code.
   The clippy lint and the graph test are the guards (§8.3), not the wasm
   `cargo check`.
+
+## 12. What is still open (2026-11-18)
+
+The one list. A section's own "Open" notes are the detail behind an
+entry here; nothing is open that is not named here.
+
+### A. Before this doc can move to the archive
+
+0. Done 2026-11-18, headless Chromium (SwiftShader) against a scratch
+   node serving the release bundle: the key prompt, a refused key, the
+   connect, the window labelled and mirroring, clicks reaching the
+   engine, the canvas following the viewport at 1.0 and 1.1 device
+   scale, nothing in `localStorage`, `sessionStorage`, cookies or the
+   URL. Found and fixed there: the first fit ran before the window was
+   shown and kept the preferred width. The page requests one file the
+   door answers with 404 (the favicon, by the look of it). Everything
+   else in item 1 is still unchecked, Firefox included.
+1. **The first real browser run** of the bundle
+   (`dist/moltrepublic-web.tar.zst`, unpacked per §8.2, a node with
+   `[web] port`). Nothing of W5 has run in a browser. To check, in
+   Chromium and in Firefox:
+   - the page: key prompt, `ready`, a refused key, a closed connection
+     and the reconnect, the one reload on `version`, a password manager
+     offering to save the key field (§4);
+   - the canvas following the viewport, also at a fractional zoom in
+     Firefox (§4, §8.4);
+   - clipboard: `readText()` and `writeText()` from a Slint click, and
+     Ctrl+C on the selected key in the new-key dialog (§6.3, §6.5);
+   - files: the file input's `click()` from a spawned task, `save_file`
+     outside a click (phase two of a download, an export), `rfd`'s
+     overlay with the page's CSS under the door's content policy, a
+     cancelled dialog (§6.3);
+   - the alert through WebAudio; `F2` and `F4` reaching the canvas from
+     inside the wiki editor (§9);
+   - right-click menus, colour emoji, popups, a real GPU (§9);
+   - the web `Spawner` (`slint::spawn_local`, detached) under a real
+     event loop (§6.2).
+2. **W0 (d) measurements**: the populated window (main screen, about 500
+   chat rows with colour emoji, a popup, a context menu) for frame time,
+   tab memory and fonts against the 990 px layout; thin LTO and
+   `opt-level` 3 if the memory allows (§8.4, §10). With them: whether
+   inline image fit and decode need chunking (§6.2) and what the
+   Organization snapshot's picture bytes weigh over a socket (§7).
+3. **Reproducibility of the web build beyond one host**: the same hash
+   from a second machine, a second checkout path, a `CARGO_TARGET_DIR`
+   outside the tree, and with the host-side build scripts rebuilt
+   (§8.4, `docs_archive/build/reproducible-builds.md`). No release
+   carries a web tarball, so no published hash exists.
+4. **Landing.** The work is on `web-ui-slint`, not on master. The
+   compiled native window (the non-live-preview profile of `molt-ui`,
+   `molt-app`, `scripts/build-release.sh`, `scripts/gui_walk.py`) has
+   not been built or run with these changes: every GUI check ran on the
+   live-preview stubs. Full test runs of `molt-engine`'s integration
+   tests, `molt-net`, `molt-storage`, `molt-config` and `molt-vault`
+   were not repeated after the last stages.
+
+### B. Decisions not taken
+
+- The font: Inter as it falls out, or a bundled proportional font (§9).
+- Whether the paste buttons stay behind the door (§6.3, §9); decided
+  after A.1.
+- Whether stored uploads travel in an export or a backup (§7).
+- A republic that is not stored has no upload store: behind the door it
+  can neither share a file nor set a picture (§7).
+- What removes phase one's file and a bare-name export's blob on the
+  server, and whether the window gets a download-dir control (§7).
+- A session flag saying whether a read key or an S3 secret is stored, so
+  the web form can stop guessing (§6.5).
+- The page links no source and shows no licence: the tarball carries
+  `COPYING` and the font licences, but the door serves only its five
+  files (§2 "Licence", §5.3). Needed before a bundle is offered to
+  anyone but its builder.
+- Whether the release script refuses on low memory instead of warning
+  (§8.2).
+- CLAUDE.md: the crate order names neither `molt-ui-kit`, `molt-remote`
+  nor `molt-web`; its `INTERNAL` sentence does not mention the byte
+  doors; "Build, test, run" has no line for
+  `scripts/build-release-web.sh` (about 26 GiB, never beside another
+  window-scale build). Left to the user.
+
+### C. Known gaps in what is built
+
+- The link read is not re-sent when a door connection returns; the user
+  edits the field (§6.4).
+- A cancelled `rfd` dialog in the browser never answers, so the task
+  behind it stays parked (§6.3).
+- A picture proposal the engine refuses after its upload went up leaves
+  that upload until the 15 minute sweep or the session's end; eight of
+  them fill the open-upload quota (§7).
+- A typed mirror folder in another spelling of the one in use keeps
+  Apply lit (§7). A relative `mirror_dir` already stored is neither
+  migrated nor refused on load.
+- In the new-key dialog Enter does not press Apply while the key input
+  holds the focus (§6.5).
+- No console sink for `tracing` lines in the tab; a panic is logged
+  (§4).
+- A command issued between a connection's end and the next welcome
+  waits in the handle and goes out after the welcome; the page covers
+  the window meanwhile, but the mirror's own reads can queue (§4).
+- Until the first session lands, a web window shows an empty footer and
+  the default embedded-Tor row (§6.6).
+- The download note (`to_user`) is per window and workspace: after a
+  switch or a reconnect the next click hands the file over (§7).
+- Not covered by any test: every `invoke_from_event_loop` hop (the
+  headless backend never drains it), the real clipboard and file
+  dialogs, and `start.rs`, `socket.rs`, `platform.rs` beyond the wasm
+  type check.
+- Seen beside this work, not caused by it, to look at: an own share
+  whose message left the log may not be re-adopted after a restart
+  (`adopt_share_paths`); two tests failed once under a full parallel
+  run and passed alone (`mirror_gossip.rs`,
+  `chat_tests::file_share_lifecycle_download_until_removed`).
+
+### D. Pipeline, with the first release that ships the tarball
+
+- Download lines in the README and on the landing page (§8.2).
+- `wasm-bindgen-cli` at the `Cargo.lock` version on the release box
+  (0.2.126, installed here 2026-11-18; again after every lock bump).
+- `shellcheck` over the two scripts (not installed here; `bash -n`
+  only).
+- The busy check sees only its own target dir; a window-scale build
+  elsewhere is the releaser's to avoid (§8.2).
+
+### Out of v1 by decision (not open)
+
+A non-loopback bind or TLS (D2, its own ADR), per-connection view state
+(§3), a web door for the read key (§5.3), driving the web GUI over MCP
+(§5.5), a browser download of the wiki export (§7), `wasm-opt` (§8.2).

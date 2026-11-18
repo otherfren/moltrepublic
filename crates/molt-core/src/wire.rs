@@ -24,6 +24,13 @@ pub const MAX_TRANSFER: u64 = 64 * 1024 * 1024;
 /// The most bytes one [`Chunk`] carries.
 pub const CHUNK: usize = 256 * 1024;
 
+/// The close code for a key that is missing, wrong, or no longer the
+/// seat key.
+pub const CLOSE_UNAUTHORIZED: u16 = 4401;
+
+/// The close code for a broken protocol.
+pub const CLOSE_PROTOCOL: u16 = 4400;
+
 /// Client to server.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -10,7 +10,9 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::BTreeSet;
 
-use molt_core::wire::{Chunk, ClientFrame, ServerFrame, CHUNK, MAX_TRANSFER, WIRE_VERSION};
+use molt_core::wire::{
+    Chunk, ClientFrame, ServerFrame, CHUNK, CLOSE_PROTOCOL, CLOSE_UNAUTHORIZED, MAX_TRANSFER, WIRE_VERSION,
+};
 use molt_core::{Command, Event, MoltError, Reply, SessionScope};
 use molt_engine::WalletHandle;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -23,10 +25,6 @@ use tokio_tungstenite::WebSocketStream;
 use crate::gate::Gate;
 use crate::server::WebDoor;
 
-/// The key is missing, wrong, or no longer the seat key.
-const CLOSE_UNAUTHORIZED: u16 = 4401;
-/// The client broke the protocol.
-const CLOSE_PROTOCOL: u16 = 4400;
 /// A hello is a version and a token: anything larger is not one.
 const MAX_HELLO: usize = 4096;
 /// Commands one session may have at the engine at once; past it the

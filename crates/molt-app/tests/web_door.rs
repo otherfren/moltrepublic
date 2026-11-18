@@ -28,6 +28,8 @@ fn bundle(dir: &Path) {
     std::fs::write(dir.join("index.html"), "<!doctype html>moltd").expect("index");
     std::fs::write(dir.join("molt_web.js"), "export default 1").expect("js");
     std::fs::write(dir.join("molt_web_bg.wasm"), [0u8, 97, 115, 109]).expect("wasm");
+    std::fs::write(dir.join("page.js"), "import './molt_web.js'").expect("page js");
+    std::fs::write(dir.join("page.css"), "body{margin:0}").expect("page css");
 }
 
 /// A headless node with a seat key and `[web] port`; the bundle directory

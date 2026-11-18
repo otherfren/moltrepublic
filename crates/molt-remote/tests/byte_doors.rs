@@ -73,9 +73,9 @@ async fn node() -> Node {
 
     let bundle = tmp.path().join("web");
     std::fs::create_dir(&bundle).expect("bundle dir");
-    std::fs::write(bundle.join("index.html"), "<!doctype html><canvas id=canvas>").expect("index");
-    std::fs::write(bundle.join("molt_web.js"), "export default 1").expect("js");
-    std::fs::write(bundle.join("molt_web_bg.wasm"), [0u8, 97, 115, 109]).expect("wasm");
+    for file in molt_remote::BUNDLE_FILES {
+        std::fs::write(bundle.join(file), "x").expect("bundle file");
+    }
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("addr").port();
     let door = WebDoor { build: "9.9.9".into(), caps: Caps::default(), dir: bundle, pre_auth: Duration::from_secs(10) };

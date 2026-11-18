@@ -1,0 +1,60 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "molt-web"
+description = "The browser build of the GUI: the same window on wasm32, against the engine behind the web door."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+# cdylib: what wasm-bindgen turns into the bundle. rlib: so the crate's own
+# tests (the dependency-graph guard, the page rules) build natively.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Dev-only, CHECK-only: the live-preview stubs type-check on wasm32 but cannot
+# run in a browser (docs/web_gui.md §8.3). Use via `scripts/dev-ui.sh wasm`.
+live-preview = ["molt-ui/live-preview"]
+
+# EVERYTHING sits under the wasm32 table: a native workspace build sees a
+# crate with no dependencies (docs/web_gui.md §4), and tests/graph.rs pins
+# what the wasm32 graph must never contain.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+molt-ui.workspace = true
+molt-ui-kit.workspace = true
+molt-core.workspace = true
+futures-channel.workspace = true
+futures-util.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+js-sys.workspace = true
+web-sys = { workspace = true, features = [
+    "Window", "Location", "Navigator", "EventTarget", "console",
+    "Clipboard",
+    "AudioContext", "BaseAudioContext", "AudioBuffer", "AudioBufferSourceNode",
+    "AudioScheduledSourceNode", "AudioNode", "AudioDestinationNode",
+    "Blob", "File",
+] }
+web-time.workspace = true
+gloo-timers.workspace = true
+gloo-net.workspace = true
+# crypto.getRandomValues behind the workspace's getrandom
+getrandom = { workspace = true, features = ["js"] }
+# the file dialogs: rfd's wasm backend (an <input type=file>, a download
+# link). The workspace entry's features name the Linux portal; rfd's build
+# script demands a backend choice on every target but macOS and Windows,
+# and both features are inert here (their crates are Linux-only).
+# `file-handle-inner`: the picked File itself, for its size before a read.
+rfd = { workspace = true, features = ["file-handle-inner"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# TEST-ONLY: a browser-minted key has the shape of a node-minted one
+molt-config.workspace = true
+# TEST-ONLY: the close codes the page rules read are the wire's
+molt-core.workspace = true

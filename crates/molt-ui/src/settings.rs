@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use molt_core::{Command, SessionSettings};
 use crate::engine::Engine;
-use crate::native::Spawner;
+use crate::platform::Spawner;
 
 use crate::alerts::{sound_index, sound_name};
 use crate::i18n::error_toast;

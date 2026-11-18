@@ -24,7 +24,7 @@ import "assets/fonts/DejaVuSansMono.ttf";
 import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, PasteTarget, SurfaceTab, ViewItem, LogLine, ChatSeg, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, SeatRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, LogRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
-    ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
+    ConfirmModal, SkillModal, DotLabel, InsetWell, KeyWell, WordChip
 } from "components.slint";
 import {
     BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, FeatureTable, SealedPanel, FoldedStep, ProposalCard, DecisionTable, Spinner, DiffViewer, OrgBanner, LogoBox
@@ -1584,6 +1584,19 @@ export component AppWindow inherits Window {
     // false where a path names the SERVER's disk (the web build): every
     // folder dialog button goes, the typed forms stay
     in property <bool> folder-browse: true;
+    // true behind the web door (docs/web_gui.md §6.5, §9): stored keys
+    // are not shown, a new key is shown before it is written, a secret is
+    // removed by its own action, and the wiki keys get browser-safe twins
+    in property <bool> web: false;
+    // a freshly minted key on show before its write (web only): the key,
+    // which one (1 seat, 2 read-only), and whether the copy step is done
+    in-out property <string> key-new;
+    in property <int> key-new-kind;
+    in-out property <bool> key-new-copied: false;
+    callback copy-new-key();
+    callback apply-new-key();
+    callback cancel-new-key();
+    callback remove-s3-secret();
     // the tables' presentation state (sorting/filtering runs in Rust over
     // the mirrored rows and lives in the UI-local state there — these echo
     // it back so the headers render the ▲/▼ arrow and the filter box
@@ -1853,6 +1866,7 @@ export component AppWindow inherits Window {
         || root.confirm-abort-ritual-open
         || root.confirm-leave-join-open
         || root.confirm-quit-open
+        || root.key-new != ""
         || root.confirm-delete-open
         || root.confirm-delmsg-open
         || root.tor-reset-confirm-open
@@ -2917,6 +2931,8 @@ export component AppWindow inherits Window {
             root.skill-open = false;
         } else if (root.confirm-quit-open) {
             root.confirm-quit-open = false;
+        } else if (root.key-new != "") {
+            root.cancel-new-key();
         } else if (root.confirm-abort-ritual-open) {
             root.confirm-abort-ritual-open = false;
         } else if (root.confirm-leave-join-open) {
@@ -3108,6 +3124,16 @@ export component AppWindow inherits Window {
                     return accept;
                 }
                 if (event.text == Key.Tab && WikiState.doc-open && !root.any-modal-open) {
+                    WikiState.edit-toggle();
+                    return accept;
+                }
+                // a browser keeps Ctrl+W and Tab for itself: the same two
+                // actions on keys it leaves alone
+                if (root.web && event.text == Key.F4) {
+                    WikiState.close-active();
+                    return accept;
+                }
+                if (root.web && event.text == Key.F2 && WikiState.doc-open && !root.any-modal-open) {
                     WikiState.edit-toggle();
                     return accept;
                 }
@@ -8962,6 +8988,26 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                 }
+                                // the web form holds the stored secret
+                                // empty, so emptying the field cannot
+                                // remove it
+                                if root.web: HorizontalLayout {
+                                    spacing: 10px;
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        vertical-alignment: center;
+                                        text: Strings.set-s3-secret-keep;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                        wrap: word-wrap;
+                                    }
+                                    s3-secret-remove := AppButton {
+                                        label: Strings.set-s3-secret-remove;
+                                        clicked => {
+                                            root.remove-s3-secret();
+                                        }
+                                    }
+                                }
                             }
                             S3BucketGroup {
                                 title: Strings.set-s3-grp-backup;
@@ -9184,13 +9230,15 @@ export component AppWindow inherits Window {
                                     // leaving the tab drops this branch, so the
                                     // token re-masks on its own
                                     property <bool> token-shown: false;
-                                    InsetWell {
+                                    // behind the web door a stored key
+                                    // never crosses: nothing to show
+                                    if !root.web: tok-well := InsetWell {
                                         horizontal-stretch: 1;
                                         text: root.cfg-mcp-token;
                                         revealed: tok-row.token-shown;
                                         char-wrap: true;
                                     }
-                                    AppButton {
+                                    if !root.web: AppButton {
                                         pad: 10px;
                                         icon: @image-url("assets/eye.svg");
                                         icon-set: true;
@@ -9201,7 +9249,7 @@ export component AppWindow inherits Window {
                                             tok-row.token-shown = !tok-row.token-shown;
                                         }
                                     }
-                                    AppButton {
+                                    if !root.web: tok-copy := AppButton {
                                         pad: 10px;
                                         icon: @image-url("assets/copy.svg");
                                         icon-set: true;
@@ -9212,7 +9260,15 @@ export component AppWindow inherits Window {
                                             root.show-toast(Strings.toast-copied);
                                         }
                                     }
-                                    AppButton {
+                                    if root.web: keys-hidden-note := Text {
+                                        horizontal-stretch: 1;
+                                        vertical-alignment: center;
+                                        text: Strings.set-keys-hidden;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                        wrap: word-wrap;
+                                    }
+                                    tok-rotate := AppButton {
                                         label: Strings.set-rotate;
                                         clicked => {
                                             root.rotate-token();
@@ -9231,13 +9287,13 @@ export component AppWindow inherits Window {
                                 read-row := HorizontalLayout {
                                     spacing: 10px;
                                     property <bool> token-shown: false;
-                                    read-well := InsetWell {
+                                    if !root.web: read-well := InsetWell {
                                         horizontal-stretch: 1;
                                         text: root.cfg-mcp-read-token;
                                         revealed: read-row.token-shown;
                                         char-wrap: true;
                                     }
-                                    AppButton {
+                                    if !root.web: AppButton {
                                         pad: 10px;
                                         icon: @image-url("assets/eye.svg");
                                         icon-set: true;
@@ -9248,7 +9304,7 @@ export component AppWindow inherits Window {
                                             read-row.token-shown = !read-row.token-shown;
                                         }
                                     }
-                                    AppButton {
+                                    if !root.web: read-copy := AppButton {
                                         pad: 10px;
                                         icon: @image-url("assets/copy.svg");
                                         icon-set: true;
@@ -9259,15 +9315,26 @@ export component AppWindow inherits Window {
                                             root.show-toast(Strings.toast-copied);
                                         }
                                     }
+                                    if root.web: Text {
+                                        horizontal-stretch: 1;
+                                        vertical-alignment: center;
+                                        text: Strings.set-keys-hidden;
+                                        color: Theme.faint;
+                                        font-size: Theme.fs-cap;
+                                        wrap: word-wrap;
+                                    }
+                                    // the web form cannot know whether a
+                                    // read key is stored: one label, and
+                                    // revoke is always live
                                     read-mint := AppButton {
-                                        label: root.cfg-mcp-read-token == "" ? Strings.set-issue : Strings.set-rotate;
+                                        label: root.web ? Strings.set-issue-rotate : root.cfg-mcp-read-token == "" ? Strings.set-issue : Strings.set-rotate;
                                         clicked => {
                                             root.rotate-read-token();
                                         }
                                     }
                                     read-revoke := AppButton {
                                         label: Strings.set-revoke;
-                                        enabled: root.cfg-mcp-read-token != "";
+                                        enabled: root.web || root.cfg-mcp-read-token != "";
                                         clicked => {
                                             root.revoke-read-token();
                                         }
@@ -10731,6 +10798,37 @@ export component AppWindow inherits Window {
             color: Theme.faint;
             font-size: Theme.fs-cap;
             wrap: word-wrap;
+        }
+    }
+
+    // Modal (web only): a freshly minted key, shown BEFORE it is written
+    // (docs/web_gui.md §6.5) - a stored key never crosses the door again,
+    // so this is the one time it can be copied. Apply waits for a copy
+    // that worked, or for the whole key selected by hand (a browser may
+    // refuse the clipboard; Ctrl+C on the selection still copies).
+    if root.key-new != "": ConfirmModal {
+        dialog-width: 520px;
+        title: root.key-new-kind == 2 ? Strings.key-new-title-read : Strings.key-new-title;
+        body: Strings.key-new-body;
+        confirm-label: Strings.ou-mirror-apply;
+        confirm-enabled: root.key-new-copied || key-new-well.all-selected;
+        dismissed => {
+            root.cancel-new-key();
+        }
+        confirmed => {
+            root.apply-new-key();
+        }
+        key-new-well := KeyWell {
+            text: root.key-new;
+        }
+        key-new-copy := AppButton {
+            icon: @image-url("assets/copy.svg");
+            icon-set: true;
+            label: Strings.ow-copy;
+            primary: !root.key-new-copied;
+            clicked => {
+                root.copy-new-key();
+            }
         }
     }
 

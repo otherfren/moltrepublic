@@ -192,7 +192,7 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 let weak = cx.weak.clone();
                 let path = value.to_string();
                 cx.spawn(async move {
-                    let read = crate::platform::platform().read_file(path.clone()).await;
+                    let read = crate::bytes::read_picked(crate::platform::platform(), &path).await;
                     let payload = match read {
                         Ok(bytes) => {
                             // WP3 pre-check with the REAL preview decoder:
@@ -224,8 +224,8 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                             }
                             payload
                         }
-                        _ => {
-                            toast_unreadable(weak, path);
+                        Err(e) => {
+                            toast_byte_error(weak, e);
                             return;
                         }
                     };
@@ -301,12 +301,15 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             let member = member.to_string();
             let path = value.to_string();
             cx.spawn(async move {
-                let Ok(bytes) = crate::platform::platform().read_file(path.clone()).await else {
-                    toast_unreadable(weak, path);
-                    return;
+                let bytes = match crate::bytes::read_picked(crate::platform::platform(), &path).await {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        toast_byte_error(weak, e);
+                        return;
+                    }
                 };
                 // the crop/downscale is CPU work on a picture up to 8192²
-                let fitted = crate::native::off_thread(move || fit_member_image(&bytes, budget)).await;
+                let fitted = crate::platform::off_thread(move || fit_member_image(&bytes, budget)).await;
                 let fitted = match fitted {
                     Some(Ok(fitted)) => fitted,
                     Some(Err(why)) => {
@@ -466,19 +469,6 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             );
         });
     }
-}
-
-/// Toast WHICH file did not read - no Debug dump at the user.
-fn toast_unreadable(weak: slint::Weak<AppWindow>, path: String) {
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(ui) = weak.upgrade() {
-            let msg = format!(
-                "\u{26a0} {} {path}",
-                ui.global::<Strings>().get_toast_file_unreadable()
-            );
-            ui.invoke_show_toast_error(msg.into());
-        }
-    });
 }
 
 /// Toast why a picture did not reach the engine.

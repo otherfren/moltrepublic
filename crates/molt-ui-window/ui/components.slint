@@ -1089,6 +1089,31 @@ export component InsetWell inherits Rectangle {
     }
 }
 
+// A key on show once: a read-only input, so it can be selected and
+// copied by hand where the clipboard refuses the Copy button.
+export component KeyWell inherits Rectangle {
+    in property <string> text;
+    // the whole key is selected (a hex key: bytes are characters)
+    out property <bool> all-selected: root.text != "" && abs(kw-t.cursor-position-byte-offset - kw-t.anchor-position-byte-offset) == root.text.character-count;
+    background: Theme.bg;
+    border-radius: Theme.win95 ? 0px : 6px;
+    border-width: Theme.border-w;
+    border-color: Theme.line;
+    height: max(38px, kw-t.preferred-height + 16px);
+    kw-t := TextInput {
+        x: 10px;
+        y: 8px;
+        width: parent.width - 20px;
+        text: root.text;
+        read-only: true;
+        single-line: false;
+        wrap: char-wrap;
+        color: Theme.text;
+        font-family: "DejaVu Sans Mono";
+        font-size: Theme.fs-cap;
+    }
+}
+
 // One word of a typed recovery phrase, toned by the BIP-39 list:
 // 1 = a list word, 2 = not one, 0 = still being typed.
 export component WordChip inherits Rectangle {

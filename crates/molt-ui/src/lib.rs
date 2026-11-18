@@ -42,7 +42,9 @@
 //! - `settings` — the settings draft (read/apply/dirty/save).
 //! - `native` — the one module that names tokio and the operating
 //!   system: the spawner behind `Ctx::spawn`, off-thread work, and the
-//!   native half of the platform seam.
+//!   native half of the platform seam. Not in a browser build, where
+//!   `web` is its twin (the spawner over Slint's event loop, work inline)
+//!   and `molt-web` brings the platform.
 //! - `platform` — the door to that seam: clipboard, alert, clocks, sleep,
 //!   random token and files (`docs/web_gui.md` §6.3).
 //! - `bytes` — file content to and from the engine: by path for the
@@ -61,9 +63,15 @@
 // if the module were still injected here.
 pub use molt_ui_window::*;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub use app::run_app;
+pub use app::{run_remote, Sizer};
+pub use i18n::page_text;
 pub use engine::Engine;
+#[cfg(not(target_arch = "wasm32"))]
 pub use native::Spawner;
+#[cfg(target_arch = "wasm32")]
+pub use web::Spawner;
 
 mod actions;
 mod alerts;
@@ -83,6 +91,7 @@ mod mirror;
 mod models;
 // the one module the OS and runtime calls of `clippy.toml` are allowed in
 // (`docs/web_gui.md` §8.3)
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(clippy::disallowed_methods)]
 mod native;
 mod net_tor;
@@ -91,6 +100,9 @@ mod platform;
 mod settings;
 mod surfaces;
 mod wallet;
+// the browser's twin of `native`; the tests compile it on every target
+#[cfg(any(target_arch = "wasm32", test))]
+mod web;
 mod wiki;
 mod wiki_bridge;
 

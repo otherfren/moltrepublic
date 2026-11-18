@@ -1,0 +1,29 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>MoltRepublic</title>
+<link rel="stylesheet" href="page.css">
+<script type="module" src="page.js"></script>
+</head>
+<body>
+<main id="gate">
+<h1>MoltRepublic</h1>
+<p id="why" role="status"></p>
+<form id="key-form" autocomplete="off">
+<label id="key-label" for="key"></label>
+<input id="key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required disabled>
+<button id="go" type="submit" disabled></button>
+</form>
+<details>
+<summary id="help-title"></summary>
+<ul id="help-list"></ul>
+</details>
+</main>
+<canvas id="canvas"></canvas>
+<p id="note" role="status" hidden></p>
+</body>
+</html>

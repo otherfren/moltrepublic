@@ -8,4 +8,4 @@ pub mod origin;
 mod server;
 mod session;
 
-pub use server::{serve, serve_loopback, WebDoor};
+pub use server::{serve, serve_loopback, WebDoor, BUNDLE_FILES};

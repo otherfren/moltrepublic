@@ -1674,6 +1674,19 @@ export global Strings {
     in property <string> rv-auto-note;
     in property <string> rv-failed-hint;
     in property <string> set-token-failed;
+    in property <string> set-keys-hidden;
+    in property <string> set-issue-rotate;
+    in property <string> set-s3-secret-keep;
+    in property <string> set-s3-secret-remove;
+    in property <string> set-s3-secret-removed;
+    in property <string> set-read-revoked;
+    in property <string> set-key-applied;
+    in property <string> set-key-unsure;
+    in property <string> set-key-kept;
+    in property <string> key-copy-failed;
+    in property <string> key-new-title;
+    in property <string> key-new-title-read;
+    in property <string> key-new-body;
     in property <string> rw-title;
     in property <string> rw-title-s3;
     in property <string> rw-seed;
@@ -2047,6 +2060,10 @@ export global Strings {
     in property <string> mem-tb-open-all;
     in property <string> mem-tb-edit;
     in property <string> mem-tb-preview;
+    // the same two with the key a browser leaves alone; Rust swaps them
+    // in behind the web door
+    in property <string> mem-tb-edit-web;
+    in property <string> mem-tb-preview-web;
     in property <string> mem-tb-link;
     in property <string> mem-tb-locate;
     in property <string> mem-tb-prev;

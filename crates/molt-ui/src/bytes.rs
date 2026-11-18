@@ -85,10 +85,21 @@ fn over_ceiling(len: usize) -> bool {
     u64::try_from(len).map_or(true, |n| n > MAX_TRANSFER)
 }
 
+/// The picked file's bytes as the platform reads them. A file the
+/// platform refuses unread (a browser knows the size from the picker) is
+/// too large, any other failure names the file - never what the picker
+/// called it.
+pub(crate) async fn read_picked(platform: &dyn Platform, file: &str) -> Result<Vec<u8>, ByteError> {
+    let read = platform.read_file(file.to_string()).await;
+    read.map_err(|e| match molt_ui_kit::platform::is_too_large(&e) {
+        true => ByteError::TooLarge,
+        false => ByteError::Unreadable(file_name(file).to_string()),
+    })
+}
+
 /// The picked file's bytes, for an engine that cannot read it in place.
 async fn picked_bytes(platform: &dyn Platform, file: &str) -> Result<Vec<u8>, ByteError> {
-    let read = platform.read_file(file.to_string()).await;
-    let bytes = read.map_err(|_| ByteError::Unreadable(file_name(file).to_string()))?;
+    let bytes = read_picked(platform, file).await?;
     if over_ceiling(bytes.len()) {
         return Err(ByteError::TooLarge);
     }

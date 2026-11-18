@@ -5,9 +5,23 @@
 
 use molt_ui_kit::platform::Platform;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use crate::native::{off_thread, Spawner};
+#[cfg(target_arch = "wasm32")]
+pub(crate) use crate::web::{off_thread, Spawner};
+
 /// The process's platform: the installed one, else this target's own.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn platform() -> &'static dyn Platform {
     molt_ui_kit::platform::get_or_install(crate::native::platform)
+}
+
+/// The browser's platform. `molt-web` installs it before it opens the
+/// window, so a missing one is a broken entry point, not a state to run
+/// in: every clock would read zero and every file dialog stay shut.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn platform() -> &'static dyn Platform {
+    molt_ui_kit::platform::installed().expect("the platform is installed before the window opens")
 }
 
 /// The wall clock as a UTC date-time.

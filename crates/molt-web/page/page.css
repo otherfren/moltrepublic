@@ -1,0 +1,149 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+/* The page around the window. Everything is here because the door's
+   content policy takes no inline style. */
+
+html,
+body {
+  margin: 0;
+  background: #14161a;
+  color: #e4e6ea;
+  font: 15px/1.5 system-ui, sans-serif;
+}
+
+/* Slint sizes this element itself (its inline size follows the viewport,
+   set from the window): no size, position or scale rule may sit here. */
+canvas {
+  display: block;
+  outline: none;
+}
+
+/* the key prompt covers the window until the server welcomed the key */
+#gate {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  box-sizing: border-box;
+  padding: 24px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: #14161a;
+}
+
+#gate[hidden],
+#note[hidden] {
+  display: none;
+}
+
+#gate h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+#why {
+  margin: 0;
+  min-height: 1.5em;
+  color: #e0a458;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+#key-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+#key,
+#go {
+  font: inherit;
+  padding: 7px 10px;
+  border: 1px solid #3a3f48;
+  border-radius: 6px;
+  background: #1d2026;
+  color: inherit;
+}
+
+#key {
+  width: 22em;
+  max-width: 80vw;
+}
+
+#go {
+  cursor: pointer;
+  background: #2c5fa8;
+  border-color: #2c5fa8;
+}
+
+#key:disabled,
+#go:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+details {
+  max-width: 34em;
+  color: #9aa0aa;
+  font-size: 13px;
+}
+
+summary {
+  cursor: pointer;
+  text-align: center;
+}
+
+#note {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  z-index: 20;
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 6px;
+  background: #2a2e36;
+  transform: translateX(-50%);
+}
+
+/* The file dialogs (rfd's wasm backend) bring their look as an inline
+   style sheet, which the door's content policy drops: the same rules. */
+#rfd-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  z-index: 1000;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: rgba(0, 0, 0, 0.5);
+}
+
+#rfd-card {
+  padding: 20px;
+  border-radius: 6px;
+  background: #1d2026;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+#rfd-title {
+  line-height: 1.6;
+}
+
+#rfd-input,
+#rfd-output {
+  text-align: center;
+}
+
+.rfd-button {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  font: inherit;
+}

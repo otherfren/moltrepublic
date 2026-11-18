@@ -835,7 +835,7 @@ macro_rules! lexicon {
 
         /// Push the localized string table for `lang` (0 = English,
         /// 1 = German) into the Slint `Strings` global.
-        pub(crate) fn apply_strings(ui: &AppWindow, lang: i32) {
+        fn apply_lexicon(ui: &AppWindow, lang: i32) {
             let l = Lexicon::of(lang);
             let s = ui.global::<Strings>();
             paste::paste! {
@@ -844,6 +844,74 @@ macro_rules! lexicon {
         }
     };
 }
+
+/// Label the window in `lang` (0 = English, 1 = German). Behind the web
+/// door the labels that name a key say the browser-safe one.
+pub(crate) fn apply_strings(ui: &AppWindow, lang: i32) {
+    apply_lexicon(ui, lang);
+    if ui.get_web() {
+        apply_web_strings(ui, lang);
+    }
+}
+
+/// The labels that differ behind the web door: `Tab` is the browser's,
+/// the wiki's edit and preview switch sits on F2 there
+/// (`docs/web_gui.md` §9).
+pub(crate) fn apply_web_strings(ui: &AppWindow, lang: i32) {
+    let l = Lexicon::of(lang);
+    let s = ui.global::<Strings>();
+    s.set_mem_tb_edit(l.mem_tb_edit_web.into());
+    s.set_mem_tb_preview(l.mem_tb_preview_web.into());
+}
+
+/// The page around the browser window (`molt-web`'s `index.html`): the
+/// key prompt, why a connection ended, and what a browser cannot do
+/// (`docs/web_gui.md` §9). `(name, text)` in `lang` (0 = English,
+/// 1 = German); `help` holds one limit per line.
+#[must_use]
+pub fn page_text(lang: i32) -> Vec<(&'static str, &'static str)> {
+    PAGE_TEXT.iter().map(|(name, en, de)| (*name, if lang == 1 { *de } else { *en })).collect()
+}
+
+const PAGE_TEXT: &[(&str, &str, &str)] = &[
+    ("lang", "en", "de"),
+    ("key", "API token", "API-Token"),
+    ("connect", "Connect", "Verbinden"),
+    ("connecting", "Connecting", "Verbinde"),
+    ("reload", "Reload", "Neu laden"),
+    ("refused", "Token refused or rotated.", "Token abgelehnt oder rotiert."),
+    ("protocol", "Connection ended: protocol error.", "Verbindung beendet: Protokollfehler."),
+    ("closed", "Connection closed.", "Verbindung getrennt."),
+    ("version", "Version mismatch: this page is not the node's build.", "Versionskonflikt: diese Seite passt nicht zum Node."),
+    ("failed", "Could not start", "Start fehlgeschlagen"),
+    ("lag", "Events dropped, reading again.", "Ereignisse verworfen, lese neu."),
+    ("help_title", "Limits in the browser", "Grenzen im Browser"),
+    (
+        "help",
+        "No quit: close the tab.\n\
+         Tabs and the desktop window show the same screen.\n\
+         Stored API tokens are not shown, only replaced.\n\
+         Paste needs Ctrl+V or the clipboard permission.\n\
+         No folder dialogs: server folders are typed.\n\
+         The wiki export writes to a server folder, no download.\n\
+         Files up to 64 MiB; uploads need a stored workspace.\n\
+         Wiki: F4 closes a tab, F2 switches edit and preview.\n\
+         No screen reader support.\n\
+         Needs 990 px width; IME and phone keyboards are weak.\n\
+         Text renders in Inter.",
+        "Kein Beenden: Tab schließen.\n\
+         Tabs und das Desktop-Fenster zeigen denselben Bildschirm.\n\
+         Gespeicherte API-Tokens werden nicht angezeigt, nur ersetzt.\n\
+         Einfügen braucht Strg+V oder die Zwischenablage-Freigabe.\n\
+         Keine Ordnerdialoge: Serverordner werden getippt.\n\
+         Der Wiki-Export schreibt in einen Serverordner, kein Download.\n\
+         Dateien bis 64 MiB; Uploads brauchen einen gespeicherten Workspace.\n\
+         Wiki: F4 schließt einen Tab, F2 wechselt Bearbeiten und Vorschau.\n\
+         Keine Screenreader-Unterstützung.\n\
+         Braucht 990 px Breite; IME und Handy-Tastaturen sind schwach.\n\
+         Text wird in Inter dargestellt.",
+    ),
+];
 
 lexicon! {
     choice_title: "Welcome", "Willkommen";
@@ -1171,6 +1239,19 @@ lexicon! {
     rv_auto_note: "members approve automatically when online", "Mitglieder stimmen automatisch zu, sobald sie online sind";
     rv_failed_hint: "Recovery links are single-use - ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig - bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
     set_token_failed: "Could not mint a token - the old one still applies.", "Konnte kein Token erzeugen - das alte gilt weiter.";
+    set_keys_hidden: "Stored tokens are not shown here. Rotate to replace one.", "Gespeicherte Tokens werden hier nicht angezeigt. Rotieren ersetzt eines.";
+    set_issue_rotate: "Issue or rotate", "Erzeugen oder rotieren";
+    set_s3_secret_keep: "Empty keeps the stored secret.", "Leer behält das gespeicherte Secret.";
+    set_s3_secret_remove: "Remove stored secret", "Gespeichertes Secret entfernen";
+    set_s3_secret_removed: "S3 secret removed.", "S3-Secret entfernt.";
+    set_read_revoked: "Read-only token revoked.", "Nur-Lese-Token entzogen.";
+    set_key_applied: "New token applies.", "Neues Token gilt.";
+    set_key_unsure: "Connection lost. The new token may apply.", "Verbindung verloren. Das neue Token gilt womöglich.";
+    set_key_kept: "Token not applied. The old one stays.", "Token nicht übernommen. Das alte gilt weiter.";
+    key_copy_failed: "Copy failed. Select the token, then Ctrl+C.", "Kopieren fehlgeschlagen. Token markieren, dann Strg+C.";
+    key_new_title: "New API token", "Neues API-Token";
+    key_new_title_read: "New read-only token", "Neues Nur-Lese-Token";
+    key_new_body: "Copy it now. It is not shown again.", "Jetzt kopieren. Es wird nicht wieder angezeigt.";
     rw_title: "(Re)Join / Recovery", "(Re)Join / Recovery";
     rw_title_s3: "Restore from backup", "Backup wiederherstellen";
     rw_seed: "Recovery phrase", "Wiederherstellungs-Phrase";
@@ -1495,6 +1576,8 @@ lexicon! {
     mem_tb_open_all: "Expand all", "Alles ausklappen";
     mem_tb_edit: "Edit as Markdown (Tab)", "Als Markdown bearbeiten (Tab)";
     mem_tb_preview: "Preview (Tab)", "Vorschau (Tab)";
+    mem_tb_edit_web: "Edit as Markdown (F2)", "Als Markdown bearbeiten (F2)";
+    mem_tb_preview_web: "Preview (F2)", "Vorschau (F2)";
     mem_tb_link: "Copy path", "Pfad kopieren";
     mem_tb_locate: "Reveal in navigator", "Im Navigator zeigen";
     mem_tb_prev: "Previous tab", "Vorheriger Tab";

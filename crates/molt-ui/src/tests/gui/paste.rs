@@ -141,8 +141,9 @@ fn a_paste_fills_the_named_field_and_no_other() {
 struct Board(Mutex<Option<String>>);
 
 impl molt_ui_kit::platform::Platform for Board {
-    fn copy(&self, text: String) {
+    fn copy(&self, text: String) -> molt_ui_kit::platform::Task<bool> {
         *self.0.lock().expect("the board") = Some(text);
+        Box::pin(async { true })
     }
     fn paste(&self) -> molt_ui_kit::platform::Task<Option<String>> {
         let text = self.0.lock().expect("the board").clone();

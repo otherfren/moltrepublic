@@ -8,7 +8,7 @@ use molt_ui_kit::platform::Platform;
 use slint::{ComponentHandle, Model};
 
 use crate::app::Ctx;
-use crate::native::Spawner;
+use crate::platform::Spawner;
 use crate::{AppWindow, PasteTarget};
 
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
@@ -32,7 +32,8 @@ pub(crate) fn wire_with(
     platform: &'static dyn Platform,
     land: impl Fn(PasteTarget, i32, String) + Clone + Send + 'static,
 ) {
-    ui.on_copy_text(move |text| platform.copy(text.to_string()));
+    // started with the call; these buttons do not wait for the answer
+    ui.on_copy_text(move |text| drop(platform.copy(text.to_string())));
     let weak = ui.as_weak();
     ui.on_paste_clipboard(move |target| {
         let Some(ui) = weak.upgrade() else {
@@ -60,7 +61,7 @@ pub(crate) fn wire_with(
             _ => ui.get_rw_log(),
         };
         let text = log.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
-        platform.copy(text);
+        drop(platform.copy(text));
     });
 }
 

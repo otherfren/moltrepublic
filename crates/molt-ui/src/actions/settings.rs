@@ -4,6 +4,7 @@
 //! tab, the WM close guard and the sound preview.
 
 use molt_core::{Command, LogEntry, LogFilter, Reply};
+use molt_ui_kit::client::NotRotated;
 use slint::{ComponentHandle, Global, Model, ModelRc, VecModel};
 
 use crate::alerts::play_alert;
@@ -189,15 +190,36 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {
         // Rotate the MCP token: mint a fresh one, drop it into the draft, and
         // persist the settings in one go (Slint cannot generate randomness).
+        // Behind the web door the key is shown first ([`rotate`]).
         let cx = ctx.clone();
-        ui.on_rotate_token(move || rotate(&cx, AppWindow::set_cfg_mcp_token));
+        ui.on_rotate_token(move || rotate(&cx, KEY_SEAT));
     }
 
     {
         // Issue or rotate the READ-ONLY key (`knowledge_base_scale.md`
         // §4.7). Same mint, same failure posture as the seat key.
         let cx = ctx.clone();
-        ui.on_rotate_read_token(move || rotate(&cx, AppWindow::set_cfg_mcp_read_token));
+        ui.on_rotate_read_token(move || rotate(&cx, KEY_READ));
+    }
+
+    {
+        let cx = ctx.clone();
+        ui.on_copy_new_key(move || copy_new_key(&cx));
+    }
+
+    {
+        // the web's second step: the key on show is written
+        let cx = ctx.clone();
+        ui.on_apply_new_key(move || apply_new_key(&cx));
+    }
+
+    {
+        let weak = ui.as_weak();
+        ui.on_cancel_new_key(move || {
+            if let Some(ui) = weak.upgrade() {
+                clear_new_key(&ui);
+            }
+        });
     }
 
     {
@@ -208,8 +230,29 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             let Some(ui) = cx.weak.upgrade() else {
                 return;
             };
+            // behind the web door the form holds every stored secret
+            // empty, so the draft cannot carry "remove": that one value
+            // is written by itself (`docs/web_gui.md` §6.5)
+            if cx.wallet.is_remote() {
+                let done = ui.global::<Strings>().get_set_read_revoked().to_string();
+                cx.issue_then_toast(clear_secret("mcp_read_token"), done);
+                return;
+            }
             ui.set_cfg_mcp_read_token(String::new().into());
             save_now(&ui, &cx);
+        });
+    }
+
+    {
+        // the web form's way to remove the stored S3 secret
+        let cx = ctx.clone();
+        ui.on_remove_s3_secret(move || {
+            let Some(ui) = cx.weak.upgrade() else {
+                return;
+            };
+            ui.set_cfg_s3_secret(String::new().into());
+            let done = ui.global::<Strings>().get_set_s3_secret_removed().to_string();
+            cx.issue_then_toast(clear_secret("s3_secret_key"), done);
         });
     }
 
@@ -534,9 +577,29 @@ fn test_s3_command(ui: &AppWindow) -> Command {
     }
 }
 
-/// Mint a fresh MCP key, drop it into the draft through `set` and persist
-/// the settings in one go (Slint cannot generate randomness).
-fn rotate(cx: &Ctx, set: fn(&AppWindow, slint::SharedString)) {
+/// The seat key, as `key-new-kind` names it.
+const KEY_SEAT: i32 = 1;
+/// The read-only key.
+const KEY_READ: i32 = 2;
+
+/// The write that removes one stored secret and touches nothing else.
+fn clear_secret(name: &str) -> Command {
+    Command::PatchSettings { patch: serde_json::json!({ name: "" }) }
+}
+
+/// Take the minted key off the window.
+fn clear_new_key(ui: &AppWindow) {
+    ui.set_key_new(String::new().into());
+    ui.set_key_new_copied(false);
+}
+
+/// Mint a fresh MCP key. The native window drops it into the draft and
+/// persists the settings in one go (Slint cannot generate randomness).
+/// Behind the web door nothing is written yet: a stored key never
+/// crosses the door again, so the new one goes on show first and
+/// [`apply_new_key`] writes it once the user has copied it ([`copy_new_key`])
+/// (`docs/web_gui.md` §6.5).
+fn rotate(cx: &Ctx, kind: i32) {
     let Some(ui) = cx.weak.upgrade() else {
         return;
     };
@@ -546,6 +609,96 @@ fn rotate(cx: &Ctx, set: fn(&AppWindow, slint::SharedString)) {
         ui.invoke_show_toast_error(Strings::get(&ui).get_set_token_failed());
         return;
     };
-    set(&ui, token.into());
+    if cx.wallet.is_remote() {
+        ui.set_key_new_kind(kind);
+        ui.set_key_new_copied(false);
+        ui.set_key_new(token.into());
+        return;
+    }
+    if kind == KEY_READ {
+        ui.set_cfg_mcp_read_token(token.into());
+    } else {
+        ui.set_cfg_mcp_token(token.into());
+    }
     save_now(&ui, cx);
+}
+
+/// Write the key on show and take it off the window. A refused write
+/// keeps the old key. The seat key's write ends this connection - the
+/// server closes every session of the old key - and the engine handle
+/// comes back on the new one by itself.
+fn apply_new_key(cx: &Ctx) {
+    let Some(ui) = cx.weak.upgrade() else {
+        return;
+    };
+    let key = ui.get_key_new().to_string();
+    let kind = ui.get_key_new_kind();
+    clear_new_key(&ui);
+    if key.is_empty() {
+        return;
+    }
+    let w = cx.wallet.clone();
+    let weak = cx.weak.clone();
+    cx.spawn(async move {
+        let outcome = if kind == KEY_READ {
+            let write = Command::PatchSettings { patch: serde_json::json!({ "mcp_read_token": key }) };
+            w.execute(write).await.map(drop).map_err(NotRotated::Refused)
+        } else {
+            w.rotate_seat(key).await
+        };
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                land_new_key(&ui, outcome);
+            }
+        });
+    });
+}
+
+/// Say how the write of a new key ended.
+pub(crate) fn land_new_key(ui: &AppWindow, outcome: Result<(), NotRotated>) {
+    let strings = ui.global::<Strings>();
+    match outcome {
+        Ok(()) => ui.invoke_show_toast(strings.get_set_key_applied()),
+        Err(NotRotated::Kept) => ui.invoke_show_toast_error(strings.get_set_key_kept()),
+        Err(NotRotated::Unsure) => ui.invoke_show_toast_error(strings.get_set_key_unsure()),
+        Err(NotRotated::Refused(e)) => ui.invoke_show_toast_error(error_toast(ui, &e)),
+    }
+}
+
+/// Copy the key on show. Only a copy that worked arms Apply
+/// (`docs/web_gui.md` §6.5): a browser may refuse the clipboard.
+fn copy_new_key(cx: &Ctx) {
+    let Some(ui) = cx.weak.upgrade() else {
+        return;
+    };
+    let key = ui.get_key_new().to_string();
+    if key.is_empty() {
+        return;
+    }
+    // asked here, on the UI thread, where a native clipboard lives
+    let copied = crate::platform::platform().copy(key.clone());
+    let weak = cx.weak.clone();
+    cx.spawn(async move {
+        let copied = copied.await;
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                land_key_copy(&ui, &key, copied);
+            }
+        });
+    });
+}
+
+/// The copy of `key` ended: arm Apply, or say that it failed. A late
+/// answer for a key no longer on show changes nothing.
+pub(crate) fn land_key_copy(ui: &AppWindow, key: &str, copied: bool) {
+    if ui.get_key_new() != key {
+        return;
+    }
+    let strings = ui.global::<Strings>();
+    if copied {
+        ui.set_key_new_copied(true);
+        ui.invoke_show_toast(strings.get_toast_copied());
+    } else {
+        ui.invoke_show_toast_error(strings.get_key_copy_failed());
+    }
 }

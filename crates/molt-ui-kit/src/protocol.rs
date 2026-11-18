@@ -18,6 +18,9 @@ pub type Answer = Result<Reply, MoltError>;
 /// (pinned equal by test), the ceiling the server and the engine keep.
 pub const MAX_TRANSFER: usize = 64 * 1024 * 1024;
 
+/// What a command answers when its connection ended first.
+pub(crate) const GONE: &str = "connection closed";
+
 /// What one request puts on the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outbound {
@@ -166,7 +169,7 @@ impl Protocol {
 
     /// The connection ended: nobody waits forever.
     pub fn on_close(&mut self) {
-        let gone = || Err(MoltError::Engine("connection closed".into()));
+        let gone = || Err(MoltError::Engine(GONE.into()));
         for (_, waiter) in std::mem::take(&mut self.waiting) {
             drop(waiter.send(gone()));
         }

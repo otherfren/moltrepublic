@@ -3,3 +3,5 @@
 [toolchain]
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]
+# The browser GUI bundle (scripts/build-release-web.sh).
+targets = ["wasm32-unknown-unknown"]

@@ -336,7 +336,7 @@ carrying the serde contract, opened by the same live seat key.
 | frames are bounded at 1 MiB, a transfer at 64 MiB either way, bytes go in 256 KiB chunks | `server.rs`, `session.rs`, `molt_core::wire` |
 | an upload's bytes ride one chunk frame behind their command; a frame that is not exactly that ends the session | `session.rs::fill_chunk` |
 | an upload is its session's; the session's end drops what it did not share | `session.rs::session_refusal`, `run` |
-| the bundle is a fixed list, read once from a private directory | `server.rs::load_bundle` |
+| the bundle is a fixed list (`BUNDLE_FILES`), read once from a private directory | `server.rs::load_bundle` |
 
 Stronger than the line protocol in one place: rotation closes a SILENT
 session, because the socket is a push channel. Same as MCP everywhere

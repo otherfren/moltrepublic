@@ -43,8 +43,8 @@ qrcode.workspace = true
 bip39.workspace = true
 
 # What a browser build cannot have (docs/web_gui.md §4, §6.7). Only
-# src/native.rs names them, engine.rs's native arm aside; a test pins that
-# (tests/gui/spawner.rs) and W5 gates both.
+# src/native.rs names them, engine.rs's native arm aside; both are
+# cfg(not(wasm32)) and a test pins the rest (tests/gui/spawner.rs).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # the engine in this process (engine.rs)
 molt-engine.workspace = true
@@ -60,6 +60,13 @@ arboard.workspace = true
 # the native file and folder dialogs behind the platform seam (§6.3); a
 # browser build brings its own in molt-web
 rfd.workspace = true
+
+# What the same code needs in a browser instead (docs/web_gui.md §6.3).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `Local` reads the browser's time zone; without it the conversion panics
+chrono = { workspace = true, features = ["wasmbind"] }
+# the diff's own timeout reads a clock: std's panics in a browser
+similar = { workspace = true, features = ["wasm32_web_time"] }
 
 [dev-dependencies]
 tempfile.workspace = true

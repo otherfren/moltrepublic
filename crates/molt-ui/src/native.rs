@@ -140,8 +140,10 @@ fn write_new_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 impl Platform for NativePlatform {
-    fn copy(&self, text: String) {
-        let _ = with_clipboard(|cb| cb.set_text(text));
+    /// Written at once, on the calling (UI) thread; the future is ready.
+    fn copy(&self, text: String) -> Task<bool> {
+        let copied = with_clipboard(|cb| cb.set_text(text)).is_some();
+        Box::pin(async move { copied })
     }
 
     /// Read at once, on the calling (UI) thread, where the one clipboard

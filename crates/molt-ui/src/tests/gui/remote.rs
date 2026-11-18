@@ -44,7 +44,7 @@ fn door(rt: &tokio::runtime::Runtime, w: &WalletHandle, root: &std::path::Path, 
 async fn open_door(w: &WalletHandle, root: &std::path::Path, caps: molt_core::wire::Caps) -> u16 {
     let web = root.join("web");
     std::fs::create_dir_all(&web).expect("web dir");
-    for f in ["index.html", "molt_web.js", "molt_web_bg.wasm"] {
+    for f in molt_remote::BUNDLE_FILES {
         std::fs::write(web.join(f), "x").expect("bundle file");
     }
     w.execute(Command::PatchSettings { patch: serde_json::json!({ "mcp_token": SEAT }) }).await.expect("a seat key");
@@ -55,33 +55,63 @@ async fn open_door(w: &WalletHandle, root: &std::path::Path, caps: molt_core::wi
     port
 }
 
-/// Connect the shipped client to the door: the engine handle a browser
-/// window would hold.
-async fn connect(port: u16) -> Engine {
+type Incoming = std::pin::Pin<Box<dyn futures_util::Stream<Item = Wire> + Send>>;
+type Outgoing = std::pin::Pin<Box<dyn futures_util::Sink<Wire, Error = tokio_tungstenite::tungstenite::Error> + Send>>;
+
+/// One socket to the door, as the two ends the client's pump runs on.
+/// `None`: the door did not take the upgrade.
+async fn dial(port: u16) -> Option<(Incoming, Outgoing)> {
     let host = format!("127.0.0.1:{port}");
     let mut req = format!("ws://{host}/ws").into_client_request().expect("request");
     req.headers_mut().insert("origin", format!("http://{host}").parse().expect("origin"));
-    let stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.expect("connect");
-    let (ws, _) = tokio_tungstenite::client_async(req, stream).await.expect("upgrade");
+    let stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.ok()?;
+    let (ws, _) = tokio_tungstenite::client_async(req, stream).await.ok()?;
     let (sink, stream) = ws.split();
-    let incoming = Box::pin(stream.filter_map(|m| async move {
+    let incoming: Incoming = Box::pin(stream.filter_map(|m| async move {
         match m {
             Ok(Message::Text(t)) => Some(Wire::Text(t.as_str().to_string())),
             Ok(Message::Binary(b)) => Some(Wire::Binary(b.to_vec())),
             _ => None,
         }
     }));
-    let outgoing = Box::pin(sink.with(|w: Wire| async move {
+    let outgoing: Outgoing = Box::pin(sink.with(|w: Wire| async move {
         Ok::<_, tokio_tungstenite::tungstenite::Error>(match w {
             Wire::Text(t) => Message::text(t),
             Wire::Binary(b) => Message::binary(b),
         })
     }));
+    Some((incoming, outgoing))
+}
+
+/// Connect the shipped client to the door: the engine handle a browser
+/// window would hold.
+async fn connect(port: u16) -> Engine {
+    let (incoming, outgoing) = dial(port).await.expect("the door");
     let (handle, pump) = remote();
     let (welcomed, welcome) = futures_channel::oneshot::channel();
     tokio::spawn(async move { pump.run(SEAT, incoming, outgoing, welcomed).await });
     assert_eq!(welcome.await.expect("welcomed").build, "test");
     Engine::from(handle)
+}
+
+/// Connect the way `molt-web` does: one connection after another on the
+/// same handle (`Pump::serve`), so a rotated key is followed. The second
+/// value counts the welcomes.
+async fn connect_serving(port: u16) -> (Engine, Arc<std::sync::atomic::AtomicUsize>) {
+    let (handle, mut pump) = remote();
+    let welcomes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen = welcomes.clone();
+    tokio::spawn(async move {
+        let heard = |signal| {
+            if matches!(signal, molt_ui_kit::client::Signal::Welcomed(_)) {
+                seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        };
+        pump.serve(SEAT, || dial(port), heard).await
+    });
+    let engine = Engine::from(handle);
+    session(&engine).await;
+    (engine, welcomes)
 }
 
 type Mirrored = (AppWindow, Arc<Mutex<Option<SessionSettings>>>, Arc<Mutex<ChatUiState>>);
@@ -144,6 +174,7 @@ fn a_window_behind_the_web_door_takes_its_startup_inputs_from_the_server() {
     assert_eq!(web.get_tor_mode_enabled().iter().collect::<Vec<_>>(), [true, true, true]);
     assert_eq!((web.get_config_dir().as_str(), web.get_config_file().as_str()), ("/srv/molt/", "config.toml"));
     assert!(!web.get_folder_browse(), "its paths are the server's: no folder dialog");
+    assert!(web.get_web(), "the window knows it sits behind the door");
 
     // the native window keeps what `run_app` was handed
     let (native, _, n_chat) = window();
@@ -152,6 +183,7 @@ fn a_window_behind_the_web_door_takes_its_startup_inputs_from_the_server() {
     assert_eq!(native.get_tor_mode_enabled().iter().collect::<Vec<_>>(), [true, false, true]);
     assert_eq!(native.get_config_dir().as_str(), "/elsewhere/");
     assert!(native.get_folder_browse(), "a native window keeps its folder dialogs");
+    assert!(!native.get_web());
 }
 
 /// The footer split reads the SERVER's path: either separator, the
@@ -284,6 +316,9 @@ use crate::bytes::{self, Handed};
 struct Hands {
     files: Mutex<HashMap<String, Vec<u8>>>,
     saved: Mutex<Vec<Save>>,
+    /// Refuse every read unread, as a browser does for a file over the
+    /// ceiling.
+    heavy: bool,
 }
 
 impl Hands {
@@ -299,7 +334,9 @@ impl Hands {
 }
 
 impl Platform for Hands {
-    fn copy(&self, _text: String) {}
+    fn copy(&self, _text: String) -> Task<bool> {
+        Box::pin(async { true })
+    }
     fn paste(&self) -> Task<Option<String>> {
         Box::pin(async { None })
     }
@@ -327,6 +364,9 @@ impl Platform for Hands {
         Box::pin(async { None })
     }
     fn read_file(&self, file: String) -> Task<std::io::Result<Vec<u8>>> {
+        if self.heavy {
+            return Box::pin(async { Err(molt_ui_kit::platform::too_large()) });
+        }
         let bytes = self.files.lock().expect("files").get(&file).cloned();
         Box::pin(async move { bytes.ok_or_else(|| std::io::Error::other("no such file")) })
     }
@@ -666,7 +706,9 @@ fn the_engine_in_this_process_shares_and_downloads_by_path() {
     /// Answers the save dialog with one path.
     struct SavesTo(String, Hands);
     impl Platform for SavesTo {
-        fn copy(&self, _text: String) {}
+        fn copy(&self, _text: String) -> Task<bool> {
+        Box::pin(async { true })
+    }
         fn paste(&self) -> Task<Option<String>> {
             self.1.paste()
         }
@@ -840,4 +882,412 @@ fn an_export_comes_to_the_user_through_the_web_door() {
         assert!(!matches!(weak, Ok(Handed::Saved(_))), "the engine refuses a weak passphrase: {weak:?}");
         assert_eq!(hands.saved().len(), 1, "a refused export hands over nothing");
     });
+}
+
+/// A platform that refuses a file before reading it (a browser knows the
+/// size from the picker) is heard as "too large", not as an unreadable
+/// file - and nothing is asked of the engine.
+#[test]
+fn a_file_the_platform_refuses_unread_is_too_large() {
+    let rt = rt();
+    // a handle whose pump never runs: any command would hang the test
+    let engine = Engine::from(remote().0);
+    let hands = Hands { heavy: true, ..Hands::default() };
+    let shared = rt.block_on(bytes::share_picked(&engine, &hands, "3/film.bin".to_string(), ChannelRef::Group));
+    assert!(matches!(shared, Err(bytes::ByteError::TooLarge)), "{shared:?}");
+    // the picture reads (republic logo, own avatar) take the same door
+    let picture = rt.block_on(bytes::read_picked(&hands, "3/photo.png"));
+    assert!(matches!(picture, Err(bytes::ByteError::TooLarge)), "{picture:?}");
+}
+
+/// A picked picture that does not read is named by its file, never by
+/// what the picker called it (a browser's pick carries its number).
+#[test]
+fn an_unreadable_picture_is_named_by_its_file() {
+    let rt = rt();
+    let hands = Hands::default();
+    let picture = rt.block_on(bytes::read_picked(&hands, "3/photo.png"));
+    assert!(matches!(&picture, Err(bytes::ByteError::Unreadable(name)) if name == "photo.png"), "{picture:?}");
+}
+
+/// **W5.** The entry a browser build starts the window with
+/// (`open_remote`): no process inputs, the labels there before the first
+/// session, no folder dialog of this machine, and every callback on the
+/// remote engine.
+#[test]
+fn the_web_entry_opens_a_window_on_the_remote_engine() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (w, port) = node(&rt, tmp.path());
+    let engine = rt.block_on(connect(port));
+
+    let ui = crate::app::open_remote(engine.clone(), rt.handle().clone(), 1).expect("headless window");
+    assert_eq!(ui.global::<Strings>().get_choice_title(), "Willkommen", "labelled before any session");
+    assert!(!ui.get_folder_browse(), "a server path is typed");
+    assert!(ui.get_web(), "the web-only behaviour is on from the first frame");
+    assert_eq!(ui.global::<Strings>().get_mem_tb_edit(), "Als Markdown bearbeiten (F2)", "Tab is the browser's");
+    assert!(!ui.get_app_version().is_empty());
+
+    // a click goes to the engine behind the door
+    assert_eq!(rt.block_on(session(&engine)).language, "en");
+    ui.invoke_set_language(1);
+    rt.block_on(wait_session(&engine, "the language to change", |sv| sv.language == "de"));
+    let native = rt.block_on(session(&Engine::from(w)));
+    assert_eq!(native.language, "de", "the one engine");
+}
+
+fn stored(rt: &tokio::runtime::Runtime, w: &WalletHandle) -> SessionSettings {
+    rt.block_on(session(&Engine::from(w.clone()))).settings
+}
+
+/// **§6.5, Rotate.** Behind the door the new seat key is minted and SHOWN
+/// first - nothing is written until the user has copied it and applies.
+/// The write makes the server close every session of the old key; this
+/// one comes back on the new key by itself.
+#[test]
+fn a_rotation_behind_the_web_door_shows_the_key_first_and_reconnects_with_it() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (w, port) = node(&rt, tmp.path());
+    let (engine, welcomes) = rt.block_on(connect_serving(port));
+    let ui = crate::app::open_remote(engine.clone(), rt.handle().clone(), 0).expect("headless window");
+
+    ui.invoke_rotate_token();
+    let minted = ui.get_key_new().to_string();
+    assert_eq!(minted.len(), 48, "a fresh key is on show: {minted:?}");
+    assert_eq!(ui.get_key_new_kind(), 1, "the seat key");
+    assert!(!ui.get_key_new_copied(), "the copy step is still ahead");
+    assert_eq!(ui.get_cfg_mcp_token(), "", "the draft is not the carrier here");
+    rt.block_on(async { tokio::time::sleep(Duration::from_millis(300)).await });
+    assert_eq!(stored(&rt, &w).mcp_token, SEAT, "nothing is written before the user applies");
+
+    // cancelled: the key is gone from the window and nothing was written
+    ui.invoke_cancel_new_key();
+    assert_eq!(ui.get_key_new(), "");
+    ui.invoke_apply_new_key();
+    rt.block_on(async { tokio::time::sleep(Duration::from_millis(300)).await });
+    assert_eq!(stored(&rt, &w).mcp_token, SEAT, "an apply with no key on show writes nothing");
+
+    ui.invoke_rotate_token();
+    let minted = ui.get_key_new().to_string();
+    // not through the Copy button: that is the user's real clipboard
+    ui.set_key_new_copied(true);
+    ui.invoke_apply_new_key();
+    assert_eq!(ui.get_key_new(), "", "the key leaves the window with the click");
+    rt.block_on(until("the new key to be stored", || async {
+        let now = session(&Engine::from(w.clone())).await.settings.mcp_token;
+        (now == minted).then_some(())
+    }));
+    // the door closed the old session; the handle answers again on the new key
+    rt.block_on(until("the connection to come back", || async {
+        let back = welcomes.load(std::sync::atomic::Ordering::SeqCst) >= 2;
+        (back && engine.execute(Command::ReadSession).await.is_ok()).then_some(())
+    }));
+    assert!(rt.block_on(dial_welcomed(port, SEAT)).is_none(), "the old key opens nothing");
+    assert!(rt.block_on(dial_welcomed(port, &minted)).is_some());
+}
+
+/// **§6.5, the outcome.** The door hangs up on the write that kills its
+/// own session's key instead of answering it, so the answer is which key
+/// the server welcomes next: the new one, and the rotation is applied.
+#[test]
+fn a_rotation_through_the_web_door_answers_applied() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (w, port) = node(&rt, tmp.path());
+    let (engine, _welcomes) = rt.block_on(connect_serving(port));
+    let key = "ab".repeat(24);
+    let outcome = rt.block_on(async { tokio::time::timeout(Duration::from_secs(20), engine.rotate_seat(key.clone())).await });
+    assert!(outcome.expect("answered").is_ok(), "a rotation that landed reads as applied");
+    assert_eq!(stored(&rt, &w).mcp_token, key);
+    rt.block_on(session(&engine));
+}
+
+/// Whether the door welcomes `token`.
+async fn dial_welcomed(port: u16, token: &str) -> Option<()> {
+    let (incoming, outgoing) = dial(port).await?;
+    let (_handle, pump) = remote();
+    let (welcomed, welcome) = futures_channel::oneshot::channel();
+    let token = token.to_string();
+    tokio::spawn(async move { pump.run(&token, incoming, outgoing, welcomed).await });
+    tokio::time::timeout(Duration::from_secs(10), welcome).await.ok()?.ok().map(|_| ())
+}
+
+/// The read key rotates through the same shown-first step and leaves the
+/// seat key - and with it this connection - alone.
+#[test]
+fn the_read_key_is_issued_behind_the_web_door_without_touching_the_seat_key() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (w, port) = node(&rt, tmp.path());
+    let (engine, welcomes) = rt.block_on(connect_serving(port));
+    let ui = crate::app::open_remote(engine.clone(), rt.handle().clone(), 0).expect("headless window");
+
+    ui.invoke_rotate_read_token();
+    let minted = ui.get_key_new().to_string();
+    assert_eq!((minted.len(), ui.get_key_new_kind()), (48, 2));
+    ui.set_key_new_copied(true);
+    ui.invoke_apply_new_key();
+    rt.block_on(until("the read key to be stored", || async {
+        (session(&Engine::from(w.clone())).await.settings.mcp_read_token == minted).then_some(())
+    }));
+    assert_eq!(stored(&rt, &w).mcp_token, SEAT);
+    rt.block_on(session(&engine));
+    assert_eq!(welcomes.load(std::sync::atomic::Ordering::SeqCst), 1, "the connection never dropped");
+}
+
+/// **§6.5, clearing.** The web form holds the stored secrets empty, so an
+/// empty field cannot mean "remove": revoking the read key and removing
+/// the S3 secret are actions of their own, each writing that one value.
+#[test]
+fn the_web_form_revokes_the_read_key_and_removes_the_s3_secret() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (w, port) = node(&rt, tmp.path());
+    rt.block_on(w.execute(Command::PatchSettings {
+        patch: serde_json::json!({ "mcp_read_token": "read-key", "s3_secret_key": "s3-secret" }),
+    }))
+    .expect("secrets set");
+    let engine = rt.block_on(connect(port));
+    let ui = crate::app::open_remote(engine.clone(), rt.handle().clone(), 0).expect("headless window");
+    assert_eq!(ui.get_cfg_mcp_read_token(), "", "the form cannot know a read key is stored");
+
+    ui.invoke_revoke_read_token();
+    rt.block_on(until("the read key to go", || async {
+        session(&Engine::from(w.clone())).await.settings.mcp_read_token.is_empty().then_some(())
+    }));
+    let now = stored(&rt, &w);
+    assert_eq!((now.mcp_token.as_str(), now.s3_secret_key.as_str()), (SEAT, "s3-secret"), "that one value only");
+
+    ui.invoke_remove_s3_secret();
+    rt.block_on(until("the S3 secret to go", || async {
+        session(&Engine::from(w.clone())).await.settings.s3_secret_key.is_empty().then_some(())
+    }));
+    assert_eq!(stored(&rt, &w).mcp_token, SEAT);
+    rt.block_on(session(&engine));
+}
+
+/// The native window rotates as it always did: mint, into the draft,
+/// save - no second step, since it can show the stored key any time.
+#[test]
+fn a_native_window_rotates_in_one_step() {
+    i_slint_backend_testing::init_no_event_loop();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let rt = rt();
+    let _guard = rt.enter();
+    let (w, _) = node_with_chat(tmp.path());
+    let (ui, last, chat) = window();
+    // the form as the mirror fills it (the headless backend never drains
+    // the hop that does)
+    let settings = stored(&rt, &w);
+    crate::settings::apply_settings_fields(&ui, &settings);
+    *last.lock().expect("last") = Some(settings);
+    let cx = crate::app::Ctx {
+        spawner: rt.handle().clone().into(),
+        wallet: Engine::from(w.clone()),
+        weak: ui.as_weak(),
+        last_settings: last,
+        chat_ui: chat,
+    };
+    crate::actions::settings::wire(&ui, &cx);
+    ui.invoke_rotate_token();
+    assert_eq!(ui.get_key_new(), "", "no shown-first step");
+    let minted = ui.get_cfg_mcp_token().to_string();
+    assert_eq!(minted.len(), 48);
+    rt.block_on(until("the key to be stored", || async {
+        (session(&Engine::from(w.clone())).await.settings.mcp_token == minted).then_some(())
+    }));
+}
+
+/// **§9.** `Ctrl+W` and `Tab` are the browser's: behind the door the wiki
+/// closes a tab on F4 and flips edit and preview on F2. A native window
+/// keeps its keys and takes neither.
+#[test]
+fn the_wiki_keys_have_browser_safe_twins_behind_the_door() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("memory".into());
+    ui.set_selected_view("brain".into());
+    let wiki = ui.global::<WikiState>();
+    wiki.set_doc_open(true);
+    let closed = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let toggled = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let (c, t) = (closed.clone(), toggled.clone());
+    wiki.on_close_active(move || c.set(c.get() + 1));
+    wiki.on_edit_toggle(move || t.set(t.get() + 1));
+    let _shown = show_headless(&ui);
+    let press = |key: slint::platform::Key| {
+        let text: slint::SharedString = key.into();
+        ui.window().dispatch_event(slint::platform::WindowEvent::KeyPressed { text: text.clone() });
+        ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased { text });
+    };
+    press(slint::platform::Key::F4);
+    press(slint::platform::Key::F2);
+    assert_eq!((closed.get(), toggled.get()), (0, 0), "a native window has Ctrl+W and Tab");
+
+    ui.set_web(true);
+    press(slint::platform::Key::F4);
+    assert_eq!((closed.get(), toggled.get()), (1, 0));
+    press(slint::platform::Key::F2);
+    assert_eq!((closed.get(), toggled.get()), (1, 1));
+}
+
+/// **§6.5, §9.** Behind the door the API tab shows no stored key - the
+/// wells, the peek and the copy are gone and a line says so - while
+/// rotate and revoke stay; the S3 secret gets its own remove action.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_web_form_states_that_stored_keys_are_not_shown() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.set_screen(AppScreen::Settings);
+    apply_strings(&ui, 0);
+    ui.window().set_size(slint::PhysicalSize::new(1600, 900));
+    ui.set_set_tab(6);
+    let _shown = show_headless(&ui);
+    let shown = |id: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id).any(|e| e.size().height > 0.0)
+    };
+    for id in ["AppWindow::tok-well", "AppWindow::read-well"] {
+        assert!(shown(id), "{id}: a native window shows its keys");
+    }
+    assert!(!shown("AppWindow::keys-hidden-note"));
+
+    ui.set_web(true);
+    for id in ["AppWindow::tok-well", "AppWindow::read-well", "AppWindow::tok-copy", "AppWindow::read-copy"] {
+        assert!(!shown(id), "{id}: nothing to show behind the door");
+    }
+    assert!(shown("AppWindow::keys-hidden-note"), "and the form says so");
+    for id in ["AppWindow::tok-rotate", "AppWindow::read-mint", "AppWindow::read-revoke"] {
+        assert!(shown(id), "{id} stays");
+    }
+    // the form cannot know whether a read key is stored: revoke is live
+    let revoked = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let seen = revoked.clone();
+    ui.on_revoke_read_token(move || seen.set(seen.get() + 1));
+    let revoke = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "AppWindow::read-revoke")
+        .next()
+        .expect("the revoke button");
+    click(&ui, &revoke);
+    assert_eq!(revoked.get(), 1);
+
+    // the shown-first step: Apply waits for the copy
+    ui.set_key_new("00ff".into());
+    ui.set_key_new_kind(1);
+    let applied = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let seen = applied.clone();
+    ui.on_apply_new_key(move || seen.set(seen.get() + 1));
+    assert!(shown("AppWindow::key-new-well"), "the new key is on show");
+    press(&ui, slint::platform::Key::Return);
+    assert_eq!(applied.get(), 0, "not before the copy step");
+    ui.set_key_new_copied(true);
+    press(&ui, slint::platform::Key::Return);
+    assert_eq!(applied.get(), 1);
+
+    ui.set_key_new("".into());
+    ui.set_set_tab(3);
+    assert!(shown("AppWindow::s3-secret-remove"), "the S3 secret has its own remove");
+    ui.set_web(false);
+    assert!(!shown("AppWindow::s3-secret-remove"), "a native form clears by emptying the field");
+}
+
+/// **§6.5, the copy step.** The Copy button asks for a copy and arms
+/// nothing by itself: only a copy that worked does. A refused clipboard
+/// says so and leaves Apply dead; the key is then selected by hand, and
+/// the whole key selected arms Apply as well.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_new_key_dialog_arms_apply_only_on_a_copy_that_worked() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.set_screen(AppScreen::Settings);
+    apply_strings(&ui, 0);
+    ui.window().set_size(slint::PhysicalSize::new(1600, 900));
+    ui.set_web(true);
+    ui.set_key_new("00ff".into());
+    ui.set_key_new_kind(1);
+    let _shown = show_headless(&ui);
+    let asked = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let applied = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let (a, b) = (asked.clone(), applied.clone());
+    // never the real route: that is the user's clipboard
+    ui.on_copy_new_key(move || a.set(a.get() + 1));
+    ui.on_apply_new_key(move || b.set(b.get() + 1));
+    let find = |id: &str| i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id).next().expect("on show");
+
+    click(&ui, &find("AppWindow::key-new-copy"));
+    assert_eq!(asked.get(), 1, "the button asks for the copy");
+    assert!(!ui.get_key_new_copied(), "a click is not a copy");
+    press(&ui, slint::platform::Key::Return);
+    assert_eq!(applied.get(), 0, "Apply waits for the answer");
+
+    // the clipboard refused
+    crate::actions::settings::land_key_copy(&ui, "00ff", false);
+    assert!(!ui.get_key_new_copied());
+    assert_eq!(ui.get_toast_text(), "Copy failed. Select the token, then Ctrl+C.");
+    press(&ui, slint::platform::Key::Return);
+    assert_eq!(applied.get(), 0, "still dead");
+
+    // by hand: the key is an input, the whole of it selected arms Apply
+    // (the input holds the keys now, so Apply is clicked)
+    let apply = || {
+        i_slint_backend_testing::ElementHandle::find_by_element_type_name(&ui, "Text")
+            .find(|t| t.size().height > 0.0 && t.accessible_label().is_some_and(|l| l == "Apply"))
+            .expect("the Apply button")
+    };
+    click(&ui, &find("AppWindow::key-new-well"));
+    click(&ui, &apply());
+    assert_eq!(applied.get(), 0, "a click into the key selects nothing");
+    click(&ui, &find("AppWindow::key-new-well"));
+    let ctrl: slint::SharedString = slint::platform::Key::Control.into();
+    ui.window().dispatch_event(slint::platform::WindowEvent::KeyPressed { text: ctrl.clone() });
+    type_char(&ui, "a");
+    ui.window().dispatch_event(slint::platform::WindowEvent::KeyReleased { text: ctrl });
+    click(&ui, &apply());
+    assert_eq!(applied.get(), 1, "the whole key is selected");
+}
+
+/// The answer of a copy: it arms Apply for the key it copied and for no
+/// other (a late answer after cancel, or after a second Rotate).
+#[test]
+fn a_copy_answer_arms_only_the_key_it_copied() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    ui.set_key_new("00ff".into());
+    crate::actions::settings::land_key_copy(&ui, "aa11", true);
+    assert!(!ui.get_key_new_copied(), "another key's answer");
+    assert_eq!(ui.get_toast_text(), "");
+    crate::actions::settings::land_key_copy(&ui, "00ff", true);
+    assert!(ui.get_key_new_copied());
+    assert_eq!(ui.get_toast_text(), "Copied to clipboard");
+}
+
+/// **§6.5, the outcome's line.** Applied, kept, open and refused each
+/// read as what they are.
+#[test]
+fn a_rotation_s_outcome_is_told_as_it_ended() {
+    use molt_ui_kit::client::NotRotated;
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    apply_strings(&ui, 0);
+    let told = |outcome| {
+        crate::actions::settings::land_new_key(&ui, outcome);
+        ui.get_toast_text().to_string()
+    };
+    assert_eq!(told(Ok(())), "New token applies.");
+    assert_eq!(told(Err(NotRotated::Kept)), "Token not applied. The old one stays.");
+    assert_eq!(told(Err(NotRotated::Unsure)), "Connection lost. The new token may apply.");
+    let refused = told(Err(NotRotated::Refused(molt_core::MoltError::Refused("no".into()))));
+    assert!(!refused.is_empty() && refused != "New token applies.", "{refused:?}");
 }

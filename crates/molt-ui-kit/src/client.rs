@@ -13,7 +13,7 @@ use futures_util::{FutureExt, Sink, SinkExt, Stream, StreamExt};
 use molt_core::wire::CHUNK;
 use molt_core::{Command, Event, MoltError, Reply};
 
-use crate::protocol::{Answer, Broken, Notice, Protocol};
+use crate::protocol::{Answer, Broken, Notice, Protocol, GONE};
 
 /// One WebSocket message, either way.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,11 +33,44 @@ pub struct RemoteHandle {
     requests: mpsc::UnboundedSender<Request>,
     notices: Arc<Mutex<Option<mpsc::UnboundedReceiver<Notice>>>>,
     welcome: Arc<OnceLock<Welcome>>,
+    rekey: Rekey,
+}
+
+/// The rotation this handle has out, until the pump takes it over
+/// ([`Pump::serve`]).
+type Rekey = Arc<Mutex<Option<Rekeying>>>;
+
+/// A seat key being written.
+struct Rekeying {
+    /// What the next connection presents first.
+    key: String,
+    /// Hears which key the server welcomed after the write's connection
+    /// ended: `true` the new one, `false` the old one.
+    welcomed: oneshot::Sender<bool>,
+}
+
+/// Why a rotation did not put the new key in force.
+#[derive(Debug, Clone)]
+pub enum NotRotated {
+    /// The server refused the write; the old key stays.
+    Refused(MoltError),
+    /// The server no longer takes the new key but welcomed the old one:
+    /// the write never landed.
+    Kept,
+    /// The connection ended and neither key was welcomed since: open.
+    Unsure,
 }
 
 /// The connection is gone: what a command answers then.
 fn gone() -> MoltError {
-    MoltError::Engine("connection closed".into())
+    MoltError::Engine(GONE.into())
+}
+
+/// Whether `error` says the connection ended before the answer came: the
+/// command may or may not have run.
+#[must_use]
+pub fn is_gone(error: &MoltError) -> bool {
+    matches!(error, MoltError::Engine(text) if text == GONE)
 }
 
 impl RemoteHandle {
@@ -46,6 +79,42 @@ impl RemoteHandle {
         let (tx, rx) = oneshot::channel();
         self.requests.unbounded_send((cmd, tx)).map_err(|_| gone())?;
         rx.await.unwrap_or_else(|_| Err(gone()))
+    }
+
+    /// Run `write`, a command that makes `key` the seat key. The server
+    /// closes every session of the old key, this one included, without
+    /// answering the write that killed it, so the connection moves onto
+    /// `key` ([`Pump::serve`]) and the answer is which key the server
+    /// welcomes next: the new one (applied) or, after it refused that,
+    /// the old one (never written).
+    pub async fn rotate(&self, write: Command, key: String) -> Result<(), NotRotated> {
+        let (welcomed, outcome) = oneshot::channel();
+        self.set_rekey(Some(Rekeying { key, welcomed }));
+        match self.execute(write).await {
+            // answered after all: the connection still moves when it ends
+            Ok(_) => Ok(()),
+            Err(e) if is_gone(&e) => {
+                // no pump is left to take the rotation over
+                if self.requests.is_closed() {
+                    self.set_rekey(None);
+                }
+                match outcome.await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(NotRotated::Kept),
+                    Err(_) => Err(NotRotated::Unsure),
+                }
+            }
+            Err(e) => {
+                self.set_rekey(None);
+                Err(NotRotated::Refused(e))
+            }
+        }
+    }
+
+    fn set_rekey(&self, rekey: Option<Rekeying>) {
+        if let Ok(mut slot) = self.rekey.lock() {
+            *slot = rekey;
+        }
     }
 
     /// [`upload`] through this connection.
@@ -153,6 +222,9 @@ pub enum Ended {
     Closed,
     /// The server broke the protocol.
     Broken(Broken),
+    /// The server is another build than the one this client serves
+    /// ([`Pump::only_build`]); no command was sent.
+    Version,
 }
 
 /// The task that owns the socket.
@@ -160,6 +232,31 @@ pub struct Pump {
     requests: mpsc::UnboundedReceiver<Request>,
     notices: mpsc::UnboundedSender<Notice>,
     welcome: Arc<OnceLock<Welcome>>,
+    /// The only server build this pump serves, if it insists on one.
+    build: Option<String>,
+    rekey: Rekey,
+    /// A connection of this pump was welcomed before: the next welcome
+    /// follows a gap in the events.
+    served: bool,
+    /// A rotation whose answer was lost with its connection, and what the
+    /// next welcome says about it: `true` while the new key is presented.
+    rotating: Option<(oneshot::Sender<bool>, bool)>,
+}
+
+impl Drop for Pump {
+    /// A rotation nobody will follow any more is answered as open.
+    fn drop(&mut self) {
+        self.forget_rotation();
+    }
+}
+
+/// What a connection tells whoever drives it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Signal {
+    /// The server welcomed this connection.
+    Welcomed(Welcome),
+    /// The server dropped events; the window re-reads everything.
+    Lagged,
 }
 
 /// A handle and the pump that serves it. Nothing happens until the pump
@@ -169,28 +266,113 @@ pub fn remote() -> (RemoteHandle, Pump) {
     let (req_tx, req_rx) = mpsc::unbounded();
     let (note_tx, note_rx) = mpsc::unbounded();
     let welcome = Arc::new(OnceLock::new());
-    let handle =
-        RemoteHandle { requests: req_tx, notices: Arc::new(Mutex::new(Some(note_rx))), welcome: welcome.clone() };
-    (handle, Pump { requests: req_rx, notices: note_tx, welcome })
+    let rekey = Rekey::default();
+    let handle = RemoteHandle {
+        requests: req_tx,
+        notices: Arc::new(Mutex::new(Some(note_rx))),
+        welcome: welcome.clone(),
+        rekey: rekey.clone(),
+    };
+    (handle, Pump { requests: req_rx, notices: note_tx, welcome, build: None, rekey, served: false, rotating: None })
 }
 
 impl Pump {
+    /// Serve only a server of this `build`: any other ends the connection
+    /// at its welcome ([`Ended::Version`]), before a command is sent.
+    #[must_use]
+    pub fn only_build(mut self, build: &str) -> Self {
+        self.build = Some(build.to_string());
+        self
+    }
+
     /// Say hello on the socket and serve the handle until it ends.
     /// `welcomed` hears the server's welcome; every command still open at
     /// the end is answered with an error, and the event stream closes.
-    pub async fn run<I, O>(
-        mut self,
-        token: &str,
-        mut incoming: I,
-        mut outgoing: O,
-        welcomed: oneshot::Sender<Welcome>,
-    ) -> Ended
+    pub async fn run<I, O>(mut self, token: &str, incoming: I, outgoing: O, welcomed: oneshot::Sender<Welcome>) -> Ended
     where
         I: Stream<Item = Wire> + Unpin,
         O: Sink<Wire> + Unpin,
     {
-        let mut protocol = Protocol::new();
         let mut welcomed = Some(welcomed);
+        let mut heard = |signal| {
+            if let (Signal::Welcomed(welcome), Some(tell)) = (signal, welcomed.take()) {
+                drop(tell.send(welcome));
+            }
+        };
+        self.connection(token, incoming, outgoing, &mut heard).await.0
+        // dropping the pump answers what is still queued and ends the events
+    }
+
+    /// Serve the handle over connections `dial` opens, starting with
+    /// `token`, until one ends for good; the pump stays usable, so the
+    /// caller may serve again with another key. A connection that ends
+    /// while a rotation is out ([`RemoteHandle::rotate`]) is followed by
+    /// one with the new key, and by one with the old key if the server
+    /// does not take the new one (the write never landed); the first
+    /// welcome of the two answers the rotation. The handle's
+    /// event stream stays open across connections; each later welcome
+    /// reads as lag, so the window re-reads everything.
+    pub async fn serve<D, Fut, I, O>(&mut self, token: &str, mut dial: D, mut heard: impl FnMut(Signal)) -> Ended
+    where
+        D: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Option<(I, O)>>,
+        I: Stream<Item = Wire> + Unpin,
+        O: Sink<Wire> + Unpin,
+    {
+        let mut token = token.to_string();
+        // the key in force before the rotation whose new key is being tried
+        let mut old: Option<String> = None;
+        loop {
+            let Some((incoming, outgoing)) = dial().await else {
+                self.forget_rotation();
+                return Ended::Closed;
+            };
+            let (ended, welcomed) = self.connection(&token, incoming, outgoing, &mut heard).await;
+            if ended == Ended::Version {
+                self.forget_rotation();
+                return ended;
+            }
+            if let Some(old) = old.take() {
+                if !welcomed {
+                    // the new key opens nothing: the write never landed
+                    if let Some((_, new)) = self.rotating.as_mut() {
+                        *new = false;
+                    }
+                    token = old;
+                    continue;
+                }
+            }
+            // neither key was welcomed: whoever waits hears "open"
+            self.rotating = None;
+            let rotated = self.rekey.lock().ok().and_then(|mut slot| slot.take());
+            match rotated {
+                Some(Rekeying { key, welcomed }) => {
+                    self.rotating = Some((welcomed, true));
+                    old = Some(std::mem::replace(&mut token, key));
+                }
+                None => return ended,
+            }
+        }
+    }
+
+    /// Drop the rotation in flight, taken over or not: its caller hears
+    /// that the outcome is open.
+    fn forget_rotation(&mut self) {
+        self.rotating = None;
+        if let Ok(mut slot) = self.rekey.lock() {
+            *slot = None;
+        }
+    }
+
+    /// One connection: why it ended, and whether the server welcomed it.
+    /// Every command open or queued at the end is answered with an error.
+    async fn connection<I, O, H>(&mut self, token: &str, mut incoming: I, mut outgoing: O, heard: &mut H) -> (Ended, bool)
+    where
+        I: Stream<Item = Wire> + Unpin,
+        O: Sink<Wire> + Unpin,
+        H: FnMut(Signal),
+    {
+        let mut protocol = Protocol::new();
         let ended = async {
             if outgoing.send(Wire::Text(Protocol::hello(token))).await.is_err() {
                 return Ended::Closed;
@@ -216,16 +398,32 @@ impl Pump {
                         Err(broken) => return Ended::Broken(broken),
                         Ok(None) => {}
                         Ok(Some(Notice::Welcome { build, caps })) => {
-                            // the handle first: a waiter woken by `welcomed`
+                            // the key was taken, whatever build answers
+                            if let Some((tell, new)) = self.rotating.take() {
+                                let _ = tell.send(new);
+                            }
+                            // before `protocol.welcomed()` is read again:
+                            // no request leaves the queue for another build
+                            if self.build.as_deref().is_some_and(|only| only != build) {
+                                return Ended::Version;
+                            }
+                            // the handle first: whoever `heard` wakes
                             // already reads it there
                             let welcome = Welcome { build, caps };
                             drop(self.welcome.set(welcome.clone()));
-                            if let Some(w) = welcomed.take() {
-                                drop(w.send(welcome));
+                            // events were missed between two connections
+                            if std::mem::replace(&mut self.served, true) {
+                                drop(self.notices.unbounded_send(Notice::Lag));
                             }
+                            heard(Signal::Welcomed(welcome));
                         }
                         // a GUI that stopped listening is not this task's problem
-                        Ok(Some(notice)) => drop(self.notices.unbounded_send(notice)),
+                        Ok(Some(notice)) => {
+                            if matches!(notice, Notice::Lag) {
+                                heard(Signal::Lagged);
+                            }
+                            drop(self.notices.unbounded_send(notice));
+                        }
                     },
                     Step::Request(Some(request)) => {
                         let (cmd, waiter) = *request;
@@ -244,13 +442,14 @@ impl Pump {
             }
         }
         .await;
+        let welcomed = protocol.welcomed();
         protocol.on_close();
-        // commands queued but never sent are answered too
-        self.requests.close();
+        // commands queued but never sent are answered too: a click must
+        // not run on a later connection
         while let Some(Some((_, waiter))) = self.requests.next().now_or_never() {
             drop(waiter.send(Err(gone())));
         }
-        ended
+        (ended, welcomed)
     }
 }
 
@@ -381,6 +580,51 @@ mod tests {
         });
     }
 
+    /// A server of another build gets the hello and nothing else: a
+    /// command queued before its welcome never reaches the socket and is
+    /// answered as closed (`docs/web_gui.md` §5.1).
+    #[test]
+    fn another_build_ends_the_connection_before_a_command_crosses() {
+        let (handle, pump) = remote();
+        let (c2s_tx, c2s_rx) = mpsc::unbounded();
+        let (s2c_tx, s2c_rx) = mpsc::unbounded();
+        let (w_tx, welcome) = oneshot::channel();
+        let mut server = Server { from_client: c2s_rx, to_client: s2c_tx };
+        // queued before the socket says anything
+        let asked = handle.execute(Command::ReadSession);
+        server.welcome(); // build "7"
+        let pump = pump.only_build("8").run("tok", s2c_rx, c2s_tx, w_tx);
+        let (answer, ended) = block_on(futures_util::future::join(asked, pump));
+        assert_eq!(ended, Ended::Version);
+        assert!(matches!(answer, Err(MoltError::Engine(_))));
+        assert!(matches!(block_on(server.heard()), ClientFrame::Hello { .. }));
+        assert!(block_on(server.from_client.next()).is_none(), "nothing but the hello was sent");
+        assert_eq!(handle.welcome(), None, "a foreign build's welcome is not this connection's");
+        assert!(block_on(welcome).is_err());
+    }
+
+    /// The build this client insists on is welcomed like any other.
+    #[test]
+    fn the_expected_build_is_served() {
+        let (handle, pump) = remote();
+        let (c2s_tx, c2s_rx) = mpsc::unbounded();
+        let (s2c_tx, s2c_rx) = mpsc::unbounded();
+        let (w_tx, _welcome) = oneshot::channel();
+        let mut server = Server { from_client: c2s_rx, to_client: s2c_tx };
+        let pump = pump.only_build("7").run("tok", s2c_rx, c2s_tx, w_tx);
+        run(pump, async {
+            let answer = handle.execute(Command::ReadSession);
+            let server_side = async {
+                server.heard().await;
+                server.welcome();
+                let ClientFrame::Cmd { id, .. } = server.heard().await else { panic!("a command") };
+                server.say(&ServerFrame::Reply { id, result: Ok(Box::new(Reply::Ack)) });
+            };
+            let (answer, ()) = futures_util::future::join(answer, server_side).await;
+            assert!(matches!(answer, Ok(Reply::Ack)));
+        });
+    }
+
     #[test]
     fn events_and_lag_reach_the_subscriber_in_the_native_shape() {
         let (handle, mut server, _welcome, pump) = rig();
@@ -485,6 +729,258 @@ mod tests {
             let (sent, ()) = futures_util::future::join(sent, server_side).await;
             assert!(matches!(sent, Err(MoltError::BadPayload(_))));
         });
+    }
+
+    /// A connection's two ends as the pump holds them.
+    type Pipes = (mpsc::UnboundedReceiver<Wire>, mpsc::UnboundedSender<Wire>);
+
+    /// The connections a `serve` dials, handed out one by one: each is a
+    /// fake server's two pipes.
+    fn dialer(n: usize) -> (Vec<Server>, impl FnMut() -> futures_util::future::Ready<Option<Pipes>>) {
+        let mut servers = Vec::new();
+        let mut ends = std::collections::VecDeque::new();
+        for _ in 0..n {
+            let (c2s_tx, c2s_rx) = mpsc::unbounded();
+            let (s2c_tx, s2c_rx) = mpsc::unbounded();
+            servers.push(Server { from_client: c2s_rx, to_client: s2c_tx });
+            ends.push_back((s2c_rx, c2s_tx));
+        }
+        (servers, move || futures_util::future::ready(ends.pop_front()))
+    }
+
+    async fn hello_token(server: &mut Server) -> String {
+        let ClientFrame::Hello { token, .. } = server.heard().await else { panic!("a hello") };
+        token
+    }
+
+    /// **Rotation (`docs/web_gui.md` §6.5).** The door never answers the
+    /// write that kills its own session's key: it hangs up. The next
+    /// connection presents the new key, and its welcome is the answer;
+    /// the event stream lives on and reads as lag.
+    #[test]
+    fn a_rotated_key_moves_the_connection_onto_the_new_key() {
+        let (handle, mut pump) = remote();
+        let (mut servers, dial) = dialer(2);
+        let mut second = servers.pop().expect("two");
+        let mut first = servers.pop().expect("two");
+        let mut events = handle.subscribe();
+        let mut signals = Vec::new();
+        let serving = pump.serve("old", dial, |s| signals.push(s));
+        let story = async {
+            assert_eq!(hello_token(&mut first).await, "old");
+            first.welcome();
+            let write = handle.rotate(Command::ReadSession, "new".into());
+            let server_side = async {
+                first.heard().await; // the write: stored, never answered
+                drop(first); // the door closes every session of the old key
+                assert_eq!(hello_token(&mut second).await, "new");
+                second.welcome();
+            };
+            let (answer, ()) = futures_util::future::join(write, server_side).await;
+            assert!(matches!(answer, Ok(())), "the new key's welcome is the answer: {answer:?}");
+            assert_eq!(events.recv().await.err(), Some(NoEvent::Lagged), "events were missed: re-read");
+            let asked = handle.execute(Command::ReadSession);
+            let server_side = async {
+                let ClientFrame::Cmd { id, .. } = second.heard().await else { panic!("a command") };
+                second.say(&ServerFrame::Reply { id, result: Ok(Box::new(Reply::Ack)) });
+            };
+            let (answer, ()) = futures_util::future::join(asked, server_side).await;
+            assert!(matches!(answer, Ok(Reply::Ack)), "the handle works on the new connection");
+        };
+        run(serving, story);
+        assert_eq!(signals.iter().filter(|s| matches!(s, Signal::Welcomed(_))).count(), 2);
+    }
+
+    /// A server that does answer the write before it hangs up: the answer
+    /// stands, and the connection still moves onto the new key.
+    #[test]
+    fn an_answered_rotation_is_applied_and_followed() {
+        let (handle, mut pump) = remote();
+        let (mut servers, dial) = dialer(2);
+        let mut second = servers.pop().expect("two");
+        let mut first = servers.pop().expect("two");
+        let serving = pump.serve("old", dial, |_| {});
+        let story = async {
+            hello_token(&mut first).await;
+            first.welcome();
+            let write = handle.rotate(Command::ReadSession, "new".into());
+            let server_side = async {
+                let ClientFrame::Cmd { id, .. } = first.heard().await else { panic!("a command") };
+                first.say(&ServerFrame::Reply { id, result: Ok(Box::new(Reply::Ack)) });
+            };
+            let (answer, ()) = futures_util::future::join(write, server_side).await;
+            assert!(matches!(answer, Ok(())), "{answer:?}");
+            drop(first);
+            assert_eq!(hello_token(&mut second).await, "new");
+        };
+        run(serving, story);
+    }
+
+    /// A refused write keeps the old key: when the connection ends later
+    /// nothing is redialled with a key the server never took.
+    #[test]
+    fn a_refused_rotation_keeps_the_old_key() {
+        let (handle, mut pump) = remote();
+        let (mut servers, dial) = dialer(2);
+        let mut second = servers.pop().expect("two");
+        let mut first = servers.pop().expect("two");
+        let serving = pump.serve("old", dial, |_| {});
+        let story = async {
+            hello_token(&mut first).await;
+            first.welcome();
+            let write = handle.rotate(Command::ReadSession, "new".into());
+            let server_side = async {
+                let ClientFrame::Cmd { id, .. } = first.heard().await else { panic!("a command") };
+                first.say(&ServerFrame::Reply { id, result: Err(MoltError::BadPayload("no".into())) });
+            };
+            let (answer, ()) = futures_util::future::join(write, server_side).await;
+            assert!(matches!(answer, Err(NotRotated::Refused(MoltError::BadPayload(_)))), "{answer:?}");
+            drop(first);
+        };
+        let (ended, ()) = block_on(futures_util::future::join(serving, story));
+        assert_eq!(ended, Ended::Closed);
+        assert!(block_on(second.from_client.next()).is_none(), "no second connection was used");
+    }
+
+    /// The write never landed: the new key is tried, the server refuses
+    /// it, and the old key is presented again. Its welcome says the old
+    /// key stays.
+    #[test]
+    fn a_rotation_the_server_never_took_falls_back_to_the_old_key() {
+        let (handle, mut pump) = remote();
+        let (mut servers, dial) = dialer(3);
+        let mut third = servers.pop().expect("three");
+        let mut second = servers.pop().expect("three");
+        let mut first = servers.pop().expect("three");
+        let serving = pump.serve("old", dial, |_| {});
+        let story = async {
+            hello_token(&mut first).await;
+            first.welcome();
+            let write = handle.rotate(Command::ReadSession, "new".into());
+            let server_side = async {
+                first.heard().await; // the write, never answered
+                drop(first);
+                assert_eq!(hello_token(&mut second).await, "new");
+                drop(second); // refused: no welcome
+                assert_eq!(hello_token(&mut third).await, "old");
+                third.welcome();
+            };
+            let (answer, ()) = futures_util::future::join(write, server_side).await;
+            assert!(matches!(answer, Err(NotRotated::Kept)), "{answer:?}");
+            let asked = handle.execute(Command::ReadSession);
+            let server_side = async {
+                let ClientFrame::Cmd { id, .. } = third.heard().await else { panic!("a command") };
+                third.say(&ServerFrame::Reply { id, result: Ok(Box::new(Reply::Ack)) });
+            };
+            let (answer, ()) = futures_util::future::join(asked, server_side).await;
+            assert!(matches!(answer, Ok(Reply::Ack)));
+        };
+        run(serving, story);
+    }
+
+    /// Neither key is welcomed (the server is gone): the outcome is open,
+    /// and the caller hears that instead of waiting.
+    #[test]
+    fn a_rotation_no_key_is_welcomed_after_stays_open() {
+        let (handle, mut pump) = remote();
+        let (mut servers, dial) = dialer(3);
+        let mut third = servers.pop().expect("three");
+        let mut second = servers.pop().expect("three");
+        let mut first = servers.pop().expect("three");
+        let serving = pump.serve("old", dial, |_| {});
+        let story = async {
+            hello_token(&mut first).await;
+            first.welcome();
+            let write = handle.rotate(Command::ReadSession, "new".into());
+            let server_side = async {
+                first.heard().await;
+                drop(first);
+                assert_eq!(hello_token(&mut second).await, "new");
+                drop(second);
+                assert_eq!(hello_token(&mut third).await, "old");
+                drop(third);
+            };
+            futures_util::future::join(write, server_side).await.0
+        };
+        let (ended, answer) = block_on(futures_util::future::join(serving, story));
+        assert_eq!(ended, Ended::Closed);
+        assert!(matches!(answer, Err(NotRotated::Unsure)), "{answer:?}");
+    }
+
+    /// No further connection can be dialled: open as well, not a hang.
+    #[test]
+    fn a_rotation_with_no_way_back_stays_open() {
+        let (handle, mut pump) = remote();
+        let (mut servers, dial) = dialer(1);
+        let mut first = servers.pop().expect("one");
+        let serving = pump.serve("old", dial, |_| {});
+        let story = async {
+            hello_token(&mut first).await;
+            first.welcome();
+            let write = handle.rotate(Command::ReadSession, "new".into());
+            let server_side = async {
+                first.heard().await;
+                drop(first);
+            };
+            futures_util::future::join(write, server_side).await.0
+        };
+        let (_, answer) = block_on(futures_util::future::join(serving, story));
+        assert!(matches!(answer, Err(NotRotated::Unsure)), "{answer:?}");
+    }
+
+    /// A pump that served one connection only (`run`) and is gone: the
+    /// rotation it left open is answered, and so is one asked after it.
+    #[test]
+    fn a_rotation_is_answered_when_its_pump_is_gone() {
+        let (handle, mut server, _welcome, pump) = rig();
+        let story = async {
+            server.heard().await;
+            server.welcome();
+            let write = handle.rotate(Command::ReadSession, "new".into());
+            let server_side = async {
+                server.heard().await;
+                drop(server);
+            };
+            futures_util::future::join(write, server_side).await.0
+        };
+        let (_, answer) = block_on(futures_util::future::join(pump, story));
+        assert!(matches!(answer, Err(NotRotated::Unsure)), "{answer:?}");
+        let late = block_on(handle.rotate(Command::ReadSession, "new".into()));
+        assert!(matches!(late, Err(NotRotated::Unsure)), "{late:?}");
+    }
+
+    /// A pump outlives a connection that ended for good: the caller
+    /// serves again with another key, and a command clicked into the dead
+    /// connection was answered, not kept for the next one.
+    #[test]
+    fn a_pump_serves_again_after_its_connection_ended() {
+        let (handle, mut pump) = remote();
+        let (mut servers, mut dial) = dialer(2);
+        let mut second = servers.pop().expect("two");
+        let mut first = servers.pop().expect("two");
+        let mut lag = 0;
+        let stale = handle.execute(Command::ReadSession);
+        let story = async {
+            hello_token(&mut first).await;
+            drop(first); // refused
+        };
+        let (ended, (), stale) = block_on(futures_util::future::join3(pump.serve("wrong", &mut dial, |_| {}), story, stale));
+        assert_eq!(ended, Ended::Closed);
+        assert!(stale.as_ref().is_err_and(is_gone));
+        let serving = pump.serve("right", &mut dial, |s| lag += usize::from(s == Signal::Lagged));
+        run(serving, async {
+            assert_eq!(hello_token(&mut second).await, "right");
+            second.welcome();
+            second.say(&ServerFrame::Lag);
+            let asked = handle.execute(Command::ReadSession);
+            let server_side = async {
+                let ClientFrame::Cmd { id, .. } = second.heard().await else { panic!("a command") };
+                second.say(&ServerFrame::Reply { id, result: Ok(Box::new(Reply::Ack)) });
+            };
+            let (answer, ()) = futures_util::future::join(asked, server_side).await;
+            assert!(matches!(answer, Ok(Reply::Ack)));
+        });
+        assert_eq!(lag, 1, "the server's lag is told to the driver");
     }
 
     #[test]

@@ -398,3 +398,29 @@ fn the_vault_founding_strings_are_compact() {
     assert_eq!(crate::i18n::localize_vault_refusal(0, &bounds), Lexicon::en().feat_vault_bounds);
     assert_eq!(crate::i18n::localize_vault_refusal(1, &bounds), Lexicon::de().feat_vault_bounds);
 }
+
+/// The browser page's labels (`docs/web_gui.md` §9): both languages
+/// carry every name, each text is there, compact and without an em dash,
+/// and the help is one limit per line, the same count in both.
+#[test]
+fn the_browser_page_is_labelled_in_both_languages() {
+    let (en, de) = (crate::i18n::page_text(0), crate::i18n::page_text(1));
+    assert_eq!(en.iter().map(|(n, _)| *n).collect::<Vec<_>>(), de.iter().map(|(n, _)| *n).collect::<Vec<_>>());
+    let find = |table: &[(&str, &'static str)], name: &str| {
+        table.iter().find(|(n, _)| *n == name).map(|(_, t)| *t).unwrap_or_default()
+    };
+    for name in ["lang", "key", "connect", "connecting", "reload", "refused", "protocol", "closed", "version", "failed", "lag", "help_title", "help"] {
+        for (lang, table) in [("en", &en), ("de", &de)] {
+            let text = find(table, name);
+            assert!(!text.is_empty(), "{lang}: {name} is missing");
+            assert!(!text.contains('\u{2014}'), "{lang}: {name} carries an em dash");
+            for line in text.lines() {
+                assert!(line.chars().count() <= 70 && line == line.trim(), "{lang}: {name}: {line:?}");
+            }
+        }
+    }
+    assert_eq!((find(&en, "lang"), find(&de, "lang")), ("en", "de"));
+    assert_eq!(find(&en, "help").lines().count(), find(&de, "help").lines().count());
+    assert!(find(&en, "help").lines().count() >= 10, "the limits of §9");
+    assert_ne!(find(&en, "refused"), find(&de, "refused"));
+}

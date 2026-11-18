@@ -7,6 +7,12 @@
 # durable close. tor.mode = "local" needs tor.service; drop the After= line
 # for "embedded" (feature build) or "whonix". A workspace or download dir
 # under /home needs ProtectHome= dropped.
+# Browser GUI: unpack the web tarball into /var/lib/molt/web as User= (not
+# group- or world-writable) and set
+#   [web]
+#   port = 4042
+# It listens on 127.0.0.1 only; reach it through a tunnel
+# (ssh -L 4042:127.0.0.1:4042 <host>) and enter [mcp] token in the page.
 # Logs: the journal, and /var/lib/molt/logs/config/moltd.<UTC date>.log
 # (7 days kept; node.log_file = false turns the file off).
 [Unit]

@@ -39,13 +39,20 @@ pub(crate) const MAX_FRAME: usize = 1 << 20;
 /// does not keep its slot. An upgraded connection has left by then.
 const HTTP_EXCHANGE: Duration = Duration::from_secs(60);
 
-/// The bundle: a fixed list, never a directory walk.
-const BUNDLE: [(&str, &str, &str); 4] = [
+/// The bundle: a fixed list, never a directory walk. The page's script
+/// and style are files of their own because the CSP below admits nothing
+/// inline.
+const BUNDLE: [(&str, &str, &str); 6] = [
     ("/", "index.html", "text/html; charset=utf-8"),
     ("/index.html", "index.html", "text/html; charset=utf-8"),
+    ("/page.js", "page.js", "text/javascript; charset=utf-8"),
+    ("/page.css", "page.css", "text/css; charset=utf-8"),
     ("/molt_web.js", "molt_web.js", "text/javascript; charset=utf-8"),
     ("/molt_web_bg.wasm", "molt_web_bg.wasm", "application/wasm"),
 ];
+
+/// The files a bundle directory must hold, each once.
+pub const BUNDLE_FILES: [&str; 5] = ["index.html", "page.js", "page.css", "molt_web.js", "molt_web_bg.wasm"];
 
 const CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; frame-ancestors 'none'";
 
@@ -93,9 +100,7 @@ fn load_bundle(dir: &std::path::Path) -> std::io::Result<Vec<(&'static str, Byte
         Ok(())
     };
     ours(dir, true)?;
-    let mut files: Vec<&'static str> = BUNDLE.iter().map(|(_, file, _)| *file).collect();
-    files.dedup();
-    files
+    BUNDLE_FILES
         .into_iter()
         .map(|file| {
             let path = dir.join(file);
@@ -261,4 +266,23 @@ fn upgrade(shared: &Arc<Shared>, mut req: Request<Incoming>) -> Response<Full<By
     h.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
     h.insert(header::SEC_WEBSOCKET_ACCEPT, accept);
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every route serves a file the bundle check read, and every file
+    /// read has a route: the two lists cannot drift.
+    #[test]
+    fn every_route_has_its_file_and_every_file_a_route() {
+        for (route, file, _) in BUNDLE {
+            assert!(BUNDLE_FILES.contains(&file), "{route} serves {file}, which is never loaded");
+            assert!(route == "/" || route.strip_prefix('/') == Some(file), "{route} is not {file}'s own name");
+        }
+        for file in BUNDLE_FILES {
+            assert!(BUNDLE.iter().any(|(_, served, _)| *served == file), "{file} is loaded and never served");
+            assert_eq!(BUNDLE_FILES.iter().filter(|f| **f == file).count(), 1, "{file} is listed twice");
+        }
+    }
 }

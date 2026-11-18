@@ -4,13 +4,14 @@
 //! callbacks capture; the `issue*` helpers are the three ways a click
 //! reaches the engine.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use molt_core::{Command, SessionSettings};
 use crate::engine::Engine;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use crate::native::Spawner;
+use crate::platform::Spawner;
 
 use crate::i18n::error_toast;
 use crate::mirror::{push_surfaces, spawn_mirror};
@@ -34,6 +35,7 @@ pub(crate) fn config_location(path: &str) -> (String, String) {
 
 /// The LOCAL config path for the footer, split the way this target's
 /// paths split (on Unix a backslash is a file-name character).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn local_config_location(path: &std::path::Path) -> (String, String) {
     let full = path.to_string_lossy();
     let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
@@ -51,6 +53,10 @@ pub(crate) fn apply_remote_startup(ui: &AppWindow, caps: molt_core::wire::Caps, 
     // a path here names the server's disk: the typed forms stay, the
     // folder dialogs of this machine go (§7)
     ui.set_folder_browse(false);
+    if !ui.get_web() {
+        ui.set_web(true);
+        crate::i18n::apply_web_strings(ui, ui.get_lang_index());
+    }
     let rows = tor_mode_enabled(caps.embedded_tor);
     if !ui.get_tor_mode_enabled().iter().eq(rows) {
         ui.set_tor_mode_enabled(ModelRc::new(VecModel::from(rows.to_vec())));
@@ -70,13 +76,13 @@ pub(crate) fn apply_remote_startup(ui: &AppWindow, caps: molt_core::wire::Caps, 
 /// its "embedded" row (the in-process arti dialer was not built in). Returns
 /// when the window closes, or an error if the GUI cannot start (e.g. no display)
 /// — in which case the caller falls back to headless.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_app(
     wallet: impl Into<Engine>,
     rt: impl Into<Spawner>,
     config_path: PathBuf,
     embedded_tor_available: bool,
 ) -> Result<(), slint::PlatformError> {
-    let wallet: Engine = wallet.into();
     let ui = AppWindow::new()?;
     // the settings footer shows the full config.toml location: directory
     // greyed, file name in text color. Absolutize a relative discovery path
@@ -91,7 +97,66 @@ pub fn run_app(
     ui.set_tor_mode_enabled(ModelRc::new(VecModel::from(
         tor_mode_enabled(embedded_tor_available).to_vec(),
     )));
+    wire_window(&ui, wallet.into(), rt.into());
+    ui.run()
+}
 
+/// Open the GUI on an engine behind the web door and run the event loop:
+/// the entry of a browser build (`docs/web_gui.md` §6.6), where `run`
+/// does not return. There are no process inputs - the config location and
+/// the embedded-Tor row arrive with the first session
+/// ([`apply_remote_startup`]). `lang` (0 = English, 1 = German) labels the
+/// window until that session names the language.
+///
+/// `opened` is handed the window's [`Sizer`] before the loop starts: a
+/// browser has no window manager, so the page sizes the window itself.
+pub fn run_remote(
+    engine: impl Into<Engine>,
+    spawner: impl Into<Spawner>,
+    lang: i32,
+    opened: impl FnOnce(Sizer),
+) -> Result<(), slint::PlatformError> {
+    let ui = open_remote(engine, spawner, lang)?;
+    opened(Sizer(ui.as_weak()));
+    ui.run()
+}
+
+/// Sets the size of an open window from outside it (the browser page
+/// follows its viewport with this). Call it on the UI thread.
+pub struct Sizer(slint::Weak<AppWindow>);
+
+impl Sizer {
+    /// Size the window to `width` x `height` logical pixels. The
+    /// window's own minimum still holds. `false`: the window is gone.
+    pub fn set(&self, width: f32, height: f32) -> bool {
+        let Some(ui) = self.0.upgrade() else { return false };
+        ui.window().set_size(slint::LogicalSize::new(width, height));
+        true
+    }
+}
+
+/// [`run_remote`] up to the event loop: the window, wired and mirroring.
+pub(crate) fn open_remote(
+    engine: impl Into<Engine>,
+    spawner: impl Into<Spawner>,
+    lang: i32,
+) -> Result<AppWindow, slint::PlatformError> {
+    let ui = AppWindow::new()?;
+    ui.set_app_version(version_label(env!("CARGO_PKG_VERSION"), cfg!(debug_assertions)).into());
+    // a path names the server's disk from the first frame on (§7), and
+    // the web-only behaviour is there before the labels are (§6.5, §9)
+    ui.set_folder_browse(false);
+    ui.set_web(true);
+    // the mirror applies the strings with each session; until the first
+    // one lands the window would stand unlabelled
+    crate::i18n::apply_strings(&ui, lang);
+    wire_window(&ui, engine.into(), spawner.into());
+    Ok(ui)
+}
+
+/// Wire every callback group of `ui` to `wallet` and start the live
+/// mirror: what both entries share.
+fn wire_window(ui: &AppWindow, wallet: Engine, spawner: Spawner) {
     // NOTE: the old duplicate-name check is gone by design — display names
     // may repeat, the workspace id disambiguates (the same DAO opened twice
     // locally is a supported setup).
@@ -107,45 +172,44 @@ pub fn run_app(
 
     // what every callback captures: one clone per closure
     let ctx = Ctx {
-        spawner: rt.into(),
-        wallet: wallet.clone(),
+        spawner,
+        wallet,
         weak: ui.as_weak(),
-        last_settings: last_settings.clone(),
-        chat_ui: chat_ui.clone(),
+        last_settings,
+        chat_ui,
     };
 
     // The Multisig-Wiki mock's state machine + its WikiState bridge —
     // UI-local by design, EXCEPT the changeset vote: that one proposes on
     // the real gated Memory surface, so it is wired with the handles.
-    let (wiki_model, wiki_last) = wire_wiki(&ui);
-    wire_wiki_vote(&ui, &ctx, &wiki_model, &wiki_last);
-    wire_patch_view(&ui);
-    wire_wiki_index(&ui, &ctx);
-    wire_wiki_file_picker(&ui, &ctx);
-    wire_wiki_export(&ui, &ctx);
-    wire_wiki_draft(&ui, &ctx);
+    let (wiki_model, wiki_last) = wire_wiki(ui);
+    wire_wiki_vote(ui, &ctx, &wiki_model, &wiki_last);
+    wire_patch_view(ui);
+    wire_wiki_index(ui, &ctx);
+    wire_wiki_file_picker(ui, &ctx);
+    wire_wiki_export(ui, &ctx);
+    wire_wiki_draft(ui, &ctx);
 
     // --- actions: each becomes a Command on the shared engine ---
-    actions::clipboard::wire(&ui, &ctx);
-    actions::workspace::wire(&ui, &ctx);
-    actions::settings::wire(&ui, &ctx);
-    actions::relays::wire(&ui, &ctx);
-    actions::ritual::wire(&ui, &ctx);
-    actions::chat::wire(&ui, &ctx);
-    actions::org::wire(&ui, &ctx);
-    actions::vault::wire(&ui, &ctx);
-    actions::wallet::wire(&ui, &ctx);
-    actions::kanban::wire(&ui, &ctx);
+    actions::clipboard::wire(ui, &ctx);
+    actions::workspace::wire(ui, &ctx);
+    actions::settings::wire(ui, &ctx);
+    actions::relays::wire(ui, &ctx);
+    actions::ritual::wire(ui, &ctx);
+    actions::chat::wire(ui, &ctx);
+    actions::org::wire(ui, &ctx);
+    actions::vault::wire(ui, &ctx);
+    actions::wallet::wire(ui, &ctx);
+    actions::kanban::wire(ui, &ctx);
     // Quit confirmed from the modal: end the Slint event loop so `ui.run()`
-    // returns and the process shuts down.
+    // returns and the process shuts down. (The modal opens on the window
+    // manager's close request, which a browser tab never raises.)
     ui.on_quit(|| {
         let _ = slint::quit_event_loop();
     });
 
     // --- live-mirror: re-read and re-render on every engine change ---
     spawn_mirror(&ctx);
-
-    ui.run()
 }
 
 /// What every callback captures: the spawner, the shared engine handle,

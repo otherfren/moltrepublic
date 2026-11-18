@@ -66,6 +66,14 @@ fn off_thread_work_returns_its_result() {
     assert_eq!(lost, None, "a dead worker is an absent result, not a hang");
 }
 
+/// The browser's twin of [`crate::native::off_thread`] has one thread: the
+/// work runs where it is asked for and always answers.
+#[test]
+fn the_browser_twin_runs_work_inline() {
+    let rt = rt();
+    assert_eq!(rt.block_on(crate::web::off_thread(|| 6 * 7)), Some(42));
+}
+
 /// Every shared source line (comments cut) that `hit` matches, as
 /// `(file relative to src, line)`; `native.rs` and the tests are exempt.
 fn shared_lines(hit: fn(&str) -> bool) -> Vec<(String, usize)> {

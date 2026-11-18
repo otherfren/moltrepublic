@@ -2484,7 +2484,7 @@ fn spawn_upload_read(cx: &Ctx, hex: String, checksum: String) {
             _ => None,
         };
         let decoded = match bytes {
-            Some(b) => crate::native::off_thread(move || crate::images::decode_wiki_image(&b)).await.flatten(),
+            Some(b) => crate::platform::off_thread(move || crate::images::decode_wiki_image(&b)).await.flatten(),
             None => None,
         };
         let _ = slint::invoke_from_event_loop(move || {
