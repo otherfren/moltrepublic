@@ -15,9 +15,9 @@
 use std::collections::HashMap;
 
 use molt_core::{
-    ChannelInfo, ChannelRef, Event, MemberView, MemberVote, MoltError, ProposalId,
-    ProposalRecord, ProposalState, ProposalView, Reply, StatusView, Surface, SurfaceSnapshot,
-    SurfaceStat, UploadView, VoteState, WorkspaceEvent,
+    ChannelInfo, ChannelRef, Event, MemberView, MemberVote, MoltError, ProposalId, ProposalRecord,
+    ProposalState, ProposalView, Reply, StatusView, Surface, SurfaceSnapshot, SurfaceStat,
+    UploadView, VoteState, WorkspaceEvent,
 };
 use serde_json::Value;
 
@@ -162,7 +162,11 @@ pub(crate) fn applied_block_plaintext_len(
             })
             .collect(),
     };
-    let by = roster.iter().max_by_key(|m| m.len()).cloned().unwrap_or_default();
+    let by = roster
+        .iter()
+        .max_by_key(|m| m.len())
+        .cloned()
+        .unwrap_or_default();
     let env = molt_core::EventEnvelope {
         seq: u64::MAX,
         prev_seq: u64::MAX,
@@ -186,11 +190,7 @@ pub(crate) fn payload_fits(
 
 /// How many DECODED image bytes still fit beside the rest of `payload` —
 /// what the refusal names, so "too large" arrives with the number to aim at.
-fn image_headroom(
-    surface: Surface,
-    payload: &Value,
-    roster: &[molt_core::MemberId],
-) -> usize {
+fn image_headroom(surface: Surface, payload: &Value, roster: &[molt_core::MemberId]) -> usize {
     let mut bare = payload.clone();
     if let Some(obj) = bare.as_object_mut() {
         obj.insert("bytes_b64".into(), Value::String(String::new()));
@@ -315,11 +315,8 @@ pub(crate) fn image_decodable(bytes: &[u8]) -> Result<(), MoltError> {
 /// handed back — so a caller that also judges the SHAPE (the square rule
 /// for a member picture) reads them once, not twice.
 pub(crate) fn image_dimensions(bytes: &[u8]) -> Result<(u32, u32), MoltError> {
-    let refuse = || {
-        MoltError::BadPayload(
-            "the image cannot be decoded (png/jpeg/webp/gif/bmp)".into(),
-        )
-    };
+    let refuse =
+        || MoltError::BadPayload("the image cannot be decoded (png/jpeg/webp/gif/bmp)".into());
     // L1 (decided 2026-08-16): SVG is REFUSED, not structurally vetted —
     // the prefix sniff accepted any <svg/<?xml text with no dimension or
     // nesting check, straight into every member's renderer (a 256 KiB
@@ -519,8 +516,7 @@ fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltErr
         // known (an applied entry is forever; the enable-only gate sits in
         // cmd_propose, the union fold makes it deterministic)
         "set_features" => {
-            let tokens: Vec<String> =
-                value.split_whitespace().map(str::to_string).collect();
+            let tokens: Vec<String> = value.split_whitespace().map(str::to_string).collect();
             if tokens.is_empty() {
                 return Err(MoltError::BadPayload("nothing to enable".into()));
             }
@@ -533,7 +529,9 @@ fn validate_org_payload(surface: Surface, payload: &Value) -> Result<(), MoltErr
         "set_relays" => {
             let tokens: Vec<&str> = value.split_whitespace().collect();
             if tokens.is_empty() {
-                return Err(MoltError::BadPayload("the pool needs at least one relay".into()));
+                return Err(MoltError::BadPayload(
+                    "the pool needs at least one relay".into(),
+                ));
             }
             for t in tokens {
                 molt_core::relay::normalize_relay_url(t)
@@ -597,7 +595,9 @@ impl State {
         // plan 1.3.7: deposits and grants come only from the vault commands
         if surface == Surface::Vault && self.is_vault_prepared() {
             self.require_vault()?;
-            return Err(MoltError::Vault(molt_core::vault::VaultRefusal::UseVaultSeal));
+            return Err(MoltError::Vault(
+                molt_core::vault::VaultRefusal::UseVaultSeal,
+            ));
         }
         // the purse's votes come only from its commands (W4)
         if surface == Surface::Wallet {
@@ -656,7 +656,11 @@ impl State {
             (Some(p), false) => Some(molt_storage::expand_tilde(&self.host_path(&p)?)),
             (None, true) => None,
         };
-        let bytes = if file.is_none() { image_bytes(payload) } else { None };
+        let bytes = if file.is_none() {
+            image_bytes(payload)
+        } else {
+            None
+        };
         let named = payload
             .get("value")
             .and_then(Value::as_str)
@@ -735,7 +739,9 @@ impl State {
         // the purse's init is the door that turns `wallet` on (W4)
         if surface == Surface::Wallet {
             if !crate::wallet::purse_op_ok(&payload) {
-                return Err(MoltError::Wallet(molt_core::wallet::WalletRefusal::UnknownOp));
+                return Err(MoltError::Wallet(
+                    molt_core::wallet::WalletRefusal::UnknownOp,
+                ));
             }
             if !crate::wallet::is_init(&payload) {
                 self.require_feature(surface)?;
@@ -753,7 +759,10 @@ impl State {
         if surface == Surface::Organization
             && payload.get("op").and_then(Value::as_str) == Some("set_relays")
         {
-            let raw = payload.get("value").and_then(Value::as_str).unwrap_or_default();
+            let raw = payload
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let canon: Result<Vec<String>, ()> = raw
                 .split_whitespace()
                 .map(|t| molt_core::relay::normalize_relay_url(t).map_err(|_| ()))
@@ -768,10 +777,12 @@ impl State {
         if surface == Surface::Organization
             && payload.get("op").and_then(Value::as_str) == Some("set_features")
         {
-            let raw = payload.get("value").and_then(Value::as_str).unwrap_or_default();
+            let raw = payload
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             let canon: std::collections::BTreeSet<&str> = raw.split_whitespace().collect();
-            payload["value"] =
-                Value::String(canon.into_iter().collect::<Vec<_>>().join(" "));
+            payload["value"] = Value::String(canon.into_iter().collect::<Vec<_>>().join(" "));
         }
         // set_member_desc: store the TRIMMED value — one spelling per
         // description, so whitespace-only input clears the field instead of
@@ -779,7 +790,10 @@ impl State {
         if surface == Surface::Organization
             && payload.get("op").and_then(Value::as_str) == Some("set_member_desc")
         {
-            let raw = payload.get("value").and_then(Value::as_str).unwrap_or_default();
+            let raw = payload
+                .get("value")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             payload["value"] = Value::String(raw.trim().to_string());
         }
         if !payload.is_object() {
@@ -804,12 +818,19 @@ impl State {
         // stateless payload validation; the wire twin is the drop in
         // `cmd_net_delivered`, where the link identity is the proof.
         if surface == Surface::Organization && is_member_profile_op(&payload) {
-            let member = payload.get("member").and_then(Value::as_str).unwrap_or_default();
+            let member = payload
+                .get("member")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
             if member.is_empty() {
-                return Err(MoltError::BadPayload("the profile op needs a member".into()));
+                return Err(MoltError::BadPayload(
+                    "the profile op needs a member".into(),
+                ));
             }
             if !self.roster().iter().any(|m| m == member) {
-                return Err(MoltError::BadPayload(format!("{member}: not in the roster")));
+                return Err(MoltError::BadPayload(format!(
+                    "{member}: not in the roster"
+                )));
             }
             if member != self.member() {
                 return Err(MoltError::BadPayload(format!(
@@ -926,7 +947,11 @@ impl State {
             },
         );
         self.record(env);
-        self.emit(Event::Proposed { id, surface, by: me.clone() });
+        self.emit(Event::Proposed {
+            id,
+            surface,
+            by: me.clone(),
+        });
         if self.is_chain_governed() {
             // real threshold: the proposer co-signs their own proposal; the
             // other members' signatures arrive over the mesh
@@ -1144,7 +1169,11 @@ impl State {
                 },
             );
             self.record(env);
-            let have = self.proposals.get(&proposal.0).map(|p| p.approvals).unwrap_or(0);
+            let have = self
+                .proposals
+                .get(&proposal.0)
+                .map(|p| p.approvals)
+                .unwrap_or(0);
             self.emit(Event::Approved {
                 id: proposal,
                 have,
@@ -1187,7 +1216,12 @@ impl State {
             return Ok(());
         };
         let me = self.member();
-        self.post_message(me, body, None, molt_core::ChannelRef::Patch { id: proposal })?;
+        self.post_message(
+            me,
+            body,
+            None,
+            molt_core::ChannelRef::Patch { id: proposal },
+        )?;
         Ok(())
     }
 
@@ -1295,7 +1329,8 @@ impl State {
                 tracing::warn!(%id, %by, "withdraw park full - dropping");
                 return WithdrawOutcome::Ignored;
             }
-            self.chain.pending_withdrawals
+            self.chain
+                .pending_withdrawals
                 .entry(id)
                 .or_insert((by.to_string(), ts));
             return WithdrawOutcome::Parked;
@@ -1313,7 +1348,7 @@ impl State {
         p.state = ProposalState::Rejected;
         p.withdrawn = true;
         p.declined_at = ts; // retention + the "when" label; declined_by stays empty
-        // G17: freeze the voters BEFORE the collection is dropped
+                            // G17: freeze the voters BEFORE the collection is dropped
         self.stash_voted(id);
         self.chain.pending_sigs.remove(&id);
         self.chain.own_approvals.remove(&id);
@@ -1428,7 +1463,10 @@ impl State {
     /// garbage stays accept-and-drop (it must not ride resend forever),
     /// and an id already parked never sheds (the member dedup appends).
     pub(crate) fn decline_would_shed(&self, id: u64, by: &str) -> bool {
-        if !self.is_chain_governed() || self.proposals.contains_key(&id) || self.retired.contains(&id) {
+        if !self.is_chain_governed()
+            || self.proposals.contains_key(&id)
+            || self.retired.contains(&id)
+        {
             return false;
         }
         if id > self.next_id.saturating_add(PARKED_DECLINE_ID_WINDOW) {
@@ -1438,7 +1476,8 @@ impl State {
             return false;
         }
         let member_parked = self
-            .chain.pending_declines
+            .chain
+            .pending_declines
             .values()
             .filter(|p| p.iter().any(|(m, _, _)| m == by))
             .count();
@@ -1483,7 +1522,8 @@ impl State {
             // with the parked voice
             self.next_id = self.next_id.max(id.saturating_add(1));
             let member_parked = self
-                .chain.pending_declines
+                .chain
+                .pending_declines
                 .values()
                 .filter(|p| p.iter().any(|(m, _, _)| m == by))
                 .count();
@@ -1545,7 +1585,10 @@ impl State {
     /// caller can ring frontends; replay callers ignore it. Idempotent —
     /// the park entry is consumed.
     pub(crate) fn register_parked_declines(&mut self, id: u64) -> ParkDrain {
-        let mut drain = ParkDrain { voices: Vec::new(), rejected: false };
+        let mut drain = ParkDrain {
+            voices: Vec::new(),
+            rejected: false,
+        };
         let Some(parked) = self.chain.pending_declines.remove(&id) else {
             return drain;
         };
@@ -1567,11 +1610,7 @@ impl State {
     /// and for the negative outcome the decliner — so "Discussion" on an
     /// accepted or declined vote says what exactly was decided. English
     /// like every engine-authored notice; NEVER the image bytes.
-    pub(crate) fn decision_summary(
-        id: u64,
-        payload: &Value,
-        decliner: Option<&str>,
-    ) -> String {
+    pub(crate) fn decision_summary(id: u64, payload: &Value, decliner: Option<&str>) -> String {
         let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
         let label = match op {
             "set_name" => "Name",
@@ -1643,7 +1682,11 @@ impl State {
         // D5: DETERMINISTIC id — whoever tips posts, and concurrent posters
         // collapse via the ordinary duplicate-id drop. Already holding the
         // line (the other tipper's copy landed first, or a replay) = done.
-        let republic = self.replica.as_ref().map(|r| r.republic_id.clone()).unwrap_or_default();
+        let republic = self
+            .replica
+            .as_ref()
+            .map(|r| r.republic_id.clone())
+            .unwrap_or_default();
         let sid = crate::chat::decision_summary_id(&republic, id, decliner.is_some());
         if self.chat_pos.contains_key(&sid) {
             return;
@@ -1770,7 +1813,8 @@ impl State {
             .collect();
         cards.sort_unstable_by_key(|(id, _)| *id);
         let total = u64::try_from(cards.len()).unwrap_or(u64::MAX);
-        let rest = &cards[cards.partition_point(|(id, _)| cursor.is_some_and(|after| *id <= after))..];
+        let rest =
+            &cards[cards.partition_point(|(id, _)| cursor.is_some_and(|after| *id <= after))..];
         let next_cursor = (rest.len() > page).then(|| rest[page - 1].0);
         // ONE organization fold for the whole page, not one per card
         let eff = with_texts.then(|| self.org_effective());
@@ -1826,7 +1870,8 @@ impl State {
         // is its own (self-cosign or the one explicit approve)
         let mut approved_by_me = if self.is_chain_governed() {
             let me = self.member();
-            self.chain.pending_sigs
+            self.chain
+                .pending_sigs
                 .get(&id)
                 .is_some_and(|s| s.verified.contains(&me))
         } else {
@@ -1889,19 +1934,24 @@ impl State {
             // applied history materializes cards. Only a Membership card
             // (its block carries no proposal id) still matches by content.
             let sealed = self.chain.applied_sigs.get(&id).or_else(|| {
-                self.chain.blocks.iter().rev().find_map(|blk| match &blk.change {
-                molt_core::ChainChange::Membership { op: bop, member, .. }
-                    if seat == Some(member.as_str())
-                        && matches!(
-                            (op, bop),
-                            ("restore_member", molt_core::MembershipOp::Restored)
-                                | ("add_member", molt_core::MembershipOp::Joined)
-                        ) =>
-                {
-                    Some(&blk.sigs)
-                }
-                _ => None,
-                })
+                self.chain
+                    .blocks
+                    .iter()
+                    .rev()
+                    .find_map(|blk| match &blk.change {
+                        molt_core::ChainChange::Membership {
+                            op: bop, member, ..
+                        } if seat == Some(member.as_str())
+                            && matches!(
+                                (op, bop),
+                                ("restore_member", molt_core::MembershipOp::Restored)
+                                    | ("add_member", molt_core::MembershipOp::Joined)
+                            ) =>
+                        {
+                            Some(&blk.sigs)
+                        }
+                        _ => None,
+                    })
             });
             if let Some(sigs) = sealed {
                 approvals = sigs.len();
@@ -1996,8 +2046,16 @@ impl State {
     /// previous name.
     pub(crate) fn org_effective(&self) -> OrgEffective {
         let mut eff = OrgEffective {
-            name: self.replica.as_ref().map(|r| r.name.clone()).unwrap_or_default(),
-            agenda: self.replica.as_ref().map(|r| r.agenda.clone()).unwrap_or_default(),
+            name: self
+                .replica
+                .as_ref()
+                .map(|r| r.name.clone())
+                .unwrap_or_default(),
+            agenda: self
+                .replica
+                .as_ref()
+                .map(|r| r.agenda.clone())
+                .unwrap_or_default(),
             retention_days: molt_core::default_chat_retention_days(),
             thread_retention_days: molt_core::default_thread_retention_days(),
             image: String::new(),
@@ -2037,8 +2095,10 @@ impl State {
                     // matches sync_logo_file — with a storage dir the
                     // reference is the materialized logo file, else (session
                     // only) the display value
-                    let has_bytes =
-                        v.get("bytes_b64").and_then(Value::as_str).is_some_and(|s| !s.is_empty());
+                    let has_bytes = v
+                        .get("bytes_b64")
+                        .and_then(Value::as_str)
+                        .is_some_and(|s| !s.is_empty());
                     eff.image = match (&self.active, has_bytes) {
                         (Some(active), true) => active
                             .dir
@@ -2074,12 +2134,18 @@ impl State {
         let mut out: std::collections::BTreeMap<&str, MemberProfile<'_>> =
             std::collections::BTreeMap::new();
         for v in self.applied_org_entries() {
-            let Some(member) = v.get("member").and_then(Value::as_str).filter(|m| !m.is_empty())
+            let Some(member) = v
+                .get("member")
+                .and_then(Value::as_str)
+                .filter(|m| !m.is_empty())
             else {
                 continue;
             };
             let op = v.get("op").and_then(Value::as_str).unwrap_or_default();
-            if !matches!(op, "set_member_image" | "remove_member_image" | "set_member_desc") {
+            if !matches!(
+                op,
+                "set_member_image" | "remove_member_image" | "set_member_desc"
+            ) {
                 continue;
             }
             let value = v.get("value").and_then(Value::as_str).unwrap_or_default();
@@ -2112,10 +2178,7 @@ impl State {
     /// The Ist-Stand of a member-profile proposal: the targeted seat's
     /// applied picture reference or description. `None` for every other op,
     /// so [`change_summary`]'s org rule stays the one rule.
-    pub(crate) fn member_profile_current(
-        &self,
-        p: &molt_core::ProposalRecord,
-    ) -> Option<String> {
+    pub(crate) fn member_profile_current(&self, p: &molt_core::ProposalRecord) -> Option<String> {
         if p.surface != Surface::Organization || !is_member_profile_op(&p.payload) {
             return None;
         }
@@ -2123,9 +2186,7 @@ impl State {
         let profiles = self.member_profiles();
         let profile = profiles.get(member);
         Some(match p.payload.get("op").and_then(Value::as_str) {
-            Some("set_member_desc") => {
-                profile.map(|x| x.desc.to_string()).unwrap_or_default()
-            }
+            Some("set_member_desc") => profile.map(|x| x.desc.to_string()).unwrap_or_default(),
             _ => profile.map(|x| x.image.clone()).unwrap_or_default(),
         })
     }
@@ -2138,7 +2199,13 @@ impl State {
             .get(&Surface::Organization)
             .into_iter()
             .flatten()
-            .chain(self.chain.applied.get(&Surface::Organization).into_iter().flatten())
+            .chain(
+                self.chain
+                    .applied
+                    .get(&Surface::Organization)
+                    .into_iter()
+                    .flatten(),
+            )
             .map(|(_, v)| v)
     }
 
@@ -2157,7 +2224,6 @@ impl State {
     pub(crate) fn aged_out_at(cutoff: u64, ts: u64) -> bool {
         ts != 0 && ts < cutoff
     }
-
 }
 
 /// The retention read-filter boundary, a pure function of the message
@@ -2235,7 +2301,10 @@ impl State {
     }
 
     /// [`Self::applied_payloads`] with the proposal id each entry came from.
-    pub(crate) fn applied_entries(&self, surface: Surface) -> impl Iterator<Item = (Option<u64>, &Value)> {
+    pub(crate) fn applied_entries(
+        &self,
+        surface: Surface,
+    ) -> impl Iterator<Item = (Option<u64>, &Value)> {
         debug_assert!(surface != Surface::Chat, "chat has no stored applied log");
         self.applied
             .get(&surface)
@@ -2319,10 +2388,7 @@ impl State {
         // the DOCUMENT never waits on the index - only its link counts do,
         // and `None` says so rather than claiming zero
         let (links_out, links_in) = match self.wiki_graph.as_ref() {
-            Some(g) => (
-                Some(count(g.out.get(&path))),
-                Some(count(g.inn.get(&path))),
-            ),
+            Some(g) => (Some(count(g.out.get(&path))), Some(count(g.inn.get(&path)))),
             None => (None, None),
         };
         let files = self.wiki_file_refs(content);
@@ -2386,7 +2452,11 @@ impl State {
             return (String::new(), "unknown");
         }
         let r = self.resolve_upload_in(rows, hex);
-        let name = r.upload.as_ref().map(|u| u.name.clone()).unwrap_or_default();
+        let name = r
+            .upload
+            .as_ref()
+            .map(|u| u.name.clone())
+            .unwrap_or_default();
         (name, upload_ref_state_word(&r))
     }
 
@@ -2444,8 +2514,8 @@ impl State {
         let start = usize::try_from(cursor).unwrap_or(0);
         let rest = edges.len().saturating_sub(start);
         let page = page.min(rest);
-        let next_cursor = (start + page < edges.len())
-            .then(|| u32::try_from(start + page).unwrap_or(u32::MAX));
+        let next_cursor =
+            (start + page < edges.len()).then(|| u32::try_from(start + page).unwrap_or(u32::MAX));
         let edges = edges.into_iter().skip(start).take(page).collect();
         Ok(Reply::WikiLinks {
             edges,
@@ -2538,10 +2608,7 @@ impl State {
     /// Note what an applied Memory entry changed, for the link graph:
     /// named paths are re-parsed on the next graph read, an unnamed change
     /// (a non-patch payload) drops the graph.
-    pub(crate) fn note_wiki_change(
-        &mut self,
-        moved: Option<&std::collections::BTreeSet<String>>,
-    ) {
+    pub(crate) fn note_wiki_change(&mut self, moved: Option<&std::collections::BTreeSet<String>>) {
         match moved {
             Some(paths) => {
                 self.wiki_graph_dirty.extend(paths.iter().cloned());
@@ -2668,8 +2735,7 @@ impl State {
         let (hits, more) = index
             .search(&query, &filters, page, start)
             .map_err(|e| MoltError::BadPayload(format!("query: {e}")))?;
-        let next_cursor =
-            more.then(|| u32::try_from(start + hits.len()).unwrap_or(u32::MAX));
+        let next_cursor = more.then(|| u32::try_from(start + hits.len()).unwrap_or(u32::MAX));
         Ok(Reply::WikiSearch {
             hits: hits
                 .into_iter()
@@ -2728,28 +2794,32 @@ impl State {
             }
         }
         let Some(cache) = self.wiki_cache.as_ref() else {
-            return Err(MoltError::Engine("the wiki fold cache is unavailable".to_string()));
+            return Err(MoltError::Engine(
+                "the wiki fold cache is unavailable".to_string(),
+            ));
         };
         let wiki_rev = cache.rev;
         let base = cache.base.clone();
         let empty: Vec<crate::WikiRevChanges> = Vec::new();
-        let (below, floor): (&[crate::WikiRevChanges], u64) = match (base.is_some(), cache.rev_at_cut) {
-            (false, _) => (&empty, 0),
-            (true, None) => (&empty, 1),
-            (true, Some(_)) if needs_cards.is_none() => (&empty, 0),
-            (true, Some(_)) => cache
-                .below_cut
-                .as_ref()
-                .map_or((&empty[..], 0), |(b, f)| (b.as_slice(), *f)),
-        };
-        let mut changes = coalesce_wiki_changes(below.iter().chain(cache.history.iter()), since_rev);
+        let (below, floor): (&[crate::WikiRevChanges], u64) =
+            match (base.is_some(), cache.rev_at_cut) {
+                (false, _) => (&empty, 0),
+                (true, None) => (&empty, 1),
+                (true, Some(_)) if needs_cards.is_none() => (&empty, 0),
+                (true, Some(_)) => cache
+                    .below_cut
+                    .as_ref()
+                    .map_or((&empty[..], 0), |(b, f)| (b.as_slice(), *f)),
+            };
+        let mut changes =
+            coalesce_wiki_changes(below.iter().chain(cache.history.iter()), since_rev);
         // revision first, then path: the order an agent replays them in
         changes.sort_by(|a, b| a.rev.cmp(&b.rev).then_with(|| a.path.cmp(&b.path)));
         let total = u64::try_from(changes.len()).unwrap_or(u64::MAX);
         let start = usize::try_from(cursor).unwrap_or(0);
         let page = page.min(changes.len().saturating_sub(start));
-        let next_cursor = (start + page < changes.len())
-            .then(|| u32::try_from(start + page).unwrap_or(u32::MAX));
+        let next_cursor =
+            (start + page < changes.len()).then(|| u32::try_from(start + page).unwrap_or(u32::MAX));
         // below the floor there is a tree and no complete change list - a
         // caller asking from under it, or from a revision this base never
         // reached, is TOLD rather than handed a short answer that reads as
@@ -3012,13 +3082,8 @@ impl State {
         // E2: a rename strands every BASE link naming the old path. The
         // repair rides the SAME patch - the emitter diffs the whole
         // after-tree, so a rewritten page is one more entry in it.
-        let (repaired, kept_link_warnings) = self.repair_rename_links(
-            &mut touched,
-            &mut base,
-            &mut after,
-            &renames,
-            repair_links,
-        )?;
+        let (repaired, kept_link_warnings) =
+            self.repair_rename_links(&mut touched, &mut base, &mut after, &renames, repair_links)?;
         let patch = molt_core::wiki_patch::build_patch(&base, &after, &renames)
             .ok_or_else(|| MoltError::BadPayload("nothing to change".to_string()))?;
         let summary = molt_core::wiki_patch::count_changes(&base, &after, &renames).summary();
@@ -3031,7 +3096,10 @@ impl State {
         // a list and one stale warning no longer blinds the caller to the
         // rest.
         let mut found: Vec<(&'static str, String)> = Vec::new();
-        found.extend(coded(WARN_HEADER, self.wiki_patch_check(Surface::Memory, &payload)?));
+        found.extend(coded(
+            WARN_HEADER,
+            self.wiki_patch_check(Surface::Memory, &payload)?,
+        ));
         found.extend(coded(
             WARN_OPEN_PATH,
             self.open_proposal_warnings(&touched, supersedes),
@@ -3056,7 +3124,12 @@ impl State {
         found.extend(coded(WARN_FILE_REF, self.file_ref_warnings(&after)));
         let warnings: Vec<String> = found.iter().map(|(c, m)| format!("{c}: {m}")).collect();
         if dry_run {
-            return Ok(Reply::WikiPreview { patch, summary, warnings, repaired });
+            return Ok(Reply::WikiPreview {
+                patch,
+                summary,
+                warnings,
+                repaired,
+            });
         }
         // B5: a warning is a refusal by default - it used to arrive once the
         // patch was already in the vote, and the only way out was withdraw
@@ -3089,9 +3162,13 @@ impl State {
         // the propose path recomputes the header half only; the sources
         // this call alone knows ride the reply from here
         match self.cmd_propose(Surface::Memory, payload)? {
-            Reply::Proposed { id, channel, .. } => {
-                Ok(Reply::Proposed { id, warnings, channel, repaired, minted: Vec::new() })
-            }
+            Reply::Proposed { id, channel, .. } => Ok(Reply::Proposed {
+                id,
+                warnings,
+                channel,
+                repaired,
+                minted: Vec::new(),
+            }),
             other => Ok(other),
         }
     }
@@ -3101,13 +3178,14 @@ impl State {
     /// file carries, and a match that is only a temporary share each
     /// warn - and a warning refuses without `allow_warnings`. A page
     /// outlives the chat window; a temporary share does not.
-    fn file_ref_warnings(
-        &self,
-        after: &std::collections::BTreeMap<String, String>,
-    ) -> Vec<String> {
+    fn file_ref_warnings(&self, after: &std::collections::BTreeMap<String, String>) -> Vec<String> {
         let mut hexes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for content in after.values() {
-            hexes.extend(molt_core::wiki_refs::file_refs(content).into_iter().map(|r| r.hex));
+            hexes.extend(
+                molt_core::wiki_refs::file_refs(content)
+                    .into_iter()
+                    .map(|r| r.hex),
+            );
         }
         if hexes.is_empty() {
             return Vec::new();
@@ -3169,9 +3247,8 @@ impl State {
     ) -> Vec<String> {
         let mut out = Vec::new();
         for (id, by, patch) in &self.open_wiki_proposals(except) {
-            let paths = molt_core::wiki_fold::touched_paths(
-                &molt_core::wiki_fold::parse_patch(patch),
-            );
+            let paths =
+                molt_core::wiki_fold::touched_paths(&molt_core::wiki_fold::parse_patch(patch));
             for path in touched.intersection(&paths) {
                 out.push(if by.is_empty() {
                     format!("{path} is in open proposal {id}")
@@ -3205,7 +3282,9 @@ impl State {
             let needles = [format!("[[{stem}"), from.clone()];
             for (id, _, patch) in &open {
                 if patch_writes_any(patch, &needles) {
-                    out.push(format!("rename of {from} leaves a link in open proposal {id}"));
+                    out.push(format!(
+                        "rename of {from} leaves a link in open proposal {id}"
+                    ));
                 }
             }
         }
@@ -3268,9 +3347,7 @@ impl State {
             return Ok((
                 Vec::new(),
                 hits.iter()
-                    .map(|(from, pages)| {
-                        format!("{from}: old path kept by {}", name_a_few(pages))
-                    })
+                    .map(|(from, pages)| format!("{from}: old path kept by {}", name_a_few(pages)))
                     .collect(),
             ));
         }
@@ -3345,7 +3422,9 @@ impl State {
                 if owner == path || owner == &origin {
                     continue;
                 }
-                out.push(format!("{kind} \"{name}\" already names {owner} - both pages lose it"));
+                out.push(format!(
+                    "{kind} \"{name}\" already names {owner} - both pages lose it"
+                ));
             }
         }
         out
@@ -3406,7 +3485,11 @@ impl State {
                 if !want.contains(path.as_str()) || out.contains_key(&path) {
                     continue;
                 }
-                let by = self.proposals.get(id).map(|p| p.by.clone()).unwrap_or_default();
+                let by = self
+                    .proposals
+                    .get(id)
+                    .map(|p| p.by.clone())
+                    .unwrap_or_default();
                 out.insert(path, (*id, by));
             }
         }
@@ -3624,7 +3707,11 @@ impl State {
     /// actor accumulated while it ran.
     pub(crate) fn cmd_net_wiki_index_ready(&mut self, epoch: u64) -> Result<Reply, MoltError> {
         self.wiki_index_building = None;
-        let built = self.wiki_index_staging.lock().ok().and_then(|mut s| s.take());
+        let built = self
+            .wiki_index_staging
+            .lock()
+            .ok()
+            .and_then(|mut s| s.take());
         let Some(indexes) = built else {
             return Ok(Reply::Ack); // it failed; the next read starts a new one
         };
@@ -3656,7 +3743,9 @@ impl State {
     /// The honest refusal while a build runs: an empty page would read as
     /// "nothing matched", which is a different claim.
     fn index_building(&self) -> MoltError {
-        let total = self.wiki_base().map_or(0, |(t, _)| u64::try_from(t.len()).unwrap_or(u64::MAX));
+        let total = self
+            .wiki_base()
+            .map_or(0, |(t, _)| u64::try_from(t.len()).unwrap_or(u64::MAX));
         MoltError::IndexBuilding { done: 0, total }
     }
 
@@ -3705,13 +3794,17 @@ impl State {
     pub(crate) fn wiki_payload_paths(
         payload: &Value,
     ) -> Option<std::collections::BTreeSet<String>> {
-        Some(molt_core::wiki_fold::touched_paths(&Self::wiki_patch_files(payload)?))
+        Some(molt_core::wiki_fold::touched_paths(
+            &Self::wiki_patch_files(payload)?,
+        ))
     }
 
     /// The parsed files of a `wiki_patch` payload; `None` for any other
     /// payload. THE extraction - the fold, the walk, the paths and the
     /// history below a cut all read the envelope through here.
-    pub(crate) fn wiki_patch_files(payload: &Value) -> Option<Vec<molt_core::wiki_fold::PatchFile>> {
+    pub(crate) fn wiki_patch_files(
+        payload: &Value,
+    ) -> Option<Vec<molt_core::wiki_fold::PatchFile>> {
         if payload.get("op").and_then(Value::as_str) != Some("wiki_patch") {
             return None;
         }
@@ -3723,10 +3816,7 @@ impl State {
     fn memory_lens(&self) -> (usize, usize) {
         (
             self.applied.get(&Surface::Memory).map_or(0, Vec::len),
-            self.chain
-                .applied
-                .get(&Surface::Memory)
-                .map_or(0, Vec::len),
+            self.chain.applied.get(&Surface::Memory).map_or(0, Vec::len),
         )
     }
 
@@ -3885,7 +3975,12 @@ impl State {
         // the revision a patch produced outlives the cut that folds it away:
         // it rides the card, which the store keeps (§4.11). Per holder,
         // like `applied_at`: written when THIS holder folds the patch.
-        stamps.extend(self.wiki_cache.as_ref().map(Self::wiki_stamps_of).unwrap_or_default());
+        stamps.extend(
+            self.wiki_cache
+                .as_ref()
+                .map(Self::wiki_stamps_of)
+                .unwrap_or_default(),
+        );
         for (id, rev) in stamps {
             if let Some(p) = self.proposals.get_mut(&id) {
                 p.wiki_rev = Some(rev);
@@ -3948,7 +4043,11 @@ impl State {
     /// wrong history read complete. The fresh fold re-stamps what it
     /// reaches; below a cut the read is truncated - honestly.
     pub(crate) fn forget_wiki_stamps(&mut self) {
-        for p in self.proposals.values_mut().filter(|p| p.surface == Surface::Memory) {
+        for p in self
+            .proposals
+            .values_mut()
+            .filter(|p| p.surface == Surface::Memory)
+        {
             p.wiki_rev = None;
         }
         if let Some(c) = self.wiki_cache.as_mut() {
@@ -4038,7 +4137,10 @@ impl State {
             if self.wiki_pending.contains_key(id) {
                 continue;
             }
-            let Some(files) = self.proposals.get(id).and_then(|p| Self::wiki_patch_files(&p.payload))
+            let Some(files) = self
+                .proposals
+                .get(id)
+                .and_then(|p| Self::wiki_patch_files(&p.payload))
             else {
                 continue; // unparseable payloads are gated at ingest
             };
@@ -4077,9 +4179,9 @@ impl State {
             if Self::wiki_patch_applies(&tree, pending) {
                 // only a REAL move re-bases: a full re-check (registration,
                 // rebuild) names no moved paths and decides nothing
-                let replayed_move = replay_held_at
-                    .get(id)
-                    .is_some_and(|at| Self::chain_moved_since(&self.chain.blocks, *at, &pending.paths));
+                let replayed_move = replay_held_at.get(id).is_some_and(|at| {
+                    Self::chain_moved_since(&self.chain.blocks, *at, &pending.paths)
+                });
                 if moved.is_some() || replayed_move {
                     rebased.push(*id);
                 }
@@ -4112,17 +4214,20 @@ impl State {
         height: u64,
         paths: &std::collections::BTreeSet<String>,
     ) -> bool {
-        blocks.iter().filter(|b| b.height >= height).any(|b| match &b.change {
-            molt_core::ChainChange::Applied {
-                surface: Surface::Memory,
-                payload,
-                ..
-            } => Self::wiki_payload_paths(payload).is_some_and(|m| !m.is_disjoint(paths)),
-            molt_core::ChainChange::Checkpoint { .. }
-            | molt_core::ChainChange::CheckpointFolded { .. }
-            | molt_core::ChainChange::CheckpointVault { .. } => true,
-            _ => false,
-        })
+        blocks
+            .iter()
+            .filter(|b| b.height >= height)
+            .any(|b| match &b.change {
+                molt_core::ChainChange::Applied {
+                    surface: Surface::Memory,
+                    payload,
+                    ..
+                } => Self::wiki_payload_paths(payload).is_some_and(|m| !m.is_disjoint(paths)),
+                molt_core::ChainChange::Checkpoint { .. }
+                | molt_core::ChainChange::CheckpointFolded { .. }
+                | molt_core::ChainChange::CheckpointVault { .. } => true,
+                _ => false,
+            })
     }
 
     /// A4: a cut moved the base under every open wiki patch. None of them
@@ -4325,11 +4430,9 @@ impl State {
                 Ok((tree, rev)) => (u64::try_from(tree.len()).unwrap_or(u64::MAX), rev, None),
                 // K6: no tree yet, and the surface says so rather than
                 // reporting an empty wiki
-                Err(molt_core::MoltError::WikiBasePending { have, size, .. }) => (
-                    0,
-                    0,
-                    Some(molt_core::WikiBaseProgress { have, size }),
-                ),
+                Err(molt_core::MoltError::WikiBasePending { have, size, .. }) => {
+                    (0, 0, Some(molt_core::WikiBaseProgress { have, size }))
+                }
                 Err(_) => (0, 0, None),
             }
         } else {
@@ -4353,8 +4456,9 @@ impl State {
             wiki_rev,
             wiki_base_pending,
             // E5: a prepared vault is invisible until enabled
-            vault: (surface == Surface::Vault && (self.is_vault_republic() || !self.is_vault_prepared()))
-                .then(|| self.vault_view()),
+            vault: (surface == Surface::Vault
+                && (self.is_vault_republic() || !self.is_vault_prepared()))
+            .then(|| self.vault_view()),
             // the chat is one window now — nothing is filed away, so there
             // is no second view to offer or hide. Kept on the wire (always
             // false) rather than removed, so an older reader that still asks
@@ -4384,7 +4488,8 @@ impl State {
         }
         if self.is_chain_governed() {
             !self
-                .chain.pending_sigs
+                .chain
+                .pending_sigs
                 .get(&id)
                 .is_some_and(|s| s.sigs.iter().any(|a| a.member == member))
         } else if member == self.member() {
@@ -4444,7 +4549,11 @@ impl State {
                 } else if let Some(relay) = bridged {
                     format!("re-join to declare {relay}")
                 } else {
-                    let own = self.member_relays(&member).first().cloned().unwrap_or_default();
+                    let own = self
+                        .member_relays(&member)
+                        .first()
+                        .cloned()
+                        .unwrap_or_default();
                     format!("no shared relay with {} ({own})", others.join(", "))
                 };
                 let profile = profiles.get(member.as_str());
@@ -4502,13 +4611,19 @@ impl State {
             ) else {
                 continue;
             };
-            votes.entry(share.to_string()).or_insert_with(|| molt_core::UploadVote {
-                op: op.to_string(),
-                proposal: ProposalId(*pid),
-                mine_open: self.waits_on(*pid, p, &me),
-            });
+            votes
+                .entry(share.to_string())
+                .or_insert_with(|| molt_core::UploadVote {
+                    op: op.to_string(),
+                    proposal: ProposalId(*pid),
+                    mine_open: self.waits_on(*pid, p, &me),
+                });
         }
-        let row = |id: molt_core::MessageId, ident: ShareIdentity, available: bool, expires_ts: u64, persistent: bool| {
+        let row = |id: molt_core::MessageId,
+                   ident: ShareIdentity,
+                   available: bool,
+                   expires_ts: u64,
+                   persistent: bool| {
             let mine = ident.by == me;
             let pieces = ident.pieces;
             // R21: my own share whose file was replaced on disk is no
@@ -4582,7 +4697,11 @@ impl State {
                         pieces: f.pieces,
                         root: f.root.clone(),
                     };
-                    let expires = if m.ts == 0 { 0 } else { m.ts.saturating_add(retention_secs) };
+                    let expires = if m.ts == 0 {
+                        0
+                    } else {
+                        m.ts.saturating_add(retention_secs)
+                    };
                     row(m.id, ident, f.available, expires, false)
                 })
             })
@@ -4605,7 +4724,9 @@ impl State {
                     st.identity().by != me || self.files.share_paths.contains_key(id)
                 });
             match st {
-                FileState::Persistent(meta) => rows.push(row(*id, meta.clone(), available, 0, true)),
+                FileState::Persistent(meta) => {
+                    rows.push(row(*id, meta.clone(), available, 0, true))
+                }
                 FileState::Unpersisted(meta, at) => {
                     let deadline = at.saturating_add(retention_secs);
                     if deadline >= clock {
@@ -4716,6 +4837,7 @@ impl State {
             image_budget: u64::try_from(member_image_budget(&me, &self.roster())).unwrap_or(0),
             // A5: distance and silence, beside the contradiction detector
             chain_lag: self.chain_lag(),
+            chain_sync: Box::new(self.chain_sync()),
             seats: self.seat_syncs(&persistent),
             persistent_files: u32::try_from(persistent.len()).unwrap_or(u32::MAX),
         }
@@ -4975,21 +5097,40 @@ mod upload_ref_state_tests {
     /// so the `ambiguous` branch is pinned here and nowhere else.
     #[test]
     fn every_resolution_gets_its_word() {
-        assert_eq!(upload_ref_state_word(&res(false, false, false, LocalCopy::None)), "unknown");
-        assert_eq!(upload_ref_state_word(&res(false, true, false, LocalCopy::None)), "ambiguous");
+        assert_eq!(
+            upload_ref_state_word(&res(false, false, false, LocalCopy::None)),
+            "unknown"
+        );
+        assert_eq!(
+            upload_ref_state_word(&res(false, true, false, LocalCopy::None)),
+            "ambiguous"
+        );
         assert_eq!(
             upload_ref_state_word(&res(true, true, false, LocalCopy::None)),
             "ambiguous",
             "an ambiguous prefix names nothing, whatever else is set"
         );
         assert_eq!(
-            upload_ref_state_word(&res(true, false, true, LocalCopy::Own { path: "/x".into() })),
+            upload_ref_state_word(&res(
+                true,
+                false,
+                true,
+                LocalCopy::Own { path: "/x".into() }
+            )),
             "temporary",
             "the bytes being here does not make an expiring share embeddable"
         );
-        assert_eq!(upload_ref_state_word(&res(true, false, false, LocalCopy::None)), "remote");
         assert_eq!(
-            upload_ref_state_word(&res(true, false, false, LocalCopy::Partial { held: 1, of: 4 })),
+            upload_ref_state_word(&res(true, false, false, LocalCopy::None)),
+            "remote"
+        );
+        assert_eq!(
+            upload_ref_state_word(&res(
+                true,
+                false,
+                false,
+                LocalCopy::Partial { held: 1, of: 4 }
+            )),
             "remote",
             "half a mirror is not a local copy"
         );
@@ -4998,7 +5139,10 @@ mod upload_ref_state_tests {
             LocalCopy::Downloaded { path: "/x".into() },
             LocalCopy::Mirrored,
         ] {
-            assert_eq!(upload_ref_state_word(&res(true, false, false, local)), "local");
+            assert_eq!(
+                upload_ref_state_word(&res(true, false, false, local)),
+                "local"
+            );
         }
     }
 }
@@ -5042,7 +5186,11 @@ mod size_gate_tests {
             relays: String::new(),
             features: String::new(),
         };
-        let rec = molt_core::ProposalRecord::new(molt_core::Surface::Organization, json!({ "op": "set_chat_retention", "value": "30" }), String::new());
+        let rec = molt_core::ProposalRecord::new(
+            molt_core::Surface::Organization,
+            json!({ "op": "set_chat_retention", "value": "30" }),
+            String::new(),
+        );
         let (current, proposed) = change_summary(&eff, &rec);
         assert_eq!((current.as_str(), proposed.as_str()), ("7", "30"));
     }
@@ -5235,7 +5383,10 @@ mod size_gate_tests {
         let MoltError::BadPayload(msg) = err else {
             panic!("expected BadPayload");
         };
-        assert!(msg.contains("image"), "the refusal must name the image: {msg}");
+        assert!(
+            msg.contains("image"),
+            "the refusal must name the image: {msg}"
+        );
         assert!(
             msg.contains(&format!("{} KiB", headroom / 1024)),
             "the refusal does not say what fits: {msg}"
@@ -5254,17 +5405,22 @@ mod size_gate_tests {
         let MoltError::BadPayload(msg) = err else {
             panic!("expected BadPayload");
         };
-        assert!(msg.contains("4x2"), "the refusal must name the dimensions: {msg}");
+        assert!(
+            msg.contains("4x2"),
+            "the refusal must name the dimensions: {msg}"
+        );
         // …the square twin passes, and the org logo keeps taking any shape
-        validate_org_payload(Surface::Organization, &member_image_payload(&padded_bmp(64)))
-            .expect("a square avatar is accepted");
+        validate_org_payload(
+            Surface::Organization,
+            &member_image_payload(&padded_bmp(64)),
+        )
+        .expect("a square avatar is accepted");
         let org = json!({
             "op": "set_image",
             "value": "logo.png",
             "bytes_b64": base64::engine::general_purpose::STANDARD.encode(&wide),
         });
-        validate_org_payload(Surface::Organization, &org)
-            .expect("the org logo has no square rule");
+        validate_org_payload(Surface::Organization, &org).expect("the org logo has no square rule");
     }
 
     /// Sign-what-you-see: an avatar proposal without the bytes is refused.
@@ -5306,7 +5462,10 @@ mod size_gate_tests {
         let name = avatar_file_name("../../etc/pas swd", "x.PNG");
         assert!(!name.contains('/'), "{name}");
         assert!(!name.contains(".."), "{name}");
-        assert!(name.starts_with("avatar-") && name.ends_with(".png"), "{name}");
+        assert!(
+            name.starts_with("avatar-") && name.ends_with(".png"),
+            "{name}"
+        );
         assert_ne!(
             avatar_stem("Anna B"),
             avatar_stem("anna-b"),
@@ -5332,7 +5491,10 @@ mod size_gate_tests {
     fn what_the_served_image_budget_promises_is_accepted() {
         let roster = roster();
         let budget = member_image_budget("hannelore-von-und-zu", &roster);
-        assert!(budget >= 32 * 1024, "the served budget is unusably small: {budget} B");
+        assert!(
+            budget >= 32 * 1024,
+            "the served budget is unusably small: {budget} B"
+        );
         let payload = json!({
             "op": "set_member_image",
             "member": "hannelore-von-und-zu",
@@ -5358,14 +5520,18 @@ mod size_gate_tests {
         let line = State::decision_summary(7, &img, None);
         assert!(line.contains("Member picture"), "{line}");
         assert!(line.contains("walter"), "{line}");
-        assert!(!line.contains("QUJD"), "the image bytes leaked into a chat line: {line}");
+        assert!(
+            !line.contains("QUJD"),
+            "the image bytes leaked into a chat line: {line}"
+        );
 
         let removed = json!({ "op": "remove_member_image", "member": "walter" });
         let line = State::decision_summary(8, &removed, None);
         assert!(line.contains("Member picture removed"), "{line}");
         assert!(line.contains("walter"), "{line}");
 
-        let desc = json!({ "op": "set_member_desc", "member": "walter", "value": "keeps the bees" });
+        let desc =
+            json!({ "op": "set_member_desc", "member": "walter", "value": "keeps the bees" });
         let line = State::decision_summary(9, &desc, None);
         assert!(line.contains("Member description"), "{line}");
         assert!(line.contains("walter: keeps the bees"), "{line}");
@@ -5380,7 +5546,10 @@ mod size_gate_tests {
         let err = st
             .cmd_propose(Surface::Organization, op("peer-1"))
             .expect_err("editing another member's profile is refused");
-        assert_eq!(format!("{err}"), "bad payload: only peer-1 can edit this profile");
+        assert_eq!(
+            format!("{err}"),
+            "bad payload: only peer-1 can edit this profile"
+        );
         let err = st
             .cmd_propose(Surface::Organization, op("ghost"))
             .expect_err("a profile op for a non-seat is refused");
@@ -5391,7 +5560,10 @@ mod size_gate_tests {
                 json!({ "op": "set_member_desc", "value": "hi" }),
             )
             .expect_err("a profile op without a member is refused");
-        assert_eq!(format!("{err}"), "bad payload: the profile op needs a member");
+        assert_eq!(
+            format!("{err}"),
+            "bad payload: the profile op needs a member"
+        );
         st.cmd_propose(Surface::Organization, op("me"))
             .expect("a member may edit its own profile");
     }
@@ -5475,14 +5647,10 @@ mod wiki_maintenance_tests {
         assert_eq!(base.len(), 2);
         let (hash, size) = crate::chain::wiki_base_commitment(&base);
         st.chain.wiki_base = Some(base);
-        st.chain
-            .applied
-            .entry(Surface::Memory)
-            .or_default()
-            .push((
-                None,
-                json!({ "op": "wiki_base", "hash": hash.clone(), "size": size }),
-            ));
+        st.chain.applied.entry(Surface::Memory).or_default().push((
+            None,
+            json!({ "op": "wiki_base", "hash": hash.clone(), "size": size }),
+        ));
         apply(&mut st, &[ADD_C]);
 
         let (list, wiki_rev, base_hash, truncated) = changes(&mut st, 0);
@@ -5504,7 +5672,10 @@ mod wiki_maintenance_tests {
             Some(hash.as_str()),
             "…and the answer names the base its revisions count from"
         );
-        assert!(truncated, "below the cut there is a tree, not a change list");
+        assert!(
+            truncated,
+            "below the cut there is a tree, not a change list"
+        );
 
         // the cached history and a fresh fold cannot disagree about what a
         // revision touched - not even across a cut
@@ -5524,7 +5695,8 @@ mod wiki_maintenance_tests {
         st.chain.wiki_base = None;
         st.bump_applied_epoch();
         assert!(matches!(
-            st.cmd_wiki_changes(0, 0, 0).expect_err("no base, no answer"),
+            st.cmd_wiki_changes(0, 0, 0)
+                .expect_err("no base, no answer"),
             MoltError::WikiBasePending { .. }
         ));
     }
@@ -5535,7 +5707,14 @@ mod wiki_maintenance_tests {
     #[test]
     fn a_full_holder_answers_below_its_cut_from_the_stamped_cards() {
         let mut st = crate::tests::plain_state();
-        let card = |patch: &str| ProposalRecord { state: ProposalState::Applied, ..ProposalRecord::new(Surface::Memory, json!({ "op": "wiki_patch", "value": patch }), String::new()) };
+        let card = |patch: &str| ProposalRecord {
+            state: ProposalState::Applied,
+            ..ProposalRecord::new(
+                Surface::Memory,
+                json!({ "op": "wiki_patch", "value": patch }),
+                String::new(),
+            )
+        };
         for (id, patch) in [(1, ADD_A), (2, MOVE_A_B), (3, ADD_C)] {
             st.proposals.insert(id, card(patch));
             st.chain
@@ -5555,7 +5734,11 @@ mod wiki_maintenance_tests {
         assert!(!truncated);
         assert_eq!(list.len(), 2);
         for (id, rev) in [(1, 1), (2, 2), (3, 3)] {
-            assert_eq!(st.proposals.get(&id).and_then(|p| p.wiki_rev), Some(rev), "card {id}");
+            assert_eq!(
+                st.proposals.get(&id).and_then(|p| p.wiki_rev),
+                Some(rev),
+                "card {id}"
+            );
         }
 
         // the cut folds 1 and 2 away at revision 2; 3 stays above it
@@ -5568,7 +5751,10 @@ mod wiki_maintenance_tests {
         st.chain.applied.insert(
             Surface::Memory,
             vec![
-                (None, json!({ "op": "wiki_base", "hash": hash, "size": size, "rev_at_cut": 2 })),
+                (
+                    None,
+                    json!({ "op": "wiki_base", "hash": hash, "size": size, "rev_at_cut": 2 }),
+                ),
                 (Some(3), json!({ "op": "wiki_patch", "value": ADD_C })),
             ],
         );
@@ -5576,11 +5762,19 @@ mod wiki_maintenance_tests {
 
         let (list, wiki_rev, _, truncated) = changes(&mut st, 1);
         assert_eq!(wiki_rev, 3);
-        assert!(!truncated, "the card answers for the revision the cut folded away");
+        assert!(
+            !truncated,
+            "the card answers for the revision the cut folded away"
+        );
         assert_eq!(
             kinds(&list),
             vec![
-                ("notes/b.md".to_string(), "renamed".to_string(), 2, Some("notes/a.md".to_string())),
+                (
+                    "notes/b.md".to_string(),
+                    "renamed".to_string(),
+                    2,
+                    Some("notes/a.md".to_string())
+                ),
                 ("notes/c.md".to_string(), "added".to_string(), 3, None),
             ]
         );
@@ -5614,7 +5808,12 @@ mod wiki_maintenance_tests {
         assert_eq!(
             kinds(&list),
             vec![
-                ("notes/b.md".to_string(), "renamed".to_string(), 2, Some("notes/a.md".to_string())),
+                (
+                    "notes/b.md".to_string(),
+                    "renamed".to_string(),
+                    2,
+                    Some("notes/a.md".to_string())
+                ),
                 ("notes/c.md".to_string(), "added".to_string(), 3, None),
             ],
             "…and lists only what the run of stamps reaches"
@@ -5670,7 +5869,10 @@ mod wiki_maintenance_tests {
         st.chain.wiki_base = Some(base);
         st.chain.applied.insert(
             Surface::Memory,
-            vec![(None, json!({ "op": "wiki_base", "hash": hash, "size": size, "rev_at_cut": 0 }))],
+            vec![(
+                None,
+                json!({ "op": "wiki_base", "hash": hash, "size": size, "rev_at_cut": 0 }),
+            )],
         );
         apply(&mut st, &[ADD_C]);
         let (list, wiki_rev, _, truncated) = changes(&mut st, 0);
@@ -5678,14 +5880,20 @@ mod wiki_maintenance_tests {
         assert!(!truncated, "an explicit 0 is not a pre-A3 cut");
     }
 
-
     /// A cut that arrives in the SAME tail as the patches it folds away:
     /// the extension folds them before it meets the base entry, and their
     /// stamps must survive the refold the cut then forces.
     #[test]
     fn a_cut_in_the_same_tail_still_stamps_the_patches_before_it() {
         let mut st = crate::tests::plain_state();
-        let card = |patch: &str| ProposalRecord { state: ProposalState::Applied, ..ProposalRecord::new(Surface::Memory, json!({ "op": "wiki_patch", "value": patch }), String::new()) };
+        let card = |patch: &str| ProposalRecord {
+            state: ProposalState::Applied,
+            ..ProposalRecord::new(
+                Surface::Memory,
+                json!({ "op": "wiki_patch", "value": patch }),
+                String::new(),
+            )
+        };
         for (id, patch) in [(1, ADD_A), (2, ADD_B), (3, ADD_C)] {
             st.proposals.insert(id, card(patch));
         }
@@ -5710,14 +5918,24 @@ mod wiki_maintenance_tests {
         st.chain.wiki_base = Some(base);
         let entries = st.chain.applied.entry(Surface::Memory).or_default();
         entries.push((Some(3), json!({ "op": "wiki_patch", "value": ADD_C })));
-        entries.push((None, json!({ "op": "wiki_base", "hash": hash, "size": size, "rev_at_cut": 3 })));
+        entries.push((
+            None,
+            json!({ "op": "wiki_base", "hash": hash, "size": size, "rev_at_cut": 3 }),
+        ));
 
         let (list, wiki_rev, _, truncated) = changes(&mut st, 2);
         assert_eq!(wiki_rev, 3);
-        assert_eq!(st.proposals.get(&3).and_then(|p| p.wiki_rev), Some(3), "stamped before the refold");
+        assert_eq!(
+            st.proposals.get(&3).and_then(|p| p.wiki_rev),
+            Some(3),
+            "stamped before the refold"
+        );
         assert!(!truncated, "the third patch answers from its card");
         assert_eq!(list.len(), 1);
-        assert!(!changes(&mut st, 0).3, "and the run of stamps reaches the founding");
+        assert!(
+            !changes(&mut st, 0).3,
+            "and the run of stamps reaches the founding"
+        );
     }
 
     /// A rename CHAIN keeps its origin: an agent holding `notes/a.md`
@@ -5733,7 +5951,11 @@ mod wiki_maintenance_tests {
         assert_eq!(wiki_rev, 3);
         assert_eq!(list.len(), 1, "one entry per path, not one per hop");
         assert_eq!(
-            (list[0].path.as_str(), list[0].kind.as_str(), list[0].from.as_deref()),
+            (
+                list[0].path.as_str(),
+                list[0].kind.as_str(),
+                list[0].from.as_deref()
+            ),
             ("notes/c.md", "renamed", Some("notes/a.md"))
         );
 
@@ -5741,7 +5963,11 @@ mod wiki_maintenance_tests {
         // the path it ended up on: there is no old path to forget
         let (list, _, _, _) = changes(&mut st, 0);
         assert_eq!(
-            (list[0].path.as_str(), list[0].kind.as_str(), list[0].from.as_deref()),
+            (
+                list[0].path.as_str(),
+                list[0].kind.as_str(),
+                list[0].from.as_deref()
+            ),
             ("notes/c.md", "added", None)
         );
     }
@@ -5857,14 +6083,22 @@ mod wiki_maintenance_tests {
         // the guard a running build holds: nothing is built inline here
         st.wiki_index_building = Some(st.applied_epoch);
 
-        let Reply::WikiHealth { index_building, dangling_total, wiki_rev, .. } =
-            st.cmd_wiki_health(0).expect("health answers")
+        let Reply::WikiHealth {
+            index_building,
+            dangling_total,
+            wiki_rev,
+            ..
+        } = st.cmd_wiki_health(0).expect("health answers")
         else {
             panic!("not a health reply");
         };
         assert!(index_building && dangling_total == 0 && wiki_rev == 1);
 
-        let Reply::WikiSearch { index_building, hits, .. } = st
+        let Reply::WikiSearch {
+            index_building,
+            hits,
+            ..
+        } = st
             .cmd_wiki_search("A".to_string(), vec![], None, None, vec![], 0, 0)
             .expect("search answers")
         else {
@@ -5872,7 +6106,11 @@ mod wiki_maintenance_tests {
         };
         assert!(index_building && hits.is_empty());
 
-        let Reply::WikiNeighbors { index_building, docs, .. } = st
+        let Reply::WikiNeighbors {
+            index_building,
+            docs,
+            ..
+        } = st
             .cmd_wiki_neighbors("notes/a.md".to_string(), 1, 0, None, None, false)
             .expect("neighbors answers")
         else {
@@ -5891,7 +6129,11 @@ mod wiki_maintenance_tests {
         let mut st = crate::tests::plain_state();
         apply(&mut st, &[ADD_A]);
         let me = st.member();
-        let mut dead = molt_core::ProposalRecord::new(Surface::Memory, json!({ "op": "wiki_patch", "value": ADD_B }), me.clone());
+        let mut dead = molt_core::ProposalRecord::new(
+            Surface::Memory,
+            json!({ "op": "wiki_patch", "value": ADD_B }),
+            me.clone(),
+        );
         st.proposals.insert(9, dead.clone());
         assert_eq!(
             st.open_wiki_proposals(None).len(),

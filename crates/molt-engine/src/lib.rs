@@ -35,8 +35,8 @@
 
 mod backup;
 mod chain;
-mod compaction;
 mod chat;
+mod compaction;
 mod configstore;
 mod events;
 mod files_state;
@@ -51,8 +51,8 @@ mod net;
 mod nostr_ritual;
 mod proposals;
 mod recovery;
-mod ritual_member;
 mod relay_msg;
+mod ritual_member;
 pub use founding::HANDLE_CHARSET_REFUSAL;
 pub use relay_msg::known_headlines;
 pub use relay_msg::{known_log_shapes, LogShape};
@@ -96,24 +96,24 @@ pub use wiki_index::front_matter::{
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-pub use configstore::ConfigStoreHandle;
 #[doc(hidden)]
 pub use chain::{verify_chain, ChainHead};
 /// The public wiki-export verifier — the reference implementation an external
 /// reviewer runs (`cargo run -p molt-engine --example verify_wiki_export`).
 pub use chain::{verify_wiki_export, WikiExportReport};
-/// Reading an export directory back: the I/O half of [`verify_wiki_export`].
-pub use wiki_export::read_wiki_export;
-#[doc(hidden)]
-pub use recovery::RecoveryInvite;
-#[doc(hidden)]
-pub use recovery::{run_rejoin, RejoinOutcome};
+pub use configstore::ConfigStoreHandle;
 #[doc(hidden)]
 pub use founding::{
     make_seat_proof, member_identity, run_ritual_member, verify_seat_proof, FoundingInvite,
     InviteMaterial, Ratifier,
 };
 pub use net::{CmdSink, FileStateStore, StorageLog};
+#[doc(hidden)]
+pub use recovery::RecoveryInvite;
+#[doc(hidden)]
+pub use recovery::{run_rejoin, RejoinOutcome};
+/// Reading an export directory back: the I/O half of [`verify_wiki_export`].
+pub use wiki_export::read_wiki_export;
 
 use molt_core::{
     ChatMessage, Command, Event, GroupConfig, MemberId, MessageId, MoltError, ProposalRecord,
@@ -232,14 +232,22 @@ impl WalletHandle {
     /// fetches nothing - an approver that does not hold the payload yet.
     #[doc(hidden)]
     pub fn __vault_hold_payload_fetch(&self, hold: bool) {
-        self.vault_seams.hold_fetch.store(hold, std::sync::atomic::Ordering::SeqCst);
+        self.vault_seams
+            .hold_fetch
+            .store(hold, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (vault plan S3a): name a payload this node must hold, as a
     /// deposit would - with `bytes`, this node holds and publishes it (the
     /// depositor). Applied on the next payload tick.
     #[doc(hidden)]
-    pub fn __vault_name_payload(&self, secret_id: &str, hash: &str, size: u64, bytes: Option<Vec<u8>>) {
+    pub fn __vault_name_payload(
+        &self,
+        secret_id: &str,
+        hash: &str,
+        size: u64,
+        bytes: Option<Vec<u8>>,
+    ) {
         self.vault_seams.name(secret_id, hash, size, bytes);
     }
 
@@ -247,7 +255,9 @@ impl WalletHandle {
     /// ingest and approve checks - a seat running modified code.
     #[doc(hidden)]
     pub fn __vault_skip_checks(&self, skip: bool) {
-        self.vault_seams.skip_checks.store(skip, std::sync::atomic::Ordering::SeqCst);
+        self.vault_seams
+            .skip_checks
+            .store(skip, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (vault plan S3b): seal `text` as a deposit of `depositor`,
@@ -263,20 +273,27 @@ impl WalletHandle {
     /// dishonest dealer. Runs on the next payload tick.
     #[doc(hidden)]
     pub fn __vault_seal_with_bad_share(&self, name: &str, kind: &str, text: &str, holder: &str) {
-        self.vault_seams.lab.stage_bad_share(name, kind, text, holder);
+        self.vault_seams
+            .lab
+            .stage_bad_share(name, kind, text, holder);
     }
 
     /// Test seam (vault plan S3c): this depositor's reveals carry a wrong share.
     #[doc(hidden)]
     pub fn __vault_lie_on_reveal(&self, lie: bool) {
-        self.vault_seams.lab.lie_on_reveal.store(lie, std::sync::atomic::Ordering::SeqCst);
+        self.vault_seams
+            .lab
+            .lie_on_reveal
+            .store(lie, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (wallet plan §10): purse run deadlines of `secs` (the
     /// fallback step is a quarter of it); 0 restores the defaults.
     #[doc(hidden)]
     pub fn __wallet_deadline(&self, secs: u64) {
-        self.wallet_seams.deadline.store(secs, std::sync::atomic::Ordering::SeqCst);
+        self.wallet_seams
+            .deadline
+            .store(secs, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (wallet plan §7.9): the scanner polls (and retries) every
@@ -284,14 +301,18 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __wallet_scan_poll(&self, every: std::time::Duration) {
         let ms = u64::try_from(every.as_millis()).unwrap_or(u64::MAX);
-        self.wallet_seams.scan_poll_ms.store(ms, std::sync::atomic::Ordering::SeqCst);
+        self.wallet_seams
+            .scan_poll_ms
+            .store(ms, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (wallet plan §10.38): while set, this seat persists its
     /// keys record but sends no attestation.
     #[doc(hidden)]
     pub fn __wallet_withhold_attestation(&self, withhold: bool) {
-        self.wallet_seams.withhold.store(withhold, std::sync::atomic::Ordering::SeqCst);
+        self.wallet_seams
+            .withhold
+            .store(withhold, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (wallet plan §10.38a): start a run with `nonce` on the
@@ -313,7 +334,10 @@ impl WalletHandle {
     /// complaint whatever its check says (the `vault-lab` switch).
     #[doc(hidden)]
     pub fn __vault_complain(&self, complain: bool) {
-        self.vault_seams.lab.complain.store(complain, std::sync::atomic::Ordering::SeqCst);
+        self.vault_seams
+            .lab
+            .complain
+            .store(complain, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -349,10 +373,17 @@ pub fn spawn_with_storage(config: GroupConfig, session: SessionView) -> WalletHa
 pub fn __spawn_manual_founding(
     config: GroupConfig,
     session: SessionView,
-) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
+) -> (
+    WalletHandle,
+    std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>,
+) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let seams = SpawnSeams { persist: true, ritual_material_sink: Some(tx), ..SpawnSeams::default() };
+    let seams = SpawnSeams {
+        persist: true,
+        ritual_material_sink: Some(tx),
+        ..SpawnSeams::default()
+    };
     let handle = spawn_actor(config, session, cmd_tx, cmd_rx, seams);
     (handle, rx)
 }
@@ -366,7 +397,10 @@ pub fn __spawn_manual_founding(
 pub fn __spawn_manual_founding_bootstrap(
     config: GroupConfig,
     session: SessionView,
-) -> (WalletHandle, std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>) {
+) -> (
+    WalletHandle,
+    std::sync::mpsc::Receiver<Vec<founding::InviteMaterial>>,
+) {
     let (tx, rx) = std::sync::mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
     let seams = SpawnSeams {
@@ -417,7 +451,10 @@ pub fn __spawn_manual_founding_bootstrap_recoverable(
 #[doc(hidden)]
 pub fn __spawn_demo_mesh(config: GroupConfig, session: SessionView) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let seams = SpawnSeams { demo_mesh: true, ..SpawnSeams::default() };
+    let seams = SpawnSeams {
+        demo_mesh: true,
+        ..SpawnSeams::default()
+    };
     spawn_actor(config, session, cmd_tx, cmd_rx, seams)
 }
 
@@ -433,7 +470,11 @@ pub fn __spawn_with_reopen_transport(
     transport: molt_net::LoopbackTransport,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let seams = SpawnSeams { persist: true, reopen_seam: Some(transport), ..SpawnSeams::default() };
+    let seams = SpawnSeams {
+        persist: true,
+        reopen_seam: Some(transport),
+        ..SpawnSeams::default()
+    };
     spawn_actor(config, session, cmd_tx, cmd_rx, seams)
 }
 
@@ -443,9 +484,17 @@ pub fn __spawn_with_reopen_transport(
 /// product never uses this: a production founding fails honestly until N4's
 /// Nostr transport lands.
 #[doc(hidden)]
-pub fn __spawn_sim_founding(config: GroupConfig, session: SessionView, persist: bool) -> WalletHandle {
+pub fn __spawn_sim_founding(
+    config: GroupConfig,
+    session: SessionView,
+    persist: bool,
+) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let seams = SpawnSeams { persist, ritual_sim: true, ..SpawnSeams::default() };
+    let seams = SpawnSeams {
+        persist,
+        ritual_sim: true,
+        ..SpawnSeams::default()
+    };
     spawn_actor(config, session, cmd_tx, cmd_rx, seams)
 }
 
@@ -491,7 +540,11 @@ fn spawn_inner(
     persist: bool,
 ) -> WalletHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel::<Envelope>(CMD_QUEUE);
-    let seams = SpawnSeams { store, persist, ..SpawnSeams::default() };
+    let seams = SpawnSeams {
+        store,
+        persist,
+        ..SpawnSeams::default()
+    };
     spawn_actor(config, session, cmd_tx, cmd_rx, seams)
 }
 
@@ -543,7 +596,10 @@ fn spawn_actor(
     let wallet_seams = state.wallet_seams.clone();
     if vault::receipts::lab_complain_at_spawn() {
         tracing::warn!("vault_lab=complain");
-        vault_seams.lab.complain.store(true, std::sync::atomic::Ordering::SeqCst);
+        vault_seams
+            .lab
+            .complain
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     // the presence ticker lives as long as the actor: it re-ages the member
     // pills from their real last-seen stamps (net/presence.rs::cmd_net_presence_tick)
@@ -569,7 +625,13 @@ fn spawn_actor(
         tracing::debug!("engine actor stopped");
     });
 
-    WalletHandle { cmd_tx, ev_tx, vault_seams, wallet_seams, farewells }
+    WalletHandle {
+        cmd_tx,
+        ev_tx,
+        vault_seams,
+        wallet_seams,
+        farewells,
+    }
 }
 
 // The one shared clock (event timestamps must not drift from the storage
@@ -606,7 +668,11 @@ pub(crate) struct ReplicaState {
 /// An in-flight founder mesh bootstrap: its ritual generation, the founded
 /// workspace id the assembled mesh persists into, and the channel carrying
 /// members' announcement ciphertext into the off-actor bootstrap task.
-type FounderMeshIn = (u64, molt_core::WorkspaceId, mpsc::UnboundedSender<(u32, String)>);
+type FounderMeshIn = (
+    u64,
+    molt_core::WorkspaceId,
+    mpsc::UnboundedSender<(u32, String)>,
+);
 
 /// The storage side of the open workspace: its id, directory, the engine's
 /// authoritative copy of the local prefs (the writer applies updates in
@@ -705,8 +771,10 @@ pub(crate) struct DeliveryState {
     /// `ORDERED_PARK_GIVEUP_SECS` (net/delivery.rs). Runtime-only, workspace
     /// scope.
     #[allow(clippy::type_complexity)]
-    pub(crate) ordered_park:
-        std::collections::HashMap<MemberId, std::collections::BTreeMap<u64, (molt_core::EventEnvelope, u64)>>,
+    pub(crate) ordered_park: std::collections::HashMap<
+        MemberId,
+        std::collections::BTreeMap<u64, (molt_core::EventEnvelope, u64)>,
+    >,
     /// `presence_now` of the last persisted accept-window save (debounce).
     pub(crate) accepted_saved_at: u64,
     /// `presence_now` of the last debounced live MLS-ratchet merge into
@@ -849,7 +917,12 @@ pub(crate) struct FilePlane {
 
 /// A status generation being collected: `(generation, page count, when
 /// its first page arrived, the pages so far)`.
-pub(crate) type MirrorPages = (u64, u16, u64, std::collections::BTreeMap<u16, Vec<molt_core::MirrorHold>>);
+pub(crate) type MirrorPages = (
+    u64,
+    u16,
+    u64,
+    std::collections::BTreeMap<u16, Vec<molt_core::MirrorHold>>,
+);
 
 /// The republic's persistent commit-block chain on this holder
 /// (`docs_archive/chain/persistent_chain.md`) and everything derived from
@@ -1018,6 +1091,11 @@ pub(crate) struct ChainProjection {
     /// The height a catch-up request is currently outstanding for (dedups the
     /// request while a gap persists; cleared when the head reaches it).
     pub(crate) catchup_from: Option<u64>,
+    /// When the open catch-up request was last sent (presence clock).
+    pub(crate) catchup_since: u64,
+    /// Fork decisions since open, and the latest (S1 diagnostics).
+    pub(crate) fork_decisions: u64,
+    pub(crate) last_fork: Option<molt_core::ForkDecision>,
 }
 
 /// Recovery on both sides of the open workspace: what this seat coordinates
@@ -1080,8 +1158,7 @@ pub(crate) struct RecoveryState {
     /// this channel so a *second* engine can run the returning-member side.
     /// Only the two-instance recovery dev test installs it; a real mint reports
     /// the link to the operator instead.
-    pub(crate) material_sink:
-        Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
+    pub(crate) material_sink: Option<std::sync::mpsc::Sender<recovery::RecoveryMaterial>>,
     /// The running Nostr rejoiner task (N4b step 6e), the [`State::join_task`]
     /// twin — aborted on a restarted recovery, for the same two reasons.
     pub(crate) task: Option<tokio::task::JoinHandle<()>>,
@@ -1099,8 +1176,7 @@ pub(crate) struct RecoveryState {
     /// its transport here (its `Arc` owns the re-established mesh queues'
     /// receive credentials), so `cmd_net_recover_sealed` can stand the runtime
     /// supervisor up over the recovered mesh. Replaced per `RecoverStart`.
-    pub(crate) transport:
-        std::sync::Arc<std::sync::Mutex<Option<molt_net::LoopbackTransport>>>,
+    pub(crate) transport: std::sync::Arc<std::sync::Mutex<Option<molt_net::LoopbackTransport>>>,
 }
 
 /// The folded Memory base, kept across reads
@@ -1427,8 +1503,7 @@ pub(crate) struct State {
     /// instead it hands the per-seat [`founding::InviteMaterial`] out on
     /// this channel so a *second* engine instance runs the member side.
     /// Only the two-instance dev test installs this.
-    pub(crate) ritual_material_sink:
-        Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
+    pub(crate) ritual_material_sink: Option<std::sync::mpsc::Sender<Vec<founding::InviteMaterial>>>,
     /// Offline **test seam only** ([`__spawn_sim_founding`]): found over the
     /// loopback hub with simulated members. The product never sets it — a
     /// production founding fails honestly until N4's Nostr transport lands;
@@ -1472,7 +1547,8 @@ pub(crate) struct State {
     /// through this slot just before it reports `NetJoinSealed`, so the runtime
     /// supervisor reuses the same instance. A fresh per-join `Arc` (replaced in
     /// `cmd_join_start`) isolates a stale task's late fill from a new join.
-    pub(crate) join_transport: std::sync::Arc<std::sync::Mutex<Option<molt_net::LoopbackTransport>>>,
+    pub(crate) join_transport:
+        std::sync::Arc<std::sync::Mutex<Option<molt_net::LoopbackTransport>>>,
     /// The running Nostr member-join task (N4a) — aborted on cancel or on a
     /// restarted join (its generation-guarded commands would be dropped
     /// anyway; aborting also releases its relay sockets).
@@ -1841,13 +1917,22 @@ impl State {
                 }
                 self.cmd_net_wiki_base_failed(&reason)
             }
-            Command::NetPieceWanted { from, id, ranges, generation } => {
+            Command::NetPieceWanted {
+                from,
+                id,
+                ranges,
+                generation,
+            } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
                 self.cmd_net_piece_wanted(&from, id, ranges)
             }
-            Command::NetPieceWantSend { id, ranges, generation } => {
+            Command::NetPieceWantSend {
+                id,
+                ranges,
+                generation,
+            } => {
                 if !self.net_scope_current(generation) {
                     return Ok(Reply::Ack);
                 }
@@ -1856,13 +1941,28 @@ impl State {
             Command::ReadMirror => Ok(Reply::Mirror(Box::new(self.mirror_view()))),
             Command::SetMirror { on, quota_bytes } => self.cmd_set_mirror(on, quota_bytes),
             Command::SetMirrorDir { path } => self.cmd_set_mirror_dir(path),
-            Command::NetMirrorDecl { from, on, quota, rev, caps, generation } => {
+            Command::NetMirrorDecl {
+                from,
+                on,
+                quota,
+                rev,
+                caps,
+                generation,
+            } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
                 self.cmd_net_mirror_decl(&from, on, quota, rev, caps)
             }
-            Command::NetMirrorStatus { from, holds, serving, gen, page, pages, generation } => {
+            Command::NetMirrorStatus {
+                from,
+                holds,
+                serving,
+                gen,
+                page,
+                pages,
+                generation,
+            } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
@@ -1877,13 +1977,24 @@ impl State {
                 }
                 self.cmd_net_mirror_who(&from)
             }
-            Command::NetMirrorProgress { id, held, bytes, generation } => {
+            Command::NetMirrorProgress {
+                id,
+                held,
+                bytes,
+                generation,
+            } => {
                 if !self.net_scope_current(generation) {
                     return Ok(Reply::Ack);
                 }
                 self.cmd_net_mirror_progress(id, held, bytes)
             }
-            Command::NetMirrorDone { id, ok, reason, bytes, generation } => {
+            Command::NetMirrorDone {
+                id,
+                ok,
+                reason,
+                bytes,
+                generation,
+            } => {
                 if !self.net_scope_current(generation) {
                     return Ok(Reply::Ack);
                 }
@@ -1891,7 +2002,9 @@ impl State {
             }
             Command::SetWakeCommand { command } => self.cmd_set_wake_command(command),
             Command::TestWake { command } => self.cmd_test_wake(command),
-            Command::ReadActions => Ok(Reply::Actions { actions: self.read_actions() }),
+            Command::ReadActions => Ok(Reply::Actions {
+                actions: self.read_actions(),
+            }),
             Command::SetNodePosture { posture } => self.cmd_set_node_posture(posture),
             // file-transfer task feedback (engine-internal, scope-guarded)
             Command::NetFileShared {
@@ -1960,11 +2073,19 @@ impl State {
                 self.set_download_phase(id, molt_core::TransferPhase::Verifying);
                 Ok(Reply::Ack)
             }
-            Command::NetFileDone { id, path, generation } => {
+            Command::NetFileDone {
+                id,
+                path,
+                generation,
+            } => {
                 if !self.net_scope_current(generation) || !self.download_running(&id) {
                     return Ok(Reply::Ack);
                 }
-                let secs = self.files.downloads.get(&id).map_or(0, |d| crate::now_secs().saturating_sub(d.since));
+                let secs = self
+                    .files
+                    .downloads
+                    .get(&id)
+                    .map_or(0, |d| crate::now_secs().saturating_sub(d.since));
                 tracing::info!(%id, secs, "download done");
                 self.files.dl_cancel.remove(&id);
                 // the landed bytes hashed to the share: remember the copy
@@ -1973,7 +2094,11 @@ impl State {
                 self.set_download_phase(id, molt_core::TransferPhase::Done { path });
                 Ok(Reply::Ack)
             }
-            Command::NetFileFailed { id, reason, generation } => {
+            Command::NetFileFailed {
+                id,
+                reason,
+                generation,
+            } => {
                 if !self.net_scope_current(generation) || !self.download_running(&id) {
                     return Ok(Reply::Ack);
                 }
@@ -1996,13 +2121,19 @@ impl State {
 
             // proposals.rs
             Command::Propose { surface, payload } => {
-                let op = payload.get("op").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
+                let op = payload
+                    .get("op")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
                 let out = self.cmd_propose(surface, payload);
                 match &out {
                     Ok(Reply::Proposed { id, .. }) => {
                         tracing::info!(id = id.0, surface = ?surface, op = %op, "proposal sent");
                     }
-                    Err(e) => tracing::warn!(surface = ?surface, op = %op, error = %e, "proposal refused"),
+                    Err(e) => {
+                        tracing::warn!(surface = ?surface, op = %op, error = %e, "proposal refused")
+                    }
                     Ok(_) => {}
                 }
                 out
@@ -2010,7 +2141,11 @@ impl State {
             Command::Approve { proposal, note } => self.cmd_approve(proposal, note),
             Command::Decline { proposal, note } => self.cmd_decline(proposal, note),
             Command::Withdraw { proposal, note } => self.cmd_withdraw(proposal, note),
-            Command::ReadState { surface, channel, view } => {
+            Command::ReadState {
+                surface,
+                channel,
+                view,
+            } => {
                 // the view key is shared vocabulary (`Surface::views`, the
                 // same list `select_view` validates against) PLUS chat's
                 // read-only slices (`CHAT_READ_SLICES` — a read axis, not a
@@ -2060,15 +2195,21 @@ impl State {
                 self.cmd_read_proposal(id)
             }
             Command::Status => Ok(Reply::Status(self.status())),
-            Command::ReadMembers => Ok(Reply::Members { members: self.members_view() }),
-            Command::ReadUploads => Ok(Reply::Uploads { uploads: self.uploads_view() }),
+            Command::ReadMembers => Ok(Reply::Members {
+                members: self.members_view(),
+            }),
+            Command::ReadUploads => Ok(Reply::Uploads {
+                uploads: self.uploads_view(),
+            }),
             Command::ResolveUpload { checksum } => self.cmd_resolve_upload(&checksum),
             Command::ReadUploadBytes { checksum, cap } => self.cmd_read_upload_bytes(checksum, cap),
             Command::UiPublish { snapshot } => {
                 self.ui_state = Some(snapshot);
                 Ok(Reply::Ack)
             }
-            Command::ReadUiState => Ok(Reply::UiState { snapshot: self.ui_state.clone() }),
+            Command::ReadUiState => Ok(Reply::UiState {
+                snapshot: self.ui_state.clone(),
+            }),
             Command::UiAction { action } => self.cmd_ui_action(action),
             Command::ReadChain => self.cmd_read_chain(),
             Command::WikiList {
@@ -2135,17 +2276,13 @@ impl State {
                 reason,
                 generation,
             } => self.cmd_net_send_failed(member, reason, generation),
-            Command::NetLinkUp { member, generation } => {
-                self.cmd_net_link_up(member, generation)
-            }
+            Command::NetLinkUp { member, generation } => self.cmd_net_link_up(member, generation),
             Command::NetLinkDown {
                 member,
                 reason,
                 generation,
             } => self.cmd_net_link_down(member, reason, generation),
-            Command::NetSendOk { member, generation } => {
-                self.cmd_net_send_ok(member, generation)
-            }
+            Command::NetSendOk { member, generation } => self.cmd_net_send_ok(member, generation),
             Command::NetPresenceTick => self.cmd_net_presence_tick(),
             Command::NetDeliveryTick => self.cmd_net_delivery_tick(),
 
@@ -2165,14 +2302,18 @@ impl State {
             Command::RelayAdd { url } => self.cmd_relay_add(url),
             Command::RelayRemove { url } => self.cmd_relay_remove(url),
             Command::RelayMove { url, up } => self.cmd_relay_move(url, up),
-            Command::RelayConfirm { url, accept_clearnet } => {
-                self.cmd_relay_confirm(url, accept_clearnet)
-            }
+            Command::RelayConfirm {
+                url,
+                accept_clearnet,
+            } => self.cmd_relay_confirm(url, accept_clearnet),
             Command::RelayRevoke { url } => self.cmd_relay_revoke(url),
             Command::RelayProbe { url } => self.cmd_relay_probe(url),
-            Command::NetRelayProbed { url, error, unreachable, confirm } => {
-                self.cmd_net_relay_probed(url, error, unreachable, confirm)
-            }
+            Command::NetRelayProbed {
+                url,
+                error,
+                unreachable,
+                confirm,
+            } => self.cmd_net_relay_probed(url, error, unreachable, confirm),
             Command::RelayClearnetSession { unlock } => self.cmd_relay_clearnet_session(unlock),
             Command::Navigate { screen } => self.cmd_navigate(screen),
             Command::SelectSurface { surface } => self.cmd_select_surface(surface),
@@ -2198,12 +2339,17 @@ impl State {
             Command::SetWorkspaceBackup { id, enabled } => {
                 self.cmd_set_workspace_backup(id, enabled)
             }
-            Command::ExportWorkspace { id, dest, passphrase } => {
-                self.cmd_export_workspace(id, dest, passphrase)
-            }
-            Command::NetExportDone { id, dest, bytes, skipped } => {
-                self.cmd_net_export_done(id, dest, bytes, skipped)
-            }
+            Command::ExportWorkspace {
+                id,
+                dest,
+                passphrase,
+            } => self.cmd_export_workspace(id, dest, passphrase),
+            Command::NetExportDone {
+                id,
+                dest,
+                bytes,
+                skipped,
+            } => self.cmd_net_export_done(id, dest, bytes, skipped),
             Command::NetExportFailed { id, error } => self.cmd_net_export_failed(id, error),
             Command::WikiExport { dest, proof } => self.cmd_wiki_export(dest, proof),
             Command::NetWikiExportDone { dest, files, bytes } => {
@@ -2224,7 +2370,9 @@ impl State {
                 prune_error,
                 quota_error,
             } => self.cmd_net_backup_done(id, ts, object, bytes, prune_error, quota_error),
-            Command::NetBackupFailed { id, error, hold } => self.cmd_net_backup_failed(id, error, hold),
+            Command::NetBackupFailed { id, error, hold } => {
+                self.cmd_net_backup_failed(id, error, hold)
+            }
 
             // lifecycles.rs
             Command::RestoreStart {
@@ -2299,7 +2447,11 @@ impl State {
             Command::VaultReseal { secret_id } => self.cmd_vault_reseal(secret_id),
             Command::VaultGrant { secret_id, reader } => self.cmd_vault_grant(secret_id, reader),
             Command::VaultRead { secret_id } => self.cmd_vault_read(secret_id),
-            Command::NetVaultPayloadFetched { hash, bytes, generation } => {
+            Command::NetVaultPayloadFetched {
+                hash,
+                bytes,
+                generation,
+            } => {
                 if !self.net_scope_current(generation) {
                     return Ok(Reply::Ack);
                 }
@@ -2323,25 +2475,47 @@ impl State {
                 }
                 self.cmd_net_vault_base_failed()
             }
-            Command::NetVaultReceipt { from, secret_id, verdict, rev, generation } => {
+            Command::NetVaultReceipt {
+                from,
+                secret_id,
+                verdict,
+                rev,
+                generation,
+            } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
                 self.cmd_net_vault_receipt(&from, secret_id, verdict, rev)
             }
-            Command::NetVaultReveal { from, secret_id, holder, share, ikm, generation } => {
+            Command::NetVaultReveal {
+                from,
+                secret_id,
+                holder,
+                share,
+                ikm,
+                generation,
+            } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
                 self.cmd_net_vault_reveal(&from, secret_id, holder, share, ikm)
             }
-            Command::NetVaultResp { from, grant_id, enc, generation } => {
+            Command::NetVaultResp {
+                from,
+                grant_id,
+                enc,
+                generation,
+            } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
                 self.cmd_net_vault_resp(&from, grant_id, enc)
             }
-            Command::NetVaultAsk { from, grant_id, generation } => {
+            Command::NetVaultAsk {
+                from,
+                grant_id,
+                generation,
+            } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
@@ -2358,42 +2532,65 @@ impl State {
             Command::WalletConsent { accept } => self.cmd_wallet_consent(accept),
             Command::WalletRetry => self.cmd_wallet_retry(),
             Command::WalletAcknowledgeLoss => self.cmd_wallet_acknowledge_loss(),
-            Command::NetWalletProbe { height, error, generation } => {
-                self.cmd_net_wallet_probe(height, error, generation)
-            }
-            Command::NetWalletFrame { from, body, generation } => {
+            Command::NetWalletProbe {
+                height,
+                error,
+                generation,
+            } => self.cmd_net_wallet_probe(height, error, generation),
+            Command::NetWalletFrame {
+                from,
+                body,
+                generation,
+            } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
                 self.cmd_net_wallet_frame(&from, &body.0)
             }
-            Command::NetWalletStatus { from, status, init, generation } => {
+            Command::NetWalletStatus {
+                from,
+                status,
+                init,
+                generation,
+            } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
                 self.cmd_net_wallet_status(&from, status, init)
             }
-            Command::NetWalletViewAnswer { from, view, generation } => {
+            Command::NetWalletViewAnswer {
+                from,
+                view,
+                generation,
+            } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
                 self.cmd_net_wallet_view_answer(&from, &view.0)
             }
-            Command::NetWalletScan { scan_height, daemon_height, paused, error, connected, state, generation } => {
-                self.cmd_net_wallet_scan(crate::wallet_scan::ScanReport {
-                    scan_height,
-                    daemon_height,
-                    paused,
-                    error,
-                    connected,
-                    state: state.0.clone(),
-                    generation,
-                })
-            }
+            Command::NetWalletScan {
+                scan_height,
+                daemon_height,
+                paused,
+                error,
+                connected,
+                state,
+                generation,
+            } => self.cmd_net_wallet_scan(crate::wallet_scan::ScanReport {
+                scan_height,
+                daemon_height,
+                paused,
+                error,
+                connected,
+                state: state.0.clone(),
+                generation,
+            }),
             Command::RecoverInviteStart { member } => self.cmd_recover_invite_start(member),
-            Command::RecoverStart { link, phrase, relays } => {
-                self.cmd_recover_start(link, phrase, relays)
-            }
+            Command::RecoverStart {
+                link,
+                phrase,
+                relays,
+            } => self.cmd_recover_start(link, phrase, relays),
             Command::NetRecoverSealed {
                 member,
                 chain,
@@ -2489,15 +2686,19 @@ impl State {
                 link,
                 generation,
             } => self.cmd_net_ritual_link_ready(seat, link, generation),
-            Command::JoinStart { invite, member, relays } => {
-                self.cmd_join_start(invite, member, relays)
-            }
+            Command::JoinStart {
+                invite,
+                member,
+                relays,
+            } => self.cmd_join_start(invite, member, relays),
             Command::JoinConfirmCharter => self.cmd_join_confirm_charter(),
             Command::JoinDeclineCharter => self.cmd_join_decline_charter(),
             Command::JoinFinish => self.cmd_join_finish(),
-            Command::NetJoinDeclined { seat, from, generation } => {
-                self.cmd_net_join_declined(seat, from, generation)
-            }
+            Command::NetJoinDeclined {
+                seat,
+                from,
+                generation,
+            } => self.cmd_net_join_declined(seat, from, generation),
             Command::NetJoinAccepted { generation } => self.cmd_net_join_accepted(generation),
             Command::NetJoinCharterProposed {
                 name,
@@ -2513,9 +2714,13 @@ impl State {
             Command::NetRecoverNote { note, generation } => {
                 self.cmd_net_recover_note(note, generation)
             }
-            Command::NetRecoverProgress { member, need, roster, approved, generation } => {
-                self.cmd_net_recover_progress(member, need, roster, approved, generation)
-            }
+            Command::NetRecoverProgress {
+                member,
+                need,
+                roster,
+                approved,
+                generation,
+            } => self.cmd_net_recover_progress(member, need, roster, approved, generation),
             Command::NetRitualPublished {
                 what,
                 accepted,
@@ -2534,7 +2739,15 @@ impl State {
                 relays,
                 rotation_seed,
                 generation,
-            } => self.cmd_net_join_sealed(sealed, mls, mesh, nostr_sk, relays, rotation_seed, generation),
+            } => self.cmd_net_join_sealed(
+                sealed,
+                mls,
+                mesh,
+                nostr_sk,
+                relays,
+                rotation_seed,
+                generation,
+            ),
             Command::NetJoinFailed { error, generation } => {
                 self.cmd_net_join_failed(error, generation)
             }

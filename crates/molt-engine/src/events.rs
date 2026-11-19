@@ -72,7 +72,11 @@ impl State {
         ts: u64,
         body: WorkspaceEvent,
     ) -> EventEnvelope {
-        let prev_seq = if by == self.member() { self.delivery.last_own_ackable } else { 0 };
+        let prev_seq = if by == self.member() {
+            self.delivery.last_own_ackable
+        } else {
+            0
+        };
         let env = EventEnvelope {
             seq: self.next_seq,
             ts,
@@ -253,7 +257,10 @@ impl State {
                 }
                 msg.reactions.retain(|_, who| !who.is_empty());
                 if want_this {
-                    msg.reactions.entry(emoji.clone()).or_default().push(by.clone());
+                    msg.reactions
+                        .entry(emoji.clone())
+                        .or_default()
+                        .push(by.clone());
                 }
             }
             WorkspaceEvent::ChatDeleted { index, id, by } => {
@@ -306,16 +313,19 @@ impl State {
                 // every answered ChainRequest (review 2026-08-09)
                 if let Some(p) = self.proposals.get(&id.0) {
                     if p.surface != *surface || p.payload != *payload {
-                        tracing::warn!(id = id.0, "replaying a Proposed whose id names another change");
+                        tracing::warn!(
+                            id = id.0,
+                            "replaying a Proposed whose id names another change"
+                        );
                     }
                 }
                 // `by` is the recording envelope's author — the same value
                 // the live wire path stamps (a WP2 re-serve re-wraps under
                 // the serving peer, so both paths agree and replay stays
                 // deterministic)
-                self.proposals
-                    .entry(id.0)
-                    .or_insert_with(|| ProposalRecord::new(*surface, payload.clone(), env.by.clone()));
+                self.proposals.entry(id.0).or_insert_with(|| {
+                    ProposalRecord::new(*surface, payload.clone(), env.by.clone())
+                });
                 self.next_id = self.next_id.max(id.0.saturating_add(1));
                 let _ = self.register_parked_declines(id.0);
                 let _ = self.register_parked_withdrawal(id.0);
@@ -325,7 +335,12 @@ impl State {
                     self.supersede_stale_wiki(None);
                 }
             }
-            WorkspaceEvent::Approved { id, by, height, sig } => {
+            WorkspaceEvent::Approved {
+                id,
+                by,
+                height,
+                sig,
+            } => {
                 // the OWN decision register is ephemeral: an own Approved in
                 // the own log means this node signed, so a restart rebuilds
                 // it here — else the next re-base drops the standing
@@ -400,7 +415,10 @@ impl State {
                         let payload = p.payload.clone();
                         let surface = p.surface;
                         let moved = Self::wiki_payload_paths(&payload);
-                        self.applied.entry(surface).or_default().push((Some(id.0), payload));
+                        self.applied
+                            .entry(surface)
+                            .or_default()
+                            .push((Some(id.0), payload));
                         if surface == Surface::Memory {
                             // the base moved — the supersede walk runs in
                             // the legacy apply path too (§4 determinism)
@@ -424,13 +442,19 @@ impl State {
                 // rebuilt from the log — and `proposal_change` refuses to
                 // resolve a membership record without it, so a half-restored
                 // state can never sign fabricated bytes.
-                self.proposals.entry(id.0).or_insert_with(|| ProposalRecord::new(Surface::Organization, serde_json::json!({
-                        "op": match op {
-                            molt_core::MembershipOp::Restored => "restore_member",
-                            molt_core::MembershipOp::Joined => "add_member",
-                        },
-                        "member": member,
-                    }), env.by.clone()));
+                self.proposals.entry(id.0).or_insert_with(|| {
+                    ProposalRecord::new(
+                        Surface::Organization,
+                        serde_json::json!({
+                            "op": match op {
+                                molt_core::MembershipOp::Restored => "restore_member",
+                                molt_core::MembershipOp::Joined => "add_member",
+                            },
+                            "member": member,
+                        }),
+                        env.by.clone(),
+                    )
+                });
                 // within the wire id window only: a pre-gate log entry (or a
                 // hostile replay) must not poison the counter on rebuild
                 if self.plausible_wire_id(id.0) {
@@ -500,12 +524,13 @@ impl State {
     /// compacted node would restart the count and synthesize different ids
     /// than its peers for the very same message (WP4a keystone).
     fn sender_ordinal(&self, from: &str, upto: usize) -> usize {
-        let live = self.chat.iter().take(upto).filter(|p| p.from == from).count();
-        let pruned = self
-            .chat_pruned_counts
-            .get(from)
-            .copied()
-            .unwrap_or(0);
+        let live = self
+            .chat
+            .iter()
+            .take(upto)
+            .filter(|p| p.from == from)
+            .count();
+        let pruned = self.chat_pruned_counts.get(from).copied().unwrap_or(0);
         live.saturating_add(usize::try_from(pruned).unwrap_or(usize::MAX))
     }
 
@@ -719,18 +744,25 @@ impl State {
         let healed = self
             .proposals
             .values_mut()
-            .filter(|p| p.state == ProposalState::Applied && (p.superseded || p.superseded_kind.is_some()))
+            .filter(|p| {
+                p.state == ProposalState::Applied && (p.superseded || p.superseded_kind.is_some())
+            })
             .map(ProposalRecord::settle_applied)
             .count();
         if healed > 0 {
-            tracing::warn!(healed, "applied cards carried a supersede verdict - cleared");
+            tracing::warn!(
+                healed,
+                "applied cards carried a supersede verdict - cleared"
+            );
         }
         self.next_id = dump.next_proposal_id.max(1);
         // the votes the snapshot covers, rebuilt exactly like the replay's
         // `Approved` arm: an own signature is genuine by construction (only
         // the own decision register vouches for it), every other one waits
         // for `reverify_all_pending` after the chain adoption
-        self.chain.own_approvals.extend(dump.own_approvals.iter().copied());
+        self.chain
+            .own_approvals
+            .extend(dump.own_approvals.iter().copied());
         let me = self.member();
         for v in dump.votes {
             let mine = v.member == me && self.chain.own_approvals.contains(&v.id);
@@ -783,7 +815,10 @@ impl State {
         // a runtime-derived Degraded belongs to the mesh that just ended —
         // it resets with its backing maps (a Down verdict is the open/config
         // path's and stays until the next resolve)
-        if matches!(self.session.net_health, molt_core::NetHealth::Degraded { .. }) {
+        if matches!(
+            self.session.net_health,
+            molt_core::NetHealth::Degraded { .. }
+        ) {
             self.session.net_health = molt_core::NetHealth::Ok;
         }
         self.replica = None;
@@ -872,6 +907,9 @@ impl State {
         self.chain.proposal_changes.clear();
         self.chain.pending_blocks.clear();
         self.chain.catchup_from = None;
+        self.chain.catchup_since = 0;
+        self.chain.fork_decisions = 0;
+        self.chain.last_fork = None;
         self.recovery.pending.clear();
         self.recovery.swept.clear();
         self.chat.clear();
@@ -914,7 +952,8 @@ mod tests {
     use crate::tests::plain_state;
 
     fn envs() -> Vec<EventEnvelope> {
-        let e = |seq: u64, by: &str, body: WorkspaceEvent| EventEnvelope { prev_seq: 0,
+        let e = |seq: u64, by: &str, body: WorkspaceEvent| EventEnvelope {
+            prev_seq: 0,
             seq,
             ts: 100 + seq,
             by: by.to_string(),
@@ -923,23 +962,21 @@ mod tests {
         // legacy-shaped messages (nil id, no channel): the keystones pin
         // that pre-chat-bus logs keep replaying identically, index fallback
         // included
-        let msg = |from: &str, body: &str, ts: u64| {
-            ChatMessage {
-                id: molt_core::MessageId::NIL,
-                from: from.to_string(),
-                body: body.to_string(),
-                ts,
-                quote: None,
-                quote_id: None,
-                channel: molt_core::ChannelRef::Group,
-                kind: molt_core::ChatKind::User,
-                reactions: Default::default(),
-                read_by: Default::default(),
-                deleted_by: None,
-                file: None,
-                thread_op: None,
-                operator: None,
-            }
+        let msg = |from: &str, body: &str, ts: u64| ChatMessage {
+            id: molt_core::MessageId::NIL,
+            from: from.to_string(),
+            body: body.to_string(),
+            ts,
+            quote: None,
+            quote_id: None,
+            channel: molt_core::ChannelRef::Group,
+            kind: molt_core::ChatKind::User,
+            reactions: Default::default(),
+            read_by: Default::default(),
+            deleted_by: None,
+            file: None,
+            thread_op: None,
+            operator: None,
         };
         vec![
             e(
@@ -1046,7 +1083,8 @@ mod tests {
     #[test]
     fn a_single_decline_in_two_of_three_is_not_a_veto() {
         let mut st = plain_state();
-        let e = |seq: u64, by: &str, body: WorkspaceEvent| EventEnvelope { prev_seq: 0,
+        let e = |seq: u64, by: &str, body: WorkspaceEvent| EventEnvelope {
+            prev_seq: 0,
             seq,
             ts: 100 + seq,
             by: by.to_string(),
@@ -1208,13 +1246,15 @@ mod tests {
             },
         );
         msg.quote_id = None;
-        all.push(EventEnvelope { prev_seq: 0,
+        all.push(EventEnvelope {
+            prev_seq: 0,
             seq: 8,
             ts: 108,
             by: "walter".to_string(),
             body: WorkspaceEvent::Chat(msg),
         });
-        all.push(EventEnvelope { prev_seq: 0,
+        all.push(EventEnvelope {
+            prev_seq: 0,
             seq: 9,
             ts: 109,
             by: "petra".to_string(),
@@ -1249,7 +1289,11 @@ mod tests {
         assert_eq!(st.chat.len(), 4);
         for (i, m) in st.chat.iter().enumerate() {
             assert!(!m.id.is_nil(), "message {i} kept a nil id after ingest");
-            assert_eq!(st.chat_pos.get(&m.id), Some(&i), "chat_pos indexes message {i}");
+            assert_eq!(
+                st.chat_pos.get(&m.id),
+                Some(&i),
+                "chat_pos indexes message {i}"
+            );
         }
         // the P4 formula is a cross-node contract: pin the synthesized ids as
         // literals so a formula change can never slip through silently.
@@ -1330,13 +1374,15 @@ mod tests {
             let mut legacy = ChatMessage::text(molt_core::MessageId::NIL, "petra", "later", 200);
             legacy.id = molt_core::MessageId::NIL;
             vec![
-                EventEnvelope { prev_seq: 0,
+                EventEnvelope {
+                    prev_seq: 0,
                     seq: from_seq,
                     ts: 200,
                     by: "petra".to_string(),
                     body: WorkspaceEvent::Chat(legacy),
                 },
-                EventEnvelope { prev_seq: 0,
+                EventEnvelope {
+                    prev_seq: 0,
                     seq: from_seq + 1,
                     ts: 201,
                     by: "petra".to_string(),
@@ -1443,8 +1489,10 @@ mod tests {
         let mut snap = st.dump();
         assert_eq!(snap.prune_chat_before(105), 2, "gm + re: gm age out at 105");
         assert!(
-            snap.chat.iter().all(|m| m.id.to_string() != LEGACY_ID_OF_MSG_0
-                && m.id.to_string() != LEGACY_ID_OF_MSG_1),
+            snap.chat
+                .iter()
+                .all(|m| m.id.to_string() != LEGACY_ID_OF_MSG_0
+                    && m.id.to_string() != LEGACY_ID_OF_MSG_1),
             "the expired legacy messages are physically gone"
         );
         let mut st2 = plain_state();
@@ -1472,7 +1520,10 @@ mod tests {
 
         st.reset_workspace_state();
         assert!(!st.chat_pruned, "the next workspace starts unpruned");
-        assert!(st.chat_pruned_counts.is_empty(), "and with no carried ordinals");
+        assert!(
+            st.chat_pruned_counts.is_empty(),
+            "and with no carried ordinals"
+        );
 
         // proof it matters: the SAME legacy log now synthesizes the SAME ids
         // as on a node that never pruned anything
@@ -1524,7 +1575,8 @@ mod tests {
                 by: "walter".to_string(),
             },
         ] {
-            st.apply(&EventEnvelope { prev_seq: 0,
+            st.apply(&EventEnvelope {
+                prev_seq: 0,
                 seq: 20,
                 ts: 210,
                 by: "walter".to_string(),
@@ -1534,7 +1586,8 @@ mod tests {
         assert_eq!(st.chat, before, "no id-less op touched a surviving message");
 
         // …while the SAME ops addressed by id still land
-        st.apply(&EventEnvelope { prev_seq: 0,
+        st.apply(&EventEnvelope {
+            prev_seq: 0,
             seq: 21,
             ts: 211,
             by: "walter".to_string(),
@@ -1555,7 +1608,8 @@ mod tests {
         // a legacy numeric quote is no longer resolved by position
         let mut quoting = ChatMessage::text(molt_core::MessageId([0x77; 16]), "walter", "re", 212);
         quoting.quote = Some(0);
-        st.apply(&EventEnvelope { prev_seq: 0,
+        st.apply(&EventEnvelope {
+            prev_seq: 0,
             seq: 22,
             ts: 212,
             by: "walter".to_string(),
@@ -1604,7 +1658,8 @@ mod tests {
     fn explicit_react_ops_are_idempotent_but_legacy_toggles() {
         let mut st = plain_state();
         let id = molt_core::MessageId([9u8; 16]);
-        st.apply(&EventEnvelope { prev_seq: 0,
+        st.apply(&EventEnvelope {
+            prev_seq: 0,
             seq: 1,
             ts: 101,
             by: "petra".to_string(),
@@ -1613,7 +1668,8 @@ mod tests {
         let mut seq = 1u64;
         let mut react = |st: &mut crate::State, emoji: &str, op: Option<molt_core::ReactOp>| {
             seq += 1;
-            st.apply(&EventEnvelope { prev_seq: 0,
+            st.apply(&EventEnvelope {
+                prev_seq: 0,
                 seq,
                 ts: 100 + seq,
                 by: "walter".to_string(),
@@ -1637,7 +1693,10 @@ mod tests {
         );
         // Add of another emoji switches (one reaction per member)
         react(&mut st, "🔥", Some(molt_core::ReactOp::Add));
-        assert!(!st.chat[0].reactions.contains_key("👍"), "the old emoji is gone");
+        assert!(
+            !st.chat[0].reactions.contains_key("👍"),
+            "the old emoji is gone"
+        );
         assert_eq!(st.chat[0].reactions["🔥"], vec!["walter".to_string()]);
         // a duplicated Remove must NOT re-add anything
         react(&mut st, "🔥", Some(molt_core::ReactOp::Remove));
@@ -1651,7 +1710,10 @@ mod tests {
         react(&mut st, "🎉", None);
         assert_eq!(st.chat[0].reactions["🎉"], vec!["walter".to_string()]);
         react(&mut st, "🎉", None);
-        assert!(st.chat[0].reactions.is_empty(), "the legacy toggle un-reacts");
+        assert!(
+            st.chat[0].reactions.is_empty(),
+            "the legacy toggle un-reacts"
+        );
     }
 
     /// A concurrent react/delete pair must **commute**: whichever order the
@@ -1660,13 +1722,15 @@ mod tests {
     #[test]
     fn react_and_delete_commute_to_a_tombstone_without_reactions() {
         let id = molt_core::MessageId([0x0bu8; 16]);
-        let chat = EventEnvelope { prev_seq: 0,
+        let chat = EventEnvelope {
+            prev_seq: 0,
             seq: 1,
             ts: 101,
             by: "petra".to_string(),
             body: WorkspaceEvent::Chat(ChatMessage::text(id, "petra", "fleeting", 101)),
         };
-        let react = EventEnvelope { prev_seq: 0,
+        let react = EventEnvelope {
+            prev_seq: 0,
             seq: 2,
             ts: 102,
             by: "walter".to_string(),
@@ -1678,7 +1742,8 @@ mod tests {
                 op: Some(molt_core::ReactOp::Add),
             },
         };
-        let delete = EventEnvelope { prev_seq: 0,
+        let delete = EventEnvelope {
+            prev_seq: 0,
             seq: 3,
             ts: 103,
             by: "petra".to_string(),
@@ -1701,7 +1766,10 @@ mod tests {
             react_then_delete, delete_then_react,
             "the pair must converge independent of arrival order"
         );
-        assert_eq!(react_then_delete.chat[0].deleted_by.as_deref(), Some("petra"));
+        assert_eq!(
+            react_then_delete.chat[0].deleted_by.as_deref(),
+            Some("petra")
+        );
         assert!(
             react_then_delete.chat[0].reactions.is_empty(),
             "no reaction survives on the tombstone"
@@ -1730,7 +1798,8 @@ mod tests {
             thread_op: None,
             operator: None,
         };
-        let env = |seq: u64, m: &ChatMessage| EventEnvelope { prev_seq: 0,
+        let env = |seq: u64, m: &ChatMessage| EventEnvelope {
+            prev_seq: 0,
             seq,
             ts: m.ts,
             by: m.from.clone(),
@@ -1767,7 +1836,8 @@ mod tests {
     #[test]
     fn out_of_range_events_are_ignored() {
         let mut st = plain_state();
-        st.apply(&EventEnvelope { prev_seq: 0,
+        st.apply(&EventEnvelope {
+            prev_seq: 0,
             seq: 1,
             ts: 1,
             by: "x".to_string(),
@@ -1777,7 +1847,8 @@ mod tests {
                 by: "x".to_string(),
             },
         });
-        st.apply(&EventEnvelope { prev_seq: 0,
+        st.apply(&EventEnvelope {
+            prev_seq: 0,
             seq: 2,
             ts: 2,
             by: "x".to_string(),
