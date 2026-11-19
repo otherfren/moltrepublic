@@ -130,6 +130,8 @@ pub struct RelayRuntime {
     size_budget: Option<u64>,
     /// Per-relay connection state, written by the subscription supervisors.
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
+    /// Why a relay last went `Down` mid-replay, beside `health`.
+    down_reasons: Arc<Mutex<std::collections::HashMap<String, RelayDownReason>>>,
     /// Stored-event bound per REQ (see [`MAX_STORED_EVENTS_PER_REQ`]);
     /// `None` = no cut-off (the file plane: its REQ replays every file's
     /// pieces under the day's tag, no per-series number is right).
@@ -175,8 +177,28 @@ pub enum RelayHealth {
     Down,
 }
 
-/// How many STORED events one relay may replay for a single REQ before we
-/// stop reading from it.
+/// Why a relay's supervisor last took it `Down` mid-replay; cleared when a
+/// replay completes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayDownReason {
+    /// A page hit the stored-event bound; the next page follows.
+    ReplayBound,
+    /// A page did not move back in time; retried after the long backoff.
+    ReplayStuck,
+}
+
+impl RelayDownReason {
+    /// The stable diagnostic token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReplayBound => "replay_bound",
+            Self::ReplayStuck => "replay_stuck",
+        }
+    }
+}
+
+/// How many STORED events one relay may replay for a single REQ; past it the
+/// replay continues in pages backwards with `until`.
 ///
 /// Counted pre-EOSE only; live traffic is unbounded, which is what buzz's
 /// "500 historical events per filter" actually means. Ours is an order of
@@ -184,8 +206,7 @@ pub enum RelayHealth {
 /// h-windows (`GroupChannel::subscribe_since`) — a bound tight enough to catch
 /// a chat flood would silently truncate a real catch-up, and a member quietly
 /// missing history it believes it has is worse than a flood that announces
-/// itself. At this size it is evidence of a hostile or broken relay, never a
-/// tuning knob.
+/// itself. An active group's relay does exceed it, hence the paging.
 pub const MAX_STORED_EVENTS_PER_REQ: usize = 5_000;
 
 /// The fan-in capacity of a FILE subscription: small on purpose, so a
@@ -213,6 +234,7 @@ impl RelayRuntime {
             cursors: Arc::new(Mutex::new(std::collections::HashMap::new())),
             size_budget: None,
             health: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            down_reasons: Arc::new(Mutex::new(std::collections::HashMap::new())),
             backoff: (Duration::from_secs(1), Duration::from_secs(60)),
             auth_keys: None,
             history_bound: Some(MAX_STORED_EVENTS_PER_REQ),
@@ -282,6 +304,11 @@ impl RelayRuntime {
     /// "relay status" surfaces (N5). Empty until a subscription runs.
     pub async fn health(&self) -> std::collections::HashMap<String, RelayHealth> {
         self.health.lock().await.clone()
+    }
+
+    /// Why each relay last went `Down` mid-replay (see [`RelayDownReason`]).
+    pub async fn down_reasons(&self) -> std::collections::HashMap<String, RelayDownReason> {
+        self.down_reasons.lock().await.clone()
     }
 
     /// Override the publish size budget (tests, or the engine after probing
@@ -383,6 +410,7 @@ pub struct Subscription {
     /// Shared health map + this subscription's relays, so teardown can clear
     /// the entries instead of leaving a stale `Up` behind (review finding).
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
+    down_reasons: Arc<Mutex<std::collections::HashMap<String, RelayDownReason>>>,
     urls: Vec<String>,
 }
 
@@ -478,6 +506,11 @@ impl Drop for Subscription {
                 health.remove(url);
             }
         }
+        if let Ok(mut reasons) = self.down_reasons.try_lock() {
+            for url in &self.urls {
+                reasons.remove(url);
+            }
+        }
     }
 }
 
@@ -491,6 +524,7 @@ struct SubShared {
     cursors: Arc<Mutex<std::collections::HashMap<String, u64>>>,
     eose_tx: Arc<tokio::sync::watch::Sender<usize>>,
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
+    down_reasons: Arc<Mutex<std::collections::HashMap<String, RelayDownReason>>>,
     backoff: (Duration, Duration),
     auth_keys: Option<nostr::Keys>,
     history_bound: Option<usize>,
@@ -521,9 +555,8 @@ impl RelayRuntime {
         // on a full `send` with the EOSE still unread behind it — the gate
         // then times out against a healthy relay, and forever, because the
         // backlog only grows (found 2026-08-17, recovery rerun). The bound
-        // is honest: the reader drops a relay that replays past
-        // `history_bound`, so this can never buffer more than that (+ some
-        // live headroom).
+        // makes it one page (+ some live headroom); a replay of several
+        // pages needs a consumer to reach its EOSE.
         let (tx, rx) = mpsc::channel(self.channel_capacity().max(1));
         let (eose_tx, eose_rx) = tokio::sync::watch::channel(0usize);
         let shared = Arc::new(SubShared {
@@ -537,6 +570,7 @@ impl RelayRuntime {
             cursors: self.cursors.clone(),
             eose_tx: Arc::new(eose_tx),
             health: self.health.clone(),
+            down_reasons: self.down_reasons.clone(),
             backoff: self.backoff,
             auth_keys: self.auth_keys.clone(),
             history_bound: self.history_bound,
@@ -554,7 +588,7 @@ impl RelayRuntime {
                 let began = tokio::time::Instant::now();
                 // every outcome is reported: a node that reached no relay must
                 // say why, in the log and in the error
-                match tokio::time::timeout(shared.connect_timeout, connect_and_req(&shared, url)).await {
+                match tokio::time::timeout(shared.connect_timeout, connect_and_req(&shared, url, &Replay::default())).await {
                     Ok(Ok(ws)) => {
                         tracing::info!(
                             relay = %url, via = %via,
@@ -631,6 +665,7 @@ impl RelayRuntime {
             connected: gated.len(),
             eose: eose_rx,
             health: self.health.clone(),
+            down_reasons: self.down_reasons.clone(),
             urls: self.urls.clone(),
         })
     }
@@ -639,15 +674,32 @@ impl RelayRuntime {
 /// Connect one relay and place the REQ, resuming from the CURRENT cursor
 /// widened by the overlap — the write-side clamp keeps that honest against
 /// future-dated events (concept §4.3).
-async fn connect_and_req(shared: &SubShared, url: &str) -> Result<RelayWs, NetError> {
+async fn connect_and_req(shared: &SubShared, url: &str, replay: &Replay) -> Result<RelayWs, NetError> {
     let mut ws = RelayWs::connect(&shared.dialer, url).await?;
     // ONE subscription id per session: the post-AUTH re-placement reuses it
     // (NIP-01 overwrites a REQ by id), so the pre-auth subscription is not
     // left open delivering every event a second time (review finding)
     let sub_id = SubscriptionId::generate();
-    place_req(shared, url, &mut ws, &sub_id).await?;
+    place_req(shared, url, &mut ws, &sub_id, replay).await?;
     ws.set_subscription(sub_id);
     Ok(ws)
+}
+
+/// Seconds a page's `until` reaches past the oldest event read, so a relay
+/// treating `until` as exclusive still repeats that second (dedup absorbs it).
+const PAGE_OVERLAP: u64 = 1;
+
+/// One relay's stored replay, carried across sessions until its EOSE: the
+/// cursor stays put meanwhile, since relays replay newest first and a cut
+/// replay would otherwise resume past what it never read (C7).
+#[derive(Debug, Default)]
+struct Replay {
+    /// The current page's upper bound; `None` on the first page.
+    until: Option<u64>,
+    /// Newest clamped `created_at` read in this replay.
+    newest: Option<u64>,
+    /// After a paged replay: read only what is newer than the cursor.
+    tail: bool,
 }
 
 /// Place (or re-place, after a NIP-42 handshake) the subscription REQ.
@@ -656,21 +708,39 @@ async fn place_req(
     url: &str,
     ws: &mut RelayWs,
     sub_id: &SubscriptionId,
+    replay: &Replay,
 ) -> Result<(), NetError> {
     let mut relay_filter = shared.filter.clone();
-    // the resume cursor applies to an OPEN-ENDED subscription only: a
-    // caller that fixed its own time window (a multi-window catch-up) must
-    // not have it narrowed to "cursor - overlap" on a reconnect (review T5)
-    if relay_filter.since.is_none() {
-        if let Some(cursor) = shared.cursors.lock().await.get(url) {
+    let cursor = shared.cursors.lock().await.get(url).copied();
+    if let Some(cursor) = cursor {
+        if replay.tail {
+            // the paged replay read everything up to the cursor already;
+            // the overlap would page through it again
+            let since = relay_filter.since.map_or(cursor, |s| s.as_secs().max(cursor));
+            relay_filter = relay_filter.since(nostr::Timestamp::from_secs(since));
+        } else if relay_filter.since.is_none() {
+            // the resume cursor applies to an OPEN-ENDED subscription only:
+            // a caller that fixed its own time window (a multi-window
+            // catch-up) must not have it narrowed on a reconnect (review T5)
             relay_filter = relay_filter.since(nostr::Timestamp::from_secs(
                 cursor.saturating_sub(CURSOR_OVERLAP),
             ));
         }
     }
+    if let Some(until) = replay.until {
+        let until = relay_filter.until.map_or(until, |u| u.as_secs().min(until));
+        relay_filter = relay_filter.until(nostr::Timestamp::from_secs(until));
+    }
     tracing::debug!(relay = %url, filter = %nostr::JsonUtil::as_json(&relay_filter), "placing REQ");
     ws.send(ClientMessage::req(sub_id.clone(), vec![relay_filter]))
         .await
+}
+
+/// Move a relay's resume cursor forward to `stamp` (already clamped to now).
+async fn advance_cursor(shared: &SubShared, url: &str, stamp: u64) {
+    let mut c = shared.cursors.lock().await;
+    let entry = c.entry(url.to_string()).or_insert(0);
+    *entry = (*entry).max(stamp);
 }
 
 /// One relay's supervisor: read the live session until it dies, then
@@ -690,6 +760,7 @@ async fn supervise(
     // relays that were down at subscribe time are NOT in the gate's
     // denominator, so they must never increment its numerator either
     let mut eose_counted = !counts_toward_eose;
+    let mut replay = Replay::default();
     // the route this relay actually takes (a Local relay is dialed direct
     // even under Tor, §10.14) — the single most useful field when an
     // operator says "Tor runs but the client will not connect"
@@ -706,7 +777,7 @@ async fn supervise(
                 shared.health.lock().await.insert(url.clone(), RelayHealth::Connecting);
                 let began = tokio::time::Instant::now();
                 let outcome =
-                    tokio::time::timeout(shared.connect_timeout, connect_and_req(&shared, &url)).await;
+                    tokio::time::timeout(shared.connect_timeout, connect_and_req(&shared, &url, &replay)).await;
                 // NEVER discard the reason. This arm used to be a bare `_`,
                 // so every connect failure — proxy refused, TLS rejected, WS
                 // upgrade 4xx, auth required — vanished and the loop retried
@@ -780,9 +851,22 @@ async fn supervise(
         };
         shared.health.lock().await.insert(url.clone(), RelayHealth::Up);
         let started = tokio::time::Instant::now();
-        let outcome = read_session(&shared, &url, ws, &mut eose_counted).await;
-        if outcome.is_break() {
-            return; // consumer gone — nothing left to supervise
+        match read_session(&shared, &url, ws, &mut eose_counted, &mut replay).await {
+            SessionEnd::ConsumerGone => return, // nothing left to supervise
+            SessionEnd::Died => {}
+            SessionEnd::Paged => {
+                // the next page follows promptly; the backoff is for failures
+                shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
+                shared.down_reasons.lock().await.insert(url.clone(), RelayDownReason::ReplayBound);
+                tokio::time::sleep(initial).await;
+                continue;
+            }
+            SessionEnd::Stuck => {
+                shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
+                shared.down_reasons.lock().await.insert(url.clone(), RelayDownReason::ReplayStuck);
+                tokio::time::sleep(cap).await;
+                continue;
+            }
         }
         // reset the backoff only after a session that LIVED: a relay that
         // accepts and drops immediately (dead backend, ban) would otherwise
@@ -814,51 +898,74 @@ async fn supervise(
     }
 }
 
-/// Drain one live session. `Break` = the consumer dropped the stream (stop
-/// supervising); `Continue` = the SESSION died (reconnect).
+/// How one session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionEnd {
+    /// The consumer dropped the stream: stop supervising.
+    ConsumerGone,
+    /// The connection died: reconnect with backoff.
+    Died,
+    /// A page hit the stored-event bound: place the next one.
+    Paged,
+    /// A page did not move back in time: retry after the cap.
+    Stuck,
+}
+
+/// Drain one session; `replay` carries the stored replay across sessions.
 async fn read_session(
     shared: &SubShared,
     url: &str,
     mut ws: RelayWs,
     eose_counted: &mut bool,
-) -> std::ops::ControlFlow<()> {
+    replay: &mut Replay,
+) -> SessionEnd {
     let (keepalive, idle_bound) = shared.sub_timing;
     let mut last_ping = tokio::time::Instant::now();
     let mut pending_auth: Option<nostr::EventId> = None;
-    // stored events this relay has replayed for this REQ. Counted only while
-    // the replay is running: after EOSE the stream is live group traffic,
-    // which is bounded by the group itself, and counting it would eventually
-    // cut off a perfectly healthy relay.
+    // the stored replay runs until EOSE; after it the stream is live group
+    // traffic, bounded by the group itself, and never counted
+    let mut replaying = true;
+    // stored events of this page, and the oldest verified one
     let mut stored_seen: usize = 0;
+    let mut page_oldest: Option<u64> = None;
     loop {
         // keepalive: a flow silently dropped by a NAT/middlebox otherwise
         // reads as a healthy-but-quiet connection until the idle bound
         if last_ping.elapsed() >= keepalive {
             if ws.ping().await.is_err() {
-                return std::ops::ControlFlow::Continue(());
+                return SessionEnd::Died;
             }
             last_ping = tokio::time::Instant::now();
         }
         match ws.recv(keepalive.min(idle_bound)).await {
             Ok(RelayMessage::Event { event, .. }) => {
-                // a relay that keeps replaying past the bound is hostile or
-                // broken; either way we stop reading from it rather than
-                // spending a signature verification and a dedup slot per
-                // event forever (buzz B3)
-                if !*eose_counted {
+                // one REQ may replay at most the bound (buzz B3): past it the
+                // session ends and the next page continues below the oldest
+                // event read, so a full relay is read whole (C6) and a relay
+                // replaying one page forever is caught by its progress
+                if replaying {
                     stored_seen += 1;
                     if shared.history_bound.is_some_and(|bound| stored_seen > bound) {
-                        tracing::warn!(
-                            relay = %url,
-                            bound = ?shared.history_bound,
-                            got = stored_seen,
-                            "relay replayed more stored events than the bound — dropped"
+                        let next = page_oldest.map(|o| o.saturating_add(PAGE_OVERLAP));
+                        let progress = match (next, replay.until) {
+                            (Some(next), Some(prev)) => next < prev,
+                            (Some(_), None) => true,
+                            (None, _) => false,
+                        };
+                        if !progress {
+                            tracing::warn!(
+                                relay = %url, reason = RelayDownReason::ReplayStuck.as_str(),
+                                got = stored_seen, until = ?replay.until, "relay replay stuck"
+                            );
+                            *replay = Replay { tail: replay.tail, ..Replay::default() };
+                            return SessionEnd::Stuck;
+                        }
+                        tracing::info!(
+                            relay = %url, reason = RelayDownReason::ReplayBound.as_str(),
+                            got = stored_seen, until = ?next, "relay replay paged"
                         );
-                        // no supervisor serves this relay any more: say so,
-                        // or `deaf()` keeps counting a live relay that is not
-                        // (review 2026-08-25 T4)
-                        shared.health.lock().await.insert(url.to_string(), RelayHealth::Down);
-                        return std::ops::ControlFlow::Break(());
+                        replay.until = next;
+                        return SessionEnd::Paged;
                     }
                 }
                 // VERIFY BEFORE TRUSTING (review 2026-07-31, HIGH): the id
@@ -874,24 +981,49 @@ async fn read_session(
                 // this relay DELIVERED the event, so its cursor advances
                 // (duplicates included) — but never past LOCAL NOW: the skew
                 // margin bounds what we ACCEPT, never the resume point, or a
-                // +1h event would eat an hour of the NIP-59 overlap
+                // +1h event would eat an hour of the NIP-59 overlap. A stored
+                // replay moves it only at its EOSE (C7).
                 let now = nostr::Timestamp::now().as_secs();
-                let stamp = event.created_at.as_secs().min(now);
-                {
-                    let mut c = shared.cursors.lock().await;
-                    let entry = c.entry(url.to_string()).or_insert(0);
-                    *entry = (*entry).max(stamp);
+                let created = event.created_at.as_secs();
+                let stamp = created.min(now);
+                if replaying {
+                    replay.newest = Some(replay.newest.map_or(stamp, |n| n.max(stamp)));
+                    page_oldest = Some(page_oldest.map_or(created, |o| o.min(created)));
+                } else {
+                    advance_cursor(shared, url, stamp).await;
                 }
                 let fresh = shared.dedup.lock().await.fresh(event.id);
                 if fresh && shared.tx.send(event.into_owned()).await.is_err() {
-                    return std::ops::ControlFlow::Break(());
+                    return SessionEnd::ConsumerGone;
                 }
             }
             Ok(RelayMessage::EndOfStoredEvents(_)) => {
                 tracing::debug!(relay = %url, counted = !*eose_counted, "relay sent EOSE");
+                if !replaying {
+                    continue;
+                }
+                replaying = false;
+                if let Some(newest) = replay.newest {
+                    advance_cursor(shared, url, newest).await;
+                }
+                let paged = replay.until.is_some();
+                *replay = Replay::default();
+                shared.down_reasons.lock().await.remove(url);
                 if !*eose_counted {
                     *eose_counted = true;
                     shared.eose_tx.send_modify(|n| *n += 1);
+                }
+                if paged {
+                    // the pages carried an `until`, so no live event can
+                    // arrive: re-place the REQ from the cursor on
+                    replay.tail = true;
+                    let sub_id = ws.subscription().cloned().unwrap_or_else(SubscriptionId::generate);
+                    if place_req(shared, url, &mut ws, &sub_id, replay).await.is_err() {
+                        return SessionEnd::Died;
+                    }
+                    replaying = true;
+                    stored_seen = 0;
+                    page_oldest = None;
                 }
             }
             Ok(RelayMessage::Auth { challenge }) => {
@@ -909,12 +1041,12 @@ async fn read_session(
                 let Some(auth_event) = auth_event else { continue };
                 let auth_id = auth_event.id;
                 if ws.send(ClientMessage::auth(auth_event)).await.is_err() {
-                    return std::ops::ControlFlow::Continue(());
+                    return SessionEnd::Died;
                 }
                 pending_auth = Some(auth_id);
                 let sub_id = ws.subscription().cloned().unwrap_or_else(SubscriptionId::generate);
-                if place_req(shared, url, &mut ws, &sub_id).await.is_err() {
-                    return std::ops::ControlFlow::Continue(());
+                if place_req(shared, url, &mut ws, &sub_id, replay).await.is_err() {
+                    return SessionEnd::Died;
                 }
             }
             // the relay's verdict on OUR auth event: a rejection would
@@ -926,7 +1058,7 @@ async fn read_session(
                 pending_auth = None;
                 if !status {
                     tracing::warn!(relay = %url, reason = %relay_reason(&message), "NIP-42 auth rejected");
-                    return std::ops::ControlFlow::Continue(());
+                    return SessionEnd::Died;
                 }
             }
             // the relay ENDED our subscription. `auth-required:` is the
@@ -940,7 +1072,7 @@ async fn read_session(
             Ok(RelayMessage::Closed { message, .. }) => {
                 if !message.starts_with("auth-required:") {
                     tracing::warn!(relay = %url, reason = %relay_reason(&message), "relay closed the subscription");
-                    return std::ops::ControlFlow::Continue(());
+                    return SessionEnd::Died;
                 }
             }
             // OK for other events / NOTICE etc. — not subscription traffic
@@ -960,7 +1092,7 @@ async fn read_session(
             Err(RecvFail::Dead(e)) => {
                 // the supervisor's "relay session ended" is the one verdict line
                 tracing::debug!(relay = %url, error = %e, "relay connection died");
-                return std::ops::ControlFlow::Continue(());
+                return SessionEnd::Died;
             }
             // a timeout is just the keepalive window elapsing — ping and
             // keep reading, unless the RELAY has been silent past the idle
@@ -977,10 +1109,10 @@ async fn read_session(
                         idle_s = ws.idle_for().as_secs(),
                         "relay sent nothing past the idle bound — reconnecting"
                     );
-                    return std::ops::ControlFlow::Continue(());
+                    return SessionEnd::Died;
                 }
                 if ws.ping().await.is_err() {
-                    return std::ops::ControlFlow::Continue(());
+                    return SessionEnd::Died;
                 }
                 last_ping = tokio::time::Instant::now();
             }
