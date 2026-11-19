@@ -398,6 +398,29 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    // The web door (docs/web_gui.md §5.3): the browser GUI, loopback only,
+    // off unless [web] port is set. The bundle is checked before the port
+    // opens - an untrusted directory opens nothing and the node stays up.
+    // A door that was asked for and did not open is an ERROR in the log:
+    // its port is then free for whoever binds it next.
+    if let Some(port) = config.web.port {
+        let door = molt_remote::WebDoor {
+            build: env!("CARGO_PKG_VERSION").to_string(),
+            caps: molt_core::wire::Caps { embedded_tor: cfg!(feature = "embedded-tor"), ..Default::default() },
+            dir: config.web.bundle_dir(&std::path::absolute(&config_path).unwrap_or_else(|_| config_path.clone())),
+            pre_auth: std::time::Duration::from_secs(10),
+            // a stall, never a total: a slow link is served, a dead one dropped
+            stall: std::time::Duration::from_secs(30),
+        };
+        let handle = wallet.clone();
+        rt.spawn(async move {
+            let dir = door.dir.clone();
+            if let Err(e) = molt_remote::serve_loopback(port, handle, door).await {
+                tracing::error!(port, dir = %dir.display(), error = %e, "web door off");
+            }
+        });
+    }
+
     if !config.node.open_on_start.is_empty() {
         open_on_start(&rt, &wallet, config.node.open_on_start.clone());
     }

@@ -907,11 +907,13 @@ pub(crate) fn spawn_share_hash(
             Ok(Err(e)) => Command::NetFileShareFailed {
                 name,
                 reason: e.to_string(),
+                id,
                 generation: Some(scope),
             },
             Err(e) => Command::NetFileShareFailed {
                 name,
                 reason: format!("hashing task failed: {e}"),
+                id,
                 generation: Some(scope),
             },
         };

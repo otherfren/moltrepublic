@@ -34,8 +34,11 @@ pub mod relay;
 pub mod vault;
 pub mod wallet;
 pub mod wiki_fold;
+pub mod wiki_front_matter;
+pub mod wiki_links;
 pub mod wiki_patch;
 pub mod wiki_refs;
+pub mod wire;
 pub use operator::ChatOperator;
 pub use chain::{
     applied_lww_slot, approval_bytes, block_link_bytes, checkpoint_canonical_bytes, ChainBlock,
@@ -1290,6 +1293,19 @@ fn u32_is_zero(v: &u32) -> bool {
 
 fn file_available_default() -> bool {
     true
+}
+
+/// One path component and nothing else: the form of a destination the
+/// engine places in its download directory. The engine and a window that
+/// fetches such a file back decide by this one reading.
+pub fn is_bare_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+        && name.len() <= 255
 }
 
 /// The display type of a shared file, from its extension (proper MIME
@@ -3709,6 +3725,29 @@ impl RunCore {
     }
 }
 
+/// What a pasted link is ([`Command::ClassifyLink`]): the verdict of the
+/// engine's own invite parsers, so a preview and the run it starts cannot
+/// disagree.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkView {
+    /// The link as asked, trimmed: a late answer is told from a current
+    /// one by this echo.
+    pub link: String,
+    /// 0 = nothing usable (empty, junk, or no valid transport handover),
+    /// 1 = a founding invite (`join_start`), 2 = a recovery link
+    /// (`recover_start`).
+    pub kind: u8,
+    /// The republic's display name; empty for kind 0.
+    #[serde(default)]
+    pub republic: String,
+    /// Invite: who minted it. Recovery: the seat coming back.
+    #[serde(default)]
+    pub who: String,
+    /// The relays the link names.
+    #[serde(default)]
+    pub relays: Vec<String>,
+}
+
 /// One row of the founding ritual's member list (transport concept §3.3):
 /// an invite that turns into a sealed member.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3716,6 +3755,10 @@ pub struct RitualSeatView {
     /// The one-time `molt://invite/…` link (ephemeral — dies with the
     /// ritual).
     pub link: String,
+    /// Whether `link` can be joined with: it carries a valid transport
+    /// handover (the engine's own parser said so). A preview link is not.
+    #[serde(default)]
+    pub joinable: bool,
     /// The member's display name; empty until they activated the link.
     pub member: String,
     /// 0 = waiting for activation, 1 = key received (awaiting seal),
@@ -4235,7 +4278,7 @@ pub struct LogEntry {
 /// The one command set. This is the single source of truth for "what the
 /// software can do"; the MCP tools and the GUI buttons are both thin shells
 /// that construct these.
-#[derive(Debug, Clone, Serialize, Deserialize, strum::VariantNames)]
+#[derive(Debug, Clone, Serialize, Deserialize, strum::VariantNames, strum::IntoStaticStr)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum Command {
@@ -4567,6 +4610,72 @@ pub enum Command {
     ReadUploadBytes {
         /// The FULL sha256 hex the bytes must reproduce.
         checksum: String,
+        /// Refuse anything larger before reading (bytes).
+        cap: u64,
+    },
+    /// Start an upload into the open workspace's upload store
+    /// (`docs_archive/security/mcp-security.md`, "The byte doors"): the
+    /// way a frontend that holds BYTES and no host path shares a file.
+    /// Answers [`Reply::UploadProgress`] with the id every later step names.
+    /// INTERNAL: an agent on the host shares by path.
+    UploadBegin {
+        /// The file's name: ONE path component, never a path.
+        name: String,
+        /// The exact byte length; [`wire::MAX_TRANSFER`] at most.
+        size: u64,
+    },
+    /// The next bytes of an upload, in order; at most [`wire::CHUNK`].
+    /// The web door carries `bytes` in a binary frame (`wire::Chunk`).
+    UploadChunk {
+        /// The id [`Command::UploadBegin`] answered.
+        upload: String,
+        /// Where `bytes` start; must equal what the store has received.
+        offset: u64,
+        /// The bytes.
+        #[serde(default)]
+        bytes: Vec<u8>,
+        /// No chunk follows: `offset + bytes` must equal the size.
+        #[serde(default)]
+        last: bool,
+    },
+    /// Drop an upload that was not shared: its bytes leave the store.
+    UploadAbort {
+        /// The id [`Command::UploadBegin`] answered.
+        upload: String,
+    },
+    /// Share a finished upload into the chat: [`Command::ShareFile`] with
+    /// the store's file as the source. The file leaves the store with the
+    /// share (`remove_file`, a delete, the expiry).
+    ShareUpload {
+        /// The id [`Command::UploadBegin`] answered.
+        upload: String,
+        /// The channel view the share files under.
+        channel: ChannelRef,
+    },
+    /// Read a share's bytes by its message id from the best LOCAL source
+    /// (the own share, the verified download, the mirror), re-hashed
+    /// against the share's checksum: phase two of a download whose phase
+    /// one is [`Command::DownloadFile`]. INTERNAL: an agent reads the
+    /// exchange folder.
+    ReadFileBytes {
+        /// The share message's stable id.
+        id: MessageId,
+        /// Refuse anything larger before reading (bytes).
+        cap: u64,
+    },
+    /// Read the republic's logo or a member's picture. `key` is the
+    /// `image` value a view carries ([`StatusView::image`],
+    /// [`MemberView::image`]); it is COMPARED against the open
+    /// workspace's current pictures and never resolved as a path.
+    ReadImageBytes {
+        /// The view's `image` value.
+        key: String,
+        /// Refuse anything larger before reading (bytes).
+        cap: u64,
+    },
+    /// Read the blob the last [`Command::ExportWorkspace`] of this run
+    /// wrote ([`SessionView::export`], `result == "ok"`). Names no path.
+    ReadExportBytes {
         /// Refuse anything larger before reading (bytes).
         cap: u64,
     },
@@ -5013,6 +5122,12 @@ pub enum Command {
     RevealSeed {
         /// The workspace id ([`WorkspaceInfo::id`]).
         id: WorkspaceId,
+    },
+    /// What a link is ([`Reply::Link`]): a founding invite, a recovery
+    /// link, or nothing usable. Stateless - nothing is started or stored.
+    ClassifyLink {
+        /// The pasted link.
+        link: String,
     },
     /// Export a workspace as ONE encrypted `.molt.enc` blob file
     /// (`molt-export-v1`): manifest, encrypted history, the threshold-signed
@@ -6164,6 +6279,9 @@ pub enum Command {
         name: String,
         /// The honest reason.
         reason: String,
+        /// The id the share was promised ([`MessageId::NIL`]: none).
+        #[serde(default)]
+        id: MessageId,
         /// Workspace-net incarnation (stale task results are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -6428,7 +6546,8 @@ pub enum Command {
     /// (`prefs.mirror_dir`; "" = the default folder). Any-path on the
     /// host, and a tool on both surfaces (ADR-0007).
     SetMirrorDir {
-        /// The folder, `~` allowed; "" restores the default.
+        /// The folder, absolute or `~`-led (a relative one is refused);
+        /// "" restores the default.
         path: String,
     },
     /// INTERNAL (A6): a peer told this node that a vote it cast was dropped
@@ -6571,6 +6690,215 @@ pub const NODE_POSTURE_KEYS: [&str; 14] = [
     "wake_min_interval_secs",
     "wake_on",
     "task_wake_lead_min",
+];
+
+// engine-internal: the run tickers are the engine's own clock;
+// net_delivered / net_peer_seen / net_send_failed and the founding
+// ritual's net_join_requested / net_seal_signed are the node's own
+// transport/ritual tasks speaking (exposing them would let an agent
+// forge network peers or ritual members);
+// net_test_s3_result is the node's own S3 probe reporting back
+// (net_test_s3 is the tool); net_list_backups_result is the node's
+// own bucket-listing task reporting back (net_list_backups is the
+// tool — an agent must not be able to forge bucket contents);
+// net_ritual_link_ready / net_ritual_failed are the off-actor
+// provisioning task reporting a seat's real link or a provisioning
+// failure; net_recover_link_failed is the recovery-mint provisioning
+// task reporting its failure (recover_invite_start is the tool; the
+// outcome — link or failure — rides the session notice);
+// net_join_sealed / net_join_failed are the off-actor join
+// task reporting back; net_recover_sealed / net_recover_failed are the
+// off-actor rejoin task reporting back (recover_start is the tool);
+// net_recover_announced is the recovery recv loop delivering a
+// rejoiner's mesh announce and net_mesh_extended is the node's own
+// off-actor mesh-extension task reporting its assembled link — both
+// the node's own transport tasks speaking, not agent-forgeable;
+// reload_settings / config_notice are the config
+// watcher's mirror path — an agent that wants a reload edits via
+// save_settings (see docs_archive/security/mcp-security.md)
+// net_mesh_announced is a member's post-founding mesh handover reaching
+// the founder over the star; net_mesh_ready is the founder's off-actor
+// bootstrap task reporting the assembled mesh — both are the node's own
+// transport tasks speaking, not agent-forgeable.
+// net_export_done / net_export_failed are the off-actor export task
+// reporting its real outcome (export_workspace is the tool; an agent
+// must not be able to forge an export success or failure).
+// backup_tick is the backup ticker's own heartbeat; net_backup_done /
+// net_backup_failed are the off-actor backup task reporting its real
+// outcome (backup_now / set_workspace_backup are the tools; an agent
+// must not be able to forge a backup stamp or failure).
+// net_restore_progress / net_restore_staged / net_restore_failed are
+// the off-actor restore task reporting real progress and its staged/
+// failed outcome (restore_start is the tool; the staged blob itself
+// rides an engine-internal slot and the HANDLER re-verifies the
+// chain, so even a forged internal command cannot materialize an
+// unverified workspace). RestoreTick is gone: there is no simulated
+// restore progress anymore.
+// net_poked is the transport handing over an MLS-AUTHENTICATED poke
+// (poke is the tool; an agent must not be able to forge a nudge that
+// claims to come from another member).
+// set_wake_command is the GUI's DIRECT door for the local shell
+// hook; the value itself rides the settings surface as
+// `poke_wake_command` (ADR-0007), so this stays internal only
+// because it is a second door, not because it is off limits.
+/// The commands that are NOT operator verbs: the engine's own clock and its
+/// transport/ritual tasks speaking, plus the window's doors. No remote
+/// operator may send one unless its door names it - MCP refuses them all
+/// (the co-equality test in `molt-mcp` pins tools + this list = every
+/// variant), the web door allows a named few (`docs/web_gui.md` §5.2).
+pub const INTERNAL: [&str; 94] = [
+    // not a door of its own: chat_send/approve/decline/withdraw
+    // build it from their `operator`/`agent` arguments
+    "as_operator",
+    // a referenced file's bytes off the local disk / mirror store
+    // (wiki_files_and_images.md §3.3): the GUI's picture, an agent
+    // gets download_file into its exchange folder
+    "read_upload_bytes",
+    // ui_publish is the WINDOW reporting what it renders — an
+    // agent must not be able to forge what the GUI claims to show
+    // (gui_over_mcp.md); reads go through read_ui_state.
+    "ui_publish",
+    "net_test_s3_result",
+    // net_test_tor_result is the off-actor Tor probe reporting its
+    // real verdict (net_test_tor is the tool; an agent must not be
+    // able to forge a "Tor works" answer for the operator).
+    "net_test_tor_result",
+    "net_presence_tick",
+    "net_delivery_tick",
+    "net_list_backups_result",
+    "backup_tick",
+    "net_backup_done",
+    "net_backup_failed",
+    "net_backup_fetched",
+    "net_restore_progress",
+    // the recovery COORDINATOR's vote report toward the waiting
+    // rejoiner (display data; an agent must not be able to forge
+    // who approved a re-admission)
+    "net_recover_progress",
+    "net_restore_staged",
+    "net_restore_failed",
+    "net_export_done",
+    "net_export_failed",
+    // the off-actor WIKI export task reporting its real outcome
+    // (wiki_export is the tool; an agent must not be able to forge
+    // an export success, least of all one that claims a proof
+    // bundle was written)
+    "net_wiki_export_done",
+    "net_wiki_export_failed",
+    // the off-actor wiki INDEX build reporting its own result: an
+    // agent must not be able to hand this node an index
+    "net_wiki_index_ready",
+    // K6: the folded wiki base arriving off the actor. Never a
+    // tool - a forged base would replace the republic's knowledge
+    // (the bytes are checked against the chain's commitment, so
+    // the worst case is noise, but it stays an engine channel).
+    "net_wiki_base_fetched",
+    "net_wiki_base_failed",
+    "net_file_shared",
+    "net_file_share_failed",
+    "net_file_request_ready",
+    "net_file_progress",
+    "net_file_verifying",
+    "net_file_done",
+    "net_file_failed",
+    // the sharer's off-actor lazy series publish reporting its
+    // stamp (relay file plane) — an agent must not forge one
+    "net_file_series_published",
+    // a PieceWanted control frame landing (the transport speaks), and
+    // the running fetch asking the actor to send one (mirroring §3.2)
+    "net_piece_wanted",
+    "net_piece_want_send",
+    // the mirror gossip landing (the transport speaks; an agent must
+    // not forge another seat's declaration or holdings)
+    "net_mirror_decl",
+    "net_mirror_status",
+    "net_mirror_who",
+    // the mirror worker's own fetch reporting (mirroring §3.3)
+    "net_mirror_progress",
+    "net_mirror_done",
+    // the vault's file-plane fetches reporting (the bytes are checked
+    // against the chain) and the vault control frames landing: an
+    // agent must not forge a payload, a base, another seat's receipt,
+    // reveal or answer, or a reader's ask
+    "net_vault_payload_fetched",
+    "net_vault_payload_failed",
+    "net_vault_base_fetched",
+    "net_vault_base_failed",
+    "net_vault_receipt",
+    "net_vault_reveal",
+    "net_vault_resp",
+    "net_vault_ask",
+    // the purse's off-actor daemon probe and scanner reporting, and
+    // its control frames landing: an agent must not forge a daemon
+    // height, a balance, another seat's run frame, key part status
+    // or view key answer
+    "net_wallet_probe",
+    "net_wallet_frame",
+    "net_wallet_scan",
+    "net_wallet_status",
+    "net_wallet_view_answer",
+    "net_delivered",
+    "net_peer_seen",
+    "net_peer_rekeyed",
+    "net_send_failed",
+    "net_link_up",
+    "net_link_down",
+    "net_send_ok",
+    "net_join_requested",
+    "net_seal_signed",
+    // a member's ❻½ backup attestation (founder ingest) — an agent
+    // must not be able to forge another seat's confirmation
+    "net_backup_confirmed",
+
+    "net_recover_requested",
+    "net_recover_link_ready",
+    "net_recover_link_failed",
+    "net_ritual_link_ready",
+    "net_ritual_failed",
+    // the publish task reporting its real per-relay outcome: an MCP
+    // agent must not be able to forge a relay result and thereby fail
+    // (or fake) a founding leg
+    "net_ritual_published",
+    // a task reporting a transport CONDITION (not an operator
+    // decision): an MCP agent must not be able to write lines into a
+    // founding or join log
+    "net_ritual_note",
+    "net_join_note",
+    "net_recover_note",
+    // the relay probe's verdict: an agent must not be able to forge
+    // one and thereby confirm a dead relay
+    "net_relay_probed",
+    "net_join_sealed",
+    "net_join_failed",
+    "net_recover_sealed",
+    "net_recover_failed",
+    "net_recover_announced",
+    "net_mesh_extended",
+    "net_join_accepted",
+    "net_join_charter_proposed",
+    "net_join_declined",
+    "net_mesh_announced",
+    "net_mesh_ready",
+    "net_poked",
+    // A6: a peer telling this seat that a vote it cast was dropped
+    // for the wrong height - a transport CONDITION, not a decision.
+    // An agent that could forge it would fake a partition.
+    "net_vote_refused",
+    "set_wake_command",
+    "reload_settings",
+    "config_notice",
+    // the byte doors of a frontend that holds bytes and no host path
+    // (the browser window, ADR-0008). An agent runs on the host: it
+    // shares by path (share_file), reads its downloads and exports in
+    // the exchange folder and a picture at the path the view names -
+    // and bulk bytes do not fit the 1 MiB MCP line.
+    "upload_begin",
+    "upload_chunk",
+    "upload_abort",
+    "share_upload",
+    "read_file_bytes",
+    "read_image_bytes",
+    "read_export_bytes",
 ];
 
 impl Command {
@@ -7004,10 +7332,27 @@ pub enum Reply {
         /// Whether, and how, the bytes are on this device.
         local: LocalCopy,
     },
-    /// A referenced file's verified bytes ([`Command::ReadUploadBytes`]).
+    /// Bulk bytes: a referenced file ([`Command::ReadUploadBytes`], its
+    /// sha256 equals the requested checksum), a share
+    /// ([`Command::ReadFileBytes`]), a picture
+    /// ([`Command::ReadImageBytes`]) or an export
+    /// ([`Command::ReadExportBytes`]). The web door sends them as chunks.
     UploadBytes {
-        /// The bytes; their sha256 equals the requested checksum.
+        /// The bytes.
         bytes: Vec<u8>,
+    },
+    /// Where an upload stands ([`Command::UploadBegin`],
+    /// [`Command::UploadChunk`]).
+    UploadProgress {
+        /// The upload's id.
+        upload: String,
+        /// Bytes the store holds.
+        received: u64,
+        /// The declared size.
+        size: u64,
+        /// The file is whole and on disk.
+        #[serde(default)]
+        done: bool,
     },
     /// The log's newest entries, newest LAST ([`Command::ReadLog`]).
     Log {
@@ -7021,6 +7366,8 @@ pub enum Reply {
         /// The phrase, space-separated words.
         seed: String,
     },
+    /// What a link is ([`Command::ClassifyLink`]).
+    Link(LinkView),
     /// The whole shared session state (boxed: it is by far the largest reply).
     Session(Box<SessionView>),
     /// The persistent chain as display views (the Chain-History read),
@@ -8515,8 +8862,11 @@ pub enum SessionScope {
     Join,
 }
 
-/// Errors returned to an operator.
-#[derive(Debug, thiserror::Error)]
+/// Errors returned to an operator. Serializable as itself, so a remote
+/// operator (the web door, `wire.rs`) gets the variant and its payload,
+/// not a flattened string.
+#[derive(Debug, Clone, thiserror::Error, Serialize, Deserialize, strum::VariantNames, strum::IntoStaticStr)]
+#[serde(rename_all = "snake_case")]
 pub enum MoltError {
     /// The named proposal does not exist.
     #[error("unknown proposal {0}")]
@@ -8531,7 +8881,7 @@ pub enum MoltError {
     /// (`charter_features.md` D7) — selecting or proposing on it is
     /// refused engine-side, the co-equal twin of the nav hiding it.
     #[error("{0}: not enabled")]
-    FeatureDisabled(&'static str),
+    FeatureDisabled(std::borrow::Cow<'static, str>),
     /// The proposal is already in a terminal state.
     #[error("proposal {0} is already {1}")]
     AlreadyTerminal(ProposalId, ProposalState),
@@ -8616,11 +8966,11 @@ pub enum MoltError {
     Recover(String),
     /// A poke was refused (feature off, unknown target, or self-poke).
     #[error("poke: {0}")]
-    Poke(&'static str),
+    Poke(std::borrow::Cow<'static, str>),
     /// A wiki export was refused (empty wiki, no target, no chain behind a
     /// proof, or one already running).
     #[error("wiki export: {0}")]
-    WikiExport(&'static str),
+    WikiExport(std::borrow::Cow<'static, str>),
     /// The wiki index is still being built off the actor
     /// (`docs_archive/memory/knowledge_base_scale.md` §4.5/§4.6). Distinct from
     /// [`MoltError::Engine`] on purpose: this is "come back in a moment",
@@ -8677,7 +9027,19 @@ pub enum MoltError {
     /// The engine task is gone or did not answer.
     #[error("engine: {0}")]
     Engine(String),
+    /// A door refused the command before the engine saw it (the web
+    /// door's gate, `docs/web_gui.md` §5.2).
+    #[error("refused: {0}")]
+    Refused(std::borrow::Cow<'static, str>),
 }
+
+/// The refusal of a new handle outside ASCII + ä ö ü ß. The engine says
+/// it and the GUI keys its German rendering on it, so it is one constant.
+pub const HANDLE_CHARSET_REFUSAL: &str = "the handle may contain only ASCII and ä ö ü ß";
+
+/// What a purse keys file that does not authenticate reads as: storage's
+/// error text, which the GUI recognises in a backup row and a toast.
+pub const WALLET_KEYS_DAMAGED: &str = "wallet_keys.state is damaged";
 
 #[cfg(test)]
 mod tests {
@@ -10084,5 +10446,21 @@ mod tests {
         let life = thread_lives([&old, &close, &within], WEEK).remove("a").expect("t");
         assert_eq!(life.closed_by.as_deref(), Some("anna"));
         assert_eq!(life.since, 100);
+    }
+}
+
+#[cfg(test)]
+mod bare_name_tests {
+    use super::is_bare_name;
+
+    #[test]
+    fn a_bare_name_is_one_path_component() {
+        for name in ["a.enc", "~a.enc", "a b", ".hidden"] {
+            assert!(is_bare_name(name), "{name:?}");
+        }
+        let long = "a".repeat(256);
+        for name in ["", ".", "..", "~/a", "/a", "d/a", "d\\a", "a\0", long.as_str()] {
+            assert!(!is_bare_name(name), "{name:?}");
+        }
     }
 }

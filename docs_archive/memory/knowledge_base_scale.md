@@ -204,8 +204,9 @@ New commands in `molt_core::Command`, tools in `molt-mcp`, scope Read:
 
 ### 4.4 Front matter: the YAML subset (K4)
 
-Where: `crates/molt-engine/src/wiki_index/front_matter.rs`, pure
-functions, no I/O; molt-ui reuses them. Parser: `yaml-rust2` (0.12, YAML
+Where: `crates/molt-core/src/wiki_front_matter.rs` (moved from the
+engine 2026-11-18; `crates/molt-engine/src/wiki_index/front_matter.rs`
+re-exports it), pure functions, no I/O; molt-ui reuses them. Parser: `yaml-rust2` (0.12, YAML
 1.2, pure Rust) driven through its `parser::Parser` EVENTS, never through
 `YamlLoader`, so a plain scalar keeps its raw text - the subset is defined
 over events and kills the `no` → `false` class of surprises by rule.
@@ -268,7 +269,7 @@ A header value keeps exactly this parse: `[[a::b]]` there is the name
 `a::b`, not a predicate. The inline form lives in the BODY only (§4.5).
 
 **The canonical EMITTER (BUILT 2026-09-05), in the parser's own crate**
-(`wiki_index/front_matter.rs`, exported as `molt_engine::canonical_header`
+(`molt_core::wiki_front_matter`, also exported as `molt_engine::canonical_header`
 / `emit_header_key` / `emit_header_value` / `yaml_quote` /
 `header_value_list` / `header_lines` / `header_body_span`). ONE of them:
 the GUI's relation modal and the engine's `wiki_edit` (§4.12) write the
@@ -303,7 +304,9 @@ replaced or removed is refused, never written.
 
 ### 4.5 The link graph (K4)
 
-`crates/molt-engine/src/wiki_index/graph.rs`:
+`crates/molt-engine/src/wiki_index/graph.rs` (the body-link parser
+itself - `body_links`, `link_parts`, `rewrite_link_target` - lives in
+`crates/molt-core/src/wiki_links.rs` since 2026-11-18, re-exported here):
 
 - `body_links(markdown) -> Vec<BodyLink { target, predicate }>`:
   pulldown-cmark link destinations ending in `.md` (moved from

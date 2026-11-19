@@ -225,46 +225,12 @@ fn encode(img: &image::DynamicImage, fmt: image::ImageFormat) -> Option<Vec<u8>>
     Some(out.into_inner())
 }
 
-/// The [`AvatarCache`] key for a materialized avatar file: its path plus
-/// what identifies THIS version of it.
-///
-/// A seat that replaces its picture keeps the same file name
-/// (`avatar-<stem>.<ext>`), so a path-only key would keep serving the old
-/// decode forever. Runs a stat, so it belongs in the off-UI-thread gather
-/// pass, never in the row mapping.
-pub(crate) fn avatar_cache_key(path: &str) -> String {
-    if path.is_empty() {
-        return String::new();
-    }
-    let Ok(meta) = std::fs::metadata(path) else {
-        return path.to_string();
-    };
-    let stamp = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_nanos());
-    format!("{path}|{}|{stamp}", meta.len())
-}
-
-/// Whether the republic's picture must be decoded again, and under which
-/// key. The engine materializes it as `logo.<ext>`, so REPLACING the picture
-/// with the same format leaves the path byte-identical - a reload guarded on
-/// the path string alone then shows the old picture until the app restarts.
-/// The member avatars carry the same trap and are keyed by content for
-/// exactly this reason.
-pub(crate) fn logo_needs_reload(shown_key: &str, image_ref: &str) -> Option<String> {
-    let key = avatar_cache_key(image_ref);
-    (key != shown_key).then_some(key)
-}
-
-/// The decoded member avatars, keyed by [`avatar_cache_key`].
+/// The decoded member avatars, keyed by [`crate::bytes::picture_key`].
 ///
 /// The mirror MAPS every row on every push (only the write is skipped),
 /// so a decode inside the row mapping would re-decode the whole roster on
-/// every engine event. This remembers the answer - the miss included, so a
-/// picture whose file is not on this device does not re-read per push
-/// either.
+/// every engine event. This remembers the answer - bytes that are no
+/// picture included, so they are not decoded again per push either.
 #[derive(Default)]
 pub(crate) struct AvatarCache {
     by_path: HashMap<String, Option<slint::Image>>,

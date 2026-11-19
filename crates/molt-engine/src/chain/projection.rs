@@ -264,7 +264,7 @@ impl State {
     /// agent meets (co-equality — clickable or refused must be one verdict).
     pub(crate) fn require_feature(&self, surface: Surface) -> Result<(), molt_core::MoltError> {
         if surface.is_charter_feature() && !self.feature_on(surface) {
-            return Err(molt_core::MoltError::FeatureDisabled(surface.as_str()));
+            return Err(molt_core::MoltError::FeatureDisabled(surface.as_str().into()));
         }
         Ok(())
     }

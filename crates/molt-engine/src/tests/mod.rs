@@ -19,4 +19,5 @@ mod recovery_tests;
 mod session_tests;
 mod thread_tests;
 mod upload_refs_tests;
+mod upload_store_tests;
 mod workspace_tests;

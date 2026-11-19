@@ -115,10 +115,7 @@ pub(crate) fn derive_channels(
 
 /// Unix seconds now (the thread rows' time-left base).
 pub(crate) fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+    crate::platform::platform().unix_now()
 }
 
 /// A thread's time left, short and ROUNDED to the nearest unit (a fresh

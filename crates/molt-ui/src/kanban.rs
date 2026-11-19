@@ -743,7 +743,7 @@ pub(crate) fn today_of(feed: &KanbanFeed) -> NaiveDate {
         .and_then(|b| b.get("today"))
         .and_then(Value::as_str)
         .and_then(parse_date)
-        .unwrap_or_else(|| chrono::Utc::now().date_naive())
+        .unwrap_or_else(|| crate::platform::utc_now().date_naive())
 }
 
 /// The headline a basket proposes under when nobody wrote one.

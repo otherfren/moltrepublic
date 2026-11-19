@@ -11,6 +11,7 @@
 //! Slint sees only flat row models built from [`Wiki`] (bridge in `lib.rs`);
 //! this module stays slint-free so the whole state machine tests headless.
 
+use molt_core::{wiki_front_matter as front_matter, wiki_links};
 use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use similar::{capture_diff_slices, Algorithm, DiffOp};
 
@@ -2197,9 +2198,9 @@ impl Wiki {
         let next = format!("---\n{}: [{}]\n---\n{}", TAG_KEY, literals.join(", "), d.raw);
         // the engine is the arbiter: a header it cannot read back is not
         // one this program writes
-        let holds = molt_engine::properties(&next)
+        let holds = front_matter::properties(&next)
             .0
-            .and_then(|m| m.get(TAG_KEY).map(|v| molt_engine::header_value_list(Some(v))))
+            .and_then(|m| m.get(TAG_KEY).map(|v| front_matter::value_list(Some(v))))
             .is_some_and(|got| {
                 got == kept
                     .iter()
@@ -2398,7 +2399,7 @@ impl Wiki {
         self.ont.error = "";
         if let Some(i) = self.ont.on.iter().position(|k| k == key) {
             self.ont.on.remove(i);
-        } else if molt_engine::header_key_ok(key) {
+        } else if front_matter::key_ok(key) {
             self.ont.on.push(key.to_string());
         }
     }
@@ -2407,7 +2408,7 @@ impl Wiki {
     /// key rule decides - a key it would reject never reaches a header.
     pub fn link_add_custom(&mut self) -> bool {
         let key = self.ont.custom.trim().to_string();
-        if !molt_engine::header_key_ok(&key) {
+        if !front_matter::key_ok(&key) {
             return false;
         }
         self.ont.custom.clear();
@@ -2479,9 +2480,9 @@ impl Wiki {
         self.active().is_some_and(|d| {
             d.loaded()
                 && !d.deleted
-                && match molt_engine::split_front_matter(&d.raw).0 {
+                && match front_matter::split(&d.raw).0 {
                     None => true,
-                    Some(_) => molt_engine::properties(&d.raw).0.is_some(),
+                    Some(_) => front_matter::properties(&d.raw).0.is_some(),
                 }
         })
     }
@@ -2512,7 +2513,7 @@ impl Wiki {
         }
         let keys: Vec<&String> = keys
             .iter()
-            .filter(|k| molt_engine::header_key_ok(k))
+            .filter(|k| front_matter::key_ok(k))
             .collect();
         if keys.is_empty() {
             return false;
@@ -2559,7 +2560,7 @@ impl Wiki {
         }
         let keys: Vec<&String> = keys
             .iter()
-            .filter(|k| molt_engine::header_key_ok(k))
+            .filter(|k| front_matter::key_ok(k))
             .collect();
         if keys.is_empty() {
             return Err(LINK_ERR_BODY);
@@ -2571,15 +2572,15 @@ impl Wiki {
             .join(" ");
         // the edges the write must produce, read back with the INDEX's own
         // parser - a claim the graph cannot see is not a claim
-        let want: Vec<molt_engine::BodyLink> = keys
+        let want: Vec<wiki_links::BodyLink> = keys
             .iter()
-            .map(|k| molt_engine::BodyLink {
+            .map(|k| wiki_links::BodyLink {
                 target: link_half(target),
                 predicate: Some((*k).clone()),
             })
             .collect();
         let asserts = |doc: &str| {
-            let got = molt_engine::body_links(body_of(doc));
+            let got = wiki_links::body_links(body_of(doc));
             want.iter().all(|w| got.contains(w))
         };
         let raw = d.raw.clone();
@@ -2742,7 +2743,7 @@ impl Wiki {
         }
         let keys: Vec<&String> = keys
             .iter()
-            .filter(|k| molt_engine::header_key_ok(k))
+            .filter(|k| front_matter::key_ok(k))
             .collect();
         if keys.is_empty() {
             return Err(LINK_ERR_HEADER);
@@ -2762,7 +2763,7 @@ impl Wiki {
         let value = serde_json::Value::Object(map);
         let mut raw = d.raw.clone();
         for key in keys {
-            let held = molt_engine::properties(&raw).0.and_then(|m| m.get(key).cloned());
+            let held = front_matter::properties(&raw).0.and_then(|m| m.get(key).cloned());
             // a key already holding a plain value would grow into a list
             // mixing scalars and mappings - the subset READS that back, so
             // the member's own value would quietly become a sibling
@@ -2785,7 +2786,7 @@ impl Wiki {
         self.docs
             .iter()
             .find(|d| d.path == path)
-            .and_then(|d| molt_engine::first_heading(&d.raw))
+            .and_then(|d| front_matter::first_heading(&d.raw))
             .unwrap_or_else(|| {
                 path.rsplit('/')
                     .next()
@@ -3259,7 +3260,7 @@ fn finish_block(mut b: Block, out: &mut Vec<Block>) {
 /// `.md` link targets in order of first appearance, deduped. The
 /// navigator cares where a link GOES; what it asserts rides the spans.
 pub fn parse_links(raw: &str) -> Vec<String> {
-    molt_engine::body_link_targets(raw)
+    wiki_links::body_link_targets(raw)
 }
 
 /// The document without its front matter: the header is rendered as the
@@ -3273,7 +3274,7 @@ pub fn parse_links(raw: &str) -> Vec<String> {
 /// only component pretending a header is there - the member would never
 /// learn why their tags do not show.
 pub fn body_of(raw: &str) -> &str {
-    molt_engine::split_front_matter(raw).1
+    front_matter::split(raw).1
 }
 
 /// The private marker an inline-code run carries while its block is being
@@ -3285,7 +3286,7 @@ const CODE_RUN: &str = "\u{1}";
 /// form into link runs, once the block's runs are WHOLE. It cannot be
 /// done per event: an unmatched `[` makes pulldown-cmark split a double
 /// bracket across several text events, so a per-event scan never sees the
-/// pair. The split itself is the index's (`molt_engine::link_parts`), so
+/// pair. The split itself is the index's (`wiki_links::link_parts`), so
 /// the pane and the graph can never disagree about what a link asserts.
 fn expand_wiki_links(b: &mut Block) {
     let mut out: Vec<Span> = Vec::new();
@@ -3316,7 +3317,7 @@ fn expand_wiki_links(b: &mut Block) {
             let Some(end) = rest[at + 2..].find("]]") else {
                 break;
             };
-            let parts = molt_engine::link_parts(&rest[at + 2..at + 2 + end]);
+            let parts = wiki_links::link_parts(&rest[at + 2..at + 2 + end]);
             // an empty display half falls back to the name: the index reads
             // `[[Name|]]` as an edge, so the pane must not read it as prose
             let shown = parts.display.unwrap_or(parts.name);
@@ -3353,7 +3354,7 @@ fn tag_literal(tag: &str) -> String {
     if bare {
         tag.to_string()
     } else {
-        molt_engine::yaml_quote(tag)
+        front_matter::yaml_quote(tag)
     }
 }
 
@@ -3490,7 +3491,7 @@ fn parse_qualifiers(line: &str) -> Option<Vec<(String, serde_json::Value)>> {
     for part in line.split(',').filter(|p| !p.trim().is_empty()) {
         let (key, value) = part.split_once(':')?;
         let (key, value) = (key.trim(), value.trim());
-        if !molt_engine::header_key_ok(key) || value.is_empty() {
+        if !front_matter::key_ok(key) || value.is_empty() {
             return None;
         }
         if out.iter().any(|(k, _)| k == key) {
@@ -3518,8 +3519,8 @@ fn qual_value(text: &str) -> serde_json::Value {
 /// a qualified write that the line-wise edit gets wrong is REFUSED, so a
 /// member's own formatting is never re-emitted behind their back.
 fn with_qualified(raw: &str, key: &str, value: &serde_json::Value) -> Option<String> {
-    let literal = molt_engine::emit_header_scalar(value);
-    let Some((start, end)) = molt_engine::header_body_span(raw) else {
+    let literal = front_matter::emit_scalar(value);
+    let Some((start, end)) = front_matter::header_body_span(raw) else {
         // a block the engine rejected (oversized, unclosed) stays untouched
         if raw.starts_with("---\n") || raw.starts_with("---\r\n") {
             return None;
@@ -3527,9 +3528,9 @@ fn with_qualified(raw: &str, key: &str, value: &serde_json::Value) -> Option<Str
         let next = format!("---\n{key}: {literal}\n---\n{raw}");
         return grew_by_value(&next, &serde_json::Map::new(), key, value).then_some(next);
     };
-    let before = molt_engine::properties(raw).0?;
+    let before = front_matter::properties(raw).0?;
     let (head, lead, tail) = (raw.get(start..end)?, raw.get(..start)?, raw.get(end..)?);
-    let patched = format!("{lead}{}{tail}", molt_engine::header_lines(head, key, &literal));
+    let patched = format!("{lead}{}{tail}", front_matter::header_lines(head, key, &literal));
     grew_by_value(&patched, &before, key, value).then_some(patched)
 }
 
@@ -3541,7 +3542,7 @@ fn grew_by_value(
     key: &str,
     value: &serde_json::Value,
 ) -> bool {
-    let Some(after) = molt_engine::properties(doc).0 else {
+    let Some(after) = front_matter::properties(doc).0 else {
         return false;
     };
     if after.len() != before.len() + usize::from(!before.contains_key(key)) {
@@ -3552,9 +3553,9 @@ fn grew_by_value(
             return false;
         }
     }
-    let mut want = molt_engine::header_value_list(before.get(key));
+    let mut want = front_matter::value_list(before.get(key));
     want.push(value.clone());
-    molt_engine::header_value_list(after.get(key)) == want
+    front_matter::value_list(after.get(key)) == want
 }
 
 /// `raw` with `display` added under `key`, or `None` when the result
@@ -3565,8 +3566,8 @@ fn grew_by_value(
 /// as "the same header plus this value" is thrown away for a canonical
 /// re-emit, and a header it cannot read at all is never touched.
 fn with_relation(raw: &str, key: &str, display: &str) -> Option<String> {
-    let literal = molt_engine::yaml_quote(display);
-    let Some((start, end)) = molt_engine::header_body_span(raw) else {
+    let literal = front_matter::yaml_quote(display);
+    let Some((start, end)) = front_matter::header_body_span(raw) else {
         // a block the engine rejected (oversized, unclosed) stays untouched
         if raw.starts_with("---\n") || raw.starts_with("---\r\n") {
             return None;
@@ -3574,13 +3575,13 @@ fn with_relation(raw: &str, key: &str, display: &str) -> Option<String> {
         let next = format!("---\n{key}: {literal}\n---\n{raw}");
         return grew_by(&next, &serde_json::Map::new(), key, display).then_some(next);
     };
-    let before = molt_engine::properties(raw).0?;
+    let before = front_matter::properties(raw).0?;
     let (head, lead, tail) = (raw.get(start..end)?, raw.get(..start)?, raw.get(end..)?);
-    let patched = format!("{lead}{}{tail}", molt_engine::header_lines(head, key, &literal));
+    let patched = format!("{lead}{}{tail}", front_matter::header_lines(head, key, &literal));
     if grew_by(&patched, &before, key, display) {
         return Some(patched);
     }
-    let rebuilt = format!("{lead}{}{tail}", molt_engine::canonical_header(&before, key, display));
+    let rebuilt = format!("{lead}{}{tail}", front_matter::canonical_header(&before, key, display));
     grew_by(&rebuilt, &before, key, display).then_some(rebuilt)
 }
 
@@ -3597,13 +3598,13 @@ fn grew_by(
 /// A document is open to a header when its ratified bytes are here and it
 /// has none yet.
 fn header_addable(d: &Doc) -> bool {
-    d.loaded() && molt_engine::split_front_matter(&d.raw).0.is_none()
+    d.loaded() && front_matter::split(&d.raw).0.is_none()
 }
 
 /// A document's header as ordered `key -> values` - the shape the infobox
 /// diffs base against working on.
 fn info_props(raw: &str) -> std::collections::BTreeMap<String, Vec<(String, String)>> {
-    let Some(props) = molt_engine::properties(raw).0 else {
+    let Some(props) = front_matter::properties(raw).0 else {
         return std::collections::BTreeMap::new();
     };
     props
@@ -3625,7 +3626,7 @@ fn link_shown(s: &str) -> String {
             .unwrap_or(target)
             .to_string();
     }
-    molt_engine::link_target(s).unwrap_or(s).to_string()
+    front_matter::link_target(s).unwrap_or(s).to_string()
 }
 
 /// One header value as infobox rows: `(shown, link target)`. A mapping is
@@ -3635,7 +3636,7 @@ fn info_values(value: &serde_json::Value) -> Vec<(String, String)> {
         match v {
             serde_json::Value::String(s) => Some((
                 link_shown(s),
-                molt_engine::link_target(s).unwrap_or_default().to_string(),
+                front_matter::link_target(s).unwrap_or_default().to_string(),
             )),
             serde_json::Value::Number(n) => Some((n.to_string(), String::new())),
             _ => None,
@@ -3649,7 +3650,7 @@ fn info_values(value: &serde_json::Value) -> Vec<(String, String)> {
             .into_iter()
             .chain(map.values())
             .filter_map(|v| v.as_str())
-            .find_map(molt_engine::link_target)
+            .find_map(front_matter::link_target)
             .unwrap_or_default()
             .to_string();
         let shown = map
@@ -4608,7 +4609,7 @@ mod tests {
         assert!(raw.starts_with("---\nlives_in: "), "{raw}");
         // the engine reads it back: a header it rejects has no properties
         assert!(
-            molt_engine::properties(raw).0.is_some_and(|m| m.contains_key("lives_in")),
+            front_matter::properties(raw).0.is_some_and(|m| m.contains_key("lives_in")),
             "the subset must accept what we wrote: {raw}"
         );
     }
@@ -4641,8 +4642,8 @@ mod tests {
         );
         // …and the INDEX reads back exactly the edge the member drew
         assert_eq!(
-            molt_engine::body_links(&w.doc(id).expect("open").raw),
-            vec![molt_engine::BodyLink {
+            wiki_links::body_links(&w.doc(id).expect("open").raw),
+            vec![wiki_links::BodyLink {
                 target: "acme.md".to_string(),
                 predicate: Some("works_at".to_string()),
             }]
@@ -4777,7 +4778,7 @@ mod tests {
             "# A\n\n[[is_a::acme.md|Acme]] [[part_of::acme.md|Acme]]\n"
         );
         assert_eq!(
-            molt_engine::body_links(&w.doc(id).expect("open").raw)
+            wiki_links::body_links(&w.doc(id).expect("open").raw)
                 .into_iter()
                 .map(|l| (l.target, l.predicate))
                 .collect::<Vec<_>>(),
@@ -4814,7 +4815,7 @@ mod tests {
         assert!(w.link_commit());
         let raw = w.doc(id).expect("open").raw.clone();
         assert_eq!(
-            molt_engine::properties(&raw).0.and_then(|m| m.get("works_at").cloned()),
+            front_matter::properties(&raw).0.and_then(|m| m.get("works_at").cloned()),
             Some(serde_json::json!({
                 "to": "[[acme.md|Acme]]",
                 "since": 2019,
@@ -4965,12 +4966,12 @@ mod tests {
         ];
         for (head, key) in shapes {
             let raw = format!("---\n{head}---\n# A\n");
-            let before = molt_engine::properties(&raw)
+            let before = front_matter::properties(&raw)
                 .0
                 .unwrap_or_else(|| panic!("the fixture itself must parse: {raw:?}"));
             let next = with_relation(&raw, key, "[[b.md|B]]")
                 .unwrap_or_else(|| panic!("refused a readable header: {raw:?}"));
-            let after = molt_engine::properties(&next)
+            let after = front_matter::properties(&next)
                 .0
                 .unwrap_or_else(|| panic!("wrote a header the engine rejects: {next:?}"));
             for (k, v) in &before {
@@ -4978,10 +4979,10 @@ mod tests {
                     assert_eq!(after.get(k), Some(v), "{k} was lost writing {raw:?}");
                 }
             }
-            let mut want = molt_engine::header_value_list(before.get(*key));
+            let mut want = front_matter::value_list(before.get(*key));
             want.push(serde_json::Value::String("[[b.md|B]]".to_string()));
             assert_eq!(
-                molt_engine::header_value_list(after.get(*key)),
+                front_matter::value_list(after.get(*key)),
                 want,
                 "the key must GROW, not be replaced: {raw:?} -> {next:?}"
             );
@@ -4995,7 +4996,7 @@ mod tests {
             // the document HAS no properties and we must not pretend
             "---\nsee_also: [\n  \"[[a.md]]\",\n]\n---\n# A\n",
         ] {
-            assert!(molt_engine::properties(broken).0.is_none(), "the fixture is broken");
+            assert!(front_matter::properties(broken).0.is_none(), "the fixture is broken");
             assert_eq!(with_relation(broken, "see_also", "[[b.md]]"), None, "{broken:?}");
         }
     }
@@ -5012,11 +5013,11 @@ mod tests {
             w.open(id);
             assert!(w.set_tags(id, &[tag.to_string()]), "{tag} was refused");
             let raw = &w.doc(id).expect("open").raw;
-            let props = molt_engine::properties(raw)
+            let props = front_matter::properties(raw)
                 .0
                 .unwrap_or_else(|| panic!("{tag} broke the header: {raw:?}"));
             assert_eq!(
-                molt_engine::header_value_list(props.get(TAG_KEY)),
+                front_matter::value_list(props.get(TAG_KEY)),
                 vec![serde_json::Value::String(tag.to_string())],
                 "{tag} did not come back as itself"
             );

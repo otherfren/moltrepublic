@@ -1111,9 +1111,9 @@ fn check_roster_anchors(identities: &[molt_core::MemberIdentity]) -> Result<(), 
     Ok(())
 }
 
-/// The refusal of a new handle outside ASCII + ä ö ü ß; molt-ui keys its
-/// German rendering on it.
-pub const HANDLE_CHARSET_REFUSAL: &str = "the handle may contain only ASCII and ä ö ü ß";
+/// The refusal of a new handle outside ASCII + ä ö ü ß (core holds the
+/// text; molt-ui keys its German rendering on it).
+pub use molt_core::HANDLE_CHARSET_REFUSAL;
 
 /// A NEW member handle as it may be anchored: [`check_handle_shape`] plus
 /// ASCII and ä ö ü ß only.
@@ -1839,6 +1839,7 @@ mod ritual_ops {
             }
             let idx = usize::try_from(seat).unwrap_or(usize::MAX);
             if let Some(view) = self.session.create.seats.get_mut(idx) {
+                view.joinable = FoundingInvite::parse(&link).is_ok();
                 view.link = link;
             }
             self.emit_session(molt_core::SessionScope::Create);

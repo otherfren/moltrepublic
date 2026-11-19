@@ -341,7 +341,7 @@ pub(crate) fn consent_notes(lang: i32) -> String {
 /// once per damage of the open one's key part file.
 pub(crate) fn apply_loss(ui: &AppWindow, sv: &molt_core::SessionView) {
     let p = ui.global::<Purse>();
-    let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+    let damaged = molt_core::WALLET_KEYS_DAMAGED;
     let open = &sv.active_workspace;
     let hit = !open.is_empty() && sv.workspaces.iter().any(|w| &w.id == open && w.backup_error == damaged);
     if !hit {
@@ -354,7 +354,7 @@ pub(crate) fn apply_loss(ui: &AppWindow, sv: &molt_core::SessionView) {
 
 /// The closed republics a damaged key part file holds, by name.
 pub(crate) fn damaged_elsewhere(sv: &molt_core::SessionView) -> Vec<String> {
-    let damaged = molt_storage::StorageError::WalletKeysDamaged.to_string();
+    let damaged = molt_core::WALLET_KEYS_DAMAGED;
     sv.workspaces
         .iter()
         .filter(|w| w.id != sv.active_workspace && w.backup_error == damaged)

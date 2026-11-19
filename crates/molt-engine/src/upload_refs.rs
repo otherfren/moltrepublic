@@ -230,20 +230,110 @@ impl State {
             )));
         }
         let source = self.byte_source(&upload, &r.local)?;
-        // taken LAST: every refusal above is answered by the actor loop
+        self.answer_bytes(source, Some(upload.checksum), cap, None)
+    }
+
+    /// Read `source` in a blocking task that answers the operator itself
+    /// through the deferred reply slot; with `want`, only bytes whose
+    /// sha256 it is. Called LAST: every refusal before it is answered by
+    /// the actor loop.
+    ///
+    /// `behind` is the storage writer the source must be read BEHIND: a
+    /// file that writer materializes off the actor (a picture) is read
+    /// only once everything queued so far is on disk.
+    fn answer_bytes(
+        &mut self,
+        source: ByteSource,
+        want: Option<String>,
+        cap: u64,
+        behind: Option<molt_storage::StorageHandle>,
+    ) -> Result<Reply, MoltError> {
         let Some(reply) = self.deferred_reply.take() else {
             return Err(MoltError::Engine("upload bytes: no reply channel".to_string()));
         };
-        let want = upload.checksum;
         tokio::spawn(async move {
-            let out = match tokio::task::spawn_blocking(move || read_verified(&source, &want, cap)).await
-            {
+            let read = move || {
+                if let Some(writer) = behind {
+                    // a failed writer leaves the file as it is: read that
+                    let _ = writer.flush_blocking();
+                }
+                match want {
+                    Some(want) => read_verified(&source, &want, cap),
+                    None => read_source(&source, cap).map(|bytes| Reply::UploadBytes { bytes }),
+                }
+            };
+            let out = match tokio::task::spawn_blocking(read).await {
                 Ok(res) => res,
                 Err(e) => Err(MoltError::Engine(format!("upload bytes: read task failed: {e}"))),
             };
             let _ = reply.send(out);
         });
         Ok(Reply::Ack)
+    }
+
+    /// [`molt_core::Command::ReadFileBytes`]: a share's bytes by its
+    /// message id, from the best local source, re-hashed like
+    /// [`State::cmd_read_upload_bytes`].
+    pub(crate) fn cmd_read_file_bytes(&mut self, id: MessageId, cap: u64) -> Result<Reply, MoltError> {
+        if self.share_deleted(&id) {
+            return Err(MoltError::FileDeleted(id));
+        }
+        // an id that names no share is refused here
+        self.share_identity(&id)?;
+        if self.share_expired(&id) {
+            return Err(MoltError::FileExpired(id));
+        }
+        let Some(upload) = self.uploads_view().into_iter().find(|u| u.id == id) else {
+            return Err(MoltError::NoFile(id));
+        };
+        if upload.size > cap {
+            return Err(MoltError::BadPayload(format!(
+                "upload bytes: {} bytes over the {cap} cap",
+                upload.size
+            )));
+        }
+        let local = self.local_copy_of(&upload);
+        let source = self.byte_source(&upload, &local)?;
+        self.answer_bytes(source, Some(upload.checksum), cap, None)
+    }
+
+    /// The file behind a picture key: `key` must BE the open workspace's
+    /// current logo or a member's current picture, as the views carry it,
+    /// and that reference must be a file this engine materialized in the
+    /// workspace directory. The key is compared - a session-only
+    /// workspace's reference is a display value somebody proposed, and is
+    /// never opened.
+    pub(crate) fn image_source(&self, key: &str) -> Result<std::path::PathBuf, MoltError> {
+        let unknown = || MoltError::BadPayload("unknown image".to_string());
+        let dir = self.active.as_ref().map(|a| a.dir.as_path()).ok_or_else(unknown)?;
+        let current = !key.is_empty()
+            && (self.org_effective().image == key
+                || self.member_profiles().values().any(|p| p.image == key));
+        let path = std::path::Path::new(key);
+        if !current || path.parent() != Some(dir) {
+            return Err(unknown());
+        }
+        Ok(path.to_path_buf())
+    }
+
+    /// [`molt_core::Command::ReadImageBytes`].
+    pub(crate) fn cmd_read_image_bytes(&mut self, key: String, cap: u64) -> Result<Reply, MoltError> {
+        let path = self.image_source(&key)?;
+        // the picture's file is written off the actor when its change
+        // applies: a read right behind that must not see the old file
+        let writer = self.active.as_ref().map(|a| a.handle.clone());
+        self.answer_bytes(ByteSource::File(path), None, cap, writer)
+    }
+
+    /// [`molt_core::Command::ReadExportBytes`]: the blob the last export
+    /// of this run wrote. The path is the engine's own record of it.
+    pub(crate) fn cmd_read_export_bytes(&mut self, cap: u64) -> Result<Reply, MoltError> {
+        let export = &self.session.export;
+        if export.running || export.result != "ok" || export.dest.is_empty() {
+            return Err(MoltError::BadPayload("no export to read".to_string()));
+        }
+        let path = std::path::PathBuf::from(&export.dest);
+        self.answer_bytes(ByteSource::File(path), None, cap, None)
     }
 
     /// The best local source of `upload`'s bytes, in the precedence of
@@ -302,6 +392,15 @@ pub(crate) enum ByteSource {
 /// the transfer plane's verification is repeated on read, so a swapped
 /// file in the exchange folder is a refusal, never a picture).
 pub(crate) fn read_verified(source: &ByteSource, want: &str, cap: u64) -> Result<Reply, MoltError> {
+    let bytes = read_source(source, cap)?;
+    if hex::encode(sha2::Sha256::digest(&bytes)) != want {
+        return Err(MoltError::Engine("upload bytes: checksum mismatch".to_string()));
+    }
+    Ok(Reply::UploadBytes { bytes })
+}
+
+/// The bytes of `source`, refused past `cap` before and during the read.
+fn read_source(source: &ByteSource, cap: u64) -> Result<Vec<u8>, MoltError> {
     let bytes = match source {
         ByteSource::File(path) => {
             let len = std::fs::metadata(path)
@@ -334,10 +433,7 @@ pub(crate) fn read_verified(source: &ByteSource, want: &str, cap: u64) -> Result
             open_pieces(dir, key, *count, *size)?
         }
     };
-    if hex::encode(sha2::Sha256::digest(&bytes)) != want {
-        return Err(MoltError::Engine("upload bytes: checksum mismatch".to_string()));
-    }
-    Ok(Reply::UploadBytes { bytes })
+    Ok(bytes)
 }
 
 /// Concatenate the mirror's sealed data pieces in index order. A piece

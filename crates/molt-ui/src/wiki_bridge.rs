@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
+use molt_core::wiki_front_matter as front_matter;
 use molt_core::{Command, LocalCopy, Reply, Surface, UploadView};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
@@ -72,7 +73,7 @@ pub(crate) struct FaceState {
     /// The draft last handed to the engine, when, and the model
     /// generation it was taken at.
     draft: String,
-    draft_at: std::time::Instant,
+    draft_at: std::time::Duration,
     draft_gen: u64,
     /// A change is waiting for the 2 s window to close, and a timer is
     /// armed to save it there: without one, a member who types once and
@@ -86,12 +87,17 @@ pub(crate) struct FaceState {
     doc_key: Option<(wiki::DocId, u64)>,
 }
 
+/// How long ago, on the monotonic clock, a draft stamped `at` was taken.
+fn draft_age(at: std::time::Duration) -> std::time::Duration {
+    crate::platform::platform().monotonic().saturating_sub(at)
+}
+
 impl FaceState {
     fn new() -> Self {
         FaceState {
             raw_for: None,
             draft: String::new(),
-            draft_at: std::time::Instant::now(),
+            draft_at: crate::platform::platform().monotonic(),
             draft_gen: 0,
             draft_pending: false,
             flush_armed: false,
@@ -826,14 +832,14 @@ fn sync_draft(ui: &AppWindow, w: &wiki::Wiki, face: &mut FaceState, forced: bool
     if gen == face.draft_gen {
         return false;
     }
-    if !forced && face.draft_at.elapsed() < DRAFT_WINDOW {
+    if !forced && draft_age(face.draft_at) < DRAFT_WINDOW {
         return true;
     }
     face.draft_gen = gen;
     let draft = w.to_draft();
     if draft != face.draft {
         face.draft = draft.clone();
-        face.draft_at = std::time::Instant::now();
+        face.draft_at = crate::platform::platform().monotonic();
         ui.invoke_wiki_draft_save(draft.into());
     }
     false
@@ -1135,7 +1141,7 @@ fn arm_draft_flush(ui: &AppWindow, m: &Rc<RefCell<wiki::Wiki>>, face: &Rc<RefCel
             return;
         }
         f.flush_armed = true;
-        DRAFT_WINDOW.saturating_sub(f.draft_at.elapsed())
+        DRAFT_WINDOW.saturating_sub(draft_age(f.draft_at))
     };
     #[cfg(test)]
     wiki::counters::bump_flush();
@@ -1416,7 +1422,7 @@ pub(crate) fn wire_wiki(ui: &AppWindow) -> (Rc<RefCell<wiki::Wiki>>, Rc<RefCell<
                 w.touch();
                 let mut f = la.borrow_mut();
                 f.draft = w.to_draft();
-                f.draft_at = std::time::Instant::now();
+                f.draft_at = crate::platform::platform().monotonic();
                 f.draft_gen = w.generation();
             }
             sync_wiki(&ui, &m.borrow(), &mut la.borrow_mut());
@@ -1931,7 +1937,7 @@ pub(crate) fn wire_wiki_export(ui: &AppWindow, cx: &Ctx) {
                 .upgrade()
                 .map(|ui| ui.get_mem_export_dir().to_string())
                 .unwrap_or_default();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 let Some(path) = pick_folder(draft).await else {
                     return; // cancelled
                 };
@@ -2027,7 +2033,7 @@ pub(crate) fn wire_wiki_vote(
         // door the panel button uses, back on the UI thread
         let weak2 = ui.as_weak();
         let wh = cx.wallet.clone();
-        cx.rt.spawn(async move {
+        cx.spawn(async move {
             let outcome = wh
                 .execute(Command::Propose {
                     surface: Surface::Memory,
@@ -2070,7 +2076,7 @@ pub(crate) fn wire_wiki_file_picker(ui: &AppWindow, ctx: &Ctx) {
         g.on_file_wanted(move || {
             let wh = cx.wallet.clone();
             let weak = cx.weak.clone();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 let uploads = match wh.execute(Command::ReadUploads).await {
                     Ok(Reply::Uploads { uploads }) => uploads,
                     other => {
@@ -2113,7 +2119,7 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
         g.on_base_changed(move || {
             let wh = cx.wallet.clone();
             let weak = cx.weak.clone();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 let mut paths: Vec<String> = Vec::new();
                 let mut cursor: Option<String> = None;
                 loop {
@@ -2159,7 +2165,7 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                                 .filter(|k| {
                                     k.values
                                         .iter()
-                                        .any(|v| molt_engine::link_target(&v.value).is_some())
+                                        .any(|v| front_matter::link_target(&v.value).is_some())
                                 })
                                 .take(24)
                                 .map(|k| k.key.clone())
@@ -2207,7 +2213,7 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
             let wh = cx.wallet.clone();
             let weak = cx.weak.clone();
             let wanted = path.to_string();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 // BOUNDED, then loud. Dropping the failure silently left a
                 // queued vote waiting for bytes nobody was fetching any
                 // more; a retry loop instead of a bound would spin. Three
@@ -2233,7 +2239,7 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
                             if wait == 0 {
                                 break;
                             }
-                            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                            crate::platform::platform().sleep(std::time::Duration::from_secs(wait)).await;
                         }
                     }
                 }
@@ -2301,7 +2307,7 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
             let wh = cx.wallet.clone();
             let weak = cx.weak.clone();
             let name = name.to_string();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 let Ok(Reply::WikiResolve {
                     exact: Some(path), ..
                 }) = wh.execute(Command::WikiResolve { name }).await
@@ -2321,7 +2327,7 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
             let wh = cx.wallet.clone();
             let weak = cx.weak.clone();
             let wanted = path.to_string();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 let edges = match wh
                     .execute(Command::WikiLinks {
                         path: wanted.clone(),
@@ -2372,7 +2378,7 @@ pub(crate) fn wire_wiki_index(ui: &AppWindow, ctx: &Ctx) {
             }
             let wh = cx.wallet.clone();
             let asked = text.clone();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 let outcome = wh
                     .execute(Command::WikiSearch {
                         query: text,
@@ -2432,7 +2438,7 @@ fn spawn_ref_resolve(cx: &Ctx, hex: String) {
     let cx2 = cx.clone();
     let wh = cx.wallet.clone();
     let weak = cx.weak.clone();
-    cx.rt.spawn(async move {
+    cx.spawn(async move {
         let answer = match wh
             .execute(Command::ResolveUpload {
                 checksum: hex.clone(),
@@ -2466,7 +2472,7 @@ fn spawn_ref_resolve(cx: &Ctx, hex: String) {
 fn spawn_upload_read(cx: &Ctx, hex: String, checksum: String) {
     let wh = cx.wallet.clone();
     let weak = cx.weak.clone();
-    cx.rt.spawn(async move {
+    cx.spawn(async move {
         let bytes = match wh
             .execute(Command::ReadUploadBytes {
                 checksum,
@@ -2478,10 +2484,7 @@ fn spawn_upload_read(cx: &Ctx, hex: String, checksum: String) {
             _ => None,
         };
         let decoded = match bytes {
-            Some(b) => tokio::task::spawn_blocking(move || crate::images::decode_wiki_image(&b))
-                .await
-                .ok()
-                .flatten(),
+            Some(b) => crate::platform::off_thread(move || crate::images::decode_wiki_image(&b)).await.flatten(),
             None => None,
         };
         let _ = slint::invoke_from_event_loop(move || {
@@ -2511,7 +2514,7 @@ pub(crate) fn wire_wiki_draft(ui: &AppWindow, ctx: &Ctx) {
         ui.on_wiki_draft_load(move || {
             let w = cx.wallet.clone();
             let weak2 = cx.weak.clone();
-            cx.rt.spawn(async move {
+            cx.spawn(async move {
                 let draft = match w.execute(Command::WikiDraftLoad).await {
                     Ok(Reply::WikiDraft { draft }) => draft,
                     _ => String::new(),

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use molt_core::{ChannelRef, Command, ProposalView, Reply, Surface, SurfaceSnapshot};
-use molt_engine::WalletHandle;
+use crate::engine::Engine;
 use slint::{ModelRc, VecModel};
 
 use crate::channels::{
@@ -19,7 +19,6 @@ use crate::chat_log::{
     annotate_chat_log, chat_line, chat_messages, merge_by_time, patch_system_lines, quote_sources,
     talk_feed, talk_previews, ChatViewCtx, TalkFeed,
 };
-use crate::images::avatar_cache_key;
 use crate::labels::{
     expires_label, file_date_label, file_size_label, never_seen_label, seen_label, stamp_label,
     strings_pick, surface_name, unix_now, when_label,
@@ -218,6 +217,10 @@ pub(crate) struct OrgStats {
     /// materialized logo file inside the workspace directory (the bytes
     /// rode the applied proposal, so every device holds them).
     pub(crate) image: String,
+    /// What the decoded logo is cached under, and its bytes as read from
+    /// the engine (`None`: it has none to give).
+    pub(crate) image_key: String,
+    pub(crate) image_bytes: Option<Arc<Vec<u8>>>,
     /// The effective "delete chat after" window (engine
     /// `StatusView.chat_retention_days`).
     pub(crate) retention_days: i32,
@@ -318,9 +321,12 @@ pub(crate) struct MemberRowData {
     /// The LOCAL file the engine materialized for this seat's applied
     /// picture ("" = none).
     pub(crate) image: String,
-    /// That file's [`avatar_cache_key`] - the stat runs in the gather
-    /// pass, off the UI thread, so the row mapping only looks it up.
+    /// What the decoded picture is cached under
+    /// ([`crate::bytes::picture_key`]).
     pub(crate) image_key: String,
+    /// The picture's bytes, read from the engine in the gather pass;
+    /// `None` when it has none to give.
+    pub(crate) image_bytes: Option<Arc<Vec<u8>>>,
     /// The seat's applied description ("" = none).
     pub(crate) desc: String,
 }
@@ -465,9 +471,19 @@ pub(crate) struct ChatUiState {
     pub(crate) link: String,
     pub(crate) link_relays: Vec<String>,
     pub(crate) link_relays_off: std::collections::BTreeSet<String>,
+    /// The last link read failed and has been reported; cleared by the
+    /// next answer, so an outage toasts once.
+    pub(crate) link_read_failed: bool,
     /// This node's pool and clearnet switch, as last mirrored.
     pub(crate) link_pool: Vec<molt_core::relay::RelayEntry>,
     pub(crate) link_clearnet: bool,
+
+    /// The pictures on display, as read from the engine
+    /// ([`crate::bytes::hold_pictures`]).
+    pub(crate) pictures: crate::bytes::Pictures,
+    /// Shares this window asked a REMOTE engine to fetch for the user,
+    /// with the name to offer each under ([`crate::bytes::download`]).
+    pub(crate) to_user: HashMap<molt_core::MessageId, String>,
 
     /// The workspace id this state belongs to — a switch resets everything
     /// (see [`ChatUiState::enter_workspace`]).
@@ -965,7 +981,7 @@ pub(crate) struct ProposalRowData {
 /// Deliberately free of the window: every decision this layer makes lives
 /// here, so a test can make them without a display (`gui_tests`).
 pub(crate) async fn gather_surfaces(
-    wallet: &WalletHandle,
+    wallet: &Engine,
     chat_ui: &Arc<Mutex<ChatUiState>>,
 ) -> Option<(u64, SurfacesBundle)> {
     let mirror = match wallet.execute(Command::ReadMirror).await {
@@ -985,6 +1001,8 @@ pub(crate) async fn gather_surfaces(
                     file_date_label(s.founded_ts)
                 },
                 image: s.image,
+                image_key: String::new(),
+                image_bytes: None,
                 retention_days: i32::try_from(s.chat_retention_days).unwrap_or(7),
                 thread_retention_days: i32::try_from(s.thread_retention_days).unwrap_or(7),
                 chain_governed: s.chain_governed,
@@ -1071,14 +1089,16 @@ pub(crate) async fn gather_surfaces(
                 state: i32::from(m.presence),
                 uploads: i32::try_from(m.uploads).unwrap_or(i32::MAX),
                 split: m.split,
-                image_key: avatar_cache_key(&m.image),
+                // both filled once the Organization log is read, below
+                image_key: String::new(),
+                image_bytes: None,
                 image: m.image,
                 desc: m.description,
             })
             .collect(),
         _ => Vec::new(),
     };
-    let upload_now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+    let upload_now = crate::platform::platform().unix_now();
     let uploads: Vec<UploadRowData> = match wallet.execute(Command::ReadUploads).await {
         Ok(Reply::Uploads { uploads: rows }) => rows
             .into_iter()
@@ -1139,6 +1159,29 @@ pub(crate) async fn gather_surfaces(
             .await
         {
             snaps.push((sf, snap));
+        }
+    }
+    // the pictures on display: read through the engine, once per state of
+    // the Organization log's picture changes (a replaced picture keeps its
+    // file name)
+    let mut members = members;
+    {
+        let version = snaps
+            .iter()
+            .find(|(sf, _)| *sf == Surface::Organization)
+            .map_or(0, |(_, s)| crate::bytes::pictures_version(&s.applied));
+        let key = |image: &str| crate::bytes::picture_key(image, version);
+        org_stats.image_key = key(&org_stats.image);
+        let mut wanted = vec![(org_stats.image_key.clone(), org_stats.image.clone())];
+        for m in &mut members {
+            m.image_key = key(&m.image);
+            wanted.push((m.image_key.clone(), m.image.clone()));
+        }
+        wanted.retain(|(key, _)| !key.is_empty());
+        let held = crate::bytes::hold_pictures(wallet, chat_ui, &wanted).await;
+        org_stats.image_bytes = held.get(&org_stats.image_key).cloned();
+        for m in &mut members {
+            m.image_bytes = held.get(&m.image_key).cloned();
         }
     }
     // D2 read-receipts trigger: while the chat surface is the one on screen,
@@ -1214,7 +1257,7 @@ pub(crate) async fn gather_surfaces(
             .execute(Command::MarkChannelRead { channel: selected.clone(), up_to: String::new() })
             .await;
     }
-    let now = u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0);
+    let now = crate::platform::platform().unix_now();
     // the Chain-History settings panel: every committed block, newest
     // first (co-equal read — the MCP read_chain tool serves the same)
     let chain_rows: Vec<molt_core::ChainBlockView> = match wallet.execute(Command::ReadChain).await
@@ -1280,7 +1323,6 @@ pub(crate) async fn gather_surfaces(
     // the Members table's presentation pass - same rule, the engine's
     // ReadMembers projection stays the full, untouched truth
     let (members_sort, members_asc, uploads_sort, uploads_asc, uploads_filter) = org_view;
-    let mut members = members;
     sort_members(&mut members, &members_sort, members_asc);
     // an open Shared Files vote marks its row on the button it belongs to
     let open_votes: HashMap<(String, bool), String> = all_pending

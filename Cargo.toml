@@ -17,10 +17,14 @@
 #   molt-treasury the purse's crypto: PedPoP DKG, view key, standard address, attestations - pure functions, no I/O, core + the Monero stack only
 #   molt-engine  the wallet-core actor: single owning task, WalletHandle
 #   molt-mcp     MCP frontend (the headless operator; stdio or tcp)
+#   molt-remote  the web door: the browser GUI's loopback WebSocket onto the same command set
+#   molt-ui-kit  what the GUI needs on every target: the remote client's protocol core (wasm-clean, core only)
 #   molt-ui-window  the Slint-compiled window (own crate: the ~400k-line
 #                   generated module recompiles only on .slint changes)
 #   molt-ui      Slint GUI frontend logic (the live-mirror operator)
 #   molt-app     the binary: ui-mode (GUI + MCP) | headless (MCP-only)
+#   molt-web     the browser build of the GUI (wasm32 only; natively only its
+#                page rules; every dependency under the wasm32 target table)
 #
 # Surfaces (`molt_core::Surface`) are not crates: each plugs into molt-engine
 # behind the same gated-proposal contract inside these crates; the open surface
@@ -38,9 +42,12 @@ members = [
     "crates/molt-treasury",
     "crates/molt-engine",
     "crates/molt-mcp",
+    "crates/molt-remote",
+    "crates/molt-ui-kit",
     "crates/molt-ui-window",
     "crates/molt-ui",
     "crates/molt-app",
+    "crates/molt-web",
 ]
 # The GUI is standard: `cargo build` builds the whole workspace, Slint included.
 # Headless is a runtime choice (`[node].headless` in config.toml, or automatic
@@ -56,6 +63,8 @@ molt-vault   = { path = "crates/molt-vault" }
 molt-treasury = { path = "crates/molt-treasury" }
 molt-engine  = { path = "crates/molt-engine" }
 molt-mcp     = { path = "crates/molt-mcp" }
+molt-remote  = { path = "crates/molt-remote" }
+molt-ui-kit  = { path = "crates/molt-ui-kit" }
 molt-ui-window = { path = "crates/molt-ui-window" }
 molt-ui      = { path = "crates/molt-ui" }
 
@@ -91,7 +100,19 @@ tokio-socks        = "0.5"    # SOCKS5h client (Tor dialing, per-host isolation 
 # N2 own WS client (ADR-0005): tungstenite WITHOUT its TLS features — TLS is our
 # rustls-rustcrypto config over the T4 DialStream, so ring stays out of the graph
 tokio-tungstenite  = { version = "0.26", default-features = false, features = ["handshake"] }
+# the web door on a slow link (docs/web_gui.md §5.6). flate2 on miniz_oxide
+# (pure Rust, both already in the native and the wasm graph via png): the
+# socket's packed frames, and gzip for the bundle. brotli (pure Rust, native
+# only, encoder side): the bundle's smaller coding. tokio-io-timeout: the
+# write timeout that restarts whenever the kernel takes more (a stall, not a total).
+flate2             = { version = "1.1", default-features = false, features = ["rust_backend"] }
+brotli             = { version = "9", default-features = false, features = ["std"] }
+tokio-io-timeout   = "1.2"
+# the accepted door socket's SO_SNDBUF (tokio sets it only before a connect;
+# socket2 is tokio's own socket layer, already in every graph)
+socket2            = "0.6"
 futures-util       = { version = "0.3", default-features = false, features = ["sink"] }
+futures-channel    = { version = "0.3", default-features = false, features = ["std", "sink"] }   # runtime-neutral channels for the remote client (tokio and wasm)
 httparse           = "1"      # NIP-11 response-head parsing (already in the tree via tungstenite)
 # the vault (molt-vault, docs_archive/vault/vault_build_plan.md 1.2): vsss-rs 5 and
 # hpke 0.13 ride the curve25519-dalek 4 / RustCrypto generation OpenMLS
@@ -127,6 +148,9 @@ argon2             = "0.5"    # passphrase KDF of the export blob (RustCrypto, p
 unicode-normalization = "0.1" # NFC of export passphrases before the KDF
 getrandom          = "0.2"    # OS CSPRNG: seeds, nonces, device key
 hex                = "0.4"
+# the web door's reply patches (docs/web_gui.md §5.7): the rsync delta,
+# pure Rust, one dependency (arrayref), Apache-2.0
+fast_rsync         = "0.2"
 bip39              = "2"      # real recovery-phrase wordlist (replaces mock_seed)
 rustix             = { version = "1", features = ["fs"] }   # flock for the per-workspace LOCK
 
@@ -203,6 +227,19 @@ similar     = "2"
 # the purse's deposit QR (wallet plan §6): module grid only, no image stack
 qrcode      = { version = "0.14", default-features = false }
 
+# the browser build (molt-web, docs/web_gui.md §4). wasm-bindgen is pinned
+# EXACTLY: the wasm-bindgen CLI must match it to the patch, so a Slint bump
+# that moves it fails here and the CLI pin moves with it.
+wasm-bindgen         = "=0.2.126"
+wasm-bindgen-futures = "0.4"
+js-sys               = "0.3"
+web-sys              = "0.3"
+web-time             = "1"      # the clocks; already in the graph via winit
+gloo-timers          = { version = "0.3", features = ["futures"] }   # setTimeout as a future; already in the graph
+# the browser WebSocket as a futures Stream + Sink (the rustwasm project's
+# own wrapper) instead of hand-written event closures; websocket only
+gloo-net             = { version = "0.6", default-features = false, features = ["websocket"] }
+
 [workspace.package]
 version    = "0.0.17"
 edition    = "2021"
@@ -252,3 +289,25 @@ panic           = "abort"    # no stack unwinding that could surface secrets
 lto             = "thin"
 codegen-units   = 1          # determinism input for reproducible release builds
 strip           = "none"     # strip in a build-release post-step, keep debug-info locally
+
+# The browser GUI bundle (scripts/build-release-web.sh, wasm32). Measured
+# 2026-11-18 on a 31 GiB box + 32 GiB swap, rustc 1.95.0 + Slint 1.17, -j 1:
+# with LTO off, the window crate at opt-level "s" and 16 codegen units, its
+# rustc peaked at 26.0 GiB (RSS + swap) in 10m48s and the bound module is
+# 58.9 MB (8.2 MB at zstd -19); one codegen unit cost 31.6 GiB and 27m24s
+# for 50.0 MB. Thin LTO is unmeasured for this target. Cargo has no
+# per-package `lto`, so the whole profile carries "off".
+# `strip = "none"` is inherited on purpose: the module in the target dir
+# keeps its name section for readable browser traces, and the script drops
+# it from the bundle's copy through wasm-bindgen, whose version Cargo.lock
+# pins (binutils `strip` does not apply to wasm). The figures above are a
+# spike on the window crate alone with `strip = true`. The real crate
+# through the script (same day): 26.1 GiB peak, 17m40s cold, bound module
+# 65.2 MB (9.5 MB at zstd -19), 105.7 MB unstripped.
+[profile.release-web]
+inherits = "release"
+lto      = "off"
+
+[profile.release-web.package.molt-ui-window]
+opt-level     = "s"
+codegen-units = 16

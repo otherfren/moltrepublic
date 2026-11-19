@@ -130,6 +130,7 @@ fn bundle(vault: Option<VaultView>) -> SurfacesBundle {
                 split: String::new(),
                 image: String::new(),
                 image_key: String::new(),
+                image_bytes: None,
                 desc: String::new(),
             })
             .collect(),

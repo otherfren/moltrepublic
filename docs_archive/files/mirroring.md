@@ -277,10 +277,15 @@ its holders plus this seat's `held/of`; `read_uploads` rows carry
 ### 3.5 Storage and settings - as built
 
 - `WorkspacePrefs.mirror_dir` (private, `prefs.toml`): the mirror folder,
-  "" = `<workspace root>/../mirror/<republic-id>/`. Any-path, so its one
-  door is the GUI's picker (`SetMirrorDir`, INTERNAL - never an MCP tool,
-  `mcp-security.md`); a change moves the folder (a rename; a failed move
-  starts the jobs over there) and restarts the running fetch.
+  "" = `<workspace root>/../mirror/<republic-id>/`. Any-path on the
+  host; its doors (all `SetMirrorDir`): the window's typed field with
+  its own Apply on every target, the folder dialog button only where
+  `folder-browse` is on (off behind the web door, `docs/web_gui.md` §7),
+  and the MCP tool `set_mirror_dir` (seat scope, ADR-0007). The path is
+  absolute or `~`-led - a relative one is refused, since it would
+  resolve against the node's working directory. A change moves the
+  folder (a rename; a failed move starts the jobs over there) and
+  restarts the running fetch.
 - `TransportState.mirror`: `on` (default true), `quota` (default 1 GiB),
   `rev`, the members' `decls` and `status`, and this seat's `jobs`. On
   and quota are settable over MCP (`set_mirror {on, quota_bytes}`) and
@@ -294,7 +299,9 @@ persistent files"), the quota as a decimal-GB field with an Apply button
 (the switch and the button issue the same `set_mirror`; a field that is
 not a number keeps the stored quota), the usage line ("2.1 GB of 1 GB",
 the warning colour at or over the quota), the folder (elided path) and
-its picker. The Persistent table gains a "Mirrored by" column (the
+its picker - since 2026-11-18 a typed field with its own Apply on a
+second line, the dialog button beside it only where `folder-browse` is
+on (§3.5). The Persistent table gains a "Mirrored by" column (the
 holder count, sortable) and, while this seat's copy is incomplete, a
 thin bar filled to `held / of` under the count. The Temporary table is
 untouched. Keystone: `molt-ui/src/tests/gui/files.rs` - the own share
@@ -304,8 +311,9 @@ follow `read_mirror`.
 ### 3.7 MCP - as built
 
 `read_uploads` rows carry `mirrors`, `mirror_held`, `mirror_of`;
-`read_mirror` and `set_mirror` are tools; `read_state files` is
-unchanged; the gossip, progress and folder commands are INTERNAL.
+`read_mirror`, `set_mirror` and `set_mirror_dir` (ADR-0007) are tools;
+`read_state files` is unchanged; the gossip and progress commands are
+INTERNAL.
 
 ## 4. Stages (each red-first, each green on master)
 
@@ -435,8 +443,8 @@ merge of the storage writer carries only the publish queue, the daily
 counter and the gossip - the fetch and mirror jobs have their own
 messages, so a load-modify-save around a cursor write cannot clobber a
 bitmap; the mirror folder default is `<workspace root>/../mirror/<id>`
-and `prefs.mirror_dir` (private, any-path) overrides it - the picker is
-M5; the election uses each seat's own presence view (a stale view costs
+and `prefs.mirror_dir` (private, any-path) overrides it - its doors are
+§3.5; the election uses each seat's own presence view (a stale view costs
 a duplicate answer, never a missing one, because the requester repeats
 the ask). Keystones: `molt-engine/tests/mirror_worker.rs` - a persisted
 share is complete in the second seat's folder (every piece opens under

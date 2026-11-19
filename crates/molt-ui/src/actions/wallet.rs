@@ -61,7 +61,7 @@ fn use_node(cx: &Ctx, url: &str, outside_tor: bool) {
     let w = cx.wallet.clone();
     let weak = cx.weak.clone();
     let cmds = node_commands(url, outside_tor);
-    cx.rt.spawn(async move {
+    cx.spawn(async move {
         let mut res = Ok(molt_core::Reply::Ack);
         for cmd in cmds {
             res = w.execute(cmd).await;

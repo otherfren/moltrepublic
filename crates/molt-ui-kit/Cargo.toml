@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+[package]
+name = "molt-ui-kit"
+description = "What the GUI needs on every target: the remote engine client's protocol core and the platform seam (wasm-clean, core only)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+molt-core.workspace = true
+serde_json.workspace = true
+# reply waiters that work on tokio and in a browser alike
+futures-channel.workspace = true
+futures-util.workspace = true
+# inflates the door's packed frames (docs/web_gui.md §5.6): miniz_oxide,
+# pure Rust, already in the wasm graph
+flate2.workspace = true

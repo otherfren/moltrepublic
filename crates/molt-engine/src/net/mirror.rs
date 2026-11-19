@@ -588,7 +588,13 @@ impl State {
         let Some(active) = self.active.as_mut() else {
             return Err(MoltError::Engine("no open workspace".into()));
         };
-        active.prefs.mirror_dir = path.trim().to_string();
+        // a relative path would resolve against the node's working
+        // directory - another folder after a restart from elsewhere
+        let path = path.trim();
+        if !path.is_empty() && !molt_storage::expand_tilde(path).is_absolute() {
+            return Err(MoltError::Engine("mirror folder: not an absolute path".into()));
+        }
+        active.prefs.mirror_dir = path.to_string();
         active.handle.set_prefs(active.prefs.clone());
         let new = self.mirror_dir();
         if let (Some(old), Some(new)) = (old, new) {

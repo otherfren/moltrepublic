@@ -64,7 +64,8 @@ pub struct VaultCtx {
 
 /// Why a vault command was refused (`MoltError::Vault`). `Display` is the
 /// English/MCP text; the GUI localizes per variant.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VaultRefusal {
     /// The founding bounds (spec §3).
     #[error("needs 2 <= m <= n-2")]

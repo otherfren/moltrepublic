@@ -122,18 +122,17 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 .upgrade()
                 .map(|ui| ui.get_org_mirror_dir().to_string())
                 .unwrap_or_default();
-            cx.rt.spawn(async move {
-                let mut picker = rfd::AsyncFileDialog::new();
-                if !start.is_empty() {
-                    picker = picker.set_directory(start);
-                }
-                let Some(folder) = picker.pick_folder().await else {
+            cx.spawn(async move {
+                let Some(path) = crate::settings::pick_folder(start).await else {
                     return; // cancelled
                 };
-                cx2.issue(Command::SetMirrorDir {
-                    path: folder.path().display().to_string(),
-                });
+                cx2.issue(Command::SetMirrorDir { path });
             });
+        });
+        // the same folder, typed: the form a browser has ("" = the default)
+        let cx = ctx.clone();
+        ui.on_set_mirror_dir(move |path| {
+            cx.issue(Command::SetMirrorDir { path: path.to_string() });
         });
     }
 
@@ -192,15 +191,10 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                 let w = cx.wallet.clone();
                 let weak = cx.weak.clone();
                 let path = value.to_string();
-                cx.rt.spawn(async move {
-                    let read = tokio::task::spawn_blocking({
-                        let path = path.clone();
-                        move || std::fs::read(&path)
-                    })
-                    .await;
+                cx.spawn(async move {
+                    let read = crate::bytes::read_picked(crate::platform::platform(), &path).await;
                     let payload = match read {
-                        Ok(Ok(bytes)) => {
-                            use base64::Engine as _;
+                        Ok(bytes) => {
                             // WP3 pre-check with the REAL preview decoder:
                             // instant, localized feedback instead of an
                             // engine-error round-trip. The engine's co-equal
@@ -219,22 +213,19 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                                 });
                                 return;
                             }
-                            let name = std::path::Path::new(&path)
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| path.clone());
+                            let name = crate::bytes::file_name(&path).to_string();
                             // no baked display title: the op is the
                             // language-neutral placeholder every UI
                             // translates at render time (display_title)
-                            serde_json::json!({
-                                "op": "set_image",
-                                "value": name,
-                                "bytes_b64":
-                                    base64::engine::general_purpose::STANDARD.encode(bytes),
-                            })
+                            let mut payload = serde_json::json!({ "op": "set_image", "value": name });
+                            if let Err(e) = crate::bytes::attach_picture(&w, &mut payload, &name, bytes).await {
+                                toast_byte_error(weak, e);
+                                return;
+                            }
+                            payload
                         }
-                        _ => {
-                            toast_unreadable(weak, path);
+                        Err(e) => {
+                            toast_byte_error(weak, e);
                             return;
                         }
                     };
@@ -309,22 +300,19 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             let weak = cx.weak.clone();
             let member = member.to_string();
             let path = value.to_string();
-            cx.rt.spawn(async move {
-                let read = tokio::task::spawn_blocking({
-                    let path = path.clone();
-                    move || std::fs::read(&path)
-                })
-                .await;
-                let Ok(Ok(bytes)) = read else {
-                    toast_unreadable(weak, path);
-                    return;
+            cx.spawn(async move {
+                let bytes = match crate::bytes::read_picked(crate::platform::platform(), &path).await {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        toast_byte_error(weak, e);
+                        return;
+                    }
                 };
                 // the crop/downscale is CPU work on a picture up to 8192²
-                let fitted =
-                    tokio::task::spawn_blocking(move || fit_member_image(&bytes, budget)).await;
+                let fitted = crate::platform::off_thread(move || fit_member_image(&bytes, budget)).await;
                 let fitted = match fitted {
-                    Ok(Ok(fitted)) => fitted,
-                    Ok(Err(why)) => {
+                    Some(Ok(fitted)) => fitted,
+                    Some(Err(why)) => {
                         let _ = slint::invoke_from_event_loop(move || {
                             if let Some(ui) = weak.upgrade() {
                                 let s = ui.global::<Strings>();
@@ -336,22 +324,24 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
                         });
                         return;
                     }
-                    Err(_) => return,
+                    None => return,
                 };
-                use base64::Engine as _;
                 // the name must match the bytes: the engine derives the
                 // avatar file's extension from this display value
-                let stem = std::path::Path::new(&path)
+                let stem = std::path::Path::new(crate::bytes::file_name(&path))
                     .file_stem()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| member.clone());
-                let payload = serde_json::json!({
+                let name = format!("{stem}.{}", fitted.ext);
+                let mut payload = serde_json::json!({
                     "op": "set_member_image",
                     "member": member,
-                    "value": format!("{stem}.{}", fitted.ext),
-                    "bytes_b64":
-                        base64::engine::general_purpose::STANDARD.encode(fitted.bytes),
+                    "value": name,
                 });
+                if let Err(e) = crate::bytes::attach_picture(&w, &mut payload, &name, fitted.bytes).await {
+                    toast_byte_error(weak, e);
+                    return;
+                }
                 // the confirmation belongs to the OUTCOME: the engine's own
                 // gates (square, budget, the seat) still run after this
                 propose_org(w, weak, payload).await;
@@ -423,22 +413,11 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
             };
             let saved_prefix = ui.global::<Strings>().get_toast_dl_done();
             let weak = cx.weak.clone();
-            cx.rt.spawn(async move {
-                let Some(dest) = rfd::AsyncFileDialog::new()
-                    .set_file_name(name.as_str())
-                    .save_file()
-                    .await
-                else {
-                    return; // cancelled
-                };
-                let path = dest.path().to_path_buf();
-                let write = tokio::task::spawn_blocking(move || {
-                    std::fs::write(&path, &bytes).map(|()| path)
-                })
-                .await;
-                let msg = match write {
-                    Ok(Ok(path)) => (format!("{saved_prefix} {}", path.display()), true),
-                    Ok(Err(e)) => (format!("⚠ {e}"), false),
+            cx.spawn(async move {
+                let save = molt_ui_kit::platform::Save { name: name.to_string(), bytes, refuse_link: false };
+                let msg = match crate::platform::platform().save_file(save).await {
+                    Ok(Some(dest)) => (format!("{saved_prefix} {dest}"), true),
+                    Ok(None) => return, // cancelled
                     Err(e) => (format!("⚠ {e}"), false),
                 };
                 let _ = slint::invoke_from_event_loop(move || {
@@ -492,31 +471,35 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     }
 }
 
-/// Toast WHICH file did not read - no Debug dump at the user.
-fn toast_unreadable(weak: slint::Weak<AppWindow>, path: String) {
+/// Toast why a picture did not reach the engine.
+fn toast_byte_error(weak: slint::Weak<AppWindow>, e: crate::bytes::ByteError) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(ui) = weak.upgrade() {
-            let msg = format!(
-                "\u{26a0} {} {path}",
-                ui.global::<Strings>().get_toast_file_unreadable()
-            );
-            ui.invoke_show_toast_error(msg.into());
+            ui.invoke_show_toast_error(crate::bytes::byte_error_toast(&ui, &e));
         }
     });
 }
 
 /// Propose `payload` on the organization surface and toast the OUTCOME.
 async fn propose_org(
-    w: molt_engine::WalletHandle,
+    w: crate::engine::Engine,
     weak: slint::Weak<AppWindow>,
     payload: serde_json::Value,
 ) {
+    // a picture that went up as an upload (an engine behind the web door)
+    let upload = payload.get("upload").and_then(|u| u.as_str()).map(str::to_string);
     let outcome = w
         .execute(Command::Propose {
             surface: Surface::Organization,
             payload,
         })
         .await;
+    if let (Err(_), Some(upload)) = (&outcome, upload) {
+        // a refused proposal leaves its upload in the store, and eight of
+        // them fill the open-upload quota: drop it now. Best effort - one
+        // the engine consumed before it refused is unknown to it by now.
+        drop(w.execute(Command::UploadAbort { upload }).await);
+    }
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = weak.upgrade() else { return };
         match outcome {
@@ -529,20 +512,19 @@ async fn propose_org(
     });
 }
 
-/// The native image picker (async XDG portal); only the picked path
-/// reaches `set`.
+/// The image picker; only what NAMES the picked file (its path on a
+/// native window) reaches `set`, and the platform reads it from there.
 fn pick_image(cx: &Ctx, set: fn(&AppWindow, slint::SharedString)) {
     let weak = cx.weak.clone();
-    cx.rt.spawn(async move {
-        let picker = rfd::AsyncFileDialog::new()
-            // no "svg" (L1, 2026-08-16): the engine refuses SVG proposals -
-            // offering a format the vote will bounce is a trap, and a
-            // square check on a vector is meaningless
-            .add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
-        let Some(file) = picker.pick_file().await else {
+    cx.spawn(async move {
+        // no "svg" (L1, 2026-08-16): the engine refuses SVG proposals -
+        // offering a format the vote will bounce is a trap, and a
+        // square check on a vector is meaningless
+        let image = ["png", "jpg", "jpeg", "webp", "gif", "bmp"].map(String::from).to_vec();
+        let pick = molt_ui_kit::platform::FilePick { filter: Some(("Image".to_string(), image)) };
+        let Some(path) = crate::platform::platform().pick_file(pick).await else {
             return; // cancelled
         };
-        let path = file.path().display().to_string();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(ui) = weak.upgrade() {
                 set(&ui, path.into());

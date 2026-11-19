@@ -11,6 +11,8 @@
 //!
 //! The dialog (if it opens) is cancelled by the 6 s timeout.
 
+// a native-only probe: it is the runtime and the dialog it exercises
+#[allow(clippy::disallowed_methods)]
 fn main() {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

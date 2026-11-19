@@ -14,6 +14,7 @@ use super::*;
 /// opens at its platform default instead of failing.
 #[test]
 fn ws_dir_browse_starts_at_the_draft_only_when_it_is_a_real_directory() {
+    use crate::native::browse_start_dir;
     let dir = tempfile::tempdir().expect("create a temp directory");
     let dir_path = dir.path().display().to_string();
     assert_eq!(

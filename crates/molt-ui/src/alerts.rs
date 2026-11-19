@@ -30,9 +30,15 @@ pub(crate) fn sound_name(i: i32) -> String {
     .to_string()
 }
 
-/// The last time an alert actually played — a debounce so a reconnect
-/// catch-up of hundreds of queued messages cannot spawn a player storm.
-static LAST_ALERT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+/// The last time an alert actually played, on the monotonic clock — a
+/// debounce so a reconnect catch-up of hundreds of queued messages cannot
+/// start a player storm.
+static LAST_ALERT: std::sync::Mutex<Option<std::time::Duration>> = std::sync::Mutex::new(None);
+
+/// Whether an alert at `now` is far enough from the `last` one to play.
+pub(crate) fn alert_due(last: Option<std::time::Duration>, now: std::time::Duration) -> bool {
+    !last.is_some_and(|t| now.saturating_sub(t) < std::time::Duration::from_millis(400))
+}
 
 /// The shared own-echo gate of the chat and vote alerts: play the configured
 /// sound unless the acting member IS the local one. The comparison runs on
@@ -59,84 +65,32 @@ pub(crate) fn alert_unless_own(
     });
 }
 
-/// Play a short alert sound, fire-and-forget. The sample is synthesized in
-/// pure Rust (a tiny WAV, cached in the temp dir) and handed to the system
-/// player — pw-play/paplay/aplay, runtime-detected, silently a no-op when
-/// none exists. Deliberately NO compiled audio stack: cpal/rodio would pull
-/// ALSA's C bindings, and the pure-Rust posture stands (CLAUDE.md).
-///
-/// Total-review hardening: (1) at most one alert per 400 ms (a message
-/// burst plays once, not hundreds of times); (2) ALL work — the first-play
-/// WAV synthesis and the player spawn — runs on a detached thread, never
-/// the caller's UI/runtime thread; (3) the spawned player is REAPED (its
-/// `wait()` runs on that thread) so no zombies accumulate.
+/// Play a short alert sound, fire-and-forget, through the platform: at
+/// most one per 400 ms (a message burst plays once, not hundreds of
+/// times). The sample is [`alert_wav`], rendered in pure Rust.
 pub(crate) fn play_alert(kind: &str) {
     if kind == "none" || kind.is_empty() {
         return;
     }
+    let platform = crate::platform::platform();
     {
-        let now = std::time::Instant::now();
+        let now = platform.monotonic();
         let mut last = match LAST_ALERT.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
-        if last.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_millis(400)) {
+        if !alert_due(*last, now) {
             return;
         }
         *last = Some(now);
     }
-    let kind = kind.to_string();
-    std::thread::spawn(move || {
-        // under the per-user runtime dir (0700) when there is one, else the
-        // shared temp dir — and never a file this process did not write:
-        // a pre-planted file (pids are enumerable) would feed the player
-        // attacker bytes (review F8). One random tag per process start.
-        let dir = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(std::path::PathBuf::from)
-            .filter(|d| d.is_dir())
-            .unwrap_or_else(std::env::temp_dir);
-        let path = dir.join(format!("molt-alert-{}-{kind}.wav", alert_nonce()));
-        if !path.exists() && write_alert_wav(&path, &kind).is_err() {
-            return;
-        }
-        for player in ["pw-play", "paplay", "aplay"] {
-            match std::process::Command::new(player)
-                .arg(&path)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-            {
-                Ok(mut child) => {
-                    let _ = child.wait(); // reap — no zombie
-                    return;
-                }
-                Err(_) => continue,
-            }
-        }
-    });
+    platform.play_alert(kind, alert_wav);
 }
 
-/// Synthesize one alert as a 44.1 kHz mono 16-bit WAV: a few decaying
-/// sine partials per kind — bell (bright fifth), chime (rising triad),
-/// pop (short thump).
-/// A per-process-start random tag for the alert files: unguessable, unlike
-/// the pid.
-fn alert_nonce() -> &'static str {
-    static NONCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    NONCE.get_or_init(|| molt_config::random_token().unwrap_or_else(|_| "0".to_string()))
-}
-
-/// Create `path` as a NEW file — never through one that already exists
-/// (a planted file or symlink there is not ours to write).
-fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    std::io::Write::write_all(&mut f, bytes)
-}
-
-fn write_alert_wav(path: &std::path::Path, kind: &str) -> std::io::Result<()> {
+/// One alert as a 44.1 kHz mono 16-bit WAV: a few decaying sine partials
+/// per kind — bell (bright fifth), chime (rising triad), pop (short
+/// thump).
+pub(crate) fn alert_wav(kind: &str) -> Vec<u8> {
     let (freqs, dur): (&[f32], f32) = match kind {
         "bell" => (&[880.0, 1318.5], 0.35),
         "chime" => (&[523.25, 659.25, 783.99], 0.5),
@@ -176,5 +130,5 @@ fn write_alert_wav(path: &std::path::Path, kind: &str) -> std::io::Result<()> {
     for s in samples {
         wav.extend_from_slice(&s.to_le_bytes());
     }
-    write_new_file(path, &wav)
+    wav
 }

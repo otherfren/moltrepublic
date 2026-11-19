@@ -19,21 +19,16 @@ live-preview = ["molt-ui-window/live-preview"]
 [dependencies]
 molt-ui-window.workspace = true
 molt-core.workspace = true
-molt-config.workspace = true
-# canonical `~` expansion (expand_tilde) — the browse dialog must resolve
-# the workspace-dir draft exactly like the engine does
-molt-storage.workspace = true
-molt-engine.workspace = true
-# the agent skill text the Settings modal shows (one source, §6.2)
-molt-mcp.workspace = true
-tokio.workspace = true
+# the remote engine handle (the web door's client); the native window holds the engine's own
+molt-ui-kit.workspace = true
+# runtime-neutral primitives for the shared code: the reply oneshots and
+# the draft saver's async lock (`std` carries `lock::Mutex`)
+futures-channel.workspace = true
+futures-util = { workspace = true, features = ["std"] }
 slint.workspace = true
 serde.workspace = true # the local wiki draft round-trips (WP-D)
 serde_json.workspace = true
 tracing.workspace = true
-# clipboard for the seed copy button (X11: contents live as long as the app)
-arboard.workspace = true
-rfd.workspace = true
 base64.workspace = true
 image.workspace = true
 chrono = { workspace = true, features = ["clock"] } # local time display
@@ -43,6 +38,35 @@ pulldown-cmark.workspace = true
 similar.workspace = true
 # the purse's deposit QR
 qrcode.workspace = true
+# the recovery-phrase wordlist behind the typed-word chips: the same crate
+# storage parses a phrase with, taken directly (pure Rust, no I/O)
+bip39.workspace = true
+
+# What a browser build cannot have (docs/web_gui.md §4, §6.7). Only
+# src/native.rs names them, engine.rs's native arm aside; both are
+# cfg(not(wasm32)) and a test pins the rest (tests/gui/spawner.rs).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# the engine in this process (engine.rs)
+molt-engine.workspace = true
+# canonical `~` expansion (expand_tilde) — the browse dialog must resolve
+# the workspace-dir draft exactly like the engine does
+molt-storage.workspace = true
+# random_token: the minted seat key and the alert file's nonce (§6.3)
+molt-config.workspace = true
+# the window's runtime (§6.2)
+tokio.workspace = true
+# clipboard for the seed copy button (X11: contents live as long as the app)
+arboard.workspace = true
+# the native file and folder dialogs behind the platform seam (§6.3); a
+# browser build brings its own in molt-web
+rfd.workspace = true
+
+# What the same code needs in a browser instead (docs/web_gui.md §6.3).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# `Local` reads the browser's time zone; without it the conversion panics
+chrono = { workspace = true, features = ["wasmbind"] }
+# the diff's own timeout reads a clock: std's panics in a browser
+similar = { workspace = true, features = ["wasm32_web_time"] }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -59,5 +83,15 @@ ttf-parser = "0.25"
 # invalidate. Layering-legal (net sits below engine, which molt-ui already
 # depends on); the shipped GUI still talks to the engine only.
 molt-net.workspace = true
+# TEST-ONLY: the window against a REMOTE engine - a real web door on
+# loopback and the shipped client over a tokio WebSocket.
+molt-remote.workspace = true
+tokio-tungstenite.workspace = true
+# TEST-ONLY: two real engines found a republic over an in-process relay,
+# one of them driven through the web door (as molt-engine's own tests do).
+nostr-relay-builder.workspace = true
+# TEST-ONLY: the skill modal shows the text MCP serves (the shipped GUI
+# takes it from molt-core).
+molt-mcp.workspace = true
 # TEST-ONLY: the vault fixtures derive each seat's real vault key.
 molt-vault.workspace = true

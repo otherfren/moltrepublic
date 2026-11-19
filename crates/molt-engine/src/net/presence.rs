@@ -268,6 +268,7 @@ impl State {
         self.mirror_gossip_tick(self.presence_now());
         crate::vault::receipts::tick(self, self.presence_now());
         self.wallet_tick();
+        self.upload_store_tick();
         // WP4a: the DAILY compaction beat rides this tick (F8) — expired chat
         // stops existing on this device, it does not merely leave the read
         // filter. Gated to one round a day; the work itself is off-actor.

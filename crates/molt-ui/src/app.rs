@@ -4,15 +4,14 @@
 //! callbacks capture; the `issue*` helpers are the three ways a click
 //! reaches the engine.
 
-use std::cell::RefCell;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use molt_core::{Command, SessionSettings};
-use molt_engine::WalletHandle;
+use crate::engine::Engine;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
-use tokio::runtime::Handle;
+use crate::platform::Spawner;
 
 use crate::i18n::error_toast;
 use crate::mirror::{push_surfaces, spawn_mirror};
@@ -25,6 +24,50 @@ use crate::wiki_bridge::{
 };
 use crate::{actions, AppWindow};
 
+/// A config path as the settings footer shows it: the directory with its
+/// trailing separator, and the file name. A string split, not `Path`: a
+/// window behind the web door shows the SERVER's path, whose separator is
+/// not this target's.
+pub(crate) fn config_location(path: &str) -> (String, String) {
+    let cut = path.rfind(['/', '\\']).map_or(0, |at| at + 1);
+    (path[..cut].to_string(), path[cut..].to_string())
+}
+
+/// The LOCAL config path for the footer, split the way this target's
+/// paths split (on Unix a backslash is a file-name character).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn local_config_location(path: &std::path::Path) -> (String, String) {
+    let full = path.to_string_lossy();
+    let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    match full.strip_suffix(file.as_str()) {
+        Some(dir) => (dir.to_string(), file),
+        None => (full.into_owned(), String::new()),
+    }
+}
+
+/// What a window behind the web door takes from the server instead of
+/// from its process (`docs/web_gui.md` §6.6): the embedded-Tor row from
+/// the welcome, the settings footer from the engine's own config path,
+/// and no folder dialog.
+pub(crate) fn apply_remote_startup(ui: &AppWindow, caps: molt_core::wire::Caps, config_path: &str) {
+    // a path here names the server's disk: the typed forms stay, the
+    // folder dialogs of this machine go (§7)
+    ui.set_folder_browse(false);
+    if !ui.get_web() {
+        ui.set_web(true);
+        crate::i18n::apply_web_strings(ui, ui.get_lang_index());
+    }
+    let rows = tor_mode_enabled(caps.embedded_tor);
+    if !ui.get_tor_mode_enabled().iter().eq(rows) {
+        ui.set_tor_mode_enabled(ModelRc::new(VecModel::from(rows.to_vec())));
+    }
+    if !config_path.is_empty() {
+        let (dir, file) = config_location(config_path);
+        ui.set_config_dir(dir.into());
+        ui.set_config_file(file.into());
+    }
+}
+
 /// Open the GUI and run the Slint event loop on the calling (main) thread.
 ///
 /// `config_path` is shown in the settings panel as the location a real save
@@ -33,9 +76,10 @@ use crate::{actions, AppWindow};
 /// its "embedded" row (the in-process arti dialer was not built in). Returns
 /// when the window closes, or an error if the GUI cannot start (e.g. no display)
 /// — in which case the caller falls back to headless.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn run_app(
-    wallet: WalletHandle,
-    rt: Handle,
+    wallet: impl Into<Engine>,
+    rt: impl Into<Spawner>,
     config_path: PathBuf,
     embedded_tor_available: bool,
 ) -> Result<(), slint::PlatformError> {
@@ -43,21 +87,8 @@ pub fn run_app(
     // the settings footer shows the full config.toml location: directory
     // greyed, file name in text color. Absolutize a relative discovery path
     // (e.g. "config.toml" found in the cwd) so it reads as a full path.
-    let abs = if config_path.is_absolute() {
-        config_path.clone()
-    } else {
-        std::env::current_dir()
-            .map(|d| d.join(&config_path))
-            .unwrap_or_else(|_| config_path.clone())
-    };
-    let file = abs
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let dir = abs
-        .parent()
-        .map(|p| format!("{}{}", p.display(), std::path::MAIN_SEPARATOR))
-        .unwrap_or_default();
+    let abs = crate::native::absolute(&config_path);
+    let (dir, file) = local_config_location(&abs);
     ui.set_config_dir(dir.into());
     ui.set_config_file(file.into());
     ui.set_app_version(version_label(env!("CARGO_PKG_VERSION"), cfg!(debug_assertions)).into());
@@ -66,74 +97,66 @@ pub fn run_app(
     ui.set_tor_mode_enabled(ModelRc::new(VecModel::from(
         tor_mode_enabled(embedded_tor_available).to_vec(),
     )));
+    wire_window(&ui, wallet.into(), rt.into());
+    ui.run()
+}
 
-    // Clipboard (copy the seed out, paste a phrase in). arboard's X11 backend
-    // serves the selection only while the `Clipboard` object is alive, and
-    // dropping it stalls ~2 s trying to hand the contents to a clipboard
-    // manager this setup may not have (then the contents are gone). So: create
-    // ONE clipboard on first use and deliberately leak it — the X11 selection
-    // dies with the process either way.
-    let clip: Rc<RefCell<Option<&'static mut arboard::Clipboard>>> = Rc::new(RefCell::new(None));
-    fn with_clipboard<R>(
-        slot: &Rc<RefCell<Option<&'static mut arboard::Clipboard>>>,
-        f: impl FnOnce(&mut arboard::Clipboard) -> Result<R, arboard::Error>,
-    ) -> Option<R> {
-        let mut slot = slot.borrow_mut();
-        if slot.is_none() {
-            match arboard::Clipboard::new() {
-                Ok(cb) => *slot = Some(Box::leak(Box::new(cb))),
-                Err(e) => {
-                    tracing::warn!(error = %e, "clipboard unavailable");
-                    return None;
-                }
-            }
-        }
-        let cb = slot.as_mut()?;
-        match f(cb) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                tracing::warn!(error = %e, "clipboard access failed");
-                None
-            }
-        }
-    }
-    {
-        let clip = clip.clone();
-        ui.on_copy_text(move |text| {
-            let _ = with_clipboard(&clip, |cb| cb.set_text(text.to_string()));
-        });
-    }
-    {
-        let clip = clip.clone();
-        ui.on_paste_clipboard(move || {
-            with_clipboard(&clip, arboard::Clipboard::get_text)
-                .unwrap_or_default()
-                .into()
-        });
-    }
+/// Open the GUI on an engine behind the web door and run the event loop:
+/// the entry of a browser build (`docs/web_gui.md` §6.6), where `run`
+/// does not return. There are no process inputs - the config location and
+/// the embedded-Tor row arrive with the first session
+/// ([`apply_remote_startup`]). `lang` (0 = English, 1 = German) labels the
+/// window until that session names the language.
+///
+/// `opened` is handed the window's [`Sizer`] before the loop starts: a
+/// browser has no window manager, so the page sizes the window itself.
+pub fn run_remote(
+    engine: impl Into<Engine>,
+    spawner: impl Into<Spawner>,
+    lang: i32,
+    opened: impl FnOnce(Sizer),
+) -> Result<(), slint::PlatformError> {
+    let ui = open_remote(engine, spawner, lang)?;
+    opened(Sizer(ui.as_weak()));
+    ui.run()
+}
 
-    // Copy one of the (session-mirrored) run logs as one text block.
-    {
-        let clip = clip.clone();
-        let weak = ui.as_weak();
-        ui.on_copy_log(move |which| {
-            let Some(ui) = weak.upgrade() else {
-                return;
-            };
-            let log = match which.as_str() {
-                "create" => ui.get_cw_log(),
-                "join" => ui.get_jw_log(),
-                _ => ui.get_rw_log(),
-            };
-            let text = log
-                .iter()
-                .map(|l| l.to_string())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let _ = with_clipboard(&clip, |cb| cb.set_text(text));
-        });
-    }
+/// Sets the size of an open window from outside it (the browser page
+/// follows its viewport with this). Call it on the UI thread.
+pub struct Sizer(slint::Weak<AppWindow>);
 
+impl Sizer {
+    /// Size the window to `width` x `height` logical pixels. The
+    /// window's own minimum still holds. `false`: the window is gone.
+    pub fn set(&self, width: f32, height: f32) -> bool {
+        let Some(ui) = self.0.upgrade() else { return false };
+        ui.window().set_size(slint::LogicalSize::new(width, height));
+        true
+    }
+}
+
+/// [`run_remote`] up to the event loop: the window, wired and mirroring.
+pub(crate) fn open_remote(
+    engine: impl Into<Engine>,
+    spawner: impl Into<Spawner>,
+    lang: i32,
+) -> Result<AppWindow, slint::PlatformError> {
+    let ui = AppWindow::new()?;
+    ui.set_app_version(version_label(env!("CARGO_PKG_VERSION"), cfg!(debug_assertions)).into());
+    // a path names the server's disk from the first frame on (§7), and
+    // the web-only behaviour is there before the labels are (§6.5, §9)
+    ui.set_folder_browse(false);
+    ui.set_web(true);
+    // the mirror applies the strings with each session; until the first
+    // one lands the window would stand unlabelled
+    crate::i18n::apply_strings(&ui, lang);
+    wire_window(&ui, engine.into(), spawner.into());
+    Ok(ui)
+}
+
+/// Wire every callback group of `ui` to `wallet` and start the live
+/// mirror: what both entries share.
+fn wire_window(ui: &AppWindow, wallet: Engine, spawner: Spawner) {
     // NOTE: the old duplicate-name check is gone by design — display names
     // may repeat, the workspace id disambiguates (the same DAO opened twice
     // locally is a supported setup).
@@ -149,81 +172,88 @@ pub fn run_app(
 
     // what every callback captures: one clone per closure
     let ctx = Ctx {
-        rt: rt.clone(),
-        wallet: wallet.clone(),
+        spawner,
+        wallet,
         weak: ui.as_weak(),
-        last_settings: last_settings.clone(),
-        chat_ui: chat_ui.clone(),
+        last_settings,
+        chat_ui,
     };
 
     // The Multisig-Wiki mock's state machine + its WikiState bridge —
     // UI-local by design, EXCEPT the changeset vote: that one proposes on
     // the real gated Memory surface, so it is wired with the handles.
-    let (wiki_model, wiki_last) = wire_wiki(&ui);
-    wire_wiki_vote(&ui, &ctx, &wiki_model, &wiki_last);
-    wire_patch_view(&ui);
-    wire_wiki_index(&ui, &ctx);
-    wire_wiki_file_picker(&ui, &ctx);
-    wire_wiki_export(&ui, &ctx);
-    wire_wiki_draft(&ui, &ctx);
+    let (wiki_model, wiki_last) = wire_wiki(ui);
+    wire_wiki_vote(ui, &ctx, &wiki_model, &wiki_last);
+    wire_patch_view(ui);
+    wire_wiki_index(ui, &ctx);
+    wire_wiki_file_picker(ui, &ctx);
+    wire_wiki_export(ui, &ctx);
+    wire_wiki_draft(ui, &ctx);
 
     // --- actions: each becomes a Command on the shared engine ---
-    actions::workspace::wire(&ui, &ctx);
-    actions::settings::wire(&ui, &ctx);
-    actions::relays::wire(&ui, &ctx);
-    actions::ritual::wire(&ui, &ctx);
-    actions::chat::wire(&ui, &ctx);
-    actions::org::wire(&ui, &ctx);
-    actions::vault::wire(&ui, &ctx);
-    actions::wallet::wire(&ui, &ctx);
-    actions::kanban::wire(&ui, &ctx);
+    actions::clipboard::wire(ui, &ctx);
+    actions::workspace::wire(ui, &ctx);
+    actions::settings::wire(ui, &ctx);
+    actions::relays::wire(ui, &ctx);
+    actions::ritual::wire(ui, &ctx);
+    actions::chat::wire(ui, &ctx);
+    actions::org::wire(ui, &ctx);
+    actions::vault::wire(ui, &ctx);
+    actions::wallet::wire(ui, &ctx);
+    actions::kanban::wire(ui, &ctx);
     // Quit confirmed from the modal: end the Slint event loop so `ui.run()`
-    // returns and the process shuts down.
+    // returns and the process shuts down. (The modal opens on the window
+    // manager's close request, which a browser tab never raises.)
     ui.on_quit(|| {
         let _ = slint::quit_event_loop();
     });
 
     // --- live-mirror: re-read and re-render on every engine change ---
     spawn_mirror(&ctx);
-
-    ui.run()
 }
 
-/// What every callback captures: the runtime, the shared engine handle,
+/// What every callback captures: the spawner, the shared engine handle,
 /// the window, and the two UI-local states the mirror task shares with the
 /// callbacks. One clone per closure; the methods are the three ways a
 /// click reaches the engine plus the surfaces re-read a view-local change
 /// needs (sort, filter, page, channel - state the engine never sees).
 #[derive(Clone)]
 pub(crate) struct Ctx {
-    pub(crate) rt: Handle,
-    pub(crate) wallet: WalletHandle,
+    pub(crate) spawner: Spawner,
+    pub(crate) wallet: Engine,
     pub(crate) weak: slint::Weak<AppWindow>,
     pub(crate) last_settings: Arc<Mutex<Option<SessionSettings>>>,
     pub(crate) chat_ui: Arc<Mutex<ChatUiState>>,
 }
 
 impl Ctx {
+    /// Run `task` to completion off the callback that started it. The one
+    /// place the window starts a future: the target decides what runs it.
+    pub(crate) fn spawn(&self, task: impl std::future::Future<Output = ()> + Send + 'static) {
+        self.spawner.spawn(task);
+    }
+
     /// Fire a command; an engine error surfaces as a toast ([`issue`]).
     pub(crate) fn issue(&self, cmd: Command) {
-        issue(&self.rt, &self.wallet, &self.weak, cmd);
+        issue(&self.spawner, &self.wallet, &self.weak, cmd);
     }
 
     /// [`issue_then_toast`]: the success toast fires only on success.
     pub(crate) fn issue_then_toast(&self, cmd: Command, toast: String) {
-        issue_then_toast(&self.rt, &self.wallet, &self.weak, cmd, toast);
+        issue_then_toast(&self.spawner, &self.wallet, &self.weak, cmd, toast);
     }
 
     /// [`issue_draft`]: the settings draft through its three doors.
     pub(crate) fn issue_draft(&self, wake: String, settings: SessionSettings) {
-        issue_draft(&self.rt, &self.wallet, &self.weak, wake, settings);
+        let shown = crate::settings::stored_settings(&self.last_settings);
+        issue_draft(&self.spawner, &self.wallet, &self.weak, wake, settings, shown);
     }
 
     /// Re-read and re-push the surfaces after a UI-local change the engine
     /// does not announce (a sort, a filter, a page, the channel selection).
     pub(crate) fn refresh_surfaces(&self) {
         let cx = self.clone();
-        self.rt.spawn(async move {
+        self.spawn(async move {
             push_surfaces(&cx.wallet, &cx.weak, &cx.chat_ui).await;
         });
     }
@@ -236,15 +266,15 @@ impl Ctx {
 /// user success followed by an error, for a proposal that never existed.
 /// The confirmation belongs to the outcome, not to the intent.
 fn issue_then_toast(
-    rt: &Handle,
-    wallet: &WalletHandle,
+    spawner: &Spawner,
+    wallet: &Engine,
     weak: &slint::Weak<AppWindow>,
     cmd: Command,
     toast: String,
 ) {
     let w = wallet.clone();
     let weak = weak.clone();
-    rt.spawn(async move {
+    spawner.spawn(async move {
         let outcome = w.execute(cmd).await;
         let _ = slint::invoke_from_event_loop(move || {
             let Some(ui) = weak.upgrade() else { return };
@@ -259,10 +289,10 @@ fn issue_then_toast(
 /// Fire a command on the shared handle; the resulting event drives the
 /// live-mirror, so callers do not await a reply — but an engine error is
 /// surfaced as a toast instead of vanishing silently.
-fn issue(rt: &Handle, wallet: &WalletHandle, weak: &slint::Weak<AppWindow>, cmd: Command) {
+fn issue(spawner: &Spawner, wallet: &Engine, weak: &slint::Weak<AppWindow>, cmd: Command) {
     let w = wallet.clone();
     let weak = weak.clone();
-    rt.spawn(async move {
+    spawner.spawn(async move {
         if let Err(e) = w.execute(cmd).await {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {

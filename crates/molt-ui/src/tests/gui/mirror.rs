@@ -77,7 +77,7 @@ fn an_unchanged_surfaces_push_keeps_every_model_instance() {
     let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
 
     let b = rt
-        .block_on(gather_surfaces(&w, &chat_ui))
+        .block_on(gather_surfaces(&w.clone().into(), &chat_ui))
         .expect("the founded workspace has surfaces")
         .1;
     apply_surfaces(&ui, &b);
@@ -114,7 +114,7 @@ fn a_new_chat_line_grows_the_log_model_in_place() {
     let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
 
     rt.block_on(async {
-        let (_, b) = gather_surfaces(&w, &chat_ui).await.expect("surfaces");
+        let (_, b) = gather_surfaces(&w.clone().into(), &chat_ui).await.expect("surfaces");
         apply_surfaces(&ui, &b);
     });
     let before = surface_tab(&ui, "chat").expect("the chat tab");
@@ -123,7 +123,7 @@ fn a_new_chat_line_grows_the_log_model_in_place() {
 
     rt.block_on(async {
         say(&w, "and one more").await;
-        let (_, b) = gather_surfaces(&w, &chat_ui).await.expect("surfaces");
+        let (_, b) = gather_surfaces(&w.clone().into(), &chat_ui).await.expect("surfaces");
         apply_surfaces(&ui, &b);
     });
     let after = surface_tab(&ui, "chat").expect("the chat tab");
@@ -178,7 +178,7 @@ fn an_unchanged_surfaces_push_paints_nothing() {
     ui.set_selected_surface("chat".into());
     let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
     let b = rt
-        .block_on(gather_surfaces(&w, &chat_ui))
+        .block_on(gather_surfaces(&w.clone().into(), &chat_ui))
         .expect("surfaces")
         .1;
     apply_surfaces(&ui, &b);
@@ -247,7 +247,7 @@ fn surfaces_push_frame_cost_offscreen() {
     ui.set_selected_view("brain".into());
     let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
     let b = rt
-        .block_on(gather_surfaces(&w, &chat_ui))
+        .block_on(gather_surfaces(&w.clone().into(), &chat_ui))
         .expect("surfaces")
         .1;
     apply_surfaces(&ui, &b);

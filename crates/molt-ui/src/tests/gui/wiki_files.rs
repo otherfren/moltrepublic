@@ -261,8 +261,8 @@ fn a_file_links_click_filters_shared_files_to_that_one_file() {
     let (ui, _shown) = page(&format!("Read [Bericht Q3](upload:{HEX}) today.\n"));
     let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
     let ctx = Ctx {
-        rt: rt.handle().clone(),
-        wallet: w.clone(),
+        spawner: rt.handle().clone().into(),
+        wallet: w.clone().into(),
         weak: ui.as_weak(),
         last_settings: Arc::new(Mutex::new(None)),
         chat_ui: chat_ui.clone(),

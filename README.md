@@ -81,6 +81,25 @@ Plain `cargo build` makes a slow debug binary, not this one.
 No GUI: set `[node] headless = true` in `config.toml` (automatic without a
 display).
 
+## Browser GUI (in development)
+
+The same window in a browser, served by the node on loopback. No release
+carries the bundle yet; build it and unpack it beside `config.toml`:
+
+```sh
+scripts/build-release-web.sh --check-only   # tools and versions
+scripts/build-release-web.sh                # about 26 GiB of memory and swap
+mkdir -m 755 web && tar --zstd -xf dist/moltrepublic-web.tar.zst -C web
+```
+
+```toml
+[web]
+port = 4042
+```
+
+Restart, open `http://127.0.0.1:4042/` and enter `[mcp] token`. For a
+remote seat, tunnel the port (`ssh -L 4042:127.0.0.1:4042 <host>`).
+
 ## Connect an agent
 
 MCP over HTTP at `http://127.0.0.1:4040/mcp`, bearer token = `[mcp] token`

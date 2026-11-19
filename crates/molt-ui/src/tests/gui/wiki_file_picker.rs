@@ -303,8 +303,8 @@ fn the_empty_picker_offers_the_jump_to_shared_files() {
 
     let (ui, _shown) = picker_window("# A\n\nprose.\n");
     let cx = Ctx {
-        rt: rt.handle().clone(),
-        wallet: w.clone(),
+        spawner: rt.handle().clone().into(),
+        wallet: w.clone().into(),
         weak: ui.as_weak(),
         last_settings: Arc::new(Mutex::new(None)),
         chat_ui: Arc::new(Mutex::new(ChatUiState::default())),

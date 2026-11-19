@@ -111,7 +111,7 @@ fn a_deposit_is_refused_outside_a_vault_republic() {
 
 fn not_enabled(r: Result<Reply, MoltError>) {
     match r {
-        Err(e @ MoltError::FeatureDisabled("vault")) => assert_eq!(e.to_string(), "vault: not enabled"),
+        Err(e @ MoltError::FeatureDisabled(_)) => assert_eq!(e.to_string(), "vault: not enabled"),
         other => panic!("expected `vault: not enabled`, got {other:?}"),
     }
 }

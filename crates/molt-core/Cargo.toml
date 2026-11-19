@@ -20,10 +20,14 @@ strum.workspace = true
 hex.workspace = true # pure byte↔string encoding (MessageId wire form) — still no I/O
 url.workspace = true # WHATWG relay-URL parsing (relay.rs) — pure Rust, still no I/O
 similar.workspace = true # the wiki patch EMITTER, beside its applier (wiki_patch.rs) — pure Rust, no I/O
-pulldown-cmark.workspace = true # the `upload:` reference grammar (wiki_refs.rs) — pure parser, no I/O
+pulldown-cmark.workspace = true # the `upload:` reference grammar (wiki_refs.rs) and the body links (wiki_links.rs) — pure parser, no I/O
+# the wiki header parser (wiki_front_matter.rs): default features off, pure Rust, no I/O
+yaml-rust2.workspace = true
 zeroize.workspace = true # wipes the vault seed on drop - pure Rust, no I/O
 # the vault's content ids (`vault::secret_id`, `vault::grant_id`) hash beside
 # their layouts; still RNG-free, no curve arithmetic (that is molt-vault)
 sha2.workspace = true
+fast_rsync.workspace = true
+base64.workspace = true
 unicase.workspace = true # kanban type labels' Unicode case fold - pure Rust, no I/O
 chrono.workspace = true # kanban date arithmetic; the caller passes every date, no clock read

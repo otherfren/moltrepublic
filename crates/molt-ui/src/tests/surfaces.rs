@@ -568,6 +568,7 @@ fn member(name: &str, id: &str, last_ts: u64, state: i32, uploads: i32) -> Membe
         split: String::new(),
         image: String::new(),
         image_key: String::new(),
+        image_bytes: None,
         desc: String::new(),
     }
 }

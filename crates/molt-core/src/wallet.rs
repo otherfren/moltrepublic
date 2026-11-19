@@ -170,7 +170,8 @@ pub fn bounds_ok(rule_m: u8, rule_n: u8) -> bool {
 }
 
 /// Why a wallet command was refused (`MoltError::Wallet`).
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WalletRefusal {
     /// The step that builds it has not landed.
     #[error("not available yet")]

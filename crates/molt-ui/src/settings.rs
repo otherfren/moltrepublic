@@ -7,38 +7,19 @@
 use std::sync::{Arc, Mutex};
 
 use molt_core::{Command, SessionSettings};
-use molt_engine::WalletHandle;
-use tokio::runtime::Handle;
+use crate::engine::Engine;
+use crate::platform::Spawner;
 
 use crate::alerts::{sound_index, sound_name};
 use crate::i18n::error_toast;
 use crate::net_tor::{mode_index, mode_name, net_index, net_name};
 use crate::AppWindow;
 
-/// The directory the workspace-folder browse dialog should start in, given
-/// the modal's hand-editable draft: the draft — its leading `~` expanded the
-/// same way the engine resolves the setting (`molt_storage::expand_tilde`,
-/// so the config default "~/…" starts at the real folder) — when it names an
-/// existing directory, otherwise `None`: an empty draft or a typo must not
-/// derail the dialog (rfd then opens at its platform default). Runs a stat —
-/// call it off the UI thread (the draft may point at a slow mount).
-pub(crate) fn browse_start_dir(draft: &str) -> Option<std::path::PathBuf> {
-    let path = molt_storage::expand_tilde(draft);
-    path.is_dir().then_some(path)
-}
-
-/// Pick a folder using the draft's existing directory, without blocking the UI.
-/// Cancellation returns `None`.
+/// Pick a folder, starting at the hand-editable draft when that names an
+/// existing directory, without blocking the UI. `None`: cancelled, or a
+/// platform without folder dialogs.
 pub(crate) async fn pick_folder(draft: String) -> Option<String> {
-    let start_dir = tokio::task::spawn_blocking(move || browse_start_dir(&draft))
-        .await
-        .ok()
-        .flatten();
-    let mut picker = rfd::AsyncFileDialog::new();
-    if let Some(dir) = start_dir {
-        picker = picker.set_directory(dir);
-    }
-    picker.pick_folder().await.map(|folder| folder.path().display().to_string())
+    crate::platform::platform().pick_folder(draft).await
 }
 
 /// Does the settings form hold unsaved edits against `stored`?
@@ -199,37 +180,58 @@ pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> S
 }
 
 /// The settings draft's three doors, in ORDER and in ONE task: the wake
-/// command, the host posture with all three secrets (`SetNodePosture` -
-/// the only door that can WRITE a secret), then the wholesale save, which
-/// keeps the stored secrets and so must land LAST. "Save & continue" and
-/// "Rotate token" used to skip the wake door and lose an edited command
-/// (review 2026-08-25 F3).
+/// command, the host posture with the secrets the user CHANGED
+/// (`SetNodePosture` - the only door that can WRITE a secret), then the
+/// wholesale save, which keeps the stored secrets and so must land LAST.
+/// "Save & continue" and "Rotate token" used to skip the wake door and
+/// lose an edited command (review 2026-08-25 F3).
+///
+/// `shown` is what the form was filled from. A secret goes out only when
+/// the draft differs from it: the secrets never serialize, so a window
+/// behind the web door shows them empty, and sending that emptiness back
+/// would clear the seat key, the read key and the S3 secret
+/// (`docs/web_gui.md` §6.5). In the native window an untouched secret
+/// equals the stored one, so leaving it out changes nothing.
 pub(crate) async fn save_draft(
-    w: &WalletHandle,
+    w: &Engine,
     wake: String,
     settings: SessionSettings,
+    shown: &SessionSettings,
 ) -> Result<(), molt_core::MoltError> {
     w.execute(Command::SetWakeCommand { command: wake }).await?;
-    w.execute(Command::SetNodePosture {
-        posture: molt_core::NodePosture::of(&settings),
-    })
-    .await?;
+    w.execute(Command::SetNodePosture { posture: posture_of_draft(&settings, shown) }).await?;
     w.execute(Command::SaveSettings { settings }).await?;
     Ok(())
 }
 
+/// The draft's posture; a secret the user did not touch is `None` (keep).
+fn posture_of_draft(draft: &SessionSettings, shown: &SessionSettings) -> molt_core::NodePosture {
+    let mut posture = molt_core::NodePosture::of(draft);
+    if draft.mcp_token == shown.mcp_token {
+        posture.mcp_token = None;
+    }
+    if draft.mcp_read_token == shown.mcp_read_token {
+        posture.mcp_read_token = None;
+    }
+    if draft.s3_secret_key == shown.s3_secret_key {
+        posture.s3_secret_key = None;
+    }
+    posture
+}
+
 /// [`save_draft`] fire-and-forget, an error as a toast.
 pub(crate) fn issue_draft(
-    rt: &Handle,
-    wallet: &WalletHandle,
+    spawner: &Spawner,
+    wallet: &Engine,
     weak: &slint::Weak<AppWindow>,
     wake: String,
     settings: SessionSettings,
+    shown: SessionSettings,
 ) {
     let w = wallet.clone();
     let weak = weak.clone();
-    rt.spawn(async move {
-        if let Err(e) = save_draft(&w, wake, settings).await {
+    spawner.spawn(async move {
+        if let Err(e) = save_draft(&w, wake, settings, &shown).await {
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
                     ui.invoke_show_toast_error(error_toast(&ui, &e));

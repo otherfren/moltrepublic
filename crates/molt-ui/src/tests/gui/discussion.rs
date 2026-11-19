@@ -311,7 +311,7 @@ fn the_compact_card_shows_no_pill_and_no_preview() {
 fn a_dropped_bundle_does_not_eat_the_toast() {
     let o = Opened::new(workspace_with_a_discussed_vote);
     o.chat_ui.lock().expect("ui state").talk_seen = Some(std::collections::HashSet::new());
-    let dropped = o.rt.block_on(gather_surfaces(&o.w, &o.chat_ui));
+    let dropped = o.rt.block_on(gather_surfaces(&o.w.clone().into(), &o.chat_ui));
     assert!(dropped.is_some(), "the pass gathered a bundle");
     assert_eq!(o.ui.get_toast_text(), "", "nothing landed yet");
     o.mirror();

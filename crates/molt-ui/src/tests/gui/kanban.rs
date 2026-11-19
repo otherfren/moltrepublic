@@ -27,8 +27,8 @@ impl Node {
 
     fn ctx(&self, rt: &tokio::runtime::Runtime) -> Ctx {
         Ctx {
-            rt: rt.handle().clone(),
-            wallet: self.w.clone(),
+            spawner: rt.handle().clone().into(),
+            wallet: self.w.clone().into(),
             weak: self.ui.as_weak(),
             last_settings: self.last.clone(),
             chat_ui: self.chat_ui.clone(),

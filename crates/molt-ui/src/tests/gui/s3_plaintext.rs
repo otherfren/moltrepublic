@@ -42,8 +42,8 @@ fn a_plaintext_endpoint_asks_once_with_its_warning_line() {
     apply_strings(&ui, 0);
     ui.window().set_size(slint::PhysicalSize::new(1100, 900));
     let cx = Ctx {
-        rt: rt.handle().clone(),
-        wallet: w.clone(),
+        spawner: rt.handle().clone().into(),
+        wallet: w.clone().into(),
         weak: ui.as_weak(),
         last_settings: Arc::new(Mutex::new(None)),
         chat_ui: Arc::new(Mutex::new(ChatUiState::default())),
@@ -114,8 +114,8 @@ fn an_unchanged_plaintext_endpoint_does_not_hold_up_save() {
     let ui = AppWindow::new().expect("headless window");
     apply_strings(&ui, 0);
     let cx = Ctx {
-        rt: rt.handle().clone(),
-        wallet: w.clone(),
+        spawner: rt.handle().clone().into(),
+        wallet: w.clone().into(),
         weak: ui.as_weak(),
         last_settings: Arc::new(Mutex::new(None)),
         chat_ui: Arc::new(Mutex::new(ChatUiState::default())),
@@ -167,8 +167,8 @@ fn save_and_continue_asks_before_a_new_plaintext_endpoint() {
     apply_strings(&ui, 0);
     ui.window().set_size(slint::PhysicalSize::new(1100, 900));
     let cx = Ctx {
-        rt: rt.handle().clone(),
-        wallet: w.clone(),
+        spawner: rt.handle().clone().into(),
+        wallet: w.clone().into(),
         weak: ui.as_weak(),
         last_settings: Arc::new(Mutex::new(None)),
         chat_ui: Arc::new(Mutex::new(ChatUiState::default())),

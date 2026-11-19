@@ -99,6 +99,99 @@ None affect the *correctness* of the binary, only its byte representation.
   the artifact is portable across x86_64 CPUs and microarchitecture differences
   do not affect the bytes.
 
+## The web bundle
+
+The browser GUI ships as a second artifact, `dist/moltrepublic-web.tar.zst`:
+the page, its JavaScript glue and the wasm module that a node serves from
+`[web] dir`. It has its own script, its own promise and its own envelope.
+Nothing in this section changes the Linux promise above, and the Linux
+script needs none of the tools named here.
+
+### The promise (web) - verified on one host
+
+The script is built to be deterministic: the same inputs and flags as the
+Linux build, a pinned post-processing tool, a deterministic tarball.
+**Verified 2026-11-18: two builds of one commit gave the same SHA-256**
+for the tarball and for the unstripped module, on one host, in one
+checkout path and one target dir, with
+`<target>/wasm32-unknown-unknown/release-web` deleted between the runs
+(rustc 1.95.0, `wasm-bindgen-cli` 0.2.126). So 16 codegen units for the
+window crate and the pinned CLI are byte-stable there.
+
+Not checked yet: a second machine, a second checkout path, a
+`CARGO_TARGET_DIR` outside the tree, and a rebuild of the host-side
+build scripts (they stayed cached between the two runs). No release
+carries a web tarball yet, so no published hash exists to compare with.
+
+### How to verify
+
+```bash
+git checkout vX.Y.Z
+bash scripts/build-release-web.sh --check-only   # tools and versions, no compile
+bash scripts/build-release-web.sh
+sha256sum dist/moltrepublic-web.tar.zst
+```
+
+`--check-only` prints one line per requirement and exits non-zero when one
+is missing. `bash scripts/test-build-release-web.sh` exercises the script
+against stub tools (no compile).
+
+### What is in the envelope
+
+- **Source tree, `Cargo.lock`, the toolchain** as for Linux;
+  `rust-toolchain.toml` also names the `wasm32-unknown-unknown` target
+  (rustup then installs it for a Linux build as well; it takes no part in
+  that build).
+- **`[profile.release-web]`**: the release profile with LTO off and, for the
+  window crate, `opt-level = "s"` and `codegen-units = 16`. Every other
+  crate keeps one codegen unit.
+- **`wasm-bindgen-cli` at exactly the `wasm-bindgen` version in
+  `Cargo.lock`.** The script compares the two and stops on a mismatch,
+  printing the `cargo install --locked wasm-bindgen-cli --version =X` line.
+  It runs with `--target web --no-typescript --remove-name-section
+  --remove-producers-section`; the unstripped module stays in the target
+  dir. No `wasm-opt`.
+- **`SOURCE_DATE_EPOCH`, `LC_ALL=C`, `TZ=UTC`, `--locked`, the path remaps**
+  as for Linux. The target dir is remapped too, so a `CARGO_TARGET_DIR`
+  outside the tree does not change the bytes.
+- **No C compiler, no glibc, no binutils `strip`**: the module is built for
+  `wasm32-unknown-unknown` and stripped by the pinned CLI, so three of the
+  Linux build's drift sources do not apply.
+- **The tarball**: the page (`index.html`, `page.js`, `page.css` from
+  `crates/molt-web/page/`), `molt_web.js`, `molt_web_bg.wasm`,
+  `COPYING` and the two font licences, flat, owner 0, mode 644, the
+  commit's time.
+
+### Known sources of drift (web)
+
+- **16 codegen units**: byte-stable across two builds on one host
+  (2026-11-18); other hosts unchecked.
+- **Host `tar` / `zstd` versions**, as for Linux.
+- **Build scripts run on the host.** The Slint compiler that generates the
+  window module is a host program; its output is expected to depend on the
+  source only. The two builds of 2026-11-18 shared the compiled build
+  scripts, so they confirm the generated module is stable for one
+  checkout path, not across paths.
+
+### Cost
+
+One more window-scale compile. Measured 2026-11-18 through the script
+(31 GiB box + 32 GiB swap, `-j 1`): the window rustc peaked at 26.1 GiB
+(RSS + swap), the whole run took 17m40s cold and 16m24s with the host
+side cached. The module is 65.2 MB in the bundle (105.7 MB unstripped in
+the target dir), the glue 111 KB, the tarball 9.5 MB. The script builds with `-j 1` and refuses to start while a
+cargo or rustc is live on its target dir. The releaser runs the Linux
+script, then this one, never side by side.
+
+### Installing the bundle
+
+```bash
+mkdir -m 755 web && tar --zstd -xf moltrepublic-web.tar.zst -C web   # beside config.toml
+```
+
+then set `[web] port`. The node refuses a bundle directory or file that is
+a symlink, group- or world-writable, or owned by another user.
+
 ## Non-Linux hosts
 
 The script assumes GNU `tar`. macOS ships `bsdtar`; use `gtar` (Homebrew) or

@@ -1676,6 +1676,8 @@ impl State {
         // that replayed as mine and still available — this node keeps
         // serving downloads across restarts
         self.adopt_share_paths();
+        // what a crash or a close left in the upload store goes now
+        self.sweep_upload_store();
         self.resume_file_jobs(&transport_state);
         self.wallet_load_seat(&transport_state);
         self.wallet_on_open(wallet_records);
@@ -1994,6 +1996,23 @@ impl State {
         molt_storage::read_sealed_seed(&root, &dir, id).filter(|s| !s.is_empty())
     }
 
+    /// What a pasted link is: the two invite parsers' verdict, nothing
+    /// started and nothing stored.
+    pub(crate) fn cmd_classify_link(&self, link: &str) -> Reply {
+        let link = link.trim();
+        // both parsers reject a missing or damaged handover: a preview
+        // link must not arm a flow that cannot run
+        let (kind, republic, who, relays) = if let Ok(inv) = crate::FoundingInvite::parse(link) {
+            (1, inv.info.republic, inv.info.inviter, inv.handover.relays)
+        } else if let Some(rec) = crate::recovery::RecoveryInvite::parse(link) {
+            let relays = rec.handover.map(|h| h.relays).unwrap_or_default();
+            (2, rec.republic, rec.member, relays)
+        } else {
+            (0, String::new(), String::new(), Vec::new())
+        };
+        Reply::Link(molt_core::LinkView { link: link.to_string(), kind, republic, who, relays })
+    }
+
     pub(crate) fn cmd_reveal_seed(&self, id: &WorkspaceId) -> Result<Reply, MoltError> {
         if !self.session.workspaces.iter().any(|w| w.id == *id) {
             return Err(MoltError::UnknownWorkspace(id.clone()));
@@ -2305,23 +2324,23 @@ impl State {
         self.require_feature(Surface::Memory)?;
         let dest = dest.trim();
         if dest.is_empty() {
-            return Err(MoltError::WikiExport("a target directory is required"));
+            return Err(MoltError::WikiExport("a target directory is required".into()));
         }
         if self.session.wiki_export.running {
-            return Err(MoltError::WikiExport("an export is already running"));
+            return Err(MoltError::WikiExport("an export is already running".into()));
         }
         // the wiki IS the open workspace's state: no workspace open, no tree
         let tree = self.wiki_tree()?;
         if tree.is_empty() {
-            return Err(MoltError::WikiExport("the wiki is empty"));
+            return Err(MoltError::WikiExport("the wiki is empty".into()));
         }
         let bundle = if proof {
             if !self.is_chain_governed() {
-                return Err(MoltError::WikiExport("proof needs chain governance"));
+                return Err(MoltError::WikiExport("proof needs chain governance".into()));
             }
             Some(
                 crate::wiki_export::bundle_from_chain(&self.chain.blocks)
-                    .ok_or(MoltError::WikiExport("proof needs the genesis block"))?,
+                    .ok_or(MoltError::WikiExport("proof needs the genesis block".into()))?,
             )
         } else {
             None
@@ -2632,7 +2651,7 @@ fn keep_stored_secrets(target: &mut SessionSettings, stored: &SessionSettings) {
 /// is an accident of the launch, not a place anybody chose.
 fn resolve_host_path(dest: &str, download_dir: &str) -> Result<String, MoltError> {
     let dest = dest.trim();
-    if is_bare_name(dest) {
+    if molt_core::is_bare_name(dest) {
         return Ok(molt_storage::expand_tilde(download_dir)
             .join(dest)
             .to_string_lossy()
@@ -2644,18 +2663,6 @@ fn resolve_host_path(dest: &str, download_dir: &str) -> Result<String, MoltError
     Err(MoltError::BadPayload(
         "a destination is a bare name in the download directory or an absolute path".to_string(),
     ))
-}
-
-/// One path component and nothing else — the exchange-folder form of a
-/// destination.
-fn is_bare_name(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains('\0')
-        && name.len() <= 255
 }
 
 fn validate_settings(s: &SessionSettings) -> Result<(), MoltError> {

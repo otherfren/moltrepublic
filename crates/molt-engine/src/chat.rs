@@ -354,11 +354,45 @@ impl State {
         }
         // a bare name is the exchange folder's; any absolute path the
         // node's user can read is fair game on both surfaces (ADR-0007)
-        let path = self.host_path(&path)?;
-        let p = std::path::PathBuf::from(&path);
+        let path = std::path::PathBuf::from(self.host_path(&path)?);
+        // a stored upload is its share's and leaves the disk with it: a
+        // second share by path would lose its source to the first. Judged
+        // on the file the path opens, so a `..` or a link is no way round
+        if self
+            .upload_store()
+            .is_ok_and(|store| crate::upload_store::reaches_store(&store, &path))
+        {
+            return Err(MoltError::BadPayload(
+                "the upload store is not a share source".into(),
+            ));
+        }
+        self.share_checked(path, channel)
+    }
+
+    /// Share the file at `p` (a path this node resolved itself):
+    /// [`State::cmd_share_file`] behind its path rule, and
+    /// [`State::cmd_share_upload`] with the store's file.
+    pub(crate) fn share_source(
+        &mut self,
+        p: std::path::PathBuf,
+        channel: ChannelRef,
+    ) -> Result<Reply, MoltError> {
+        self.ensure_demo_net();
+        let channel = channel.normalized().map_err(MoltError::BadPayload)?;
+        self.refuse_closed_thread(&channel)?;
+        self.share_checked(p, channel)
+    }
+
+    /// The share itself; `channel` is normalized and open.
+    fn share_checked(
+        &mut self,
+        p: std::path::PathBuf,
+        channel: ChannelRef,
+    ) -> Result<Reply, MoltError> {
         if p.file_name().is_none() {
             return Err(MoltError::BadPayload(format!(
-                "{path:?} has no file name component"
+                "{:?} has no file name component",
+                p.display().to_string()
             )));
         }
         // file_cap_bytes = 0 turns sharing off on every transport (FP4);
@@ -444,8 +478,11 @@ impl State {
         &mut self,
         name: String,
         reason: String,
+        id: MessageId,
     ) -> Result<Reply, MoltError> {
         tracing::warn!(%name, %reason, "sharing a file failed");
+        // an upload behind the share goes: nobody holds its id any more
+        self.uploads.share_failed(&id);
         self.session.notice = format!("share-failed:{name}:{reason}");
         self.note_mirror_holds_changed(crate::now_secs());
         self.emit_session(molt_core::SessionScope::Full);
@@ -728,6 +765,8 @@ impl State {
     /// Remember one of MY shares' local source path — runtime map + the
     /// per-workspace prefs sidecar (survives restarts; never wire/log).
     fn remember_share_path(&mut self, id: MessageId, path: &str, modified: u64) {
+        // an upload that became this share is the share's file from here on
+        self.uploads.shared(&id);
         self.files.share_paths.insert(id, std::path::PathBuf::from(path));
         self.files.share_stamps.insert(id, modified);
         if let Some(active) = &mut self.active {
@@ -745,7 +784,10 @@ impl State {
 
     /// Forget a share's source path (share removed).
     pub(crate) fn forget_share_path(&mut self, id: &MessageId) {
-        self.files.share_paths.remove(id);
+        // a share out of the upload store takes its bytes with it
+        if let Some(path) = self.files.share_paths.remove(id) {
+            self.drop_stored_share(&path);
+        }
         self.files.share_stamps.remove(id);
         if let Some(active) = &mut self.active {
             let stamp = active.prefs.shared_file_mtimes.remove(&id.to_string()).is_some();
@@ -1017,14 +1059,14 @@ impl State {
     /// the TARGET's live ingest reacts — behind that node's own opt-in.
     pub(crate) fn cmd_poke(&mut self, member: MemberId) -> Result<Reply, MoltError> {
         if !self.session.settings.poke_enabled {
-            return Err(MoltError::Poke("not enabled"));
+            return Err(MoltError::Poke("not enabled".into()));
         }
         let from = self.member();
         if member == from {
-            return Err(MoltError::Poke("cannot poke yourself"));
+            return Err(MoltError::Poke("cannot poke yourself".into()));
         }
         if !self.roster().contains(&member) {
-            return Err(MoltError::Poke("unknown member"));
+            return Err(MoltError::Poke("unknown member".into()));
         }
         self.send_poke(&from, &member)?;
         if self.note_line(&format!("poked {member}")) {
@@ -1054,10 +1096,10 @@ impl State {
         }
         // queue mesh (the test transport): straight onto the target's leg
         let Some(net) = self.net.as_ref() else {
-            return Err(MoltError::Poke("no transport"));
+            return Err(MoltError::Poke("no transport".into()));
         };
         let (Some(transport), Some(group)) = (net.runtime_transport(), net.group_arc()) else {
-            return Err(MoltError::Poke("no transport"));
+            return Err(MoltError::Poke("no transport".into()));
         };
         let Some(peer) = net
             .mesh()
@@ -1065,7 +1107,7 @@ impl State {
             .filter_map(molt_net::PeerLink::from_mesh)
             .find(|p| p.member == *to)
         else {
-            return Err(MoltError::Poke("no link to that member"));
+            return Err(MoltError::Poke("no link to that member".into()));
         };
         tokio::spawn(Self::send_ping(transport, group, peer, poke.to_frame()));
         Ok(())
@@ -2004,20 +2046,20 @@ mod tests {
         let err = st
             .cmd_poke("peer-1".to_string())
             .expect_err("poking is an explicit opt-in");
-        assert!(matches!(err, MoltError::Poke("not enabled")), "{err:?}");
+        assert!(matches!(&err, MoltError::Poke(r) if r == "not enabled"), "{err:?}");
 
         st.session.settings.poke_enabled = true;
         assert!(
             matches!(
                 st.cmd_poke("me".to_string()),
-                Err(MoltError::Poke("cannot poke yourself"))
+                Err(MoltError::Poke(r)) if r == "cannot poke yourself"
             ),
             "self-poke is refused"
         );
         assert!(
             matches!(
                 st.cmd_poke("nobody".to_string()),
-                Err(MoltError::Poke("unknown member"))
+                Err(MoltError::Poke(r)) if r == "unknown member"
             ),
             "a poke needs a roster member"
         );
@@ -2027,7 +2069,7 @@ mod tests {
         assert!(
             matches!(
                 st.cmd_poke("peer-1".to_string()),
-                Err(MoltError::Poke("no transport"))
+                Err(MoltError::Poke(r)) if r == "no transport"
             ),
             "a poke without a transport is refused, not silently swallowed"
         );

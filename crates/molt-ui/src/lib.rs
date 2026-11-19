@@ -23,7 +23,7 @@
 //! The GUI is a **live-mirror of the engine's shared session**, not a holder of
 //! its own state. Every action (navigate, switch language, save settings, finish
 //! a wizard) is turned into a [`molt_core::Command`] on the shared
-//! [`WalletHandle`]; a background task re-reads the session on each
+//! [`Engine`]; a background task re-reads the session on each
 //! [`molt_core::Event::SessionChanged`] and pushes it back into the Slint
 //! properties. An MCP agent issuing the *same* commands drives this *same* state,
 //! so the GUI and the MCP operator are co-equal — exactly as for the surfaces.
@@ -40,6 +40,16 @@
 //! - `chat_log`, `channels` — the chat pane's rows and the chat bus's
 //!   channels + proposal cache.
 //! - `settings` — the settings draft (read/apply/dirty/save).
+//! - `native` — the one module that names tokio and the operating
+//!   system: the spawner behind `Ctx::spawn`, off-thread work, and the
+//!   native half of the platform seam. Not in a browser build, where
+//!   `web` is its twin (the spawner over Slint's event loop, work inline)
+//!   and `molt-web` brings the platform.
+//! - `platform` — the door to that seam: clipboard, alert, clocks, sleep,
+//!   random token and files (`docs/web_gui.md` §6.3).
+//! - `bytes` — file content to and from the engine: by path for the
+//!   engine in this process, through the byte doors for one behind the
+//!   web door (`docs/web_gui.md` §7).
 //! - `models` — the one in-place `VecModel` patch (`sync_model`).
 //! - `images`, `labels`, `i18n`, `alerts`, `net_tor` — pictures, rendered
 //!   prose, localization, alert sounds, the anonymity panel.
@@ -53,16 +63,24 @@
 // if the module were still injected here.
 pub use molt_ui_window::*;
 
-/// The Restore wizard's one link field: which flow a pasted link arms.
-pub use actions::ritual::{link_kind, LinkKind};
+#[cfg(not(target_arch = "wasm32"))]
 pub use app::run_app;
+pub use app::{run_remote, Sizer};
+pub use i18n::page_text;
+pub use engine::Engine;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native::Spawner;
+#[cfg(target_arch = "wasm32")]
+pub use web::Spawner;
 
 mod actions;
 mod alerts;
 mod app;
+mod bytes;
 mod channels;
 mod chat_log;
 mod download_status;
+mod engine;
 mod i18n;
 mod images;
 mod kanban;
@@ -71,13 +89,24 @@ mod labels;
 mod log_view;
 mod mirror;
 mod models;
+// the one module the OS and runtime calls of `clippy.toml` are allowed in
+// (`docs/web_gui.md` §8.3)
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::disallowed_methods)]
+mod native;
 mod net_tor;
 mod patchview;
+mod platform;
 mod settings;
 mod surfaces;
 mod wallet;
+// the browser's twin of `native`; the tests compile it on every target
+#[cfg(any(target_arch = "wasm32", test))]
+mod web;
 mod wiki;
 mod wiki_bridge;
 
+// tests set up files, runtimes and waits of their own; they never ship
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests;

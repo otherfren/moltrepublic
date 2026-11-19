@@ -127,7 +127,10 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
     match e {
         E::UnknownProposal(id) => format!("Unbekannter Vorschlag #{}", id.0),
         E::NotGated(sf) => format!("{} ist ungated - nichts vorzuschlagen", sf.as_str()),
-        E::BadPayload(t) => format!("Ungültige Payload: {t}"),
+        E::BadPayload(t) => match upload_refusal_de(t) {
+            Some(de) => de.to_string(),
+            None => format!("Ungültige Payload: {t}"),
+        },
         E::IndexBuilding { done, total } => {
             format!("Der Wiki-Index wird gebaut ({done} von {total} Dokumenten)")
         }
@@ -172,7 +175,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::Recover(t) => format!("Recovery: {t}"),
         E::Poke(t) => format!(
             "Anstupsen: {}",
-            match *t {
+            match &**t {
                 "not enabled" => "nicht aktiviert",
                 "cannot poke yourself" => "nicht dich selbst",
                 "unknown member" => "unbekanntes Mitglied",
@@ -181,7 +184,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         ),
         E::WikiExport(t) => format!(
             "Wiki-Export: {}",
-            match *t {
+            match &**t {
                 "a target directory is required" => "Zielordner fehlt",
                 "an export is already running" => "läuft bereits",
                 "the wiki is empty" => "Wiki ist leer",
@@ -193,17 +196,33 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
             }
         ),
         E::Engine(t) => format!("Engine: {t}"),
+        E::Refused(t) => format!("Abgelehnt: {t}"),
     }
 }
 
 /// A create/join refusal: the handle charset rule in German, anything
 /// else carried through.
 fn handle_err_de(t: &str) -> &str {
-    if t == molt_engine::HANDLE_CHARSET_REFUSAL {
+    if t == molt_core::HANDLE_CHARSET_REFUSAL {
         "Name nur aus ASCII und ä ö ü ß"
     } else {
         t
     }
+}
+
+/// The upload store's refusals a user can meet through the web door
+/// (`docs/web_gui.md` §7), in German; the rest ride verbatim.
+fn upload_refusal_de(t: &str) -> Option<&'static str> {
+    let t = t.strip_prefix("upload: ")?;
+    Some(match t {
+        "no stored workspace is open" => "Upload: kein gespeicherter Workspace offen",
+        "8 uploads already open" => "Upload: schon 8 Uploads offen",
+        "already shared" => "Upload: schon geteilt",
+        "unknown id" => "Upload: unbekannt",
+        _ if t.starts_with("the store is full") => "Upload: der Upload-Speicher ist voll",
+        _ if t.contains(" over the ") => Lexicon::de().toast_too_large_web,
+        _ => return None,
+    })
 }
 
 /// The one way an engine error becomes toast copy: ⚠ + the localized
@@ -778,12 +797,12 @@ pub(crate) static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
 ];
 
 /// The agent skill in the UI language, placeholders unfilled
-/// ([`molt_mcp::fill_wake_skill`]); English is the text MCP serves.
+/// ([`molt_core::kanban_wake::fill_wake_skill`]); English is the text MCP serves.
 pub(crate) fn wake_skill(lang: i32) -> &'static str {
     if lang == 1 {
         include_str!("wake_skill_de.md")
     } else {
-        molt_mcp::WAKE_SKILL
+        molt_core::kanban_wake::WAKE_SKILL
     }
 }
 
@@ -816,7 +835,7 @@ macro_rules! lexicon {
 
         /// Push the localized string table for `lang` (0 = English,
         /// 1 = German) into the Slint `Strings` global.
-        pub(crate) fn apply_strings(ui: &AppWindow, lang: i32) {
+        fn apply_lexicon(ui: &AppWindow, lang: i32) {
             let l = Lexicon::of(lang);
             let s = ui.global::<Strings>();
             paste::paste! {
@@ -825,6 +844,74 @@ macro_rules! lexicon {
         }
     };
 }
+
+/// Label the window in `lang` (0 = English, 1 = German). Behind the web
+/// door the labels that name a key say the browser-safe one.
+pub(crate) fn apply_strings(ui: &AppWindow, lang: i32) {
+    apply_lexicon(ui, lang);
+    if ui.get_web() {
+        apply_web_strings(ui, lang);
+    }
+}
+
+/// The labels that differ behind the web door: `Tab` is the browser's,
+/// the wiki's edit and preview switch sits on F2 there
+/// (`docs/web_gui.md` §9).
+pub(crate) fn apply_web_strings(ui: &AppWindow, lang: i32) {
+    let l = Lexicon::of(lang);
+    let s = ui.global::<Strings>();
+    s.set_mem_tb_edit(l.mem_tb_edit_web.into());
+    s.set_mem_tb_preview(l.mem_tb_preview_web.into());
+}
+
+/// The page around the browser window (`molt-web`'s `index.html`): the
+/// key prompt, why a connection ended, and what a browser cannot do
+/// (`docs/web_gui.md` §9). `(name, text)` in `lang` (0 = English,
+/// 1 = German); `help` holds one limit per line.
+#[must_use]
+pub fn page_text(lang: i32) -> Vec<(&'static str, &'static str)> {
+    PAGE_TEXT.iter().map(|(name, en, de)| (*name, if lang == 1 { *de } else { *en })).collect()
+}
+
+const PAGE_TEXT: &[(&str, &str, &str)] = &[
+    ("lang", "en", "de"),
+    ("key", "API token", "API-Token"),
+    ("connect", "Connect", "Verbinden"),
+    ("connecting", "Connecting", "Verbinde"),
+    ("reload", "Reload", "Neu laden"),
+    ("refused", "Token refused or rotated.", "Token abgelehnt oder rotiert."),
+    ("protocol", "Connection ended: protocol error.", "Verbindung beendet: Protokollfehler."),
+    ("closed", "Connection closed.", "Verbindung getrennt."),
+    ("version", "Version mismatch: this page is not the node's build.", "Versionskonflikt: diese Seite passt nicht zum Node."),
+    ("failed", "Could not start", "Start fehlgeschlagen"),
+    ("lag", "Events dropped, reading again.", "Ereignisse verworfen, lese neu."),
+    ("help_title", "Limits in the browser", "Grenzen im Browser"),
+    (
+        "help",
+        "No quit: close the tab.\n\
+         Tabs and the desktop window show the same screen.\n\
+         Stored API tokens are not shown, only replaced.\n\
+         Paste needs Ctrl+V or the clipboard permission.\n\
+         No folder dialogs: server folders are typed.\n\
+         The wiki export writes to a server folder, no download.\n\
+         Files up to 64 MiB; uploads need a stored workspace.\n\
+         Wiki: F4 closes a tab, F2 switches edit and preview.\n\
+         No screen reader support.\n\
+         Needs 990 px width; IME and phone keyboards are weak.\n\
+         Text renders in Inter.",
+        "Kein Beenden: Tab schließen.\n\
+         Tabs und das Desktop-Fenster zeigen denselben Bildschirm.\n\
+         Gespeicherte API-Tokens werden nicht angezeigt, nur ersetzt.\n\
+         Einfügen braucht Strg+V oder die Zwischenablage-Freigabe.\n\
+         Keine Ordnerdialoge: Serverordner werden getippt.\n\
+         Der Wiki-Export schreibt in einen Serverordner, kein Download.\n\
+         Dateien bis 64 MiB; Uploads brauchen einen gespeicherten Workspace.\n\
+         Wiki: F4 schließt einen Tab, F2 wechselt Bearbeiten und Vorschau.\n\
+         Keine Screenreader-Unterstützung.\n\
+         Braucht 990 px Breite; IME und Handy-Tastaturen sind schwach.\n\
+         Text wird in Inter dargestellt.",
+    ),
+];
 
 lexicon! {
     choice_title: "Welcome", "Willkommen";
@@ -1039,6 +1126,7 @@ lexicon! {
     ou_mirror_quota: "Quota (GB)", "Quota (GB)";
     ou_mirror_apply: "Apply", "Übernehmen";
     ou_mirror_browse: "Folder...", "Ordner...";
+    ou_mirror_dir_ph: "Default folder", "Standardordner";
     ou_mirror_of: "of", "von";
     ou_copy: "Copy", "Kopieren";
     ou_gone: "gone", "weg";
@@ -1151,6 +1239,19 @@ lexicon! {
     rv_auto_note: "members approve automatically when online", "Mitglieder stimmen automatisch zu, sobald sie online sind";
     rv_failed_hint: "Recovery links are single-use - ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig - bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";
     set_token_failed: "Could not mint a token - the old one still applies.", "Konnte kein Token erzeugen - das alte gilt weiter.";
+    set_keys_hidden: "Stored tokens are not shown here. Rotate to replace one.", "Gespeicherte Tokens werden hier nicht angezeigt. Rotieren ersetzt eines.";
+    set_issue_rotate: "Issue or rotate", "Erzeugen oder rotieren";
+    set_s3_secret_keep: "Empty keeps the stored secret.", "Leer behält das gespeicherte Secret.";
+    set_s3_secret_remove: "Remove stored secret", "Gespeichertes Secret entfernen";
+    set_s3_secret_removed: "S3 secret removed.", "S3-Secret entfernt.";
+    set_read_revoked: "Read-only token revoked.", "Nur-Lese-Token entzogen.";
+    set_key_applied: "New token applies.", "Neues Token gilt.";
+    set_key_unsure: "Connection lost. The new token may apply.", "Verbindung verloren. Das neue Token gilt womöglich.";
+    set_key_kept: "Token not applied. The old one stays.", "Token nicht übernommen. Das alte gilt weiter.";
+    key_copy_failed: "Copy failed. Select the token, then Ctrl+C.", "Kopieren fehlgeschlagen. Token markieren, dann Strg+C.";
+    key_new_title: "New API token", "Neues API-Token";
+    key_new_title_read: "New read-only token", "Neues Nur-Lese-Token";
+    key_new_body: "Copy it now. It is not shown again.", "Jetzt kopieren. Es wird nicht wieder angezeigt.";
     rw_title: "(Re)Join / Recovery", "(Re)Join / Recovery";
     rw_title_s3: "Restore from backup", "Backup wiederherstellen";
     rw_seed: "Recovery phrase", "Wiederherstellungs-Phrase";
@@ -1237,7 +1338,7 @@ lexicon! {
     chain_empty: "No chain - this workspace is not chain-governed.", "Keine Chain - dieser Workspace ist nicht chain-regiert.";
     set_ws_choose: "Choose folder…", "Ordner auswählen…";
     set_ws_dir_title: "Choose workspace folder", "Workspace-Ordner auswählen";
-    set_ws_dir_body: "Path of the folder that holds your workspaces - browse via the file dialog or type it directly.", "Pfad des Ordners, der deine Workspaces enthält - per Datei-Dialog auswählen oder direkt eintippen.";
+    set_ws_dir_body: "Path of the folder that holds your workspaces.", "Pfad des Ordners, der deine Workspaces enthält.";
     set_ws_dir_browse: "Browse…", "Durchsuchen…";
     set_ws_found_one: "workspace found in this folder", "Workspace in diesem Ordner gefunden";
     set_ws_found_many: "workspaces found in this folder", "Workspaces in diesem Ordner gefunden";
@@ -1447,6 +1548,7 @@ lexicon! {
     mv_file_gone: "File no longer available - its owner deleted it.", "Datei nicht mehr verfügbar - der Besitzer hat sie gelöscht.";
     toast_dl_done: "Saved:", "Gespeichert:";
     toast_dl_failed: "Download failed:", "Download fehlgeschlagen:";
+    toast_too_large_web: "Too large for the browser (64 MiB at most).", "Zu groß für den Browser (höchstens 64 MiB).";
     toast_file_removed: "Local file deleted - the share is no longer available.", "Lokale Datei gelöscht - die Freigabe ist nicht mehr verfügbar.";
     dm_title: "Delete message?", "Nachricht löschen?";
     dm_body: "The text disappears for everyone and only a deletion notice remains - a replicated tombstone addressed by message id, kept in the event log.", "Der Text verschwindet für alle, nur ein Lösch-Hinweis bleibt - ein replizierter Tombstone, per Nachrichten-ID adressiert und im Event-Log gehalten.";
@@ -1474,6 +1576,8 @@ lexicon! {
     mem_tb_open_all: "Expand all", "Alles ausklappen";
     mem_tb_edit: "Edit as Markdown (Tab)", "Als Markdown bearbeiten (Tab)";
     mem_tb_preview: "Preview (Tab)", "Vorschau (Tab)";
+    mem_tb_edit_web: "Edit as Markdown (F2)", "Als Markdown bearbeiten (F2)";
+    mem_tb_preview_web: "Preview (F2)", "Vorschau (F2)";
     mem_tb_link: "Copy path", "Pfad kopieren";
     mem_tb_locate: "Reveal in navigator", "Im Navigator zeigen";
     mem_tb_prev: "Previous tab", "Vorheriger Tab";
