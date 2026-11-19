@@ -1018,6 +1018,8 @@ pub(crate) struct ChainProjection {
     /// The height a catch-up request is currently outstanding for (dedups the
     /// request while a gap persists; cleared when the head reaches it).
     pub(crate) catchup_from: Option<u64>,
+    /// S3: a served checkpoint blob arriving in parts.
+    pub(crate) blob_parts: chain::blob_parts::BlobAssembly,
     /// When the open catch-up request was last sent (presence clock).
     pub(crate) catchup_since: u64,
     /// Fork decisions since open (S1 diagnostics).

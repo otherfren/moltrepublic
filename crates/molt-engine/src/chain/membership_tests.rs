@@ -1538,3 +1538,18 @@ fn the_v2_capability_survives_a_reopen() {
     });
     assert!(back.consent_anchor_for("dora").is_some(), "the capability came back from disk");
 }
+
+/// S3/B5: a sealed restore whose seat was never heard from since may be
+/// re-admitted under the same anchor; one whose seat came back may not.
+#[test]
+fn an_unfinished_restore_may_be_retried_under_its_anchor() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let anchor = "ab".repeat(32);
+    b.commit_restored("dora", &anchor, &["petra", "walter"]);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    let height = walter.chain.blocks.last().expect("block").height;
+    walter.chain.block_ts.insert(height, 1_000);
+    assert!(walter.restore_never_finished("dora", &anchor));
+    assert!(!walter.restore_never_finished("dora", &"cd".repeat(32)), "only its own anchor");
+    assert!(!walter.restore_never_finished("petra", &anchor), "only the restored seat");
+}

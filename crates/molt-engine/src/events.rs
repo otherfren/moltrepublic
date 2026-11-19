@@ -463,6 +463,7 @@ impl State {
             | WorkspaceEvent::ChainRequest { .. }
             | WorkspaceEvent::CheckpointProposed { .. }
             | WorkspaceEvent::CheckpointServed { .. }
+            | WorkspaceEvent::CheckpointServedPart { .. }
             | WorkspaceEvent::MlsCommit { .. }
             | WorkspaceEvent::MeshAnnounced { .. }
             | WorkspaceEvent::FileRequested { .. }

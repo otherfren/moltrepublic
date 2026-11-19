@@ -3179,6 +3179,20 @@ pub enum WorkspaceEvent {
         /// The full checkpoint state the anchored `state_hash` commits.
         blob: chain::CheckpointState,
     },
+    /// S3 (`chain_divergence_plan.md`): one part of a served checkpoint
+    /// blob too large for one frame. The parts' bytes concatenate to the
+    /// blob's JSON; `blob_hash` (sha256 hex of those bytes) ties them
+    /// together and is checked before the blob is used. Transport-only.
+    CheckpointServedPart {
+        /// sha256 (hex) of the whole serialized blob.
+        blob_hash: String,
+        /// This part's position, 0-based.
+        index: u32,
+        /// How many parts the blob has.
+        total: u32,
+        /// This part's bytes, base64.
+        data: String,
+    },
     /// A member wants a shared file's BYTES: its fetch request, carried as
     /// **MLS ciphertext** (hex of the group-encrypted
     /// `molt_net::transfer::FetchRequest` JSON — share id, reply-queue

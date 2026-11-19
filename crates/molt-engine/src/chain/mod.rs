@@ -27,6 +27,7 @@ use molt_core::{
 
 use crate::State;
 
+pub(crate) mod blob_parts;
 mod checkpoint;
 mod governance;
 mod membership;

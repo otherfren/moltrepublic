@@ -847,6 +847,23 @@ impl State {
     /// dead incarnation again. (History pruned below a checkpoint forgets
     /// pre-cut anchors — bounded by the cut, and the cooldown covers the
     /// gap for live traffic.)
+    /// Whether `pk` is `member`'s own latest `Restored` anchor and the seat
+    /// has not been heard from since that block: a sealed restore whose
+    /// rejoiner never materialized (S3/B5).
+    pub(crate) fn restore_never_finished(&self, member: &str, pk: &str) -> bool {
+        let latest = self.chain.blocks.iter().rev().find_map(|b| match &b.change {
+            ChainChange::Membership { op: MembershipOp::Restored, member: m, nostr_pk, .. } if m == member => {
+                Some((b.height, nostr_pk.clone().unwrap_or_default()))
+            }
+            _ => None,
+        });
+        let Some((height, anchor)) = latest else {
+            return false;
+        };
+        let sealed_at = self.chain.block_ts.get(&height).copied().unwrap_or(0);
+        anchor == pk && sealed_at > 0 && self.member_last_seen(member) < sealed_at
+    }
+
     pub(crate) fn anchor_seen_in_chain(&self, pk: &str) -> bool {
         if pk.is_empty() {
             return false;

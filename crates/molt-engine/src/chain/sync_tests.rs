@@ -480,13 +480,14 @@ fn a_headless_rejoiner_bootstraps_from_a_served_genesis() {
 /// would write nothing more, across restarts - so the honest answer to a
 /// peer's request is silence, not a self-inflicted outbox freeze.
 #[test]
-fn an_oversized_checkpoint_blob_is_never_served() {
+fn an_oversized_checkpoint_blob_is_served_in_parts() {
     let mut b = Builder::new(&["petra", "walter"], 2);
     b.commit_applied(1, &["petra", "walter"]);
     let blob = checkpoint_state(&b.blocks, 1).expect("state@1");
+    let whole = crate::State::served_blob_events(&blob);
     assert!(
-        crate::State::served_blob_fits(&blob),
-        "an ordinary blob is servable"
+        matches!(whole.as_slice(), [WorkspaceEvent::CheckpointServed { .. }]),
+        "an ordinary blob is served whole"
     );
 
     // a blob whose applied history alone outgrows one frame
@@ -497,10 +498,51 @@ fn an_oversized_checkpoint_blob_is_never_served() {
             .map(|i| (i, serde_json::json!({ "op": "add_note", "text": "x".repeat(200) })))
             .collect(),
     )];
-    assert!(
-        !crate::State::served_blob_fits(&fat),
-        "a blob past the frame budget is refused before it can stall the outbox"
-    );
+    let parts = crate::State::served_blob_events(&fat);
+    assert!(parts.len() > 1, "served in parts, not refused");
+    let cap = crate::State::served_blob_cap();
+    let mut asm = super::blob_parts::BlobAssembly::default();
+    let mut got = None;
+    // any order reassembles; every part stays within one frame
+    for ev in parts.iter().rev() {
+        assert!(serde_json::to_vec(ev).expect("json").len() <= cap);
+        let WorkspaceEvent::CheckpointServedPart { blob_hash, index, total, data } = ev else {
+            panic!("only parts: {ev:?}");
+        };
+        got = asm.accept(blob_hash, *index, *total, data).or(got);
+    }
+    assert_eq!(got, Some(fat), "the parts rebuild the blob");
+}
+
+/// S3: a part of another blob restarts the assembly; a part set whose
+/// bytes do not match the hash yields nothing.
+#[test]
+fn blob_parts_check_their_hash() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_applied(1, &["petra", "walter"]);
+    let mut fat = checkpoint_state(&b.blocks, 1).expect("state@1");
+    fat.applied = vec![(
+        Surface::Memory,
+        (0..2_000u64).map(|i| (i, serde_json::json!({ "text": "y".repeat(200) }))).collect(),
+    )];
+    let parts: Vec<(String, u32, u32, String)> = crate::State::served_blob_events(&fat)
+        .into_iter()
+        .map(|ev| match ev {
+            WorkspaceEvent::CheckpointServedPart { blob_hash, index, total, data } => (blob_hash, index, total, data),
+            other => panic!("only parts: {other:?}"),
+        })
+        .collect();
+    let mut asm = super::blob_parts::BlobAssembly::default();
+    for (h, i, t, d) in &parts[1..] {
+        assert!(asm.accept(&format!("{h}0"), *i, *t, d).is_none());
+    }
+    let (h, i, t, d) = &parts[0];
+    assert!(asm.accept(h, *i, *t, d).is_none(), "the other hash's parts were dropped");
+    let mut asm = super::blob_parts::BlobAssembly::default();
+    let wrong = format!("{:0>64}", "1");
+    for (_, i, t, d) in &parts {
+        assert!(asm.accept(&wrong, *i, *t, d).is_none(), "bytes that miss the hash are refused");
+    }
 }
 
 /// A2.1 (mcp_agent_friction_fixes.md): a block from another branch - one

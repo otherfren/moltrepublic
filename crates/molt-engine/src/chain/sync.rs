@@ -408,37 +408,16 @@ impl State {
         }
     }
 
-    /// **Does a served blob fit one transport frame?** (K6 §4.9.8.)
-    ///
-    /// An over-budget `WorkspaceEvent` is a PERMANENT publish stall: the
-    /// node writes nothing more, across restarts. So a pruned holder whose
-    /// blob outgrew the frame budget would brick its own outbox the first
-    /// time a peer asked for catch-up below its anchor. Nothing else
-    /// measures a WorkspaceEvent against the transport budget
-    /// (`payload_fits` covers proposals), and this is the one event whose
-    /// size a PEER's request decides.
-    ///
-    /// Not serving costs that peer one bootstrap source; serving would
-    /// cost this node every future write.
-    pub(crate) fn served_blob_fits(blob: &molt_core::CheckpointState) -> bool {
-        // room for the envelope around the event; the number it guards is
-        // tens of kilobytes, so the reserve is deliberately generous
-        let len = serde_json::to_vec(&WorkspaceEvent::CheckpointServed { blob: blob.clone() })
-            .map_or(usize::MAX, |b| b.len());
-        let cap = Self::served_blob_cap();
-        if len > cap {
-            tracing::warn!(
-                bytes = len,
-                cap,
-                upto = blob.upto,
-                "checkpoint blob does not fit one frame - not serving it"
-            );
-        }
-        len <= cap
+    /// The events that serve `blob`: whole when it fits one frame, else in
+    /// parts (S3); nothing when it is too large even for that.
+    pub(crate) fn served_blob_events(blob: &molt_core::CheckpointState) -> Vec<WorkspaceEvent> {
+        super::blob_parts::blob_events(blob, Self::served_blob_cap()).unwrap_or_default()
     }
 
     /// The most a served blob event may serialize to: one frame, less a
-    /// generous reserve for the envelope around it.
+    /// generous reserve for the envelope around it. An over-budget event is
+    /// a PERMANENT publish stall (K6 §4.9.8), so nothing larger is ever
+    /// recorded.
     pub(crate) fn served_blob_cap() -> usize {
         const ENVELOPE_RESERVE: usize = 2048;
         crate::proposals::transport_plaintext_ceiling().saturating_sub(ENVELOPE_RESERVE)
@@ -467,10 +446,11 @@ impl State {
             // strictly below: a requester missing only the anchor block can
             // verify it against its own history — the full-state blob would
             // be pure fan-out amplification
-            if from < anchor.height && Self::served_blob_fits(blob) {
-                let blob = blob.clone();
-                let env = self.make_env(me.clone(), WorkspaceEvent::CheckpointServed { blob });
-                self.record(env);
+            if from < anchor.height {
+                for ev in Self::served_blob_events(blob) {
+                    let env = self.make_env(me.clone(), ev);
+                    self.record(env);
+                }
             }
         }
         for block in blocks {
@@ -498,8 +478,8 @@ impl State {
             return Vec::new();
         };
         let mut out = Vec::new();
-        if let Some(blob) = self.chain.checkpoint_blob.as_ref().filter(|b| Self::served_blob_fits(b)) {
-            out.push(WorkspaceEvent::CheckpointServed { blob: blob.clone() });
+        if let Some(blob) = self.chain.checkpoint_blob.as_ref() {
+            out.extend(Self::served_blob_events(blob));
         }
         out.push(WorkspaceEvent::Committed(anchor.clone()));
         out

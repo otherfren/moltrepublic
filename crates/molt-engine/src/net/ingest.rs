@@ -724,6 +724,13 @@ impl State {
             WorkspaceEvent::CheckpointServed { blob } if self.is_chain_governed() => {
                 self.receive_checkpoint_blob(blob);
             }
+            WorkspaceEvent::CheckpointServedPart { blob_hash, index, total, data }
+                if self.is_chain_governed() =>
+            {
+                if let Some(blob) = self.chain.blob_parts.accept(&blob_hash, index, total, &data) {
+                    self.receive_checkpoint_blob(blob);
+                }
+            }
             // dynamic mesh membership ❸: a relayed mesh announce — authenticate
             // the ANNOUNCER by MLS decryption (the event author is only the
             // relay) and extend this node's own mesh toward it. A nonce'd

@@ -98,7 +98,11 @@ impl State {
             // the complete register (review C8): founding anchors, every
             // Restored block's anchor and the blob's working anchors
             let taken = self.anchor_seen_in_chain(&canonical);
-            if taken {
+            // S3/B5: the seat's OWN last re-anchor, never heard from since -
+            // its restore was sealed but the rejoiner never got the chain
+            if taken && self.restore_never_finished(&member, &canonical) {
+                tracing::info!(%member, "recovery_retry=readmit");
+            } else if taken {
                 tracing::warn!(%member, "recovery request reuses an anchored transport key - dropped");
                 return Ok(Reply::Ack);
             }

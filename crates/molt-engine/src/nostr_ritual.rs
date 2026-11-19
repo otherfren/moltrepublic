@@ -1146,6 +1146,7 @@ async fn recovery_rejoin(
     // republic's chain, whoever relayed it.
     let mut blob: Option<molt_core::CheckpointState> = None;
     let mut verified_run: (u64, usize) = (u64::MAX, 0);
+    let mut parts = crate::chain::blob_parts::BlobAssembly::default();
     let mut blocks: Vec<molt_core::ChainBlock> = Vec::new();
     let (head, _sealed) = loop {
         let now = tokio::time::Instant::now();
@@ -1168,6 +1169,12 @@ async fn recovery_rejoin(
                 blob = Some(b);
                 // new evidence: the same run may verify now (suffix + blob)
                 verified_run = (u64::MAX, 0);
+            }
+            molt_core::WorkspaceEvent::CheckpointServedPart { blob_hash, index, total, data } => {
+                if let Some(b) = parts.accept(&blob_hash, index, total, &data) {
+                    blob = Some(b);
+                    verified_run = (u64::MAX, 0);
+                }
             }
             molt_core::WorkspaceEvent::Committed(block) => {
                 // bounded (review R7): any group member can flood distinct
