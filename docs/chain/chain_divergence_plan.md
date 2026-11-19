@@ -190,39 +190,78 @@ without a restart by hand and without new proposals.
   while running and the beacon heals it; a restored seat that missed its
   bootstrap materializes from a re-push.
 
-### S5. One sealer per height (replaces E1/E5)
+### S5. One sticky sealer (replaces E1/E5)
 
-- `sealer(h)` = the roster seats sorted by member name, index
-  `h mod n`. Only the sealer seals at h. Everyone keeps signing and
-  gossiping approvals as today.
-- A seat the presence tick reports silent (`chain_lag().silent`) is
-  skipped: `sealer(h)` is the next seat in order that is not silent. An
-  offline seat then costs no wait at all.
-- Fallback for a sealer that looks present but stays quiet: if no block
-  at h is seen `SEALER_GRACE_SECS` (60) after this node could have
-  sealed, seat `(h + k) mod n` for the k-th grace period may seal. A
-  fallback can still fork against a late original; the hash rule heals
-  it as today.
-- Why 60 and not 15: the sealer first has to receive the approvals over
-  Tor (1-5 s per frame), wait the seal pacing (5 s) and publish (1-5 s),
-  so 15 s is the normal tail, not a failure, and a takeover there would
-  re-create the forks S5 removes. A late takeover only delays; an early
-  one forks. S1's logs give the measured approval-to-block latency; the
-  grace is set to its p99 times two once measured, 60 until then.
+Revised 2026-11-20 after the S6 research: a rotating sealer (`h mod n`)
+makes every height a hand-over, so a disagreement between presence views
+can fork at any height. A sticky leader confines that to leader changes.
+
+- `leader` = the lowest-named roster seat that is not silent
+  (`chain_lag().silent`). It keeps the role while it delivers; it loses
+  it only by going silent or by missing a grace. Only the leader seals.
+  Everyone keeps signing and gossiping approvals as today.
+- One deterministic choice for the leader and every fallback: the
+  smallest proposal id holding m valid signatures at head+1. A late
+  original against a fallback then usually carries the same change, so
+  the "fork" is an attestation variant, which R1 re-links without a
+  re-vote.
+- The leader seals without the seal pacing round (the pacing exists so
+  that many sealers' signature sets converge); everyone else keeps it.
+- Fallback: if no block at h is seen `SEALER_GRACE_SECS` (60) after this
+  node could have sealed, the next seat in name order that is not silent
+  becomes leader for this node. Before its first seal it sends a
+  `ChainRequest` with its `known_heads` and waits one pacing round, so a
+  block the old leader sealed has a chance to arrive first.
+- Why 60 and not 15: the leader first has to receive the approvals over
+  Tor (1-5 s per frame) and publish (1-5 s), so 15 s is the normal tail,
+  not a failure, and a takeover there would re-create the forks S5
+  removes. A late takeover only delays; an early one forks. S1's logs give
+  the measured approval-to-block latency; the grace is set to its p99
+  times two once measured, 60 until then.
 - No format change: `verify_chain` and every signed layout stay as they
   are; old builds mixed in keep sealing freely and only fork more.
+- A reducer, not a guarantee: every seat still signs every open
+  candidate (C1), so a second sealer can always collect m signatures.
+  Forks become impossible only with S6.
 - A cut (n-of-n) and a consented restore go through the same rule.
 - Tests: the E2E in `tests/chain_convergence.rs` extended to three seats
-  with bursts; fork count (S1 `last_fork` counter) recorded with and
-  without S5, and S5 well below; a silent sealer delays a height by one
-  grace period, never stalls it.
+  with bursts; fork count (S1 counter) recorded with and without S5, and
+  S5 well below; a silent leader is replaced after one grace, never
+  stalls the chain.
 
-### S6. Research: fork-free sealing (E0)
+### S6. Fork-free sealing: a Flexible-Paxos lock (research done 2026-11-20)
 
-Only if S5 leaves forks that matter. Evaluate established crash-fault
-consensus implementations against the chain's model (threshold signatures
-already exist, sealing would need a leader/term and a lock), record a
-take/leave verdict per candidate here, design after.
+Not in this release. Only if S1's counter still shows forks that matter
+after S5 (the field rate before S5 was 79 of ~124 heights).
+
+Verdict per candidate (crash-fault model, honest seats):
+
+| candidate | verdict |
+|---|---|
+| openraft, tikv raft-rs | leave the crates: they bring their own log, membership and RPC (duplicating chain, roster and sync), carry no member signatures, and use a majority where governance is m-of-n. Take the ideas: term, persisted vote, sticky leader. |
+| Multi-Paxos / Flexible Paxos | take as the design: chain heights are the slots, the m-signature block is phase 2; Flexible Paxos needs only Q1 + Q2 > n, so Q2 = m gives Q1 = n - m + 1. No maintained Rust crate found. |
+| Viewstamped Replication | same class as Raft, nothing extra. |
+| Tendermint / malachite, HotStuff, Narwhal/Bullshark | leave: BFT quorums need more than 2/3 of the seats, so a 2-of-3 republic halts on one offline seat; malachite is alpha, Narwhal archived. |
+| CRDT / DAG | leave: signatures cover the height, so a merge is always a re-vote; order matters for wiki, membership and cuts. R1's re-link of attestation variants stays the fork-tolerant part. |
+
+Design sketch (honest seats; no signed-layout change):
+
+- Approval split from position signing: an approval becomes an unsigned
+  intent; the leader announces "height h, ballot b, change P" for a
+  proposal with m intents; seats sign `(rid, h, P)` only for the current
+  leader's announced P and only if b is at least their promise. Costs one
+  more round trip.
+- Takeover is phase 1: the new leader collects n - m + 1 promises; each
+  carries the seat's accepted (ballot, change) at h, and the highest one
+  must be re-proposed. Quorum overlap guarantees a sealed block is seen.
+- Persisted per seat, written before sending: the promised ballot and the
+  accepted (ballot, change) per open height. Forgetting it on restart
+  breaks safety.
+- The ballot travels in MLS-authenticated gossip as additive
+  `#[serde(default)]` fields; signing it or `prev` (R6) is only needed
+  against Byzantine seats (a versioned layout).
+- Activation: only once every roster seat advertises support; one seat
+  that signs everything breaks the quorum overlap.
 
 ### S7. Every error toast lands in the log (same release)
 
@@ -260,7 +299,7 @@ signed layout changes anywhere in this plan.
 ## 7. Decisions (user, 2026-11-20)
 
 1. S5 grace: 60 s plus skipping silent seats, re-set from S1's measured
-   latency.
+   latency; a sticky leader instead of `h mod n` (S6 research).
 2. 15 min unhealed: wake, chat line and a log warning (S4).
 3. Order: S1 -> S2 -> S3 -> S4 + S4a -> S5, with S7, released as one
    version.
