@@ -99,8 +99,7 @@ impl State {
     /// wherever the walk adopts or extends; `max` keeps it monotone.
     pub(super) fn bump_next_id_past_chain(&mut self) {
         if let Some(top) = self
-            .chain
-            .walk
+            .chain.walk
             .as_ref()
             .and_then(|w| w.seen.iter().next_back())
         {
@@ -202,9 +201,7 @@ impl State {
             if v.get("op").and_then(serde_json::Value::as_str) == Some("set_relays") {
                 Self::fold_pool_edit(
                     &mut pool,
-                    v.get("value")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default(),
+                    v.get("value").and_then(serde_json::Value::as_str).unwrap_or_default(),
                 );
             }
         }
@@ -237,10 +234,8 @@ impl State {
             };
         for v in self.applied_org_entries() {
             if v.get("op").and_then(serde_json::Value::as_str) == Some("set_features") {
-                let value = v
-                    .get("value")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
+                let value =
+                    v.get("value").and_then(serde_json::Value::as_str).unwrap_or_default();
                 set.extend(value.split_whitespace().map(str::to_string));
             }
         }
@@ -261,9 +256,7 @@ impl State {
         if surface == Surface::Wallet && self.wallet_init_pending() {
             return true;
         }
-        self.effective_features()
-            .iter()
-            .any(|f| f == surface.as_str())
+        self.effective_features().iter().any(|f| f == surface.as_str())
     }
 
     /// The D7 gate: refuse an optional surface the charter has not enabled.
@@ -339,10 +332,7 @@ impl State {
             let confirmed =
                 molt_core::relay::relay_kind(&url) == molt_core::relay::RelayKind::Onion;
             tracing::info!(relay = %url, confirmed, "relay adopted from the ratified pool");
-            self.session
-                .settings
-                .relays
-                .push(molt_core::relay::RelayEntry { url, confirmed });
+            self.session.settings.relays.push(molt_core::relay::RelayEntry { url, confirmed });
         }
         self.dialable_relays_changed(&dial_before);
         self.persist_settings(false);
@@ -373,18 +363,12 @@ impl State {
             } => {
                 let pool_edit =
                     payload.get("op").and_then(serde_json::Value::as_str) == Some("set_relays");
-                let before = if pool_edit {
-                    self.effective_relays()
-                } else {
-                    Vec::new()
-                };
-                self.chain
-                    .applied
+                let before = if pool_edit { self.effective_relays() } else { Vec::new() };
+                self.chain.applied
                     .entry(*surface)
                     .or_default()
                     .push((Some(*proposal_id), payload.clone()));
-                self.chain
-                    .applied_sigs
+                self.chain.applied_sigs
                     .insert(*proposal_id, block.sigs.clone());
                 // R6: a committed pool edit reaches the live transport
                 if pool_edit {
@@ -408,9 +392,7 @@ impl State {
                 }
                 // R3b: the relay ledger follows the same last-wins fold
                 if !relays.is_empty() {
-                    self.chain
-                        .member_relays
-                        .insert(member.clone(), relays.clone());
+                    self.chain.member_relays.insert(member.clone(), relays.clone());
                     self.note_relay_splits();
                 }
             }
@@ -551,8 +533,7 @@ impl State {
         // membership blocks carry no proposal id — settle by content, the
         // `after_block_applied` pattern
         let membership: Vec<ChainChange> = self
-            .chain
-            .blocks
+            .chain.blocks
             .iter()
             .filter(|b| matches!(b.change, ChainChange::Membership { .. }))
             .map(|b| b.change.clone())
@@ -621,8 +602,7 @@ impl State {
         // design — so folding the surviving suffix alone would silently
         // re-address every recovered member to the key it no longer holds.
         let mut anchors: std::collections::HashMap<molt_core::MemberId, String> = self
-            .chain
-            .checkpoint_blob
+            .chain.checkpoint_blob
             .as_ref()
             .map(|b| b.anchors.iter().cloned().collect())
             .unwrap_or_default();
@@ -631,8 +611,7 @@ impl State {
         // …and the relay ledger, seeded from the blob for the same reason
         // (the declaring blocks are gone after a cut — R3b/v6)
         let mut ledger: std::collections::HashMap<molt_core::MemberId, Vec<String>> = self
-            .chain
-            .checkpoint_blob
+            .chain.checkpoint_blob
             .as_ref()
             .map(|b| b.member_relays.iter().cloned().collect())
             .unwrap_or_default();

@@ -194,9 +194,7 @@ fn apply_membership(
             // every roster entry there). The variant stays reserved; a
             // chain carrying it is refused whole, like any unknown change.
             let _ = (identities, member, identity_pk);
-            return Err(
-                "membership op `joined` is not supported: seats are fixed at founding".to_string(),
-            );
+            return Err("membership op `joined` is not supported: seats are fixed at founding".to_string());
         }
         MembershipOp::Restored => {
             let Some(id) = identities.iter_mut().find(|i| i.member == member) else {
@@ -364,11 +362,7 @@ pub(crate) fn verify_restore_consent(
                 Err("consent does not verify")
             }
         }
-        Some(RestoreConsent::V2 {
-            anchor_height,
-            prev_anchor,
-            sig,
-        }) => {
+        Some(RestoreConsent::V2 { anchor_height, prev_anchor, sig }) => {
             let bytes = molt_core::chain::restore_consent_bytes_v2(
                 republic_id,
                 member,
@@ -386,9 +380,7 @@ pub(crate) fn verify_restore_consent(
             if !fresh {
                 return Err("consent is stale");
             }
-            Ok(ConsentKind::V2 {
-                prev_anchor: prev_anchor.to_string(),
-            })
+            Ok(ConsentKind::V2 { prev_anchor: prev_anchor.to_string() })
         }
     }
 }
@@ -400,12 +392,7 @@ pub(crate) fn consent_spends(
     change: &ChainChange,
     working: impl Fn(&str) -> String,
 ) -> Result<(), &'static str> {
-    let ChainChange::Membership {
-        member,
-        consent: Some(consent),
-        ..
-    } = change
-    else {
+    let ChainChange::Membership { member, consent: Some(consent), .. } = change else {
         return Ok(());
     };
     match molt_core::chain::parse_restore_consent(consent) {
@@ -423,10 +410,7 @@ pub(crate) fn consent_spends(
 /// A seat's working transport anchor in a walk's running state: its last
 /// re-anchor, else its roster anchor (the [`State::working_nostr_pk`] twin).
 fn walk_working_anchor(state: &molt_core::CheckpointState, member: &str) -> String {
-    if let Ok(i) = state
-        .anchors
-        .binary_search_by(|(m, _)| m.as_str().cmp(member))
-    {
+    if let Ok(i) = state.anchors.binary_search_by(|(m, _)| m.as_str().cmp(member)) {
         return state.anchors[i].1.clone();
     }
     state
@@ -460,10 +444,7 @@ fn verify_next(
         ));
     }
     if block.prev != head.hash {
-        return Err(format!(
-            "block {} does not link to its predecessor",
-            block.height
-        ));
+        return Err(format!("block {} does not link to its predecessor", block.height));
     }
     let mut consumed = None;
     match &block.change {
@@ -749,13 +730,8 @@ pub(crate) fn fold_one(
                 if !crate::vault::walk_enabled(state, ctx) {
                     return Err(format!("block {}: vault not enabled", block.height));
                 }
-                crate::vault::deposit::check_vault_op(
-                    &state.republic_id,
-                    *proposal_id,
-                    payload,
-                    ctx,
-                )
-                .map_err(|e| format!("block {}: vault {e}", block.height))?;
+                crate::vault::deposit::check_vault_op(&state.republic_id, *proposal_id, payload, ctx)
+                    .map_err(|e| format!("block {}: vault {e}", block.height))?;
             }
             if !state.applied.iter().any(|(s, _)| s == surface) {
                 // a surface outside the frozen set: its group is born with
@@ -803,10 +779,7 @@ pub(crate) fn fold_one(
             // Carrying it here is what keeps a recovered seat addressable
             // after the block that re-anchored it is dropped at a cut.
             if let Some(pk) = nostr_pk.as_ref().filter(|p| !p.is_empty()) {
-                match state
-                    .anchors
-                    .binary_search_by(|(m, _)| m.as_str().cmp(member))
-                {
+                match state.anchors.binary_search_by(|(m, _)| m.as_str().cmp(member)) {
                     Ok(i) => state.anchors[i].1 = pk.clone(),
                     Err(i) => state.anchors.insert(i, (member.clone(), pk.clone())),
                 }
@@ -814,14 +787,9 @@ pub(crate) fn fold_one(
             // v6: the relay ledger rides beside it, for the same
             // survive-the-cut reason (R3b)
             if !relays.is_empty() {
-                match state
-                    .member_relays
-                    .binary_search_by(|(m, _)| m.as_str().cmp(member))
-                {
+                match state.member_relays.binary_search_by(|(m, _)| m.as_str().cmp(member)) {
                     Ok(i) => state.member_relays[i].1 = relays.clone(),
-                    Err(i) => state
-                        .member_relays
-                        .insert(i, (member.clone(), relays.clone())),
+                    Err(i) => state.member_relays.insert(i, (member.clone(), relays.clone())),
                 }
             }
         }
@@ -1006,20 +974,11 @@ pub fn verify_wiki_export(
         // rides the bundle, so the working anchors fold exactly
         consent_spends(&block.change, |m| {
             anchors.get(m).cloned().unwrap_or_else(|| {
-                identities
-                    .iter()
-                    .find(|i| i.member == m)
-                    .map(|i| i.nostr_pk.clone())
-                    .unwrap_or_default()
+                identities.iter().find(|i| i.member == m).map(|i| i.nostr_pk.clone()).unwrap_or_default()
             })
         })
         .map_err(|why| format!("block {}: {why}", block.height))?;
-        if let ChainChange::Membership {
-            member,
-            nostr_pk: Some(pk),
-            ..
-        } = &block.change
-        {
+        if let ChainChange::Membership { member, nostr_pk: Some(pk), .. } = &block.change {
             if !pk.is_empty() {
                 anchors.insert(member.clone(), pk.clone());
             }
@@ -1170,10 +1129,7 @@ pub(crate) fn effective_relays_of_served(
             if payload.get("op").and_then(serde_json::Value::as_str) == Some("set_relays") {
                 State::fold_pool_edit(
                     &mut pool,
-                    payload
-                        .get("value")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default(),
+                    payload.get("value").and_then(serde_json::Value::as_str).unwrap_or_default(),
                 );
             }
         }
@@ -1202,7 +1158,9 @@ pub(crate) fn verify_served(
             let sealed = blocks
                 .first()
                 .and_then(crate::recovery::sealed_roster_from_genesis)
-                .ok_or_else(|| "the chain does not root on a genesis constitution".to_string())?;
+                .ok_or_else(|| {
+                    "the chain does not root on a genesis constitution".to_string()
+                })?;
             if let Some(rid) = expected_rid {
                 if head.republic_id != rid {
                     return Err("the chain does not match the expected republic".to_string());
@@ -1274,7 +1232,9 @@ pub(crate) fn walk_suffix_chain(
     // subtraction also rejects an attacker-served height-0 anchor instead
     // of underflowing (overflow-checks=true → abort)
     if anchor.height.checked_sub(1) != Some(upto) {
-        return Err("checkpoint upto must be exactly the anchor height minus one".to_string());
+        return Err(
+            "checkpoint upto must be exactly the anchor height minus one".to_string(),
+        );
     }
     // founding recomputation — forging the founding changes the id
     let rid = molt_storage::republic_id(
@@ -1284,7 +1244,9 @@ pub(crate) fn walk_suffix_chain(
         &blob.founding_identities,
     );
     if rid != expected_republic_id || rid != blob.republic_id {
-        return Err("checkpoint founding table does not recompute to the republic id".to_string());
+        return Err(
+            "checkpoint founding table does not recompute to the republic id".to_string(),
+        );
     }
     if blob.rule_m == 0 || blob.rule_m > blob.rule_n || blob.roster.is_empty() {
         return Err("checkpoint roster/threshold out of range".to_string());
@@ -1298,10 +1260,7 @@ pub(crate) fn walk_suffix_chain(
     }
     // only a vault anchor binds the keys (checkpoint-v10; the rid skips
     // them), and a vault republic takes no other anchor (plan 1.3.6)
-    let keyed = blob
-        .founding_identities
-        .iter()
-        .any(|i| !i.vault_pk.is_empty());
+    let keyed = blob.founding_identities.iter().any(|i| !i.vault_pk.is_empty());
     if keyed != anchor_kind.vault {
         return Err(if keyed {
             "a legacy checkpoint cannot anchor a vault republic".to_string()

@@ -36,11 +36,11 @@ pub mod wallet;
 pub mod wiki_fold;
 pub mod wiki_patch;
 pub mod wiki_refs;
+pub use operator::ChatOperator;
 pub use chain::{
     applied_lww_slot, approval_bytes, block_link_bytes, checkpoint_canonical_bytes, ChainBlock,
     ChainChange, CheckpointState, MembershipOp, GENESIS_PREV,
 };
-pub use operator::ChatOperator;
 
 /// A member of the republic (the holder of one threshold share). In this
 /// scaffold it is just a display handle; the real per-group MLS identity is a
@@ -568,10 +568,7 @@ pub fn default_wake_min_interval_secs() -> u64 {
 
 /// Default wake triggers: every reason.
 pub fn default_wake_on() -> Vec<String> {
-    kanban_wake::WAKE_REASONS
-        .iter()
-        .map(|r| (*r).to_string())
-        .collect()
+    kanban_wake::WAKE_REASONS.iter().map(|r| (*r).to_string()).collect()
 }
 
 /// Default `task_start` lead time in minutes (§11 Q12).
@@ -1178,11 +1175,7 @@ pub fn backup_key(id: &WorkspaceId, ts: u64) -> String {
 pub fn parse_backup_key(key: &str) -> Option<(WorkspaceId, u64)> {
     let rest = key.strip_prefix(BACKUP_OBJECT_PREFIX)?;
     let (id, file) = rest.split_once('/')?;
-    if id.len() != 64
-        || !id
-            .bytes()
-            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
-    {
+    if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
         return None;
     }
     let stem = file.strip_suffix(".molt.enc")?;
@@ -1350,7 +1343,9 @@ impl std::str::FromStr for MessageId {
     /// Parse the canonical form only: exactly 32 lowercase hex chars.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.len() != 32 || !s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-            return Err(format!("a message id is 32 lowercase hex chars, got {s:?}"));
+            return Err(format!(
+                "a message id is 32 lowercase hex chars, got {s:?}"
+            ));
         }
         let bytes = hex::decode(s).map_err(|e| format!("bad message id: {e}"))?;
         let mut id = [0u8; 16];
@@ -1566,19 +1561,12 @@ pub fn thread_lives<'a>(
     per.into_iter()
         .map(|(name, mut thread)| {
             thread.sort_by_key(|m| (m.ts, m.id));
-            let mut life = ThreadLife {
-                window_secs,
-                ..ThreadLife::default()
-            };
+            let mut life = ThreadLife { window_secs, ..ThreadLife::default() };
             for (i, m) in thread.into_iter().enumerate() {
                 if i == 0 {
                     life.since = m.ts;
                 } else if life.last_ts != 0 && m.ts != 0 && life.expired(m.ts) {
-                    life = ThreadLife {
-                        since: m.ts,
-                        window_secs,
-                        ..ThreadLife::default()
-                    };
+                    life = ThreadLife { since: m.ts, window_secs, ..ThreadLife::default() };
                 }
                 life.last_ts = life.last_ts.max(m.ts);
                 match m.thread_op.filter(|_| m.kind == ChatKind::System) {
@@ -2032,20 +2020,14 @@ pub struct AcceptedWindow {
 /// accept marks before aging out as accepted.
 pub const ACCEPT_WINDOW_BITS: u64 = 1024;
 const ACCEPT_WINDOW_WORDS: usize = 16;
-const _: () = assert!(
-    ACCEPT_WINDOW_WORDS * 64 == 1024,
-    "words must cover the window"
-);
+const _: () = assert!(ACCEPT_WINDOW_WORDS * 64 == 1024, "words must cover the window");
 
 /// Split an in-window bit offset into its word index and bit position.
 /// Callers guard `offset < ACCEPT_WINDOW_BITS`, so the conversion is total;
 /// the fallback only defends against a future guard slip (reads miss, writes
 /// no-op — never a panic, never a wrong bit).
 fn window_word_bit(offset: u64) -> (usize, u64) {
-    (
-        usize::try_from(offset / 64).unwrap_or(usize::MAX),
-        offset % 64,
-    )
+    (usize::try_from(offset / 64).unwrap_or(usize::MAX), offset % 64)
 }
 
 impl AcceptedWindow {
@@ -2119,11 +2101,7 @@ impl AcceptedWindow {
             } else {
                 0
             };
-            self.bits[w] = if bits > 0 {
-                (lower << bits) | carry
-            } else {
-                lower
-            };
+            self.bits[w] = if bits > 0 { (lower << bits) | carry } else { lower };
         }
     }
 }
@@ -2736,8 +2714,7 @@ impl SealedRoster {
     /// finalize, GUI join, standalone join). `member` is this node's own local
     /// handle; `ts` the founding timestamp.
     pub fn into_genesis(&self, member: &str, ts: u64) -> EventEnvelope {
-        EventEnvelope {
-            prev_seq: 0,
+        EventEnvelope { prev_seq: 0,
             seq: 1,
             ts,
             by: member.to_string(),
@@ -3675,6 +3652,7 @@ pub mod mockrand {
     }
 }
 
+
 // NOTE: the old `mock_seed` (12 words off a 48-word LCG list) and
 // `mock_ticket` (10 base32 chars off an LCG) are gone on purpose: founded
 // workspaces derive their key hierarchy from a real OS-CSPRNG seed
@@ -4015,6 +3993,7 @@ impl TorTestState {
             TorTestState::Circuit => "circuit",
         }
     }
+
 }
 
 /// The outcome of a Tor connectivity probe — the rung that was reached plus
@@ -8260,10 +8239,10 @@ pub struct ChainSync {
     /// Buffered blocks of another branch.
     #[serde(default)]
     pub fork_candidates: u32,
-    /// Lowest and highest height among them (0 = none).
+    /// Lowest height among them (0 = none).
     #[serde(default)]
     pub fork_lowest: u64,
-    /// Highest height among the fork candidates (0 = none).
+    /// Highest height among them (0 = none).
     #[serde(default)]
     pub fork_highest: u64,
     /// Fork decisions since the workspace opened.
@@ -8272,8 +8251,7 @@ pub struct ChainSync {
     /// The most recent fork decision.
     #[serde(default)]
     pub last_fork: Option<ForkDecision>,
-    /// Serialized size of this node's checkpoint blob (0 = none) and the
-    /// most one frame carries.
+    /// Serialized size of this node's checkpoint blob (0 = none).
     #[serde(default)]
     pub blob_bytes: u64,
     /// The most one transport frame carries for a served blob.
@@ -8290,7 +8268,7 @@ pub struct ForkDecision {
     pub height: u64,
     /// `kept` | `rebased` | `relinked` | `dropped` | `tip_swapped`.
     pub outcome: String,
-    /// Our and their block hash at that height (12 hex).
+    /// Our block hash at that height (12 hex).
     pub mine: String,
     /// Their block hash at that height (12 hex).
     pub theirs: String,
@@ -8628,9 +8606,7 @@ pub enum MoltError {
     /// counts invented approvals on behalf of other members. The missing
     /// approvals must come from the members themselves, which takes a
     /// chain-governed republic (real signed m-of-n over the mesh).
-    #[error(
-        "proposal {0} already carries this node's approval - the others must approve themselves"
-    )]
+    #[error("proposal {0} already carries this node's approval - the others must approve themselves")]
     AlreadyApproved(ProposalId),
     /// A repeated `Decline` by the same member — one voice per member; the
     /// proposal rejects only when enough DISTINCT members decline.
@@ -8817,12 +8793,7 @@ mod tests {
             "edits": []
         }))
         .expect("the legacy shape loads");
-        let Command::WikiEdit {
-            repair_links,
-            allow_warnings,
-            ..
-        } = cmd
-        else {
+        let Command::WikiEdit { repair_links, allow_warnings, .. } = cmd else {
             panic!("not a wiki_edit");
         };
         assert!(repair_links);
@@ -8865,33 +8836,21 @@ mod tests {
             rotation_seed: Some(vec![7u8; 32]),
             ..TransportState::default()
         };
-        st.relay_cursors
-            .insert("wss://relay.example".to_string(), 1_753_900_000);
+        st.relay_cursors.insert("wss://relay.example".to_string(), 1_753_900_000);
         let json = serde_json::to_value(&st).expect("encode");
         let back: TransportState = serde_json::from_value(json).expect("decode");
         assert_eq!(back, st, "v4 fields survive the round trip");
 
-        st.wallet_status
-            .insert("b".to_string(), wallet::ShareStatus::WatchOnly);
+        st.wallet_status.insert("b".to_string(), wallet::ShareStatus::WatchOnly);
         st.wallet_view = Some(vault::SecretBytes(vec![9; 32]));
         let json = serde_json::to_value(&st).expect("encode");
-        assert_eq!(
-            json["wallet_status"],
-            serde_json::json!({"b": "watch_only"})
-        );
+        assert_eq!(json["wallet_status"], serde_json::json!({"b": "watch_only"}));
         let back: TransportState = serde_json::from_value(json).expect("decode");
         assert_eq!(back, st, "the purse's status and view key survive");
 
         let legacy = serde_json::to_value(TransportState::default()).expect("encode default");
         let obj = legacy.as_object().expect("object");
-        for key in [
-            "kind",
-            "relays",
-            "rotation_seed",
-            "relay_cursors",
-            "wallet_status",
-            "wallet_view",
-        ] {
+        for key in ["kind", "relays", "rotation_seed", "relay_cursors", "wallet_status", "wallet_view"] {
             assert!(
                 !obj.contains_key(key),
                 "default state must not serialize `{key}` — legacy shape preserved"
@@ -8970,14 +8929,8 @@ mod tests {
         assert!(w.accept(5), "first sight is fresh");
         assert!(!w.accept(5), "the high itself dups");
         assert!(w.accept(9), "forward jump is fresh");
-        assert!(
-            w.is_accepted(5),
-            "the old high stays accepted after the jump"
-        );
-        assert!(
-            !w.is_accepted(7),
-            "an unseen seq between marks is not accepted"
-        );
+        assert!(w.is_accepted(5), "the old high stays accepted after the jump");
+        assert!(!w.is_accepted(7), "an unseen seq between marks is not accepted");
         assert!(w.accept(7), "an in-window fill is fresh");
         assert!(!w.accept(7), "and dups after");
         assert!(!w.is_accepted(6), "its neighbors stay unaccepted");
@@ -9051,9 +9004,7 @@ mod tests {
             seq: 7,
             ts: 1,
             by: "a".to_string(),
-            body: WorkspaceEvent::MemberJoined {
-                member: "b".to_string(),
-            },
+            body: WorkspaceEvent::MemberJoined { member: "b".to_string() },
             prev_seq: prev,
         };
         let legacy = serde_json::to_string(&env(0)).expect("json");
@@ -9062,10 +9013,7 @@ mod tests {
             "zero serializes away — pre-G7 bytes stay identical: {legacy}"
         );
         let chained = serde_json::to_string(&env(5)).expect("json");
-        assert!(
-            chained.contains("\"prev_seq\":5"),
-            "a chain value travels: {chained}"
-        );
+        assert!(chained.contains("\"prev_seq\":5"), "a chain value travels: {chained}");
         let back: EventEnvelope = serde_json::from_str(&chained).expect("parse");
         assert_eq!(back.prev_seq, 5);
         let old: EventEnvelope = serde_json::from_str(&legacy).expect("parse legacy");
@@ -9079,10 +9027,7 @@ mod tests {
     #[test]
     fn accepted_window_rejects_seq_zero_without_panicking() {
         let mut w = AcceptedWindow::default();
-        assert!(
-            !w.accept(0),
-            "seq 0 on a fresh window is rejected, not a panic"
-        );
+        assert!(!w.accept(0), "seq 0 on a fresh window is rejected, not a panic");
         assert!(w.accept(1), "real seqs still work");
         assert!(!w.accept(0), "seq 0 with a high set is still rejected");
         assert!(!w.is_accepted(0), "and never reads as accepted");
@@ -9092,11 +9037,12 @@ mod tests {
     /// `bits`) deserializes to a working window.
     #[test]
     fn accepted_window_tolerates_missing_fields() {
-        let w: AcceptedWindow = serde_json::from_str("{\"high\":7}").expect("short form parses");
+        let w: AcceptedWindow =
+            serde_json::from_str("{\"high\":7}").expect("short form parses");
         assert!(w.is_accepted(7));
         assert!(!w.is_accepted(6), "no bits = nothing marked below the high");
-        let ts: TransportState =
-            serde_json::from_str("{\"version\":2}").expect("an old transport.state parses");
+        let ts: TransportState = serde_json::from_str("{\"version\":2}")
+            .expect("an old transport.state parses");
         assert!(ts.accepted.is_empty(), "additive default");
     }
 
@@ -9130,19 +9076,11 @@ mod tests {
                 repaired: Vec::new(),
                 minted: Vec::new(),
             },
-            Reply::Proposals {
-                proposals: vec![],
-                total: 0,
-                next_cursor: None,
-            },
+            Reply::Proposals { proposals: vec![], total: 0, next_cursor: None },
             Reply::Members { members: vec![] },
             Reply::Uploads { uploads: vec![] },
             Reply::Session(Box::default()),
-            Reply::Chain {
-                blocks: vec![],
-                diverged: vec![],
-                stale_signers: vec![],
-            },
+            Reply::Chain { blocks: vec![], diverged: vec![], stale_signers: vec![] },
         ];
         for r in replies {
             let json = serde_json::to_string(&r);
@@ -9265,15 +9203,7 @@ mod tests {
                 &[],
                 None,
             ),
-            roster_canonical_bytes(
-                "f00",
-                2,
-                3,
-                &[],
-                "ada",
-                &["\0\0\0\0\0\0\0\0\0".to_string()],
-                None
-            ),
+            roster_canonical_bytes("f00", 2, 3, &[], "ada", &["\0\0\0\0\0\0\0\0\0".to_string()], None),
         );
         // v4 also length-prefixes ws_id, so the id/rule boundary is
         // self-delimiting: these two differ, and under v3 their prefixes
@@ -9286,10 +9216,7 @@ mod tests {
         // nostr_pk changes what every member signs
         let mut changed = table.clone();
         changed[0].nostr_pk = "dd".repeat(32);
-        assert_ne!(
-            bytes,
-            roster_canonical_bytes("f00", 2, 3, &changed, "charter", &[], None)
-        );
+        assert_ne!(bytes, roster_canonical_bytes("f00", 2, 3, &changed, "charter", &[], None));
         // a legacy (empty) nostr_pk still length-prefixes as 0 — no special
         // casing that could collide two different rosters onto one byte form
         let mut legacy = table.clone();
@@ -9304,10 +9231,7 @@ mod tests {
     /// gated, but a client can tell them apart.
     #[test]
     fn only_the_built_surfaces_read_as_implemented() {
-        let real: Vec<Surface> = Surface::ALL
-            .into_iter()
-            .filter(|s| s.is_implemented())
-            .collect();
+        let real: Vec<Surface> = Surface::ALL.into_iter().filter(|s| s.is_implemented()).collect();
         assert_eq!(
             real,
             vec![
@@ -9340,13 +9264,9 @@ mod tests {
         assert_eq!(serde_json::to_string(&id).expect("serializes"), before);
         let back: MemberIdentity = serde_json::from_str(&before).expect("old shape decodes");
         assert_eq!(back, id);
-        let keyed = MemberIdentity {
-            vault_pk: "ee".repeat(32),
-            ..id
-        };
+        let keyed = MemberIdentity { vault_pk: "ee".repeat(32), ..id };
         let round: MemberIdentity =
-            serde_json::from_str(&serde_json::to_string(&keyed).expect("serializes"))
-                .expect("decodes");
+            serde_json::from_str(&serde_json::to_string(&keyed).expect("serializes")).expect("decodes");
         assert_eq!(round, keyed);
     }
 
@@ -9376,10 +9296,7 @@ mod tests {
         let features = vec!["memory".to_string(), "wallet".to_string()];
         let v5 = roster_canonical_bytes("f00", 1, 1, &table[..1], "charter", &[], Some(&features));
         assert!(v5.starts_with(b"molt-roster-v5\0"));
-        assert_eq!(
-            v5.len(),
-            15 + 7 + 2 + 4 + 7 + 68 + 68 + 11 + 4 + 4 + 10 + 10
-        );
+        assert_eq!(v5.len(), 15 + 7 + 2 + 4 + 7 + 68 + 68 + 11 + 4 + 4 + 10 + 10);
     }
 
     fn keyed_table() -> Vec<MemberIdentity> {
@@ -9463,10 +9380,8 @@ mod tests {
         // one key present already bumps the tag
         let mut one = table;
         one[1].vault_pk = String::new();
-        assert!(
-            roster_canonical_bytes("f00", 2, 4, &one, "charter", &[], Some(&features))
-                .starts_with(b"molt-roster-v6\0")
-        );
+        assert!(roster_canonical_bytes("f00", 2, 4, &one, "charter", &[], Some(&features))
+            .starts_with(b"molt-roster-v6\0"));
     }
 
     /// A table without vault keys stays v5 (and v4) byte-identically, even
@@ -9500,10 +9415,8 @@ mod tests {
         want.extend_from_slice(&1u32.to_le_bytes());
         put(&mut want, b"vault");
         assert_eq!(bytes, want);
-        assert!(
-            roster_canonical_bytes("f00", 2, 4, &table, "charter", &[], None)
-                .starts_with(b"molt-roster-v4\0")
-        );
+        assert!(roster_canonical_bytes("f00", 2, 4, &table, "charter", &[], None)
+            .starts_with(b"molt-roster-v4\0"));
     }
 
     /// Shared Files is the seventh surface and a CORE one: never a feature
@@ -9518,19 +9431,12 @@ mod tests {
         assert!(!Surface::Files.is_charter_feature());
         assert!(Surface::Files.is_gated());
         assert_eq!(
-            Surface::Files
-                .views()
-                .iter()
-                .map(|(k, _)| *k)
-                .collect::<Vec<_>>(),
+            Surface::Files.views().iter().map(|(k, _)| *k).collect::<Vec<_>>(),
             ["uploads", "persistent", "pending", "accepted", "declined"]
         );
         assert_eq!(Surface::Files.default_view(), "uploads");
         assert!(
-            !Surface::Organization
-                .views()
-                .iter()
-                .any(|(k, _)| *k == "uploads"),
+            !Surface::Organization.views().iter().any(|(k, _)| *k == "uploads"),
             "the uploads view moved out of Organization"
         );
         assert_eq!(
@@ -9555,11 +9461,9 @@ mod tests {
             vault_pk: String::new(),
         }];
         let features = vec!["memory".to_string(), "wallet".to_string()];
-        let bytes = roster_canonical_bytes("f00", 1, 1, &table, "charter", &[], Some(&features));
-        assert!(
-            bytes.starts_with(b"molt-roster-v5\0"),
-            "presence bumps the tag"
-        );
+        let bytes =
+            roster_canonical_bytes("f00", 1, 1, &table, "charter", &[], Some(&features));
+        assert!(bytes.starts_with(b"molt-roster-v5\0"), "presence bumps the tag");
 
         // the independent recomputation
         let mut want = Vec::new();
@@ -9634,32 +9538,14 @@ mod tests {
             },
         ];
         let a = roster_canonical_bytes("f00", 2, 3, &table, "charter", &[], None);
-        assert_eq!(
-            a,
-            roster_canonical_bytes("f00", 2, 3, &table, "charter", &[], None)
-        );
+        assert_eq!(a, roster_canonical_bytes("f00", 2, 3, &table, "charter", &[], None));
         // any changed field changes the bytes
-        assert_ne!(
-            a,
-            roster_canonical_bytes("f01", 2, 3, &table, "charter", &[], None)
-        );
-        assert_ne!(
-            a,
-            roster_canonical_bytes("f00", 3, 3, &table, "charter", &[], None)
-        );
-        assert_ne!(
-            a,
-            roster_canonical_bytes("f00", 2, 3, &table[..1], "charter", &[], None)
-        );
+        assert_ne!(a, roster_canonical_bytes("f01", 2, 3, &table, "charter", &[], None));
+        assert_ne!(a, roster_canonical_bytes("f00", 3, 3, &table, "charter", &[], None));
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table[..1], "charter", &[], None));
         // the ratified agenda is bound: a changed charter changes the bytes
-        assert_ne!(
-            a,
-            roster_canonical_bytes("f00", 2, 3, &table, "other", &[], None)
-        );
-        assert_ne!(
-            a,
-            roster_canonical_bytes("f00", 2, 3, &table, "", &[], None)
-        );
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table, "other", &[], None));
+        assert_ne!(a, roster_canonical_bytes("f00", 2, 3, &table, "", &[], None));
         // length prefixes prevent name/pk boundary games
         let shifted = vec![MemberIdentity {
             member: "petraa".to_string(),
@@ -9681,8 +9567,7 @@ mod tests {
 
     #[test]
     fn event_envelope_roundtrips_and_unknown_variants_fall_back_raw() {
-        let env = EventEnvelope {
-            prev_seq: 0,
+        let env = EventEnvelope { prev_seq: 0,
             seq: 7,
             ts: 1_751_700_000,
             by: "mithra".to_string(),
@@ -9792,10 +9677,7 @@ mod tests {
             SessionView::default().backup_orphans.is_empty(),
             "demo orphans must not leak into the production session state"
         );
-        assert!(
-            SessionView::default().s3_list.is_empty(),
-            "no listing ran yet"
-        );
+        assert!(SessionView::default().s3_list.is_empty(), "no listing ran yet");
     }
 
     /// The bucket object-naming scheme (`backup_restore_design.md` §6.2):
@@ -9811,14 +9693,14 @@ mod tests {
             "the canonical scheme parses"
         );
         for foreign in [
-            "molt/backup.tar".to_string(),                    // no id level
-            format!("molt/{id}/notes.txt"),                   // wrong suffix
-            format!("molt/{id}/xx.molt.enc"),                 // non-numeric ts
-            format!("molt/{id}/+123.molt.enc"),               // sign is not a digit
-            format!("molt/{}/001.molt.enc", "zz".repeat(32)), // not hex
-            format!("molt/{}/001.molt.enc", "ab".repeat(16)), // wrong id length
-            format!("other/{id}/001.molt.enc"),               // outside molt/
-            format!("molt/{id}/deep/001.molt.enc"),           // extra level
+            "molt/backup.tar".to_string(),                     // no id level
+            format!("molt/{id}/notes.txt"),                    // wrong suffix
+            format!("molt/{id}/xx.molt.enc"),                  // non-numeric ts
+            format!("molt/{id}/+123.molt.enc"),                // sign is not a digit
+            format!("molt/{}/001.molt.enc", "zz".repeat(32)),  // not hex
+            format!("molt/{}/001.molt.enc", "ab".repeat(16)),  // wrong id length
+            format!("other/{id}/001.molt.enc"),                // outside molt/
+            format!("molt/{id}/deep/001.molt.enc"),            // extra level
             String::new(),
         ] {
             assert_eq!(parse_backup_key(&foreign), None, "foreign: {foreign:?}");
@@ -9866,31 +9748,16 @@ mod tests {
         );
         // every other width is a foreign key — never counted, pruned or picked
         for stem in ["9", "09", "00000000009", "0000000000009", "999999999999999"] {
-            assert_ne!(
-                stem.len(),
-                12,
-                "negative fixture {stem:?} must be off-width"
-            );
-            assert_eq!(
-                parse_backup_key(&make(stem)),
-                None,
-                "off-width {stem:?} is foreign"
-            );
+            assert_ne!(stem.len(), 12, "negative fixture {stem:?} must be off-width");
+            assert_eq!(parse_backup_key(&make(stem)), None, "off-width {stem:?} is foreign");
         }
         // the concrete corruption the fix prevents: a planted short key (age 9)
         // sorts lexicographically AFTER a real 12-wide key (age 10) — so it
         // must not parse at all, leaving the real key the sole age-ordered one.
         let planted = make("9");
         let real = backup_key(&id, 10);
-        assert!(
-            planted > real,
-            "the short planted key sorts later than the newer real one"
-        );
-        assert_eq!(
-            parse_backup_key(&planted),
-            None,
-            "yet the planted key is not a backup"
-        );
+        assert!(planted > real, "the short planted key sorts later than the newer real one");
+        assert_eq!(parse_backup_key(&planted), None, "yet the planted key is not a backup");
         assert_eq!(parse_backup_key(&real), Some((id, 10)));
     }
 
@@ -9911,37 +9778,18 @@ mod tests {
         };
         let objects = vec![
             // two generations of a local workspace's backup → no orphan
-            obj(
-                &format!("molt/{local}/001752700000.molt.enc"),
-                4096,
-                now - 100_000,
-            ),
-            obj(
-                &format!("molt/{local}/001752790000.molt.enc"),
-                4096,
-                now - 10_000,
-            ),
+            obj(&format!("molt/{local}/001752700000.molt.enc"), 4096, now - 100_000),
+            obj(&format!("molt/{local}/001752790000.molt.enc"), 4096, now - 10_000),
             // two generations of an unknown workspace → ONE orphan entry
-            obj(
-                &format!("molt/{orphan}/001752600000.molt.enc"),
-                1024,
-                now - 200_000,
-            ),
-            obj(
-                &format!("molt/{orphan}/001752796400.molt.enc"),
-                2048,
-                now - 3_600,
-            ),
+            obj(&format!("molt/{orphan}/001752600000.molt.enc"), 1024, now - 200_000),
+            obj(&format!("molt/{orphan}/001752796400.molt.enc"), 2048, now - 3_600),
             // a foreign key → a per-key unknown entry
             obj("molt/leftover.bin", 512, now - 60),
         ];
         let got = backup_orphans_from_listing(&objects, std::slice::from_ref(&local), now);
         assert_eq!(got.len(), 2, "one orphan + one unknown: {got:?}");
         let o = &got[0];
-        assert_eq!(
-            o.id, orphan,
-            "the orphan carries the workspace-id pseudonym"
-        );
+        assert_eq!(o.id, orphan, "the orphan carries the workspace-id pseudonym");
         assert_eq!(o.name, "", "no display name is known for an orphan");
         assert_eq!(o.size_kib, 3, "sizes sum, KiB rounded up");
         assert_eq!(o.last_backup_min, 60, "dated by the NEWEST object");
@@ -9951,23 +9799,18 @@ mod tests {
         assert_eq!(f.size_kib, 1);
         assert_eq!(f.last_backup_min, 1);
         // a listing with only local backups yields no orphans at all
-        assert!(backup_orphans_from_listing(&objects[..2], &[local], now).is_empty());
+        assert!(
+            backup_orphans_from_listing(&objects[..2], &[local], now).is_empty()
+        );
         // a future-dated object (clock skew) clamps to "just now", and an
         // empty listing stays empty (canonical 12-wide key so it is a real
         // orphan, not a foreign off-width key)
         let skew = backup_orphans_from_listing(
-            &[obj(
-                &format!("molt/{orphan}/000000000009.molt.enc"),
-                10,
-                now + 500,
-            )],
+            &[obj(&format!("molt/{orphan}/000000000009.molt.enc"), 10, now + 500)],
             &[],
             now,
         );
-        assert_eq!(
-            skew[0].id, orphan,
-            "a canonical-width object is a real orphan"
-        );
+        assert_eq!(skew[0].id, orphan, "a canonical-width object is a real orphan");
         assert_eq!(skew[0].last_backup_min, 0);
         assert!(backup_orphans_from_listing(&[], &[], now).is_empty());
     }
@@ -10096,10 +9939,7 @@ mod tests {
         let plain = ChatMessage::text(MessageId::NIL, "petra", "gm", 102);
         assert_eq!(plain.kind, ChatKind::User);
         let wire = serde_json::to_string(&plain).expect("encode");
-        assert!(
-            !wire.contains("kind"),
-            "User kind must stay invisible: {wire}"
-        );
+        assert!(!wire.contains("kind"), "User kind must stay invisible: {wire}");
         assert_eq!(wire, r#"{"from":"petra","body":"gm","ts":102}"#);
 
         // (c) a System message round-trips through JSON, snake_case tag
@@ -10107,10 +9947,7 @@ mod tests {
             ChatMessage::text(MessageId::NIL, "petra", "rejoined", 104).with_kind(ChatKind::System);
         assert!(!sys.kind.is_user());
         let wire = serde_json::to_string(&sys).expect("encode");
-        assert!(
-            wire.contains(r#""kind":"system""#),
-            "system tag on the wire: {wire}"
-        );
+        assert!(wire.contains(r#""kind":"system""#), "system tag on the wire: {wire}");
         let back: ChatMessage = serde_json::from_str(&wire).expect("decode");
         assert_eq!(back.kind, ChatKind::System);
         assert_eq!(back, sys);
@@ -10123,10 +9960,7 @@ mod tests {
         let plain = ChatMessage::text(MessageId::NIL, "petra", "gm", 102);
         assert!(plain.read_by.is_empty());
         let wire = serde_json::to_string(&plain).expect("encode");
-        assert!(
-            !wire.contains("read_by"),
-            "empty read_by must stay invisible: {wire}"
-        );
+        assert!(!wire.contains("read_by"), "empty read_by must stay invisible: {wire}");
         assert_eq!(wire, r#"{"from":"petra","body":"gm","ts":102}"#);
 
         // (b) legacy JSON without read_by decodes to the empty-set default
@@ -10139,10 +9973,7 @@ mod tests {
         m.read_by.insert("walter".to_string());
         m.read_by.insert("clara".to_string());
         let wire = serde_json::to_string(&m).expect("encode");
-        assert!(
-            wire.contains(r#""read_by":["clara","walter"]"#),
-            "sorted set on the wire: {wire}"
-        );
+        assert!(wire.contains(r#""read_by":["clara","walter"]"#), "sorted set on the wire: {wire}");
         let back: ChatMessage = serde_json::from_str(&wire).expect("decode");
         assert_eq!(back.read_by, m.read_by);
         assert_eq!(back, m);
@@ -10160,22 +9991,13 @@ mod tests {
             nonce: None,
         };
         let wire = serde_json::to_string(&none).expect("encode");
-        assert!(
-            !wire.contains("nonce"),
-            "absent nonce must stay invisible: {wire}"
-        );
+        assert!(!wire.contains("nonce"), "absent nonce must stay invisible: {wire}");
         assert_eq!(wire, r#"{"type":"mesh_announced","ct":"deadbeef"}"#);
 
         // (b) legacy JSON without nonce decodes to None
         let legacy = r#"{"type":"mesh_announced","ct":"cafe"}"#;
         let back: WorkspaceEvent = serde_json::from_str(legacy).expect("decode");
-        assert_eq!(
-            back,
-            WorkspaceEvent::MeshAnnounced {
-                ct: "cafe".to_string(),
-                nonce: None
-            }
-        );
+        assert_eq!(back, WorkspaceEvent::MeshAnnounced { ct: "cafe".to_string(), nonce: None });
 
         // (c) a self-heal re-announce carries and round-trips its nonce
         let rot = WorkspaceEvent::MeshAnnounced {
@@ -10183,14 +10005,8 @@ mod tests {
             nonce: Some(0x1234_5678_9abc_def0),
         };
         let wire = serde_json::to_string(&rot).expect("encode");
-        assert!(
-            wire.contains(r#""nonce":1311768467463790320"#),
-            "nonce on the wire: {wire}"
-        );
-        assert_eq!(
-            serde_json::from_str::<WorkspaceEvent>(&wire).expect("decode"),
-            rot
-        );
+        assert!(wire.contains(r#""nonce":1311768467463790320"#), "nonce on the wire: {wire}");
+        assert_eq!(serde_json::from_str::<WorkspaceEvent>(&wire).expect("decode"), rot);
     }
 
     #[test]
@@ -10270,15 +10086,11 @@ mod tests {
             assert_eq!(life.closed_by, None);
             assert_eq!(life.last_ts, 40);
         }
-        let life = thread_lives([&a, &close], WEEK)
-            .remove("a")
-            .expect("thread");
+        let life = thread_lives([&a, &close], WEEK).remove("a").expect("thread");
         assert_eq!(life.closed_by.as_deref(), Some("bert"));
         assert_eq!(life.closed_at, 20);
         // a late speech after the close does not reopen
-        let life = thread_lives([&close, &late], WEEK)
-            .remove("a")
-            .expect("thread");
+        let life = thread_lives([&close, &late], WEEK).remove("a").expect("thread");
         assert_eq!(life.closed_by.as_deref(), Some("bert"));
     }
 
@@ -10299,25 +10111,18 @@ mod tests {
     /// never.
     #[test]
     fn a_thread_expires_after_inactivity_or_after_its_close() {
-        let life = thread_lives([&topic_line(1, "anna", 100, None)], WEEK)
-            .remove("a")
-            .expect("t");
+        let life = thread_lives([&topic_line(1, "anna", 100, None)], WEEK).remove("a").expect("t");
         assert_eq!(life.expires_at(), 100 + WEEK);
         assert!(!life.expired(100 + WEEK - 1));
         assert!(life.expired(100 + WEEK));
         let closed = thread_lives(
-            [
-                &topic_line(1, "anna", 100, None),
-                &topic_line(2, "anna", 200, Some(ThreadOp::Close)),
-            ],
+            [&topic_line(1, "anna", 100, None), &topic_line(2, "anna", 200, Some(ThreadOp::Close))],
             WEEK,
         )
         .remove("a")
         .expect("t");
         assert_eq!(closed.expires_at(), 200 + THREAD_CLOSED_GRACE_SECS);
-        let unknown = thread_lives([&topic_line(1, "anna", 0, None)], WEEK)
-            .remove("a")
-            .expect("t");
+        let unknown = thread_lives([&topic_line(1, "anna", 0, None)], WEEK).remove("a").expect("t");
         assert_eq!(unknown.expires_at(), 0);
         assert!(!unknown.expired(u64::MAX));
     }
@@ -10334,16 +10139,12 @@ mod tests {
 
         let close = topic_line(3, "anna", 200, Some(ThreadOp::Close));
         let after_grace = topic_line(4, "bert", 200 + THREAD_CLOSED_GRACE_SECS, None);
-        let life = thread_lives([&old, &close, &after_grace], WEEK)
-            .remove("a")
-            .expect("t");
+        let life = thread_lives([&old, &close, &after_grace], WEEK).remove("a").expect("t");
         assert_eq!(life.closed_by, None, "the new incarnation is open");
         assert!(life.predates(&close));
         // inside the grace it is the same, still closed thread
         let within = topic_line(5, "bert", 200 + 60, None);
-        let life = thread_lives([&old, &close, &within], WEEK)
-            .remove("a")
-            .expect("t");
+        let life = thread_lives([&old, &close, &within], WEEK).remove("a").expect("t");
         assert_eq!(life.closed_by.as_deref(), Some("anna"));
         assert_eq!(life.since, 100);
     }

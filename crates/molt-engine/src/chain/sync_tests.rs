@@ -22,54 +22,16 @@ fn a_catch_up_request_is_served_once_per_debounce() {
     let mut walter = chain_peer("walter", &b, b.blocks.clone());
     walter.presence.clock_override = Some(1_000);
     let before = walter.next_seq;
-    wire(
-        &mut walter,
-        "petra",
-        1,
-        WorkspaceEvent::ChainRequest {
-            from_height: 0,
-            known: vec![],
-        },
-    );
+    wire(&mut walter, "petra", 1, WorkspaceEvent::ChainRequest { from_height: 0, known: vec![] });
     let served = walter.next_seq;
     assert!(served > before, "the first request is served");
-    wire(
-        &mut walter,
-        "petra",
-        2,
-        WorkspaceEvent::ChainRequest {
-            from_height: 0,
-            known: vec![],
-        },
-    );
-    assert_eq!(
-        walter.next_seq, served,
-        "a repeat inside the debounce serves nothing"
-    );
-    wire(
-        &mut walter,
-        "petra",
-        3,
-        WorkspaceEvent::ChainRequest {
-            from_height: 99,
-            known: vec![],
-        },
-    );
+    wire(&mut walter, "petra", 2, WorkspaceEvent::ChainRequest { from_height: 0, known: vec![] });
+    assert_eq!(walter.next_seq, served, "a repeat inside the debounce serves nothing");
+    wire(&mut walter, "petra", 3, WorkspaceEvent::ChainRequest { from_height: 99, known: vec![] });
     assert_eq!(walter.next_seq, served, "nothing above the head is served");
     walter.presence.clock_override = Some(1_000 + crate::net::CHAIN_SERVE_DEBOUNCE_SECS);
-    wire(
-        &mut walter,
-        "petra",
-        4,
-        WorkspaceEvent::ChainRequest {
-            from_height: 0,
-            known: vec![],
-        },
-    );
-    assert!(
-        walter.next_seq > served,
-        "after the debounce it is served again"
-    );
+    wire(&mut walter, "petra", 4, WorkspaceEvent::ChainRequest { from_height: 0, known: vec![] });
+    assert!(walter.next_seq > served, "after the debounce it is served again");
 }
 
 /// C6: a headless node adopts only ITS republic's genesis — a valid
@@ -83,10 +45,7 @@ fn a_headless_node_refuses_another_republics_genesis() {
     walter.chain.head = None;
     walter.chain.walk = None;
     walter.receive_block(other.blocks[0].clone());
-    assert!(
-        walter.chain.head.is_none(),
-        "a foreign genesis is not adopted"
-    );
+    assert!(walter.chain.head.is_none(), "a foreign genesis is not adopted");
     walter.receive_block(b.blocks[0].clone());
     assert!(walter.chain.head.is_some(), "the own genesis is");
 }
@@ -205,23 +164,14 @@ fn a_peer_adopts_a_broadcast_block_and_converges() {
     assert_eq!(peer.chain.head.as_ref().expect("head").height, 0);
 
     peer.receive_block(block);
-    assert_eq!(
-        peer.chain.blocks.len(),
-        2,
-        "the peer adopted the broadcast block"
-    );
+    assert_eq!(peer.chain.blocks.len(), 2, "the peer adopted the broadcast block");
     assert_eq!(peer.chain.head.as_ref().expect("head").height, 1);
     let applied = peer
-        .chain
-        .applied
+        .chain.applied
         .get(&Surface::Memory)
         .expect("memory projection");
     assert_eq!(applied.len(), 1);
-    assert_eq!(
-        applied[0].0,
-        Some(1),
-        "the projection keeps the proposal id"
-    );
+    assert_eq!(applied[0].0, Some(1), "the projection keeps the proposal id");
     assert_eq!(applied[0].1["title"], json!("minutes"));
 
     // an invalid block (tampered payload, sigs no longer match) is rejected
@@ -239,11 +189,7 @@ fn a_peer_adopts_a_broadcast_block_and_converges() {
         *payload = json!({ "op": "add_note", "title": "forged" });
     }
     peer.receive_block(forged);
-    assert_eq!(
-        peer.chain.blocks.len(),
-        2,
-        "a tampered block is hard-rejected"
-    );
+    assert_eq!(peer.chain.blocks.len(), 2, "a tampered block is hard-rejected");
 }
 
 /// A block arriving ahead of our head is buffered, then applied once the
@@ -339,11 +285,7 @@ fn the_served_anchor_is_the_smallest_prefix_that_verifies() {
     let offer = full.anchor_bootstrap();
     let (blob, blocks) = split_bootstrap(&offer);
     assert!(blob.is_none(), "a full holder has no blob to offer");
-    assert_eq!(
-        blocks.len(),
-        1,
-        "the genesis and nothing else - not the chain"
-    );
+    assert_eq!(blocks.len(), 1, "the genesis and nothing else - not the chain");
     assert_eq!(blocks[0].height, 0);
     let (head, sealed) = verify_served(blob.as_ref(), &blocks, Some(&b.republic_id))
         .expect("the genesis verifies standalone");
@@ -373,20 +315,14 @@ fn the_served_anchor_is_the_smallest_prefix_that_verifies() {
     assert_eq!(blocks[0].height, 3);
     let (head, _) = verify_served(blob.as_ref(), &blocks, Some(&b.republic_id))
         .expect("blob + anchor verify standalone under the suffix rules");
-    assert_eq!(
-        head.height, 3,
-        "the rejoiner starts at the cut, not at zero"
-    );
+    assert_eq!(head.height, 3, "the rejoiner starts at the cut, not at zero");
 
     // …and broadcasting it must not disturb the SERVER: a 445 reaches
     // every member, so the offer travels back through this node's own
     // apply path (and through every survivor's) as a duplicate
     let before = (pruned.chain.blocks.clone(), pruned.chain.head.clone());
     pruned.serve_chain_anchor();
-    assert_eq!(
-        pruned.chain.blocks, before.0,
-        "serving must not move the server's chain"
-    );
+    assert_eq!(pruned.chain.blocks, before.0, "serving must not move the server's chain");
     assert_eq!(
         pruned.chain.head.as_ref().map(|h| h.height),
         before.1.as_ref().map(|h| h.height),
@@ -417,11 +353,7 @@ fn a_far_future_block_is_refused_not_buffered() {
         "a block far past the head never buffers"
     );
     walter.receive_block(junk(3));
-    assert_eq!(
-        walter.chain.pending_blocks.len(),
-        1,
-        "a near gap buffers for the drain"
-    );
+    assert_eq!(walter.chain.pending_blocks.len(), 1, "a near gap buffers for the drain");
 }
 
 /// **The catch-up is linear.** Draining a buffered suffix used to verify
@@ -454,8 +386,7 @@ fn catching_up_verifies_each_block_once() {
         "the whole suffix drained"
     );
     assert_eq!(
-        steps,
-        N,
+        steps, N,
         "each block is verified exactly once - a re-walk per block would \
          cost {} here, and 7M at N=1000",
         N * (N + 1)
@@ -563,12 +494,7 @@ fn an_oversized_checkpoint_blob_is_never_served() {
     fat.applied = vec![(
         Surface::Memory,
         (0..2_000u64)
-            .map(|i| {
-                (
-                    i,
-                    serde_json::json!({ "op": "add_note", "text": "x".repeat(200) }),
-                )
-            })
+            .map(|i| (i, serde_json::json!({ "op": "add_note", "text": "x".repeat(200) })))
             .collect(),
     )];
     assert!(
@@ -602,10 +528,7 @@ fn a_block_from_another_branch_flags_its_sender() {
     let molt_core::Reply::Chain { diverged, .. } = walter.cmd_read_chain().expect("read") else {
         panic!("read_chain answers Reply::Chain");
     };
-    assert_eq!(
-        (diverged[0].peer.as_str(), diverged[0].since_height),
-        ("petra", 1)
-    );
+    assert_eq!((diverged[0].peer.as_str(), diverged[0].since_height), ("petra", 1));
     assert_eq!(walter.status().chain_diverged.len(), 1);
     assert_eq!(walter.session.notice, "chain-diverged:petra:1");
 
@@ -618,10 +541,7 @@ fn a_block_from_another_branch_flags_its_sender() {
     a.commit_applied(3, &["petra", "walter"]);
     walter.receive_block_from("petra", a.blocks[3].clone());
     assert_eq!(walter.chain.blocks.len(), 4);
-    assert!(
-        walter.chain.diverged.is_empty(),
-        "petra is back on our branch"
-    );
+    assert!(walter.chain.diverged.is_empty(), "petra is back on our branch");
     assert!(walter.status().chain_diverged.is_empty());
 }
 
@@ -637,11 +557,7 @@ fn a_tip_tie_on_a_shared_prev_is_not_divergence() {
     let mut walter = chain_peer("walter", &a, a.blocks.clone());
     walter.receive_block_from("petra", b.blocks[1].clone());
     assert!(walter.chain.diverged.is_empty());
-    assert_eq!(
-        walter.chain.blocks.len(),
-        2,
-        "one of the two tip blocks stands"
-    );
+    assert_eq!(walter.chain.blocks.len(), 2, "one of the two tip blocks stands");
 }
 
 /// A2.3 (`docs_archive/chain/chain_reorg.md` R1-R4): two branches fork at height 1
@@ -691,14 +607,8 @@ fn a_deeper_fork_reorgs_onto_the_smaller_branch() {
     for blk in [&win.blocks[3], &win.blocks[2], &win.blocks[1]] {
         loser.receive_block_from("petra", blk.clone());
     }
-    assert_eq!(
-        loser.chain.blocks, win.blocks,
-        "re-based onto the smaller branch"
-    );
-    assert_eq!(
-        applied_ids(&loser),
-        applied_ids(&chain_peer("walter", &win, win.blocks.clone()))
-    );
+    assert_eq!(loser.chain.blocks, win.blocks, "re-based onto the smaller branch");
+    assert_eq!(applied_ids(&loser), applied_ids(&chain_peer("walter", &win, win.blocks.clone())));
     for id in &lost_ids[..2] {
         assert_eq!(
             loser.proposals.get(id).map(|p| p.state),
@@ -706,14 +616,8 @@ fn a_deeper_fork_reorgs_onto_the_smaller_branch() {
             "displaced proposal {id} returns to the vote"
         );
     }
-    assert!(
-        !loser.proposals.contains_key(&lost_ids[2]),
-        "a materialized record has no vote to return to"
-    );
-    assert!(
-        loser.chain.diverged.is_empty(),
-        "the peer is on our branch now"
-    );
+    assert!(!loser.proposals.contains_key(&lost_ids[2]), "a materialized record has no vote to return to");
+    assert!(loser.chain.diverged.is_empty(), "the peer is on our branch now");
     assert!(loser.chain.fork_candidates.is_empty());
 
     // the winner sees the loser's branch and does not move
@@ -735,10 +639,7 @@ fn a_reorg_never_crosses_the_cut() {
     let blob_at_2 = checkpoint_state(&b.blocks, 2).expect("state@2");
     let anchor = b.seal(
         3,
-        ChainChange::Checkpoint {
-            upto: 2,
-            state_hash: checkpoint_state_hash(&blob_at_2),
-        },
+        ChainChange::Checkpoint { upto: 2, state_hash: checkpoint_state_hash(&blob_at_2) },
         &["petra", "walter"],
     );
     b.push(anchor.clone());
@@ -756,10 +657,7 @@ fn a_reorg_never_crosses_the_cut() {
     for blk in [&c.blocks[4], &c.blocks[3], &c.blocks[2]] {
         pruned.receive_block_from("petra", blk.clone());
     }
-    assert_eq!(
-        pruned.chain.blocks, before,
-        "nothing below the cut is re-based"
-    );
+    assert_eq!(pruned.chain.blocks, before, "nothing below the cut is re-based");
     assert!(pruned.chain.checkpoint_blob.is_some());
 }
 
@@ -800,14 +698,8 @@ fn an_unverifiable_candidate_is_dropped() {
     for blk in [&w.blocks[3], &w.blocks[2], &w.blocks[1]] {
         loser.receive_block_from("petra", blk.clone());
     }
-    assert_eq!(
-        loser.chain.blocks, a.blocks,
-        "an unverifiable branch never adopts"
-    );
-    assert!(
-        loser.chain.fork_candidates.is_empty(),
-        "and is dropped, not kept"
-    );
+    assert_eq!(loser.chain.blocks, a.blocks, "an unverifiable branch never adopts");
+    assert!(loser.chain.fork_candidates.is_empty(), "and is dropped, not kept");
 }
 
 /// R5: a fork-aware request names what the requester holds; the server
@@ -835,21 +727,9 @@ fn a_chain_request_names_the_fork_point() {
         vec![4, 3, 2, 0],
         "head, then back geometrically"
     );
-    assert_eq!(
-        known[2].hash,
-        block_hash(&rid, &a.blocks[2]),
-        "the shared prefix matches"
-    );
-    assert_eq!(
-        server.serve_from_for(5, &known),
-        3,
-        "serve from the block above the last shared one"
-    );
-    assert_eq!(
-        server.serve_from_for(5, &[]),
-        5,
-        "a plain request keeps its estimate"
-    );
+    assert_eq!(known[2].hash, block_hash(&rid, &a.blocks[2]), "the shared prefix matches");
+    assert_eq!(server.serve_from_for(5, &known), 3, "serve from the block above the last shared one");
+    assert_eq!(server.serve_from_for(5, &[]), 5, "a plain request keeps its estimate");
 }
 
 /// A5 KEYSTONE (round 3, D9/R3): a seat the republic ran on without reads
@@ -869,18 +749,9 @@ fn a_seat_the_republic_ran_past_reads_the_distance() {
     let head_here = walter.chain.head.as_ref().expect("a head").height;
     b.commit_applied(2, &["petra", "dora"]);
     b.commit_applied(3, &["petra", "dora"]);
-    assert_eq!(
-        walter.chain_lag().peers_ahead,
-        0,
-        "nothing heard yet, nothing claimed"
-    );
+    assert_eq!(walter.chain_lag().peers_ahead, 0, "nothing heard yet, nothing claimed");
     for block in &b.blocks[2..] {
-        wire(
-            &mut walter,
-            "petra",
-            10 + block.height,
-            WorkspaceEvent::Committed(block.clone()),
-        );
+        wire(&mut walter, "petra", 10 + block.height, WorkspaceEvent::Committed(block.clone()));
     }
     let lag = walter.chain_lag();
     assert_eq!(
@@ -917,23 +788,12 @@ fn the_status_table_reads_each_seats_height() {
     let head = walter.chain.head.as_ref().expect("a head").height;
     walter.note_peer_height("petra", head + 2);
     let status = walter.status();
-    let seat = |m: &str| {
-        status
-            .seats
-            .iter()
-            .find(|s| s.member == m)
-            .expect("a row")
-            .clone()
-    };
+    let seat = |m: &str| status.seats.iter().find(|s| s.member == m).expect("a row").clone();
     assert_eq!(seat("walter").height, Some(head), "the own head");
     assert_eq!(seat("petra").height, Some(head + 2), "the claim");
     assert_eq!(seat("dora").height, None, "never claimed: unknown, not 0");
     assert_eq!(seat("dora").signed, Some(1), "dora signed block 1");
-    assert_eq!(
-        seat("walter").signed,
-        Some(0),
-        "walter signed only the genesis"
-    );
+    assert_eq!(seat("walter").signed, Some(0), "walter signed only the genesis");
 }
 
 /// A seat never seen here, in a republic whose founding date this node
@@ -944,25 +804,11 @@ fn a_never_seen_seat_of_unknown_founding_reads_silent_with_no_age() {
     let mut b = Builder::new(&["petra", "walter", "dora"], 2);
     b.commit_applied(1, &["petra", "dora"]);
     let walter = chain_peer("walter", &b, b.blocks.clone());
-    assert_eq!(
-        walter.replica.as_ref().map(|r| r.founded_ts),
-        Some(0),
-        "the fixture knows no founding"
-    );
+    assert_eq!(walter.replica.as_ref().map(|r| r.founded_ts), Some(0), "the fixture knows no founding");
     let lag = walter.chain_lag();
-    let petra = lag
-        .silent
-        .iter()
-        .find(|s| s.member == "petra")
-        .expect("never seen = silent");
-    assert_eq!(
-        petra.secs, 0,
-        "unknown age reads 0, not the seconds since 1970"
-    );
-    assert!(
-        lag.silent.iter().all(|s| s.member != "walter"),
-        "never the own seat"
-    );
+    let petra = lag.silent.iter().find(|s| s.member == "petra").expect("never seen = silent");
+    assert_eq!(petra.secs, 0, "unknown age reads 0, not the seconds since 1970");
+    assert!(lag.silent.iter().all(|s| s.member != "walter"), "never the own seat");
 }
 
 /// A6 KEYSTONE: while the peers are ahead, this seat's vote would be
@@ -980,24 +826,15 @@ fn a_vote_is_refused_while_the_peers_are_ahead() {
     let mut walter = chain_peer("walter", &b, b.blocks.clone());
     // a real seat holds its key: a keyless vote is refused for that reason
     walter.identity_sk = Some(b.key("walter").clone());
-    walter.receive_proposed(
-        7,
-        Surface::Memory,
-        json!({ "op": "add_note", "id": 7 }),
-        "petra",
-    );
+    walter.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 }), "petra");
     assert!(
         walter.cmd_approve(molt_core::ProposalId(7), None).is_ok(),
         "level with the republic, the vote counts"
     );
     walter.note_peer_height("petra", 3);
-    let (res, logs) =
-        crate::wake::tests::capture(|| walter.cmd_decline(molt_core::ProposalId(7), None));
+    let (res, logs) = crate::wake::tests::capture(|| walter.cmd_decline(molt_core::ProposalId(7), None));
     let err = res.expect_err("a lagging vote is refused");
-    assert!(
-        logs.contains("vote=refused_lagging") && logs.contains("peers_ahead="),
-        "the error log keeps it: {logs}"
-    );
+    assert!(logs.contains("vote=refused_lagging") && logs.contains("peers_ahead="), "the error log keeps it: {logs}");
     assert!(
         matches!(err, molt_core::MoltError::ChainLagging { peers_ahead } if peers_ahead >= 2),
         "the refusal names the distance: {err:?}"
@@ -1028,21 +865,14 @@ fn a_seat_that_stopped_signing_is_reported_stale() {
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
     let stale = walter.stale_signers();
     assert!(
-        stale
-            .iter()
-            .any(|s| s.member == "walter" && s.last_signed_height == 0),
+        stale.iter().any(|s| s.member == "walter" && s.last_signed_height == 0),
         "walter signed only the genesis: {stale:?}"
     );
     assert!(
         !stale.iter().any(|s| s.member == "petra"),
         "petra signed the head, she is not stale: {stale:?}"
     );
-    walter.receive_proposed(
-        7,
-        Surface::Memory,
-        json!({ "op": "add_note", "id": 7 }),
-        "petra",
-    );
+    walter.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 }), "petra");
     walter
         .cmd_approve(molt_core::ProposalId(7), None)
         .expect("level with the republic, the vote counts");
@@ -1074,10 +904,7 @@ fn a_junk_attestation_variant_never_rolls_back_the_chain() {
     let variant = (0u32..64)
         .map(|i| {
             let mut v = honest.clone();
-            v.sigs.push(molt_core::RosterAttestation {
-                member: "zz".to_string(),
-                sig: format!("{i:064x}"),
-            });
+            v.sigs.push(molt_core::RosterAttestation { member: "zz".to_string(), sig: format!("{i:064x}") });
             v
         })
         .find(|v| block_hash(&rid, v) < block_hash(&rid, &honest))
@@ -1086,11 +913,7 @@ fn a_junk_attestation_variant_never_rolls_back_the_chain() {
     assert_eq!(changes(&walter), before, "no decision is rolled back");
     assert_eq!(walter.chain.head.as_ref().map(|h| h.height), Some(3));
     for id in [1u64, 2, 3] {
-        assert_eq!(
-            walter.proposals.get(&id).map(|p| p.state),
-            Some(ProposalState::Applied),
-            "card {id}"
-        );
+        assert_eq!(walter.proposals.get(&id).map(|p| p.state), Some(ProposalState::Applied), "card {id}");
     }
 }
 
@@ -1108,18 +931,11 @@ fn a_signer_set_variant_relinks_instead_of_rolling_back() {
                 b.commit_applied(id, &["petra", "walter"]);
             }
             let honest = b.blocks[1].clone();
-            [
-                &["petra", "dora"][..],
-                &["walter", "dora"],
-                &["dora", "petra", "walter"],
-            ]
-            .iter()
-            .map(|s| ChainBlock {
-                prev: honest.prev.clone(),
-                ..b.seal(1, honest.change.clone(), s)
-            })
-            .find(|v| block_hash(&b.republic_id, v) < block_hash(&b.republic_id, &honest))
-            .map(|v| (b, v))
+            [&["petra", "dora"][..], &["walter", "dora"], &["dora", "petra", "walter"]]
+                .iter()
+                .map(|s| ChainBlock { prev: honest.prev.clone(), ..b.seal(1, honest.change.clone(), s) })
+                .find(|v| block_hash(&b.republic_id, v) < block_hash(&b.republic_id, &honest))
+                .map(|v| (b, v))
         })
         .expect("a chain with a lower signer-set variant");
     let ids: Vec<u64> = b.blocks[1..]
@@ -1133,21 +949,11 @@ fn a_signer_set_variant_relinks_instead_of_rolling_back() {
     let before = changes(&walter);
     walter.receive_block_from("dora", variant.clone());
     assert_eq!(changes(&walter), before, "no decision is rolled back");
-    assert_eq!(
-        walter.chain.blocks[1], variant,
-        "the lower variant holds the slot"
-    );
+    assert_eq!(walter.chain.blocks[1], variant, "the lower variant holds the slot");
     let relinked = walter.chain.blocks.clone();
-    assert!(
-        walter.walk_own(&relinked).is_ok(),
-        "the re-linked chain verifies"
-    );
+    assert!(walter.walk_own(&relinked).is_ok(), "the re-linked chain verifies");
     for id in ids {
-        assert_eq!(
-            walter.proposals.get(&id).map(|p| p.state),
-            Some(ProposalState::Applied),
-            "card {id}"
-        );
+        assert_eq!(walter.proposals.get(&id).map(|p| p.state), Some(ProposalState::Applied), "card {id}");
     }
     // the old links arriving afterwards change nothing
     for blk in b.blocks[1..].iter().rev() {
@@ -1183,13 +989,8 @@ fn a_catch_up_adopts_only_the_relays_its_last_pool_keeps() {
     walter.receive_block_from("petra", b.blocks[2].clone());
     walter.receive_block_from("petra", b.blocks[1].clone());
     assert_eq!(walter.chain.blocks.len(), 3);
-    let pool: Vec<(String, bool)> = walter
-        .session
-        .settings
-        .relays
-        .iter()
-        .map(|r| (r.url.clone(), r.confirmed))
-        .collect();
+    let pool: Vec<(String, bool)> =
+        walter.session.settings.relays.iter().map(|r| (r.url.clone(), r.confirmed)).collect();
     assert_eq!(pool, vec![(kept, true)]);
 }
 
@@ -1198,17 +999,9 @@ fn a_catch_up_adopts_only_the_relays_its_last_pool_keeps() {
 fn a_refused_vote_lands_in_the_log() {
     let b = Builder::new(&["petra", "walter", "dora"], 2);
     let mut walter = chain_peer("walter", &b, b.blocks.clone());
-    let (_, logs) = crate::wake::tests::capture(|| {
-        walter.cmd_net_vote_refused(molt_core::ProposalId(7), "petra", 303)
-    });
+    let (_, logs) = crate::wake::tests::capture(|| walter.cmd_net_vote_refused(molt_core::ProposalId(7), "petra", 303));
     assert!(logs.contains("WARN"), "{logs}");
-    for field in [
-        "vote=refused",
-        "proposal=7",
-        "peer=petra",
-        "peer_head=303",
-        "head=0",
-    ] {
+    for field in ["vote=refused", "proposal=7", "peer=petra", "peer_head=303", "head=0"] {
         assert!(logs.contains(field), "{field}: {logs}");
     }
 }

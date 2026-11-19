@@ -20,6 +20,7 @@ pub(crate) const CHAIN_SERVE_DEBOUNCE_SECS: u64 = 30;
 /// random ids would otherwise sweep the whole P6 parking buffer (review E6).
 pub(crate) const PARKED_READS_PER_FRAME: usize = 16;
 
+
 impl State {
     /// Tell the operator a peer's proposal was dropped here. Once per
     /// distinct drop: a re-served card must not re-notify on every pass.
@@ -54,11 +55,7 @@ impl State {
         let molt_core::ChannelRef::Patch { id } = msg.channel else {
             return false;
         };
-        let republic = self
-            .replica
-            .as_ref()
-            .map(|r| r.republic_id.clone())
-            .unwrap_or_default();
+        let republic = self.replica.as_ref().map(|r| r.republic_id.clone()).unwrap_or_default();
         [true, false]
             .iter()
             .any(|declined| crate::chat::decision_summary_id(&republic, id.0, *declined) == msg.id)
@@ -134,21 +131,21 @@ impl State {
         match envelope.body {
             WorkspaceEvent::Chat(mut msg) => {
                 msg.from = from.clone(); // defense in depth: the link decides
-                                         // a wake notice never leaves its node: a peer's is speech
+                // a wake notice never leaves its node: a peer's is speech
                 if msg.kind == molt_core::ChatKind::Wake {
                     msg.kind = molt_core::ChatKind::User;
                 }
                 msg.quote = None; // sender-local LEGACY index — does not transfer
                                   // (`quote_id`/`channel` are global refs and stay)
-                                  // The channel tag is a CLAIM, not a fact (display routing,
-                                  // never a boundary — nothing engine-side trusts it): run it
-                                  // through the same normalization a local send gets, and
-                                  // COERCE an unnormalizable claim (empty/oversized topic
-                                  // name) to the all-hands `Group` channel instead of
-                                  // dropping the message — a peer's mangled tag must not
-                                  // suppress content anyone was meant to see, and the log
-                                  // keeps its "every stored topic name is normalized"
-                                  // invariant.
+                // The channel tag is a CLAIM, not a fact (display routing,
+                // never a boundary — nothing engine-side trusts it): run it
+                // through the same normalization a local send gets, and
+                // COERCE an unnormalizable claim (empty/oversized topic
+                // name) to the all-hands `Group` channel instead of
+                // dropping the message — a peer's mangled tag must not
+                // suppress content anyone was meant to see, and the log
+                // keeps its "every stored topic name is normalized"
+                // invariant.
                 msg.channel = msg
                     .channel
                     .normalized()
@@ -191,17 +188,13 @@ impl State {
                         // a foreign id, so leave an audit trail at WARN.
                         // D10: unless it is the DECISION LINE, whose id every
                         // tipping seat mints identically by design.
-                        Some(author) if author != from && !self.is_decision_summary(&msg) => {
-                            tracing::warn!(
-                                %from,
-                                stored_author = %author,
-                                id = %msg.id,
-                                "dropping a wire chat message whose duplicate id belongs to another author"
-                            )
-                        }
-                        _ => {
-                            tracing::debug!(%from, id = %msg.id, "dropping a wire chat message with a duplicate id")
-                        }
+                        Some(author) if author != from && !self.is_decision_summary(&msg) => tracing::warn!(
+                            %from,
+                            stored_author = %author,
+                            id = %msg.id,
+                            "dropping a wire chat message whose duplicate id belongs to another author"
+                        ),
+                        _ => tracing::debug!(%from, id = %msg.id, "dropping a wire chat message with a duplicate id"),
                     }
                     return Ok(Reply::Ack);
                 }
@@ -290,11 +283,7 @@ impl State {
             }
             // chain governance gossip + block broadcast — only a chain-governed
             // workspace acts on it (the transport carries it; the chain decides)
-            WorkspaceEvent::Proposed {
-                id,
-                surface,
-                payload,
-            } if self.is_chain_governed() => {
+            WorkspaceEvent::Proposed { id, surface, payload } if self.is_chain_governed() => {
                 tracing::info!(
                     from = %from,
                     id = id.0,
@@ -393,10 +382,8 @@ impl State {
                         .and_then(serde_json::Value::as_str)
                         .is_some_and(|m| self.roster().iter().any(|s| s == m))
                 {
-                    let claimed = payload
-                        .get("member")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("");
+                    let claimed =
+                        payload.get("member").and_then(serde_json::Value::as_str).unwrap_or("");
                     tracing::warn!(from = %from, claimed = %claimed, "dropping a profile proposal for an unknown seat");
                     return Ok(Reply::Ack);
                 }
@@ -407,10 +394,7 @@ impl State {
                     && payload.get("op").and_then(serde_json::Value::as_str)
                         == Some("set_member_desc")
                     && crate::proposals::member_desc_ok(
-                        payload
-                            .get("value")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or(""),
+                        payload.get("value").and_then(serde_json::Value::as_str).unwrap_or(""),
                     )
                     .is_err()
                 {
@@ -428,11 +412,7 @@ impl State {
                     // wake a sleeping agent harness if this seat's vote is
                     // now awaited (debounced; no-op without a wake command)
                     self.maybe_wake_pending(&from);
-                    self.emit(molt_core::Event::Proposed {
-                        id,
-                        surface,
-                        by: from.clone(),
-                    });
+                    self.emit(molt_core::Event::Proposed { id, surface, by: from.clone() });
                     // the parked voices this card is about to make real —
                     // read BEFORE the drain empties the park, so each can be
                     // kept in the log under its own seat below
@@ -442,7 +422,8 @@ impl State {
                         .get(&id.0)
                         .cloned()
                         .unwrap_or_default();
-                    let parked_withdraw = self.chain.pending_withdrawals.get(&id.0).cloned();
+                    let parked_withdraw =
+                        self.chain.pending_withdrawals.get(&id.0).cloned();
                     // a retraction that outran the card stands now
                     let retracted = matches!(
                         self.register_parked_withdrawal(id.0),
@@ -470,11 +451,7 @@ impl State {
                         self.keep_peer_event(
                             from.clone(),
                             envelope.ts,
-                            WorkspaceEvent::Proposed {
-                                id,
-                                surface,
-                                payload,
-                            },
+                            WorkspaceEvent::Proposed { id, surface, payload },
                         );
                     }
                     for (member, ts, hash) in parked {
@@ -486,11 +463,7 @@ impl State {
                             self.keep_peer_event(
                                 member.clone(),
                                 ts,
-                                WorkspaceEvent::Declined {
-                                    id,
-                                    by: member,
-                                    hash,
-                                },
+                                WorkspaceEvent::Declined { id, by: member, hash },
                             );
                         }
                     }
@@ -519,12 +492,7 @@ impl State {
                     }
                 }
             }
-            WorkspaceEvent::Approved {
-                id,
-                by,
-                height,
-                sig,
-            } if self.is_chain_governed() => {
+            WorkspaceEvent::Approved { id, by, height, sig } if self.is_chain_governed() => {
                 // D2: a LINK-AUTHENTICATED approve clears the member's
                 // standing decline (newest stance wins). Gated on by ==
                 // from — receive_approval never verifies the signature, so
@@ -554,12 +522,7 @@ impl State {
                     self.keep_peer_event(
                         from.clone(),
                         envelope.ts,
-                        WorkspaceEvent::Approved {
-                            id,
-                            by: by.clone(),
-                            height,
-                            sig: sig.clone(),
-                        },
+                        WorkspaceEvent::Approved { id, by: by.clone(), height, sig: sig.clone() },
                     );
                 }
                 self.emit(molt_core::Event::Approved {
@@ -598,11 +561,7 @@ impl State {
                     self.keep_peer_event(
                         from.clone(),
                         envelope.ts,
-                        WorkspaceEvent::Declined {
-                            id,
-                            by: by.clone(),
-                            hash: hash.clone(),
-                        },
+                        WorkspaceEvent::Declined { id, by: by.clone(), hash: hash.clone() },
                     );
                 }
                 match outcome {
@@ -652,19 +611,15 @@ impl State {
             WorkspaceEvent::Committed(block) if self.is_chain_governed() => {
                 // D4: the block's DISPLAY stamp is the sender's, so every
                 // node names the same moment for the same height
-                let at = self
-                    .chain
-                    .block_ts
-                    .entry(block.height)
-                    .or_insert(envelope.ts);
+                let at = self.chain.block_ts.entry(block.height).or_insert(envelope.ts);
                 *at = (*at).min(envelope.ts);
                 self.receive_block_from(&from, block);
             }
             // A6: a peer dropped a vote of OURS - only that (a frame naming
             // another member's vote is that member's business, never ours)
-            WorkspaceEvent::VoteRefused {
-                id, voter, head, ..
-            } if self.is_chain_governed() && voter == self.member() => {
+            WorkspaceEvent::VoteRefused { id, voter, head, .. }
+                if self.is_chain_governed() && voter == self.member() =>
+            {
                 self.note_peer_height(&from, head);
                 let _ = self.cmd_net_vote_refused(id, &from, head);
             }
@@ -682,21 +637,15 @@ impl State {
                 // to serve, and one requester at most once per debounce
                 let now = self.presence_now();
                 let beyond_head = self
-                    .chain
-                    .head
+                    .chain.head
                     .as_ref()
                     .is_some_and(|h| from_height > h.height);
                 let recently = self
-                    .chain
-                    .served_at
+                    .chain.served_at
                     .get(&from)
                     .is_some_and(|t| now.saturating_sub(*t) < CHAIN_SERVE_DEBOUNCE_SECS);
                 if beyond_head || recently {
-                    let reason = if beyond_head {
-                        "beyond_head"
-                    } else {
-                        "recently"
-                    };
+                    let reason = if beyond_head { "beyond_head" } else { "recently" };
                     tracing::info!(%from, from_height, reason, "chain_catchup=not_served");
                 } else {
                     self.chain.served_at.insert(from.clone(), now);
@@ -763,12 +712,9 @@ impl State {
             // hash from OUR chain and auto-co-sign only on a match
             // (verify-before-sign; correctness attestation, not a product
             // decision, so no human round-trip)
-            WorkspaceEvent::CheckpointProposed {
-                id,
-                upto,
-                state_hash,
-                folded,
-            } if self.is_chain_governed() => {
+            WorkspaceEvent::CheckpointProposed { id, upto, state_hash, folded }
+                if self.is_chain_governed() =>
+            {
                 self.note_peer_height(&from, upto);
                 self.receive_checkpoint_proposal(id.0, upto, &state_hash, folded);
             }
@@ -789,10 +735,8 @@ impl State {
                 if nonce.is_none() {
                     let me = self.member();
                     if let Ok(raw) = hex::decode(&ct) {
-                        if let Some((announcer, plain)) = self
-                            .net
-                            .as_ref()
-                            .and_then(|n| n.decrypt_group_message(&raw))
+                        if let Some((announcer, plain)) =
+                            self.net.as_ref().and_then(|n| n.decrypt_group_message(&raw))
                         {
                             if announcer != me && self.roster().contains(&announcer) {
                                 if let Ok(a) =
@@ -844,10 +788,8 @@ impl State {
             WorkspaceEvent::FileRequested { ct } => {
                 let me = self.member();
                 if let Ok(raw) = hex::decode(&ct) {
-                    if let Some((requester, plain)) = self
-                        .net
-                        .as_ref()
-                        .and_then(|n| n.decrypt_group_message(&raw))
+                    if let Some((requester, plain)) =
+                        self.net.as_ref().and_then(|n| n.decrypt_group_message(&raw))
                     {
                         if requester != me && self.roster().contains(&requester) {
                             if let Ok(req) =
