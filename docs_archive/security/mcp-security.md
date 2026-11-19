@@ -326,10 +326,13 @@ carrying the serde contract, opened by the same live seat key.
 
 | Rule | Where |
 |---|---|
-| off unless `[web] port` is set; `127.0.0.1` only, no bind key | `molt_config::WebConfig`, `serve_loopback` |
+| off unless `[web] port` is set; loopback only, `127.0.0.1` and `[::1]` both, no bind key; a `[::1]` port somebody else holds opens no door | `molt_config::WebConfig`, `serve_loopback`, `bind_v6` |
+| a door that did not open is an ERROR line; an accept that fails is retried | `molt-app` `main.rs`, `server.rs::accept_loop` |
 | nothing is served while the seat key is empty (503, the page included) | `server.rs::route` |
 | `Host` is a canonical loopback name, `Origin` the served page | `origin.rs` |
 | the token is the first frame; 10 s deadline; seat scope only, the read key gets no door | `session.rs::authenticate`, `molt_mcp::seat_token_matches` |
+| a refused key is answered after 1 s with its slot held (64 guesses a second at most) and logged once a second | `session.rs::REFUSED_DELAY`, `log_refusal` |
+| a static request from another site or another local port (`Sec-Fetch-Site` not `same-origin`/`none`) gets nothing | `server.rs::route` |
 | the key is re-checked per frame, per reply, and before an event that can follow a rotation | `session.rs::serve` |
 | a command runs only if it is a tool's command or on `WEB_DOOR` | `gate.rs` |
 | the door cannot empty its own seat key | `gate.rs::refusal` |
@@ -383,7 +386,9 @@ so none reaches further than the path commands a seat already has:
   only as exactly `<store>/<minted id>/<name>`, compared by component, so
   a path with `..` is never the store's; and `share_file` refuses a path
   under `<workspace>/uploads`, so a by-path share cannot claim (or lose)
-  a stored upload (review 2026-11-18). Quota: 64 MiB
+  a stored upload (review 2026-11-18) - judged on the file the path
+  opens, so a `..` or a link into the store is refused too
+  (`reaches_store`, 2026-11-19). Quota: 64 MiB
   per upload, 8 open uploads, 1 GiB per workspace (open uploads at their
   declared size plus every shared one). `file_cap_bytes` applies at the
   share, as for `share_file`.

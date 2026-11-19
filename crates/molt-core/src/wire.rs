@@ -33,6 +33,10 @@ pub const PACK_MIN: usize = 1024;
 /// whole memory); the server sends anything larger unpacked.
 pub const MAX_UNPACKED: usize = 64 * 1024 * 1024;
 
+/// A reply shorter than this is never sent as a [`ServerFrame::Patch`],
+/// and neither side keeps it for the next one.
+pub const PATCH_MIN: usize = 16 * 1024;
+
 /// The close code for a key that is missing, wrong, or no longer the
 /// seat key.
 pub const CLOSE_UNAUTHORIZED: u16 = 4401;
@@ -63,6 +67,12 @@ pub enum ClientFrame {
         id: u64,
         /// The command.
         cmd: Box<Command>,
+        /// An earlier request with this very command whose reply the
+        /// client still holds: the server may answer with a
+        /// [`ServerFrame::Patch`] on it. Only sent to a server whose
+        /// [`Caps::patch`] is set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        like: Option<u64>,
     },
 }
 
@@ -72,7 +82,7 @@ impl std::fmt::Debug for ClientFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ClientFrame::Hello { v, .. } => f.debug_struct("Hello").field("v", v).finish_non_exhaustive(),
-            ClientFrame::Cmd { id, cmd } => {
+            ClientFrame::Cmd { id, cmd, .. } => {
                 let name: &'static str = (&**cmd).into();
                 f.debug_struct("Cmd").field("id", id).field("cmd", &name).finish_non_exhaustive()
             }
@@ -86,6 +96,10 @@ pub struct Caps {
     /// The binary was built with the embedded Tor client.
     #[serde(default)]
     pub embedded_tor: bool,
+    /// The server answers a repeated command with what changed
+    /// ([`ServerFrame::Patch`]) when the client names its last reply.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub patch: bool,
 }
 
 /// Server to client.
@@ -109,10 +123,73 @@ pub enum ServerFrame {
         /// What the engine answered.
         result: Result<Box<Reply>, MoltError>,
     },
+    /// The answer to a `Cmd` that named an earlier request (`like`), as
+    /// what changed: the reply's `result` text is that request's `result`
+    /// text with `delta` applied ([`patched`]). A window re-reads a whole
+    /// surface, megabytes of which a few entries are new.
+    Patch {
+        /// The request's id.
+        id: u64,
+        /// The earlier request whose `result` text this one builds on.
+        base: u64,
+        /// [`delta`] in base64; empty for "the same text".
+        delta: String,
+    },
     /// An engine event. Events are invalidations; a client re-reads.
     Event(Box<Event>),
     /// Events were dropped for this client: re-read everything.
     Lag,
+}
+
+/// The text frame of a reply whose `result` is already JSON text. The
+/// same bytes [`ServerFrame::Reply`] serializes to.
+#[must_use]
+pub fn reply_frame(id: u64, result: &str) -> String {
+    format!(r#"{{"reply":{{"id":{id},"result":{result}}}}}"#)
+}
+
+/// The `result` text of a reply frame [`reply_frame`] wrote for `id`;
+/// `None` for any other text.
+#[must_use]
+pub fn reply_result(id: u64, frame: &str) -> Option<&str> {
+    frame.strip_prefix(&format!(r#"{{"reply":{{"id":{id},"result":"#))?.strip_suffix("}}")
+}
+
+/// The block a patch matches the old text in. Smaller finds more, at a
+/// larger table: 20 MB of text is 10 000 blocks.
+const PATCH_BLOCK: u32 = 2048;
+
+/// What turns `base` into `new`, for [`ServerFrame::Patch`]: an rsync
+/// delta in base64, empty when the two are the same text. It finds
+/// every unchanged run wherever it moved to, so several changes far
+/// apart cost what changed and no more. `None`: no delta could be made.
+#[must_use]
+pub fn delta(base: &str, new: &str) -> Option<String> {
+    use base64::Engine as _;
+    if base == new {
+        return Some(String::new());
+    }
+    // the whole MD4 per block: a block is matched by content, never by luck
+    let options = fast_rsync::SignatureOptions { block_size: PATCH_BLOCK, crypto_hash_size: 16 };
+    let signature = fast_rsync::Signature::calculate(base.as_bytes(), options);
+    let mut out = Vec::new();
+    fast_rsync::diff(&signature.index(), new.as_bytes(), &mut out).ok()?;
+    Some(base64::engine::general_purpose::STANDARD_NO_PAD.encode(out))
+}
+
+/// The text a [`ServerFrame::Patch`] stands for, at most
+/// [`MAX_UNPACKED`] of it. `None`: the delta does not fit its base, and
+/// the connection is not usable.
+#[must_use]
+pub fn patched(base: &str, delta: &str) -> Option<String> {
+    use base64::Engine as _;
+    if delta.is_empty() {
+        return Some(base.to_string());
+    }
+    let delta = base64::engine::general_purpose::STANDARD_NO_PAD.decode(delta).ok()?;
+    let mut out = Vec::new();
+    fast_rsync::apply_limited(base.as_bytes(), &delta, &mut out, MAX_UNPACKED).ok()?;
+    String::from_utf8(out).ok()
 }
 
 /// A binary frame: `le64 id ‖ le64 offset ‖ flags ‖ bytes`. `id` is the
@@ -280,9 +357,9 @@ mod tests {
 
         let cmd: ClientFrame =
             serde_json::from_str(r#"{"cmd":{"id":4,"cmd":{"cmd":"read_session"}}}"#).expect("a command frame");
-        assert!(matches!(cmd, ClientFrame::Cmd { id: 4, ref cmd } if matches!(**cmd, Command::ReadSession)));
+        assert!(matches!(cmd, ClientFrame::Cmd { id: 4, ref cmd, .. } if matches!(**cmd, Command::ReadSession)));
 
-        let welcome = ServerFrame::Welcome { v: 1, build: "0.0.1".into(), caps: Caps { embedded_tor: true } };
+        let welcome = ServerFrame::Welcome { v: 1, build: "0.0.1".into(), caps: Caps { embedded_tor: true, patch: false } };
         assert_eq!(
             serde_json::to_string(&welcome).expect("json"),
             r#"{"welcome":{"v":1,"build":"0.0.1","caps":{"embedded_tor":true}}}"#
@@ -297,6 +374,78 @@ mod tests {
         assert_eq!(serde_json::to_string(&ServerFrame::Lag).expect("json"), r#""lag""#);
     }
 
+    /// Text shaped like a surface read: `n` entries, entry `i` of
+    /// version `v[i]`.
+    fn entries(versions: &[u32]) -> String {
+        let one = |(i, v): (usize, &u32)| format!(r#"{{"id":{i},"v":{v},"body":"{}"}}"#, format!("entry {i} ä€ ").repeat(40));
+        format!("[{}]", versions.iter().enumerate().map(one).collect::<Vec<_>>().join(","))
+    }
+
+    /// A patch rebuilds exactly the new text, and costs what changed:
+    /// several entries far apart, one gone, one new.
+    #[test]
+    fn a_patch_rebuilds_the_new_text() {
+        let old = entries(&[1; 2000]);
+        let mut versions = vec![1; 2000];
+        (versions[3], versions[900], versions[1990]) = (2, 2, 2);
+        versions.remove(1200);
+        versions.push(7);
+        let new = entries(&versions);
+        let d = delta(&old, &new).expect("a delta");
+        assert_eq!(patched(&old, &d).as_deref(), Some(new.as_str()));
+        assert!(old.len() > 1_000_000 && d.len() < 40_000, "{} of {}", d.len(), new.len());
+
+        // the same text is the empty delta
+        assert_eq!(delta(&old, &old).as_deref(), Some(""));
+        assert_eq!(patched(&old, "").as_deref(), Some(old.as_str()));
+        // small and odd texts go round too
+        for (a, b) in [("", "x"), ("x", ""), ("xäy", "xöy"), ("abc", "cba")] {
+            assert_eq!(patched(a, &delta(a, b).expect("a delta")).as_deref(), Some(b), "{a:?} -> {b:?}");
+        }
+    }
+
+    /// A delta that does not fit its base is refused, not guessed.
+    #[test]
+    fn a_patch_that_does_not_fit_is_refused() {
+        let (old, new) = (entries(&[1; 50]), entries(&[2; 50]));
+        let d = delta(&old, &new).expect("a delta");
+        assert_eq!(patched(&old, "not base64!"), None);
+        assert_eq!(patched(&old, "AAAA"), None, "not a delta");
+        assert_eq!(patched(&old, &d[..d.len() / 2]), None, "cut off");
+        // a delta that copies from its base finds no such run in another
+        let grown = format!("{old}more");
+        let copy = delta(&old, &grown).expect("a delta");
+        assert_eq!(patched(&old, &copy).as_deref(), Some(grown.as_str()));
+        assert_eq!(patched("short", &copy), None);
+        drop(new);
+    }
+
+    #[test]
+    fn a_reply_frame_is_the_reply_it_stands_for() {
+        let reply = ServerFrame::Reply { id: 4, result: Ok(Box::new(Reply::Ack)) };
+        let result = serde_json::to_string(&Ok::<_, MoltError>(Reply::Ack)).expect("json");
+        assert_eq!(reply_frame(4, &result), serde_json::to_string(&reply).expect("json"));
+        assert_eq!(reply_result(4, &reply_frame(4, &result)), Some(result.as_str()));
+        assert_eq!(reply_result(5, &reply_frame(4, &result)), None);
+        assert_eq!(reply_result(4, r#""lag""#), None);
+    }
+
+    /// `like` and `patch` are additive: left out when unused, so both
+    /// frames are the ones an older peer knows, and it ignores the new
+    /// words when they are there.
+    #[test]
+    fn the_patch_words_are_additive() {
+        let plain = ClientFrame::Cmd { id: 1, cmd: Box::new(Command::ReadSession), like: None };
+        assert_eq!(serde_json::to_string(&plain).expect("json"), r#"{"cmd":{"id":1,"cmd":{"cmd":"read_session"}}}"#);
+        let like = ClientFrame::Cmd { id: 2, cmd: Box::new(Command::ReadSession), like: Some(1) };
+        assert_eq!(serde_json::to_string(&like).expect("json"), r#"{"cmd":{"id":2,"cmd":{"cmd":"read_session"},"like":1}}"#);
+        assert_eq!(serde_json::to_string(&Caps::default()).expect("json"), r#"{"embedded_tor":false}"#);
+        let caps: Caps = serde_json::from_str(r#"{"embedded_tor":true,"patch":true,"later":1}"#).expect("parses");
+        assert!(caps.patch);
+        let patch = ServerFrame::Patch { id: 2, base: 1, delta: "x".into() };
+        assert_eq!(serde_json::to_string(&patch).expect("json"), r#"{"patch":{"id":2,"base":1,"delta":"x"}}"#);
+    }
+
     /// A welcome from a server that knows no caps still parses.
     #[test]
     fn welcome_without_caps_parses() {
@@ -309,7 +458,7 @@ mod tests {
         let hello = ClientFrame::Hello { v: 1, token: "sekrit".into(), packed: true };
         assert!(!format!("{hello:?}").contains("sekrit"));
         let patch = Command::PatchSettings { patch: serde_json::json!({ "mcp_token": "sekrit" }) };
-        let shown = format!("{:?}", ClientFrame::Cmd { id: 1, cmd: Box::new(patch) });
+        let shown = format!("{:?}", ClientFrame::Cmd { id: 1, cmd: Box::new(patch), like: None });
         assert!(!shown.contains("sekrit"), "{shown}");
         assert!(shown.contains("patch_settings"), "{shown}");
     }

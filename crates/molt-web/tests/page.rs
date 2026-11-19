@@ -122,6 +122,26 @@ fn the_page_knows_every_word_and_styles_the_file_overlay() {
     assert!(js.contains("Using exceptions for control flow"), "winit leaves `start` by throwing");
 }
 
+/// The door serves five files and none of them is `COPYING`: the page
+/// itself names the licence and where the source is. Plain text, no link
+/// (`the_page_loads_only_its_own_files`).
+#[test]
+fn the_page_names_its_licence_and_source() {
+    assert!(HTML.contains("GPL-3.0-or-later"));
+    assert!(HTML.contains("github.com/otherfren/moltrepublic"));
+}
+
+/// The labels arrive with the module; until then the page says that it
+/// is loading, and the line goes once the labels are there.
+#[test]
+fn the_page_says_that_it_is_loading() {
+    let js = code(JS);
+    let shown = js.find("why.textContent = LOADING;").expect("the loading line is shown");
+    let started = js.find("init().then(").expect("the module is loaded");
+    assert!(shown < started, "shown before the load starts");
+    assert!(js[started..].contains("why.textContent = \"\";"), "and cleared when it is there");
+}
+
 /// No em dash in what a human reads.
 #[test]
 fn no_em_dash_on_the_page() {

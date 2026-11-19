@@ -390,6 +390,21 @@ pub(crate) fn stored_dir(store: &Path, path: &Path) -> Option<PathBuf> {
     minted.then(|| store.join(dir))
 }
 
+/// Whether `path` lies in `store`, as it is written or as the file system
+/// resolves it: a `..` that climbs back in and a link from outside reach
+/// the store's files too. Unlike [`stored_dir`] this errs towards "yes" -
+/// it guards a share's source, it deletes nothing. A store that does not
+/// exist holds nothing. Two stats, like the share's own size check.
+pub(crate) fn reaches_store(store: &Path, path: &Path) -> bool {
+    if path.starts_with(store) {
+        return true;
+    }
+    let (Ok(store), Ok(path)) = (std::fs::canonicalize(store), std::fs::canonicalize(path)) else {
+        return false;
+    };
+    path.starts_with(store)
+}
+
 /// Serializes making an upload's directory against removing the empty
 /// store, across the writers and the actor.
 static STORE_DIRS: Mutex<()> = Mutex::new(());
@@ -762,6 +777,31 @@ mod tests {
         assert_eq!(at(&format!("{id}/../../a.bin")), None);
         assert_eq!(at(&format!("../uploads/{id}/a.bin")), None);
         assert_eq!(at(&format!("{id}/..")), None);
+    }
+
+    /// `share_file`'s guard: the store is refused under every spelling
+    /// that opens one of its files.
+    #[test]
+    fn a_path_that_resolves_into_the_store_reaches_it() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let store = tmp.path().join("uploads");
+        let id = "ab".repeat(16);
+        std::fs::create_dir_all(store.join(&id)).expect("upload dir");
+        std::fs::write(store.join(&id).join("a.bin"), b"x").expect("upload");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&other).expect("other dir");
+        std::fs::write(other.join("b.bin"), b"x").expect("file");
+
+        assert!(reaches_store(&store, &store.join(&id).join("a.bin")), "as written");
+        let climbed = other.join("..").join("uploads").join(&id).join("a.bin");
+        assert!(reaches_store(&store, &climbed), "a climb back in");
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(store.join(&id), &link).expect("link");
+        assert!(reaches_store(&store, &link.join("a.bin")), "a link from outside");
+
+        assert!(!reaches_store(&store, &other.join("b.bin")));
+        assert!(!reaches_store(&store, &other.join("missing.bin")), "a file that is not there");
+        assert!(!reaches_store(&tmp.path().join("none"), &other.join("b.bin")), "no store, nothing in it");
     }
 
     #[test]

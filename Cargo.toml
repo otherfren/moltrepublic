@@ -148,6 +148,9 @@ argon2             = "0.5"    # passphrase KDF of the export blob (RustCrypto, p
 unicode-normalization = "0.1" # NFC of export passphrases before the KDF
 getrandom          = "0.2"    # OS CSPRNG: seeds, nonces, device key
 hex                = "0.4"
+# the web door's reply patches (docs/web_gui.md §5.7): the rsync delta,
+# pure Rust, one dependency (arrayref), Apache-2.0
+fast_rsync         = "0.2"
 bip39              = "2"      # real recovery-phrase wordlist (replaces mock_seed)
 rustix             = { version = "1", features = ["fs"] }   # flock for the per-workspace LOCK
 

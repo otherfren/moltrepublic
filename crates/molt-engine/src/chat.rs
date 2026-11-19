@@ -356,8 +356,12 @@ impl State {
         // node's user can read is fair game on both surfaces (ADR-0007)
         let path = std::path::PathBuf::from(self.host_path(&path)?);
         // a stored upload is its share's and leaves the disk with it: a
-        // second share by path would lose its source to the first
-        if self.upload_store().is_ok_and(|store| path.starts_with(store)) {
+        // second share by path would lose its source to the first. Judged
+        // on the file the path opens, so a `..` or a link is no way round
+        if self
+            .upload_store()
+            .is_ok_and(|store| crate::upload_store::reaches_store(&store, &path))
+        {
             return Err(MoltError::BadPayload(
                 "the upload store is not a share source".into(),
             ));

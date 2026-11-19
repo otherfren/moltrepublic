@@ -8,9 +8,16 @@ Builds on ADR-0007.
 `moltd` gets a second remote door beside MCP: a WebSocket that carries the
 serde contract (`Command`, `Reply`, `Event`, `MoltError`) directly, for the
 browser build of the GUI. It is off unless `[web] port` is set, binds
-`127.0.0.1` and nothing else, and is opened by the same live seat key as
+loopback and nothing else, and is opened by the same live seat key as
 MCP. Remote use goes through an SSH tunnel. A non-loopback bind or TLS
 needs its own ADR first.
+
+Loopback is both addresses, `127.0.0.1` and `[::1]` (2026-11-19, review
+of PR #9): the door answers `Host: localhost`, and a browser asked for
+`localhost` may try either, so a door on one of them leaves the other to
+whoever binds it - a page that is not the node's asking for the seat
+key. A `[::1]` port already held by another process opens no door at
+all; a host without IPv6 has one loopback and binds one.
 
 ## Why not MCP
 

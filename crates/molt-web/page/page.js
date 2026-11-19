@@ -15,6 +15,12 @@ const note = el("note");
 // set on the one reload a version mismatch gets; never anything else
 const RELOADED = "#reloaded";
 
+// The labels come with the window's module, and the first load fetches
+// all of it: until then this one line is the page's own.
+const LOADING = (navigator.language || "").toLowerCase().startsWith("de")
+  ? "Lade das Fenster. Beim ersten Mal kann das auf einer langsamen Leitung Minuten dauern."
+  : "Loading the window. The first load can take minutes on a slow link.";
+
 let text = {};
 let started = false;
 // only a reload helps: another build's node, or a window that did not start
@@ -122,10 +128,12 @@ el("key-form").addEventListener("submit", (event) => {
   }
 });
 
+why.textContent = LOADING;
 init().then(
   () => {
     text = page_text(navigator.language || "");
     label();
+    why.textContent = "";
     key.disabled = false;
     go.disabled = false;
     key.focus();

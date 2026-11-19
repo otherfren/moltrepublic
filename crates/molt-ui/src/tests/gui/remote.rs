@@ -215,7 +215,7 @@ fn a_window_behind_the_web_door_takes_its_startup_inputs_from_the_server() {
         ..SessionView::default()
     };
     let w = molt_engine::spawn_with_storage(GroupConfig::demo(), session);
-    let port = door(&rt, &w, tmp.path(), molt_core::wire::Caps { embedded_tor: true });
+    let port = door(&rt, &w, tmp.path(), molt_core::wire::Caps { embedded_tor: true, ..Default::default() });
 
     // the mirror's session landing, called directly: the headless backend
     // never drains `invoke_from_event_loop` (see `mirror`)

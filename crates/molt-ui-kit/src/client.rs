@@ -488,7 +488,7 @@ mod tests {
             }
         }
         fn welcome(&self) {
-            self.say(&ServerFrame::Welcome { v: WIRE_VERSION, build: "7".into(), caps: Caps { embedded_tor: true } });
+            self.say(&ServerFrame::Welcome { v: WIRE_VERSION, build: "7".into(), caps: Caps { embedded_tor: true, ..Caps::default() } });
         }
     }
 
@@ -573,7 +573,7 @@ mod tests {
             let server_side = async {
                 server.heard().await; // hello
                 server.welcome();
-                let ClientFrame::Cmd { id, cmd } = server.heard().await else { panic!("a command") };
+                let ClientFrame::Cmd { id, cmd, .. } = server.heard().await else { panic!("a command") };
                 assert!(matches!(*cmd, Command::ReadSession));
                 server.say(&ServerFrame::Reply { id, result: Ok(Box::new(Reply::Ack)) });
             };
@@ -674,7 +674,7 @@ mod tests {
             let server_side = async {
                 server.heard().await; // hello
                 server.welcome();
-                let ClientFrame::Cmd { id, cmd } = server.heard().await else { panic!("a command") };
+                let ClientFrame::Cmd { id, cmd, .. } = server.heard().await else { panic!("a command") };
                 let total = u64::try_from(bytes.len()).expect("small");
                 assert!(matches!(*cmd, Command::UploadBegin { ref name, size } if name == "a.bin" && size == total));
                 let upload = |received: usize, done| Reply::UploadProgress {
@@ -686,7 +686,7 @@ mod tests {
                 server.say(&ServerFrame::Reply { id, result: Ok(Box::new(upload(0, false))) });
                 let mut got = Vec::new();
                 loop {
-                    let ClientFrame::Cmd { id, cmd } = server.heard().await else { panic!("a command") };
+                    let ClientFrame::Cmd { id, cmd, .. } = server.heard().await else { panic!("a command") };
                     let Command::UploadChunk { upload: of, offset, bytes: inline, last } = *cmd else { panic!("a chunk") };
                     assert_eq!(of, "u1");
                     assert!(inline.is_empty());
@@ -724,7 +724,7 @@ mod tests {
                 let ClientFrame::Cmd { id, .. } = server.heard().await else { panic!("a command") };
                 server.heard_bytes().await;
                 server.say(&ServerFrame::Reply { id, result: Err(MoltError::BadPayload("upload: no".into())) });
-                let ClientFrame::Cmd { id, cmd } = server.heard().await else { panic!("a command") };
+                let ClientFrame::Cmd { id, cmd, .. } = server.heard().await else { panic!("a command") };
                 assert!(matches!(*cmd, Command::UploadAbort { ref upload } if upload == "u1"));
                 server.say(&ServerFrame::Reply { id, result: Ok(Box::new(Reply::Ack)) });
             };

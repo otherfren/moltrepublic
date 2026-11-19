@@ -122,9 +122,13 @@ Strict crate layering: a lower crate never depends on a higher one, and there is
 **one** command set (`molt_core::Command`) executed in **one** place
 (`molt-engine`); every frontend (MCP, GUI) drives that same set as a co-equal
 operator. `molt-core` holds the Command/Event/Surface contract and has **no
-I/O**. Order: core → config → storage → net → engine → mcp → ui → app;
-`molt-vault` (the vault's crypto, pure functions) sits beside them on core
-only, used by engine and ui.
+I/O**. Order: core → config → storage → net → engine → mcp → remote → ui
+→ app; `molt-vault` (the vault's crypto, pure functions) sits beside them
+on core only, used by engine and ui. `molt-remote` is the web door (the
+browser GUI's loopback WebSocket, ADR-0008) on engine and mcp;
+`molt-ui-kit` (the remote client's protocol core, wasm-clean) sits on core
+only, under ui; `molt-web` is the browser build of the GUI on ui, wasm32
+only, and nothing native depends on it.
 
 The engine is a single-owner actor: command handlers are synchronous and never
 await I/O. Off-actor work (transport round-trips, the join ritual) runs in spawned
@@ -170,8 +174,15 @@ finding, the same as a bug.
   cheap everyday clippy.
 - **Co-equality is enforced by a test.** Every `Command` variant must be either
   an MCP tool (`crates/molt-mcp/src/lib.rs::tools()`) or on the documented
-  `INTERNAL` list in that file — `co_equality_every_command_is_a_tool_or_documented_internal`
-  fails otherwise. Adding a `Command` means updating one of those. Network/ritual
+  `INTERNAL` list (`molt_core::INTERNAL`, `crates/molt-core/src/lib.rs`) — `co_equality_every_command_is_a_tool_or_documented_internal`
+  fails otherwise. Adding a `Command` means updating one of those, and the
+  web door's gate test (`crates/molt-remote/src/gate.rs`) wants it
+  classified too: the door runs a tool's command or one of the few
+  INTERNAL ones on its `WEB_DOOR` list. The byte doors (`upload_*`,
+  `share_upload`, `read_file_bytes`, `read_image_bytes`,
+  `read_export_bytes`) are INTERNAL because an agent on the host has the
+  path forms, not because they are a boundary
+  (`docs_archive/security/mcp-security.md`, "The byte doors"). Network/ritual
   tasks speaking *to* the engine are INTERNAL (an MCP agent must not be able to
   forge a peer/ritual member); human decisions (approve, propose, confirm) are
   tools on **both** surfaces. Since ADR-0007 the seat token operates the
@@ -506,6 +517,11 @@ both verified red-without/green-with).
   away the moment `-p molt-ui` is built after it
   (`UnitDependencyInfoChanged`, verified 2026-08-21 — it cost a full
   10-minute rebuild).
+- **The browser GUI bundle is its own script, `scripts/build-release-web.sh`**
+  (`docs/web_gui.md` §8): a window-scale wasm32 compile of about 26 GiB of
+  memory and swap, `-j 1`, never beside another window-scale build.
+  `--check-only` tests the tools and versions without compiling; it needs
+  `wasm-bindgen-cli` at the exact `wasm-bindgen` version of `Cargo.lock`.
 - **GUI iteration goes through `scripts/dev-ui.sh` — NOT the 9-GiB build.**
   It sets `SLINT_LIVE_PREVIEW=1` + the `live-preview` feature chain
   (molt-app → molt-ui → molt-ui-window → `slint/live-preview`, Slint ≥ 1.13):

@@ -2596,6 +2596,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
+name = "fast_rsync"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d97c4d6e20491c84c60612a24660fc1fbfc56bfe24f5b49e6a9fd3259010794"
+dependencies = [
+ "arrayref",
+]
+
+[[package]]
 name = "fastdivide"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5183,7 +5192,9 @@ dependencies = [
 name = "molt-core"
 version = "0.0.17"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
+ "fast_rsync",
  "hex",
  "pulldown-cmark",
  "serde",

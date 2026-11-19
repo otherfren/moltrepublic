@@ -214,7 +214,7 @@ async fn ask<S>(ws: &mut WebSocketStream<S>, id: u64, cmd: Command)
 where
     S: AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let frame = ClientFrame::Cmd { id, cmd: Box::new(cmd) };
+    let frame = ClientFrame::Cmd { id, cmd: Box::new(cmd), like: None };
     ws.send(Message::text(serde_json::to_string(&frame).expect("json"))).await.expect("send");
 }
 
@@ -692,4 +692,78 @@ async fn a_kept_file_is_revalidated_not_sent_again() {
         assert_eq!(header(&head, "cache-control"), Some("no-store"), "{path}");
         assert_eq!(header(&head, "etag"), None, "{path}");
     }
+}
+
+/// A window re-reads a whole surface after every change. The second
+/// answer to the same command crosses as what changed, not as megabytes
+/// (docs/web_gui.md §5.7), and it is the reply the engine gives.
+#[tokio::test]
+async fn the_shipped_client_gets_a_repeated_read_as_what_changed() {
+    let n = node().await;
+    let read = fill_chat(&n.handle, 3_000_000).await;
+    let (handle, seen) = client(&n).await;
+    let crossed = || seen[0].load(Ordering::SeqCst) + seen[1].load(Ordering::SeqCst);
+    let state = |r: Result<Reply, molt_core::MoltError>| serde_json::to_value(r.expect("a state")).expect("json");
+
+    let first = state(handle.execute(read.clone()).await);
+    assert_eq!(first, direct(&n.handle).await);
+    let whole = crossed();
+    assert!(whole > 100_000, "{whole} bytes for the first read");
+
+    // nothing changed: next to nothing crosses
+    assert_eq!(state(handle.execute(read.clone()).await), first);
+    let same = crossed() - whole;
+    assert!(same < 2_000, "{same} bytes for an unchanged read");
+
+    // one line more: about that line crosses, and the reply is the engine's
+    let body = "one more line".to_string();
+    n.handle.execute(Command::Chat { body, quote: None, channel: ChannelRef::Group }).await.expect("chat");
+    let before = crossed();
+    let third = state(handle.execute(read.clone()).await);
+    assert_eq!(third, direct(&n.handle).await);
+    assert_ne!(third, first);
+    // the events of that line cross too
+    let changed = crossed() - before;
+    assert!(changed < 20_000, "{changed} bytes for one more line");
+
+    // and again on top of a patched reply
+    assert_eq!(state(handle.execute(read).await), third);
+}
+
+/// What the door sends on a raw socket: a patch only to a request that
+/// names a reply this session was sent, and a whole reply otherwise.
+#[tokio::test]
+async fn a_patch_answers_only_a_request_that_names_a_held_reply() {
+    let n = node().await;
+    let read = fill_chat(&n.handle, 300_000).await;
+    let mut ws = open(&n).await;
+    // the welcome says the door patches
+    ws.send(Message::text(OLD_HELLO)).await.expect("hello");
+    let Message::Text(w) = ws.next().await.expect("open").expect("clean") else { panic!("a welcome") };
+    assert!(matches!(serde_json::from_str(w.as_str()), Ok(ServerFrame::Welcome { caps: Caps { patch: true, .. }, .. })));
+    let say = |id: u64, like: Option<u64>| {
+        let frame = ClientFrame::Cmd { id, cmd: Box::new(read.clone()), like };
+        Message::text(serde_json::to_string(&frame).expect("json"))
+    };
+    let frame_of = async |ws: &mut WebSocketStream<TcpStream>, m: Message| -> ServerFrame {
+        ws.send(m).await.expect("send");
+        loop {
+            let Message::Text(t) = ws.next().await.expect("open").expect("clean") else { panic!("a text frame") };
+            match serde_json::from_str(t.as_str()).expect("a frame") {
+                ServerFrame::Event(_) | ServerFrame::Lag => {}
+                frame => return frame,
+            }
+        }
+    };
+    // a client that names nothing gets whole replies, as ever
+    assert!(matches!(frame_of(&mut ws, say(1, None)).await, ServerFrame::Reply { id: 1, .. }));
+    assert!(matches!(frame_of(&mut ws, say(2, None)).await, ServerFrame::Reply { id: 2, .. }));
+    // a reply this session never sent is not a base
+    assert!(matches!(frame_of(&mut ws, say(3, Some(77))).await, ServerFrame::Reply { id: 3, .. }));
+    // a held one is, once
+    let ServerFrame::Patch { id: 4, base: 2, delta } = frame_of(&mut ws, say(4, Some(2))).await else {
+        panic!("a patch on reply 2")
+    };
+    assert!(delta.len() < 1_000, "{} bytes of delta for an unchanged read", delta.len());
+    assert!(matches!(frame_of(&mut ws, say(5, Some(2))).await, ServerFrame::Reply { id: 5, .. }), "spent");
 }

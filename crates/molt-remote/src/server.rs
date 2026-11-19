@@ -46,6 +46,9 @@ const CONNECTIONS: usize = 256;
 const SEND_BUFFER: usize = 32 * 1024;
 /// One control frame; also the ceiling for a binary frame.
 pub(crate) const MAX_FRAME: usize = 1 << 20;
+/// The pause after an accept that failed (a full descriptor table, an
+/// aborted handshake) before the next one is tried.
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
 /// The bundle: a fixed list, never a directory walk. The page's script
 /// and style are files of their own because the CSP below admits nothing
@@ -62,7 +65,11 @@ const BUNDLE: [(&str, &str, &str); 6] = [
 /// The files a bundle directory must hold, each once.
 pub const BUNDLE_FILES: [&str; 5] = ["index.html", "page.js", "page.css", "molt_web.js", "molt_web_bg.wasm"];
 
-const CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; frame-ancestors 'none'";
+/// `base-uri` and `form-action` do not fall back to `default-src`, so
+/// they are named: no `<base>` may move the page's own relative files,
+/// and the key form posts nowhere.
+const CSP: &str =
+    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
 
 /// What a listener serves.
 #[derive(Debug, Clone)]
@@ -234,21 +241,43 @@ fn load_bundle(dir: &std::path::Path) -> std::io::Result<Vec<Served>> {
         .collect()
 }
 
-/// Bind `127.0.0.1:port` and serve the door. The bundle is checked BEFORE
-/// the port opens: an untrusted directory binds nothing. Loopback is not
-/// a parameter (`docs/web_gui.md` D2).
+/// Bind the loopback addresses at `port` and serve the door. The bundle
+/// is checked BEFORE a port opens: an untrusted directory binds nothing.
+/// Loopback is not a parameter (`docs/web_gui.md` D2).
+///
+/// Both loopbacks, `127.0.0.1` and `[::1]`: a browser asked for
+/// `localhost` may try either, and whoever holds the other one answers in
+/// the door's place - with a page of its own that asks for the seat key.
 pub async fn serve_loopback(port: u16, handle: WalletHandle, door: WebDoor) -> std::io::Result<()> {
     let bundle = load(&door).await?;
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await?;
-    tracing::info!(port, "web door on loopback");
-    serve_with(listener, handle, door, bundle).await
+    let second = bind_v6(port).await?;
+    tracing::info!(port, v6 = second.is_some(), "web door on loopback");
+    serve_with(listener, second, handle, door, bundle).await
+}
+
+/// `[::1]:port`, the door's second loopback. `None` on a host without
+/// IPv6: there is no second loopback to hold. A port somebody else
+/// already holds there is an error, and no door opens at all.
+async fn bind_v6(port: u16) -> std::io::Result<Option<TcpListener>> {
+    match TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port)).await {
+        Ok(listener) => Ok(Some(listener)),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => Err(std::io::Error::new(
+            e.kind(),
+            format!("[::1]:{port} is held by another process, which would answer `localhost` in the door's place"),
+        )),
+        Err(e) => {
+            tracing::debug!(port, error = %e, "web door: no IPv6 loopback");
+            Ok(None)
+        }
+    }
 }
 
 /// Serve the door on `listener` until the task is dropped. Fails at once
 /// when the bundle directory is not trustworthy (see [`load_bundle`]).
 pub async fn serve(listener: TcpListener, handle: WalletHandle, door: WebDoor) -> std::io::Result<()> {
     let bundle = load(&door).await?;
-    serve_with(listener, handle, door, bundle).await
+    serve_with(listener, None, handle, door, bundle).await
 }
 
 /// [`load_bundle`] off the runtime's threads: encoding the module takes
@@ -258,8 +287,11 @@ async fn load(door: &WebDoor) -> std::io::Result<Vec<Served>> {
     tokio::task::spawn_blocking(move || load_bundle(&dir)).await.map_err(std::io::Error::other)?
 }
 
+/// One door on `listener` and, if there is one, on `second`: the same
+/// sessions, the same limits, whichever address a connection came in on.
 async fn serve_with(
     listener: TcpListener,
+    second: Option<TcpListener>,
     handle: WalletHandle,
     door: WebDoor,
     bundle: Vec<Served>,
@@ -269,8 +301,36 @@ async fn serve_with(
     let sessions = Arc::new(Semaphore::new(SESSIONS));
     let shared = Arc::new(Shared { handle, door, gate: Gate::new(), sessions, bundle });
     let connections = Arc::new(Semaphore::new(CONNECTIONS));
+    let first = accept_loop(listener, shared.clone(), connections.clone(), header_timeout, stall);
+    match second {
+        Some(second) => {
+            let second = accept_loop(second, shared, connections, header_timeout, stall);
+            tokio::join!(first, second);
+        }
+        None => first.await,
+    }
+    Ok(())
+}
+
+/// Accept on `listener` for as long as the door is served. An accept
+/// that fails is logged and tried again, as MCP's is: one bad accept
+/// must not end the door until the next restart.
+async fn accept_loop(
+    listener: TcpListener,
+    shared: Arc<Shared>,
+    connections: Arc<Semaphore>,
+    header_timeout: Duration,
+    stall: Duration,
+) {
     loop {
-        let (sock, peer) = listener.accept().await?;
+        let (sock, peer) = match listener.accept().await {
+            Ok(accepted) => accepted,
+            Err(e) => {
+                tracing::warn!(error = %e, "web door: accept failed - retrying");
+                tokio::time::sleep(ACCEPT_RETRY).await;
+                continue;
+            }
+        };
         let Ok(slot) = connections.clone().try_acquire_owned() else {
             tracing::debug!(%peer, "web door: connection limit");
             continue;
@@ -340,9 +400,13 @@ async fn route(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<Full<By
         return upgrade(shared, req);
     }
     // a navigation sends no Origin; one that is sent must be ours. A page
-    // of another site must not even learn that a node runs here.
-    let cross_site = header_str(&req, header::HeaderName::from_static("sec-fetch-site")) == Some("cross-site");
-    if cross_site || (origin.is_some() && !origin_matches(origin, &host)) {
+    // of another site must not even learn that a node runs here - nor one
+    // on another port of this host, which a browser calls `same-site` (a
+    // site has no port). What passes is the page's own request
+    // (`same-origin`), the user's (`none`), and a client that says nothing.
+    let foreign = header_str(&req, header::HeaderName::from_static("sec-fetch-site"))
+        .is_some_and(|site| !matches!(site, "same-origin" | "none"));
+    if foreign || (origin.is_some() && !origin_matches(origin, &host)) {
         return plain(StatusCode::FORBIDDEN);
     }
     // matched on the raw request target: no decoding, no normalizing
@@ -384,6 +448,9 @@ async fn route(shared: &Arc<Shared>, req: Request<Incoming>) -> Response<Full<By
         }
     }
     h.insert(header::HeaderName::from_static("cross-origin-resource-policy"), HeaderValue::from_static("same-origin"));
+    // the page holds the seat key: no window another origin opened or was
+    // opened from keeps a handle on it
+    h.insert(header::HeaderName::from_static("cross-origin-opener-policy"), HeaderValue::from_static("same-origin"));
     r
 }
 
@@ -484,6 +551,21 @@ mod tests {
         assert_eq!(tiny.body(offer(true, true)), (&tiny.plain, None));
         let empty = Served::new("page.css", Vec::new());
         assert_eq!(empty.body(offer(true, true)), (&empty.plain, None));
+    }
+
+    /// Somebody else on `[::1]` at the door's port would answer `localhost`
+    /// in its place: no door opens beside it.
+    #[tokio::test]
+    async fn a_taken_v6_loopback_opens_no_door() {
+        // a host without IPv6 has no second loopback to take
+        let Ok(taken) = TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, 0)).await else {
+            return;
+        };
+        let port = taken.local_addr().expect("addr").port();
+        let refused = bind_v6(port).await.expect_err("the port is taken");
+        assert_eq!(refused.kind(), std::io::ErrorKind::AddrInUse);
+        drop(taken);
+        assert!(bind_v6(port).await.expect("free again").is_some());
     }
 
     /// Every route serves a file the bundle check read, and every file

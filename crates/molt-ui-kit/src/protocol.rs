@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 
 use futures_channel::oneshot;
-use molt_core::wire::{Caps, Chunk, ClientFrame, ServerFrame, CHUNK, MAX_UNPACKED, WIRE_VERSION};
+use molt_core::wire::{patched, reply_result, Caps, Chunk, ClientFrame, ServerFrame, CHUNK, MAX_UNPACKED, PATCH_MIN, WIRE_VERSION};
 use molt_core::{Command, Event, MoltError, Reply};
 
 /// What a command answers with.
@@ -20,6 +20,63 @@ pub type Answer = Result<Reply, MoltError>;
 /// (pinned equal by test), the ceiling the server and the engine keep. A
 /// packed frame's bytes on the wire are held to it too.
 pub const MAX_TRANSFER: usize = 64 * 1024 * 1024;
+
+/// The reply texts held for patches, at most; past it everything no open
+/// request names is let go and the next replies arrive whole.
+const HOLD_BYTES: usize = 128 * 1024 * 1024;
+
+/// The large replies this connection holds, so a repeated command is
+/// answered with what changed (`docs/web_gui.md` §5.7). A text stays
+/// while it is its command's newest or an open request named it.
+#[derive(Default)]
+struct Held {
+    /// Request id to its reply's `result` text.
+    texts: BTreeMap<u64, String>,
+    /// A command (its JSON) to the request holding its newest reply.
+    newest: BTreeMap<String, u64>,
+    /// An open request to its command and the request it named.
+    asked: BTreeMap<u64, (String, Option<u64>)>,
+}
+
+impl Held {
+    /// A request for `cmd` goes out as `id`: the reply to name, if any.
+    fn ask(&mut self, id: u64, cmd: &Command) -> Option<u64> {
+        let key = serde_json::to_string(cmd).ok()?;
+        let like = self.newest.get(&key).copied();
+        self.asked.insert(id, (key, like));
+        like
+    }
+
+    /// The reply of request `id` arrived as `text`.
+    fn answered(&mut self, id: u64, text: Option<String>) {
+        let Some((key, _)) = self.asked.remove(&id) else { return };
+        match text.filter(|t| (PATCH_MIN..=MAX_UNPACKED).contains(&t.len())) {
+            Some(text) => {
+                self.texts.insert(id, text);
+                self.newest.insert(key, id);
+            }
+            // the server spent the named reply on this answer
+            None => drop(self.newest.remove(&key)),
+        }
+        self.tidy();
+    }
+
+    /// Drop what nothing can name any more, and everything idle once the
+    /// whole is too much.
+    fn tidy(&mut self) {
+        let named = |id: &u64, held: &Held| held.asked.values().any(|(_, like)| like.as_ref() == Some(id));
+        let newest = |id: &u64, held: &Held| held.newest.values().any(|n| n == id);
+        let ids: Vec<u64> = self.texts.keys().copied().collect();
+        let over = self.texts.values().map(String::len).sum::<usize>() > HOLD_BYTES;
+        for id in ids {
+            if !named(&id, self) && (over || !newest(&id, self)) {
+                self.texts.remove(&id);
+            }
+        }
+        let texts = &self.texts;
+        self.newest.retain(|_, id| texts.contains_key(id));
+    }
+}
 
 /// What a command answers when its connection ended first.
 pub(crate) const GONE: &str = "connection closed";
@@ -71,6 +128,9 @@ pub struct Protocol {
     /// to back.
     packed: Option<(u64, Vec<u8>)>,
     welcomed: bool,
+    /// The server answers a repeated command with a patch.
+    patches: bool,
+    held: Held,
 }
 
 impl Protocol {
@@ -125,7 +185,9 @@ impl Protocol {
         self.next_id += 1;
         let id = self.next_id;
         self.waiting.insert(id, waiter);
-        let text = encode(&ClientFrame::Cmd { id, cmd: Box::new(cmd) });
+        // a command with bytes beside it is never one to repeat
+        let like = if self.patches && chunk.is_none() { self.held.ask(id, &cmd) } else { None };
+        let text = encode(&ClientFrame::Cmd { id, cmd: Box::new(cmd), like });
         let binary = chunk.map(|(offset, last, data)| Chunk { id, offset, last, data: &data }.encode());
         Some(Outbound { text, binary })
     }
@@ -139,24 +201,40 @@ impl Protocol {
                     return Err(Broken("unexpected welcome"));
                 }
                 self.welcomed = true;
+                self.patches = caps.patch;
                 Ok(Some(Notice::Welcome { build, caps }))
             }
             _ if !self.welcomed => Err(Broken("a frame before welcome")),
+            ServerFrame::Patch { id, base, delta } => {
+                let known = self.held.asked.get(&id).is_some_and(|(_, like)| *like == Some(base));
+                let old = self.held.texts.get(&base).filter(|_| known).ok_or(Broken("a patch on a reply not held"))?;
+                let new = patched(old, &delta).ok_or(Broken("a patch that does not fit"))?;
+                let result: Result<Box<Reply>, MoltError> =
+                    serde_json::from_str(&new).map_err(|_| Broken("unreadable patched reply"))?;
+                self.held.answered(id, Some(new));
+                self.answer(id, result)
+            }
             ServerFrame::Reply { id, result } => {
-                let waiter = self.waiting.remove(&id).ok_or(Broken("a reply nobody asked for"))?;
-                match result.map(|r| *r) {
-                    // the bytes follow as chunks
-                    Ok(Reply::UploadBytes { .. }) => {
-                        self.assembling.insert(id, Assembling { waiter, bytes: Vec::new() });
-                    }
-                    // a caller that stopped waiting is not an error
-                    answer => drop(waiter.send(answer)),
-                }
-                Ok(None)
+                self.held.answered(id, reply_result(id, text).map(str::to_string));
+                self.answer(id, result)
             }
             ServerFrame::Event(e) => Ok(Some(Notice::Event(e))),
             ServerFrame::Lag => Ok(Some(Notice::Lag)),
         }
+    }
+
+    /// A reply reaches whoever asked.
+    fn answer(&mut self, id: u64, result: Result<Box<Reply>, MoltError>) -> Result<Option<Notice>, Broken> {
+        let waiter = self.waiting.remove(&id).ok_or(Broken("a reply nobody asked for"))?;
+        match result.map(|r| *r) {
+            // the bytes follow as chunks
+            Ok(Reply::UploadBytes { .. }) => {
+                self.assembling.insert(id, Assembling { waiter, bytes: Vec::new() });
+            }
+            // a caller that stopped waiting is not an error
+            answer => drop(waiter.send(answer)),
+        }
+        Ok(None)
     }
 
     /// A binary frame arrived: bytes of a reply, or a piece of a packed
@@ -213,6 +291,9 @@ impl Protocol {
             drop(slot.waiter.send(gone()));
         }
         self.packed = None;
+        // the server's copies went with its session
+        self.held = Held::default();
+        self.patches = false;
     }
 }
 
@@ -519,5 +600,112 @@ mod tests {
         let (f, r) = p.request(Command::ReadSession);
         drop(r);
         assert!(p.on_text(&reply(id_of(&f), Ok(Reply::Ack))).is_ok());
+    }
+
+    /// A protocol whose server patches, and a large reply text to `n`.
+    fn patching() -> Protocol {
+        let mut p = Protocol::new();
+        let caps = Caps { patch: true, ..Caps::default() };
+        let w = ServerFrame::Welcome { v: WIRE_VERSION, build: "1".into(), caps };
+        p.on_text(&server(&w)).expect("welcomed");
+        p
+    }
+
+    fn large(n: usize) -> (String, Answer) {
+        let answer: Answer = Err(MoltError::Engine(format!("{n}:{}", "x".repeat(PATCH_MIN))));
+        (serde_json::to_string(&answer).expect("json"), answer)
+    }
+
+    fn like_of(out: &Option<Outbound>) -> Option<u64> {
+        match serde_json::from_str(&out.as_ref().expect("a frame").text).expect("a client frame") {
+            ClientFrame::Cmd { like, .. } => like,
+            ClientFrame::Hello { .. } => panic!("not a command"),
+        }
+    }
+
+    fn patch(id: u64, base: u64, old: &str, new: &str) -> String {
+        let delta = molt_core::wire::delta(old, new).expect("a delta");
+        server(&ServerFrame::Patch { id, base, delta })
+    }
+
+    /// A repeated command names the reply held for it, and a patch on
+    /// that reply is the new answer; only a server that patches is asked.
+    #[test]
+    fn a_repeated_command_is_answered_by_a_patch() {
+        let mut p = welcomed();
+        let (out, _a) = p.request(Command::ReadSession);
+        p.on_text(&molt_core::wire::reply_frame(id_of(&out), &large(1).0)).expect("a reply");
+        assert_eq!(like_of(&p.request(Command::ReadSession).0), None, "a server that does not patch is not asked");
+
+        let mut p = patching();
+        let (first, _a) = p.request(Command::ReadSession);
+        assert_eq!(like_of(&first), None);
+        let (one, two) = (large(1), large(2));
+        p.on_text(&molt_core::wire::reply_frame(id_of(&first), &one.0)).expect("a reply");
+        // another command has nothing held
+        assert_eq!(like_of(&p.request(Command::Status).0), None);
+        let (second, mut answer) = p.request(Command::ReadSession);
+        assert_eq!(like_of(&second), Some(id_of(&first)));
+        p.on_text(&patch(id_of(&second), id_of(&first), &one.0, &two.0)).expect("a patch");
+        assert_eq!(format!("{:?}", answer.try_recv().expect("open").expect("answered")), format!("{:?}", two.1));
+        // the patched reply is the one held now, the old one is gone
+        assert_eq!(like_of(&p.request(Command::ReadSession).0), Some(id_of(&second)));
+        assert!(!p.held.texts.contains_key(&id_of(&first)));
+        // a small reply holds nothing
+        let (third, _a) = p.request(Command::Status);
+        p.on_text(&server(&ServerFrame::Reply { id: id_of(&third), result: Ok(Box::new(Reply::Ack)) })).expect("a reply");
+        assert_eq!(like_of(&p.request(Command::Status).0), None);
+    }
+
+    /// Two requests in flight on one held reply, and a third naming the
+    /// first one's answer while the second is still out: every patch
+    /// finds the reply it names.
+    #[test]
+    fn a_reply_is_held_for_as_long_as_a_request_names_it() {
+        let mut p = patching();
+        let (r1, _a) = p.request(Command::ReadSession);
+        let texts: Vec<String> = (1..=4).map(|n| large(n).0).collect();
+        p.on_text(&molt_core::wire::reply_frame(id_of(&r1), &texts[0])).expect("a reply");
+        let (r2, _a2) = p.request(Command::ReadSession);
+        let (r3, _a3) = p.request(Command::ReadSession);
+        assert_eq!((like_of(&r2), like_of(&r3)), (Some(id_of(&r1)), Some(id_of(&r1))));
+        p.on_text(&patch(id_of(&r2), id_of(&r1), &texts[0], &texts[1])).expect("a patch");
+        let (r4, _a4) = p.request(Command::ReadSession);
+        assert_eq!(like_of(&r4), Some(id_of(&r2)));
+        // r3 comes whole (its base was spent), then r4 as a patch on r2
+        p.on_text(&molt_core::wire::reply_frame(id_of(&r3), &texts[2])).expect("a reply");
+        p.on_text(&patch(id_of(&r4), id_of(&r2), &texts[1], &texts[3])).expect("r2 is still held");
+        assert_eq!(p.held.texts.len(), 1, "only the newest stays");
+        assert!(p.held.asked.is_empty());
+    }
+
+    /// A patch the client cannot place ends the connection: it is never
+    /// guessed at.
+    #[test]
+    fn a_patch_that_cannot_be_placed_breaks_the_connection() {
+        let (one, two) = (large(1).0, large(2).0);
+        let held = || {
+            let mut p = patching();
+            let (r1, _a) = p.request(Command::ReadSession);
+            p.on_text(&molt_core::wire::reply_frame(id_of(&r1), &one)).expect("a reply");
+            let (r2, a) = p.request(Command::ReadSession);
+            (p, id_of(&r1), id_of(&r2), a)
+        };
+        let (mut p, r1, r2, _a) = held();
+        assert_eq!(p.on_text(&patch(r2, r1 + 50, &one, &two)).err(), Some(Broken("a patch on a reply not held")));
+        let (mut p, r1, _r2, _a) = held();
+        assert_eq!(p.on_text(&patch(99, r1, &one, &two)).err(), Some(Broken("a patch on a reply not held")));
+        let (mut p, r1, r2, _a) = held();
+        let off = server(&ServerFrame::Patch { id: r2, base: r1, delta: "AAAA".into() });
+        assert_eq!(p.on_text(&off).err(), Some(Broken("a patch that does not fit")));
+        // the same text again is no reply if that text is none
+        let (mut p, r1, r2, _a) = held();
+        p.held.texts.insert(r1, "{".into());
+        let cut = server(&ServerFrame::Patch { id: r2, base: r1, delta: String::new() });
+        assert_eq!(p.on_text(&cut).err(), Some(Broken("unreadable patched reply")));
+        // a closed connection holds nothing for the next one
+        let (mut p, ..) = held();
+        p.on_close();
+        assert!(p.held.texts.is_empty() && p.held.newest.is_empty() && p.held.asked.is_empty());
     }
 }

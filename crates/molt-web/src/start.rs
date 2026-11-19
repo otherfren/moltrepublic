@@ -105,7 +105,13 @@ async fn connections(
         // a rotated key is followed inside: the pump redials with it
         let why = match pump.serve(&token, dial, heard).await {
             Ended::Version => rules::VERSION,
-            ended => rules::why_ended(closed.get(), matches!(ended, Ended::Broken(_))),
+            ended => {
+                // which rule of the protocol: a fixed word, never content
+                if let Ended::Broken(broken) = &ended {
+                    web_sys::console::warn_1(&format!("connection broken: {}", broken.0).into());
+                }
+                rules::why_ended(closed.get(), matches!(ended, Ended::Broken(_)))
+            }
         };
         tell(&notify, why);
         if why == rules::VERSION {

@@ -137,7 +137,7 @@ async fn welcomed(n: &Node) -> Ws {
 }
 
 async fn cmd(ws: &mut Ws, id: u64, cmd: Command) {
-    let frame = ClientFrame::Cmd { id, cmd: Box::new(cmd) };
+    let frame = ClientFrame::Cmd { id, cmd: Box::new(cmd), like: None };
     ws.send(Message::text(serde_json::to_string(&frame).expect("json"))).await.expect("send");
 }
 

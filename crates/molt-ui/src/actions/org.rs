@@ -486,12 +486,20 @@ async fn propose_org(
     weak: slint::Weak<AppWindow>,
     payload: serde_json::Value,
 ) {
+    // a picture that went up as an upload (an engine behind the web door)
+    let upload = payload.get("upload").and_then(|u| u.as_str()).map(str::to_string);
     let outcome = w
         .execute(Command::Propose {
             surface: Surface::Organization,
             payload,
         })
         .await;
+    if let (Err(_), Some(upload)) = (&outcome, upload) {
+        // a refused proposal leaves its upload in the store, and eight of
+        // them fill the open-upload quota: drop it now. Best effort - one
+        // the engine consumed before it refused is unknown to it by now.
+        drop(w.execute(Command::UploadAbort { upload }).await);
+    }
     let _ = slint::invoke_from_event_loop(move || {
         let Some(ui) = weak.upgrade() else { return };
         match outcome {

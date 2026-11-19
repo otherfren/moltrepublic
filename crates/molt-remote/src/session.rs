@@ -4,6 +4,7 @@
 //! the key ends. A large frame goes out packed to a client that asked
 //! (§5.6).
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
@@ -12,7 +13,8 @@ use futures_util::{SinkExt, StreamExt};
 use std::collections::BTreeSet;
 
 use molt_core::wire::{
-    Chunk, ClientFrame, ServerFrame, CHUNK, CLOSE_PROTOCOL, CLOSE_UNAUTHORIZED, MAX_TRANSFER, MAX_UNPACKED, PACK_MIN,
+    delta, reply_frame, Caps, Chunk, ClientFrame, ServerFrame, CHUNK, CLOSE_PROTOCOL, CLOSE_UNAUTHORIZED, MAX_TRANSFER,
+    MAX_UNPACKED, PACK_MIN, PATCH_MIN,
     WIRE_VERSION,
 };
 use molt_core::{Command, Event, MoltError, Reply, SessionScope};
@@ -39,10 +41,61 @@ const PACK_INLINE: usize = 64 * 1024;
 /// A command still at the engine when its session ends is given this
 /// long to answer, so an upload it opened is not left without an owner.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a refused key keeps its session slot before the close. The
+/// door has 64 slots, so this is the rate a key can be guessed at: 64 a
+/// second, however many sockets ask. A minted key never needed it; a key
+/// somebody typed into the config may.
+const REFUSED_DELAY: Duration = Duration::from_secs(1);
+
+/// The unix second the last refused key was logged in: one line a second
+/// at most, whatever a local process sends.
+static REFUSAL_LOGGED: AtomicU64 = AtomicU64::new(0);
+
+/// Log a refused key, unless one was logged this second already.
+fn log_refusal() {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    if REFUSAL_LOGGED.swap(now, Ordering::Relaxed) != now {
+        tracing::warn!("web door: hello refused");
+    }
+}
 
 type Ws<S> = WebSocketStream<S>;
-/// A command's answer: its id, the upload a success spends, the result.
-type Answer = (u64, Option<String>, Result<Reply, MoltError>);
+/// A command's answer: its id, the earlier request its client still
+/// holds the reply of, the upload a success spends, the result.
+type Answer = (u64, Option<u64>, Option<String>, Result<Reply, MoltError>);
+
+/// The reply texts one session may be asked to patch, at most.
+const KEEP_BYTES: usize = 96 * 1024 * 1024;
+
+/// The large replies a session was sent, by request: what a later
+/// request naming one (`like`) is answered against (`docs/web_gui.md`
+/// §5.7). Oldest out first; a reply that is gone is answered whole.
+#[derive(Default)]
+struct Kept {
+    texts: std::collections::VecDeque<(u64, String)>,
+    bytes: usize,
+}
+
+impl Kept {
+    /// The reply of `request`, which is spent by being built on.
+    fn take(&mut self, request: u64) -> Option<String> {
+        let at = self.texts.iter().position(|(id, _)| *id == request)?;
+        let (_, text) = self.texts.remove(at)?;
+        self.bytes -= text.len();
+        Some(text)
+    }
+
+    fn keep(&mut self, request: u64, text: String) {
+        self.bytes += text.len();
+        self.texts.push_back((request, text));
+        while self.bytes > KEEP_BYTES {
+            let Some((_, old)) = self.texts.pop_front() else { break };
+            self.bytes -= old.len();
+        }
+    }
+}
 /// The commands one session has at the engine.
 type InFlight = FuturesUnordered<BoxFuture<'static, Answer>>;
 
@@ -58,6 +111,8 @@ struct Out<'a> {
     packs: bool,
     /// How many packed frames it was sent.
     packed: u64,
+    /// The replies it may name.
+    kept: Kept,
 }
 
 pub(crate) async fn run<S>(mut ws: Ws<S>, handle: &WalletHandle, gate: &Gate, door: &WebDoor)
@@ -71,11 +126,11 @@ where
         Ok((token, packed)) => {
             let mut uploads = BTreeSet::new();
             let mut in_flight = InFlight::new();
-            let mut out = Out { handle, token: &token, packs: packed, packed: 0 };
+            let mut out = Out { handle, token: &token, packs: packed, packed: 0, kept: Kept::default() };
             let end = serve(&mut ws, gate, events, &mut uploads, &mut in_flight, &mut out).await;
             // the engine runs what was sent whether or not anyone reads
             // the answer: an upload begun on the way out is this session's too
-            while let Ok(Some((_, spent, result))) = tokio::time::timeout(SETTLE_TIMEOUT, in_flight.next()).await {
+            while let Ok(Some((_, _, spent, result))) = tokio::time::timeout(SETTLE_TIMEOUT, in_flight.next()).await {
                 note_upload(&mut uploads, &result, spent);
             }
             // a session that ends takes its unshared uploads along; one
@@ -114,10 +169,12 @@ where
         return Err(End(Some(CLOSE_PROTOCOL)));
     }
     if !molt_mcp::seat_token_matches(handle, &token).await {
-        tracing::warn!("web door: hello refused");
+        log_refusal();
+        // the answer waits, and the slot with it: see `REFUSED_DELAY`
+        tokio::time::sleep(REFUSED_DELAY).await;
         return Err(denied);
     }
-    let welcome = ServerFrame::Welcome { v: WIRE_VERSION, build: door.build.clone(), caps: door.caps.clone() };
+    let welcome = ServerFrame::Welcome { v: WIRE_VERSION, build: door.build.clone(), caps: Caps { patch: true, ..door.caps.clone() } };
     // the welcome is small: a text frame for every client
     let Ok(welcome) = serde_json::to_string(&welcome) else {
         return Err(End(Some(CLOSE_PROTOCOL)));
@@ -215,7 +272,7 @@ where
     loop {
         tokio::select! {
             incoming = ws.next(), if in_flight.len() < IN_FLIGHT => {
-                let (id, mut cmd, filled) = match (incoming, parked.take()) {
+                let (id, mut cmd, filled, like) = match (incoming, parked.take()) {
                     (Some(Ok(Message::Ping(_) | Message::Pong(_))), waiting) => {
                         parked = waiting;
                         continue;
@@ -223,15 +280,15 @@ where
                     (Some(Ok(Message::Close(_))) | None | Some(Err(_)), _) => return End(None),
                     // the bytes of the upload_chunk just read
                     (Some(Ok(Message::Binary(frame))), Some(waiting)) => match fill_chunk(waiting, &frame) {
-                        Ok(Some((id, cmd))) => (id, cmd, true),
+                        Ok(Some((id, cmd))) => (id, cmd, true, None),
                         Ok(None) => continue,
                         Err(end) => return end,
                     },
                     (Some(Ok(Message::Text(text))), None) => {
-                        let Ok(ClientFrame::Cmd { id, cmd }) = serde_json::from_str(text.as_str()) else {
+                        let Ok(ClientFrame::Cmd { id, cmd, like }) = serde_json::from_str(text.as_str()) else {
                             return End(Some(CLOSE_PROTOCOL));
                         };
-                        (id, cmd, false)
+                        (id, cmd, false, like)
                     }
                     // bytes nobody announced, or anything but the bytes that were due
                     (Some(Ok(_)), _) => return End(Some(CLOSE_PROTOCOL)),
@@ -275,15 +332,15 @@ where
                     _ => None,
                 };
                 let handle = handle.clone();
-                in_flight.push(Box::pin(async move { (id, spent, handle.execute(*cmd).await) }));
+                in_flight.push(Box::pin(async move { (id, like, spent, handle.execute(*cmd).await) }));
             }
-            Some((id, spent, result)) = in_flight.next() => {
+            Some((id, like, spent, result)) = in_flight.next() => {
                 // an answer (a phrase, say) never goes to a key that died meanwhile
                 if !molt_mcp::seat_token_matches(handle, token).await {
                     return End(Some(CLOSE_UNAUTHORIZED));
                 }
                 note_upload(uploads, &result, spent);
-                if let Err(end) = send_reply(ws, out, id, result).await {
+                if let Err(end) = send_reply(ws, out, id, like, result).await {
                     return end;
                 }
             }
@@ -316,7 +373,16 @@ where
 
 /// A reply; one that carries bulk bytes sends them after it as chunks, so
 /// no frame holds a whole file as a JSON number array.
-async fn send_reply<S>(ws: &mut Ws<S>, out: &mut Out<'_>, id: u64, result: Result<Reply, MoltError>) -> Result<(), End>
+///
+/// A large reply is kept, and one whose client names the reply it still
+/// holds (`like`) goes out as what changed since (§5.7).
+async fn send_reply<S>(
+    ws: &mut Ws<S>,
+    out: &mut Out<'_>,
+    id: u64,
+    like: Option<u64>,
+    result: Result<Reply, MoltError>,
+) -> Result<(), End>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -324,7 +390,17 @@ where
         Ok(Reply::UploadBytes { bytes }) => (Ok(Reply::UploadBytes { bytes: Vec::new() }), Some(bytes)),
         other => (other, None),
     };
-    send(ws, out, &ServerFrame::Reply { id, result: result.map(Box::new) }).await?;
+    let Ok(text) = serde_json::to_string(&result) else {
+        return Err(End(Some(CLOSE_PROTOCOL)));
+    };
+    // named or not, a base is spent by the request that names it
+    let base = like.and_then(|like| Some((like, out.kept.take(like)?)));
+    let (text, frame) = patch_frame(id, base, text).await;
+    let frame = frame.unwrap_or_else(|| reply_frame(id, &text));
+    if (PATCH_MIN..=MAX_UNPACKED).contains(&text.len()) {
+        out.kept.keep(id, text);
+    }
+    send_text(ws, out, frame).await?;
     match bytes {
         Some(bytes) => write_chunks(ws, out, id, &bytes, false).await,
         None => Ok(()),
@@ -384,6 +460,23 @@ async fn packed(text: String) -> Option<(String, Option<Vec<u8>>)> {
     tokio::task::spawn_blocking(move || deflate(text)).await.ok()
 }
 
+/// The patch frame of a large reply on the reply its client holds, if
+/// that saves at least half of it. Off the session's thread: a delta of
+/// megabytes takes a moment.
+async fn patch_frame(id: u64, base: Option<(u64, String)>, text: String) -> (String, Option<String>) {
+    let Some((base, old)) = base.filter(|_| (PATCH_MIN..=MAX_UNPACKED).contains(&text.len())) else {
+        return (text, None);
+    };
+    let made = tokio::task::spawn_blocking(move || {
+        let frame = delta(&old, &text)
+            .filter(|delta| delta.len() < text.len() / 2)
+            .and_then(|delta| serde_json::to_string(&ServerFrame::Patch { id, base, delta }).ok());
+        (text, frame)
+    });
+    // a text lost with its thread cannot be sent either way
+    made.await.unwrap_or_default()
+}
+
 async fn send<S>(ws: &mut Ws<S>, out: &mut Out<'_>, frame: &ServerFrame) -> Result<(), End>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -391,6 +484,13 @@ where
     let Ok(text) = serde_json::to_string(frame) else {
         return Err(End(Some(CLOSE_PROTOCOL)));
     };
+    send_text(ws, out, text).await
+}
+
+async fn send_text<S>(ws: &mut Ws<S>, out: &mut Out<'_>, text: String) -> Result<(), End>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     if !out.packs {
         return write(ws, Message::text(text)).await;
     }

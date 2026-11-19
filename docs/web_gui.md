@@ -384,8 +384,11 @@ browser never raises (2026-11-18; no control to hide).
 - `[web] port` (unset = no listener) and `[web] dir` are start-time config
   only: not in `Settings`, not reachable through `patch_settings`, changed
   by editing the file and restarting (the rule `mcp.port` follows). Bound
-  to `127.0.0.1` only in v1; anything else is refused at start with one
-  line.
+  to loopback only in v1 - `127.0.0.1` and `[::1]`, both, so nobody else
+  answers `localhost` at the door's port (ADR-0008, 2026-11-19); anything
+  else is refused at start with one line. A door that was asked for and
+  did not open (the bundle, a taken port) is an ERROR line and the node
+  stays up.
 - While the seat key is empty the door serves nothing: every request,
   the page included, answers 503, and a cleared key closes every session
   at its next check (built this way instead of unbinding the port; the
@@ -421,18 +424,24 @@ browser never raises (2026-11-18; no control to hide).
   web page cannot) can hold those slots with silent sockets, 10 s at a
   time. Static requests are unauthenticated by design, short-lived
   (header read timeout, no long keep-alive) and cannot exhaust the
-  session slots.
+  session slots. A refused key is answered after 1 s, its slot held
+  meanwhile: 64 guesses a second at most, and one log line a second
+  (2026-11-19). An accept that fails is logged and tried again; it does
+  not end the door.
 - Static files: a fixed file list (`index.html`, `page.js`, `page.css`,
   `molt_web.js`, `molt_web_bg.wasm`; `molt_remote::BUNDLE_FILES`)
   matched on the raw request target, no directory walking; the bytes are read ONCE at start (§5.4), so nothing
-  on disk is followed per request. A `Sec-Fetch-Site: cross-site` request
-  is refused and files carry `Cross-Origin-Resource-Policy: same-origin`,
-  so another site cannot probe for a running node. A file goes out in
+  on disk is followed per request. A request whose `Sec-Fetch-Site` is
+  anything but `same-origin` or `none` is refused - another site, and
+  another port of this host, which a browser calls `same-site` - and
+  files carry `Cross-Origin-Resource-Policy: same-origin`, so neither
+  can probe for a running node. A file goes out in
   the smallest content coding the request offers (gzip or brotli, made
   once at start) with `Vary: Accept-Encoding`; a connection that takes
   nothing of its answer for 30 s is dropped, one that reads slowly is
   not (§5.6). Headers: CSP `default-src 'self'; script-src
-  'self' 'wasm-unsafe-eval'; frame-ancestors 'none'`,
+  'self' 'wasm-unsafe-eval'; frame-ancestors 'none'; base-uri 'none';
+  form-action 'none'`, `Cross-Origin-Opener-Policy: same-origin`,
   `X-Content-Type-Options: nosniff`. The page is `Cache-Control:
   no-store`; its files are `no-cache` with an `ETag` (§5.6).
 - The page keeps the token in memory only and asks on every load.
@@ -656,6 +665,42 @@ HTTP connection is closed, each coding, old and new hello, a rotation
 mid-reply), `molt-ui-kit` (`protocol.rs`, `client.rs`: packed frames
 through the shipped client, the bomb bound), `molt-core` (`wire.rs`:
 the hello both ways against the old frame type).
+
+### 5.7 A repeated read crosses as what changed (2026-11-19)
+
+The window re-reads a whole surface after every change. Measured on a
+real node: two reads of one surface 40 s apart were 6.6 MB each and
+differed in 14 KB; another surface's 20.7 MB did not differ at all.
+
+- The door keeps the `result` text of each large reply it sent
+  (`PATCH_MIN` 16 KiB up to `MAX_UNPACKED`), per session, by request
+  id, oldest out first past 96 MiB.
+- The client holds the newest large reply per command (its JSON) and
+  names that request in the next one: `like` on the `cmd` frame, only
+  to a server whose welcome says `caps.patch`.
+- A request naming a kept reply is answered with a `patch` frame: an
+  rsync delta from that reply's text to the new one, base64, empty for
+  "the same text". The base is spent by it. A delta of more than half
+  the reply, or a base that is gone, gives a whole reply.
+- The client holds a named reply for as long as an open request names
+  it, at most 128 MiB in all. A patch it cannot place ends the
+  connection; it is never guessed at. A closed connection holds
+  nothing.
+- Both words are additive: an older client names nothing and gets whole
+  replies, an older server never says `caps.patch`.
+- The delta is `fast_rsync` (Dropbox's librsync in pure Rust, one
+  dependency, Apache-2.0; 2048-byte blocks, the whole MD4 per block),
+  not a common prefix and suffix. That simpler form was built first and
+  measured on the real node: one applied change touched 5 of 3460
+  entries (92 KB) of a 21.4 MB reply, far apart, and left 19.2 MB
+  between the first and the last - so it was sent whole.
+- No engine code takes part. The engine still builds the whole reply
+  and the window still parses it; only the socket carries less.
+- Pinned in `crates/molt-remote/tests/slow_link.rs` (the shipped client
+  through a real door: an unchanged 3 MB read crosses in under 2 KB),
+  `crates/molt-ui-kit/src/protocol.rs` and `crates/molt-core/src/wire.rs`.
+- Open: not yet seen in a browser; the first read after a page load is
+  still whole.
 
 ## 6. Making `molt-ui` target-generic
 
@@ -1111,7 +1156,8 @@ too, which is what the tests run.
   export or a backup.
 - The store deletes only a directory it minted
   (`<store>/<minted id>/<name>`, compared by component), and
-  `share_file` refuses a path under `<workspace>/uploads`.
+  `share_file` refuses a path under `<workspace>/uploads`, also one
+  that only resolves there (a `..`, a link).
 - After an accepted `share_upload` the upload id is spent for the
   session. If the share then fails (session notice
   `share-failed:<name>:<reason>`), the upload is gone and the file must
@@ -1595,17 +1641,35 @@ entry here; nothing is open that is not named here.
   server, and whether the window gets a download-dir control (§7).
 - A session flag saying whether a read key or an S3 secret is stored, so
   the web form can stop guessing (§6.5).
-- The page links no source and shows no licence: the tarball carries
-  `COPYING` and the font licences, but the door serves only its five
-  files (§2 "Licence", §5.3). Needed before a bundle is offered to
-  anyone but its builder.
+- Done 2026-11-19: the key prompt names the licence and where the
+  source is, as plain text (the page links no other host, pinned by
+  `molt-web/tests/page.rs`). The door still serves only its five files:
+  `COPYING` and the font licences are in the tarball, not behind the
+  door (§2 "Licence", §5.3). Whether that is enough for a bundle offered
+  to others, and the repository address once it is locked
+  (`Cargo.toml`, `repository`), stay the user's to decide.
 - Whether the release script refuses on low memory instead of warning
   (§8.2).
-- CLAUDE.md: the crate order names neither `molt-ui-kit`, `molt-remote`
-  nor `molt-web`; its `INTERNAL` sentence does not mention the byte
-  doors; "Build, test, run" has no line for
-  `scripts/build-release-web.sh` (about 26 GiB, never beside another
-  window-scale build). Left to the user.
+- Done 2026-11-19: CLAUDE.md names `molt-ui-kit`, `molt-remote` and
+  `molt-web` in the crate order, says where `INTERNAL` lives now and why
+  the byte doors are on it, and has a line for
+  `scripts/build-release-web.sh`.
+- From the review of PR #9 (2026-11-19), each its own ADR-0008 change:
+  - a key of its own for the door instead of the seat token (the token
+    reaches the wake command, the recovery phrase and any host path, and
+    a browser brings extensions, a password manager and the clipboard
+    into its reach), narrower if possible, and revocable without
+    breaking every MCP agent;
+  - a Unix socket for the tunnel case (`ssh -L <port>:<socket>`): no
+    port another local user can take or probe. Both loopbacks are bound
+    since 2026-11-19, which closes the `localhost` half only: a port
+    that is free because `moltd` is down is still anybody's;
+  - a hello that proves the key instead of sending it (a challenge the
+    key signs): a foreign listener then learns nothing it can use, and
+    the page could reconnect by itself after a dropped tunnel instead of
+    asking for the key again;
+  - `molt-remote` behind a cargo feature of `molt-app` until the above
+    are decided.
 
 ### C. Known gaps in what is built
 
@@ -1616,8 +1680,10 @@ entry here; nothing is open that is not named here.
   2 min packed - for every chat line. While such a reply is written the
   session forwards no events; the queue overflows, the client is told
   `lag` and re-reads everything again. §5.6 makes the window fill; it
-  does not make it usable on that link. An incremental read (a cursor
-  or a delta per surface) is its own design.
+  does not make it usable on that link. Since 2026-11-19 a repeated
+  read crosses as what changed (§5.7), so this holds for the first
+  read after a page load only; the engine still builds and the window
+  still parses the whole reply each time.
 - The first page load after an install fetches the module: 10.4 MB as
   brotli, 12.8 MB as gzip, 5 to 6 minutes at 35 KB/s. Later loads
   revalidate it (§5.6); not yet seen in a browser.
@@ -1632,9 +1698,21 @@ entry here; nothing is open that is not named here.
   edits the field (§6.4).
 - A cancelled `rfd` dialog in the browser never answers, so the task
   behind it stays parked (§6.3).
-- A picture proposal the engine refuses after its upload went up leaves
-  that upload until the 15 minute sweep or the session's end; eight of
-  them fill the open-upload quota (§7).
+- Done 2026-11-19, not run: a picture proposal the engine refuses drops
+  its upload at once (`molt-ui` `actions/org.rs::propose_org`); before,
+  it stayed until the 15 minute sweep or the session's end, and eight of
+  them filled the open-upload quota (§7). No test covers it yet.
+- The review fixes of 2026-11-19 (§5.3: both loopbacks, the retried
+  accept, the refused key's delay, the stricter `Sec-Fetch-Site` rule,
+  the two added CSP directives, `reaches_store`) were written without a
+  compiler at hand: `cargo test -p molt-remote`, `cargo test -p
+  molt-engine --lib upload_store` and clippy over both are still due.
+- The gate judges a command by its variant name; its fields arrive as
+  the browser sent them, with no tool `build` step in between. A
+  property test over the admitted commands is not written.
+- The first load shows one line of text and no progress: the page
+  itself fetches nothing (pinned), so it cannot count the module's
+  bytes.
 - A typed mirror folder in another spelling of the one in use keeps
   Apply lit (§7). A relative `mirror_dir` already stored is neither
   migrated nor refused on load.

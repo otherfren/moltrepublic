@@ -42,7 +42,7 @@ async fn node_with(seat: &str, pre_auth: Duration) -> Node {
     let port = listener.local_addr().expect("addr").port();
     let door = WebDoor {
         build: "9.9.9".into(),
-        caps: Caps { embedded_tor: true },
+        caps: Caps { embedded_tor: true, ..Caps::default() },
         dir: dir.path().to_path_buf(),
         pre_auth,
         stall: Duration::from_secs(30),
@@ -148,7 +148,7 @@ async fn the_seat_key_opens_the_door_and_commands_answer() {
         }
         other => panic!("expected welcome, got {other:?}"),
     }
-    send(&mut ws, &ClientFrame::Cmd { id: 7, cmd: Box::new(Command::ReadSession) }).await;
+    send(&mut ws, &ClientFrame::Cmd { id: 7, cmd: Box::new(Command::ReadSession), like: None }).await;
     let r = reply(&mut ws, 7).await.expect("the session");
     assert!(matches!(*r, Reply::Session(_)));
 }
@@ -158,8 +158,11 @@ async fn a_wrong_key_is_closed_without_a_welcome() {
     let n = node().await;
     for key in ["nope", "read-key", ""] {
         let mut ws = open(&n).await;
+        let asked = std::time::Instant::now();
         hello(&mut ws, key).await;
         assert_eq!(close_code(&next(&mut ws).await), Some(4401), "{key:?}");
+        // the refusal takes its time: that is what bounds a guesser
+        assert!(asked.elapsed() >= Duration::from_millis(900), "{key:?} was refused at once");
     }
 }
 
@@ -175,7 +178,7 @@ async fn a_node_without_a_seat_key_serves_nothing() {
 async fn a_command_before_hello_or_a_wrong_version_is_closed() {
     let n = node().await;
     let mut ws = open(&n).await;
-    send(&mut ws, &ClientFrame::Cmd { id: 1, cmd: Box::new(Command::ReadSession) }).await;
+    send(&mut ws, &ClientFrame::Cmd { id: 1, cmd: Box::new(Command::ReadSession), like: None }).await;
     assert_eq!(close_code(&next(&mut ws).await), Some(4401));
 
     let mut ws = open(&n).await;
@@ -226,7 +229,7 @@ async fn an_internal_command_is_refused_before_the_engine() {
     ws.send(Message::text(forged.to_string())).await.expect("send");
     assert!(matches!(reply(&mut ws, 3).await, Err(MoltError::Refused(_))));
     // the session survives a refusal
-    send(&mut ws, &ClientFrame::Cmd { id: 4, cmd: Box::new(Command::ReadSession) }).await;
+    send(&mut ws, &ClientFrame::Cmd { id: 4, cmd: Box::new(Command::ReadSession), like: None }).await;
     assert!(reply(&mut ws, 4).await.is_ok());
 }
 
@@ -235,7 +238,7 @@ async fn the_door_cannot_empty_its_own_seat_key() {
     let n = node().await;
     let mut ws = welcomed(&n).await;
     let patch = Command::PatchSettings { patch: json!({ "mcp_token": "" }) };
-    send(&mut ws, &ClientFrame::Cmd { id: 1, cmd: Box::new(patch) }).await;
+    send(&mut ws, &ClientFrame::Cmd { id: 1, cmd: Box::new(patch), like: None }).await;
     assert!(matches!(reply(&mut ws, 1).await, Err(MoltError::Refused(_))));
     assert!(molt_mcp::seat_token_matches(&n.handle, SEAT).await, "the key is untouched");
 }
@@ -283,7 +286,10 @@ async fn the_bundle_is_a_fixed_list() {
     assert_eq!(status, 200);
     assert!(body.starts_with(b"<!doctype html>"));
     assert!(head.contains("content-type: text/html"));
-    assert!(head.contains("content-security-policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; frame-ancestors 'none'"));
+    assert!(head.contains(
+        "content-security-policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    ));
+    assert!(head.contains("cross-origin-opener-policy: same-origin"));
     assert!(head.contains("x-content-type-options: nosniff"));
     assert!(head.contains("cache-control: no-store"));
     let (status, head, body) = get(n.port, &host, "/molt_web_bg.wasm").await;
@@ -384,7 +390,9 @@ fn the_release_script_packs_exactly_what_the_door_serves() {
 async fn a_foreign_page_gets_no_static_file() {
     let n = node().await;
     let host = format!("127.0.0.1:{}", n.port);
-    for extra in ["Origin: http://evil.example", "Sec-Fetch-Site: cross-site"] {
+    // another port of this host is `same-site` to a browser: as foreign
+    // as another site
+    for extra in ["Origin: http://evil.example", "Sec-Fetch-Site: cross-site", "Sec-Fetch-Site: same-site"] {
         let mut s = TcpStream::connect(("127.0.0.1", n.port)).await.expect("connect");
         s.write_all(format!("GET /molt_web.js HTTP/1.1\r\nHost: {host}\r\n{extra}\r\nConnection: close\r\n\r\n").as_bytes())
             .await
@@ -392,6 +400,16 @@ async fn a_foreign_page_gets_no_static_file() {
         let mut buf = Vec::new();
         s.read_to_end(&mut buf).await.expect("read");
         assert!(buf.starts_with(b"HTTP/1.1 403"), "{extra}");
+    }
+    // the page's own requests and the user's navigation pass
+    for own in ["Sec-Fetch-Site: same-origin", "Sec-Fetch-Site: none"] {
+        let mut s = TcpStream::connect(("127.0.0.1", n.port)).await.expect("connect");
+        s.write_all(format!("GET /molt_web.js HTTP/1.1\r\nHost: {host}\r\n{own}\r\nConnection: close\r\n\r\n").as_bytes())
+            .await
+            .expect("write");
+        let mut buf = Vec::new();
+        s.read_to_end(&mut buf).await.expect("read");
+        assert!(buf.starts_with(b"HTTP/1.1 200"), "{own}");
     }
     let mut s = TcpStream::connect(("127.0.0.1", n.port)).await.expect("connect");
     s.write_all(format!("POST / HTTP/1.1\r\nHost: {host}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes())
