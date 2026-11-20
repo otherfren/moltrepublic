@@ -3919,6 +3919,10 @@ pub struct ExportState {
     /// single-blob workspace export, which writes one file by definition).
     #[serde(default)]
     pub files: u64,
+    /// Files that were local but failed to copy or verify (the files
+    /// export; the others still landed).
+    #[serde(default)]
+    pub failed: u64,
 }
 
 /// Transport-health state surfaced on the header "chat" pill (transport
@@ -8270,6 +8274,14 @@ pub struct SeatSync {
     pub signed: Option<u64>,
     /// Persistent shares this seat holds whole.
     pub files: u32,
+}
+
+/// Whether an own envelope stays out of the delivery guarantee and the G7
+/// order chain: an `MlsCommit` never reaches a peer's engine, a
+/// `CheckpointServedPart` is re-served on demand and an older build cannot
+/// parse it. Owing either would wedge every successor at the receiver.
+pub fn unowed_on_the_wire(body: &WorkspaceEvent) -> bool {
+    matches!(body, WorkspaceEvent::MlsCommit { .. } | WorkspaceEvent::CheckpointServedPart { .. })
 }
 
 /// This node's chain sync state ([`StatusView::chain_sync`]).

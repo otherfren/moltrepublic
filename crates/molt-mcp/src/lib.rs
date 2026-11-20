@@ -3120,7 +3120,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "recover_cancel",
             command: "recover_cancel",
             scope: Scope::Seat,
-            description: "Abort this node's running rejoin (recover_start) - e.g. when it hangs. Nothing is written; start again with a link and the phrase.",
+            description: "Abort this node's running rejoin (recover_start) - e.g. when it hangs. Only before the survivors re-admitted the seat; start again with a link and the phrase.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::RecoverCancel),
         },

@@ -5210,7 +5210,9 @@ export component AppWindow inherits Window {
                                 font-size: Theme.fs-cap;
                                 wrap: word-wrap;
                             }
-                            HorizontalLayout {
+                            // once the survivors re-admitted the seat an abort
+                            // would strand it: the button goes
+                            if root.rv-need == 0 || root.rv-have < root.rv-need: HorizontalLayout {
                                 alignment: start;
                                 AppButton {
                                     label: Strings.rv-cancel;

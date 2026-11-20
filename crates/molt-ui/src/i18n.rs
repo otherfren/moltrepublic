@@ -1590,6 +1590,7 @@ lexicon! {
     fx_body: "Every file complete on this node, into one folder. Partial ones are skipped.", "Alle auf diesem Gerät vollständigen Dateien in einen Ordner. Unvollständige werden übersprungen.";
     fx_done: "files exported:", "Dateien exportiert:";
     fx_failed: "files export failed:", "Datei-Export fehlgeschlagen:";
+    fx_failed_n: "failed", "fehlgeschlagen";
     ed_copy: "Copy", "Kopieren";
     ed_cut: "Cut", "Ausschneiden";
     ed_paste: "Paste", "Einfügen";

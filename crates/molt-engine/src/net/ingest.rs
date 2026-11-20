@@ -626,8 +626,12 @@ impl State {
             WorkspaceEvent::ChainRequest { from_height, known } if self.is_chain_governed() => {
                 tracing::info!(%from, from_height, known = known.len(), "chain_catchup=received");
                 // A5: the requester's own samples say where it stands
-                if let Some(top) = known.iter().map(|h| h.height).max() {
-                    self.note_peer_height(&from, top);
+                if let Some(top) = known.iter().max_by_key(|h| h.height) {
+                    self.note_peer_height(&from, top.height);
+                    // its head is a block we hold: the requester is on our branch
+                    if self.holds_block(top.height, &top.hash) {
+                        self.clear_divergence(&from);
+                    }
                 }
                 // R5: a requester on another branch names what it holds; serve
                 // from the fork point it lets us find, not from its estimate

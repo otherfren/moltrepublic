@@ -2218,6 +2218,7 @@ impl State {
             result: String::new(),
             bytes: 0,
             files: 0,
+            failed: 0,
             skipped: Vec::new(),
         };
         self.emit_session(SessionScope::Full);
@@ -2260,6 +2261,7 @@ impl State {
             result: "ok".to_string(),
             bytes,
             files: 0,
+            failed: 0,
             skipped,
         };
         self.emit_session(SessionScope::Full);
@@ -2338,6 +2340,7 @@ impl State {
             result: String::new(),
             bytes: 0,
             files: 0,
+            failed: 0,
             skipped: Vec::new(),
         };
         self.emit_session(SessionScope::Full);
@@ -2463,8 +2466,9 @@ impl State {
         let ex = &mut self.session.files_export;
         ex.running = false;
         ex.dest = dest;
-        ex.result = if failed == 0 { "ok".to_string() } else { format!("error: {failed} failed") };
+        ex.result = "ok".to_string();
         ex.files = files;
+        ex.failed = failed;
         ex.bytes = bytes;
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
@@ -2476,6 +2480,7 @@ impl State {
         let ex = &mut self.session.files_export;
         ex.running = false;
         ex.result = format!("error: {error}");
+        ex.failed = 0;
         ex.files = 0;
         ex.bytes = 0;
         self.emit_session(SessionScope::Full);

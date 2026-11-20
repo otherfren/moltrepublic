@@ -262,6 +262,9 @@ fn the_files_export_toasts_its_outcome() {
     ex.result = "ok".to_string();
     ex.files = 3;
     assert_eq!(files_export_toast(0, &ex), Some(("files exported: 3".to_string(), false)));
+    ex.failed = 2;
+    assert_eq!(files_export_toast(0, &ex), Some(("⚠ files exported: 3 · 2 failed".to_string(), true)));
+    ex.failed = 0;
     ex.result = "error: creating /x: denied".to_string();
     assert!(files_export_toast(0, &ex).is_some_and(|(_, failed)| failed));
 }

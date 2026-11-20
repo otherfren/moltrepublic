@@ -488,7 +488,7 @@ impl State {
         // would wedge every successor at the receiver.
         if env.seq > self.delivery.last_own_ackable
             && env.by == self.member()
-            && !matches!(env.body, WorkspaceEvent::MlsCommit { .. })
+            && !molt_core::unowed_on_the_wire(&env.body)
         {
             self.delivery.last_own_ackable = env.seq;
         }
@@ -877,6 +877,7 @@ impl State {
         self.chain.fork_decisions = 0;
         self.chain.last_fork = None;
         self.chain.heal_since = 0;
+        self.chain.candidates_since = 0;
         self.chain.heal_escalated = false;
         self.chain.heal_next_at = 0;
         self.chain.heal_backoff = 0;

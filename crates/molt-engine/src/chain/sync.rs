@@ -47,6 +47,10 @@ const CHAIN_BEACON_SECS: u64 = 300;
 const DENSE_KNOWN_HEADS: u64 = 64;
 /// S4a: an unfinished restore's anchor is re-pushed this often, this many times.
 const ANCHOR_REPUSH_SECS: u64 = 600;
+/// S4a: re-pushes stop a day after the restore sealed (restarts included).
+const ANCHOR_REPUSH_WINDOW_SECS: u64 = 86_400;
+/// S4: fork candidates that never linked are dropped after this long.
+const CANDIDATE_TTL_SECS: u64 = 1_200;
 const ANCHOR_REPUSH_MAX: u32 = 12;
 
 /// How many `(height, hash)` samples a fork-aware catch-up request carries.
@@ -244,6 +248,24 @@ impl State {
         out
     }
 
+    /// Seconds since `member`'s latest `Restored` block sealed, as stamped.
+    fn restore_age(&self, member: &str) -> Option<u64> {
+        let height = self.chain.blocks.iter().rev().find_map(|b| match &b.change {
+            ChainChange::Membership { op: molt_core::MembershipOp::Restored, member: m, .. } if m == member => {
+                Some(b.height)
+            }
+            _ => None,
+        })?;
+        let at = self.chain.block_ts.get(&height).copied().filter(|t| *t > 0)?;
+        Some(self.presence_now().saturating_sub(at))
+    }
+
+    /// Whether this node holds the block at `height` with link hash `hash`.
+    pub(crate) fn holds_block(&self, height: u64, hash: &str) -> bool {
+        let rid = self.republic_id();
+        self.chain.blocks.iter().any(|b| b.height == height && block_hash(&rid, b) == hash)
+    }
+
     /// S5: a fallback sealer asks its peers for a block at `height` it may
     /// have missed, outside the catch-up dedup.
     pub(crate) fn ask_for_height(&mut self, height: u64) {
@@ -263,8 +285,7 @@ impl State {
     /// B3: serve our branch from `fork` to a peer that lost the fork,
     /// at most once per serve debounce per peer.
     fn serve_branch_to(&mut self, peer: &str, fork: u64) {
-        // one server is enough: the first seat in the sealing line
-        if peer.is_empty() || !self.first_in_line() {
+        if peer.is_empty() {
             return;
         }
         let now = self.presence_now();
@@ -298,6 +319,20 @@ impl State {
             return;
         };
         let now = self.presence_now();
+        // candidates that never linked in a while are a branch nobody holds
+        // any more; a catch-up mark at or below the head is stale
+        if self.chain.fork_candidates.is_empty() {
+            self.chain.candidates_since = 0;
+        } else if self.chain.candidates_since == 0 {
+            self.chain.candidates_since = now;
+        } else if now.saturating_sub(self.chain.candidates_since) >= CANDIDATE_TTL_SECS {
+            tracing::info!(dropped = self.chain.fork_candidates.len(), "fork=candidates_expired");
+            self.chain.fork_candidates.clear();
+            self.chain.candidates_since = 0;
+        }
+        if self.chain.fork_candidates.is_empty() && self.chain.catchup_from.is_some_and(|f| f <= head) {
+            self.chain.catchup_from = None;
+        }
         // a peer gone silent cannot heal; it is not this node's trouble
         let silent: Vec<String> = self.chain_lag().silent.into_iter().map(|s| s.member).collect();
         let troubled = self.chain.diverged.keys().any(|p| !silent.contains(p)) || !self.chain.fork_candidates.is_empty();
@@ -362,7 +397,11 @@ impl State {
         tracing::warn!(%peer, since, secs, "chain_heal_stuck");
         self.wake_trigger(molt_core::kanban_wake::CHAIN_STUCK_REASON, "");
         let me = self.member();
-        let body = format!("chain not healed with {peer} since height {since}");
+        let body = if peer.is_empty() {
+            format!("chain not healed since height {since}")
+        } else {
+            format!("chain not healed with {peer} since height {since}")
+        };
         if let Err(e) = self.post_message(me, body, None, molt_core::ChannelRef::Group) {
             tracing::warn!(error = %e, "chain_heal_stuck chat=failed");
         }
@@ -385,7 +424,7 @@ impl State {
         }
         let due: Vec<String> = latest
             .into_iter()
-            .filter(|(m, pk)| *m != me && self.restore_never_finished(m, pk))
+            .filter(|(m, pk)| *m != me && self.restore_never_finished(m, pk) && self.restore_age(m).is_some_and(|age| age < ANCHOR_REPUSH_WINDOW_SECS))
             .map(|(m, _)| m)
             .filter(|m| {
                 self.chain
@@ -460,7 +499,7 @@ impl State {
                 if lowest > anchor.saturating_add(1) {
                     let want = lowest.saturating_sub(1).max(anchor.saturating_add(1));
                     let suppressed = self.chain.catchup_from == Some(want);
-                    tracing::info!(%from, lowest, requested = want, suppressed, "fork=unlinked");
+                    tracing::debug!(%from, lowest, requested = want, suppressed, "fork=unlinked");
                     self.request_catchup(want);
                 }
             }
@@ -989,7 +1028,7 @@ impl State {
 
     /// A block from `from` that fits our chain: whatever it was on, it is
     /// on our branch now.
-    fn clear_divergence(&mut self, from: &str) {
+    pub(crate) fn clear_divergence(&mut self, from: &str) {
         if self.chain.diverged.remove(from).is_some() {
             tracing::info!(%from, "peer is back on this branch");
             self.emit_session(crate::SessionScope::Full);

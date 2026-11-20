@@ -1708,6 +1708,7 @@ impl State {
         if !self.persist {
             return false;
         }
+        self.recovery.link_rejoin = false;
         let member = self.member();
         let Some(head) = self.chain.head.as_ref() else {
             return false;
@@ -1909,6 +1910,7 @@ impl State {
         let generation = self.recovery.generation;
         let task_phrase = phrase.clone();
         self.recovery.ctx = Some((inv.clone(), phrase.into()));
+        self.recovery.link_rejoin = true;
         // a fresh run starts with a fresh checklist (the old republic's
         // finished list must not front-run the new coordinator's report)
         self.session.notice.clear();
@@ -2390,6 +2392,7 @@ impl State {
     pub(crate) fn invalidate_recovery(&mut self) {
         self.recovery.generation += 1;
         self.recovery.ctx = None;
+        self.recovery.link_rejoin = false;
         if let Some(task) = self.recovery.task.take() {
             task.abort();
         }
@@ -2506,9 +2509,13 @@ impl State {
     /// Abort the running rejoin: the task stops and a late result of it is
     /// dropped by the bumped generation. Nothing was written yet.
     pub(crate) fn cmd_recover_cancel(&mut self) -> Result<Reply, MoltError> {
-        let running = self.recovery.task.as_ref().is_some_and(|t| !t.is_finished());
+        // only a link rejoin: a self-heal reattach shares the task slot
+        if !self.recovery.link_rejoin || !self.recovery.task.as_ref().is_some_and(|t| !t.is_finished()) {
+            return Err(MoltError::Recover("no rejoin running".to_string()));
+        }
         self.invalidate_recovery();
-        tracing::info!(running, "recover=cancelled");
+        self.session.recover = molt_core::RecoverState::default();
+        tracing::info!("recover=cancelled");
         self.session.notice = "recover-cancelled".to_string();
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)

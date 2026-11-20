@@ -201,10 +201,9 @@ async fn a_relay_stuck_on_one_page_is_backed_off_not_dropped() {
     }
     assert_eq!(rt.health().await.get(&relay.url), Some(&RelayHealth::Down));
     let stuck_at = relay.reqs.lock().expect("log").len();
-    assert_eq!(
-        stuck_at, 2,
-        "page one, then the page that did not move back"
-    );
+    // page one; page two does not move back, so one second is skipped;
+    // the next page brings events past its `until`: the relay ignores it
+    assert_eq!(stuck_at, 4, "{:?}", relay.reqs.lock().expect("log"));
 
     // backed off: nothing during most of the cap...
     tokio::time::sleep(Duration::from_millis(1000)).await;

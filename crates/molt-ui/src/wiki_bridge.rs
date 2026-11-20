@@ -1924,7 +1924,13 @@ pub(crate) fn files_export_toast(lang: i32, ex: &molt_core::ExportState) -> Opti
     if let Some(reason) = ex.result.strip_prefix("error: ") {
         return Some((format!("⚠ {} {reason}", l.fx_failed), true));
     }
-    (ex.result == "ok").then(|| (format!("{} {}", l.fx_done, ex.files), false))
+    if ex.result != "ok" {
+        return None;
+    }
+    if ex.failed > 0 {
+        return Some((format!("⚠ {} {} · {} {}", l.fx_done, ex.files, ex.failed, l.fx_failed_n), true));
+    }
+    Some((format!("{} {}", l.fx_done, ex.files), false))
 }
 
 /// The export dialog's two doors: the native folder picker, and the command

@@ -1021,6 +1021,7 @@ pub(crate) struct ChainProjection {
     /// S4 healing: when the current trouble began (0 = none), whether it
     /// was escalated, the next retry and its backoff, the next beacon.
     pub(crate) heal_since: u64,
+    pub(crate) candidates_since: u64,
     pub(crate) heal_escalated: bool,
     pub(crate) heal_next_at: u64,
     pub(crate) heal_backoff: u64,
@@ -1068,6 +1069,8 @@ pub(crate) struct RecoveryState {
     /// last tried. Session-lifetime cap — two devices restoring the same
     /// seat would otherwise re-key each other in an endless ping-pong.
     pub(crate) reattach_attempts: u32,
+    /// A link rejoin (`RecoverStart`) runs, not a self-heal reattach.
+    pub(crate) link_rejoin: bool,
     pub(crate) last_reattach: Option<u64>,
     /// Self-service reattach cooldown (`detached_reattach.md` §2.2): a
     /// `(member, new_anchor) → unix stamp` map that swallows relay replays
@@ -1654,6 +1657,7 @@ impl State {
                 inboxes: Vec::new(),
                 seat_inbox: None,
                 reattach_attempts: 0,
+                link_rejoin: false,
                 last_reattach: None,
                 unsolicited_cooldown: std::collections::HashMap::new(),
                 pending: HashMap::new(),

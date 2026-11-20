@@ -1731,6 +1731,22 @@ fn spawn_derived_series_fetch(
     .abort_handle()
 }
 
+/// A peer's file name made safe for a bulk export: no leading dots (a
+/// `.bashrc` must not land in a home folder unseen), no control or
+/// direction-override characters.
+fn export_name(name: &str) -> String {
+    let clean: String = sanitize_file_name(name)
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        .collect();
+    let clean = clean.trim_start_matches('.').trim().to_string();
+    if clean.is_empty() {
+        "file".to_string()
+    } else {
+        clean
+    }
+}
+
 /// One share complete on this node, for the files export.
 pub(crate) struct ExportItem {
     /// The share's file name (peer input; sanitized on landing).
@@ -1751,7 +1767,8 @@ pub(crate) fn export_files(dir: &Path, items: &[ExportItem]) -> Result<(u64, u64
     let dest = DestSpec { explicit: Some(dir.display().to_string()), default_dir: String::new() };
     let (mut written, mut bytes, mut failed) = (0u64, 0u64, 0u64);
     for item in items {
-        let landed = prepare_landing(&dest, &item.name, &item.id_hex).and_then(|landing| {
+        let name = export_name(&item.name);
+        let landed = prepare_landing(&dest, &name, &item.id_hex).and_then(|landing| {
             let copy = match &item.source {
                 crate::upload_refs::ByteSource::File(p) => {
                     std::fs::copy(p, &landing.part).map(|_| ()).map_err(|e| format!("copying: {e}"))
@@ -1883,6 +1900,16 @@ mod tests {
             .collect();
         names.sort();
         assert_eq!(names, vec!["a (1).txt".to_string(), "a.txt".to_string()], "no .part is left behind");
+    }
+
+    /// A bulk export never writes a dotfile or a direction override.
+    #[test]
+    fn export_names_lose_leading_dots_and_overrides() {
+        assert_eq!(export_name(".bashrc"), "bashrc");
+        assert_eq!(export_name("../.x/..evil"), "evil");
+        assert_eq!(export_name("a\u{202e}gpj.exe"), "agpj.exe");
+        assert_eq!(export_name("..."), "file");
+        assert_eq!(export_name("photo.jpg"), "photo.jpg");
     }
 
     /// A spill a killed fetch left beside its `.part` is gone the moment a

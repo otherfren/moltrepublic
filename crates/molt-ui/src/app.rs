@@ -194,7 +194,8 @@ pub fn run_app(
 /// Every error toast also lands in the error log.
 pub(crate) fn wire_toast_log(ui: &AppWindow) {
     ui.on_toast_error_shown(|msg| {
-        let text = msg.trim_start_matches(['⚠', '\u{fe0f}']).trim_start();
+        // one log line: a newline in the copy would split it past the filter
+        let text = msg.trim_start_matches(['⚠', '\u{fe0f}']).trim_start().replace(['\n', '\r'], " ");
         tracing::warn!(toast = %text, "gui_error");
     });
 }

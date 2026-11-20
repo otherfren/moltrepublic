@@ -513,9 +513,16 @@ fn recovery_hard_rejects_a_chain_that_does_not_anchor_the_phrase() {
 /// the aborted task is dropped, and the session says so.
 #[test]
 fn a_running_rejoin_can_be_cancelled() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
     let mut st = crate::tests::plain_state();
+    assert!(st.cmd_recover_cancel().is_err(), "nothing to abort");
+    st.recovery.task = Some(tokio::spawn(std::future::pending::<()>()));
+    st.recovery.link_rejoin = true;
+    st.session.recover.member = "petra".to_string();
     let before = st.recovery.generation;
     st.cmd_recover_cancel().expect("cancel");
+    assert!(st.session.recover.member.is_empty(), "the run's checklist is gone");
     assert_eq!(st.recovery.generation, before + 1);
     assert_eq!(st.session.notice, "recover-cancelled");
     st.cmd_net_recover_failed("late".to_string(), Some(before)).expect("late result");

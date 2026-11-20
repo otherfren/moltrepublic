@@ -50,9 +50,13 @@ pub(super) enum SealerWait {
     Ask,
 }
 
+/// S5: how long a fallback waits for answers after asking (one serve
+/// debounce, so its request is not swallowed by a recent one).
+pub(super) const FALLBACK_ASK_SECS: u64 = 30;
+
 pub(super) fn sealer_wait(rank: u64, waited: u64) -> SealerWait {
     let turn = rank.saturating_mul(SEALER_GRACE_SECS);
-    if rank == 0 || waited >= turn.saturating_add(SEAL_PACE_SECS) {
+    if rank == 0 || waited >= turn.saturating_add(FALLBACK_ASK_SECS) {
         SealerWait::Seal
     } else if waited >= turn {
         SealerWait::Ask
@@ -568,7 +572,14 @@ impl State {
         if let ChainChange::Membership { op: MembershipOp::Restored, member, .. } = change {
             out.push(member.clone());
         }
-        let rank = sealer_rank(&self.member(), &self.roster(), &out);
+        // a seat that did not sign stands last: it seals only as a fallback
+        let rank = if signers.contains(&me) {
+            sealer_rank(&me, &self.roster(), &out)
+        } else {
+            let mut line: Vec<String> = signers.iter().filter(|m| !out.contains(m)).cloned().collect();
+            line.push(me.clone());
+            u64::try_from(line.len() - 1).unwrap_or(u64::MAX)
+        };
         let waited = now.saturating_sub(since);
         let turn = sealer_wait(rank, waited);
         // waiting on a seat ahead: hand it the signatures held here, once,
@@ -1491,15 +1502,17 @@ impl State {
     /// events is idempotent on every receiver (`receive_proposed` or-inserts,
     /// `collect_sig` keeps one signature per member, `try_commit` refuses
     /// decided proposals), so several answering peers converge harmlessly.
-    /// Re-send the verified signatures held for `id` (S5).
+    /// Re-send this seat's own signature for `id` (S5): the seat ahead may
+    /// have missed it. Only the own one - re-sending all would multiply.
     fn reserve_signatures(&mut self, id: u64) {
+        let me = self.member();
         let Some(pending) = self.chain.pending_sigs.get(&id) else {
             return;
         };
         let events: Vec<WorkspaceEvent> = pending
             .sigs
             .iter()
-            .filter(|a| pending.verified.contains(&a.member))
+            .filter(|a| a.member == me && pending.verified.contains(&a.member))
             .map(|a| WorkspaceEvent::Approved {
                 id: ProposalId(id),
                 by: a.member.clone(),

@@ -856,7 +856,6 @@ async fn supervise(
             SessionEnd::ConsumerGone => return, // nothing left to supervise
             SessionEnd::Died => {}
             SessionEnd::Paged => {
-                stuck_rounds = 0;
                 // the next page follows promptly; the backoff is for failures
                 shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
                 shared.down_reasons.lock().await.insert(url.clone(), RelayDownReason::ReplayBound);
@@ -962,7 +961,19 @@ async fn read_session(
                             (Some(_), None) => true,
                             (None, _) => false,
                         };
-                        if !progress {
+                        // events newer than the page's `until`: the relay
+                        // ignores it, and paging can never move
+                        let ignores_until = matches!((page_oldest, replay.until), (Some(o), Some(u)) if o > u);
+                        if !progress && !ignores_until {
+                            if let Some(prev) = replay.until.filter(|p| *p > 0) {
+                                // more than a page in one second: skip the
+                                // rest of that second rather than stall on it
+                                tracing::warn!(relay = %url, second = prev, "relay replay skipped one second");
+                                replay.until = Some(prev - 1);
+                                return SessionEnd::Paged;
+                            }
+                        }
+                        if !progress || ignores_until {
                             tracing::warn!(
                                 relay = %url, reason = RelayDownReason::ReplayStuck.as_str(),
                                 got = stored_seen, until = ?replay.until, "relay replay stuck"
@@ -1058,6 +1069,10 @@ async fn read_session(
                 if place_req(shared, url, &mut ws, &sub_id, replay).await.is_err() {
                     return SessionEnd::Died;
                 }
+                // the re-placed REQ replays from scratch: so does the count
+                replaying = true;
+                stored_seen = 0;
+                page_oldest = None;
             }
             // the relay's verdict on OUR auth event: a rejection would
             // otherwise leave a connected-but-never-syncing session with no

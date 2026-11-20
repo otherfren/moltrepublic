@@ -1277,3 +1277,21 @@ fn an_unfinished_restore_gets_its_anchor_again() {
     }
     assert_eq!(walter.chain.anchor_repush.get("dora").map(|e| e.0), Some(12), "bounded");
 }
+
+/// Review A/H1: once the loser re-based, its next request names our head;
+/// the winner leaves the diverged state instead of alarming later.
+#[test]
+fn the_winner_drops_the_divergence_once_the_loser_asks_from_its_head() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let (win, lose) = forked_pair();
+    let mut winner = chain_peer("petra", &win, win.blocks.clone());
+    winner.presence.clock_override = Some(1_000);
+    for blk in [&lose.blocks[1], &lose.blocks[2], &lose.blocks[3]] {
+        winner.receive_block_from("walter", blk.clone());
+    }
+    assert!(winner.chain.diverged.contains_key("walter"));
+    let known = winner.known_heads();
+    wire(&mut winner, "walter", 1, WorkspaceEvent::ChainRequest { from_height: 4, known });
+    assert!(winner.chain.diverged.is_empty(), "the loser stands on our head");
+}

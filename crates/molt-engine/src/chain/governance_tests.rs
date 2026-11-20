@@ -2560,7 +2560,7 @@ fn a_vote_without_a_signing_key_is_refused_not_swallowed() {
 /// first seals at once, the k-th after k grace periods, asking first.
 #[test]
 fn one_sealer_at_a_time() {
-    use super::governance::{sealer_rank, sealer_wait, SealerWait, SEALER_GRACE_SECS, SEAL_PACE_SECS};
+    use super::governance::{sealer_rank, sealer_wait, SealerWait, FALLBACK_ASK_SECS, SEALER_GRACE_SECS};
     let roster: Vec<String> = ["walter", "dora", "petra"].iter().map(|s| (*s).to_string()).collect();
     assert_eq!(sealer_rank("dora", &roster, &[]), 0);
     assert_eq!(sealer_rank("walter", &roster, &[]), 2);
@@ -2571,6 +2571,6 @@ fn one_sealer_at_a_time() {
     assert_eq!(sealer_wait(0, 0), SealerWait::Seal);
     assert_eq!(sealer_wait(1, SEALER_GRACE_SECS - 1), SealerWait::Wait);
     assert_eq!(sealer_wait(1, SEALER_GRACE_SECS), SealerWait::Ask);
-    assert_eq!(sealer_wait(1, SEALER_GRACE_SECS + SEAL_PACE_SECS), SealerWait::Seal);
-    assert_eq!(sealer_wait(2, SEALER_GRACE_SECS + SEAL_PACE_SECS), SealerWait::Wait);
+    assert_eq!(sealer_wait(1, SEALER_GRACE_SECS + FALLBACK_ASK_SECS), SealerWait::Seal);
+    assert_eq!(sealer_wait(2, SEALER_GRACE_SECS + FALLBACK_ASK_SECS), SealerWait::Wait);
 }
