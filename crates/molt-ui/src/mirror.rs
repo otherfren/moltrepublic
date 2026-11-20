@@ -228,7 +228,7 @@ pub(crate) fn rejoin_log_lines(log: &[String]) -> Vec<String> {
 }
 
 /// Rejoin log lines the recover pane shows.
-const RV_LOG_SHOWN: usize = 8;
+const RV_LOG_SHOWN: usize = 30;
 
 /// The recovery-flow reading of the transient session notice — the engine's
 /// contract for the recovery ritual (`recovery_ritual.md`): a coordinator's

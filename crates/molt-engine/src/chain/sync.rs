@@ -822,6 +822,14 @@ impl State {
     pub(crate) fn serve_chain_anchor(&mut self) {
         let me = self.member();
         for ev in self.anchor_bootstrap() {
+            let bytes = serde_json::to_vec(&ev).map_or(0, |b| b.len());
+            let what = match &ev {
+                WorkspaceEvent::CheckpointServedPart { index, total, .. } => format!("checkpoint-part {}/{total}", index + 1),
+                WorkspaceEvent::CheckpointServed { .. } => "checkpoint".to_string(),
+                WorkspaceEvent::Committed(b) => format!("block {}", b.height),
+                _ => "other".to_string(),
+            };
+            tracing::info!(what = %what, bytes, "anchor=served");
             let env = self.make_env(me.clone(), ev);
             self.record(env);
         }

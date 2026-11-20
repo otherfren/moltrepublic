@@ -505,7 +505,8 @@ fn an_oversized_checkpoint_blob_is_served_in_parts() {
     let mut got = None;
     // any order reassembles; every part stays within one frame
     for ev in parts.iter().rev() {
-        assert!(serde_json::to_vec(ev).expect("json").len() <= cap);
+        let len = serde_json::to_vec(ev).expect("json").len();
+        assert!(len <= cap && len <= super::blob_parts::MAX_SERVED_EVENT, "{len}");
         let WorkspaceEvent::CheckpointServedPart { blob_hash, index, total, data } = ev else {
             panic!("only parts: {ev:?}");
         };

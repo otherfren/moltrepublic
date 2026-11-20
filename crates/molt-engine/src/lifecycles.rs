@@ -2458,6 +2458,7 @@ impl State {
             return Ok(Reply::Ack);
         }
         // the step log under the checklist: one line per step, bounded
+        tracing::info!(note = %note, "rejoin_step");
         let log = &mut self.session.recover.log;
         // a run of block / part / waiting lines is one line, the newest, so
         // the first steps (the coordinator's version) stay in the log

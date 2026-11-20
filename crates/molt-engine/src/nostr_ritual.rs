@@ -29,6 +29,31 @@ use crate::Envelope;
 /// Long-poll slice for the unbounded waits — short enough that an aborted
 /// task dies promptly, long enough to stay quiet.
 const RECV_SLICE: Duration = Duration::from_secs(30);
+
+/// How many frames after the Welcome a rejoiner logs one by one.
+const FRAMES_LOGGED: u64 = 20;
+
+/// The event kind a rejoin frame carries, for its log line.
+fn event_kind(body: &molt_core::WorkspaceEvent) -> &'static str {
+    match body {
+        molt_core::WorkspaceEvent::CheckpointServed { .. } => "checkpoint",
+        molt_core::WorkspaceEvent::CheckpointServedPart { .. } => "checkpoint-part",
+        molt_core::WorkspaceEvent::Committed(_) => "block",
+        molt_core::WorkspaceEvent::MlsCommit { .. } => "mls-commit",
+        molt_core::WorkspaceEvent::Chat(_) => "chat",
+        _ => "other",
+    }
+}
+
+/// `hh:mm:ss` UTC of a unix stamp.
+fn hms(unix: u64) -> String {
+    let d = unix % 86_400;
+    format!("{:02}:{:02}:{:02}", d / 3600, (d / 60) % 60, d % 60)
+}
+
+/// How far before its recovery request a rejoiner still reads group frames
+/// (clock skew between it and the coordinator).
+const RECENT_SKEW_SECS: u64 = 600;
 /// Best-effort EOSE wait after placing a subscription.
 const LIVE_WAIT: Duration = Duration::from_secs(10);
 /// A ritual's group-channel replay (founder and joiner): an onion relay over
@@ -1043,6 +1068,9 @@ async fn recovery_rejoin(
         .chain(ctx.extra_targets.iter().cloned())
         .collect();
     targets.dedup();
+    // the anchor is sent after this request: frames older than it (minus
+    // clock skew) are a backlog from epochs this seat cannot read
+    let asked_at = molt_net::ritual_net::unix_now();
     let request = RitualMsg::Recover(invite::RecoverRequest {
         member: ctx.member.clone(),
         identity_pk: pk,
@@ -1188,7 +1216,7 @@ async fn recovery_rejoin(
     // 445 under the Welcome's rotation seed, dialing only our own subset
     let chan = GroupChannel::new(dialer, ctx.dial_relays.clone(), payload.rotation_seed);
     let mut sub = chan
-        .subscribe()
+        .subscribe_recent(asked_at.saturating_sub(RECENT_SKEW_SECS))
         .await
         .map_err(|e| format!("group subscribe: {e}"))?;
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1213,6 +1241,10 @@ async fn recovery_rejoin(
     // what arrived, for the reason if nothing verifies in time
     let mut parts_seen: Option<(std::collections::BTreeSet<u32>, u32)> = None;
     let mut last_verify_error = String::new();
+    // a life sign every 30 s, whatever arrives: frames that cannot be read
+    // must not look like silence
+    let (mut frames, mut unreadable, mut other) = (0u64, 0u64, 0u64);
+    let mut last_beat = tokio::time::Instant::now();
     let note = |n: String| send_cmd(tx, Command::NetRecoverNote { note: n, generation });
     let (head, _sealed) = loop {
         let now = tokio::time::Instant::now();
@@ -1236,16 +1268,29 @@ async fn recovery_rejoin(
             }
             return Err(reason);
         }
-        let content = match sub.recv((deadline - now).min(RECV_SLICE)).await {
-            molt_net::ritual_net::GroupRecv::Frame { content, .. } => content,
-            _ => {
-                // a silent wait must not read as a dead connection
-                let secs = waiting_since.elapsed().as_secs();
-                let _ = note(format!("still waiting for the chain anchor ({secs} s)")).await;
-                continue;
-            }
+        if last_beat.elapsed() >= RECV_SLICE {
+            last_beat = tokio::time::Instant::now();
+            let secs = waiting_since.elapsed().as_secs();
+            let _ = note(format!(
+                "still waiting for the chain anchor ({secs} s): frames={frames} unreadable={unreadable} other={other}"
+            ))
+            .await;
+        }
+        let (content, created_at) = match sub.recv((deadline - now).min(RECV_SLICE)).await {
+            molt_net::ritual_net::GroupRecv::Frame { content, created_at } => (content, created_at),
+            _ => continue,
         };
-        let Some(env) = open_group_envelope(&group, &content) else {
+        frames += 1;
+        let opened = open_group_envelope(&group, &content);
+        // the first frames one by one: size, stamp and what they are
+        if frames <= FRAMES_LOGGED {
+            let what = opened.as_ref().map_or("unreadable", |e| event_kind(&e.body));
+            let line = format!("frame {frames}: {} B at {} {what}", content.len(), hms(created_at));
+            tracing::info!(frame = frames, bytes = content.len(), created_at, what, "rejoin_frame");
+            let _ = note(line).await;
+        }
+        let Some(env) = opened else {
+            unreadable += 1;
             continue;
         };
         match env.body {
@@ -1282,7 +1327,10 @@ async fn recovery_rejoin(
                     blocks.truncate(RECOVER_BLOCK_BUFFER);
                 }
             }
-            _ => continue,
+            _ => {
+                other += 1;
+                continue;
+            }
         }
         // Only a CONSECUTIVE run can verify — and the stream is not one. The
         // coordinator's outbox publishes whatever sits above its cursor, so

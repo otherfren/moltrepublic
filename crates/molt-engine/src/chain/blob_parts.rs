@@ -10,7 +10,11 @@ use base64::Engine as _;
 use molt_core::{CheckpointState, WorkspaceEvent};
 
 /// The most parts one blob may have (a blob past this is not served).
-pub(crate) const MAX_BLOB_PARTS: u32 = 64;
+pub(crate) const MAX_BLOB_PARTS: u32 = 128;
+
+/// The most one served blob event may serialize to, whatever the frame
+/// allows: small frames get through slow Tor circuits and strict relays.
+pub(crate) const MAX_SERVED_EVENT: usize = 48 * 1024;
 
 /// Room for the event fields around a part's data.
 const PART_RESERVE: usize = 512;
@@ -19,6 +23,7 @@ const PART_RESERVE: usize = 512;
 /// `CheckpointServed` when it fits, else its parts. `None` = too large even
 /// in parts.
 pub(crate) fn blob_events(blob: &CheckpointState, cap: usize) -> Option<Vec<WorkspaceEvent>> {
+    let cap = cap.min(MAX_SERVED_EVENT);
     let whole = WorkspaceEvent::CheckpointServed { blob: blob.clone() };
     let whole_len = serde_json::to_vec(&whole).map_or(usize::MAX, |b| b.len());
     if whole_len <= cap {

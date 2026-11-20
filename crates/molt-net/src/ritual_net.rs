@@ -622,6 +622,23 @@ impl GroupChannel {
         self.subscribe_group(window_tags(&self.rotation_seed, now_secs()), None).await
     }
 
+    /// The current window, but only events created since `since_secs`: a
+    /// rejoiner wants the frames sent for it, not the day's backlog of
+    /// frames from epochs it cannot read.
+    pub async fn subscribe_recent(&self, since_secs: u64) -> Result<GroupSub, NetError> {
+        let tags = window_tags(&self.rotation_seed, now_secs());
+        let sub = self.subscribe_tags_kind_since(crate::kinds::KIND_GROUP, &tags, false, Some(since_secs)).await?;
+        Ok(GroupSub {
+            sub,
+            tags,
+            since: None,
+            channel: self.clone(),
+            deaf: None,
+            retry_at: tokio::time::Instant::now(),
+            retry_backoff: RETRY_INITIAL,
+        })
+    }
+
     /// A live subscription that also KEEPS every window since `since_secs`
     /// (unix): a founding may run for days, and a frame published under an
     /// earlier day's tag must stay reachable across window rolls.
@@ -708,9 +725,24 @@ impl GroupChannel {
         tags: &[String],
         files: bool,
     ) -> Result<Subscription, NetError> {
-        let filter = Filter::new()
+        self.subscribe_tags_kind_since(kind, tags, files, None).await
+    }
+
+    /// [`Self::subscribe_tags_kind`] with an optional `since` (unix): only
+    /// events created from then on are replayed.
+    async fn subscribe_tags_kind_since(
+        &self,
+        kind: u16,
+        tags: &[String],
+        files: bool,
+        since: Option<u64>,
+    ) -> Result<Subscription, NetError> {
+        let mut filter = Filter::new()
             .kind(Kind::Custom(kind))
             .custom_tags(SingleLetterTag::lowercase(Alphabet::H), tags.iter().cloned());
+        if let Some(s) = since {
+            filter = filter.since(nostr::Timestamp::from_secs(s));
+        }
         // A FRESH ephemeral key per placement (and per window-roll
         // re-placement) — NOT the roster anchor. The 445 filter names only an
         // h tag, so it is anonymous; authenticating it with the anchor would
