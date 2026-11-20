@@ -16,6 +16,10 @@ use crate::{MemberId, Surface};
 /// Every reason a trigger may wake a seat, in `[node] wake_on` spelling.
 pub const WAKE_REASONS: [&str; 4] = ["poked", "vote_pending", "kanban", "task_start"];
 
+/// The reason a chain divergence that did not heal carries
+/// (`chain_divergence_plan.md` S4); never switched off by `wake_on`.
+pub const CHAIN_STUCK_REASON: &str = "chain_stuck";
+
 /// The reason a test wake carries; never switched off by `wake_on`.
 pub const TEST_REASON: &str = "test";
 

@@ -1140,3 +1140,138 @@ fn fork_decisions_and_candidates_show_in_status() {
         .expect("a fork decision");
     assert_eq!((fork.height, fork.outcome.as_str()), (1, "kept"));
 }
+
+/// Two branches forked at height 1; returns (winner's blocks, loser's).
+fn forked_pair() -> (Builder, Builder) {
+    let base = Builder::new(&["petra", "walter"], 2);
+    let mut a = base.clone();
+    for id in [1, 2, 3] {
+        a.commit_applied(id, &["petra", "walter"]);
+    }
+    let mut b = base.clone();
+    for id in [11, 12, 13] {
+        b.commit_applied(id, &["petra", "walter"]);
+    }
+    let rid = &base.republic_id;
+    if block_hash(rid, &a.blocks[1]) < block_hash(rid, &b.blocks[1]) {
+        (a, b)
+    } else {
+        (b, a)
+    }
+}
+
+/// S4 (B1): a catch-up whose request or answer was lost is asked again
+/// after the retry delay, with dense samples, backing off - no restart.
+#[test]
+fn a_lost_catch_up_is_retried_with_backoff() {
+    let (win, lose) = forked_pair();
+    let mut loser = chain_peer("walter", &lose, lose.blocks.clone());
+    loser.presence.clock_override = Some(1_000);
+    loser.chain_heal_tick(); // arms the beacon
+    loser.receive_block_from("petra", win.blocks[3].clone());
+    assert_eq!(loser.chain.catchup_from, Some(2));
+    let sent = loser.next_seq;
+    // the first ask is lost; a repeat for the same height stays deduped...
+    loser.receive_block_from("petra", win.blocks[3].clone());
+    assert_eq!(loser.next_seq, sent);
+    // ...until the retry delay passes
+    loser.presence.clock_override = Some(1_030);
+    loser.chain_heal_tick();
+    assert_eq!(loser.next_seq, sent, "no retry inside the delay");
+    loser.presence.clock_override = Some(1_061);
+    loser.chain_heal_tick();
+    assert!(loser.next_seq > sent, "the retry goes out");
+    let retried = loser.next_seq;
+    loser.presence.clock_override = Some(1_062 + 60);
+    loser.chain_heal_tick();
+    assert_eq!(loser.next_seq, retried, "the next retry backs off");
+    loser.presence.clock_override = Some(1_062 + 121);
+    loser.chain_heal_tick();
+    assert!(loser.next_seq > retried);
+}
+
+/// S4 (B3): the fork's winner hands its branch to the loser instead of
+/// waiting to be asked.
+#[test]
+fn the_fork_winner_serves_its_branch() {
+    let (win, lose) = forked_pair();
+    let mut winner = chain_peer("petra", &win, win.blocks.clone());
+    winner.presence.clock_override = Some(1_000);
+    let before = winner.next_seq;
+    for blk in [&lose.blocks[1], &lose.blocks[2], &lose.blocks[3]] {
+        winner.receive_block_from("walter", blk.clone());
+    }
+    assert_eq!(winner.chain.blocks, win.blocks, "the winner keeps its branch");
+    assert!(winner.next_seq >= before + 3, "its three blocks from the fork went out");
+}
+
+/// S4: a divergence that does not heal in 15 minutes goes loud once - a
+/// chat line from this seat and a session notice; healing resets it.
+#[test]
+fn an_unhealed_divergence_goes_loud_once() {
+    let (win, lose) = forked_pair();
+    let mut loser = chain_peer("walter", &lose, lose.blocks.clone());
+    loser.presence.clock_override = Some(1_000);
+    loser.receive_block_from("petra", win.blocks[3].clone());
+    loser.chain_heal_tick();
+    loser.presence.clock_override = Some(1_000 + 899);
+    loser.chain_heal_tick();
+    assert!(loser.chat.is_empty());
+    loser.presence.clock_override = Some(1_000 + 900);
+    loser.chain_heal_tick();
+    assert_eq!(loser.chat.len(), 1);
+    assert!(loser.chat[0].body.starts_with("chain not healed: peer=petra"), "{}", loser.chat[0].body);
+    assert!(loser.session.notice.starts_with("chain-heal-stuck:petra:"));
+    loser.presence.clock_override = Some(1_000 + 2_000);
+    loser.chain_heal_tick();
+    assert_eq!(loser.chat.len(), 1, "once per episode");
+    // the rest of the winner's branch arrives: healed, reset
+    for blk in [&win.blocks[2], &win.blocks[1]] {
+        loser.receive_block_from("petra", blk.clone());
+    }
+    loser.chain_heal_tick();
+    assert_eq!(loser.chain.heal_since, 0);
+    assert!(!loser.chain.heal_escalated);
+}
+
+/// S4: the head beacon goes out every few minutes even when all is well,
+/// so a quiet republic still finds a fork.
+#[test]
+fn the_head_beacon_goes_out_periodically() {
+    let b = forked_pair().0;
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    walter.presence.clock_override = Some(1_000);
+    let before = walter.next_seq;
+    walter.chain_heal_tick();
+    assert_eq!(walter.next_seq, before, "the first tick only arms it");
+    walter.presence.clock_override = Some(1_000 + 299);
+    walter.chain_heal_tick();
+    assert_eq!(walter.next_seq, before);
+    walter.presence.clock_override = Some(1_000 + 360);
+    walter.chain_heal_tick();
+    assert_eq!(walter.next_seq, before + 1, "one beacon");
+}
+
+/// S4a: a restored seat never heard from since its `Restored` block gets
+/// the anchor bootstrap again every ten minutes, at most twelve times.
+#[test]
+fn an_unfinished_restore_gets_its_anchor_again() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_restored("dora", &"ab".repeat(32), &["petra", "walter"]);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    let height = walter.chain.blocks.last().expect("block").height;
+    walter.chain.block_ts.insert(height, 500);
+    walter.presence.clock_override = Some(1_000);
+    let before = walter.next_seq;
+    walter.chain_heal_tick();
+    let pushed = walter.next_seq;
+    assert!(pushed > before, "the anchor went out");
+    walter.presence.clock_override = Some(1_000 + 120);
+    walter.chain_heal_tick();
+    assert_eq!(walter.next_seq, pushed, "not again inside ten minutes");
+    for i in 1..30u64 {
+        walter.presence.clock_override = Some(1_000 + i * 600);
+        walter.chain_heal_tick();
+    }
+    assert_eq!(walter.chain.anchor_repush.get("dora").map(|e| e.0), Some(12), "bounded");
+}

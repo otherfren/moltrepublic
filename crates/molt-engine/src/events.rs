@@ -876,6 +876,13 @@ impl State {
         self.chain.catchup_since = 0;
         self.chain.fork_decisions = 0;
         self.chain.last_fork = None;
+        self.chain.heal_since = 0;
+        self.chain.heal_escalated = false;
+        self.chain.heal_next_at = 0;
+        self.chain.heal_backoff = 0;
+        self.chain.beacon_at = 0;
+        self.chain.anchor_repush.clear();
+        self.chain.repush_check_at = 0;
         self.recovery.pending.clear();
         self.recovery.swept.clear();
         self.chat.clear();

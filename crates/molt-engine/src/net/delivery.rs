@@ -342,6 +342,7 @@ impl State {
         self.vault_base_tick();
         // A2.2: held seals land once their round has passed
         self.drain_held_seals();
+        self.chain_heal_tick();
         self.wake_tick();
         self.wallet_run_tick(now);
         Ok(Reply::Ack)

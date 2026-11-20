@@ -122,7 +122,7 @@ impl State {
             if s.poke_wake_command.trim().is_empty() {
                 return;
             }
-            if !s.wake_on.iter().any(|r| r == reason) {
+            if reason != molt_core::kanban_wake::CHAIN_STUCK_REASON && !s.wake_on.iter().any(|r| r == reason) {
                 tracing::debug!(reason, "wake_on=off");
                 return;
             }

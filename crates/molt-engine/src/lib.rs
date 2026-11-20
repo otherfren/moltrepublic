@@ -1018,6 +1018,17 @@ pub(crate) struct ChainProjection {
     /// The height a catch-up request is currently outstanding for (dedups the
     /// request while a gap persists; cleared when the head reaches it).
     pub(crate) catchup_from: Option<u64>,
+    /// S4 healing: when the current trouble began (0 = none), whether it
+    /// was escalated, the next retry and its backoff, the next beacon.
+    pub(crate) heal_since: u64,
+    pub(crate) heal_escalated: bool,
+    pub(crate) heal_next_at: u64,
+    pub(crate) heal_backoff: u64,
+    pub(crate) beacon_at: u64,
+    /// S4a: anchor re-pushes per restored seat (count, last) and the next
+    /// check.
+    pub(crate) anchor_repush: HashMap<MemberId, (u32, u64)>,
+    pub(crate) repush_check_at: u64,
     /// S3: a served checkpoint blob arriving in parts.
     pub(crate) blob_parts: chain::blob_parts::BlobAssembly,
     /// When the open catch-up request was last sent (presence clock).

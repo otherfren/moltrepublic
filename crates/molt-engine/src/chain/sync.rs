@@ -36,6 +36,19 @@ fn short_hash(hash: &str) -> &str {
     hash.get(..12).unwrap_or(hash)
 }
 
+/// S4: the first catch-up retry, and the most the retries back off to.
+const CATCHUP_RETRY_SECS: u64 = 60;
+const HEAL_BACKOFF_MAX_SECS: u64 = 600;
+/// S4: an unhealed divergence goes loud after this long.
+const HEAL_STUCK_SECS: u64 = 900;
+/// S4: the head beacon's period (plus a per-seat offset below a minute).
+const CHAIN_BEACON_SECS: u64 = 300;
+/// S4: a retry names this many recent heights one by one.
+const DENSE_KNOWN_HEADS: u64 = 64;
+/// S4a: an unfinished restore's anchor is re-pushed this often, this many times.
+const ANCHOR_REPUSH_SECS: u64 = 600;
+const ANCHOR_REPUSH_MAX: u32 = 12;
+
 /// How many `(height, hash)` samples a fork-aware catch-up request carries.
 const KNOWN_HEADS_MAX: usize = 16;
 
@@ -210,6 +223,167 @@ impl State {
         out
     }
 
+    /// [`Self::known_heads`] for a retry: the last [`DENSE_KNOWN_HEADS`]
+    /// heights one by one, then the geometric samples below them, so the
+    /// fork point is found whatever its depth.
+    pub(crate) fn dense_known_heads(&self) -> Vec<molt_core::HeightHash> {
+        let rid = self.republic_id();
+        let Some(head) = self.chain.blocks.last().map(|b| b.height) else {
+            return Vec::new();
+        };
+        let floor = head.saturating_sub(DENSE_KNOWN_HEADS);
+        let mut out: Vec<molt_core::HeightHash> = self
+            .chain
+            .blocks
+            .iter()
+            .rev()
+            .take_while(|b| b.height > floor)
+            .map(|b| molt_core::HeightHash { height: b.height, hash: block_hash(&rid, b) })
+            .collect();
+        out.extend(self.known_heads().into_iter().filter(|k| k.height <= floor));
+        out
+    }
+
+    /// Send a catch-up request outside the dedup of [`Self::request_catchup`]
+    /// (the retry and the beacon), with dense samples when asked.
+    fn send_chain_request(&mut self, from: u64, dense: bool) {
+        let known = if dense { self.dense_known_heads() } else { self.known_heads() };
+        let me = self.member();
+        tracing::info!(from, dense, known = known.len(), "chain_catchup=requested");
+        let env = self.make_env(me, WorkspaceEvent::ChainRequest { from_height: from, known });
+        self.record(env);
+    }
+
+    /// B3: serve our branch from `fork` to a peer that lost the fork,
+    /// at most once per serve debounce per peer.
+    fn serve_branch_to(&mut self, peer: &str, fork: u64) {
+        if peer.is_empty() {
+            return;
+        }
+        let now = self.presence_now();
+        let recently = self
+            .chain
+            .served_at
+            .get(peer)
+            .is_some_and(|t| now.saturating_sub(*t) < crate::net::CHAIN_SERVE_DEBOUNCE_SECS);
+        if recently {
+            return;
+        }
+        self.chain.served_at.insert(peer.to_string(), now);
+        tracing::info!(%peer, fork, "fork=served_winner");
+        self.serve_chain_from(fork);
+    }
+
+    /// S4/S4a, on the delivery tick: retry a stalled catch-up with backoff,
+    /// beacon the head, go loud on a divergence that does not heal, and
+    /// re-push the anchor to a restored seat that never arrived.
+    pub(crate) fn chain_heal_tick(&mut self) {
+        if !self.is_chain_governed() {
+            return;
+        }
+        let Some(head) = self.chain.head.as_ref().map(|h| h.height) else {
+            return;
+        };
+        let now = self.presence_now();
+        let troubled = !self.chain.diverged.is_empty() || !self.chain.fork_candidates.is_empty();
+        if troubled {
+            if self.chain.heal_since == 0 {
+                self.chain.heal_since = now;
+                self.chain.heal_backoff = CATCHUP_RETRY_SECS;
+                // the retry delay runs from the request already out
+                let asked = if self.chain.catchup_from.is_some() { self.chain.catchup_since } else { now };
+                self.chain.heal_next_at = asked.saturating_add(CATCHUP_RETRY_SECS);
+            }
+            if now >= self.chain.heal_next_at {
+                let anchor = self.chain.blocks.first().map_or(0, |b| b.height);
+                let from = self
+                    .chain
+                    .fork_candidates
+                    .keys()
+                    .next()
+                    .map_or(head.saturating_add(1), |l| l.saturating_sub(1).max(anchor.saturating_add(1)));
+                self.chain.catchup_from = Some(from);
+                self.chain.catchup_since = now;
+                self.send_chain_request(from, true);
+                self.chain.heal_backoff = self.chain.heal_backoff.saturating_mul(2).min(HEAL_BACKOFF_MAX_SECS);
+                self.chain.heal_next_at = now.saturating_add(self.chain.heal_backoff);
+            }
+            if !self.chain.heal_escalated && now.saturating_sub(self.chain.heal_since) >= HEAL_STUCK_SECS {
+                self.chain.heal_escalated = true;
+                self.escalate_unhealed(now);
+            }
+        } else if self.chain.heal_since != 0 {
+            tracing::info!(secs = now.saturating_sub(self.chain.heal_since), "chain_healed");
+            self.chain.heal_since = 0;
+            self.chain.heal_escalated = false;
+        }
+        if now >= self.chain.beacon_at {
+            if self.chain.beacon_at != 0 {
+                self.send_chain_request(head.saturating_add(1), false);
+            }
+            let offset = self.member().bytes().map(u64::from).sum::<u64>() % 60;
+            self.chain.beacon_at = now.saturating_add(CHAIN_BEACON_SECS + offset);
+        }
+        if now >= self.chain.repush_check_at {
+            self.chain.repush_check_at = now.saturating_add(60);
+            self.repush_unfinished_restores(now);
+        }
+    }
+
+    /// The divergence did not heal in [`HEAL_STUCK_SECS`]: a wake, a chat
+    /// line from this seat and a warning, once per episode.
+    fn escalate_unhealed(&mut self, now: u64) {
+        let (peer, since) = self
+            .chain
+            .diverged
+            .values()
+            .min_by_key(|d| d.since_height)
+            .map(|d| (d.peer.clone(), d.since_height))
+            .unwrap_or_else(|| (String::new(), self.chain.fork_candidates.keys().next().copied().unwrap_or(0)));
+        let secs = now.saturating_sub(self.chain.heal_since);
+        tracing::warn!(%peer, since, secs, "chain_heal_stuck");
+        self.wake_trigger(molt_core::kanban_wake::CHAIN_STUCK_REASON, "");
+        let me = self.member();
+        let body = format!("chain not healed: peer={peer} since={since}");
+        if let Err(e) = self.post_message(me, body, None, molt_core::ChannelRef::Group) {
+            tracing::warn!(error = %e, "chain_heal_stuck chat=failed");
+        }
+        self.session.notice = format!("chain-heal-stuck:{peer}:{since}");
+        self.emit_session(crate::SessionScope::Full);
+    }
+
+    /// S4a: seats whose last `Restored` block sealed but which were never
+    /// heard from since get the anchor bootstrap again, bounded.
+    fn repush_unfinished_restores(&mut self, now: u64) {
+        let me = self.member();
+        let mut latest: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        for b in &self.chain.blocks {
+            if let ChainChange::Membership { op: molt_core::MembershipOp::Restored, member, nostr_pk, .. } = &b.change {
+                latest.insert(member.clone(), nostr_pk.clone().unwrap_or_default());
+            }
+        }
+        let due: Vec<String> = latest
+            .into_iter()
+            .filter(|(m, pk)| *m != me && self.restore_never_finished(m, pk))
+            .map(|(m, _)| m)
+            .filter(|m| {
+                self.chain
+                    .anchor_repush
+                    .get(m)
+                    .map_or(true, |(n, last)| *n < ANCHOR_REPUSH_MAX && now.saturating_sub(*last) >= ANCHOR_REPUSH_SECS)
+            })
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        for m in &due {
+            let e = self.chain.anchor_repush.entry(m.clone()).or_insert((0, 0));
+            *e = (e.0 + 1, now);
+            tracing::info!(member = %m, count = e.0, "anchor=repushed");
+        }
+        self.serve_chain_anchor();
+    }
+
     /// Where a fork-aware request wants serving from: one above the highest
     /// `known` sample that names a block we hold, else `from_height`.
     pub(crate) fn serve_from_for(&self, from_height: u64, known: &[molt_core::HeightHash]) -> u64 {
@@ -292,6 +466,8 @@ impl State {
             // ours wins at the fork (R1): the peer re-bases, not this node
             self.note_fork(from, f, "kept", &mine, &theirs, ids);
             self.chain.fork_candidates.clear();
+            // B3: hand the peer our branch instead of waiting for it to ask
+            self.serve_branch_to(from, f);
             return;
         }
         let mut candidate: Vec<ChainBlock> =
