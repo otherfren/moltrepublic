@@ -1,88 +1,280 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #![allow(missing_docs)]
 
-//! **buzz B3 step 2** — a relay may not answer one REQ with an unbounded
-//! stream of stored events.
+//! **buzz B3 step 2 + chain divergence S2** — the stored-replay bound.
 //!
-//! We are the client against relays we do not control, which is buzz's problem
-//! mirrored. A relay that replays forever costs us a signature verification and
-//! a dedup-ring slot per event, and pushes real deliveries out of the ring.
-//!
-//! The bound is counted **pre-EOSE only**, and that is the whole subtlety: a
-//! legitimate `subscribe_since` catch-up (N5.1) places ONE REQ across several
-//! past h-windows and may legitimately replay a lot. A bound that also counted
-//! live traffic, or that sat at buzz's chat-shaped 500, would silently truncate
-//! a catch-up — and a member quietly missing history it believes it has is a
-//! worse outcome than the flood, which at least announces itself.
+//! A relay that replays forever costs a signature verification and a
+//! dedup-ring slot per event, so one REQ may replay at most the bound. But a
+//! healthy relay of an active group legitimately holds more than that, so
+//! the bound ends the SESSION and the replay continues in pages backwards
+//! with `until` (`docs/chain/chain_divergence_plan.md` S2, C6/C7). Only a
+//! relay whose pages do not move back is backed off - and even then its
+//! supervisor keeps running.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use molt_net::dial::Dialer;
-use molt_net::envelope::h_tag;
-use molt_net::relay_runtime::RelayRuntime;
-use molt_net::ritual_net::GroupChannel;
-use nostr::{Filter, Kind};
+use molt_net::relay_runtime::{RelayDownReason, RelayHealth, RelayRuntime};
+use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, Timestamp};
 use nostr_relay_builder::MockRelay;
+
+const H: &str = "6d6f6c74";
 
 fn dialer() -> Dialer {
     Dialer::resolve("none", "local", 0).expect("direct dialer")
 }
 
-/// Stuff `n` real kind-445 frames into the relay's store, through the very
-/// path a member would use — a flood of WELL-FORMED events is the case that
-/// matters, since a malformed one is already dropped by the tag gate.
-async fn flood(url: &str, seed: &[u8; 32], n: usize) {
-    let chan = GroupChannel::new(dialer(), vec![url.to_string()], *seed);
-    for i in 0..n {
-        chan.publish_frame(&[9u8; 32], format!("junk {i}").as_bytes())
-            .await
-            .expect("publish");
-    }
+fn filter() -> Filter {
+    Filter::new()
+        .kind(Kind::Custom(445))
+        .custom_tag(SingleLetterTag::lowercase(Alphabet::H), H)
 }
 
-/// A relay replaying more stored events than the bound is cut off, and says so.
+/// `n` events, one per `step` seconds back from `newest`.
+fn events(n: u64, newest: u64, step: u64) -> Vec<nostr::Event> {
+    let keys = Keys::generate();
+    (0..n)
+        .map(|i| {
+            EventBuilder::new(Kind::Custom(445), format!("e{i}"))
+                .tag(Tag::parse(["h", H]).expect("h tag"))
+                .custom_created_at(Timestamp::from_secs(newest - i * step))
+                .sign_with_keys(&keys)
+                .expect("sign")
+        })
+        .collect()
+}
+
+/// How a [`scripted_relay`] answers a REQ (newest first).
+#[derive(Clone, Copy)]
+enum Script {
+    /// NIP-01: honours `since`/`until`, then EOSE.
+    Honest,
+    /// Ignores `until`: the same newest page on every REQ, never EOSE.
+    SamePage,
+    /// The FIRST connection sends this many events and drops; later ones
+    /// are honest.
+    CutAfter(usize),
+}
+
+struct Scripted {
+    url: String,
+    /// The filter of every REQ, in arrival order.
+    reqs: Arc<Mutex<Vec<serde_json::Value>>>,
+}
+
+/// A hand-scripted relay over a fixed store (sorted newest first).
+async fn scripted_relay(mut store: Vec<nostr::Event>, script: Script) -> Scripted {
+    store.sort_by_key(|e| std::cmp::Reverse(e.created_at));
+    let store = Arc::new(store);
+    let reqs = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let url = format!(
+        "ws://127.0.0.1:{}",
+        listener.local_addr().expect("addr").port()
+    );
+    let log = reqs.clone();
+    tokio::spawn(async move {
+        let mut conn = 0usize;
+        while let Ok((stream, _)) = listener.accept().await {
+            conn += 1;
+            let first = conn == 1;
+            let store = store.clone();
+            let log = log.clone();
+            tokio::spawn(async move {
+                use futures_util::{SinkExt, StreamExt};
+                use tokio_tungstenite::tungstenite::Message;
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                while let Some(Ok(msg)) = ws.next().await {
+                    let Ok(text) = msg.into_text() else { continue };
+                    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&text) else {
+                        continue;
+                    };
+                    if parsed.get(0).and_then(|v| v.as_str()) != Some("REQ") {
+                        continue;
+                    }
+                    let sub = parsed
+                        .get(1)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("s")
+                        .to_string();
+                    let f = parsed.get(2).cloned().unwrap_or_default();
+                    log.lock().expect("log").push(f.clone());
+                    let since = f.get("since").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let until = f.get("until").and_then(|v| v.as_u64()).unwrap_or(u64::MAX);
+                    let honest = |e: &&nostr::Event| {
+                        let t = e.created_at.as_secs();
+                        t >= since && t <= until
+                    };
+                    let (page, eose): (Vec<&nostr::Event>, bool) = match script {
+                        Script::Honest => (store.iter().filter(honest).collect(), true),
+                        Script::SamePage => (store.iter().collect(), false),
+                        Script::CutAfter(k) if first => {
+                            (store.iter().filter(honest).take(k).collect(), false)
+                        }
+                        Script::CutAfter(_) => (store.iter().filter(honest).collect(), true),
+                    };
+                    for e in page {
+                        let frame = serde_json::json!(["EVENT", sub, e]).to_string();
+                        if ws.send(Message::text(frame)).await.is_err() {
+                            return;
+                        }
+                    }
+                    if eose {
+                        let frame = serde_json::json!(["EOSE", sub]).to_string();
+                        let _ = ws.send(Message::text(frame)).await;
+                    } else if matches!(script, Script::CutAfter(_)) {
+                        return; // drop the connection mid-replay
+                    }
+                }
+            });
+        }
+    });
+    Scripted { url, reqs }
+}
+
+async fn drain(sub: &mut molt_net::relay_runtime::Subscription) -> Vec<nostr::EventId> {
+    let mut got = Vec::new();
+    while let Some(ev) = sub.recv(Duration::from_millis(800)).await {
+        got.push(ev.id);
+    }
+    got
+}
+
+/// C6: a relay holding three times the bound is READ, in pages, and stays
+/// up; its cursor lands on the newest event once the replay completed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_relay_may_not_replay_more_stored_events_than_the_bound() {
+async fn a_full_relay_is_paged_through_not_dropped() {
     let relay = MockRelay::run().await.expect("in-process relay");
     let url = relay.url().await.to_string();
-    let seed = [7u8; 32];
-    let tag = h_tag(&seed, nostr::Timestamp::now().as_secs());
+    let now = Timestamp::now().as_secs();
+    let store = events(60, now - 10, 10);
+    let rt = RelayRuntime::new(dialer(), vec![url.clone()])
+        .with_history_bound(20)
+        .with_backoff(Duration::from_millis(20), Duration::from_millis(200));
+    for e in &store {
+        rt.publish(e).await.expect("seed");
+    }
 
-    // …well past a small test bound, nowhere near the production one
-    flood(&url, &seed, 40).await;
-
-    let filter = Filter::new()
-        .kind(Kind::Custom(molt_net::kinds::KIND_GROUP))
-        .custom_tags(
-            nostr::SingleLetterTag::lowercase(nostr::Alphabet::H),
-            [tag.clone()],
+    let mut sub = rt.clone().subscribe(filter()).await.expect("subscribe");
+    let got = drain(&mut sub).await;
+    for e in &store {
+        assert!(
+            got.contains(&e.id),
+            "missing {} of {} delivered",
+            e.created_at.as_secs(),
+            got.len()
         );
-    let rt = RelayRuntime::new(dialer(), vec![url.clone()]).with_history_bound(10);
-    let mut sub = rt.clone().subscribe(filter).await.expect("subscribe");
-
-    // drain what the relay is allowed to give us
-    let mut got = 0usize;
-    while sub.recv(Duration::from_millis(400)).await.is_some() {
-        got += 1;
-        assert!(got <= 40, "runaway: the bound did nothing");
     }
     assert!(
-        got <= 10,
-        "the pre-EOSE bound is 10; the relay got {got} events through"
+        sub.synced(Duration::from_secs(2)).await,
+        "a completed paged replay syncs"
     );
-    assert!(got > 0, "…and the bound must not swallow the whole stream");
+    assert_eq!(rt.health().await.get(&url), Some(&RelayHealth::Up));
+    assert_eq!(
+        rt.down_reasons().await.get(&url),
+        None,
+        "a completed replay clears the reason"
+    );
+    assert_eq!(rt.cursors().await.get(&url), Some(&(now - 10)));
+}
 
-    // the cut-off is not silent — the relay's own diagnostics carry it
-    // (structured, one line: relay=… bound=… got=…) — and the health map
-    // says the relay is DOWN: no supervisor serves it any more, so `deaf()`
-    // must not count it as live (review 2026-08-25 T4)
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let health = rt.health().await;
-        if health.get(&url) == Some(&molt_net::relay_runtime::RelayHealth::Down) {
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "the dropped relay stays Up: {health:?}");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+/// A relay whose page never moves back is backed off with the long
+/// backoff - and the subscription survives: it is retried later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_stuck_on_one_page_is_backed_off_not_dropped() {
+    let now = Timestamp::now().as_secs();
+    let relay = scripted_relay(events(30, now - 10, 10), Script::SamePage).await;
+    let rt = RelayRuntime::new(dialer(), vec![relay.url.clone()])
+        .with_history_bound(10)
+        .with_backoff(Duration::from_millis(20), Duration::from_secs(2));
+    let mut sub = rt.clone().subscribe(filter()).await.expect("subscribe");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while rt.down_reasons().await.get(&relay.url) != Some(&RelayDownReason::ReplayStuck) {
+        assert!(tokio::time::Instant::now() < deadline, "never marked stuck");
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert_eq!(rt.health().await.get(&relay.url), Some(&RelayHealth::Down));
+    let stuck_at = relay.reqs.lock().expect("log").len();
+    assert_eq!(
+        stuck_at, 2,
+        "page one, then the page that did not move back"
+    );
+
+    // backed off: nothing during most of the cap...
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(
+        relay.reqs.lock().expect("log").len(),
+        stuck_at,
+        "hammered while backed off"
+    );
+    // ...and retried after it: the supervisor is alive
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+    while relay.reqs.lock().expect("log").len() == stuck_at {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the supervisor died"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        rt.cursors().await.get(&relay.url),
+        None,
+        "no EOSE, no cursor"
+    );
+    assert_eq!(drain(&mut sub).await.len(), 10, "exactly the bound, once");
+}
+
+/// C7: a session cut mid-replay (newest first) must not move the cursor,
+/// or the resumed REQ starts past the part it never read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replay_cut_midway_resumes_without_a_gap() {
+    let now = Timestamp::now().as_secs();
+    // spans five days: wider than the 48 h resubscribe overlap
+    let store = events(10, now - 10, 12 * 3600);
+    let relay = scripted_relay(store.clone(), Script::CutAfter(3)).await;
+    let rt = RelayRuntime::new(dialer(), vec![relay.url.clone()])
+        .with_backoff(Duration::from_millis(20), Duration::from_millis(200));
+    let mut sub = rt.clone().subscribe(filter()).await.expect("subscribe");
+    let got = drain(&mut sub).await;
+    let reqs = relay.reqs.lock().expect("log").clone();
+    assert!(reqs.len() >= 2, "the cut session was resumed: {reqs:?}");
+    assert_eq!(
+        reqs[1].get("since"),
+        None,
+        "the cursor moved before EOSE: {reqs:?}"
+    );
+    for e in &store {
+        assert!(got.contains(&e.id), "gap at {}", e.created_at.as_secs());
+    }
+    assert_eq!(rt.cursors().await.get(&relay.url), Some(&(now - 10)));
+}
+
+/// The plan's scale: 12 000 stored events against the production bound
+/// (MockRelay answers at most 500 per REQ, so this one is scripted).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn twelve_thousand_events_page_through_the_production_bound() {
+    let now = Timestamp::now().as_secs();
+    let store = events(12_000, now - 10, 1);
+    let relay = scripted_relay(store.clone(), Script::Honest).await;
+    let rt = RelayRuntime::new(dialer(), vec![relay.url.clone()])
+        .with_history_bound(5_000)
+        .with_backoff(Duration::from_millis(20), Duration::from_millis(200));
+    let mut sub = rt.clone().subscribe(filter()).await.expect("subscribe");
+    let got: std::collections::HashSet<_> = drain(&mut sub).await.into_iter().collect();
+    assert_eq!(got.len(), 12_000);
+    assert!(store.iter().all(|e| got.contains(&e.id)));
+    let reqs = relay.reqs.lock().expect("log").clone();
+    assert_eq!(reqs.len(), 4, "three pages, then the live tail: {reqs:?}");
+    assert_eq!(reqs[3].get("until"), None, "the tail is live");
+    assert_eq!(
+        reqs[3].get("since").and_then(|v| v.as_u64()),
+        Some(now - 10)
+    );
+    assert_eq!(rt.health().await.get(&relay.url), Some(&RelayHealth::Up));
 }
