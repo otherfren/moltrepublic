@@ -488,7 +488,7 @@ pub(crate) fn localize_recover_note(lang: i32, n: &str) -> String {
     if let Some(rest) = n.strip_prefix("still waiting for the chain anchor (") {
         return match rest.split_once(" s): ") {
             Some((secs, counts)) => format!("warte weiter auf den Chain-Anker ({secs} s): {counts}"),
-            None => format!("warte weiter auf den Chain-Anker ({}", rest.replace(" s)", " s)")),
+            None => format!("warte weiter auf den Chain-Anker ({rest}"),
         };
     }
     if let Some(p) = n.strip_prefix("checkpoint part ") {
