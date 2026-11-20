@@ -21,8 +21,9 @@ anchor" and timed out with "the republic's chain anchor never arrived".
 
 - `RecoverRequest` and `RecoverProgress` gain `#[serde(default)] version`
   (`CARGO_PKG_VERSION`). An empty value means a build before v0.0.18.
-- The rejoiner logs `coordinator version 0.0.18` (or `coordinator older
-  than 0.0.18`) once its first progress frame arrives.
+- The rejoiner logs `coordinator runs 0.0.19` (or `coordinator runs
+  0.0.18 or older`: v0.0.18 sends no version) once its first progress
+  frame arrives.
 - On the anchor timeout the reason names what arrived: checkpoint parts
   `k/n` or none, blocks received, the last verify error, and, for an old
   coordinator, that it cannot send a checkpoint over one frame.
@@ -36,8 +37,9 @@ anchor" and timed out with "the republic's chain anchor never arrived".
 
 ## R2. Catch-up indicator in the workspace
 
-- `status.chain_sync` gains `target` (highest height a peer reported) and
-  `rate` (blocks applied in the last minute).
+- `SessionView.catchup` (as built; not `status.chain_sync`): head, target
+  (highest height a peer on this branch reported), rate (blocks in the
+  last minute), an open request, fork candidates.
 - The GUI shows a bar above the surface while `target - head > 3`:
   `Catching up: block 412 of 934`, a progress bar, and one detail line
   (open catch-up request, fork candidates, last fork outcome, rate).

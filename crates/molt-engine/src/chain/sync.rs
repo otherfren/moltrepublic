@@ -396,7 +396,16 @@ impl State {
             return;
         }
         let head = self.chain.head.as_ref().map_or(0, |h| h.height);
-        let target = self.chain.peer_heights.values().copied().max().unwrap_or(0).max(head);
+        // a peer on another branch claims heights this node will never reach
+        let target = self
+            .chain
+            .peer_heights
+            .iter()
+            .filter(|(p, _)| !self.chain.diverged.contains_key(*p))
+            .map(|(_, h)| *h)
+            .max()
+            .unwrap_or(0)
+            .max(head);
         let catchup = molt_core::CatchUp {
             head,
             target,
@@ -443,11 +452,12 @@ impl State {
         if let Some(id) = open {
             // every seat sees the vote, not only the coordinator: verified
             // signatures plus the returning seat's own consent
-            let consent = matches!(
-                self.chain.proposal_changes.get(&id),
-                Some(ChainChange::Membership { consent: Some(_), .. })
-            );
-            let have = self.chain.pending_sigs.get(&id).map_or(0, |p| p.verified.len()) + usize::from(consent);
+            let mut voices: std::collections::BTreeSet<String> =
+                self.chain.pending_sigs.get(&id).map(|p| p.verified.iter().cloned().collect()).unwrap_or_default();
+            if matches!(self.chain.proposal_changes.get(&id), Some(ChainChange::Membership { consent: Some(_), .. })) {
+                voices.insert(member.to_string());
+            }
+            let have = voices.len();
             let need = self.chain.head.as_ref().map_or(0, |h| h.rule_m);
             return format!("recovering:{have}:{need}");
         }

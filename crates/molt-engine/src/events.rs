@@ -877,6 +877,10 @@ impl State {
         self.chain.fork_decisions = 0;
         self.chain.last_fork = None;
         self.chain.heal_since = 0;
+        self.chain.peer_heights.clear();
+        self.chain.applied_at.clear();
+        self.chain.feedback_emitted_at = 0;
+        self.session.catchup = molt_core::CatchUp::default();
         self.chain.candidates_since = 0;
         self.chain.heal_escalated = false;
         self.chain.heal_next_at = 0;

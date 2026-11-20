@@ -200,6 +200,33 @@ pub(crate) fn catchup_bar(lang: i32, c: &molt_core::CatchUp) -> (bool, String, S
     (true, title, detail.join(" · "), progress)
 }
 
+/// The rejoin log as shown: a run of `block N received` or `checkpoint
+/// part k/n` lines collapses to its last, so the version line and the
+/// steps stay in view; then the last [`RV_LOG_SHOWN`].
+pub(crate) fn rejoin_log_lines(log: &[String]) -> Vec<String> {
+    let kind = |l: &str| {
+        if l.starts_with("block ") && l.ends_with(" received") {
+            1
+        } else if l.starts_with("checkpoint part ") {
+            2
+        } else if l.starts_with("still waiting for the chain anchor") {
+            3
+        } else {
+            0
+        }
+    };
+    let mut out: Vec<String> = Vec::new();
+    for l in log {
+        let k = kind(l);
+        if k != 0 && out.last().is_some_and(|p| kind(p) == k) {
+            out.pop();
+        }
+        out.push(l.clone());
+    }
+    let tail = out.len().saturating_sub(RV_LOG_SHOWN);
+    out.split_off(tail)
+}
+
 /// Rejoin log lines the recover pane shows.
 const RV_LOG_SHOWN: usize = 8;
 
@@ -563,7 +590,11 @@ pub(crate) fn apply_session(
     sync_rows(&ui.get_active_members(), roster, |m| {
         ui.set_active_members(m)
     });
-    let (show, title, detail, progress) = catchup_bar(lang, &sv.catchup);
+    let (show, title, detail, progress) = if sv.active_workspace.is_empty() {
+        (false, String::new(), String::new(), 1.0)
+    } else {
+        catchup_bar(lang, &sv.catchup)
+    };
     ui.set_catchup_show(show);
     ui.set_catchup_title(title.into());
     ui.set_catchup_detail(detail.into());
@@ -731,7 +762,10 @@ pub(crate) fn apply_session(
                 // a phrase that does not fit the link's seat is, in the field,
                 // a member using someone else's link: say whose it is
                 let shown = if error.contains("does not derive this seat's identity key") {
-                    crate::i18n::Lexicon::of(lang).rv_wrong_seat.replace("{who}", &ui.get_rv_member())
+                    // the seat the LINK names; the run's member only as a fallback
+                    let link_who = ui.get_rv_kind().who;
+                    let who = if link_who.is_empty() { ui.get_rv_member() } else { link_who };
+                    crate::i18n::Lexicon::of(lang).rv_wrong_seat.replace("{who}", &who)
                 } else {
                     localize_recover_failed(lang, &error)
                 };
@@ -1070,8 +1104,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     ui.set_rv_need(i32::try_from(sv.recover.need).unwrap_or(0));
     ui.set_rv_replaces(sv.recover.replaces.clone().into());
     // the step log: the last lines, newest at the bottom
-    let tail = sv.recover.log.len().saturating_sub(RV_LOG_SHOWN);
-    let lines: Vec<slint::SharedString> = sv.recover.log[tail..]
+    let lines: Vec<slint::SharedString> = rejoin_log_lines(&sv.recover.log)
         .iter()
         .map(|l| localize_recover_note(lang, l).into())
         .collect();

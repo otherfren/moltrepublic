@@ -2459,6 +2459,23 @@ impl State {
         }
         // the step log under the checklist: one line per step, bounded
         let log = &mut self.session.recover.log;
+        // a run of block / part / waiting lines is one line, the newest, so
+        // the first steps (the coordinator's version) stay in the log
+        let kind = |l: &str| {
+            if l.starts_with("block ") && l.ends_with(" received") {
+                1
+            } else if l.starts_with("checkpoint part ") {
+                2
+            } else if l.starts_with("still waiting for the chain anchor") {
+                3
+            } else {
+                0
+            }
+        };
+        let k = kind(&note);
+        if k != 0 && log.last().is_some_and(|p| kind(p) == k) {
+            log.pop();
+        }
         if log.last() != Some(&note) {
             log.push(note.clone());
             let over = log.len().saturating_sub(RECOVER_LOG_MAX);

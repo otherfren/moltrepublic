@@ -1196,9 +1196,18 @@ export component MemberPill inherits Rectangle {
                 // the tip generation this element owns (HintTip.show hands
                 // it out): only its owner may clear the bubble
                 property <int> tip-gen;
+                // the words change while hovered (a catch-up moves on)
+                property <string> tip-text: root.m.sync != "" ? "\{root.m.name} - \{root.m.sync}" : root.m.name;
+                changed tip-text => {
+                    if (self.tip-on) {
+                        self.tip-gen = HintTip.show(self.tip-text,
+                            root.absolute-position.x + root.width + 8px,
+                            root.absolute-position.y + (root.height - 23px) / 2);
+                    }
+                }
                 changed tip-on => {
                     if (self.tip-on) {
-                        self.tip-gen = HintTip.show(root.m.sync != "" ? "\{root.m.name} - \{root.m.sync}" : root.m.name,
+                        self.tip-gen = HintTip.show(self.tip-text,
                             root.absolute-position.x + root.width + 8px,
                             root.absolute-position.y + (root.height - 23px) / 2);
                     } else {

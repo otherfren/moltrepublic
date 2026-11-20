@@ -280,10 +280,25 @@ fn catch_up_and_seat_sync_render() {
     let (show, title, detail, progress) = catchup_bar(1, &behind);
     assert!(show);
     assert_eq!(title, "Holt auf: Block 100 von 400");
-    assert_eq!(detail, "noch 300 · 12 Blöcke/min · fragt nach");
+    assert_eq!(detail, "noch 300 · 12 Blöcke/min · fragt Peers an");
     assert!((progress - 0.25).abs() < 1e-6);
     assert_eq!(seat_sync_text(1, "recovering:1:2").1, "↻ 1/2");
     assert_eq!(seat_sync_text(1, "behind:5:40").0, "holt auf: Block 5 von 40");
     assert_eq!(seat_sync_text(0, "readmitted").0, "re-admitted, fetching the chain");
     assert_eq!(seat_sync_text(0, ""), (String::new(), String::new()));
+}
+
+/// The rejoin log keeps its steps in view: a run of block or part lines
+/// is one line, the newest.
+#[test]
+fn the_rejoin_log_collapses_runs() {
+    use crate::mirror::rejoin_log_lines;
+    let log: Vec<String> = ["coordinator runs 0.0.19", "welcomed back - fetching the chain anchor", "checkpoint part 1/3", "checkpoint part 2/3", "block 5 received", "block 6 received", "block 7 received"]
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect();
+    assert_eq!(
+        rejoin_log_lines(&log),
+        vec!["coordinator runs 0.0.19", "welcomed back - fetching the chain anchor", "checkpoint part 2/3", "block 7 received"]
+    );
 }

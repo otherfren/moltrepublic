@@ -238,7 +238,7 @@ impl State {
         });
         let canonical = molt_net::canonical_nostr_pk(sender).unwrap_or_default();
         if !anchor.is_some_and(|a| !a.is_empty() && a == canonical) {
-            tracing::debug!(%member, "recovery_failed frame=not_from_the_seat");
+            tracing::debug!(member = ?member, "recovery_failed frame=not_from_the_seat");
             return Ok(Reply::Ack);
         }
         let version = if version.is_empty() { "unknown" } else { version };

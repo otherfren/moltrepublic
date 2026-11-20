@@ -2194,7 +2194,7 @@ export component AppWindow inherits Window {
     // helpers the panel drives from it. Both flows already exist as co-equal
     // commands (join-start / recover-start); what the merge changes is only
     // which of them a click issues.
-    property <LinkPreview> rv-kind: root.classify-link(root.rv-link);
+    out property <LinkPreview> rv-kind: root.classify-link(root.rv-link);
     // one changeset kind (0 created · 1 folder · 2 renamed · 3 moved ·
     // 4 deleted · 5 edited) → its glyph and its tone, named once
     pure function cs-glyph(kind: int) -> string {
@@ -5189,7 +5189,7 @@ export component AppWindow inherits Window {
                         // which workspace the rejoin lands in: a copy here
                         // is replaced (to the trash), else it is new
                         if root.rv-running: Text {
-                            text: root.rv-replaces != "" ? "\{Strings.rv-replaces} \{root.rv-replaces}" : Strings.rv-new-here;
+                            text: root.rv-replaces != "" ? "\{Strings.rv-replaces}: \{root.rv-replaces}" : Strings.rv-new-here;
                             color: Theme.dim;
                             font-size: Theme.fs-cap;
                             wrap: word-wrap;
@@ -5399,7 +5399,7 @@ export component AppWindow inherits Window {
                         label: root.rv-kind.kind == 1
                             ? "\{Strings.rw-link-join} \{root.rv-kind.republic} · \{root.rv-kind.who}"
                             : (root.rv-kind.kind == 2
-                                ? "\{Strings.rw-link-recover} \{root.rv-kind.republic} · \{root.rv-kind.who}"
+                                ? "\{Strings.rw-link-recover} \{root.rv-kind.who} · \{root.rv-kind.republic}"
                                 : Strings.rw-link-unknown);
                         label-color: root.rv-kind.kind == 0 ? Theme.bad : Theme.text;
                     }
@@ -5762,7 +5762,7 @@ export component AppWindow inherits Window {
                                                 font-weight: 600;
                                             }
                                             Text {
-                                                text: m.last;
+                                                text: m.sync-short != "" ? m.sync-short : m.last;
                                                 font-size: Theme.fs-cap;
                                             }
                                         }

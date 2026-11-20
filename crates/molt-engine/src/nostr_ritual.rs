@@ -425,13 +425,14 @@ pub(crate) fn spawn_recovery_inbox(
 /// old coordinator (no version) cannot send a checkpoint larger than one
 /// frame; that is the usual cause and is named first.
 fn anchor_timeout_reason(
+    waited_min: u64,
     blob: bool,
     parts: Option<(u32, u32)>,
     blocks: &[molt_core::ChainBlock],
     verify_error: &str,
     coordinator_version: Option<&str>,
 ) -> String {
-    let mut out = "the chain anchor did not verify within 15 minutes".to_string();
+    let mut out = format!("the chain anchor did not verify within {waited_min} min of the Welcome");
     let checkpoint = match (blob, parts) {
         (true, _) => "checkpoint=received".to_string(),
         (false, Some((have, total))) => format!("checkpoint=parts {have}/{total}"),
@@ -446,7 +447,12 @@ fn anchor_timeout_reason(
         out.push_str(&format!(" error={verify_error}"));
     }
     match coordinator_version {
-        Some("") => out.push_str(" - the coordinator runs a build older than 0.0.18, which cannot send a checkpoint larger than one frame: update it"),
+        // no version = 0.0.18 or older; before 0.0.18 a checkpoint over one
+        // frame was never sent, which is what "none" then means
+        Some("") if !blob && parts.is_none() => {
+            out.push_str(" coordinator=0.0.18 or older - before 0.0.18 a large checkpoint was never sent: update the coordinator")
+        }
+        Some("") => out.push_str(" coordinator=0.0.18 or older"),
         Some(v) => out.push_str(&format!(" coordinator={v}")),
         None => {}
     }
@@ -1151,7 +1157,7 @@ async fn recovery_rejoin(
                 answered = true;
                 if coordinator_version.is_none() {
                     let line = if version.is_empty() {
-                        "coordinator runs a build older than 0.0.18".to_string()
+                        "coordinator runs 0.0.18 or older".to_string()
                     } else {
                         format!("coordinator runs {version}")
                     };
@@ -1205,15 +1211,16 @@ async fn recovery_rejoin(
     let mut blocks: Vec<molt_core::ChainBlock> = Vec::new();
     let waiting_since = tokio::time::Instant::now();
     // what arrived, for the reason if nothing verifies in time
-    let mut parts_seen: Option<(u32, u32)> = None;
+    let mut parts_seen: Option<(std::collections::BTreeSet<u32>, u32)> = None;
     let mut last_verify_error = String::new();
     let note = |n: String| send_cmd(tx, Command::NetRecoverNote { note: n, generation });
     let (head, _sealed) = loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
             let reason = anchor_timeout_reason(
+                waiting_since.elapsed().as_secs() / 60,
                 blob.is_some(),
-                parts_seen,
+                parts_seen.map(|(seen, total)| (u32::try_from(seen.len()).unwrap_or(u32::MAX), total)),
                 &blocks,
                 &last_verify_error,
                 coordinator_version.as_deref(),
@@ -1250,8 +1257,10 @@ async fn recovery_rejoin(
             }
             molt_core::WorkspaceEvent::CheckpointServedPart { blob_hash, index, total, data } => {
                 let _ = note(format!("checkpoint part {}/{total}", index.saturating_add(1))).await;
-                let have = parts_seen.map_or(0, |(h, _)| h).saturating_add(1);
-                parts_seen = Some((have.min(total), total));
+                // distinct parts of the newest blob, not frames
+                let mut seen = parts_seen.take().filter(|(_, t)| *t == total).map(|(s, _)| s).unwrap_or_default();
+                seen.insert(index);
+                parts_seen = Some((seen, total));
                 if let Some(b) = parts.accept(&blob_hash, index, total, &data) {
                     let _ = note("checkpoint received".to_string()).await;
                     blob = Some(b);
@@ -2103,11 +2112,12 @@ mod anchor_reason_tests {
     /// by name when its version is missing.
     #[test]
     fn the_anchor_timeout_says_what_arrived_and_who_is_old() {
-        let old = super::anchor_timeout_reason(false, Some((1, 2)), &[], "", Some(""));
-        assert!(old.contains("checkpoint=parts 1/2"), "{old}");
-        assert!(old.contains("blocks=none"), "{old}");
-        assert!(old.contains("older than 0.0.18"), "{old}");
-        let new = super::anchor_timeout_reason(false, None, &[], "bad prev", Some("0.0.19"));
+        let old = super::anchor_timeout_reason(3, false, None, &[], "", Some(""));
+        assert!(old.contains("within 3 min") && old.contains("checkpoint=none"), "{old}");
+        assert!(old.contains("update the coordinator"), "{old}");
+        let parts = super::anchor_timeout_reason(3, false, Some((1, 2)), &[], "", Some(""));
+        assert!(parts.contains("checkpoint=parts 1/2") && !parts.contains("update"), "{parts}");
+        let new = super::anchor_timeout_reason(9, false, None, &[], "bad prev", Some("0.0.19"));
         assert!(new.contains("checkpoint=none") && new.contains("error=bad prev") && new.contains("coordinator=0.0.19"), "{new}");
     }
 }

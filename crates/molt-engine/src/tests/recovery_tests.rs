@@ -547,5 +547,10 @@ fn the_rejoin_keeps_a_step_log() {
     for i in 0..80 {
         st.cmd_net_recover_note(format!("still waiting for the chain anchor ({i} s)"), g).expect("note");
     }
+    assert_eq!(st.session.recover.log.len(), 4, "a run of waiting lines is one line");
+    assert_eq!(st.session.recover.log[0], "welcomed back - fetching the chain anchor", "the first steps stay");
+    for i in 0..80 {
+        st.cmd_net_recover_note(format!("step {i}"), g).expect("note");
+    }
     assert_eq!(st.session.recover.log.len(), 50, "bounded");
 }

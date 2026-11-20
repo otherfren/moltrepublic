@@ -501,8 +501,8 @@ pub(crate) fn localize_recover_note(lang: i32, n: &str) -> String {
         return format!("Blöcke {range} noch nicht prüfbar: {why}");
     }
     if let Some(v) = n.strip_prefix("coordinator runs ") {
-        if v == "a build older than 0.0.18" {
-            return "Koordinator läuft auf einer Version vor 0.0.18".into();
+        if v == "0.0.18 or older" {
+            return "Koordinator läuft auf 0.0.18 oder älter".into();
         }
         return format!("Koordinator läuft auf {v}");
     }
@@ -1171,7 +1171,7 @@ lexicon! {
     jw_failed: "Failed", "Fehlgeschlagen";
     om_recover_link: "Recovery link", "Recovery-Link";
     rlk_title: "Recovery link", "Recovery-Link";
-    rlk_body: "Only for this member: the link restores exactly this one seat. Every returning member needs a link of their own.", "Nur für dieses Mitglied: Der Link stellt genau diesen einen Sitz wieder her. Jedes zurückkehrende Mitglied braucht einen eigenen Link.";
+    rlk_body: "Restores only this seat. Every returning member needs a link of their own.", "Stellt nur diesen Sitz wieder her. Jedes zurückkehrende Mitglied braucht einen eigenen Link.";
     rlk_caution: "Caution: share this link only over a secret channel. It is single-use and becomes invalid again when this application restarts.", "Achtung, dieser Link sollte nur über einen geheimen Kanal geteilt werden. Er ist einmalig nutzbar und wird nach Neustart dieser Anwendung wieder ungültig.";
     rlk_pending: "Creating the link…", "Link wird erstellt…";
     rlk_pending_hint: "The returning member does not need to be online - a recovery link is made for someone who is unreachable.", "Das zurückkehrende Mitglied muss dafür nicht online sein - ein Recovery-Link ist ja gerade für ein unerreichbares Mitglied gedacht.";
@@ -1182,8 +1182,8 @@ lexicon! {
     cu_title: "Catching up: block {h} of {t}", "Holt auf: Block {h} von {t}";
     cu_left: "{n} to go", "noch {n}";
     cu_rate: "{r} blocks/min", "{r} Blöcke/min";
-    cu_asking: "asking peers", "fragt nach";
-    cu_forks: "{n} blocks of another branch", "{n} Blöcke eines anderen Zweigs";
+    cu_asking: "asking peers", "fragt Peers an";
+    cu_forks: "{n} block(s) of another branch", "{n} Block/Blöcke eines anderen Zweigs";
     sy_recovering: "recovering: {h} of {n} approvals", "Wiederherstellung: {h} von {n} Zustimmungen";
     sy_readmitted: "re-admitted, fetching the chain", "wieder aufgenommen, holt die Kette";
     sy_behind: "catching up: block {h} of {t}", "holt auf: Block {h} von {t}";
@@ -1208,9 +1208,9 @@ lexicon! {
     rw_join_goto: "Show", "Anzeigen";
     rw_link_join: "Invite to", "Einladung zu";
     rw_link_recover: "Seat of", "Sitz von";
-    rv_replaces: "Replaces the local copy", "Ersetzt die lokale Kopie";
+    rv_replaces: "Replaces local copy", "Ersetzt lokale Kopie";
     rv_new_here: "New on this device", "Neu auf diesem Gerät";
-    rv_wrong_seat: "This link restores the seat of {who}. Ask for a link for your own seat.", "Dieser Link stellt den Sitz von {who} wieder her. Bitte um einen Link für deinen eigenen Sitz.";
+    rv_wrong_seat: "The phrase does not fit the seat of {who}.", "Die Phrase passt nicht zum Sitz von {who}.";
     rw_link_unknown: "Not a usable molt:// link.", "Kein brauchbarer molt://-Link.";
     rw_rl_not_in_pool: "not in your pool", "nicht in deinem Pool";
     rw_rl_unconfirmed: "not confirmed", "nicht bestätigt";
