@@ -50,12 +50,14 @@ pub(crate) fn blob_events(blob: &CheckpointState, cap: usize) -> Option<Vec<Work
     )
 }
 
-/// One blob being reassembled. A part of another blob replaces it.
+/// How many blobs are reassembled side by side (two servers on different
+/// cuts must not reset each other).
+const MAX_ASSEMBLIES: usize = 4;
+
+/// The blobs being reassembled, by hash; the oldest goes when a fifth starts.
 #[derive(Debug, Default)]
 pub(crate) struct BlobAssembly {
-    hash: String,
-    total: u32,
-    parts: BTreeMap<u32, Vec<u8>>,
+    slots: Vec<(String, u32, BTreeMap<u32, Vec<u8>>)>,
 }
 
 impl BlobAssembly {
@@ -66,17 +68,23 @@ impl BlobAssembly {
             return None;
         }
         let bytes = base64::engine::general_purpose::STANDARD.decode(data).ok()?;
-        if self.hash != blob_hash || self.total != total {
-            *self = Self { hash: blob_hash.to_string(), total, parts: BTreeMap::new() };
-        }
-        self.parts.insert(index, bytes);
-        if self.parts.len() < usize::try_from(total).unwrap_or(usize::MAX) {
+        let slot = match self.slots.iter().position(|(h, t, _)| h == blob_hash && *t == total) {
+            Some(i) => i,
+            None => {
+                if self.slots.len() >= MAX_ASSEMBLIES {
+                    self.slots.remove(0);
+                }
+                self.slots.push((blob_hash.to_string(), total, BTreeMap::new()));
+                self.slots.len() - 1
+            }
+        };
+        self.slots[slot].2.insert(index, bytes);
+        if self.slots[slot].2.len() < usize::try_from(total).unwrap_or(usize::MAX) {
             return None;
         }
-        let whole: Vec<u8> = std::mem::take(&mut self.parts).into_values().flatten().collect();
-        let ok = molt_storage::content_hash(&whole) == self.hash;
-        *self = Self::default();
-        if !ok {
+        let (hash, _, parts) = self.slots.remove(slot);
+        let whole: Vec<u8> = parts.into_values().flatten().collect();
+        if molt_storage::content_hash(&whole) != hash {
             tracing::warn!(blob_hash, "checkpoint_blob=hash_mismatch");
             return None;
         }

@@ -2391,6 +2391,97 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Export every shared file complete on this node into one directory.
+    pub(crate) fn cmd_files_export(&mut self, dest: String) -> Result<Reply, MoltError> {
+        let dest = dest.trim();
+        if dest.is_empty() {
+            return Err(MoltError::FilesExport("a target directory is required"));
+        }
+        if self.session.files_export.running {
+            return Err(MoltError::FilesExport("an export is already running"));
+        }
+        let mut items = Vec::new();
+        for u in self.uploads_view() {
+            let source = match self.local_copy_of(&u) {
+                molt_core::LocalCopy::Own { path } | molt_core::LocalCopy::Downloaded { path } => {
+                    Some(crate::upload_refs::ByteSource::File(path.into()))
+                }
+                molt_core::LocalCopy::Mirrored => self.mirrored_byte_source(&u.id),
+                _ => None,
+            };
+            if let Some(source) = source {
+                items.push(crate::transfer::ExportItem {
+                    name: u.name.clone(),
+                    id_hex: u.id.to_string(),
+                    checksum: u.checksum.clone(),
+                    source,
+                });
+            }
+        }
+        if items.is_empty() {
+            return Err(MoltError::FilesExport("no file is complete on this node"));
+        }
+        let dest_path = molt_storage::expand_tilde(&self.host_path(dest)?);
+        let dest_str = dest_path.display().to_string();
+        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
+            return Err(MoltError::Engine("engine is shutting down".to_string()));
+        };
+        tracing::info!(dest = %dest_str, files = items.len(), "files_export=start");
+        self.session.files_export = molt_core::ExportState {
+            running: true,
+            workspace: self.session.active_workspace.clone(),
+            dest: dest_str.clone(),
+            ..molt_core::ExportState::default()
+        };
+        self.emit_session(SessionScope::Full);
+        tokio::spawn(async move {
+            let res = tokio::task::spawn_blocking(move || crate::transfer::export_files(&dest_path, &items)).await;
+            let cmd = match res {
+                Ok(Ok((files, bytes, failed))) => molt_core::Command::NetFilesExportDone {
+                    dest: dest_str,
+                    files,
+                    bytes,
+                    failed,
+                },
+                Ok(Err(e)) => molt_core::Command::NetFilesExportFailed { error: e },
+                Err(e) => molt_core::Command::NetFilesExportFailed { error: format!("export task failed: {e}") },
+            };
+            crate::send_internal(&cmd_tx, cmd).await;
+        });
+        Ok(Reply::Ack)
+    }
+
+    /// The files export finished (engine-internal).
+    pub(crate) fn cmd_net_files_export_done(
+        &mut self,
+        dest: String,
+        files: u64,
+        bytes: u64,
+        failed: u64,
+    ) -> Result<Reply, MoltError> {
+        tracing::info!(dest = %dest, files, bytes, failed, "files_export=done");
+        let ex = &mut self.session.files_export;
+        ex.running = false;
+        ex.dest = dest;
+        ex.result = if failed == 0 { "ok".to_string() } else { format!("error: {failed} failed") };
+        ex.files = files;
+        ex.bytes = bytes;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// The files export failed as a whole (engine-internal).
+    pub(crate) fn cmd_net_files_export_failed(&mut self, error: String) -> Result<Reply, MoltError> {
+        tracing::warn!(error = %error, "files_export=failed");
+        let ex = &mut self.session.files_export;
+        ex.running = false;
+        ex.result = format!("error: {error}");
+        ex.files = 0;
+        ex.bytes = 0;
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     pub(crate) fn cmd_set_workspace_backup(
         &mut self,
         id: WorkspaceId,

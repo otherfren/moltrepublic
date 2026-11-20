@@ -272,9 +272,11 @@ async fn twelve_thousand_events_page_through_the_production_bound() {
     let reqs = relay.reqs.lock().expect("log").clone();
     assert_eq!(reqs.len(), 4, "three pages, then the live tail: {reqs:?}");
     assert_eq!(reqs[3].get("until"), None, "the tail is live");
+    // the tail keeps the 48 h overlap: back-dated wraps and resent
+    // commits still arrive
     assert_eq!(
         reqs[3].get("since").and_then(|v| v.as_u64()),
-        Some(now - 10)
+        Some((now - 10).saturating_sub(48 * 3600))
     );
     assert_eq!(rt.health().await.get(&relay.url), Some(&RelayHealth::Up));
 }

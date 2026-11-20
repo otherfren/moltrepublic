@@ -237,10 +237,10 @@ DENY_TOOLS=(propose withdraw wiki_edit quests_propose propose_checkpoint poke
             relay_probe relay_add relay_remove relay_move relay_confirm relay_revoke
             relay_clearnet_session net_test_s3 net_test_tor net_reset_tor read_log net_list_backups
             test_wake clear_notice set_workspace_backup backup_now backup_fetch
-            encrypt_workspace decrypt_workspace wiki_export
+            encrypt_workspace decrypt_workspace wiki_export files_export
             restore_start restore_cancel restore_finish
             create_start create_cancel create_propose create_finish
-            recover_invite_start recover_start confirm_seed_backup
+            recover_invite_start recover_start recover_cancel confirm_seed_backup
             join_start join_confirm_charter join_decline_charter join_finish join_cancel
             wiki_draft_save wiki_draft_load quests_draft_save quests_draft_load)
 [[ "$VOTING" == "ja" ]] || DENY_TOOLS+=(approve decline)

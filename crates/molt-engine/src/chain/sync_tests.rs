@@ -514,8 +514,8 @@ fn an_oversized_checkpoint_blob_is_served_in_parts() {
     assert_eq!(got, Some(fat), "the parts rebuild the blob");
 }
 
-/// S3: a part of another blob restarts the assembly; a part set whose
-/// bytes do not match the hash yields nothing.
+/// S3: parts of two blobs interleave without resetting each other; a
+/// part set whose bytes do not match the hash yields nothing.
 #[test]
 fn blob_parts_check_their_hash() {
     let mut b = Builder::new(&["petra", "walter"], 2);
@@ -532,12 +532,14 @@ fn blob_parts_check_their_hash() {
             other => panic!("only parts: {other:?}"),
         })
         .collect();
+    // two blobs interleaved: each completes on its own
     let mut asm = super::blob_parts::BlobAssembly::default();
     for (h, i, t, d) in &parts[1..] {
         assert!(asm.accept(&format!("{h}0"), *i, *t, d).is_none());
+        assert!(asm.accept(h, *i, *t, d).is_none());
     }
     let (h, i, t, d) = &parts[0];
-    assert!(asm.accept(h, *i, *t, d).is_none(), "the other hash's parts were dropped");
+    assert!(asm.accept(h, *i, *t, d).is_some(), "an interleaved blob still completes");
     let mut asm = super::blob_parts::BlobAssembly::default();
     let wrong = format!("{:0>64}", "1");
     for (_, i, t, d) in &parts {
@@ -1220,7 +1222,7 @@ fn an_unhealed_divergence_goes_loud_once() {
     loser.presence.clock_override = Some(1_000 + 900);
     loser.chain_heal_tick();
     assert_eq!(loser.chat.len(), 1);
-    assert!(loser.chat[0].body.starts_with("chain not healed: peer=petra"), "{}", loser.chat[0].body);
+    assert!(loser.chat[0].body.starts_with("chain not healed with petra"), "{}", loser.chat[0].body);
     assert!(loser.session.notice.starts_with("chain-heal-stuck:petra:"));
     loser.presence.clock_override = Some(1_000 + 2_000);
     loser.chain_heal_tick();

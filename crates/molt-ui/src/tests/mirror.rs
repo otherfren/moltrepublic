@@ -251,3 +251,17 @@ fn log_line_tone_follows_the_prefix() {
     assert_eq!(crate::mirror::log_line_tone("→ opened"), 0);
     assert_eq!(crate::mirror::log_line_tone(""), 0);
 }
+
+/// The files export toasts its outcome once it is over, never while it runs.
+#[test]
+fn the_files_export_toasts_its_outcome() {
+    use crate::wiki_bridge::files_export_toast;
+    let mut ex = molt_core::ExportState { running: true, ..Default::default() };
+    assert_eq!(files_export_toast(0, &ex), None);
+    ex.running = false;
+    ex.result = "ok".to_string();
+    ex.files = 3;
+    assert_eq!(files_export_toast(0, &ex), Some(("files exported: 3".to_string(), false)));
+    ex.result = "error: creating /x: denied".to_string();
+    assert!(files_export_toast(0, &ex).is_some_and(|(_, failed)| failed));
+}

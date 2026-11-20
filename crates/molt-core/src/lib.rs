@@ -4145,6 +4145,9 @@ pub struct SessionView {
     /// outcome.
     #[serde(default)]
     pub wiki_export: ExportState,
+    /// The shared-files export lifecycle (`FilesExport`; additive).
+    #[serde(default)]
+    pub files_export: ExportState,
     /// The founding lifecycle (real over SMP).
     pub create: CreateState,
     /// The join-via-invite lifecycle (real over SMP).
@@ -4188,6 +4191,7 @@ impl Default for SessionView {
             recover: RecoverState::default(),
             export: ExportState::default(),
             wiki_export: ExportState::default(),
+            files_export: ExportState::default(),
             create: CreateState::default(),
             join: JoinState::default(),
             net_health: NetHealth::default(),
@@ -5103,6 +5107,33 @@ pub enum Command {
     /// The wiki export task failed (engine-internal); the real reason is
     /// surfaced verbatim — never a fake success.
     NetWikiExportFailed {
+        /// The failure, honestly.
+        error: String,
+    },
+    /// Copy every shared file this node holds COMPLETE - the own shares,
+    /// verified downloads and whole mirrors, persistent and temporary - into
+    /// one directory. Partial and absent files are skipped. Each copy is
+    /// re-checked against its share checksum; names collide as
+    /// "name (1).ext". Runs off the actor; the outcome lands in
+    /// [`SessionView::files_export`].
+    FilesExport {
+        /// Target directory: absolute (`~` expanded, parents created) or a
+        /// BARE NAME in the download directory; a relative path is refused.
+        dest: String,
+    },
+    /// The files export finished (engine-internal).
+    NetFilesExportDone {
+        /// The directory written.
+        dest: String,
+        /// Files written.
+        files: u64,
+        /// Bytes written.
+        bytes: u64,
+        /// Files that were local but failed to copy or verify.
+        failed: u64,
+    },
+    /// The files export failed as a whole (engine-internal).
+    NetFilesExportFailed {
         /// The failure, honestly.
         error: String,
     },
@@ -8701,6 +8732,10 @@ pub enum MoltError {
     /// proof, or one already running).
     #[error("wiki export: {0}")]
     WikiExport(&'static str),
+    /// A files export was refused (no target, nothing complete here, or one
+    /// already running).
+    #[error("files export: {0}")]
+    FilesExport(&'static str),
     /// The wiki index is still being built off the actor
     /// (`docs_archive/memory/knowledge_base_scale.md` §4.5/§4.6). Distinct from
     /// [`MoltError::Engine`] on purpose: this is "come back in a moment",

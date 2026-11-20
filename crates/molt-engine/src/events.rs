@@ -883,6 +883,8 @@ impl State {
         self.chain.beacon_at = 0;
         self.chain.anchor_repush.clear();
         self.chain.repush_check_at = 0;
+        self.chain.ready_at.clear();
+        self.chain.fallback_asked = None;
         self.recovery.pending.clear();
         self.recovery.swept.clear();
         self.chat.clear();

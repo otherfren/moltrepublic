@@ -1915,6 +1915,18 @@ pub(crate) fn wiki_export_toast(lang: i32, ex: &molt_core::ExportState) -> Optio
     None
 }
 
+/// The files export's outcome as toast copy (the wiki twin, its own words).
+pub(crate) fn files_export_toast(lang: i32, ex: &molt_core::ExportState) -> Option<(String, bool)> {
+    if ex.running || ex.result.is_empty() {
+        return None;
+    }
+    let l = Lexicon::of(lang);
+    if let Some(reason) = ex.result.strip_prefix("error: ") {
+        return Some((format!("⚠ {} {reason}", l.fx_failed), true));
+    }
+    (ex.result == "ok").then(|| (format!("{} {}", l.fx_done, ex.files), false))
+}
+
 /// The export dialog's two doors: the native folder picker, and the command
 /// itself. `WikiExport` answers `Ack` — the REAL outcome lands
 /// asynchronously in `SessionView::wiki_export` (toasted from the mirror),

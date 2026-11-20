@@ -1869,6 +1869,7 @@ export component AppWindow inherits Window {
         || WikiState.file-view-open
         || WikiState.file-modal-open
         || root.mem-export-open
+        || root.files-export-open
         || root.patch-view-open
         || root.relay-clearnet-modal-open
         || root.nt-open
@@ -1948,6 +1949,12 @@ export component AppWindow inherits Window {
     // session re-pushes unchanged, and a toast per push would repeat the
     // same result forever
     in-out property <string> wiki-export-seen;
+    // export every locally complete shared file into one folder
+    in-out property <bool> files-export-open: false;
+    in-out property <string> files-export-dir;
+    callback files-export-pick();
+    callback files-export(string);
+    in-out property <string> files-export-seen;
     // the changeset panel's action stack, read in a modal (the panel
     // itself stays one row)
     property <bool> mem-cs-stack-open: false;
@@ -2953,6 +2960,8 @@ export component AppWindow inherits Window {
             WikiState.file-modal-open = false;
         } else if (root.mem-export-open) {
             root.mem-export-open = false;
+        } else if (root.files-export-open) {
+            root.files-export-open = false;
         } else if (root.patch-view-open) {
             root.patch-view-open = false;
         } else if (root.org-retention-modal-open) {
@@ -7346,6 +7355,13 @@ export component AppWindow inherits Window {
                                             root.filter-uploads("");
                                         }
                                     }
+                                }
+                            }
+                            HorizontalLayout {
+                                alignment: end;
+                                AppButton {
+                                    label: Strings.fx-button;
+                                    clicked => { root.files-export-open = true; }
                                 }
                             }
                             if root.selected-view == "uploads": UploadsTable {
@@ -11766,6 +11782,49 @@ export component AppWindow inherits Window {
             font-size: Theme.fs-cap;
             wrap: word-wrap;
             preferred-width: 0;
+        }
+    }
+
+    // =================================================================
+    // Modal: export every shared file complete on this node into a folder
+    // =================================================================
+    if root.files-export-open: fex-dlg := ConfirmModal {
+        dialog-width: 460px;
+        child-focus: true;
+        title: Strings.fx-title;
+        body: Strings.fx-body;
+        confirm-label: Strings.mem-ex-confirm;
+        confirm-enabled: root.files-export-dir != "";
+        dismissed => {
+            root.files-export-open = false;
+        }
+        confirmed => {
+            root.files-export-open = false;
+            root.files-export(root.files-export-dir);
+        }
+        HorizontalLayout {
+            spacing: 8px;
+            AppField {
+                text <=> root.files-export-dir;
+                placeholder: "~/files-export";
+                horizontal-stretch: 1;
+                init => {
+                    self.focus-input();
+                }
+                accepted => {
+                    fex-dlg.confirm-from-field();
+                }
+            }
+            AppButton {
+                height: 38px * Theme.ui-scale;
+                pad: 10px;
+                icon: @image-url("assets/folder.svg");
+                icon-set: true;
+                label: Strings.set-ws-dir-browse;
+                clicked => {
+                    root.files-export-pick();
+                }
+            }
         }
     }
 

@@ -2997,6 +2997,20 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "files_export",
+            command: "files_export",
+            scope: Scope::Seat,
+            description: "Copy every shared file this node holds complete (own shares, verified downloads, whole mirrors; persistent and temporary) into one directory; partial and absent files are skipped. Name it with `path` (an ABSOLUTE directory) or `name` (a bare name in the download directory). Each copy is re-checked against its checksum; names collide as \"name (1).ext\". Async kickoff - the outcome lands in read_session's `files_export` state.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "an absolute target directory (~ expanded; parents are created)" },
+                    "name": { "type": "string", "description": "a bare directory name inside the download directory" }
+                }
+            }),
+            build: |args| Ok(Command::FilesExport { dest: dest_arg(args)? }),
+        },
+        ToolDef {
             name: "restore_start",
             command: "restore_start",
             scope: Scope::Seat,
@@ -3366,7 +3380,7 @@ pub(crate) mod tests {
         // hook; the value itself rides the settings surface as
         // `poke_wake_command` (ADR-0007), so this stays internal only
         // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 87] = [
+        const INTERNAL: [&str; 89] = [
             // not a door of its own: chat_send/approve/decline/withdraw
             // build it from their `operator`/`agent` arguments
             "as_operator",
@@ -3405,6 +3419,8 @@ pub(crate) mod tests {
             // bundle was written)
             "net_wiki_export_done",
             "net_wiki_export_failed",
+            "net_files_export_done",
+            "net_files_export_failed",
             // the off-actor wiki INDEX build reporting its own result: an
             // agent must not be able to hand this node an index
             "net_wiki_index_ready",

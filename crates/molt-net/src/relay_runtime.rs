@@ -685,6 +685,10 @@ async fn connect_and_req(shared: &SubShared, url: &str, replay: &Replay) -> Resu
     Ok(ws)
 }
 
+/// A relay whose replay makes no progress this many rounds in a row is not
+/// read again by this subscription.
+const MAX_STUCK_ROUNDS: u32 = 3;
+
 /// Seconds a page's `until` reaches past the oldest event read, so a relay
 /// treating `until` as exclusive still repeats that second (dedup absorbs it).
 const PAGE_OVERLAP: u64 = 1;
@@ -698,7 +702,8 @@ struct Replay {
     until: Option<u64>,
     /// Newest clamped `created_at` read in this replay.
     newest: Option<u64>,
-    /// After a paged replay: read only what is newer than the cursor.
+    /// After a paged replay: the live tail, from the cursor less the
+    /// overlap, not bounded.
     tail: bool,
 }
 
@@ -713,12 +718,7 @@ async fn place_req(
     let mut relay_filter = shared.filter.clone();
     let cursor = shared.cursors.lock().await.get(url).copied();
     if let Some(cursor) = cursor {
-        if replay.tail {
-            // the paged replay read everything up to the cursor already;
-            // the overlap would page through it again
-            let since = relay_filter.since.map_or(cursor, |s| s.as_secs().max(cursor));
-            relay_filter = relay_filter.since(nostr::Timestamp::from_secs(since));
-        } else if relay_filter.since.is_none() {
+        if relay_filter.since.is_none() {
             // the resume cursor applies to an OPEN-ENDED subscription only:
             // a caller that fixed its own time window (a multi-window
             // catch-up) must not have it narrowed on a reconnect (review T5)
@@ -761,6 +761,7 @@ async fn supervise(
     // denominator, so they must never increment its numerator either
     let mut eose_counted = !counts_toward_eose;
     let mut replay = Replay::default();
+    let mut stuck_rounds: u32 = 0;
     // the route this relay actually takes (a Local relay is dialed direct
     // even under Tor, §10.14) — the single most useful field when an
     // operator says "Tor runs but the client will not connect"
@@ -855,6 +856,7 @@ async fn supervise(
             SessionEnd::ConsumerGone => return, // nothing left to supervise
             SessionEnd::Died => {}
             SessionEnd::Paged => {
+                stuck_rounds = 0;
                 // the next page follows promptly; the backoff is for failures
                 shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
                 shared.down_reasons.lock().await.insert(url.clone(), RelayDownReason::ReplayBound);
@@ -864,6 +866,11 @@ async fn supervise(
             SessionEnd::Stuck => {
                 shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
                 shared.down_reasons.lock().await.insert(url.clone(), RelayDownReason::ReplayStuck);
+                stuck_rounds += 1;
+                if stuck_rounds >= MAX_STUCK_ROUNDS {
+                    tracing::warn!(relay = %url, rounds = stuck_rounds, "relay replay stuck - not read again");
+                    return;
+                }
                 tokio::time::sleep(cap).await;
                 continue;
             }
@@ -943,7 +950,10 @@ async fn read_session(
                 // session ends and the next page continues below the oldest
                 // event read, so a full relay is read whole (C6) and a relay
                 // replaying one page forever is caught by its progress
-                if replaying {
+                // the tail after a paged replay is not bounded: it re-reads
+                // the overlap (NIP-59 back-dated wraps, resent commits), and
+                // bounding it would page it forever
+                if replaying && !replay.tail {
                     stored_seen += 1;
                     if shared.history_bound.is_some_and(|bound| stored_seen > bound) {
                         let next = page_oldest.map(|o| o.saturating_add(PAGE_OVERLAP));

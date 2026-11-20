@@ -27,6 +27,40 @@ pub(super) const OPEN_CARDS_PER_PROPOSER_MAX: usize = 64;
 /// republic three ways (F00). Loopback has no round to wait for.
 pub(super) const SEAL_PACE_SECS: u64 = 5;
 
+/// S5: how long a sealer gets before the next seat in line takes over.
+/// A late takeover only delays, an early one forks; Tor alone costs a few
+/// seconds per hop.
+pub(super) const SEALER_GRACE_SECS: u64 = 60;
+
+/// This seat's place in the sealing line: the roster sorted by name,
+/// silent seats left out (this seat never is).
+pub(super) fn sealer_rank(me: &str, roster: &[String], silent: &[String]) -> u64 {
+    let mut line: Vec<&String> = roster.iter().filter(|m| *m == me || !silent.contains(m)).collect();
+    line.sort();
+    line.iter().position(|m| *m == me).map_or(0, |i| u64::try_from(i).unwrap_or(u64::MAX))
+}
+
+/// What the `rank`-th seat in line does `waited` seconds after a proposal
+/// became sealable.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum SealerWait {
+    Seal,
+    Wait,
+    /// Its turn has come: first ask the peers for a block it missed.
+    Ask,
+}
+
+pub(super) fn sealer_wait(rank: u64, waited: u64) -> SealerWait {
+    let turn = rank.saturating_mul(SEALER_GRACE_SECS);
+    if rank == 0 || waited >= turn.saturating_add(SEAL_PACE_SECS) {
+        SealerWait::Seal
+    } else if waited >= turn {
+        SealerWait::Ask
+    } else {
+        SealerWait::Wait
+    }
+}
+
 /// The **ephemeral** signature collection for one pending proposal on a
 /// chain-governed republic (never persisted; rebuilt from gossip). The
 /// committer bundles these into a block once `sigs` reaches the threshold. A
@@ -445,6 +479,7 @@ impl State {
             .collect();
         valid.sort_by(|a, b| a.member.cmp(&b.member));
         valid.dedup_by(|a, b| a.member == b.member);
+        let signers: Vec<String> = valid.iter().map(|a| a.member.clone()).collect();
         // the restored member's consent is one distinct signer (recovery
         // approval design, 2026-08-08) — the sealer must count EXACTLY like
         // `verify_next`, or it seals blocks the verifiers reject. The consent
@@ -487,6 +522,11 @@ impl State {
         } else if valid.len() + consented < need {
             return;
         }
+        // S5: one sealer at a time; the others wait their turn
+        if !self.sealer_turn(id, target, &change, &signers) {
+            self.chain.seal_held.insert(id);
+            return;
+        }
         // A2.2: one round after the head moved, a local seal may build on it
         let pace = self.seal_pace_secs();
         if pace > 0 && self.presence_now().saturating_sub(self.chain.head_moved_at) < pace {
@@ -501,6 +541,68 @@ impl State {
             sigs: valid,
         };
         self.adopt_committed_block(block, id);
+    }
+
+    /// S5 (`docs/chain/chain_divergence_plan.md`): whether this node may
+    /// seal at `target` now. Of the seats that signed this proposal and are
+    /// seen here, the lowest-named seals at once; the k-th only once `k`
+    /// grace periods passed
+    /// since a proposal became sealable here, and after asking its peers
+    /// for a block it may have missed. Off without a real transport.
+    fn sealer_turn(&mut self, id: u64, target: u64, change: &ChainChange, signers: &[String]) -> bool {
+        if self.seal_pace_secs() == 0 {
+            return true;
+        }
+        let now = self.presence_now();
+        // per proposal: one that becomes sealable later must not inherit
+        // an earlier one's wait
+        self.chain.ready_at.retain(|_, (h, _)| *h == target);
+        let fresh = !self.chain.ready_at.contains_key(&id);
+        let since = self.chain.ready_at.entry(id).or_insert((target, now)).1;
+        // the line is the seats that signed THIS proposal and are seen: a
+        // seat that left or never voted holds nobody back
+        let me = self.member();
+        let mut out = self.unseen_seats();
+        out.extend(self.roster().into_iter().filter(|m| *m != me && !signers.contains(m)));
+        // the seat being restored has no node in the group to seal with
+        if let ChainChange::Membership { op: MembershipOp::Restored, member, .. } = change {
+            out.push(member.clone());
+        }
+        let rank = sealer_rank(&self.member(), &self.roster(), &out);
+        let waited = now.saturating_sub(since);
+        let turn = sealer_wait(rank, waited);
+        // waiting on a seat ahead: hand it the signatures held here, once,
+        // or it may lack one it needs and the wait runs to the fallback
+        if fresh && turn != SealerWait::Seal {
+            self.reserve_signatures(id);
+        }
+        match turn {
+            SealerWait::Seal => true,
+            SealerWait::Wait => false,
+            SealerWait::Ask => {
+                if self.chain.fallback_asked != Some(target) {
+                    self.chain.fallback_asked = Some(target);
+                    tracing::info!(target, rank, waited, "sealer=fallback");
+                    self.ask_for_height(target);
+                }
+                false
+            }
+        }
+    }
+
+    /// Seats with no recent sign of life here: never seen, or silent for
+    /// [`super::sync::SILENT_AFTER_SECS`]. The sealing line takes only seats
+    /// it has seen, so an unknown seat (a fresh founding, a seat being
+    /// restored) never holds the others back.
+    pub(crate) fn unseen_seats(&self) -> Vec<String> {
+        let now = self.presence_now();
+        self.roster()
+            .into_iter()
+            .filter(|m| {
+                let seen = self.member_last_seen(m);
+                seen == molt_core::MemberInfo::NEVER || now.saturating_sub(seen) >= super::sync::SILENT_AFTER_SECS
+            })
+            .collect()
     }
 
     /// The pacing round: [`SEAL_PACE_SECS`] over a Nostr transport, none
@@ -1389,6 +1491,29 @@ impl State {
     /// events is idempotent on every receiver (`receive_proposed` or-inserts,
     /// `collect_sig` keeps one signature per member, `try_commit` refuses
     /// decided proposals), so several answering peers converge harmlessly.
+    /// Re-send the verified signatures held for `id` (S5).
+    fn reserve_signatures(&mut self, id: u64) {
+        let Some(pending) = self.chain.pending_sigs.get(&id) else {
+            return;
+        };
+        let events: Vec<WorkspaceEvent> = pending
+            .sigs
+            .iter()
+            .filter(|a| pending.verified.contains(&a.member))
+            .map(|a| WorkspaceEvent::Approved {
+                id: ProposalId(id),
+                by: a.member.clone(),
+                height: pending.height,
+                sig: a.sig.clone(),
+            })
+            .collect();
+        let me = self.member();
+        for body in events {
+            let env = self.make_env(me.clone(), body);
+            self.record(env);
+        }
+    }
+
     pub(crate) fn serve_open_governance(&mut self) {
         let events = self.open_governance_events();
         let me = self.member();

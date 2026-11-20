@@ -1731,6 +1731,59 @@ fn spawn_derived_series_fetch(
     .abort_handle()
 }
 
+/// One share complete on this node, for the files export.
+pub(crate) struct ExportItem {
+    /// The share's file name (peer input; sanitized on landing).
+    pub name: String,
+    /// The share id, hex (names the `.part`).
+    pub id_hex: String,
+    /// The share's sha256, hex.
+    pub checksum: String,
+    /// Where the bytes are.
+    pub source: crate::upload_refs::ByteSource,
+}
+
+/// Write every item into `dir`, collision-dodged and re-verified against its
+/// checksum: `(written, bytes, failed)`. Only a missing or unwritable `dir`
+/// fails the whole export.
+pub(crate) fn export_files(dir: &Path, items: &[ExportItem]) -> Result<(u64, u64, u64), String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    let dest = DestSpec { explicit: Some(dir.display().to_string()), default_dir: String::new() };
+    let (mut written, mut bytes, mut failed) = (0u64, 0u64, 0u64);
+    for item in items {
+        let landed = prepare_landing(&dest, &item.name, &item.id_hex).and_then(|landing| {
+            let copy = match &item.source {
+                crate::upload_refs::ByteSource::File(p) => {
+                    std::fs::copy(p, &landing.part).map(|_| ()).map_err(|e| format!("copying: {e}"))
+                }
+                crate::upload_refs::ByteSource::Pieces { dir, key, count, size } => std::fs::File::create(&landing.part)
+                    .map_err(|e| format!("opening the landing: {e}"))
+                    .and_then(|f| {
+                        let mut w = std::io::BufWriter::new(f);
+                        crate::upload_refs::write_pieces(dir, key, *count, *size, &mut w).map_err(|e| e.to_string())?;
+                        std::io::Write::flush(&mut w).map_err(|e| format!("writing: {e}"))
+                    }),
+            };
+            if let Err(e) = copy {
+                let _ = std::fs::remove_file(&landing.part);
+                return Err(e);
+            }
+            verify_and_finish(&landing, &item.checksum, None)
+        });
+        match landed {
+            Ok(path) => {
+                written += 1;
+                bytes += std::fs::metadata(&path).map_or(0, |m| m.len());
+            }
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(id = %item.id_hex, error = %e, "files_export=item_failed");
+            }
+        }
+    }
+    Ok((written, bytes, failed))
+}
+
 pub(crate) fn spawn_local_copy(
     source: PathBuf,
     id: MessageId,
@@ -1800,6 +1853,37 @@ pub(crate) fn spawn_mirror_assembly(
 mod tests {
     use super::*;
     use molt_net::{LoopbackHub, LoopbackTransport};
+
+    /// The files export writes every complete share once, collision-dodged,
+    /// and counts a copy that misses its checksum as failed, not written.
+    #[test]
+    fn the_files_export_writes_verified_copies() {
+        let src = tempfile::tempdir().expect("src");
+        let out = tempfile::tempdir().expect("out");
+        let a = src.path().join("a.txt");
+        std::fs::write(&a, b"one").expect("write");
+        let sum = |b: &[u8]| hex::encode(sha2::Sha256::digest(b));
+        let item = |name: &str, checksum: String| ExportItem {
+            name: name.to_string(),
+            id_hex: "0".repeat(32),
+            checksum,
+            source: crate::upload_refs::ByteSource::File(a.clone()),
+        };
+        let items = vec![
+            item("a.txt", sum(b"one")),
+            ExportItem { id_hex: "1".repeat(32), ..item("a.txt", sum(b"one")) },
+            ExportItem { id_hex: "2".repeat(32), ..item("b.txt", sum(b"two")) },
+        ];
+        let dest = out.path().join("export");
+        let (written, bytes, failed) = export_files(&dest, &items).expect("export");
+        assert_eq!((written, bytes, failed), (2, 6, 1));
+        let mut names: Vec<String> = std::fs::read_dir(&dest)
+            .expect("dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["a (1).txt".to_string(), "a.txt".to_string()], "no .part is left behind");
+    }
 
     /// A spill a killed fetch left beside its `.part` is gone the moment a
     /// retry opens the sink, and a day-old orphan is swept when any

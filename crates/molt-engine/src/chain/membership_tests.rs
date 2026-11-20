@@ -1539,10 +1539,10 @@ fn the_v2_capability_survives_a_reopen() {
     assert!(back.consent_anchor_for("dora").is_some(), "the capability came back from disk");
 }
 
-/// S3/B5: a sealed restore whose seat was never heard from since may be
-/// re-admitted under the same anchor; one whose seat came back may not.
+/// S4a: a sealed restore whose seat was never heard from since is
+/// recognized by its own latest anchor only.
 #[test]
-fn an_unfinished_restore_may_be_retried_under_its_anchor() {
+fn an_unfinished_restore_is_recognized_by_its_anchor() {
     let mut b = Builder::new(&["petra", "walter", "dora"], 2);
     let anchor = "ab".repeat(32);
     b.commit_restored("dora", &anchor, &["petra", "walter"]);

@@ -1,8 +1,8 @@
 # Chain divergence: diagnose, heal, prevent
 
-**Status: PLAN, open work, not built (2026-11-20).** Execution-ready
-stages S1-S5 and S7, one release; S6 is research only. Every question is
-decided (§7). Threat model for this plan: **honest seats, faulty
+**Status: S1-S5, S7-S9 BUILT 2026-11-20 (release v0.0.18); S6 open
+(research done, not built).** §6a records where the build deviates from
+the stages below. Every question is decided (§7). Threat model for this plan: **honest seats, faulty
 network** (user, 2026-11-20). Verification stays as it is: `verify_chain`
 hard-rejects, the hash rule (`docs_archive/chain/chain_reorg.md` R1)
 alone decides a fork.
@@ -287,6 +287,15 @@ an Abort button under the running rejoin) aborts the task through
 `invalidate_recovery`; the bumped generation drops its late results, the
 notice `recover-cancelled` ends the run in the GUI.
 
+### S9. Export every local shared file (same release)
+
+User requirement (2026-11-20), the wiki export's twin: `Command::FilesExport`
+(MCP `files_export`, "Export all" in Shared Files) copies every share this
+node holds COMPLETE - own shares, verified downloads, whole mirrors;
+persistent and temporary - into one folder. Partial and absent files are
+skipped; each copy is re-checked against its checksum; names collide as
+"name (1).ext". The outcome lands in `SessionView::files_export`.
+
 ## 5. Compatibility
 
 S1, S2, S4, S5 change only local behaviour or local output; old and new
@@ -303,6 +312,29 @@ signed layout changes anywhere in this plan.
 - A divergence persisted by a v0.0.17-shaped chain heals after the
   update without restart by hand (S4a).
 - fmt, clippy 0 per crate, all tests green.
+
+## 6a. As built (2026-11-20)
+
+- S2: the bound also counts every reconnect's replay; the live tail after
+  a paged replay keeps the 48 h overlap and is not bounded (it re-reads
+  back-dated NIP-59 wraps and resent commits); a relay stuck three rounds
+  is not read again by that subscription.
+- S3/B5 dropped after review: a re-admission under an already anchored
+  key was unreachable (the spent ticket and the self-service lane both
+  refuse it) and replay-prone. A stuck restore retries with a FRESH link
+  (a new anchor); the parts make that retry succeed. Parts are not owed
+  in the delivery guarantee (`own_ackable`), so an older peer that cannot
+  parse them never pins the acked floor. Up to four blobs reassemble side
+  by side.
+- S4: the retry marks `catchup_from` only when this node is behind; the
+  escalation ignores silent peers.
+- S4a and the winner's serve (B3) run only on the first seat in the
+  sealing line, not on every survivor.
+- S5: the line is the seats that SIGNED the proposal and were seen in the
+  last 120 s, sorted by name, the restored seat of a `Restored` change
+  left out; rank k seals after k x 60 s, asking its peers first. Every
+  seat keeps the 5 s seal pacing (the leader too). `ready_at` is kept per
+  proposal.
 
 ## 7. Decisions (user, 2026-11-20)
 

@@ -192,6 +192,15 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
                 other => other,
             }
         ),
+        E::FilesExport(t) => format!(
+            "Datei-Export: {}",
+            match *t {
+                "a target directory is required" => "Zielordner fehlt",
+                "an export is already running" => "läuft bereits",
+                "no file is complete on this node" => "keine Datei vollständig auf diesem Gerät",
+                other => other,
+            }
+        ),
         E::Engine(t) => format!("Engine: {t}"),
     }
 }
@@ -1576,6 +1585,11 @@ lexicon! {
     mem_ex_file: "file", "Datei";
     mem_ex_files: "files", "Dateien";
     mem_ex_failed: "wiki export failed:", "Wiki-Export fehlgeschlagen:";
+    fx_button: "Export all", "Alle exportieren";
+    fx_title: "Export files", "Dateien exportieren";
+    fx_body: "Every file complete on this node, into one folder. Partial ones are skipped.", "Alle auf diesem Gerät vollständigen Dateien in einen Ordner. Unvollständige werden übersprungen.";
+    fx_done: "files exported:", "Dateien exportiert:";
+    fx_failed: "files export failed:", "Datei-Export fehlgeschlagen:";
     ed_copy: "Copy", "Kopieren";
     ed_cut: "Cut", "Ausschneiden";
     ed_paste: "Paste", "Einfügen";

@@ -419,3 +419,18 @@ async fn uploads(w: &WalletHandle) -> Vec<UploadView> {
         other => panic!("unexpected: {other:?}"),
     }
 }
+
+/// The files export needs a target and something complete to copy.
+#[test]
+fn a_files_export_without_local_files_is_refused() {
+    let mut st = crate::tests::plain_state();
+    assert!(matches!(
+        st.cmd_files_export("  ".to_string()),
+        Err(molt_core::MoltError::FilesExport("a target directory is required"))
+    ));
+    assert!(matches!(
+        st.cmd_files_export("/tmp/x".to_string()),
+        Err(molt_core::MoltError::FilesExport("no file is complete on this node"))
+    ));
+    assert!(!st.session.files_export.running);
+}

@@ -196,6 +196,32 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
         });
     }
 
+    // export every locally complete shared file: the folder picker and the
+    // command; the outcome toasts from the mirror (`files_export`)
+    {
+        let cx = ctx.clone();
+        ui.on_files_export_pick(move || {
+            let weak = cx.weak.clone();
+            let draft = weak.upgrade().map(|ui| ui.get_files_export_dir().to_string()).unwrap_or_default();
+            cx.rt.spawn(async move {
+                let Some(path) = crate::settings::pick_folder(draft).await else {
+                    return;
+                };
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_files_export_dir(path.into());
+                    }
+                });
+            });
+        });
+    }
+    {
+        let cx = ctx.clone();
+        ui.on_files_export(move |dest| {
+            cx.issue(Command::FilesExport { dest: dest.to_string() });
+        });
+    }
+
     {
         let cx = ctx.clone();
         ui.on_download_file(move |id, name| {

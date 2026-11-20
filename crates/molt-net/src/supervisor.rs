@@ -1335,7 +1335,10 @@ pub(crate) fn rewind_unacked(state: &mut TransportState) {
 /// OWN envelope that is not an `MlsCommit` (commits are supervisor-consumed
 /// raw — §4.5 — and foreign envelopes are never fanned out at all).
 pub(crate) fn own_ackable(me: &MemberId, env: &EventEnvelope) -> bool {
-    env.by == *me && !matches!(env.body, WorkspaceEvent::MlsCommit { .. })
+    // a checkpoint part is re-served on demand, and an older build cannot
+    // parse it: owing it would pin the floor on such a peer for good
+    env.by == *me
+        && !matches!(env.body, WorkspaceEvent::MlsCommit { .. } | WorkspaceEvent::CheckpointServedPart { .. })
 }
 
 /// Delivery guarantee §4.4: compute the new acked floor for one peer from

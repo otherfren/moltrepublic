@@ -54,7 +54,7 @@ const KNOWN_HEADS_MAX: usize = 16;
 
 /// A5: a seat unheard-of for this long is reported silent. Two presence
 /// ticks (30 s each) plus slack - shorter and every ordinary gap rings.
-const SILENT_AFTER_SECS: u64 = 120;
+pub(super) const SILENT_AFTER_SECS: u64 = 120;
 /// A5: a seat is silent once its signature is in none of the last this
 /// many blocks. One missed block is a lost race, not silence.
 const STALE_AFTER_BLOCKS: u64 = 2;
@@ -244,6 +244,12 @@ impl State {
         out
     }
 
+    /// S5: a fallback sealer asks its peers for a block at `height` it may
+    /// have missed, outside the catch-up dedup.
+    pub(crate) fn ask_for_height(&mut self, height: u64) {
+        self.send_chain_request(height, false);
+    }
+
     /// Send a catch-up request outside the dedup of [`Self::request_catchup`]
     /// (the retry and the beacon), with dense samples when asked.
     fn send_chain_request(&mut self, from: u64, dense: bool) {
@@ -257,7 +263,8 @@ impl State {
     /// B3: serve our branch from `fork` to a peer that lost the fork,
     /// at most once per serve debounce per peer.
     fn serve_branch_to(&mut self, peer: &str, fork: u64) {
-        if peer.is_empty() {
+        // one server is enough: the first seat in the sealing line
+        if peer.is_empty() || !self.first_in_line() {
             return;
         }
         let now = self.presence_now();
@@ -274,6 +281,12 @@ impl State {
         self.serve_chain_from(fork);
     }
 
+    /// Whether this seat is first in the sealing line (S5): the one that
+    /// serves what every seat could serve.
+    fn first_in_line(&self) -> bool {
+        super::governance::sealer_rank(&self.member(), &self.roster(), &self.unseen_seats()) == 0
+    }
+
     /// S4/S4a, on the delivery tick: retry a stalled catch-up with backoff,
     /// beacon the head, go loud on a divergence that does not heal, and
     /// re-push the anchor to a restored seat that never arrived.
@@ -285,7 +298,9 @@ impl State {
             return;
         };
         let now = self.presence_now();
-        let troubled = !self.chain.diverged.is_empty() || !self.chain.fork_candidates.is_empty();
+        // a peer gone silent cannot heal; it is not this node's trouble
+        let silent: Vec<String> = self.chain_lag().silent.into_iter().map(|s| s.member).collect();
+        let troubled = self.chain.diverged.keys().any(|p| !silent.contains(p)) || !self.chain.fork_candidates.is_empty();
         if troubled {
             if self.chain.heal_since == 0 {
                 self.chain.heal_since = now;
@@ -302,8 +317,11 @@ impl State {
                     .keys()
                     .next()
                     .map_or(head.saturating_add(1), |l| l.saturating_sub(1).max(anchor.saturating_add(1)));
-                self.chain.catchup_from = Some(from);
-                self.chain.catchup_since = now;
+                // a mark at head+1 would mute a later real gap there
+                if from <= head {
+                    self.chain.catchup_from = Some(from);
+                    self.chain.catchup_since = now;
+                }
                 self.send_chain_request(from, true);
                 self.chain.heal_backoff = self.chain.heal_backoff.saturating_mul(2).min(HEAL_BACKOFF_MAX_SECS);
                 self.chain.heal_next_at = now.saturating_add(self.chain.heal_backoff);
@@ -344,7 +362,7 @@ impl State {
         tracing::warn!(%peer, since, secs, "chain_heal_stuck");
         self.wake_trigger(molt_core::kanban_wake::CHAIN_STUCK_REASON, "");
         let me = self.member();
-        let body = format!("chain not healed: peer={peer} since={since}");
+        let body = format!("chain not healed with {peer} since height {since}");
         if let Err(e) = self.post_message(me, body, None, molt_core::ChannelRef::Group) {
             tracing::warn!(error = %e, "chain_heal_stuck chat=failed");
         }
@@ -355,6 +373,9 @@ impl State {
     /// S4a: seats whose last `Restored` block sealed but which were never
     /// heard from since get the anchor bootstrap again, bounded.
     fn repush_unfinished_restores(&mut self, now: u64) {
+        if !self.first_in_line() {
+            return;
+        }
         let me = self.member();
         let mut latest: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         for b in &self.chain.blocks {

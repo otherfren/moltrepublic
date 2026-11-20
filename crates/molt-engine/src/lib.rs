@@ -1029,6 +1029,10 @@ pub(crate) struct ChainProjection {
     /// check.
     pub(crate) anchor_repush: HashMap<MemberId, (u32, u64)>,
     pub(crate) repush_check_at: u64,
+    /// S5: per proposal, the height it became sealable at here and when;
+    /// and the height a fallback sealer already asked its peers about.
+    pub(crate) ready_at: BTreeMap<u64, (u64, u64)>,
+    pub(crate) fallback_asked: Option<u64>,
     /// S3: a served checkpoint blob arriving in parts.
     pub(crate) blob_parts: chain::blob_parts::BlobAssembly,
     /// When the open catch-up request was last sent (presence clock).
@@ -2229,6 +2233,11 @@ impl State {
                 self.cmd_net_wiki_export_done(dest, files, bytes)
             }
             Command::NetWikiExportFailed { error } => self.cmd_net_wiki_export_failed(error),
+            Command::FilesExport { dest } => self.cmd_files_export(dest),
+            Command::NetFilesExportDone { dest, files, bytes, failed } => {
+                self.cmd_net_files_export_done(dest, files, bytes, failed)
+            }
+            Command::NetFilesExportFailed { error } => self.cmd_net_files_export_failed(error),
 
             // backup.rs (story 12: the auto-backup ticker + manual trigger)
             Command::BackupNow { id } => self.cmd_backup_now(id),

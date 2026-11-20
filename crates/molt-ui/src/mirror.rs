@@ -36,7 +36,7 @@ use crate::surfaces::{
     SurfacesBundle, UploadRowData,
     LIST_PAGE_SIZE,
 };
-use crate::wiki_bridge::{patch_view_sync, wiki_export_toast};
+use crate::wiki_bridge::{files_export_toast, patch_view_sync, wiki_export_toast};
 use crate::{
     AppScreen, AppWindow, BackupRow, ChainRow, ChannelItem, LogLine, MemberRow, MemberSync,
     PatchView, Poke, ChatSeg, ProposalRow, ReactionItem, ReceiptItem, RecoverSeatRow, RelayItem, RelayPick,
@@ -570,6 +570,24 @@ pub(crate) fn apply_session(
     // re-pushes unchanged, so a toast per push would repeat the same result
     // forever. A started export clears the mark, which is what lets the very
     // same export toast a second time.
+    {
+        let ex = &sv.files_export;
+        let mark = if ex.running {
+            String::new()
+        } else {
+            format!("{}|{}|{}|{}", ex.dest, ex.result, ex.files, ex.bytes)
+        };
+        if ui.get_files_export_seen() != mark.as_str() {
+            ui.set_files_export_seen(mark.as_str().into());
+            if let Some((msg, failed)) = files_export_toast(lang, ex) {
+                if failed {
+                    ui.invoke_show_toast_error(msg.into());
+                } else {
+                    ui.invoke_show_toast(msg.into());
+                }
+            }
+        }
+    }
     {
         let ex = &sv.wiki_export;
         let mark = if ex.running {
