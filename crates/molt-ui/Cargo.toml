@@ -61,3 +61,5 @@ ttf-parser = "0.25"
 molt-net.workspace = true
 # TEST-ONLY: the vault fixtures derive each seat's real vault key.
 molt-vault.workspace = true
+# TEST-ONLY: captures the error toast's log event.
+tracing-subscriber.workspace = true
