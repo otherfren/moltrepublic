@@ -534,14 +534,15 @@ fn a_running_rejoin_can_be_cancelled() {
 #[test]
 fn the_rejoin_keeps_a_step_log() {
     let mut st = crate::tests::plain_state();
-    let g = Some(st.recovery.generation);
+    let gen = st.recovery.generation;
+    let g = Some(gen);
     for n in ["welcomed back - fetching the chain anchor", "checkpoint part 1/3", "checkpoint part 1/3", "block 7 received"] {
         st.cmd_net_recover_note(n.to_string(), g).expect("note");
     }
     assert_eq!(st.session.recover.log.len(), 3, "a repeat is one line");
     st.cmd_net_recover_progress("petra".to_string(), 2, vec!["petra".to_string()], Vec::new(), g).expect("progress");
     assert_eq!(st.session.recover.log.len(), 3, "the checklist keeps the log");
-    st.cmd_net_recover_note("stale".to_string(), Some(g.unwrap_or(0) + 9)).expect("stale");
+    st.cmd_net_recover_note("stale".to_string(), Some(gen + 9)).expect("stale");
     assert_eq!(st.session.recover.log.len(), 3);
     for i in 0..80 {
         st.cmd_net_recover_note(format!("still waiting for the chain anchor ({i} s)"), g).expect("note");
