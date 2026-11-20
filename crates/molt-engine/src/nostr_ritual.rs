@@ -1148,6 +1148,8 @@ async fn recovery_rejoin(
     let mut verified_run: (u64, usize) = (u64::MAX, 0);
     let mut parts = crate::chain::blob_parts::BlobAssembly::default();
     let mut blocks: Vec<molt_core::ChainBlock> = Vec::new();
+    let waiting_since = tokio::time::Instant::now();
+    let note = |n: String| send_cmd(tx, Command::NetRecoverNote { note: n, generation });
     let (head, _sealed) = loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
@@ -1159,19 +1161,27 @@ async fn recovery_rejoin(
         }
         let content = match sub.recv((deadline - now).min(RECV_SLICE)).await {
             molt_net::ritual_net::GroupRecv::Frame { content, .. } => content,
-            _ => continue,
+            _ => {
+                // a silent wait must not read as a dead connection
+                let secs = waiting_since.elapsed().as_secs();
+                let _ = note(format!("still waiting for the chain anchor ({secs} s)")).await;
+                continue;
+            }
         };
         let Some(env) = open_group_envelope(&group, &content) else {
             continue;
         };
         match env.body {
             molt_core::WorkspaceEvent::CheckpointServed { blob: b } => {
+                let _ = note("checkpoint received".to_string()).await;
                 blob = Some(b);
                 // new evidence: the same run may verify now (suffix + blob)
                 verified_run = (u64::MAX, 0);
             }
             molt_core::WorkspaceEvent::CheckpointServedPart { blob_hash, index, total, data } => {
+                let _ = note(format!("checkpoint part {}/{total}", index.saturating_add(1))).await;
                 if let Some(b) = parts.accept(&blob_hash, index, total, &data) {
+                    let _ = note("checkpoint received".to_string()).await;
                     blob = Some(b);
                     verified_run = (u64::MAX, 0);
                 }
@@ -1185,6 +1195,7 @@ async fn recovery_rejoin(
                     continue;
                 }
                 if !blocks.iter().any(|b| b.height == block.height) {
+                    let _ = note(format!("block {} received", block.height)).await;
                     blocks.push(block);
                     blocks.sort_by_key(|b| b.height);
                     blocks.truncate(RECOVER_BLOCK_BUFFER);
@@ -1218,9 +1229,15 @@ async fn recovery_rejoin(
             continue;
         }
         verified_run = key;
-        if let Ok(pair) = crate::chain::verify_served(blob.as_ref(), &run, Some(&h.republic_id)) {
-            blocks = run;
-            break pair;
+        match crate::chain::verify_served(blob.as_ref(), &run, Some(&h.republic_id)) {
+            Ok(pair) => {
+                let _ = note(format!("chain verified up to block {}", run[run.len() - 1].height)).await;
+                blocks = run;
+                break pair;
+            }
+            Err(e) => {
+                let _ = note(format!("blocks {}-{} do not verify yet: {e}", run[0].height, run[run.len() - 1].height)).await;
+            }
         }
     };
 

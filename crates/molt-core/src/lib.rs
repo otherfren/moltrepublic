@@ -3874,6 +3874,9 @@ pub struct RecoverState {
     /// The local workspace this rejoin replaces ("" = new on this device).
     #[serde(default)]
     pub replaces: String,
+    /// What the rejoin did so far, one line per step (bounded).
+    #[serde(default)]
+    pub log: Vec<String>,
 }
 
 /// The restore lifecycle (real: download/read → decrypt+stage →

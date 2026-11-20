@@ -160,6 +160,9 @@ pub(crate) fn sort_ws_items(items: &mut [WorkspaceItem], key: &str, desc: bool) 
     }
 }
 
+/// Rejoin log lines the recover pane shows.
+const RV_LOG_SHOWN: usize = 8;
+
 /// The recovery-flow reading of the transient session notice — the engine's
 /// contract for the recovery ritual (`recovery_ritual.md`): a coordinator's
 /// mint lifecycle (pending → link | failed), and the rejoiner's
@@ -1016,6 +1019,13 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
     );
     ui.set_rv_need(i32::try_from(sv.recover.need).unwrap_or(0));
     ui.set_rv_replaces(sv.recover.replaces.clone().into());
+    // the step log: the last lines, newest at the bottom
+    let tail = sv.recover.log.len().saturating_sub(RV_LOG_SHOWN);
+    let lines: Vec<slint::SharedString> = sv.recover.log[tail..]
+        .iter()
+        .map(|l| localize_recover_note(lang, l).into())
+        .collect();
+    ui.set_rv_log(ModelRc::new(VecModel::from(lines)));
     sync_rows(&ui.get_rv_seats(), rv_seats, |m| ui.set_rv_seats(m));
 
     // join

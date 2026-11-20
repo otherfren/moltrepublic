@@ -485,7 +485,23 @@ pub(crate) fn localize_recover_note(lang: i32, n: &str) -> String {
     {
         return format!("warte auf das Welcome des Koordinators ({m} min)");
     }
+    if let Some(s) = n.strip_prefix("still waiting for the chain anchor (").and_then(|r| r.strip_suffix(" s)")) {
+        return format!("warte weiter auf den Chain-Anker ({s} s)");
+    }
+    if let Some(p) = n.strip_prefix("checkpoint part ") {
+        return format!("Checkpoint-Teil {p}");
+    }
+    if let Some(h) = n.strip_prefix("block ").and_then(|r| r.strip_suffix(" received")) {
+        return format!("Block {h} empfangen");
+    }
+    if let Some(h) = n.strip_prefix("chain verified up to block ") {
+        return format!("Kette geprüft bis Block {h}");
+    }
+    if let Some((range, why)) = n.strip_prefix("blocks ").and_then(|r| r.split_once(" do not verify yet: ")) {
+        return format!("Blöcke {range} noch nicht prüfbar: {why}");
+    }
     match n {
+        "checkpoint received" => "Checkpoint empfangen".into(),
         "request sent - waiting for the coordinator's Welcome" => {
             "Anfrage gesendet - warte auf das Welcome des Koordinators".into()
         }

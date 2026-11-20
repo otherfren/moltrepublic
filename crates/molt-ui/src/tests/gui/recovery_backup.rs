@@ -21,6 +21,7 @@ fn the_recover_checklist_maps_seats_and_counts() {
                 molt_core::RecoverSeat { member: "vera".to_string(), approved: false },
             ],
             replaces: String::new(),
+            log: Vec::new(),
         },
         ..SessionView::default()
     };
@@ -252,11 +253,16 @@ fn a_rejoin_names_its_workspace_and_a_foreign_link() {
     let ui = AppWindow::new().expect("headless window");
     let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
     let sv = SessionView {
-        recover: molt_core::RecoverState { replaces: "Drei".to_string(), ..Default::default() },
+        recover: molt_core::RecoverState {
+            replaces: "Drei".to_string(),
+            log: vec!["checkpoint part 1/3".to_string()],
+            ..Default::default()
+        },
         ..SessionView::default()
     };
     apply_session(&ui, &sv, true, &chat_ui);
     assert_eq!(ui.get_rv_replaces().as_str(), "Drei");
+    assert_eq!(ui.get_rv_log().row_count(), 1, "the step log shows");
     ui.set_rv_member("petra".into());
     let sv = SessionView {
         notice: "recover-failed:the phrase does not derive this seat's identity key".to_string(),

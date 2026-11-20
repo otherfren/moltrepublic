@@ -58,6 +58,9 @@ fn guard_finished(run: &RunCore, err: fn(String) -> MoltError) -> Result<(), Mol
     Ok(())
 }
 
+
+/// Lines the rejoin's step log keeps.
+const RECOVER_LOG_MAX: usize = 50;
 impl State {
     /// Materialize a workspace directory from its founding facts and make it
     /// the actor's open workspace: `molt-storage::create_workspace` writes
@@ -2454,11 +2457,15 @@ impl State {
         if generation != Some(self.recovery.generation) {
             return Ok(Reply::Ack);
         }
-        let notice = format!("recover-note:{note}");
-        if self.session.notice != notice {
-            self.session.notice = notice;
-            self.emit_session(SessionScope::Full);
+        // the step log under the checklist: one line per step, bounded
+        let log = &mut self.session.recover.log;
+        if log.last() != Some(&note) {
+            log.push(note.clone());
+            let over = log.len().saturating_sub(RECOVER_LOG_MAX);
+            log.drain(..over);
         }
+        self.session.notice = format!("recover-note:{note}");
+        self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
 
@@ -2479,6 +2486,7 @@ impl State {
         }
         let state = molt_core::RecoverState {
             replaces: self.session.recover.replaces.clone(),
+            log: self.session.recover.log.clone(),
             member,
             need,
             seats: roster

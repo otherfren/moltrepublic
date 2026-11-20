@@ -2325,6 +2325,8 @@ export component AppWindow inherits Window {
     // success the engine flips to Main by itself
     in-out property <bool> rv-running: false;
     in property <string> rv-replaces;
+    // what the rejoin did so far, newest last
+    in property <[string]> rv-log;
     in-out property <string> rv-member;
     in-out property <string> rv-error;
     // the recovery task's live status line (NetRecoverNote) — a bounded
@@ -5213,7 +5215,23 @@ export component AppWindow inherits Window {
                                 label: seat.member;
                                 label-color: seat.approved ? Theme.text : Theme.dim;
                             }
-                            if root.rv-note != "": Text {
+                            if root.rv-log.length > 0: Rectangle {
+                                background: Theme.panel;
+                                border-radius: Theme.win95 ? 0px : 6px;
+                                border-width: Theme.border-w;
+                                border-color: Theme.line;
+                                VerticalLayout {
+                                    padding: 6px;
+                                    spacing: 2px;
+                                    for line in root.rv-log: Text {
+                                        text: line;
+                                        color: Theme.dim;
+                                        font-size: Theme.fs-cap;
+                                        wrap: word-wrap;
+                                    }
+                                }
+                            }
+                            if root.rv-log.length == 0 && root.rv-note != "": Text {
                                 text: root.rv-note;
                                 color: Theme.faint;
                                 font-size: Theme.fs-cap;
