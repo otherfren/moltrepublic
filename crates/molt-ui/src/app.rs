@@ -156,6 +156,8 @@ pub fn run_app(
         chat_ui: chat_ui.clone(),
     };
 
+    wire_toast_log(&ui);
+
     // The Multisig-Wiki mock's state machine + its WikiState bridge —
     // UI-local by design, EXCEPT the changeset vote: that one proposes on
     // the real gated Memory surface, so it is wired with the handles.
@@ -187,6 +189,14 @@ pub fn run_app(
     spawn_mirror(&ctx);
 
     ui.run()
+}
+
+/// Every error toast also lands in the error log.
+pub(crate) fn wire_toast_log(ui: &AppWindow) {
+    ui.on_toast_error_shown(|msg| {
+        let text = msg.trim_start_matches(['⚠', '\u{fe0f}']).trim_start();
+        tracing::warn!(toast = %text, "gui_error");
+    });
 }
 
 /// What every callback captures: the runtime, the shared engine handle,

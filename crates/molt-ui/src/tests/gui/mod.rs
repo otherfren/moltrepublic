@@ -36,6 +36,7 @@ mod s3_plaintext;
 mod seed_confirm;
 mod snapshot;
 mod tab_order;
+mod toast_log;
 mod vault;
 #[cfg(feature = "live-preview")]
 mod tor_reset;

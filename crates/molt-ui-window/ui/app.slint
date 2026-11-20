@@ -2766,10 +2766,13 @@ export component AppWindow inherits Window {
         root.toast-bad = false;
         root.toast-open = true;
     }
+    // every error toast also reaches the error log (molt-ui logs it)
+    callback toast-error-shown(string);
     public function show-toast-error(msg: string) {
         root.toast-text = msg;
         root.toast-bad = true;
         root.toast-open = true;
+        root.toast-error-shown(msg);
     }
     function hide-toast() {
         root.toast-open = false;
