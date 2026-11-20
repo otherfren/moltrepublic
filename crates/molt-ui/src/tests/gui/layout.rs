@@ -87,6 +87,7 @@ fn a_long_member_name_grows_its_pill_and_keeps_the_last_seen_label() {
         name: name.into(),
         last: last.into(),
         state: 0,
+        ..Default::default()
     };
     let measure = |ui: &AppWindow| -> Vec<(f32, f32, f32)> {
         let pills: Vec<_> = i_slint_backend_testing::ElementHandle::find_by_element_type_name(

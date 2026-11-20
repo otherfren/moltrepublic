@@ -189,6 +189,8 @@ export struct MemberSync {
     name: string,
     last: string, // human "last synced" label, e.g. "2 min ago"
     state: int, // 0 = synced, 1 = syncing, 2 = offline
+    sync: string, // the seat's catch-up/recovery in words ("" = level)
+    sync-short: string, // the same as a short pill label
 }
 
 // One row of the Organization → Members table (engine ReadMembers — the
@@ -1659,6 +1661,14 @@ export global Strings {
     in property <string> rlk-failed-prefix;
     in property <string> rv-running-note;
     in property <string> rv-cancel;
+    in property <string> cu-title;
+    in property <string> cu-left;
+    in property <string> cu-rate;
+    in property <string> cu-asking;
+    in property <string> cu-forks;
+    in property <string> sy-recovering;
+    in property <string> sy-readmitted;
+    in property <string> sy-behind;
     in property <string> rv-replaces;
     in property <string> rv-new-here;
     in property <string> rv-wrong-seat;

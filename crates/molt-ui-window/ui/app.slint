@@ -1556,6 +1556,11 @@ export component AppWindow inherits Window {
     in property <[SurfaceTab]> surfaces;
     // the active workspace's roster (chat members strip: who is online)
     in property <[MemberSync]> active-members;
+    // R2: this node trails its peers by more than three blocks
+    in property <bool> catchup-show;
+    in property <string> catchup-title;
+    in property <string> catchup-detail;
+    in property <float> catchup-progress;
     // the Members / Uploads tables, mirrored from the engine's ReadMembers /
     // ReadUploads (the same projections the MCP tools of those names read)
     in property <[MemberRow]> org-members;
@@ -5588,6 +5593,41 @@ export component AppWindow inherits Window {
                 Rectangle {
                     height: 1px;
                     background: Theme.line;
+                }
+                // R2: catching up, with progress and what the node is doing
+                if root.catchup-show: Rectangle {
+                    background: Theme.warn.transparentize(0.9);
+                    VerticalLayout {
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+                        padding-left: 16px;
+                        padding-right: 12px;
+                        spacing: 4px;
+                        Text {
+                            text: root.catchup-title;
+                            color: Theme.text;
+                            font-size: Theme.fs-body;
+                            font-weight: 600;
+                        }
+                        Rectangle {
+                            height: 4px;
+                            border-radius: 2px;
+                            background: Theme.line;
+                            Rectangle {
+                                x: 0;
+                                width: parent.width * clamp(root.catchup-progress, 0, 1);
+                                height: parent.height;
+                                border-radius: 2px;
+                                background: Theme.warn;
+                            }
+                        }
+                        Text {
+                            text: root.catchup-detail;
+                            color: Theme.dim;
+                            font-size: Theme.fs-cap;
+                            wrap: word-wrap;
+                        }
+                    }
                 }
                 // mesh self-heal Phase 4 — honest connection-health banner.
                 // `net-health-tone` is set from SessionView.net_health (0 ok /

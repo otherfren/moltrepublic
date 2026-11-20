@@ -1295,3 +1295,23 @@ fn the_winner_drops_the_divergence_once_the_loser_asks_from_its_head() {
     wire(&mut winner, "walter", 1, WorkspaceEvent::ChainRequest { from_height: 4, known });
     assert!(winner.chain.diverged.is_empty(), "the loser stands on our head");
 }
+
+/// R2/R3 (`recovery_feedback_plan.md`): the session carries how far this
+/// node trails, and a seat that trails by more than three blocks reads
+/// `behind`; level seats read nothing.
+#[test]
+fn the_session_carries_catch_up_and_seat_sync() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    for id in 1..=6 {
+        b.commit_applied(id, &["petra", "walter"]);
+    }
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    walter.presence.clock_override = Some(1_000);
+    walter.note_peer_height("petra", 40);
+    walter.note_peer_height("dora", 2);
+    walter.chain_heal_tick();
+    assert_eq!((walter.session.catchup.head, walter.session.catchup.target), (6, 40));
+    assert_eq!(walter.seat_sync_label("dora", 6), "behind:2:6");
+    assert_eq!(walter.seat_sync_label("petra", 6), "");
+    assert_eq!(walter.seat_sync_label("walter", 6), "", "never for the own seat");
+}

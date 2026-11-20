@@ -268,3 +268,22 @@ fn the_files_export_toasts_its_outcome() {
     ex.result = "error: creating /x: denied".to_string();
     assert!(files_export_toast(0, &ex).is_some_and(|(_, failed)| failed));
 }
+
+/// R2/R3: the catch-up bar shows past three blocks behind, the seat codes
+/// become words and a short pill label.
+#[test]
+fn catch_up_and_seat_sync_render() {
+    use crate::mirror::{catchup_bar, seat_sync_text};
+    let level = molt_core::CatchUp { head: 10, target: 13, ..Default::default() };
+    assert!(!catchup_bar(1, &level).0, "three behind is not shown");
+    let behind = molt_core::CatchUp { head: 100, target: 400, rate: 12, asking: true, fork_candidates: 0 };
+    let (show, title, detail, progress) = catchup_bar(1, &behind);
+    assert!(show);
+    assert_eq!(title, "Holt auf: Block 100 von 400");
+    assert_eq!(detail, "noch 300 · 12 Blöcke/min · fragt nach");
+    assert!((progress - 0.25).abs() < 1e-6);
+    assert_eq!(seat_sync_text(1, "recovering:1:2").1, "↻ 1/2");
+    assert_eq!(seat_sync_text(1, "behind:5:40").0, "holt auf: Block 5 von 40");
+    assert_eq!(seat_sync_text(0, "readmitted").0, "re-admitted, fetching the chain");
+    assert_eq!(seat_sync_text(0, ""), (String::new(), String::new()));
+}

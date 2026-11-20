@@ -161,6 +161,8 @@ impl State {
         // verify the whole chain a SECOND time per block — an exact doubling
         // of the catch-up cost that bought nothing.
         if self.append_committed_block(block.clone()) {
+            let now = self.presence_now();
+            self.chain.applied_at.push_back(now);
             self.after_block_applied(&block);
             // the head advanced — a catch-up request that reached this height is done
             if self.chain.catchup_from.is_some_and(|f| f <= block.height) {
@@ -380,6 +382,87 @@ impl State {
         if now >= self.chain.repush_check_at {
             self.chain.repush_check_at = now.saturating_add(60);
             self.repush_unfinished_restores(now);
+        }
+        self.refresh_sync_feedback(now);
+    }
+
+    /// R2/R3 (`recovery_feedback_plan.md`): the catch-up and each seat's
+    /// sync into the session, at most every two seconds and only on change.
+    fn refresh_sync_feedback(&mut self, now: u64) {
+        while self.chain.applied_at.front().is_some_and(|t| now.saturating_sub(*t) > 60) {
+            self.chain.applied_at.pop_front();
+        }
+        if now.saturating_sub(self.chain.feedback_emitted_at) < 2 {
+            return;
+        }
+        let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        let target = self.chain.peer_heights.values().copied().max().unwrap_or(0).max(head);
+        let catchup = molt_core::CatchUp {
+            head,
+            target,
+            rate: u32::try_from(self.chain.applied_at.len()).unwrap_or(u32::MAX),
+            asking: self.chain.catchup_from.is_some(),
+            fork_candidates: u32::try_from(self.chain.fork_candidates.len()).unwrap_or(u32::MAX),
+        };
+        let syncs: Vec<(String, String)> = self.roster().into_iter().map(|m| {
+            let s = self.seat_sync_label(&m, head);
+            (m, s)
+        }).collect();
+        let active = self.session.active_workspace.clone();
+        let mut changed = self.session.catchup != catchup;
+        if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == active) {
+            for m in &mut ws.members {
+                if let Some((_, s)) = syncs.iter().find(|(n, _)| *n == m.name) {
+                    if m.sync != *s {
+                        m.sync = s.clone();
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if changed {
+            self.session.catchup = catchup;
+            self.chain.feedback_emitted_at = now;
+            self.emit_session(crate::SessionScope::Full);
+        }
+    }
+
+    /// R3: one seat's sync as this node sees it.
+    pub(crate) fn seat_sync_label(&self, member: &str, head: u64) -> String {
+        if member == self.member() {
+            return String::new();
+        }
+        let open = self.chain.proposal_changes.iter().find_map(|(id, c)| match c {
+            ChainChange::Membership { op: molt_core::MembershipOp::Restored, member: m, .. }
+                if m == member && self.chain.pending_sigs.contains_key(id) =>
+            {
+                Some(*id)
+            }
+            _ => None,
+        });
+        if let Some(id) = open {
+            // every seat sees the vote, not only the coordinator: verified
+            // signatures plus the returning seat's own consent
+            let consent = matches!(
+                self.chain.proposal_changes.get(&id),
+                Some(ChainChange::Membership { consent: Some(_), .. })
+            );
+            let have = self.chain.pending_sigs.get(&id).map_or(0, |p| p.verified.len()) + usize::from(consent);
+            let need = self.chain.head.as_ref().map_or(0, |h| h.rule_m);
+            return format!("recovering:{have}:{need}");
+        }
+        let anchor = self.chain.blocks.iter().rev().find_map(|b| match &b.change {
+            ChainChange::Membership { op: molt_core::MembershipOp::Restored, member: m, nostr_pk, .. } if m == member => {
+                Some(nostr_pk.clone().unwrap_or_default())
+            }
+            _ => None,
+        });
+        if anchor.is_some_and(|a| self.restore_never_finished(member, &a)) {
+            return "readmitted".to_string();
+        }
+        match self.chain.peer_heights.get(member) {
+            Some(h) if h.saturating_add(3) < head => format!("behind:{h}:{head}"),
+            _ => String::new(),
         }
     }
 

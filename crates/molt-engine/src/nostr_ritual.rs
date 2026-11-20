@@ -297,10 +297,16 @@ pub(crate) fn spawn_seat_inbox(
             let Some(delivery) = inbox.recv(RECV_SLICE).await else {
                 continue; // idle slice
             };
-            let RitualDelivery::Msg(RitualMsg::Recover(r), sender) = delivery else {
-                continue;
+            let cmd = match delivery {
+                RitualDelivery::Msg(RitualMsg::Recover(r), sender) => {
+                    crate::founding::recover_command(r, sender, generation)
+                }
+                RitualDelivery::Msg(RitualMsg::RecoverFailed { member, reason, version }, sender) => {
+                    Command::NetRecoverPeerFailed { member, reason, version, sender }
+                }
+                _ => continue,
             };
-            if !send_cmd(&tx, crate::founding::recover_command(r, sender, generation)).await {
+            if !send_cmd(&tx, cmd).await {
                 return;
             }
         }
@@ -395,18 +401,56 @@ pub(crate) fn spawn_recovery_inbox(
             let Some(delivery) = inbox.recv(RECV_SLICE).await else {
                 continue; // idle slice
             };
-            // only gift-wrapped Recover requests belong on this inbox
-            let RitualDelivery::Msg(RitualMsg::Recover(r), sender) = delivery else {
-                continue;
+            // gift-wrapped Recover requests, and a rejoiner's failure report
+            // (the PoP comparison itself lives in the ACTOR, with every other
+            // check — one validation ladder; this task only carries the
+            // PROVEN sealer across)
+            let cmd = match delivery {
+                RitualDelivery::Msg(RitualMsg::Recover(r), sender) => {
+                    crate::founding::recover_command(r, sender, generation)
+                }
+                RitualDelivery::Msg(RitualMsg::RecoverFailed { member, reason, version }, sender) => {
+                    Command::NetRecoverPeerFailed { member, reason, version, sender }
+                }
+                _ => continue,
             };
-            // the PoP comparison itself lives in the ACTOR, with every other
-            // check — one validation ladder, one place that can refuse. This
-            // task only carries the PROVEN sealer across.
-            if !send_cmd(&tx, crate::founding::recover_command(r, sender, generation)).await {
+            if !send_cmd(&tx, cmd).await {
                 return;
             }
         }
     })
+}
+
+/// Why the chain anchor did not verify in time, from what did arrive. An
+/// old coordinator (no version) cannot send a checkpoint larger than one
+/// frame; that is the usual cause and is named first.
+fn anchor_timeout_reason(
+    blob: bool,
+    parts: Option<(u32, u32)>,
+    blocks: &[molt_core::ChainBlock],
+    verify_error: &str,
+    coordinator_version: Option<&str>,
+) -> String {
+    let mut out = "the chain anchor did not verify within 15 minutes".to_string();
+    let checkpoint = match (blob, parts) {
+        (true, _) => "checkpoint=received".to_string(),
+        (false, Some((have, total))) => format!("checkpoint=parts {have}/{total}"),
+        (false, None) => "checkpoint=none".to_string(),
+    };
+    let heights = match (blocks.first(), blocks.last()) {
+        (Some(a), Some(b)) => format!("blocks={}..{} ({})", a.height, b.height, blocks.len()),
+        _ => "blocks=none".to_string(),
+    };
+    out.push_str(&format!(": {checkpoint} {heights}"));
+    if !verify_error.is_empty() {
+        out.push_str(&format!(" error={verify_error}"));
+    }
+    match coordinator_version {
+        Some("") => out.push_str(" - the coordinator runs a build older than 0.0.18, which cannot send a checkpoint larger than one frame: update it"),
+        Some(v) => out.push_str(&format!(" coordinator={v}")),
+        None => {}
+    }
+    out
 }
 
 /// MLS-encrypt one RitualMsg, ONCE: a retry republishes these bytes (see
@@ -1046,7 +1090,9 @@ async fn recovery_rejoin(
     // a coordinator that ANSWERED (progress/refusal) is live and working —
     // no further coordinator is addressed past that point
     let mut answered = false;
-    let payload = loop {
+    // the coordinator's build, from its first progress frame (None = none yet)
+    let mut coordinator_version: Option<String> = None;
+    let (payload, coordinator) = loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
             return Err(
@@ -1086,7 +1132,7 @@ async fn recovery_rejoin(
             .await;
         }
         match inbox.recv((deadline - now).min(RECV_SLICE)).await {
-            Some(RitualDelivery::Welcome(p, sender)) if addressed.contains(&sender) => break p,
+            Some(RitualDelivery::Welcome(p, sender)) if addressed.contains(&sender) => break (p, sender),
             // the coordinator REFUSED the request (WP6): fail fast with the
             // reason instead of sitting out the 15-minute deadline — the
             // ticket is not spent, so a retry with the right phrase works
@@ -1099,10 +1145,19 @@ async fn recovery_rejoin(
             // who has approved, from an ADDRESSED coordinator's anchor and
             // nobody else's — display data the session renders live
             Some(RitualDelivery::Msg(
-                RitualMsg::RecoverProgress { member, need, roster, approved },
+                RitualMsg::RecoverProgress { member, need, roster, approved, version },
                 sender,
             )) if addressed.contains(&sender) => {
                 answered = true;
+                if coordinator_version.is_none() {
+                    let line = if version.is_empty() {
+                        "coordinator runs a build older than 0.0.18".to_string()
+                    } else {
+                        format!("coordinator runs {version}")
+                    };
+                    let _ = send_cmd(tx, Command::NetRecoverNote { note: line, generation }).await;
+                    coordinator_version = Some(version);
+                }
                 let _ = send_cmd(
                     tx,
                     Command::NetRecoverProgress { member, need, roster, approved, generation },
@@ -1149,15 +1204,30 @@ async fn recovery_rejoin(
     let mut parts = crate::chain::blob_parts::BlobAssembly::default();
     let mut blocks: Vec<molt_core::ChainBlock> = Vec::new();
     let waiting_since = tokio::time::Instant::now();
+    // what arrived, for the reason if nothing verifies in time
+    let mut parts_seen: Option<(u32, u32)> = None;
+    let mut last_verify_error = String::new();
     let note = |n: String| send_cmd(tx, Command::NetRecoverNote { note: n, generation });
     let (head, _sealed) = loop {
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            return Err(
-                "the republic's chain anchor never arrived - the coordinator re-keyed \
-                 but served no chain"
-                    .to_string(),
+            let reason = anchor_timeout_reason(
+                blob.is_some(),
+                parts_seen,
+                &blocks,
+                &last_verify_error,
+                coordinator_version.as_deref(),
             );
+            // the coordinator learns it too, in its own log
+            let failed = RitualMsg::RecoverFailed {
+                member: ctx.member.clone(),
+                reason: reason.clone(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            };
+            if let Err(e) = net.send_ritual(&coordinator, &failed).await {
+                tracing::warn!(error = %e, "recover_failed frame=unsent");
+            }
+            return Err(reason);
         }
         let content = match sub.recv((deadline - now).min(RECV_SLICE)).await {
             molt_net::ritual_net::GroupRecv::Frame { content, .. } => content,
@@ -1180,6 +1250,8 @@ async fn recovery_rejoin(
             }
             molt_core::WorkspaceEvent::CheckpointServedPart { blob_hash, index, total, data } => {
                 let _ = note(format!("checkpoint part {}/{total}", index.saturating_add(1))).await;
+                let have = parts_seen.map_or(0, |(h, _)| h).saturating_add(1);
+                parts_seen = Some((have.min(total), total));
                 if let Some(b) = parts.accept(&blob_hash, index, total, &data) {
                     let _ = note("checkpoint received".to_string()).await;
                     blob = Some(b);
@@ -1237,6 +1309,7 @@ async fn recovery_rejoin(
             }
             Err(e) => {
                 let _ = note(format!("blocks {}-{} do not verify yet: {e}", run[0].height, run[run.len() - 1].height)).await;
+                last_verify_error = e;
             }
         }
     };
@@ -2021,5 +2094,20 @@ mod wait_note_tests {
         for s in [0, 59, 60, 3_599, 3_600, 86_400] {
             assert!(elapsed_label(s).len() <= 6, "{}", elapsed_label(s));
         }
+    }
+}
+
+#[cfg(test)]
+mod anchor_reason_tests {
+    /// The anchor timeout names what arrived, and blames an old coordinator
+    /// by name when its version is missing.
+    #[test]
+    fn the_anchor_timeout_says_what_arrived_and_who_is_old() {
+        let old = super::anchor_timeout_reason(false, Some((1, 2)), &[], "", Some(""));
+        assert!(old.contains("checkpoint=parts 1/2"), "{old}");
+        assert!(old.contains("blocks=none"), "{old}");
+        assert!(old.contains("older than 0.0.18"), "{old}");
+        let new = super::anchor_timeout_reason(false, None, &[], "bad prev", Some("0.0.19"));
+        assert!(new.contains("checkpoint=none") && new.contains("error=bad prev") && new.contains("coordinator=0.0.19"), "{new}");
     }
 }

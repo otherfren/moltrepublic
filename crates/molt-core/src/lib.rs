@@ -726,6 +726,11 @@ pub struct MemberInfo {
     /// keeps the pushed pills current; a send-failure pins 2 until the
     /// next sighting).
     pub state: u8,
+    /// The seat's sync as this node sees it (`recovery_feedback_plan.md`
+    /// R3): `recovering:<have>:<need>`, `readmitted`, `behind:<h>:<head>`,
+    /// or "" when level.
+    #[serde(default)]
+    pub sync: String,
 }
 
 impl MemberInfo {
@@ -782,6 +787,7 @@ pub fn roster_members(
                 name: m.clone(),
                 last_seen,
                 state: presence_state(now, last_seen),
+                sync: String::new(),
             }
         })
         .collect()
@@ -948,6 +954,7 @@ impl WorkspaceInfo {
                 name: name.to_string(),
                 last_seen: MemberInfo::NEVER,
                 state,
+                sync: String::new(),
             }
         }
         #[allow(clippy::too_many_arguments)]
@@ -4147,6 +4154,10 @@ pub struct SessionView {
     /// Additive; empty outside a recovery.
     #[serde(default)]
     pub recover: RecoverState,
+    /// This node's catch-up against its peers (`recovery_feedback_plan.md`
+    /// R2). Additive; zero outside a chain-governed workspace.
+    #[serde(default)]
+    pub catchup: CatchUp,
     /// The manual-export lifecycle (real; additive).
     #[serde(default)]
     pub export: ExportState,
@@ -4199,6 +4210,7 @@ impl Default for SessionView {
             active_workspace: String::new(),
             restore: RestoreState::default(),
             recover: RecoverState::default(),
+            catchup: CatchUp::default(),
             export: ExportState::default(),
             wiki_export: ExportState::default(),
             files_export: ExportState::default(),
@@ -5961,6 +5973,19 @@ pub enum Command {
         /// Recovery incarnation.
         #[serde(default)]
         generation: Option<u64>,
+    },
+    /// A returning member reports that its rejoin failed after the
+    /// re-admission (engine-internal, from the recovery inbox): logged so
+    /// the coordinator sees why. Display data only.
+    NetRecoverPeerFailed {
+        /// The seat.
+        member: MemberId,
+        /// Why, as the rejoiner saw it.
+        reason: String,
+        /// The rejoiner's build version.
+        version: String,
+        /// The gift wrap's sealing key (the rejoiner's new anchor), hex.
+        sender: String,
     },
     /// The coordinator's live report of the re-admission vote (engine-
     /// internal, `recovery_auto_approval.md` §4): who has approved, out of
@@ -8290,6 +8315,27 @@ pub fn unowed_on_the_wire(body: &WorkspaceEvent) -> bool {
     matches!(body, WorkspaceEvent::MlsCommit { .. } | WorkspaceEvent::CheckpointServedPart { .. })
 }
 
+/// How far this node trails the highest height a peer reported
+/// ([`SessionView::catchup`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatchUp {
+    /// This node's head height.
+    #[serde(default)]
+    pub head: u64,
+    /// The highest height a peer reported (0 = none).
+    #[serde(default)]
+    pub target: u64,
+    /// Blocks applied in the last minute.
+    #[serde(default)]
+    pub rate: u32,
+    /// A catch-up request is open.
+    #[serde(default)]
+    pub asking: bool,
+    /// Buffered blocks of another branch.
+    #[serde(default)]
+    pub fork_candidates: u32,
+}
+
 /// This node's chain sync state ([`StatusView::chain_sync`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainSync {
@@ -9711,11 +9757,13 @@ mod tests {
                     name: "ada".to_string(),
                     last_seen: now - 10,
                     state: 0,
+                    sync: String::new(),
                 },
                 MemberInfo {
                     name: "bob".to_string(),
                     last_seen: MemberInfo::NEVER,
                     state: 2,
+                    sync: String::new(),
                 },
             ]
         );

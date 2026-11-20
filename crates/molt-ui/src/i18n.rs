@@ -500,6 +500,12 @@ pub(crate) fn localize_recover_note(lang: i32, n: &str) -> String {
     if let Some((range, why)) = n.strip_prefix("blocks ").and_then(|r| r.split_once(" do not verify yet: ")) {
         return format!("Blöcke {range} noch nicht prüfbar: {why}");
     }
+    if let Some(v) = n.strip_prefix("coordinator runs ") {
+        if v == "a build older than 0.0.18" {
+            return "Koordinator läuft auf einer Version vor 0.0.18".into();
+        }
+        return format!("Koordinator läuft auf {v}");
+    }
     match n {
         "checkpoint received" => "Checkpoint empfangen".into(),
         "request sent - waiting for the coordinator's Welcome" => {
@@ -1173,6 +1179,14 @@ lexicon! {
     rlk_failed_prefix: "The link could not be created: ", "Der Link konnte nicht erstellt werden: ";
     rv_running_note: "Waiting for the survivors - times out after ~15 min.", "Warte auf die verbliebenen Mitglieder - Timeout nach ~15 min.";
     rv_cancel: "Abort", "Abbrechen";
+    cu_title: "Catching up: block {h} of {t}", "Holt auf: Block {h} von {t}";
+    cu_left: "{n} to go", "noch {n}";
+    cu_rate: "{r} blocks/min", "{r} Blöcke/min";
+    cu_asking: "asking peers", "fragt nach";
+    cu_forks: "{n} blocks of another branch", "{n} Blöcke eines anderen Zweigs";
+    sy_recovering: "recovering: {h} of {n} approvals", "Wiederherstellung: {h} von {n} Zustimmungen";
+    sy_readmitted: "re-admitted, fetching the chain", "wieder aufgenommen, holt die Kette";
+    sy_behind: "catching up: block {h} of {t}", "holt auf: Block {h} von {t}";
     rv_approvals: "Approvals", "Zustimmungen";
     rv_auto_note: "members approve automatically when online", "Mitglieder stimmen automatisch zu, sobald sie online sind";
     rv_failed_hint: "Recovery links are single-use - ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig - bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";

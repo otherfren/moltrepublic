@@ -218,6 +218,34 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// A returning member's rejoin failed after its re-admission: log why,
+    /// when the frame came from that seat's latest re-anchor.
+    pub(crate) fn cmd_net_recover_peer_failed(
+        &mut self,
+        member: &str,
+        reason: &str,
+        version: &str,
+        sender: &str,
+    ) -> Result<Reply, MoltError> {
+        let anchor = self.chain.blocks.iter().rev().find_map(|b| match &b.change {
+            molt_core::ChainChange::Membership {
+                op: molt_core::MembershipOp::Restored,
+                member: m,
+                nostr_pk,
+                ..
+            } if m == member => Some(nostr_pk.clone().unwrap_or_default()),
+            _ => None,
+        });
+        let canonical = molt_net::canonical_nostr_pk(sender).unwrap_or_default();
+        if !anchor.is_some_and(|a| !a.is_empty() && a == canonical) {
+            tracing::debug!(%member, "recovery_failed frame=not_from_the_seat");
+            return Ok(Reply::Ack);
+        }
+        let version = if version.is_empty() { "unknown" } else { version };
+        tracing::warn!(%member, version, reason, "recovery_failed");
+        Ok(Reply::Ack)
+    }
+
     /// Report a coordinated recovery's vote state to its waiting rejoiner
     /// (`recovery_auto_approval.md` §4): gift-wrap a `RecoverProgress` frame
     /// to the seat's NEW transport anchor. A no-op unless `id` is a pending
@@ -243,6 +271,7 @@ impl State {
             need: report.need,
             roster: report.roster,
             approved: report.approved,
+            version: env!("CARGO_PKG_VERSION").to_string(),
         };
         self.send_recover_frame(to, msg);
     }

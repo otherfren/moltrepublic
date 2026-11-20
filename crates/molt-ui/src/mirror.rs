@@ -55,6 +55,8 @@ fn workspace_item(lang: i32, now: u64, w: &molt_core::WorkspaceInfo) -> Workspac
             name: m.name.as_str().into(),
             last: seen_label(lang, now, m.last_seen, "").into(),
             state: i32::from(m.state),
+            sync: "".into(),
+            sync_short: "".into(),
         })
         .collect();
     WorkspaceItem {
@@ -158,6 +160,44 @@ pub(crate) fn sort_ws_items(items: &mut [WorkspaceItem], key: &str, desc: bool) 
     if desc {
         items.reverse();
     }
+}
+
+/// R3: a seat's engine sync code as (tooltip words, short pill label).
+pub(crate) fn seat_sync_text(lang: i32, code: &str) -> (String, String) {
+    let l = crate::i18n::Lexicon::of(lang);
+    let mut it = code.split(':');
+    match (it.next(), it.next(), it.next()) {
+        (Some("recovering"), Some(h), Some(n)) => {
+            (l.sy_recovering.replace("{h}", h).replace("{n}", n), format!("↻ {h}/{n}"))
+        }
+        (Some("readmitted"), _, _) => (l.sy_readmitted.to_string(), "↻".to_string()),
+        (Some("behind"), Some(h), Some(t)) => {
+            (l.sy_behind.replace("{h}", h).replace("{t}", t), format!("↻ {h}/{t}"))
+        }
+        _ => (String::new(), String::new()),
+    }
+}
+
+/// R2: the workspace's catch-up bar: (shown, title, detail, progress 0..1).
+pub(crate) fn catchup_bar(lang: i32, c: &molt_core::CatchUp) -> (bool, String, String, f32) {
+    if c.target <= c.head.saturating_add(3) {
+        return (false, String::new(), String::new(), 1.0);
+    }
+    let l = crate::i18n::Lexicon::of(lang);
+    let title = l.cu_title.replace("{h}", &c.head.to_string()).replace("{t}", &c.target.to_string());
+    let mut detail = vec![l.cu_left.replace("{n}", &(c.target - c.head).to_string())];
+    if c.rate > 0 {
+        detail.push(l.cu_rate.replace("{r}", &c.rate.to_string()));
+    }
+    if c.asking {
+        detail.push(l.cu_asking.to_string());
+    }
+    if c.fork_candidates > 0 {
+        detail.push(l.cu_forks.replace("{n}", &c.fork_candidates.to_string()));
+    }
+    #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
+    let progress = (c.head as f64 / c.target as f64) as f32;
+    (true, title, detail.join(" · "), progress)
 }
 
 /// Rejoin log lines the recover pane shows.
@@ -507,10 +547,15 @@ pub(crate) fn apply_session(
         .map(|w| {
             w.members
                 .iter()
-                .map(|m| MemberSync {
-                    name: m.name.as_str().into(),
-                    last: seen_label(lang, now, m.last_seen, never_seen_label(lang)).into(),
-                    state: i32::from(m.state),
+                .map(|m| {
+                    let (sync, sync_short) = seat_sync_text(lang, &m.sync);
+                    MemberSync {
+                        name: m.name.as_str().into(),
+                        last: seen_label(lang, now, m.last_seen, never_seen_label(lang)).into(),
+                        state: i32::from(m.state),
+                        sync: sync.into(),
+                        sync_short: sync_short.into(),
+                    }
                 })
                 .collect()
         })
@@ -518,6 +563,11 @@ pub(crate) fn apply_session(
     sync_rows(&ui.get_active_members(), roster, |m| {
         ui.set_active_members(m)
     });
+    let (show, title, detail, progress) = catchup_bar(lang, &sv.catchup);
+    ui.set_catchup_show(show);
+    ui.set_catchup_title(title.into());
+    ui.set_catchup_detail(detail.into());
+    ui.set_catchup_progress(progress);
     // Organization → Status/Members: reachable count from the roster (a member
     // is reachable unless offline, state 2)
     let total = active.map(|w| w.members.len()).unwrap_or(0);

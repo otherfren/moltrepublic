@@ -824,6 +824,7 @@ fn spawn_founder_recv(
                 | invite::RitualMsg::Recover(_)
                 | invite::RitualMsg::RecoverProgress { .. }
                 | invite::RitualMsg::RecoverRefused { .. }
+                | invite::RitualMsg::RecoverFailed { .. }
                 | invite::RitualMsg::Welcome { .. } => continue,
             };
             if !crate::nostr_ritual::send_cmd(&cmd_tx, cmd).await {

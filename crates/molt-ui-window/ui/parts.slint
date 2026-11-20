@@ -1192,13 +1192,13 @@ export component MemberPill inherits Rectangle {
                     - 2 * Theme.pill-gap - mp-last.preferred-width);
                 // the cut name reads in full beside the pill (window-topmost
                 // overlay - a local bubble paints under the chat log)
-                property <bool> tip-on: mp-ta.has-hover && self.width < self.preferred-width;
+                property <bool> tip-on: mp-ta.has-hover && (self.width < self.preferred-width || root.m.sync != "");
                 // the tip generation this element owns (HintTip.show hands
                 // it out): only its owner may clear the bubble
                 property <int> tip-gen;
                 changed tip-on => {
                     if (self.tip-on) {
-                        self.tip-gen = HintTip.show(root.m.name,
+                        self.tip-gen = HintTip.show(root.m.sync != "" ? "\{root.m.name} - \{root.m.sync}" : root.m.name,
                             root.absolute-position.x + root.width + 8px,
                             root.absolute-position.y + (root.height - 23px) / 2);
                     } else {
@@ -1207,8 +1207,8 @@ export component MemberPill inherits Rectangle {
                 }
             }
             mp-last := Text {
-                text: root.m.last;
-                color: Theme.faint;
+                text: root.m.sync-short != "" ? root.m.sync-short : root.m.last;
+                color: root.m.sync-short != "" ? Theme.warn : Theme.faint;
                 font-size: Theme.fs-cap;
                 vertical-alignment: center;
                 // never squeezed - the strip is FOR this label - and parked at

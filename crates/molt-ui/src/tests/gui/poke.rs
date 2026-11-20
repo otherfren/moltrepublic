@@ -256,6 +256,7 @@ fn the_clipped_presence_pill_still_opens_its_poke_menu() {
         name: "ada".into(),
         last: "2 min ago".into(),
         state: 0,
+        ..Default::default()
     }])));
     let _shown = show_headless(&ui);
 

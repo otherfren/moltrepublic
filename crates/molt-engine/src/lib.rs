@@ -1034,6 +1034,10 @@ pub(crate) struct ChainProjection {
     /// and the height a fallback sealer already asked its peers about.
     pub(crate) ready_at: BTreeMap<u64, (u64, u64)>,
     pub(crate) fallback_asked: Option<u64>,
+    /// Recovery feedback (R2/R3): when blocks were applied (last minute),
+    /// and when the session last carried the catch-up and seat sync.
+    pub(crate) applied_at: std::collections::VecDeque<u64>,
+    pub(crate) feedback_emitted_at: u64,
     /// S3: a served checkpoint blob arriving in parts.
     pub(crate) blob_parts: chain::blob_parts::BlobAssembly,
     /// When the open catch-up request was last sent (presence clock).
@@ -2545,6 +2549,9 @@ impl State {
             Command::NetJoinNote { note, generation } => self.cmd_net_join_note(note, generation),
             Command::NetRecoverNote { note, generation } => {
                 self.cmd_net_recover_note(note, generation)
+            }
+            Command::NetRecoverPeerFailed { member, reason, version, sender } => {
+                self.cmd_net_recover_peer_failed(&member, &reason, &version, &sender)
             }
             Command::NetRecoverProgress { member, need, roster, approved, generation } => {
                 self.cmd_net_recover_progress(member, need, roster, approved, generation)

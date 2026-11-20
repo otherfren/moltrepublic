@@ -584,6 +584,9 @@ pub enum RitualMsg {
         roster: Vec<String>,
         /// Members whose voice is counted (approvals + the consent).
         approved: Vec<String>,
+        /// The coordinator's build version ("" = a build before 0.0.18).
+        #[serde(default)]
+        version: String,
     },
     /// coordinator → returning member: the recovery request was REFUSED
     /// (`recovery_auto_approval.md` WP6) — sent only to a sender that passed
@@ -597,6 +600,18 @@ pub enum RitualMsg {
         member: String,
         /// Why, verbatim from the coordinator's validation ladder.
         reason: String,
+    },
+    /// returning member -> coordinator: the rejoin failed after the
+    /// re-admission, so the coordinator can log why. Display data only; an
+    /// older coordinator drops the unknown variant.
+    RecoverFailed {
+        /// The seat that failed to come back.
+        member: String,
+        /// Why, as the rejoiner saw it.
+        reason: String,
+        /// The rejoiner's build version.
+        #[serde(default)]
+        version: String,
     },
     /// coordinator → returning member: the MLS **Welcome** that re-admits a
     /// recovered seat (`recovery_ritual.md` §4 ❺–❻), sent on the rejoiner's reply
@@ -632,6 +647,15 @@ pub enum RitualMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An older coordinator's progress frame has no version: it decodes,
+    /// and reads as empty.
+    #[test]
+    fn a_progress_frame_without_version_decodes() {
+        let old = r#"{"kind":"recover_progress","member":"petra","need":2,"roster":["petra"],"approved":[]}"#;
+        let msg: RitualMsg = serde_json::from_str(old).expect("old frame");
+        assert!(matches!(msg, RitualMsg::RecoverProgress { version, .. } if version.is_empty()));
+    }
 
     // ---- invite handover v2 (N4a step 3, nostr_n4_plan.md §3) -------------
 
