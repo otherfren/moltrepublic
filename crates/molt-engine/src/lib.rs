@@ -2402,6 +2402,7 @@ impl State {
             Command::RecoverStart { link, phrase, relays } => {
                 self.cmd_recover_start(link, phrase, relays)
             }
+            Command::RecoverCancel => self.cmd_recover_cancel(),
             Command::NetRecoverSealed {
                 member,
                 chain,

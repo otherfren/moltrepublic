@@ -26,6 +26,7 @@ fn recover_notices_parse_into_their_ui_effects() {
         parse_recover_notice("recovered:ashi"),
         RecoverNotice::Done("ashi".to_string())
     );
+    assert_eq!(parse_recover_notice("recover-cancelled"), RecoverNotice::Cancelled);
     // the coordinator's mint lifecycle: pending on the attempt, then the
     // outcome — a calm failed state (the flip side of Link) whose payload
     // is a reason the dialog maps onto localized text

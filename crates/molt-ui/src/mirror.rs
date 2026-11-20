@@ -166,6 +166,8 @@ pub(crate) fn sort_ws_items(items: &mut [WorkspaceItem], key: &str, desc: bool) 
 /// started/failed/done lifecycle.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum RecoverNotice {
+    /// This node aborted its own rejoin.
+    Cancelled,
     /// Not a recovery notice (every other notice, e.g. "saved").
     None,
     /// Rejoiner: the recovery task's live status line (a bounded wait must
@@ -216,6 +218,8 @@ pub(crate) fn parse_recover_notice(notice: &str) -> RecoverNotice {
         RecoverNotice::Done(member.to_string())
     } else if let Some(rest) = notice.strip_prefix("recover-refused:") {
         RecoverNotice::Refused(rest.to_string())
+    } else if notice == "recover-cancelled" {
+        RecoverNotice::Cancelled
     } else {
         RecoverNotice::None
     }
@@ -662,6 +666,11 @@ pub(crate) fn apply_session(
             RecoverNotice::Done(_) => {
                 // the engine flips to Main itself — just clear the peer-way
                 // state so a later return to the Restore screen starts clean
+                ui.set_rv_running(false);
+                ui.set_rv_error("".into());
+                ui.set_rv_note("".into());
+            }
+            RecoverNotice::Cancelled => {
                 ui.set_rv_running(false);
                 ui.set_rv_error("".into());
                 ui.set_rv_note("".into());

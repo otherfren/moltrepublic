@@ -279,6 +279,14 @@ read again in the regular error log (Settings › Error log, `read_log`).
 - Test (live-preview GUI test): showing an error toast writes one
   `gui_error` line with the text; a plain toast writes none.
 
+### S8. Abort a running rejoin (same release)
+
+User requirement (2026-11-20): a rejoin started from a recovery link that
+hangs must be stoppable. `Command::RecoverCancel` (MCP `recover_cancel`,
+an Abort button under the running rejoin) aborts the task through
+`invalidate_recovery`; the bumped generation drops its late results, the
+notice `recover-cancelled` ends the run in the GUI.
+
 ## 5. Compatibility
 
 S1, S2, S4, S5 change only local behaviour or local output; old and new

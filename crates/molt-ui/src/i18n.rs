@@ -1147,6 +1147,7 @@ lexicon! {
     rlk_failed_mesh: "The link could not be created: this device is not on the republic's mesh. Reopen the republic, then try again.", "Der Link konnte nicht erstellt werden: Dieses Gerät ist nicht im Mesh der Republik. Republik neu öffnen, dann erneut versuchen.";
     rlk_failed_prefix: "The link could not be created: ", "Der Link konnte nicht erstellt werden: ";
     rv_running_note: "Waiting for the survivors - times out after ~15 min.", "Warte auf die verbliebenen Mitglieder - Timeout nach ~15 min.";
+    rv_cancel: "Abort", "Abbrechen";
     rv_approvals: "Approvals", "Zustimmungen";
     rv_auto_note: "members approve automatically when online", "Mitglieder stimmen automatisch zu, sobald sie online sind";
     rv_failed_hint: "Recovery links are single-use - ask any surviving member for a fresh one and try again.", "Recovery-Links sind einmalig - bitte ein verbliebenes Mitglied um einen neuen und versuch es erneut.";

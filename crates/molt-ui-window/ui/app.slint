@@ -2177,6 +2177,7 @@ export component AppWindow inherits Window {
     callback recover-invite(string);
     // rejoiner side — rejoin from link + phrase (RecoverStart)
     callback recover-start(string, string);
+    callback recover-cancel();
     // The Restore wizard's live verdict on its link field, and the two
     // helpers the panel drives from it. Both flows already exist as co-equal
     // commands (join-start / recover-start); what the merge changes is only
@@ -5196,6 +5197,13 @@ export component AppWindow inherits Window {
                                 color: Theme.faint;
                                 font-size: Theme.fs-cap;
                                 wrap: word-wrap;
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                AppButton {
+                                    label: Strings.rv-cancel;
+                                    clicked => { root.recover-cancel(); }
+                                }
                             }
                         }
                         if root.rv-error != "": VerticalLayout {

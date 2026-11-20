@@ -508,3 +508,16 @@ fn recovery_hard_rejects_a_chain_that_does_not_anchor_the_phrase() {
         );
     });
 }
+
+/// A rejoin can be aborted: the generation moves on, so a late result of
+/// the aborted task is dropped, and the session says so.
+#[test]
+fn a_running_rejoin_can_be_cancelled() {
+    let mut st = crate::tests::plain_state();
+    let before = st.recovery.generation;
+    st.cmd_recover_cancel().expect("cancel");
+    assert_eq!(st.recovery.generation, before + 1);
+    assert_eq!(st.session.notice, "recover-cancelled");
+    st.cmd_net_recover_failed("late".to_string(), Some(before)).expect("late result");
+    assert_eq!(st.session.notice, "recover-cancelled", "the aborted task's result is dropped");
+}

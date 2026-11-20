@@ -2503,6 +2503,17 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Abort the running rejoin: the task stops and a late result of it is
+    /// dropped by the bumped generation. Nothing was written yet.
+    pub(crate) fn cmd_recover_cancel(&mut self) -> Result<Reply, MoltError> {
+        let running = self.recovery.task.as_ref().is_some_and(|t| !t.is_finished());
+        self.invalidate_recovery();
+        tracing::info!(running, "recover=cancelled");
+        self.session.notice = "recover-cancelled".to_string();
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     pub(crate) fn cmd_join_cancel(&mut self) -> Result<Reply, MoltError> {
         self.invalidate_join();
         self.session.screen = Screen::Choice;

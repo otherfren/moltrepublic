@@ -5550,6 +5550,9 @@ pub enum Command {
         #[serde(default)]
         relays: Vec<String>,
     },
+    /// Abort this node's running rejoin (`RecoverStart`): the task stops,
+    /// its late results are dropped, nothing is written.
+    RecoverCancel,
     /// A returning member's **recovery request** arrived on the coordinator's
     /// recovery queue (engine-internal — the recovery-ritual transport speaks to
     /// the engine; a member must not be able to forge one). The coordinator

@@ -281,6 +281,13 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
 
     {
         let cx = ctx.clone();
+        ui.on_recover_cancel(move || {
+            cx.issue(Command::RecoverCancel);
+        });
+    }
+
+    {
+        let cx = ctx.clone();
         ui.on_join_confirm_charter(move || {
             cx.issue(Command::JoinConfirmCharter);
         });

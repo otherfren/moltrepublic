@@ -224,3 +224,21 @@ fn a_double_click_on_an_orphan_row_arms_the_restore_modal() {
     assert!(ui.get_bk_restore_open(), "double-click arms the restore modal");
     assert_eq!(ui.get_bk_restore_id().as_str(), id, "the row's own id");
 }
+
+/// A running rejoin can be aborted: the callback reaches its handler and
+/// the cancel notice clears the run.
+#[test]
+fn a_running_rejoin_has_an_abort_button() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    ui.set_rv_running(true);
+    let cancelled = std::rc::Rc::new(std::cell::Cell::new(false));
+    let c = cancelled.clone();
+    ui.on_recover_cancel(move || c.set(true));
+    ui.invoke_recover_cancel();
+    assert!(cancelled.get(), "the button's callback reaches the handler");
+    let sv = SessionView { notice: "recover-cancelled".to_string(), ..SessionView::default() };
+    apply_session(&ui, &sv, true, &chat_ui);
+    assert!(!ui.get_rv_running(), "the cancel notice ends the run");
+}
