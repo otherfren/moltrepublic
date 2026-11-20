@@ -675,7 +675,14 @@ pub(crate) fn apply_session(
             }
             RecoverNotice::Failed(error) => {
                 ui.set_rv_running(false);
-                ui.set_rv_error(localize_recover_failed(lang, &error).into());
+                // a phrase that does not fit the link's seat is, in the field,
+                // a member using someone else's link: say whose it is
+                let shown = if error.contains("does not derive this seat's identity key") {
+                    crate::i18n::Lexicon::of(lang).rv_wrong_seat.replace("{who}", &ui.get_rv_member())
+                } else {
+                    localize_recover_failed(lang, &error)
+                };
+                ui.set_rv_error(shown.into());
                 ui.set_rv_note("".into());
             }
             RecoverNotice::Note(line) => {
@@ -1008,6 +1015,7 @@ fn apply_runs(ui: &AppWindow, sv: &SessionView) {
         i32::try_from(sv.recover.seats.iter().filter(|s| s.approved).count()).unwrap_or(0),
     );
     ui.set_rv_need(i32::try_from(sv.recover.need).unwrap_or(0));
+    ui.set_rv_replaces(sv.recover.replaces.clone().into());
     sync_rows(&ui.get_rv_seats(), rv_seats, |m| ui.set_rv_seats(m));
 
     // join

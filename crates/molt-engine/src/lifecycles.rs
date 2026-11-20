@@ -1914,7 +1914,14 @@ impl State {
         // a fresh run starts with a fresh checklist (the old republic's
         // finished list must not front-run the new coordinator's report)
         self.session.notice.clear();
-        self.session.recover = molt_core::RecoverState::default();
+        // the seat's workspace id derives from phrase + seat: a copy here
+        // is the one the rejoin replaces
+        let replaces = molt_storage::seed_entropy(&task_phrase)
+            .ok()
+            .map(|e| molt_storage::derive_workspace_id(&e, &inv.member))
+            .and_then(|id| self.session.workspaces.iter().find(|w| w.id == id).map(|w| w.name.clone()))
+            .unwrap_or_default();
+        self.session.recover = molt_core::RecoverState { replaces, ..molt_core::RecoverState::default() };
         // a fresh transport slot for this recovery incarnation, the
         // join_transport twin: cmd_net_recover_sealed stands the runtime
         // supervisor up from it when a rejoin task filled it (the two-instance
@@ -2471,6 +2478,7 @@ impl State {
             return Ok(Reply::Ack);
         }
         let state = molt_core::RecoverState {
+            replaces: self.session.recover.replaces.clone(),
             member,
             need,
             seats: roster

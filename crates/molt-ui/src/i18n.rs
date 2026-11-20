@@ -1149,7 +1149,7 @@ lexicon! {
     jw_failed: "Failed", "Fehlgeschlagen";
     om_recover_link: "Recovery link", "Recovery-Link";
     rlk_title: "Recovery link", "Recovery-Link";
-    rlk_body: "Hand this link to the returning member so they can rejoin this republic from a new device.", "Gib diesen Link dem zurückkehrenden Mitglied, damit es dieser Republik von einem neuen Gerät wieder beitreten kann.";
+    rlk_body: "Only for this member: the link restores exactly this one seat. Every returning member needs a link of their own.", "Nur für dieses Mitglied: Der Link stellt genau diesen einen Sitz wieder her. Jedes zurückkehrende Mitglied braucht einen eigenen Link.";
     rlk_caution: "Caution: share this link only over a secret channel. It is single-use and becomes invalid again when this application restarts.", "Achtung, dieser Link sollte nur über einen geheimen Kanal geteilt werden. Er ist einmalig nutzbar und wird nach Neustart dieser Anwendung wieder ungültig.";
     rlk_pending: "Creating the link…", "Link wird erstellt…";
     rlk_pending_hint: "The returning member does not need to be online - a recovery link is made for someone who is unreachable.", "Das zurückkehrende Mitglied muss dafür nicht online sein - ein Recovery-Link ist ja gerade für ein unerreichbares Mitglied gedacht.";
@@ -1177,7 +1177,10 @@ lexicon! {
     rw_join_awaits: "A join is waiting for your confirmation.", "Ein Beitritt wartet auf deine Bestätigung.";
     rw_join_goto: "Show", "Anzeigen";
     rw_link_join: "Invite to", "Einladung zu";
-    rw_link_recover: "Recovery for", "Wiederherstellung für";
+    rw_link_recover: "Seat of", "Sitz von";
+    rv_replaces: "Replaces the local copy", "Ersetzt die lokale Kopie";
+    rv_new_here: "New on this device", "Neu auf diesem Gerät";
+    rv_wrong_seat: "This link restores the seat of {who}. Ask for a link for your own seat.", "Dieser Link stellt den Sitz von {who} wieder her. Bitte um einen Link für deinen eigenen Sitz.";
     rw_link_unknown: "Not a usable molt:// link.", "Kein brauchbarer molt://-Link.";
     rw_rl_not_in_pool: "not in your pool", "nicht in deinem Pool";
     rw_rl_unconfirmed: "not confirmed", "nicht bestätigt";

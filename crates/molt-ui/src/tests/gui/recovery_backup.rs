@@ -20,6 +20,7 @@ fn the_recover_checklist_maps_seats_and_counts() {
                 molt_core::RecoverSeat { member: "petra".to_string(), approved: true },
                 molt_core::RecoverSeat { member: "vera".to_string(), approved: false },
             ],
+            replaces: String::new(),
         },
         ..SessionView::default()
     };
@@ -241,4 +242,26 @@ fn a_running_rejoin_has_an_abort_button() {
     let sv = SessionView { notice: "recover-cancelled".to_string(), ..SessionView::default() };
     apply_session(&ui, &sv, true, &chat_ui);
     assert!(!ui.get_rv_running(), "the cancel notice ends the run");
+}
+
+/// A rejoin says whether it replaces a local copy, and a phrase that does
+/// not fit the link names whose seat the link is for.
+#[test]
+fn a_rejoin_names_its_workspace_and_a_foreign_link() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    let sv = SessionView {
+        recover: molt_core::RecoverState { replaces: "Drei".to_string(), ..Default::default() },
+        ..SessionView::default()
+    };
+    apply_session(&ui, &sv, true, &chat_ui);
+    assert_eq!(ui.get_rv_replaces().as_str(), "Drei");
+    ui.set_rv_member("petra".into());
+    let sv = SessionView {
+        notice: "recover-failed:the phrase does not derive this seat's identity key".to_string(),
+        ..SessionView::default()
+    };
+    apply_session(&ui, &sv, true, &chat_ui);
+    assert!(ui.get_rv_error().contains("petra"), "{}", ui.get_rv_error());
 }

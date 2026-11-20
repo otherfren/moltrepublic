@@ -3871,6 +3871,9 @@ pub struct RecoverState {
     pub need: u32,
     /// The full roster, each with its approval state, in roster order.
     pub seats: Vec<RecoverSeat>,
+    /// The local workspace this rejoin replaces ("" = new on this device).
+    #[serde(default)]
+    pub replaces: String,
 }
 
 /// The restore lifecycle (real: download/read → decrypt+stage →
