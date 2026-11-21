@@ -314,14 +314,16 @@ impl WalletHandle {
 
     /// Test seam (B3): a seat heard within `secs` counts as still active
     /// for the restore gates (production: 120 s). A test that drops a
-    /// node and restores it at once sets 0.
+    /// node and restores it at once sets 0. Inert until a test arms it;
+    /// no `Command` reaches it, so MCP and GUI cannot.
     #[doc(hidden)]
     pub fn __seat_active_secs(&self, secs: u64) {
         self.seat_active.store(secs, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (B4): this coordinator ignores `anchor_first` and seals
-    /// first, as a build before B4 does.
+    /// first, as a build before B4 does. Inert until a test arms it; no
+    /// `Command` reaches it, so MCP and GUI cannot.
     #[doc(hidden)]
     pub fn __seal_first(&self, on: bool) {
         self.seal_first.store(on, std::sync::atomic::Ordering::SeqCst);
@@ -336,13 +338,15 @@ impl WalletHandle {
 
     /// Test seam: drop every `n`-th inbound peer envelope before it is
     /// accepted, as a lossy relay would (the sender's resend re-earns it);
-    /// 0 stops dropping.
+    /// 0 stops dropping. Inert until a test arms it; no `Command` reaches
+    /// it, so MCP and GUI cannot.
     #[doc(hidden)]
     pub fn __drop_inbound_every(&self, n: u64) {
         self.drop_seam.every.store(n, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Test seam: how many inbound envelopes the drop seam swallowed.
+    /// Test seam: how many inbound envelopes the drop seam swallowed. A
+    /// read only; no `Command` reaches it.
     #[doc(hidden)]
     pub fn __dropped_inbound(&self) -> u64 {
         self.drop_seam.dropped.load(std::sync::atomic::Ordering::SeqCst)
