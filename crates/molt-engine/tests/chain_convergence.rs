@@ -11,7 +11,7 @@
 
 mod common;
 
-use common::{adopt_relay, engine, found_pair, read_session, wait_for, wiki_docs};
+use common::{adopt_relay, engine, found_pair, read_session, wait_for_secs, wiki_docs};
 use std::time::Duration;
 
 use molt_core::{Command, ProposalState, Reply};
@@ -115,6 +115,17 @@ async fn concurrent_bursts_end_on_one_chain() {
     assert_eq!((wiki_docs(&a).await, wiki_docs(&b).await), (want_docs, want_docs), "the wikis agree");
 }
 
+/// The engine runs on wall-clock time (presence, sealing grace), so a
+/// paused tokio clock cannot drive it: every wait is a condition with a
+/// ceiling sized for a loaded machine.
+async fn wait_long(
+    w: &WalletHandle,
+    what: &str,
+    pred: impl Fn(&molt_core::SessionView) -> bool,
+) -> Box<molt_core::SessionView> {
+    wait_for_secs(w, what, 180, pred).await
+}
+
 /// A real 2-of-3 republic over `url`: mara founds, walter and dora join.
 async fn found_trio(root: &std::path::Path, url: &str) -> [WalletHandle; 3] {
     let a = engine(&root.join("mara"));
@@ -128,7 +139,7 @@ async fn found_trio(root: &std::path::Path, url: &str) -> [WalletHandle; 3] {
     })
     .await
     .expect("create start");
-    let s = wait_for(&a, "two seat links", |s| {
+    let s = wait_long(&a, "two seat links", |s| {
         s.create.seats.len() >= 2
             && s.create.seats.iter().all(|seat| molt_engine::FoundingInvite::parse(&seat.link).is_ok())
     })
@@ -143,7 +154,7 @@ async fn found_trio(root: &std::path::Path, url: &str) -> [WalletHandle; 3] {
             .expect("join start");
         joiners.push(w);
     }
-    wait_for(&a, "both joins", |s| s.create.can_propose).await;
+    wait_long(&a, "both joins", |s| s.create.can_propose).await;
     a.execute(Command::CreatePropose {
         name: "Drei".to_string(),
         agenda: String::new(),
@@ -154,17 +165,17 @@ async fn found_trio(root: &std::path::Path, url: &str) -> [WalletHandle; 3] {
     let seed = read_session(&a).await.create.seed.clone();
     a.execute(Command::ConfirmSeedBackup { phrase: seed }).await.expect("founder backup");
     for w in &joiners {
-        wait_for(w, "the charter", |s| s.join.awaiting_ratify).await;
+        wait_long(w, "the charter", |s| s.join.awaiting_ratify).await;
         w.execute(Command::JoinConfirmCharter).await.expect("ratify");
         let seed = read_session(w).await.join.seed.clone();
         w.execute(Command::ConfirmSeedBackup { phrase: seed }).await.expect("joiner backup");
     }
-    wait_for(&a, "the seal", |s| s.create.run.outcome == 1).await;
+    wait_long(&a, "the seal", |s| s.create.run.outcome == 1).await;
     a.execute(Command::CreateFinish).await.expect("create finish");
     for w in &joiners {
-        wait_for(w, "the join seal", |s| s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()).await;
+        wait_long(w, "the join seal", |s| s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()).await;
         w.execute(Command::JoinFinish).await.expect("join finish");
-        wait_for(w, "the joiner to enter", |s| s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
+        wait_long(w, "the joiner to enter", |s| s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
             .await;
     }
     let mut it = joiners.into_iter();
@@ -218,7 +229,9 @@ async fn three_seats_with_bursts_and_lost_frames_end_on_one_head() {
     const BURSTS: usize = 2;
     const PAGES: usize = 3;
     let names = ["mara", "walter", "dora"];
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(420);
+    // a ceiling, not a pace: the loop leaves as soon as the heads agree
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(900);
+    let started = tokio::time::Instant::now();
     for burst in 0..BURSTS {
         for i in 0..PAGES {
             for (w, name) in seats.iter().zip(names) {
@@ -256,7 +269,7 @@ async fn three_seats_with_bursts_and_lost_frames_end_on_one_head() {
         forks += sync_of(w).await.1;
     }
     let dropped: u64 = seats.iter().map(WalletHandle::__dropped_inbound).sum();
-    eprintln!("fork_decisions={forks} dropped={dropped}");
+    eprintln!("fork_decisions={forks} dropped={dropped} secs={}", started.elapsed().as_secs());
     assert!(dropped > 0, "the network was lossy");
     assert!(forks <= FORKS_MAX, "fork decisions {forks} above {FORKS_MAX}");
 }
