@@ -323,9 +323,7 @@ impl State {
             self.chain.catchup_from = None;
         }
         // a peer gone silent cannot heal; it is not this node's trouble
-        let silent: Vec<String> = self.chain_lag().silent.into_iter().map(|s| s.member).collect();
-        let troubled = self.chain.diverged.keys().any(|p| !silent.contains(p)) || !self.chain.fork_candidates.is_empty();
-        if troubled {
+        if self.chain_unsettled() {
             if self.chain.heal_since == 0 {
                 self.chain.heal_since = now;
                 self.chain.heal_backoff = CATCHUP_RETRY_SECS;

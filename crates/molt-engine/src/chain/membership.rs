@@ -468,7 +468,8 @@ impl State {
         if active {
             return Some(SEAT_STILL_ACTIVE);
         }
-        if !self.chain.diverged.is_empty() || !self.chain.fork_candidates.is_empty() {
+        // the restored seat's own entry clears only once it is back
+        if self.chain_unsettled_besides(Some(member)) {
             return Some(CHAIN_DIVERGED);
         }
         None

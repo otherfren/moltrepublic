@@ -226,8 +226,22 @@ impl State {
 
     /// A peer is on another branch or blocks of one are held. No state
     /// tracks an attestation variant this node won, so it does not count.
+    /// A diverged seat gone silent does not count either: only it could
+    /// clear its entry.
     pub(crate) fn chain_unsettled(&self) -> bool {
-        !self.chain.diverged.is_empty() || !self.chain.fork_candidates.is_empty()
+        self.chain_unsettled_besides(None)
+    }
+
+    /// [`Self::chain_unsettled`], ignoring `seat`'s own entry as well.
+    pub(crate) fn chain_unsettled_besides(&self, seat: Option<&str>) -> bool {
+        if !self.chain.fork_candidates.is_empty() {
+            return true;
+        }
+        if self.chain.diverged.is_empty() {
+            return false;
+        }
+        let silent: Vec<String> = self.chain_lag().silent.into_iter().map(|s| s.member).collect();
+        self.chain.diverged.keys().any(|p| Some(p.as_str()) != seat && !silent.contains(p))
     }
 
     /// B5: sign the held relay approvals once the chain has healed; the

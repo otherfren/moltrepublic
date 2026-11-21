@@ -1613,6 +1613,7 @@ fn a_diverged_coordinator_refuses_a_restore() {
     let kp_hex = &kp_hex_for(&b, "dora");
     let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &b.republic_id, "", &[]);
     let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    heard(&mut coord, "walter", 10_000, 10_000);
     coord.chain.diverged.insert(
         "walter".to_string(),
         molt_core::ChainDivergence { peer: "walter".to_string(), since_height: 0, seen_ts: 1 },
@@ -1625,6 +1626,50 @@ fn a_diverged_coordinator_refuses_a_restore() {
     assert_eq!(refused, Err("chain diverged".to_string()), "an unlinked fork candidate counts");
 }
 
+/// **A diverged seat gone silent blocks no restore** - least of all its
+/// own: only its restored device could clear the entry. A diverged seat
+/// still talking keeps blocking.
+#[test]
+fn a_silent_diverged_seat_does_not_block_its_own_restore() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let kp_hex = &kp_hex_for(&b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &b.republic_id, "", &[]);
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    heard(&mut coord, "walter", 10_000, 10_000);
+    heard(&mut coord, "dora", 10_000 - 200, 10_000);
+    coord.chain.diverged.insert(
+        "dora".to_string(),
+        molt_core::ChainDivergence { peer: "dora".to_string(), since_height: 0, seen_ts: 1 },
+    );
+    coord
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], "", "")
+        .expect("the silent diverged seat restores");
+
+    // a shorter activity window: dora is restorable, not yet silent
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    coord.seat_active.store(60, std::sync::atomic::Ordering::SeqCst);
+    heard(&mut coord, "walter", 10_000, 10_000);
+    heard(&mut coord, "dora", 10_000 - 90, 10_000);
+    coord.chain.diverged.insert(
+        "dora".to_string(),
+        molt_core::ChainDivergence { peer: "dora".to_string(), since_height: 0, seen_ts: 1 },
+    );
+    coord
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], "", "")
+        .expect("the restored seat's own entry does not count");
+
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    heard(&mut coord, "walter", 10_000 - 200, 10_000);
+    heard(&mut coord, "dora", 10_000 - 200, 10_000);
+    coord.chain.diverged.insert(
+        "walter".to_string(),
+        molt_core::ChainDivergence { peer: "walter".to_string(), since_height: 0, seen_ts: 1 },
+    );
+    coord
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], "", "")
+        .expect("another silent diverged seat blocks nothing");
+}
+
 /// **B3: the ingest gate answers through the ordinary refusal**: the
 /// operator's `recover-refused` notice, the ticket left unspent.
 #[test]
@@ -1634,6 +1679,7 @@ fn a_ticketed_request_on_a_fork_is_refused_and_keeps_its_ticket() {
     let proof = crate::make_seat_proof(b.key("dora"), "t", &kp_hex, &b.republic_id, "", &[]);
     let mut coord = genesis_seat("petra", &b, b.blocks.clone());
     coord.recovery.tickets.insert("t".to_string(), "dora".to_string());
+    heard(&mut coord, "walter", 10_000, 10_000);
     coord.chain.diverged.insert(
         "walter".to_string(),
         molt_core::ChainDivergence { peer: "walter".to_string(), since_height: 0, seen_ts: 1 },
@@ -1669,6 +1715,7 @@ fn a_link_is_not_minted_for_a_live_seat_or_on_a_fork() {
     assert_eq!(coord.session.notice, "recovery-link-failed:seat still active");
     assert!(coord.recovery.tickets.is_empty(), "no ticket minted");
     heard(&mut coord, "dora", 10_000 - 10, 10_000 + 120);
+    heard(&mut coord, "walter", 10_000 + 120, 10_000 + 120);
     coord.chain.diverged.insert(
         "walter".to_string(),
         molt_core::ChainDivergence { peer: "walter".to_string(), since_height: 0, seen_ts: 1 },
