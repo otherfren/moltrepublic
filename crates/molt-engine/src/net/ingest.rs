@@ -506,7 +506,7 @@ impl State {
                 }
                 // A6: only the voter itself is told; a relayed vote is
                 // not its sender's to answer for
-                if self.receive_approval(id.0, &by, height, &sig) && by == from {
+                if self.receive_approval_via(&from, id.0, &by, height, &sig) && by == from {
                     self.tell_the_voter_it_was_dropped(id.0, &by, height);
                 }
                 // R12: a collected signature is ephemeral — keep the vote

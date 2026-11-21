@@ -655,7 +655,9 @@ impl State {
         }
         self.vault_displaced(&dropped, &kept);
         // the adopted suffix's bookkeeping (emits, cleared sigs, the re-base
-        // of every open card onto the new head)
+        // of every open card onto the new head); the park is judged after
+        // the clear below, or what it releases is cleared with the rest
+        let parked = std::mem::take(&mut self.chain.parked_approvals);
         for b in &suffix {
             self.after_block_applied(b);
         }
@@ -663,6 +665,7 @@ impl State {
         // heights that no longer exist here; this node's own decisions
         // re-sign at the new heights, on a healed chain (B5)
         self.chain.pending_sigs.clear();
+        self.chain.parked_approvals.extend(parked);
         self.chain.fork_candidates.clear();
         self.chain.diverged.clear();
         let mine: Vec<u64> = self
@@ -679,6 +682,7 @@ impl State {
         for id in mine {
             self.chain_sign_and_gossip_approval(id);
         }
+        self.judge_parked_approvals();
         self.persist_chain_now();
         self.emit_session(crate::SessionScope::Full);
         // whatever the peer holds above what we adopted

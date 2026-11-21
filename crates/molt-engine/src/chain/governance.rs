@@ -35,6 +35,8 @@ pub(super) const SEALER_GRACE_SECS: u64 = 60;
 /// B6: head+2 approvals parked at most, one per (proposal, signer): 64 open
 /// cards from each of four seats. Beyond it they are refused as before.
 const PARKED_APPROVALS_MAX: usize = 256;
+/// C4: parked entries one relaying sender may hold.
+const PARKED_PER_SENDER_MAX: usize = 64;
 
 /// B5: the blocker a relay change meets on a forked chain.
 pub(crate) const RELAYS_WAIT: &str = "relays wait: chain diverged";
@@ -69,6 +71,29 @@ pub(super) fn sealer_wait(rank: u64, waited: u64) -> SealerWait {
         SealerWait::Ask
     } else {
         SealerWait::Wait
+    }
+}
+
+/// B6 (D3): an approval for head+2, held until the head moves.
+#[derive(Debug, Clone)]
+pub(crate) struct ParkedApproval {
+    pub(crate) height: u64,
+    pub(crate) sig: String,
+    /// The wire sender that relayed it (the per-sender cap).
+    pub(crate) via: molt_core::MemberId,
+    /// Checked at park time against the registered change.
+    pub(crate) verified: bool,
+}
+
+impl ParkedApproval {
+    /// Who may replace whom: verified over the signer's own frame over a
+    /// relayed copy.
+    fn rank(&self, by: &str) -> u8 {
+        if self.verified {
+            2
+        } else {
+            u8::from(self.via == by)
+        }
     }
 }
 
@@ -619,12 +644,18 @@ impl State {
     /// at `height` - the roster seats heard within
     /// [`super::sync::SILENT_AFTER_SECS`] (this seat always), by name. Per
     /// height, never per proposal: two proposals at one height must not
-    /// have two first sealers.
+    /// have two first sealers. A seat on another branch cannot seal on
+    /// ours and leaves the line (every seat learns that from the same
+    /// block; its catch-up request after a re-base clears it). A seat
+    /// merely behind stays: its height here is stale while it catches up.
     pub(crate) fn sealing_line(&self, _height: u64) -> Vec<String> {
         let me = self.member();
         let unseen = self.unseen_seats();
-        let mut line: Vec<String> =
-            self.roster().into_iter().filter(|m| *m == me || !unseen.contains(m)).collect();
+        let mut line: Vec<String> = self
+            .roster()
+            .into_iter()
+            .filter(|m| *m == me || (!unseen.contains(m) && !self.chain.diverged.contains_key(m)))
+            .collect();
         line.sort();
         line.dedup();
         line
@@ -646,7 +677,7 @@ impl State {
             return true;
         }
         let now = self.presence_now();
-        self.chain.ready_at.retain(|_, (h, _)| *h == target);
+        self.prune_ready_at(target);
         let fresh = !self.chain.ready_at.contains_key(&id);
         self.chain.ready_at.entry(id).or_insert((target, now));
         // the wait is the HEIGHT's: a proposal sealable later inherits it
@@ -681,6 +712,55 @@ impl State {
                 false
             }
         }
+    }
+
+    /// C2: keep a "sealable since" only while its proposal is still
+    /// sealable at `target`. Re-judged at every use and every delivery
+    /// tick, so no terminal path (withdraw, decline, supersede, a lost
+    /// signature) can leave a stale start behind.
+    fn prune_ready_at(&mut self, target: u64) {
+        let ids: Vec<u64> = self.chain.ready_at.keys().copied().collect();
+        for id in ids {
+            let keep = self.chain.ready_at.get(&id).is_some_and(|(h, _)| *h == target)
+                && self.still_sealable(id, target);
+            if !keep {
+                self.chain.ready_at.remove(&id);
+            }
+        }
+    }
+
+    /// Open, its change registered, and holding the needed verified
+    /// signatures at `target` (the counting rule of [`Self::try_commit`]).
+    fn still_sealable(&self, id: u64, target: u64) -> bool {
+        let Some(head) = self.chain.head.as_ref() else {
+            return false;
+        };
+        let card = self.proposals.get(&id);
+        if card.is_some_and(|p| p.state != ProposalState::Proposed) {
+            return false;
+        }
+        let (Some(change), Some(pending)) = (self.proposal_change(id), self.chain.pending_sigs.get(&id)) else {
+            return false;
+        };
+        if pending.height != target {
+            return false;
+        }
+        let decliners = card.map(|p| p.decliners.as_slice()).unwrap_or_default();
+        let restored = match &change {
+            ChainChange::Membership { op: MembershipOp::Restored, member, consent: Some(_), .. } => Some(member),
+            _ => None,
+        };
+        let voices = pending
+            .verified
+            .iter()
+            .filter(|m| !decliners.contains(m) && restored != Some(m))
+            .count();
+        let need = if CutKind::of(&change).is_some() {
+            head.identities.len()
+        } else {
+            usize::from(head.rule_m)
+        };
+        voices + usize::from(restored.is_some()) >= need
     }
 
     /// B6: the turn seals the SMALLEST sealable id at `target`, so a seat
@@ -753,6 +833,9 @@ impl State {
     /// lands once the round has passed and is dropped once its proposal is
     /// no longer open (a peer sealed it, or it was withdrawn).
     pub(crate) fn drain_held_seals(&mut self) {
+        if let Some(target) = self.chain.head.as_ref().map(|h| h.height + 1) {
+            self.prune_ready_at(target);
+        }
         let open: Vec<u64> = self
             .chain
             .seal_held
@@ -1164,24 +1247,58 @@ impl State {
 
     /// B6 (D3): park an approval for head+2 - its signer holds one block
     /// more than this node. One slot per (proposal, signer); `false` when
-    /// it cannot be parked (not a seat, or the park is full).
-    fn park_approval(&mut self, id: u64, by: &str, height: u64, sig: &str) -> bool {
-        let rostered = self.chain.head.as_ref().is_some_and(|h| h.identities.iter().any(|i| i.member == by));
-        let key = (id, by.to_string());
-        if !rostered
-            || (self.chain.parked_approvals.len() >= PARKED_APPROVALS_MAX
-                && !self.chain.parked_approvals.contains_key(&key))
-        {
+    /// it cannot be parked (not a seat, a signature that fails, the
+    /// sender's share or the park full). C4: verified against the
+    /// registered change where there is one; an entry never gives way to a
+    /// lower-ranked one ([`ParkedApproval::rank`]), and a full park gives
+    /// up an unverified entry only for a verified one.
+    fn park_approval(&mut self, via: &str, id: u64, by: &str, height: u64, sig: &str) -> bool {
+        let Some(head) = self.chain.head.as_ref() else {
             return false;
+        };
+        let Some(identity) = head.identities.iter().find(|i| i.member == by) else {
+            return false;
+        };
+        let verified = match self.proposal_change(id) {
+            Some(change) => {
+                let bytes = approval_bytes(&self.republic_id(), height, &change);
+                if !molt_storage::identity_verify(&identity.identity_pk, &bytes, sig) {
+                    return false;
+                }
+                true
+            }
+            None => false,
+        };
+        let entry = ParkedApproval { height, sig: sig.to_string(), via: via.to_string(), verified };
+        let key = (id, by.to_string());
+        let park = &mut self.chain.parked_approvals;
+        if let Some(held) = park.get(&key) {
+            if held.rank(by) > entry.rank(by) || (held.rank(by) == 0 && entry.rank(by) == 0) {
+                return true;
+            }
+        } else {
+            let share = park.values().filter(|p| p.via == via).count();
+            if share >= PARKED_PER_SENDER_MAX {
+                return false;
+            }
+            if park.len() >= PARKED_APPROVALS_MAX {
+                let loose = park.iter().find(|(_, p)| !p.verified).map(|(k, _)| k.clone());
+                match loose {
+                    Some(k) if verified => {
+                        park.remove(&k);
+                    }
+                    _ => return false,
+                }
+            }
         }
-        tracing::debug!(id, %by, height, "approval=parked");
-        self.chain.parked_approvals.insert(key, (height, sig.to_string()));
+        tracing::debug!(id, %by, %via, height, verified, "approval=parked");
+        park.insert(key, entry);
         true
     }
 
     /// B6 (D3): the head moved - parked approvals for the new target count
     /// now, those still one ahead stay, the rest are stale.
-    fn judge_parked_approvals(&mut self) {
+    pub(super) fn judge_parked_approvals(&mut self) {
         if self.chain.parked_approvals.is_empty() {
             return;
         }
@@ -1190,11 +1307,11 @@ impl State {
         };
         let parked = std::mem::take(&mut self.chain.parked_approvals);
         let mut due = Vec::new();
-        for ((id, by), (height, sig)) in parked {
-            if height == target {
-                due.push((id, by, height, sig));
-            } else if height == target + 1 {
-                self.chain.parked_approvals.insert((id, by), (height, sig));
+        for ((id, by), p) in parked {
+            if p.height == target {
+                due.push((id, by, p.height, p.sig));
+            } else if p.height == target + 1 {
+                self.chain.parked_approvals.insert((id, by), p);
             }
         }
         for (id, by, height, sig) in due {
@@ -1442,6 +1559,11 @@ impl State {
     /// Inbound: a peer's signed approval (gossip). Collect + try to seal.
     /// `true` when it was dropped for a height beyond the next block.
     pub(crate) fn receive_approval(&mut self, id: u64, by: &str, height: u64, sig: &str) -> bool {
+        self.receive_approval_via(by, id, by, height, sig)
+    }
+
+    /// [`Self::receive_approval`] as relayed by the wire sender `via`.
+    pub(crate) fn receive_approval_via(&mut self, via: &str, id: u64, by: &str, height: u64, sig: &str) -> bool {
         if sig.is_empty() || self.retired.contains(&id) {
             return false;
         }
@@ -1461,7 +1583,7 @@ impl State {
         let target = self.chain.head.as_ref().map(|h| h.height + 1);
         if target.is_some_and(|t| height > t) {
             // B6 (D3): one block ahead is the sender's own seal racing it
-            if target.is_some_and(|t| height == t + 1) && self.park_approval(id, by, height, sig) {
+            if target.is_some_and(|t| height == t + 1) && self.park_approval(via, id, by, height, sig) {
                 return false;
             }
             tracing::warn!(%id, height, "dropping an approval for an implausible future height");

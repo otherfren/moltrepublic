@@ -1088,9 +1088,9 @@ pub(crate) struct ChainProjection {
     /// and the height a fallback sealer already asked its peers about.
     pub(crate) ready_at: BTreeMap<u64, (u64, u64)>,
     pub(crate) fallback_asked: Option<u64>,
-    /// B6: approvals for head+2 by (proposal, signer) -> (height, sig),
-    /// re-judged when the head moves.
-    pub(crate) parked_approvals: BTreeMap<(u64, MemberId), (u64, String)>,
+    /// B6: approvals for head+2 by (proposal, signer), re-judged when the
+    /// head moves.
+    pub(crate) parked_approvals: BTreeMap<(u64, MemberId), chain::ParkedApproval>,
     /// B6: a nested seal runs without the smallest-id pass.
     pub(crate) sealing_smaller: bool,
     /// Recovery feedback (R2/R3): when blocks were applied (last minute),
