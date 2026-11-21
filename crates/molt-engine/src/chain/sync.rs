@@ -1126,6 +1126,7 @@ impl State {
     pub(crate) fn clear_divergence(&mut self, from: &str) {
         if self.chain.diverged.remove(from).is_some() {
             tracing::info!(%from, "peer is back on this branch");
+            self.sign_held_approvals();
             self.emit_session(crate::SessionScope::Full);
         }
     }

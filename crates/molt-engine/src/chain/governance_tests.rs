@@ -2965,3 +2965,32 @@ fn fork_candidates_expire_without_their_sender() {
     walter.chain_heal_tick();
     assert!(!walter.chain_unsettled(), "expired after 1200 s");
 }
+
+/// C5: an explicit approve of a relay change on a forked chain is held,
+/// not refused; the held decision survives a hard restart and is signed
+/// once the chain heals without a head move.
+#[test]
+fn an_approve_of_a_relay_change_is_held_through_a_restart() {
+    let b = Builder::new(&ALL3, 2);
+    let (mut walter, _tmp, dir) = crate::tests::stored_chain_signer(&b, "walter", &ALL3);
+    hear(&mut walter, T, &ALL3);
+    let relays = json!({ "op": "set_relays", "value": "wss://relay.one" });
+    wire(&mut walter, "petra", 1, WorkspaceEvent::Proposed { id: ProposalId(4), surface: Surface::Organization, payload: relays });
+    diverge(&mut walter, "dora");
+    let reply = walter.cmd_approve(ProposalId(4), None).expect("held, not refused");
+    let Reply::Vote { held, .. } = reply else {
+        panic!("unexpected reply {reply:?}");
+    };
+    assert_eq!(held.as_deref(), Some("held - chain diverged"));
+    assert!(!walter.own_signature_stands(4), "nothing signed on a forked chain");
+
+    let mut back = crate::tests::reopen_chain_signer(walter, &dir, &b, "walter", false);
+    assert!(back.chain.own_approvals.contains(&4), "the held decision survives the restart");
+    hear(&mut back, T, &ALL3);
+    diverge(&mut back, "dora");
+    back.sign_held_approvals();
+    assert!(!back.own_signature_stands(4), "still forked");
+    back.clear_divergence("dora");
+    assert!(back.own_signature_stands(4), "signed on the heal");
+    assert_eq!(back.chain.blocks.len(), 1, "no head move");
+}

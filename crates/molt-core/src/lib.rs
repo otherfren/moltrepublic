@@ -6872,6 +6872,10 @@ pub enum Reply {
         /// shows first.
         #[serde(default)]
         head: u64,
+        /// Why this seat's signature waits, the decision itself recorded
+        /// (`held - chain diverged`); `None` = signed or nothing to sign.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        held: Option<String>,
     },
     /// A `wiki_edit` dry run: the patch it WOULD propose, nothing proposed.
     WikiPreview {

@@ -40,6 +40,8 @@ const PARKED_PER_SENDER_MAX: usize = 64;
 
 /// B5: the blocker a relay change meets on a forked chain.
 pub(crate) const RELAYS_WAIT: &str = "relays wait: chain diverged";
+/// C5: what an approve answers while its relay change waits.
+pub(crate) const APPROVAL_HELD: &str = "held - chain diverged";
 /// B6: the blocker a cut meets on a forked chain.
 pub(crate) const CUT_WAIT: &str = "cut waits: chain diverged";
 
@@ -292,11 +294,23 @@ impl State {
         }
     }
 
+    /// C5: [`APPROVAL_HELD`] while this seat's decision on `id` waits for
+    /// the heal.
+    pub(crate) fn approval_held(&self, id: u64) -> Option<String> {
+        let waits = self.chain.own_approvals.contains(&id)
+            && !self.own_signature_stands(id)
+            && self.sign_blocker(id).as_deref() == Some(RELAYS_WAIT);
+        waits.then(|| APPROVAL_HELD.to_string())
+    }
+
     pub(crate) fn chain_sign_and_gossip_approval(&mut self, id: u64) {
         if let Some(why) = self.sign_blocker(id) {
-            // B5: the decision stands, the signature waits for the heal
-            if why == RELAYS_WAIT {
-                self.chain.own_approvals.insert(id);
+            // B5: the decision stands, the signature waits for the heal; no
+            // Approved envelope carries it, so the snapshot does
+            if why == RELAYS_WAIT && self.chain.own_approvals.insert(id) {
+                if let Some(active) = &self.active {
+                    active.handle.snapshot(self.snapshot_now());
+                }
             }
             // the re-base path re-signs a STANDING decision: never silent
             tracing::warn!(id, reason = %why, "approval not signed");
