@@ -127,7 +127,7 @@ async fn a_full_anchor_part_stays_under_sixty_kib_on_the_wire() {
         "ab".repeat(32)
     );
     assert!(event.len() <= 24 * 1024, "{}", event.len());
-    let msg = RitualMsg::RecoverAnchor { member: "petra".into(), index: 7, total: 9, event };
+    let msg = RitualMsg::RecoverAnchor { member: "petra".into(), index: 7, total: 9, event, attempt: "ab".repeat(16) };
     let coordinator = Keys::generate();
     let rejoiner = Keys::generate();
     let wrap = wrap_ritual(&coordinator, &rejoiner.public_key(), &msg).await.expect("wrap");

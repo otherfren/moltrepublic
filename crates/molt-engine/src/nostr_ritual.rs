@@ -222,14 +222,14 @@ fn recover_inbox_command(delivery: RitualDelivery, generation: u64) -> Option<Co
     };
     Some(match msg {
         RitualMsg::Recover(r) => crate::founding::recover_command(r, sender, generation),
-        RitualMsg::RecoverFailed { member, reason, version } => {
-            Command::NetRecoverPeerFailed { member, reason, version, sender }
+        RitualMsg::RecoverFailed { member, reason, version, attempt } => {
+            Command::NetRecoverPeerFailed { member, reason, version, attempt, sender }
         }
-        RitualMsg::RecoverWant { member, ticket, missing } => {
-            Command::NetRecoverWant { member, ticket, missing, sender, generation: Some(generation) }
+        RitualMsg::RecoverWant { member, ticket, missing, attempt } => {
+            Command::NetRecoverWant { member, ticket, missing, attempt, sender, generation: Some(generation) }
         }
-        RitualMsg::RecoverReady { member, ticket } => {
-            Command::NetRecoverReady { member, ticket, sender, generation: Some(generation) }
+        RitualMsg::RecoverReady { member, ticket, attempt } => {
+            Command::NetRecoverReady { member, ticket, attempt, sender, generation: Some(generation) }
         }
         _ => return None,
     })
@@ -918,7 +918,13 @@ pub(crate) struct RecoverCtx {
     /// The recovery phrase — wiped on drop (review R9).
     pub phrase: zeroize::Zeroizing<String>,
     pub generation: u64,
+    /// Set once the run saw its re-admission seal (a cancel cannot undo it).
+    pub readmitted: Arc<std::sync::atomic::AtomicBool>,
 }
+
+/// What a quitting rejoiner sends: its run's withdrawal, to the
+/// coordinator, over its own endpoint. Filled once the request is out.
+type Withdrawal = Arc<Mutex<Option<(RitualNet, String, RitualMsg)>>>;
 
 /// One inbound 445 as an engine envelope. The recovery anchor rides the
 /// coordinator's ordinary outbox, so it arrives as an `EventEnvelope` rather
@@ -968,15 +974,38 @@ fn wait_line(what: &str, since_unix: u64, waited: Duration) -> String {
 /// `Command::RecoverStart` on a Nostr republic) — the [`spawn_member_join`]
 /// twin. Every exit reports: success ends in `NetRecoverSealed`, every
 /// failure in `NetRecoverFailed` with a human reason.
+///
+/// A fired `quit` (a cancel, a new run) ends the run after one attempt to
+/// publish its withdrawal (review R2), so the coordinator drops the open
+/// attempt or the unsealed card instead of re-keying onto a KeyPackage
+/// nobody holds.
 pub(crate) fn spawn_recovery_rejoiner(
     dialer: molt_net::dial::Dialer,
     ctx: RecoverCtx,
+    quit: tokio::sync::oneshot::Receiver<()>,
     tx: mpsc::WeakSender<Envelope>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let generation = Some(ctx.generation);
-        if let Err(error) = recovery_rejoin(dialer, ctx, &tx).await {
-            let _ = send_cmd(&tx, Command::NetRecoverFailed { error, generation }).await;
+        let withdrawal = Withdrawal::default();
+        let mut quit = quit;
+        let why = tokio::select! {
+            r = recovery_rejoin(dialer, ctx, &tx, withdrawal.clone()) => match r {
+                Ok(()) => return,
+                Err(error) => {
+                    let _ = send_cmd(&tx, Command::NetRecoverFailed { error: error.clone(), generation }).await;
+                    error
+                }
+            },
+            Ok(()) = &mut quit => "cancelled".to_string(),
+        };
+        let pending = withdrawal.lock().ok().and_then(|mut w| w.take());
+        if let Some((net, to, RitualMsg::RecoverFailed { member, version, attempt, .. })) = pending {
+            let msg = RitualMsg::RecoverFailed { member, reason: why, version, attempt };
+            match net.send_ritual(&to, &msg).await {
+                Ok(_) => tracing::info!("recover_withdraw=sent"),
+                Err(e) => tracing::warn!(error = %e, "recover_withdraw=unsent"),
+            }
         }
     })
 }
@@ -1115,17 +1144,36 @@ impl AnchorCollect {
     }
 }
 
+/// One rejoin run as the coordinator conversation sees it: its id, and
+/// whether its re-admission was seen to seal.
+pub(crate) struct Run<'a> {
+    pub attempt: &'a str,
+    pub readmitted: &'a std::sync::atomic::AtomicBool,
+}
+
+impl Run<'_> {
+    /// An answer this run may act on: one naming it, or one from an older
+    /// coordinator that names no run.
+    fn ours(&self, attempt: &str) -> bool {
+        attempt.is_empty() || attempt == self.attempt
+    }
+}
+
 /// Wait for the coordinator: the anchor first (asking again for missing
 /// pieces), `RecoverReady`, then the Welcome. A Welcome that comes first
-/// is the seal-first order. Ends only on the Welcome or a refusal.
+/// is the seal-first order. Ends only on the Welcome or a refusal of this
+/// run; a refusal naming no run (an older coordinator) may be an earlier
+/// run's, replayed - it is shown and the wait goes on.
 pub(crate) async fn await_admission(
     io: &mut impl RejoinIo,
     h: &molt_net::invite::RecoveryHandoverV2,
     member: &str,
     request: &RitualMsg,
+    run: &Run<'_>,
     tx: &mpsc::WeakSender<Envelope>,
     generation: Option<u64>,
 ) -> Result<Admission, String> {
+    use std::sync::atomic::Ordering::SeqCst;
     let note = |n: String| send_cmd(tx, Command::NetRecoverNote { note: n, generation });
     let mut stage = (molt_net::ritual_net::unix_now(), tokio::time::Instant::now());
     let mut last_note = tokio::time::Instant::now();
@@ -1137,7 +1185,12 @@ pub(crate) async fn await_admission(
     let mut ready_at: Option<tokio::time::Instant> = None;
     let mut ready_fail = PUBLISH_RETRY_INITIAL;
     let mut ready_repeat = READY_REPEAT_INITIAL;
-    let ready = RitualMsg::RecoverReady { member: member.to_string(), ticket: h.ticket.clone() };
+    let ready = RitualMsg::RecoverReady {
+        member: member.to_string(),
+        ticket: h.ticket.clone(),
+        attempt: run.attempt.to_string(),
+    };
+    let mut advisories: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut reask_wait = REASK_INITIAL;
     let mut reask_at = tokio::time::Instant::now() + reask_wait;
     loop {
@@ -1167,7 +1220,12 @@ pub(crate) async fn await_admission(
             let missing = collect.missing();
             if !missing.is_empty() {
                 let list: Vec<String> = missing.iter().map(|i| (i + 1).to_string()).collect();
-                let want = RitualMsg::RecoverWant { member: member.to_string(), ticket: h.ticket.clone(), missing };
+                let want = RitualMsg::RecoverWant {
+                    member: member.to_string(),
+                    ticket: h.ticket.clone(),
+                    missing,
+                    attempt: run.attempt.to_string(),
+                };
                 match io.send(&want).await {
                     Ok(()) => {
                         let _ = note(format!("asked again for anchor parts {}", list.join(" "))).await;
@@ -1201,19 +1259,31 @@ pub(crate) async fn await_admission(
         };
         match delivery {
             RitualDelivery::Welcome(welcome, sender) if sender == h.npub => {
+                run.readmitted.store(true, SeqCst);
                 return Ok(match verified {
                     Some((blob, blocks)) => Admission::AnchorFirst { welcome, blob, blocks },
                     None => Admission::SealFirst { welcome, version },
                 });
             }
-            // the coordinator REFUSED (WP6): the ticket is not spent, a retry
-            // with the right phrase works on the same link
-            RitualDelivery::Msg(RitualMsg::RecoverRefused { reason, .. }, sender) if sender == h.npub => {
-                return Err(format!("the coordinator refused the request: {reason}"));
+            // the coordinator REFUSED this run (WP6): the ticket is not
+            // spent, a retry with the right phrase works on the same link
+            RitualDelivery::Msg(RitualMsg::RecoverRefused { reason, attempt, .. }, sender) if sender == h.npub => {
+                if attempt == run.attempt {
+                    return Err(format!("the coordinator refused the request: {reason}"));
+                }
+                if attempt.is_empty() && advisories.insert(reason.clone()) {
+                    tracing::warn!(%reason, "recover_refusal=unattributed");
+                    let _ = note(format!("⚠ refused, maybe an earlier run: {reason}")).await;
+                }
             }
-            RitualDelivery::Msg(RitualMsg::RecoverProgress { member, need, roster, approved, version: v }, sender)
-                if sender == h.npub =>
+            RitualDelivery::Msg(
+                RitualMsg::RecoverProgress { member, need, roster, approved, version: v, attempt, sealed },
+                sender,
+            ) if sender == h.npub && run.ours(&attempt) =>
             {
+                if sealed {
+                    run.readmitted.store(true, SeqCst);
+                }
                 if version.is_none() {
                     let line = if v.is_empty() {
                         "coordinator runs 0.0.18 or older".to_string()
@@ -1225,8 +1295,8 @@ pub(crate) async fn await_admission(
                 }
                 let _ = send_cmd(tx, Command::NetRecoverProgress { member, need, roster, approved, generation }).await;
             }
-            RitualDelivery::Msg(RitualMsg::RecoverAnchor { index, total, event, .. }, sender)
-                if sender == h.npub && verified.is_none() =>
+            RitualDelivery::Msg(RitualMsg::RecoverAnchor { index, total, event, attempt, .. }, sender)
+                if sender == h.npub && verified.is_none() && run.ours(&attempt) =>
             {
                 if let Some(line) = collect.accept(index, total, &event) {
                     let _ = note(line).await;
@@ -1265,6 +1335,7 @@ async fn recovery_rejoin(
     dialer: molt_net::dial::Dialer,
     ctx: RecoverCtx,
     tx: &mpsc::WeakSender<Envelope>,
+    withdrawal: Withdrawal,
 ) -> Result<(), String> {
     let h = &ctx.handover;
     let generation = Some(ctx.generation);
@@ -1332,6 +1403,7 @@ async fn recovery_rejoin(
     // the seal-first order's group frames are read from shortly before the
     // request on (clock skew)
     let asked_at = molt_net::ritual_net::unix_now();
+    let attempt = invite::recover_attempt_id(&kp_hex);
     let request = RitualMsg::Recover(invite::RecoverRequest {
         member: ctx.member.clone(),
         identity_pk: pk,
@@ -1346,7 +1418,17 @@ async fn recovery_rejoin(
         reply: None,
         anchor_first: true,
         version: env!("CARGO_PKG_VERSION").to_string(),
+        started: asked_at,
     });
+    if let Ok(mut w) = withdrawal.lock() {
+        let msg = RitualMsg::RecoverFailed {
+            member: ctx.member.clone(),
+            reason: String::new(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            attempt: attempt.clone(),
+        };
+        *w = Some((net.clone(), h.npub.clone(), msg));
+    }
     let mut wait = PUBLISH_RETRY_INITIAL;
     while let Err(e) = net.send_ritual(&h.npub, &request).await {
         let _ = note(format!("⚠ the request did not publish - {e} · retrying")).await;
@@ -1356,7 +1438,8 @@ async fn recovery_rejoin(
     let _ = note("request sent - waiting for the coordinator".to_string()).await;
 
     let mut io = RelayIo { net, inbox, to: h.npub.clone() };
-    let admission = await_admission(&mut io, h, &ctx.member, &request, tx, generation).await?;
+    let run = Run { attempt: &attempt, readmitted: &ctx.readmitted };
+    let admission = await_admission(&mut io, h, &ctx.member, &request, &run, tx, generation).await?;
     let (payload, blob, blocks) = match admission {
         Admission::AnchorFirst { welcome, blob, blocks } => {
             join_from_coordinator_welcome(&mut mls, &welcome.welcome)?;
@@ -2356,6 +2439,8 @@ mod admission_tests {
         /// Repeated requests seen; answered with the whole anchor when set.
         reasks: u32,
         answer_reask: bool,
+        /// The run the pieces name.
+        attempt: String,
     }
 
     impl Fake {
@@ -2371,13 +2456,17 @@ mod admission_tests {
                 readies: 0,
                 reasks: 0,
                 answer_reask: false,
+                attempt: run_id(),
             }
         }
 
         fn part(&self, index: u32) -> RitualDelivery {
             let total = u32::try_from(self.frames.len()).expect("total");
             let event = self.frames[usize::try_from(index).expect("index")].clone();
-            RitualDelivery::Msg(RitualMsg::RecoverAnchor { member: "petra".into(), index, total, event }, COORDINATOR.into())
+            RitualDelivery::Msg(
+                RitualMsg::RecoverAnchor { member: "petra".into(), index, total, event, attempt: self.attempt.clone() },
+                COORDINATOR.into(),
+            )
         }
     }
 
@@ -2442,7 +2531,21 @@ mod admission_tests {
             reply: None,
             anchor_first: true,
             version: "0.0.21".into(),
+            started: 0,
         })
+    }
+
+    /// The id of the run [`request`] starts.
+    fn run_id() -> String {
+        invite::recover_attempt_id("bb")
+    }
+
+    /// Await the admission of the run [`request`] starts.
+    async fn admit(io: &mut Fake, rid: &str, weak: &mpsc::WeakSender<Envelope>) -> Result<Admission, String> {
+        let attempt = run_id();
+        let readmitted = std::sync::atomic::AtomicBool::new(false);
+        let run = Run { attempt: &attempt, readmitted: &readmitted };
+        await_admission(io, &handover(rid), "petra", &request(), &run, weak, Some(1)).await
     }
 
     /// An engine stand-in that swallows the notes.
@@ -2461,7 +2564,7 @@ mod admission_tests {
         let (_tx, weak) = sink();
         let mut io = Fake::new(frames, None, Duration::from_secs(20 * 60));
         let started = tokio::time::Instant::now();
-        let got = await_admission(&mut io, &handover(&rid), "petra", &request(), &weak, Some(1)).await.expect("admitted");
+        let got = admit(&mut io, &rid, &weak).await.expect("admitted");
         assert!(started.elapsed() >= Duration::from_secs(20 * 60));
         let Admission::AnchorFirst { blob, blocks, .. } = got else {
             panic!("the anchor came first");
@@ -2478,7 +2581,7 @@ mod admission_tests {
         assert!(frames.len() > 3, "the blob travels in parts: {}", frames.len());
         let (_tx, weak) = sink();
         let mut io = Fake::new(frames, Some(2), Duration::ZERO);
-        let got = await_admission(&mut io, &handover(&rid), "petra", &request(), &weak, Some(1)).await.expect("admitted");
+        let got = admit(&mut io, &rid, &weak).await.expect("admitted");
         assert!(matches!(got, Admission::AnchorFirst { .. }));
         assert_eq!(io.wants, vec![vec![2]], "one ask, for the lost piece");
     }
@@ -2493,7 +2596,7 @@ mod admission_tests {
         io.answer_reask = true;
         let got = tokio::time::timeout(
             Duration::from_secs(4 * 3600),
-            await_admission(&mut io, &handover(&rid), "petra", &request(), &weak, Some(1)),
+            admit(&mut io, &rid, &weak),
         )
         .await
         .expect("the rejoiner asked again")
@@ -2517,14 +2620,12 @@ mod admission_tests {
                 roster: vec!["petra".into(), "walter".into()],
                 approved: vec!["petra".into()],
                 version: "0.0.20".into(),
+                attempt: String::new(),
+                sealed: false,
             },
             COORDINATOR.into(),
         ));
-        let waited = tokio::time::timeout(
-            Duration::from_secs(3600),
-            await_admission(&mut io, &handover(&rid), "petra", &request(), &weak, Some(1)),
-        )
-        .await;
+        let waited = tokio::time::timeout(Duration::from_secs(3600), admit(&mut io, &rid, &weak)).await;
         assert!(waited.is_err(), "still waiting for the Welcome");
         assert_eq!(io.reasks, 0);
     }
@@ -2537,17 +2638,94 @@ mod admission_tests {
         let (_tx, weak) = sink();
         let mut io = Fake::new(Vec::new(), None, Duration::from_secs(3600));
         io.queue.push_back(RitualDelivery::Welcome(welcome(), COORDINATOR.into()));
-        let got = await_admission(&mut io, &handover(&rid), "petra", &request(), &weak, Some(1)).await.expect("admitted");
+        let got = admit(&mut io, &rid, &weak).await.expect("admitted");
         assert!(matches!(got, Admission::SealFirst { .. }));
         // a Welcome from anybody else is not the coordinator's
         let mut io = Fake::new(Vec::new(), None, Duration::from_secs(3600));
         io.queue.push_back(RitualDelivery::Welcome(welcome(), "someone-else".into()));
         io.queue.push_back(RitualDelivery::Msg(
-            RitualMsg::RecoverRefused { member: "petra".into(), reason: "link outdated".into() },
+            RitualMsg::RecoverRefused { member: "petra".into(), reason: "link outdated".into(), attempt: run_id() },
             COORDINATOR.into(),
         ));
-        let err = await_admission(&mut io, &handover(&rid), "petra", &request(), &weak, Some(1)).await.err();
+        let err = admit(&mut io, &rid, &weak).await.err();
         assert_eq!(err.as_deref(), Some("the coordinator refused the request: link outdated"));
+    }
+
+    /// Review R1: every run on one link shares its transport key, and relays
+    /// replay stored wraps. An earlier run's refusal and anchor pieces must
+    /// not end or feed this run.
+    #[tokio::test(start_paused = true)]
+    async fn an_earlier_runs_refusal_and_pieces_do_not_touch_this_run() {
+        let (rid, frames) = fat_anchor();
+        let (_tx, weak) = sink();
+        let mut io = Fake::new(frames, None, Duration::from_secs(5));
+        let stale = invite::recover_attempt_id("an earlier key package");
+        io.queue.push_back(RitualDelivery::Msg(
+            RitualMsg::RecoverRefused { member: "petra".into(), reason: "seat still active".into(), attempt: stale.clone() },
+            COORDINATOR.into(),
+        ));
+        io.queue.push_back(RitualDelivery::Msg(
+            RitualMsg::RecoverAnchor { member: "petra".into(), index: 0, total: 1, event: "{}".into(), attempt: stale },
+            COORDINATOR.into(),
+        ));
+        let got = admit(&mut io, &rid, &weak).await.expect("this run is admitted");
+        assert!(matches!(got, Admission::AnchorFirst { .. }));
+        assert!(io.wants.is_empty(), "the foreign piece never set the count");
+    }
+
+    /// Review R1, an older coordinator: a refusal naming no run may be a
+    /// replay of an earlier run's - it does not end the wait.
+    #[tokio::test(start_paused = true)]
+    async fn a_refusal_naming_no_run_does_not_end_the_wait() {
+        let (rid, _) = fat_anchor();
+        let (_tx, weak) = sink();
+        let mut io = Fake::new(Vec::new(), None, Duration::MAX);
+        io.queue.push_back(RitualDelivery::Msg(
+            RitualMsg::RecoverRefused { member: "petra".into(), reason: "seat still active".into(), attempt: String::new() },
+            COORDINATOR.into(),
+        ));
+        let waited = tokio::time::timeout(Duration::from_secs(3600), admit(&mut io, &rid, &weak)).await;
+        assert!(waited.is_err(), "still waiting");
+    }
+
+    /// Review R2: the sealed report marks the run re-admitted, so a cancel
+    /// can say a new link is needed.
+    #[tokio::test(start_paused = true)]
+    async fn the_sealed_report_marks_the_run_readmitted() {
+        let (rid, _) = fat_anchor();
+        let (_tx, weak) = sink();
+        let mut io = Fake::new(Vec::new(), None, Duration::MAX);
+        let progress = |sealed| {
+            RitualDelivery::Msg(
+                RitualMsg::RecoverProgress {
+                    member: "petra".into(),
+                    need: 2,
+                    roster: vec!["petra".into(), "walter".into()],
+                    approved: vec!["petra".into(), "walter".into()],
+                    version: "0.0.21".into(),
+                    attempt: run_id(),
+                    sealed,
+                },
+                COORDINATOR.into(),
+            )
+        };
+        io.queue.push_back(progress(false));
+        let attempt = run_id();
+        let readmitted = std::sync::atomic::AtomicBool::new(false);
+        let run = Run { attempt: &attempt, readmitted: &readmitted };
+        let _ = tokio::time::timeout(
+            Duration::from_secs(60),
+            await_admission(&mut io, &handover(&rid), "petra", &request(), &run, &weak, Some(1)),
+        )
+        .await;
+        assert!(!readmitted.load(std::sync::atomic::Ordering::SeqCst), "a live vote is not the seal");
+        io.queue.push_back(progress(true));
+        let _ = tokio::time::timeout(
+            Duration::from_secs(60),
+            await_admission(&mut io, &handover(&rid), "petra", &request(), &run, &weak, Some(1)),
+        )
+        .await;
+        assert!(readmitted.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     /// Every anchor piece of a ~150 KB blob fits the gift-wrap budget and

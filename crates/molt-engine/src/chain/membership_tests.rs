@@ -980,6 +980,7 @@ fn a_restored_commit_triggers_the_coordinators_rekey() {
             key_package: "beef".to_string(),
             reply: String::new(),
             card: change.clone(),
+            ticket: String::new(),
         },
     );
     let block = b.seal(1, change, &["petra", "walter"]);
@@ -1126,6 +1127,7 @@ fn a_restored_commit_without_a_pending_recovery_is_inert() {
         PendingRecovery {
             key_package: "beef".to_string(),
             reply: String::new(),
+            ticket: String::new(),
             card: ChainChange::Membership {
                 op: MembershipOp::Restored,
                 member: "dora".to_string(),
@@ -1314,7 +1316,7 @@ fn a_planted_restore_card_does_not_block_a_recovery() {
                 consent_for(&b, "dora", ""),
                 String::new(),
                 String::new(),
-                false,
+                (false, 0),
                 None,
             )
             .expect("ack");
@@ -1650,7 +1652,7 @@ fn a_ticketed_request_on_a_fork_is_refused_and_keeps_its_ticket() {
             String::new(),
             String::new(),
             String::new(),
-            false,
+            (false, 0),
             None,
         )
         .expect("ack");
@@ -1699,7 +1701,7 @@ fn a_link_less_request_is_refused_and_never_proposed() {
                 consent.clone(),
                 String::new(),
                 String::new(),
-                false,
+                (false, 0),
                 None,
             )
             .expect("ack");

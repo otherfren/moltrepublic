@@ -551,3 +551,16 @@ fn the_rejoin_keeps_a_step_log() {
     }
     assert_eq!(st.session.recover.log.len(), 50, "bounded");
 }
+
+/// Review R2: a cancel once the re-admission sealed cannot withdraw it -
+/// the session says a new link is needed instead of a plain cancel.
+#[test]
+fn a_cancel_after_the_seal_says_a_new_link_is_needed() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut st = crate::tests::plain_state();
+    st.recovery.task = Some(tokio::spawn(std::future::pending::<()>()));
+    st.recovery.readmitted.store(true, std::sync::atomic::Ordering::SeqCst);
+    st.cmd_recover_cancel().expect("cancel");
+    assert_eq!(st.session.notice, format!("recover-failed:{}", crate::recovery::READMITTED_NEW_LINK));
+}

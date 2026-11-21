@@ -1822,12 +1822,13 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return self.cmd_net_recover_failed("engine stopped".to_string(), Some(generation));
         };
-        // a restarted recovery aborts the previous incarnation's task: its
-        // generation-guarded results would be dropped anyway, and aborting
-        // also releases its relay sockets
-        if let Some(task) = self.recovery.task.take() {
-            task.abort();
-        }
+        // a restarted recovery ends the previous incarnation's task: its
+        // generation-guarded results would be dropped anyway, and its run
+        // is withdrawn at the coordinator
+        self.stop_rejoiner();
+        let (quit, quit_rx) = tokio::sync::oneshot::channel();
+        self.recovery.quit = Some(quit);
+        self.recovery.readmitted = std::sync::Arc::default();
         self.recovery.task = Some(crate::nostr_ritual::spawn_recovery_rejoiner(
             dialer,
             crate::nostr_ritual::RecoverCtx {
@@ -1836,7 +1837,9 @@ impl State {
                 member: inv.member.clone(),
                 phrase: task_phrase.into(),
                 generation,
+                readmitted: self.recovery.readmitted.clone(),
             },
+            quit_rx,
             cmd_tx.downgrade(),
         ));
         Ok(Reply::Ack)
@@ -2238,8 +2241,19 @@ impl State {
     pub(crate) fn invalidate_recovery(&mut self) {
         self.recovery.generation += 1;
         self.recovery.ctx = None;
-        if let Some(task) = self.recovery.task.take() {
-            task.abort();
+        self.stop_rejoiner();
+    }
+
+    /// End the rejoiner task: it withdraws its run at the coordinator
+    /// (review R2), then ends; a task that cannot hear the quit is aborted.
+    fn stop_rejoiner(&mut self) {
+        let quit = self.recovery.quit.take();
+        let Some(task) = self.recovery.task.take() else {
+            return;
+        };
+        match quit.map(|q| q.send(())) {
+            Some(Ok(())) => self.farewell(task),
+            _ => task.abort(),
         }
     }
 
@@ -2383,10 +2397,16 @@ impl State {
         if !self.recovery.task.as_ref().is_some_and(|t| !t.is_finished()) {
             return Err(MoltError::Recover("no rejoin running".to_string()));
         }
+        // review R2: a sealed re-admission cannot be withdrawn
+        let readmitted = self.recovery.readmitted.load(std::sync::atomic::Ordering::SeqCst);
         self.invalidate_recovery();
         self.session.recover = molt_core::RecoverState::default();
-        tracing::info!("recover=cancelled");
-        self.session.notice = "recover-cancelled".to_string();
+        tracing::info!(readmitted, "recover=cancelled");
+        self.session.notice = if readmitted {
+            format!("recover-failed:{}", crate::recovery::READMITTED_NEW_LINK)
+        } else {
+            "recover-cancelled".to_string()
+        };
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }

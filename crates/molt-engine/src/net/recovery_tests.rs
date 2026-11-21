@@ -73,6 +73,8 @@ fn an_announce_without_our_queue_does_not_burn_the_cooldown() {
 fn attempt(member: &str, touched: tokio::time::Instant) -> crate::chain::AnchorFirst {
     crate::chain::AnchorFirst {
         member: member.to_string(),
+        attempt: String::new(),
+        started: 0,
         identity_pk: String::new(),
         key_package: String::new(),
         seat_proof: String::new(),
@@ -100,14 +102,15 @@ fn open_anchor_attempts_are_bounded_by_count() {
     let cap = super::recovery::MAX_ANCHOR_ATTEMPTS;
     for i in 0..=cap {
         let at = t0 + std::time::Duration::from_secs(u64::try_from(i).expect("small"));
+        st.recovery.attempts.note_minted(&format!("t{i}"));
         st.admit_anchor_attempt(&format!("t{i}"), attempt(&format!("m{i}"), at));
     }
     assert_eq!(st.recovery.anchor_first.len(), cap);
     assert!(!st.recovery.anchor_first.contains_key("t0"), "the least recently heard went");
-    st.cmd_net_recover_ready("m0", "t0", &"ab".repeat(32), None).expect("ready");
+    st.cmd_net_recover_ready("m0", "t0", "", &"ab".repeat(32), None).expect("ready");
     assert_eq!(st.recovery.anchor_first.len(), cap, "an evicted attempt proposes nothing");
     assert!(
-        st.recovery.unsolicited_cooldown.keys().any(|(k, _)| k == "outdated:m0"),
+        st.recovery.unsolicited_cooldown.keys().any(|(k, _)| k.starts_with("outdated:m0:")),
         "answered link outdated"
     );
 }
@@ -163,5 +166,45 @@ fn an_anchor_first_seat_survives_a_restart() {
         walter.note_anchor_first_seat(seat.clone());
         let back = crate::tests::reopen_chain_signer(walter, &dir, &b, "walter", with_snapshot);
         assert!(back.recovery.anchor_first_seats.contains(&seat), "with_snapshot={with_snapshot}");
+    }
+}
+
+/// Review R4: a Want/Ready for a ticket this node never minted is a
+/// prober or a replay - dropped, no answer, no cooldown entry.
+#[test]
+fn a_want_for_a_ticket_never_minted_is_not_answered() {
+    let mut st = crate::tests::plain_state();
+    let sender = "ab".repeat(32);
+    st.cmd_net_recover_want("petra", "never-minted", &[0], "a1", &sender, None).expect("want");
+    st.cmd_net_recover_ready("petra", "never-minted", "a1", &sender, None).expect("ready");
+    assert!(st.recovery.unsolicited_cooldown.is_empty(), "nothing answered");
+    st.recovery.attempts.note_minted("minted-here");
+    st.cmd_net_recover_ready("petra", "minted-here", "a1", &sender, None).expect("ready");
+    assert_eq!(st.recovery.unsolicited_cooldown.len(), 1, "a ticket minted here is answered");
+}
+
+/// Review R4: the answer map is capped on every insert.
+#[test]
+fn the_answer_map_is_capped() {
+    let mut st = crate::tests::plain_state();
+    for i in 0..1_000 {
+        assert!(st.answer_once((format!("k{i}"), "s".to_string())));
+    }
+    assert!(st.recovery.unsolicited_cooldown.len() <= 256, "{}", st.recovery.unsolicited_cooldown.len());
+    assert!(!st.answer_once(("k999".to_string(), "s".to_string())), "the newest is still remembered");
+}
+
+/// Review R4: a minted ticket's fingerprint - never the ticket - survives
+/// a restart, so its Want/Ready still earns `link outdated`.
+#[test]
+fn a_minted_ticket_survives_a_restart() {
+    for with_snapshot in [false, true] {
+        let b = crate::chain::test_support::Builder::new(&["petra", "walter"], 2);
+        let (mut walter, _tmp, dir) = crate::tests::stored_chain_signer(&b, "walter", &["petra", "walter"]);
+        walter.recovery.attempts.note_minted("t-secret");
+        walter.snapshot_to_disk();
+        let back = crate::tests::reopen_chain_signer(walter, &dir, &b, "walter", with_snapshot);
+        assert!(back.recovery.attempts.minted("t-secret"), "with_snapshot={with_snapshot}");
+        assert!(!back.recovery.attempts.minted.iter().any(|p| p.contains("t-secret")));
     }
 }

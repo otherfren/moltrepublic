@@ -1157,6 +1157,12 @@ pub(crate) struct RecoveryState {
     /// Recoveries whose card the sweep dropped as dead, one per seat: not
     /// in flight (R3), but a reorg can still seal the card.
     pub(crate) swept: HashMap<String, chain::PendingRecovery>,
+    /// Review R1-R4: runs seen per ticket, spent runs, minted tickets.
+    pub(crate) attempts: chain::AttemptBook,
+    /// The running rejoiner's quit: it withdraws its run, then ends.
+    pub(crate) quit: Option<tokio::sync::oneshot::Sender<()>>,
+    /// The running rejoiner saw its re-admission seal.
+    pub(crate) readmitted: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Recovery tickets this node has minted and is still listening for — the
     /// spend-once guard. A ticket is inserted when a recovery link is minted and
     /// removed the moment a valid request spends it, so a replayed request on a
@@ -1751,6 +1757,9 @@ impl State {
                 spent_tickets: std::collections::HashSet::new(),
                 anchor_first_seats: std::collections::HashSet::new(),
                 swept: HashMap::new(),
+                attempts: chain::AttemptBook::default(),
+                quit: None,
+                readmitted: std::sync::Arc::default(),
                 tickets: HashMap::new(),
                 mesh_window: std::collections::HashSet::new(),
                 mesh_extension_at: std::collections::HashMap::new(),
@@ -2558,6 +2567,7 @@ impl State {
                 reply,
                 sender_npub,
                 anchor_first,
+                started,
                 generation,
             } => self.cmd_net_recover_requested(
                 member,
@@ -2570,14 +2580,14 @@ impl State {
                 consent,
                 reply,
                 sender_npub,
-                anchor_first,
+                (anchor_first, started),
                 generation,
             ),
-            Command::NetRecoverReady { member, ticket, sender, generation } => {
-                self.cmd_net_recover_ready(&member, &ticket, &sender, generation)
+            Command::NetRecoverReady { member, ticket, attempt, sender, generation } => {
+                self.cmd_net_recover_ready(&member, &ticket, &attempt, &sender, generation)
             }
-            Command::NetRecoverWant { member, ticket, missing, sender, generation } => {
-                self.cmd_net_recover_want(&member, &ticket, &missing, &sender, generation)
+            Command::NetRecoverWant { member, ticket, missing, attempt, sender, generation } => {
+                self.cmd_net_recover_want(&member, &ticket, &missing, &attempt, &sender, generation)
             }
             Command::NetRecoverLinkReady {
                 member,
@@ -2645,8 +2655,8 @@ impl State {
             Command::NetRecoverNote { note, generation } => {
                 self.cmd_net_recover_note(note, generation)
             }
-            Command::NetRecoverPeerFailed { member, reason, version, sender } => {
-                self.cmd_net_recover_peer_failed(&member, &reason, &version, &sender)
+            Command::NetRecoverPeerFailed { member, reason, version, attempt, sender } => {
+                self.cmd_net_recover_peer_failed(&member, &reason, &version, &attempt, &sender)
             }
             Command::NetRecoverProgress { member, need, roster, approved, generation } => {
                 self.cmd_net_recover_progress(member, need, roster, approved, generation)

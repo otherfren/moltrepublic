@@ -614,6 +614,9 @@ impl State {
                 v.sort();
                 v
             },
+            minted_tickets: self.recovery.attempts.minted.iter().cloned().collect(),
+            seal_first_seats: Vec::new(),
+            anchor_repushes: Vec::new(),
         }
     }
 
@@ -752,6 +755,14 @@ impl State {
         // for `reverify_all_pending` after the chain adoption
         self.chain.own_approvals.extend(dump.own_approvals.iter().copied());
         self.recovery.anchor_first_seats.extend(dump.anchor_first_seats.iter().cloned());
+        self.recovery.attempts.minted = dump
+            .minted_tickets
+            .iter()
+            .rev()
+            .take(crate::chain::MINTED_TICKETS)
+            .rev()
+            .cloned()
+            .collect();
         let me = self.member();
         for v in dump.votes {
             let mine = v.member == me && self.chain.own_approvals.contains(&v.id);
@@ -924,6 +935,7 @@ impl State {
         self.recovery.spent_tickets.clear();
         self.recovery.anchor_first_seats.clear();
         self.recovery.swept.clear();
+        self.recovery.attempts = crate::chain::AttemptBook::default();
         self.chat.clear();
         self.chat_pos.clear();
         // the compaction state belongs to the workspace we are leaving:

@@ -1033,6 +1033,7 @@ async fn a_request_wrapped_by_another_key_is_refused_and_leaves_the_ticket_unspe
                 anchor_first: false,
                 version: String::new(),
                 consent: String::new(),
+                started: 0,
             }),
         )
         .await
@@ -1625,6 +1626,7 @@ async fn a_link_less_request_from_an_older_build_is_refused_and_answered() {
             anchor_first: false,
             version: String::new(),
             consent: String::new(),
+            started: 0,
         }),
     )
     .await
@@ -1821,17 +1823,33 @@ struct ManualRejoiner {
     coordinator: String,
     ticket: String,
     request: molt_net::invite::RitualMsg,
+    /// This run's id; frames naming another run are skipped.
+    attempt: String,
+    mls: molt_net::MlsMember,
+}
+
+/// How a [`ManualRejoiner`] run differs from the plain one.
+#[derive(Default)]
+struct RunShape {
+    /// The relays the request declares (default: the test relay).
+    declared: Option<Vec<String>>,
+    /// The run's start stamp.
+    started: u64,
 }
 
 impl ManualRejoiner {
     async fn start(url: &str, link: &str, phrase: &str, anchor_first: bool) -> Self {
+        Self::start_as(url, link, phrase, anchor_first, RunShape::default()).await
+    }
+
+    async fn start_as(url: &str, link: &str, phrase: &str, anchor_first: bool, shape: RunShape) -> Self {
         let h = molt_engine::RecoveryInvite::parse(link).expect("link").handover.expect("v2 handover");
         let (sk, identity_pk) = molt_engine::member_identity(phrase).expect("seat identity");
         let entropy = molt_storage::seed_entropy(phrase).expect("entropy");
         let (anchor_sk, anchor) = molt_net::nostr_identity(&entropy, &h.ticket);
         let mls = molt_net::MlsMember::new(&sk, "petra").expect("mls identity");
         let kp_hex = hex::encode(mls.key_package().expect("key package"));
-        let relays = vec![url.to_string()];
+        let relays = shape.declared.unwrap_or_else(|| vec![url.to_string()]);
         let seat_proof = molt_engine::make_seat_proof(&sk, &h.ticket, &kp_hex, &h.republic_id, &anchor, &relays);
         let consent = molt_engine::make_restore_consent(
             &sk,
@@ -1843,24 +1861,26 @@ impl ManualRejoiner {
             h.consent_anchor.as_ref(),
         );
         let dialer = molt_net::dial::Dialer::resolve("none", "local", 0).expect("direct dialer");
-        let net = molt_net::ritual_net::RitualNet::new(dialer, relays.clone(), &anchor_sk).expect("transport");
+        let net = molt_net::ritual_net::RitualNet::new(dialer, vec![url.to_string()], &anchor_sk).expect("transport");
         let mut inbox = net.inbox().await.expect("inbox");
         assert!(inbox.first_read(Duration::from_secs(10)).await.any(), "the inbox is readable");
+        let attempt = molt_net::invite::recover_attempt_id(&kp_hex);
         let request = molt_net::invite::RitualMsg::Recover(molt_net::invite::RecoverRequest {
-                member: "petra".to_string(),
-                identity_pk,
-                key_package: kp_hex,
-                ticket: h.ticket.clone(),
-                seat_proof,
-                new_nostr_pk: anchor,
-                relays,
-                consent,
-                reply: None,
-                anchor_first,
-                version: if anchor_first { "0.0.21".to_string() } else { String::new() },
+            member: "petra".to_string(),
+            identity_pk,
+            key_package: kp_hex,
+            ticket: h.ticket.clone(),
+            seat_proof,
+            new_nostr_pk: anchor,
+            relays,
+            consent,
+            reply: None,
+            anchor_first,
+            version: if anchor_first { "0.0.21".to_string() } else { String::new() },
+            started: shape.started,
         });
         net.send_ritual(&h.npub, &request).await.expect("the request publishes");
-        ManualRejoiner { net, inbox, coordinator: h.npub, ticket: h.ticket, request }
+        ManualRejoiner { net, inbox, coordinator: h.npub, ticket: h.ticket, request, attempt, mls }
     }
 
     async fn repeat_request(&self) {
@@ -1871,16 +1891,49 @@ impl ManualRejoiner {
         self.net.send_ritual(&self.coordinator, &msg).await.expect("publish");
     }
 
-    /// The next anchor piece / Welcome / refusal from the coordinator.
+    /// This run's Ready.
+    fn ready(&self) -> molt_net::invite::RitualMsg {
+        molt_net::invite::RitualMsg::RecoverReady {
+            member: "petra".to_string(),
+            ticket: self.ticket.clone(),
+            attempt: self.attempt.clone(),
+        }
+    }
+
+    /// This run's withdrawal, as a cancelled rejoiner sends it.
+    fn withdrawal(&self) -> molt_net::invite::RitualMsg {
+        molt_net::invite::RitualMsg::RecoverFailed {
+            member: "petra".to_string(),
+            reason: "cancelled".to_string(),
+            version: "0.0.21".to_string(),
+            attempt: self.attempt.clone(),
+        }
+    }
+
+    /// The next anchor piece / Welcome / refusal from the coordinator for
+    /// this run (a stored frame of another run on the link is skipped).
     async fn next(&mut self, what: &str) -> molt_net::ritual_net::RitualDelivery {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        self.next_within(what, Duration::from_secs(30)).await.unwrap_or_else(|| panic!("nothing arrived: {what}"))
+    }
+
+    async fn next_within(&mut self, what: &str, within: Duration) -> Option<molt_net::ritual_net::RitualDelivery> {
+        use molt_net::invite::RitualMsg as M;
+        let deadline = tokio::time::Instant::now() + within;
         loop {
             let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-            assert!(!left.is_zero(), "nothing arrived: {what}");
+            if left.is_zero() {
+                return None;
+            }
             match self.inbox.recv(left).await {
-                Some(d @ molt_net::ritual_net::RitualDelivery::Welcome(..)) => return d,
-                Some(molt_net::ritual_net::RitualDelivery::Msg(molt_net::invite::RitualMsg::RecoverProgress { .. }, _)) => {}
-                Some(d @ molt_net::ritual_net::RitualDelivery::Msg(..)) => return d,
+                Some(d @ molt_net::ritual_net::RitualDelivery::Welcome(..)) => return Some(d),
+                Some(molt_net::ritual_net::RitualDelivery::Msg(M::RecoverProgress { .. }, _)) => {}
+                Some(molt_net::ritual_net::RitualDelivery::Msg(
+                    M::RecoverAnchor { attempt, .. } | M::RecoverRefused { attempt, .. },
+                    _,
+                )) if !attempt.is_empty() && attempt != self.attempt => {
+                    tracing::debug!(what, "skipping another run's frame");
+                }
+                Some(d @ molt_net::ritual_net::RitualDelivery::Msg(..)) => return Some(d),
                 None => {}
             }
         }
@@ -1901,6 +1954,19 @@ impl ManualRejoiner {
                     }
                 }
                 other => panic!("expected an anchor piece: {other:?}"),
+            }
+        }
+    }
+
+    /// The Welcome for this run, joined with this run's KeyPackage.
+    async fn join_welcome(&mut self) -> Result<(), String> {
+        loop {
+            match self.next("the Welcome").await {
+                molt_net::ritual_net::RitualDelivery::Welcome(w, _) => {
+                    return self.mls.join_from_welcome(&w.welcome).map_err(|e| e.to_string());
+                }
+                molt_net::ritual_net::RitualDelivery::Msg(molt_net::invite::RitualMsg::RecoverAnchor { .. }, _) => {}
+                other => panic!("expected the Welcome: {other:?}"),
             }
         }
     }
@@ -1929,11 +1995,12 @@ async fn the_coordinator_holds_still_until_the_rejoiner_is_ready() {
     assert_eq!(status_of(&a).await.mls_epoch, epoch, "no re-key before Ready");
     assert_eq!(open_proposals(&a).await, 0, "nothing proposed before Ready");
 
-    // a piece lost on the way is asked for by index
+    // a piece lost on the way is asked for by index (a B4 build names no run)
     r.send(molt_net::invite::RitualMsg::RecoverWant {
         member: "petra".to_string(),
         ticket: r.ticket.clone(),
         missing: vec![0],
+        attempt: String::new(),
     })
     .await;
     match r.next("the re-sent piece").await {
@@ -1945,7 +2012,7 @@ async fn the_coordinator_holds_still_until_the_rejoiner_is_ready() {
     }
     assert_eq!(chain_len(&a).await, 1, "a Want seals nothing");
 
-    r.send(molt_net::invite::RitualMsg::RecoverReady { member: "petra".to_string(), ticket: r.ticket.clone() }).await;
+    r.send(r.ready()).await;
     match r.next("the Welcome").await {
         molt_net::ritual_net::RitualDelivery::Welcome(..) => {}
         other => panic!("expected the Welcome: {other:?}"),
@@ -1974,7 +2041,7 @@ async fn a_repeated_request_gets_the_anchor_again() {
     assert_eq!(chain_len(&a).await, 1, "nothing sealed");
     assert_eq!(open_proposals(&a).await, 0, "nothing proposed");
     // the ticket is not spent: Ready still admits
-    r.send(molt_net::invite::RitualMsg::RecoverReady { member: "petra".to_string(), ticket: r.ticket.clone() }).await;
+    r.send(r.ready()).await;
     loop {
         match r.next("the Welcome").await {
             molt_net::ritual_net::RitualDelivery::Welcome(..) => break,
@@ -2046,7 +2113,7 @@ async fn a_restarted_coordinator_answers_link_outdated() {
     let id = read_session(&a).await.workspaces[0].id.clone();
     a.execute(Command::CloseWorkspace).await.expect("close");
     a.execute(Command::OpenWorkspace { id }).await.expect("reopen");
-    r.send(molt_net::invite::RitualMsg::RecoverReady { member: "petra".to_string(), ticket: r.ticket.clone() }).await;
+    r.send(r.ready()).await;
     loop {
         match r.next("the refusal").await {
             molt_net::ritual_net::RitualDelivery::Msg(molt_net::invite::RitualMsg::RecoverRefused { reason, .. }, _) => {
@@ -2202,4 +2269,225 @@ async fn the_welcome_survives_five_refused_publishes() {
     .await;
     assert!(!s.notice.starts_with("recover-failed:"), "rejoin: {:?}", s.notice);
     assert_eq!(gate.refused.load(SeqCst), 5, "five publishes were refused");
+}
+
+// ---- review R1-R4: every frame of a run names the run --------------------
+
+/// Poll `probe` until it returns `want`, at most `secs`.
+async fn eventually<F, Fut>(what: &str, secs: u64, want: usize, probe: F)
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = usize>,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let got = probe().await;
+        if got == want {
+            return;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{what}: {got}, want {want}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs()
+}
+
+/// **Review R1:** every run on one link derives the same transport key and
+/// its inbox replays stored wraps. A refusal of an earlier run must not
+/// end the retry - B3 made "refused, fix it, retry the same link" the
+/// normal path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retry_on_the_same_link_is_not_ended_by_an_earlier_runs_refusal() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    // run 1 declares a relay nobody else uses: refused, the ticket stays
+    let shape = RunShape { declared: Some(vec!["wss://nowhere.invalid".to_string()]), started: 1 };
+    let mut first = ManualRejoiner::start_as(&url, &link, &petra_phrase, true, shape).await;
+    match first.next("the refusal").await {
+        molt_net::ritual_net::RitualDelivery::Msg(molt_net::invite::RitualMsg::RecoverRefused { reason, .. }, _) => {
+            assert!(reason.contains("nowhere.invalid"), "{reason}");
+        }
+        other => panic!("expected the refusal: {other:?}"),
+    }
+    drop(first);
+
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart { link, phrase: petra_phrase, relays: Vec::new() }).await.expect("recover start");
+    let s = wait_for_secs(&c, "the retry", 120, |s| {
+        s.notice.starts_with("recovered:") || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "the retry: {:?}", s.notice);
+}
+
+/// **Review R3:** a replay of an earlier run's request - one the
+/// coordinator saw, or one it never saw that started earlier - never
+/// replaces the running attempt, so the Welcome opens with the running
+/// run's KeyPackage.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replayed_earlier_run_never_replaces_the_running_one() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let now = unix_now();
+    let mut oldest = ManualRejoiner::start_as(&url, &link, &petra_phrase, true, RunShape { started: now - 200, ..RunShape::default() }).await;
+    oldest.anchor().await;
+    let mut running = ManualRejoiner::start_as(&url, &link, &petra_phrase, true, RunShape { started: now, ..RunShape::default() }).await;
+    running.anchor().await;
+    // the run it replaced, replayed; and a run never seen that started earlier
+    oldest.repeat_request().await;
+    let _unseen = ManualRejoiner::start_as(&url, &link, &petra_phrase, true, RunShape { started: now - 100, ..RunShape::default() }).await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    running.send(running.ready()).await;
+    running.join_welcome().await.expect("the Welcome is for the running run");
+    assert_eq!(chain_len(&a).await, 2);
+}
+
+/// **Review R2:** a cancel after Ready, with the card still unsealed (vera
+/// heard petra's old device and holds her approval): the rejoiner
+/// withdraws its run, the coordinator withdraws the card through the
+/// ordinary governance path - vera sees it withdrawn too - and the link
+/// is live again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_after_ready_withdraws_the_unsealed_card() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, v, petra_phrase) = found_three_at(tmp.path(), &url, 3).await;
+    v.__seat_active_secs(u64::MAX);
+    b.execute(Command::Chat { body: "still here".to_string(), quote: None, channel: molt_core::ChannelRef::Group })
+        .await
+        .expect("petra speaks");
+    wait_for(&v, "vera to hear petra", |s| {
+        s.workspaces.iter().any(|w| w.members.iter().any(|m| m.name == "petra" && m.last_seen > 0))
+    })
+    .await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart { link: link.clone(), phrase: petra_phrase.clone(), relays: Vec::new() })
+        .await
+        .expect("recover start");
+    eventually("the card on the coordinator", 60, 1, || open_proposals(&a)).await;
+    eventually("the card at vera", 60, 1, || open_proposals(&v)).await;
+    c.execute(Command::RecoverCancel).await.expect("cancel");
+    assert_eq!(read_session(&c).await.notice, "recover-cancelled");
+    eventually("the card withdrawn on the coordinator", 60, 0, || open_proposals(&a)).await;
+    eventually("the card withdrawn at vera", 60, 0, || open_proposals(&v)).await;
+    assert_eq!(chain_len(&a).await, 1, "nothing sealed");
+
+    // the ticket is live again: a new run on the same link gets the anchor
+    let mut again = ManualRejoiner::start(&url, &link, &petra_phrase, true).await;
+    again.anchor().await;
+}
+
+/// **Review R2:** once the re-admission sealed, a withdrawal changes
+/// nothing, and a new run on the spent link hears `link outdated` naming
+/// that run - not silence.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_run_on_a_spent_link_hears_link_outdated() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let mut first = ManualRejoiner::start(&url, &link, &petra_phrase, true).await;
+    first.anchor().await;
+    first.send(first.ready()).await;
+    eventually("the seal", 60, 2, || chain_len(&a)).await;
+    first.send(first.withdrawal()).await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(chain_len(&a).await, 2, "a sealed re-admission stays");
+    drop(first);
+
+    let mut second = ManualRejoiner::start(&url, &link, &petra_phrase, true).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!left.is_zero(), "no answer to the run on the spent link");
+        // anything else is the first run's Welcome, stored for the shared key
+        if let Some(molt_net::ritual_net::RitualDelivery::Msg(
+            molt_net::invite::RitualMsg::RecoverRefused { reason, attempt, .. },
+            _,
+        )) = second.next_within("the answer", left).await
+        {
+            assert_eq!(reason, "link outdated");
+            assert_eq!(attempt, second.attempt, "names the run it answers");
+            break;
+        }
+    }
+}
+
+/// **Review R4:** a link-less request whose seat proof does not verify is
+/// dropped without an answer - only a sender that proved the seat learns
+/// anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_less_request_without_a_seat_proof_gets_no_answer() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let h = molt_engine::RecoveryInvite::parse(&link).expect("link").handover.expect("v2 handover");
+    let self_ticket = "self-minted-ticket";
+    let (_, identity_pk) = molt_engine::member_identity(&petra_phrase).expect("seat identity");
+    let stranger = molt_storage::generate_seed_phrase().expect("a foreign phrase");
+    let (wrong_sk, _) = molt_engine::member_identity(&stranger).expect("a foreign key");
+    let entropy = molt_storage::seed_entropy(&stranger).expect("entropy");
+    let (anchor_sk, anchor) = molt_net::nostr_identity(&entropy, self_ticket);
+    let mls = molt_net::MlsMember::new(&wrong_sk, "petra").expect("mls identity");
+    let kp_hex = hex::encode(mls.key_package().expect("key package"));
+    let seat_proof = molt_engine::make_seat_proof(&wrong_sk, self_ticket, &kp_hex, &h.republic_id, &anchor, &[]);
+    let dialer = molt_net::dial::Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let prober = molt_net::ritual_net::RitualNet::new(dialer, vec![url.clone()], &anchor_sk).expect("transport");
+    let mut inbox = prober.inbox().await.expect("inbox");
+    prober
+        .send_ritual(
+            &h.npub,
+            &molt_net::invite::RitualMsg::Recover(molt_net::invite::RecoverRequest {
+                member: "petra".to_string(),
+                identity_pk,
+                key_package: kp_hex,
+                ticket: self_ticket.to_string(),
+                seat_proof,
+                new_nostr_pk: anchor,
+                relays: Vec::new(),
+                reply: None,
+                anchor_first: false,
+                version: String::new(),
+                consent: String::new(),
+                started: 0,
+            }),
+        )
+        .await
+        .expect("publish");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        if let Some(molt_net::ritual_net::RitualDelivery::Msg(molt_net::invite::RitualMsg::RecoverRefused { reason, .. }, _)) =
+            inbox.recv(left).await
+        {
+            panic!("an unproven sender was answered: {reason}");
+        }
+    }
 }
