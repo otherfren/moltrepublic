@@ -314,6 +314,7 @@ fn an_evicted_or_locked_out_seat_says_so() {
         ("de", "seat-locked-out", "Aus der Gruppe ausgesperrt - mit Link neu beitreten."),
     ] {
         let ui = AppWindow::new().expect("headless window");
+        apply_strings(&ui, i32::from(lang == "de"));
         let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
         let sv = SessionView { language: lang.to_string(), notice: notice.to_string(), ..SessionView::default() };
         apply_session(&ui, &sv, true, &chat_ui);
