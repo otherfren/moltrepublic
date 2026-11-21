@@ -329,6 +329,7 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
         <li>Eine Story gehört zu genau einem Board, ein Task zu genau einer Story.</li>
         <li>Ein Task trägt Titel, Details und das Menschen-Tag. Das Tag ist eine Erklärung, keine Sperre.</li>
         <li>Eine wartende Story darf per Vote in ein anderes Board wandern.</li>
+        <li>Ein Vote darf jeden Task, jede Story und jedes Board entfernen, auch beendete. So räumt die Republik auf. Nur das allgemeine Board bleibt.</li>
       </ul>
     </section>
 
@@ -452,7 +453,7 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
         <li><b>Keine Zyklen</b><span>Geprüft je Graph: die Stories eines Boards, und die Boards.</span></li>
         <li><b>Board sperrt Board</b><span>Hängt Board B an Board A, läuft in B nichts, bevor A beendet ist.</span></li>
         <li><b>Keine Priorität</b><span>Kein Ranking zusätzlich zu den Abhängigkeiten.</span></li>
-        <li><b>Blocker bleiben</b><span>Was etwas blockiert, kann nicht verworfen werden. Ein Vote darf umhängen und im selben Zug verwerfen.</span></li>
+        <li><b>Blocker bleiben</b><span>Worauf noch etwas wartet, kann nicht verworfen oder entfernt werden. Ein Vote darf umhängen und im selben Zug verwerfen.</span></li>
       </ul>
     </section>
   </div>
@@ -486,7 +487,7 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
     <div class="votes">
       <div class="vote">
         <h3>Was ein Paket kann</h3>
-        <p>Boards, Stories und Tasks anlegen und ändern, einen Board-Zustand setzen, Abhängigkeiten setzen, wartende Stories verschieben, Stories abschließen. Beliebig kombiniert.</p>
+        <p>Boards, Stories und Tasks anlegen und ändern, einen Board-Zustand setzen, Abhängigkeiten setzen, wartende Stories verschieben, Stories abschließen, Tasks, Stories und Boards entfernen. Beliebig kombiniert.</p>
       </div>
       <div class="vote">
         <h3>Planen durch Weiterreichen</h3>
