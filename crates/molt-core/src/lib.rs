@@ -3502,6 +3502,10 @@ pub struct EngineStateDump {
     /// discussion: a late re-serve of one must not reopen the vote.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub retired_proposals: Vec<u64>,
+    /// `(seat, new anchor)` this node restored anchor-first: the rejoiner
+    /// holds the anchor, so a restart must not start re-pushing it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchor_first_seats: Vec<(MemberId, String)>,
 }
 
 /// One collected approval signature of an open proposal, as a snapshot

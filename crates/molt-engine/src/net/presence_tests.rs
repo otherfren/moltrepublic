@@ -533,3 +533,21 @@ fn presence_of_and_the_pill_refresh_agree_on_every_input() {
         }
     }
 }
+
+/// The genesis re-publish ends on an event, not on time: once every other
+/// seat was heard in the running group, nobody needs the frame any more.
+#[test]
+fn the_genesis_republish_ends_once_every_seat_was_heard() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut st = presence_fixture();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    st.genesis_stop = Some(stop.clone());
+    st.genesis_unheard = ["bob".to_string(), "cid".to_string()].into_iter().collect();
+    st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
+    assert!(!stop.load(SeqCst), "cid has not been heard");
+    st.cmd_net_peer_seen("bob".to_string(), None).expect("ack");
+    assert!(!stop.load(SeqCst));
+    st.cmd_net_peer_seen("cid".to_string(), None).expect("ack");
+    assert!(stop.load(SeqCst), "every seat was heard");
+    assert!(st.genesis_stop.is_none());
+}

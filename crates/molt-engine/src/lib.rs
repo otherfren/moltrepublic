@@ -1520,6 +1520,9 @@ pub(crate) struct State {
     /// Ends the genesis re-publish of the republic founded here once its
     /// workspace is left.
     pub(crate) genesis_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Seats not yet heard in the running group since the founding here;
+    /// the genesis re-publish ends once none is left.
+    pub(crate) genesis_unheard: std::collections::BTreeSet<MemberId>,
     /// Dropped peer proposals already reported (`from:why`), so a re-served
     /// card notifies once.
     pub(crate) dropped_noted: std::collections::HashSet<String>,
@@ -1781,6 +1784,7 @@ impl State {
             net_ritual: None,
             seal_published: false,
             genesis_stop: None,
+            genesis_unheard: std::collections::BTreeSet::new(),
             dropped_noted: std::collections::HashSet::new(),
             ritual_attestations: Vec::new(),
             ritual_material_sink: None,

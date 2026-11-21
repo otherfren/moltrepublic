@@ -69,8 +69,20 @@ pub(crate) struct AnchorFirst {
     pub frames: Vec<String>,
     /// Last re-send, for the debounce.
     pub resent_at: Option<tokio::time::Instant>,
-    /// The send tasks still retrying.
+    /// The send tasks still retrying; each ends once a relay took its pieces.
     pub tasks: Vec<tokio::task::JoinHandle<()>>,
+    pub opened: tokio::time::Instant,
+    /// Last frame from the rejoiner: the eviction order.
+    pub touched: tokio::time::Instant,
+    pub logged_at: Option<tokio::time::Instant>,
+    pub counts: std::sync::Arc<RecoverSendCounts>,
+}
+
+/// Pieces handed to the send tasks and pieces a relay took.
+#[derive(Default)]
+pub(crate) struct RecoverSendCounts {
+    pub sent: std::sync::atomic::AtomicUsize,
+    pub accepted: std::sync::atomic::AtomicUsize,
 }
 
 impl AnchorFirst {

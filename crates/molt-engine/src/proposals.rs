@@ -932,6 +932,10 @@ impl State {
             // other members' signatures arrive over the mesh
             if self.config.self_cosign {
                 self.chain_sign_and_gossip_approval(id.0);
+                // a decision held unsigned (B5) has no `Approved` in the log
+                if self.chain.own_approvals.contains(&id.0) && !self.own_signature_stands(id.0) {
+                    self.snapshot_to_disk();
+                }
             }
         } else {
             if self.config.self_cosign {

@@ -1925,6 +1925,7 @@ impl State {
         if let Some(stop) = self.genesis_stop.take() {
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
         }
+        self.genesis_unheard.clear();
         self.dropped_noted.clear();
         // WP4a F8: the clean close is the second compaction trigger — the
         // snapshot and the delivery cursors are freshest exactly here. It

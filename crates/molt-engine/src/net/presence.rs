@@ -60,8 +60,21 @@ impl State {
             let now = self.presence_now();
             self.stamp_member_pill(&member, now);
             self.recompute_net_health();
+            self.genesis_heard(&member);
         }
         Ok(Reply::Ack)
+    }
+
+    /// End the genesis re-publish once every other seat spoke in the
+    /// running group: a seat there already holds the genesis.
+    fn genesis_heard(&mut self, member: &str) {
+        if self.genesis_stop.is_none() || !self.genesis_unheard.remove(member) || !self.genesis_unheard.is_empty() {
+            return;
+        }
+        if let Some(stop) = self.genesis_stop.take() {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        tracing::info!("genesis_republish=done");
     }
 
     /// A merged re-key commit re-admitted `member` as a new incarnation
@@ -345,6 +358,7 @@ impl State {
         self.recompute_net_health();
         self.note_unreadable_tick();
         self.retry_held_restore_approvals();
+        self.recover_wait_tick(tokio::time::Instant::now());
         // the mirror gossip beat (mirroring §3.4) rides this tick as well
         self.mirror_gossip_tick(self.presence_now());
         crate::vault::receipts::tick(self, self.presence_now());
