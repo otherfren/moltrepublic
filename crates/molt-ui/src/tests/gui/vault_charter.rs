@@ -35,9 +35,10 @@ fn settle() {
     i_slint_backend_testing::mock_elapsed_time(std::time::Duration::from_millis(300));
 }
 
-/// The founder's charter step of an `m`-of-`n` founding, every seat in.
-/// The caller initializes the backend (once per test thread).
-fn charter_step(m: i32, n: i32) -> (AppWindow, Shown) {
+/// The founder's setup form of an `m`-of-`n` founding, where the charter
+/// and its features are chosen. The caller initializes the backend (once
+/// per test thread).
+fn setup_form(m: i32, n: i32) -> (AppWindow, Shown) {
     let ui = AppWindow::new().expect("headless window");
     ui.window().set_size(slint::PhysicalSize::new(1200, 1800));
     ui.set_screen(AppScreen::Create);
@@ -45,17 +46,7 @@ fn charter_step(m: i32, n: i32) -> (AppWindow, Shown) {
     ui.set_cw_member("a".into());
     ui.set_cw_threshold(m);
     ui.set_cw_members(n);
-    ui.set_cw_step(1);
-    let seats: Vec<RitualSeat> = (0..n)
-        .map(|i| RitualSeat {
-            member: format!("seat {i}").into(),
-            detail: String::new().into(),
-            state: 1,
-        })
-        .collect();
-    ui.set_cw_seats(ModelRc::new(VecModel::from(seats)));
-    ui.set_cw_total(n);
-    ui.set_cw_can_propose(true);
+    ui.set_cw_step(0);
     apply_strings(&ui, 0);
     let shown = show_headless(&ui);
     settle();
@@ -65,7 +56,7 @@ fn charter_step(m: i32, n: i32) -> (AppWindow, Shown) {
 fn wizard_vault_box(ui: &AppWindow) -> Handle {
     let label = ui.global::<Strings>().get_feat_vault().to_string();
     let mut found = checks_in(&window_root(ui), &label);
-    assert_eq!(found.len(), 1, "one vault box on the charter step");
+    assert_eq!(found.len(), 1, "one vault box on the setup form");
     found.remove(0)
 }
 
@@ -73,7 +64,7 @@ fn wizard_vault_box(ui: &AppWindow) -> Handle {
 fn the_vault_box_is_disabled_outside_2_to_n_minus_2() {
     i_slint_backend_testing::init_no_event_loop();
     for (m, n, allowed) in [(2, 3, false), (2, 4, true), (3, 4, false), (1, 4, false), (3, 5, true)] {
-        let (ui, _shown) = charter_step(m, n);
+        let (ui, _shown) = setup_form(m, n);
         let s = ui.global::<Strings>();
         let low = s.get_feat_vault_low().to_string();
         let high = s.get_feat_vault_high().to_string();
@@ -92,7 +83,7 @@ fn the_vault_box_is_disabled_outside_2_to_n_minus_2() {
 #[test]
 fn the_vault_reason_sits_beside_the_box() {
     i_slint_backend_testing::init_no_event_loop();
-    let (ui, _shown) = charter_step(3, 4);
+    let (ui, _shown) = setup_form(3, 4);
     let high = ui.global::<Strings>().get_feat_vault_high().to_string();
     let reason = Handle::find_by_accessible_label(&ui, &high).next().expect("reason shown");
     let check = wizard_vault_box(&ui);
@@ -108,17 +99,17 @@ fn the_vault_reason_sits_beside_the_box() {
 #[test]
 fn the_vault_box_is_on_by_default_where_allowed() {
     i_slint_backend_testing::init_no_event_loop();
-    let (ui, _shown) = charter_step(2, 4);
+    let (ui, _shown) = setup_form(2, 4);
     assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string(), "vault".to_string()]);
     drop(_shown);
-    let (ui, _shown) = charter_step(2, 3);
+    let (ui, _shown) = setup_form(2, 3);
     assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string()]);
 }
 
 #[test]
 fn an_unticked_vault_leaves_create_propose() {
     i_slint_backend_testing::init_no_event_loop();
-    let (ui, _shown) = charter_step(2, 4);
+    let (ui, _shown) = setup_form(2, 4);
     click(&ui, &wizard_vault_box(&ui));
     assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string()]);
 }
@@ -272,10 +263,10 @@ fn an_org_proposal_in_a_vault_republic_carries_no_vault() {
 #[test]
 fn a_ticked_kanban_reaches_create_propose() {
     i_slint_backend_testing::init_no_event_loop();
-    let (ui, _shown) = charter_step(2, 4);
+    let (ui, _shown) = setup_form(2, 4);
     let label = ui.global::<Strings>().get_feat_quests().to_string();
     let mut found = checks_in(&window_root(&ui), &label);
-    assert_eq!(found.len(), 1, "one kanban box on the charter step");
+    assert_eq!(found.len(), 1, "one kanban box on the setup form");
     assert!(!ui.get_cw_feat_quests(), "off by default");
     click(&ui, &found.remove(0));
     assert_eq!(
@@ -284,14 +275,14 @@ fn a_ticked_kanban_reaches_create_propose() {
     );
 }
 
-/// The charter step's features are a table: chat and file sharing locked
+/// The setup form's features are a table: chat and file sharing locked
 /// on, every row with a status - active for the finished ones, in
 /// progress for the unfinished, inactive where the bounds rule it out.
 #[test]
 fn the_feature_table_states_each_rows_status() {
     i_slint_backend_testing::init_no_event_loop();
     let count = |ui: &AppWindow, t: &str| Handle::find_by_accessible_label(ui, t).count();
-    let (ui, _shown) = charter_step(2, 4);
+    let (ui, _shown) = setup_form(2, 4);
     let s = ui.global::<Strings>();
     for locked in [s.get_feat_chat(), s.get_feat_files()] {
         let row = checks_in(&window_root(&ui), &locked);
@@ -307,7 +298,7 @@ fn the_feature_table_states_each_rows_status() {
     drop(_shown);
     // 1-of-3: neither the vault nor the purse is possible
     for (m, n) in [(2, 4), (1, 3)] {
-        let (ui, _shown) = charter_step(m, n);
+        let (ui, _shown) = setup_form(m, n);
         let s = ui.global::<Strings>();
         if m == 1 {
             assert_eq!(count(&ui, &s.get_feat_st_off()), 2);

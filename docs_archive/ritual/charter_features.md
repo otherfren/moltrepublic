@@ -201,6 +201,11 @@ surface lands (the established stepwise-UI modus; never fake, always badged).
   surface is core). Defaults: memory ✓, kanban ☐, vault ✓ where
   `2 <= m <= n-2` holds, wallet ☐. The folded steps below sit under a
   `Founding History` / `Join History` title.*
+  *Amended 2026-11-21 (user decision): the agenda and the feature table
+  move into the wizard's SETUP form beside the name ("Begin ritual" needs
+  an agenda); once every seat joined, the charter step shows them
+  read-only with one Propose & Seal. The UI term is now "social
+  contract" / "Gesellschaftsvertrag"; wire and API names keep `charter`.*
 - **Ratification card:** between agenda and the confirm/decline buttons, the
   five rows with their on/off state — the member sees the whole selection it
   signs, not only the enabled part. Read-only.

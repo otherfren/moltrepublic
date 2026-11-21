@@ -319,7 +319,7 @@ fn a_voted_set_up_without_a_run_offers_the_start() {
     assert!(!shown(&ui, &s.get_wl_try_again()), "a start is due: nothing to press");
 }
 
-fn charter_step(m: i32, n: i32) -> (AppWindow, Shown) {
+fn setup_form(m: i32, n: i32) -> (AppWindow, Shown) {
     backend();
     let ui = AppWindow::new().expect("headless window");
     ui.window().set_size(slint::PhysicalSize::new(1200, 1800));
@@ -328,9 +328,7 @@ fn charter_step(m: i32, n: i32) -> (AppWindow, Shown) {
     ui.set_cw_member("a".into());
     ui.set_cw_threshold(m);
     ui.set_cw_members(n);
-    ui.set_cw_step(1);
-    ui.set_cw_total(n);
-    ui.set_cw_can_propose(true);
+    ui.set_cw_step(0);
     apply_strings(&ui, 0);
     let shown = show_headless(&ui);
     settle();
@@ -342,7 +340,7 @@ fn charter_step(m: i32, n: i32) -> (AppWindow, Shown) {
 #[test]
 fn the_wallet_checkbox_is_opt_in_within_bounds() {
     for (m, n, allowed) in [(2, 3, true), (3, 4, true), (1, 3, false), (3, 3, false)] {
-        let (ui, _shown) = charter_step(m, n);
+        let (ui, _shown) = setup_form(m, n);
         let s = ui.global::<Strings>();
         let wallet = || crate::actions::ritual::charter_features(&ui).contains(&"wallet".to_string());
         assert!(!wallet(), "{m}-of-{n}: off by default");

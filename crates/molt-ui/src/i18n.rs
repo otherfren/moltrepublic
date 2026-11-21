@@ -728,28 +728,28 @@ pub(crate) static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["→ ", " aktivierte Einladung ", " · Schlüssel empfangen"],
     ),
     (
-        &["→ every member has joined · propose the charter to seal"],
-        &["→ alle Mitglieder sind beigetreten · zum Versiegeln die Charter vorschlagen"],
+        &["→ every member has joined · propose the social contract to seal"],
+        &["→ alle Mitglieder sind beigetreten · zum Versiegeln den Gesellschaftsvertrag vorschlagen"],
     ),
     (
-        &["→ charter proposed · awaiting every member's ratification"],
-        &["→ Charter vorgeschlagen · warte auf die Ratifikation aller Mitglieder"],
+        &["→ social contract proposed · awaiting every member's ratification"],
+        &["→ Gesellschaftsvertrag vorgeschlagen · warte auf die Ratifikation aller Mitglieder"],
     ),
     (
         &["✗ a decline for invite ", " came from ", ", who does not hold that seat - ignored"],
         &["✗ eine Ablehnung für Einladung ", " kam von ", ", das diesen Sitz nicht hält - ignoriert"],
     ),
     (
-        &["✗ ", " declined the charter · cancel and re-mint to change it"],
-        &["✗ ", " hat die Charter abgelehnt · zum Ändern abbrechen und neu erzeugen"],
+        &["✗ ", " declined the social contract · cancel and re-mint to change it"],
+        &["✗ ", " hat den Gesellschaftsvertrag abgelehnt · zum Ändern abbrechen und neu erzeugen"],
     ),
     (
         &["✗ the ritual is over - this republic must be founded anew (close and re-mint)"],
         &["✗ das Ritual ist vorbei - diese Republik muss neu gegründet werden (schließen und neu erzeugen)"],
     ),
     (
-        &["→ charter proposed · sealing the roster for ratification"],
-        &["→ Charter vorgeschlagen · versiegle den Roster zur Ratifikation"],
+        &["→ social contract proposed · sealing the roster for ratification"],
+        &["→ Gesellschaftsvertrag vorgeschlagen · versiegle den Roster zur Ratifikation"],
     ),
     (
         &["✓ ", " signed the roster · seat sealed"],
@@ -785,18 +785,18 @@ pub(crate) static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["✓ der Gründer hat den Beitritt angenommen · warte auf die Beratung"],
     ),
     (
-        &["→ charter proposed: “", "” · review and confirm to join"],
-        &["→ Charter vorgeschlagen: “", "” · prüfen und bestätigen zum Beitritt"],
+        &["→ social contract proposed: “", "” · review and confirm to join"],
+        &["→ Gesellschaftsvertrag vorgeschlagen: “", "” · prüfen und bestätigen zum Beitritt"],
     ),
     (
-        &["✓ you ratified the charter · sealing your signature"],
-        &["✓ Charter ratifiziert · versiegle die Signatur"],
+        &["✓ you ratified the social contract · sealing your signature"],
+        &["✓ Gesellschaftsvertrag ratifiziert · versiegle die Signatur"],
     ),
     (
         &["→ save your recovery phrase - re-type it to confirm"],
         &["→ Recovery-Phrase sichern - zur Bestätigung erneut eintippen"],
     ),
-    (&["✗ you declined the charter"], &["✗ Charter abgelehnt"]),
+    (&["✗ you declined the social contract"], &["✗ Gesellschaftsvertrag abgelehnt"]),
     (
         &["✗ the ritual is over - this republic must be founded anew"],
         &["✗ das Ritual ist vorbei - diese Republik muss neu gegründet werden"],
@@ -882,7 +882,7 @@ lexicon! {
     wiz_history_found: "Founding History", "Gründungsverlauf";
     wiz_history_join: "Join History", "Beitrittsverlauf";
     wiz_step_invites: "Invites", "Einladungen";
-    wiz_step_charter: "Charter & Features", "Charta & Features";
+    wiz_step_charter: "Social contract & features", "Gesellschaftsvertrag & Features";
     wiz_step_enter: "Enter", "Eintreten";
     wiz_sealed_note: "Sealed by all members", "Von allen Mitgliedern besiegelt";
     wiz_step_invite: "Invite", "Einladung";
@@ -959,24 +959,23 @@ lexicon! {
     cw_open_relay_settings: "Relay settings", "Relay-Einstellungen";
     cw_ritual_hint_sim: "No real network yet: this node simulates the other members - it auto-activates and signs for them. Nothing is shared with anyone. Real members arrive with the Nostr transport (N4).", "Noch kein echtes Netzwerk: dieser Knoten simuliert die anderen Mitglieder - er aktiviert und signiert selbst für sie. Es wird nichts mit jemandem geteilt. Echte Mitglieder kommen mit dem Nostr-Transport (N4).";
     cw_log_title: "Ritual log", "Ritual-Protokoll";
-    cw_charter_step: "Agree on the charter", "Einigt euch auf die Satzung";
+    cw_charter_step: "All members joined", "Alle Mitglieder sind beigetreten";
     cw_seed_confirm_title: "Save your recovery phrase", "Sichere deine Wiederherstellungs-Phrase";
     cw_backup_confirm: "Confirm backup", "Backup bestätigen";
     cw_backup_wait: "Backup confirmed - waiting for every member's confirmation", "Backup bestätigt - warte auf die Bestätigung aller Mitglieder";
     cw_seed_confirm_hint: "It is the only way back to this seat. Re-type it to continue.", "Sie ist der einzige Weg zurück zu deinem Sitz. Gib sie zur Bestätigung erneut ein.";
     cw_seed_confirm_ph: "Re-type the phrase - Ctrl+Enter continues", "Phrase erneut eingeben - Strg+Enter bestätigt";
-    cw_ratify_wait: "The charter is with the members - waiting for their signatures…", "Die Satzung liegt bei den Mitgliedern - warte auf ihre Unterschriften…";
-    cw_charter_name_label: "Republic name", "Name der Republik";
-    cw_charter_agenda_ph: "Agenda / charter - what this republic is for", "Agenda / Satzung - wofür diese Republik steht";
-    cw_charter_hint: "Write the republic's agenda - every member must sign it.", "Schreib die Agenda der Republik - alle Mitglieder müssen sie unterzeichnen.";
+    cw_ratify_wait: "The social contract is with the members - waiting for their signatures…", "Der Gesellschaftsvertrag liegt bei den Mitgliedern - warte auf ihre Unterschriften…";
+    cw_charter_agenda_ph: "Social contract - what this republic is for", "Gesellschaftsvertrag - wofür diese Republik steht";
+    cw_charter_hint: "Write the republic's social contract - every member must sign it.", "Schreib den Gesellschaftsvertrag der Republik - alle Mitglieder müssen ihn unterzeichnen.";
     cw_abort_title: "Abort the founding ritual?", "Gründungsritual abbrechen?";
     cw_abort_body: "Every distributed invite link becomes invalid and the ritual ends for all participants. You can start a fresh founding afterwards.", "Alle verteilten Einladungslinks werden ungültig und das Ritual endet für alle Beteiligten. Danach kann eine neue Gründung gestartet werden.";
     cw_abort_confirm: "Abort ritual", "Ritual abbrechen";
-    run_keep: "Keep running", "Weiterlaufen lassen";
+    run_keep: "Run in background", "Im Hintergrund weiterlaufen";
     jw_leave_title: "Cancel the join?", "Beitritt abbrechen?";
     jw_leave_confirm: "Cancel join", "Beitritt abbrechen";
     cw_declined_title: "The founding is over", "Die Gründung ist beendet";
-    cw_declined_hint: "A member declined the charter - close and found anew.", "Ein Mitglied hat die Satzung abgelehnt - schließen und neu gründen.";
+    cw_declined_hint: "A member declined the social contract - close and found anew.", "Ein Mitglied hat den Gesellschaftsvertrag abgelehnt - schließen und neu gründen.";
     cw_propose: "Propose & seal", "Vorschlagen & versiegeln";
     cw_features: "Features", "Features";
     feat_chat: "Chat", "Chat";
@@ -1004,12 +1003,12 @@ lexicon! {
     feat_vault_high: "needs 2 more members than the threshold", "braucht 2 Mitglieder mehr als die Schwelle";
     vault_newer_republic: "needs a newer republic", "braucht eine neuere Republik";
     jw_back_to_start: "Back to start", "Zurück zum Start";
-    jw_ratify_title: "Ratify the charter", "Satzung ratifizieren";
+    jw_ratify_title: "Ratify the social contract", "Gesellschaftsvertrag ratifizieren";
     jw_ratify_confirm: "Confirm & join", "Bestätigen & beitreten";
     jw_ratify_decline: "Decline", "Ablehnen";
-    jw_ratify_agenda_empty: "(no agenda set)", "(keine Agenda festgelegt)";
-    const_charter_title: "Charter", "Satzung";
-    const_no_agenda: "(founded without a written charter)", "(ohne schriftliche Satzung gegründet)";
+    jw_ratify_agenda_empty: "(no social contract written)", "(kein Gesellschaftsvertrag geschrieben)";
+    const_charter_title: "Social contract", "Gesellschaftsvertrag";
+    const_no_agenda: "(founded without a written social contract)", "(ohne schriftlichen Gesellschaftsvertrag gegründet)";
     enter_republic: "Enter republic", "Republik betreten";
     org_reachable: "reachable", "erreichbar";
     org_approvals: "Approvals", "Approvals";
@@ -1031,8 +1030,8 @@ lexicon! {
     ol_current: "Current image", "Aktuelles Bild";
     ol_none: "No image set.", "Kein Bild gesetzt.";
     ol_pick: "Choose…", "Auswählen…";
-    oc_title: "Edit charter", "Satzung bearbeiten";
-    oc_body: "The charter was ratified by everyone at the founding - an edit is a gated change: the draft becomes a proposal the members approve by threshold. Once applied, every view shows the new charter; the founding charter stays immutable in block 0.", "Die Satzung wurde bei der Gründung von allen ratifiziert - eine Bearbeitung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Nach dem Anwenden zeigt jede Ansicht die neue Satzung; die Gründungssatzung bleibt unveränderlich in Block 0.";
+    oc_title: "Edit social contract", "Gesellschaftsvertrag bearbeiten";
+    oc_body: "The social contract was ratified by everyone at the founding - an edit is a gated change: the draft becomes a proposal the members approve by threshold. Once applied, every view shows the new version; the founding version stays immutable in block 0.", "Der Gesellschaftsvertrag wurde bei der Gründung von allen ratifiziert - eine Bearbeitung ist eine geschützte Änderung: der Entwurf wird ein Vorschlag, dem die Mitglieder per Schwelle zustimmen. Nach dem Anwenden zeigt jede Ansicht die neue Fassung; die Gründungsfassung bleibt unveränderlich in Block 0.";
     oc_propose: "Propose change", "Änderung vorschlagen";
     toast_proposed: "Proposed - awaiting approvals", "Vorgeschlagen - wartet auf Zustimmungen";
     toast_proposed_bad_header: "Proposed - a header is unreadable, its properties will be missing", "Vorgeschlagen - ein Kopfblock ist unlesbar, seine Eigenschaften fehlen";
@@ -1166,7 +1165,7 @@ lexicon! {
     jw_busy_cancel: "Cancel", "Abbrechen";
     jw_ph1: "Contacting the inviter…", "Kontaktiere den Einlader…";
     jw_ph2: "Synchronizing ritual, please wait…", "Synchronisiere Ritual, bitte warten…";
-    jw_ph_founder: "Waiting for the founder - the charter is being written…", "Warte auf den Gründer - die Satzung entsteht…";
+    jw_ph_founder: "Waiting for the founder to propose the social contract…", "Warte, bis der Gründer den Gesellschaftsvertrag vorschlägt…";
     jw_ph3: "Syncing surfaces…", "Synchronisiere Surfaces…";
     // no cause here: the headline above carries it, and "invite rejected" was
     // wrong for the commonest refusal of all — the relay gate, which turns the
@@ -1617,7 +1616,7 @@ lexicon! {
     mem_ex_body: "The approved wiki, as plain files.", "Das freigegebene Wiki, als einfache Dateien.";
     mem_ex_confirm: "Export", "Exportieren";
     mem_ex_proof: "Include verification bundle", "Prüfpaket beilegen";
-    mem_ex_reveals: "Reveals member names, keys, transport anchors, relays, the charter and each patch's signers.", "Zeigt Mitgliedsnamen, Schlüssel, Transport-Anker, Relays, die Charta und die Unterzeichner jedes Patches.";
+    mem_ex_reveals: "Reveals member names, keys, transport anchors, relays, the social contract and each patch's signers.", "Zeigt Mitgliedsnamen, Schlüssel, Transport-Anker, Relays, den Gesellschaftsvertrag und die Unterzeichner jedes Patches.";
     mem_ex_drafts: "local changes stay local", "lokale Änderungen bleiben lokal";
     mem_ex_done: "wiki exported:", "Wiki exportiert:";
     mem_ex_file: "file", "Datei";

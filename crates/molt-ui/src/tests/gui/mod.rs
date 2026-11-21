@@ -16,6 +16,8 @@ mod agent_tab;
 mod chat;
 mod discussion;
 mod files;
+#[cfg(feature = "live-preview")]
+mod founding_charter;
 mod founding_fold;
 mod kanban;
 mod layout;

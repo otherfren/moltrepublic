@@ -2605,7 +2605,7 @@ impl State {
             .join
             .run
             .log
-            .push(format!("→ charter proposed: “{name}” · review and confirm to join"));
+            .push(format!("→ social contract proposed: “{name}” · review and confirm to join"));
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -2616,7 +2616,7 @@ impl State {
     pub(crate) fn cmd_join_confirm_charter(&mut self) -> Result<Reply, MoltError> {
         if !self.session.join.awaiting_ratify {
             return Err(MoltError::Join(
-                "no charter is awaiting your ratification".to_string(),
+                "no social contract is awaiting your ratification".to_string(),
             ));
         }
         if let Some(tx) = self.join_confirm.take() {
@@ -2633,7 +2633,7 @@ impl State {
             .join
             .run
             .log
-            .push("✓ you ratified the charter · sealing your signature".to_string());
+            .push("✓ you ratified the social contract · sealing your signature".to_string());
         self.session
             .join
             .run
@@ -2650,7 +2650,7 @@ impl State {
     pub(crate) fn cmd_join_decline_charter(&mut self) -> Result<Reply, MoltError> {
         if !self.session.join.awaiting_ratify {
             return Err(MoltError::Join(
-                "no charter is awaiting your ratification".to_string(),
+                "no social contract is awaiting your ratification".to_string(),
             ));
         }
         if let Some(tx) = self.join_confirm.take() {
@@ -2661,7 +2661,7 @@ impl State {
             .join
             .run
             .log
-            .push("✗ you declined the charter".to_string());
+            .push("✗ you declined the social contract".to_string());
         // terminal for the whole ritual, not just this join: a declined seat
         // can never seal, so the founder must re-mint — say so here too
         self.session.join.run.push_log(

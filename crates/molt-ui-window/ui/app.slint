@@ -3683,7 +3683,8 @@ export component AppWindow inherits Window {
                     : (root.cw-proposed && root.cw-outcome == 0 && !root.cw-backup-confirmed
                         && root.cw-all-ratified ? Strings.cw-backup-confirm
                     : "")));
-                primary-enabled: root.cw-step == 0 ? (root.cw-name != "" && root.cw-member != "")
+                primary-enabled: root.cw-step == 0 ? (root.cw-name != "" && root.cw-member != ""
+                        && root.cw-agenda != "" && root.cw-agenda.character-count <= root.cw-agenda-max)
                     : (root.cw-outcome == 1 ? true
                     : (root.cw-can-propose && !root.cw-proposed
                         ? (root.cw-name != "" && root.cw-agenda != ""
@@ -3750,6 +3751,24 @@ export component AppWindow inherits Window {
                                 color: Theme.faint;
                                 font-size: Theme.fs-cap;
                                 overflow: elide;
+                            }
+                            // the charter, signed by every member once all joined
+                            Text {
+                                text: Strings.cw-charter-hint;
+                                color: Theme.faint;
+                                font-size: Theme.fs-cap;
+                                wrap: word-wrap;
+                            }
+                            AppArea {
+                                height: 7 * 1.2 * Theme.fs-body + 16px;
+                                text <=> root.cw-agenda;
+                                placeholder: Strings.cw-charter-agenda-ph;
+                            }
+                            Text {
+                                text: "\{root.cw-agenda.character-count} / \{root.cw-agenda-max}";
+                                color: root.cw-agenda.character-count > root.cw-agenda-max ? Theme.bad : Theme.faint;
+                                font-size: Theme.fs-cap;
+                                horizontal-alignment: right;
                             }
                         }
                     }
@@ -3830,6 +3849,25 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                 }
+                            }
+                        }
+                    }
+
+                    // the feature selection, ratified with the charter; its
+                    // bounds follow the rule above
+                    RestoreWay {
+                        title: Strings.cw-features;
+                        HorizontalLayout {
+                            alignment: start;
+                            FeatureTable {
+                                editable: true;
+                                memory <=> root.cw-feat-memory;
+                                quests <=> root.cw-feat-quests;
+                                vault <=> root.cw-feat-vault;
+                                wallet <=> root.cw-feat-wallet;
+                                vault-ok: root.cw-vault-allowed;
+                                wallet-ok: root.cw-wallet-allowed;
+                                low: root.cw-threshold < 2;
                             }
                         }
                     }
@@ -4122,84 +4160,20 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    // ---- deliberation: the phase's current interaction, on
-                    // top of the stack — its own panel, accent-framed so it
-                    // reads as "input needed now". Propose & Seal sits in
-                    // the wizard footer. ----
-                    if root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0: Rectangle {
+                    // the charter was written at setup: one look, then Propose & Seal
+                    if root.cw-can-propose && !root.cw-proposed && root.cw-outcome == 0: CharterView {
                         vertical-stretch: 0;
-                        background: Theme.panel;
-                        border-radius: Theme.win95 ? 0px : 8px;
-                        border-width: Theme.border-w;
-                        border-color: Theme.accent;
-                        VerticalLayout {
-                            padding: 14px;
-                            spacing: 8px;
-                            Text {
-                                text: Strings.cw-charter-step;
-                                color: Theme.accent;
-                                font-size: Theme.fs-h2;
-                                font-weight: 700;
-                                wrap: word-wrap;
-                            }
-                            // the ONE instruction, at reading size — what to
-                            // write and what it means
-                            Text {
-                                text: Strings.cw-charter-hint;
-                                color: Theme.text;
-                                font-size: Theme.fs-body;
-                                wrap: word-wrap;
-                            }
-                            // the name was fixed when the ritual started —
-                            // shown read-only, never re-editable here
-                            HorizontalLayout {
-                                spacing: 8px;
-                                Text {
-                                    text: "\{Strings.cw-charter-name-label}:";
-                                    color: Theme.faint;
-                                    font-size: Theme.fs-body;
-                                    vertical-alignment: center;
-                                }
-                                Text {
-                                    text: root.cw-name;
-                                    color: Theme.text;
-                                    font-size: Theme.fs-body;
-                                    font-weight: 700;
-                                    vertical-alignment: center;
-                                    horizontal-stretch: 1;
-                                    overflow: elide;
-                                }
-                            }
-                            // the charter itself: seven visible body lines
-                            // (plus the skin's 2x8px padding), its own
-                            // scroll hint, the engine's 4096-char limit
-                            AppArea {
-                                height: 7 * 1.2 * Theme.fs-body + 16px;
-                                text <=> root.cw-agenda;
-                                placeholder: Strings.cw-charter-agenda-ph;
-                            }
-                            Text {
-                                text: "\{root.cw-agenda.character-count} / \{root.cw-agenda-max}";
-                                color: root.cw-agenda.character-count > root.cw-agenda-max ? Theme.bad : Theme.faint;
-                                font-size: Theme.fs-cap;
-                                horizontal-alignment: right;
-                            }
-                            // the feature selection, ratified with the
-                            // charter; content-sized, anchored left
-                            HorizontalLayout {
-                                alignment: start;
-                                FeatureTable {
-                                    editable: true;
-                                    memory <=> root.cw-feat-memory;
-                                    quests <=> root.cw-feat-quests;
-                                    vault <=> root.cw-feat-vault;
-                                    wallet <=> root.cw-feat-wallet;
-                                    vault-ok: root.cw-vault-allowed;
-                                    wallet-ok: root.cw-wallet-allowed;
-                                    low: root.cw-threshold < 2;
-                                }
-                            }
-                        }
+                        accent: true;
+                        heading: Strings.cw-charter-step;
+                        republic: root.cw-name;
+                        agenda: root.cw-agenda;
+                        feat-memory: root.cw-feat-memory;
+                        feat-quests: root.cw-feat-quests;
+                        feat-vault: root.cw-feat-vault && root.cw-vault-allowed;
+                        feat-wallet: root.cw-feat-wallet && root.cw-wallet-allowed;
+                        vault-ok: root.cw-vault-allowed;
+                        wallet-ok: root.cw-wallet-allowed;
+                        low: root.cw-threshold < 2;
                     }
 
                     // P1: the member list IS the current step
@@ -4274,6 +4248,7 @@ export component AppWindow inherits Window {
                             root.cw-fold = root.cw-fold == 0 ? -1 : 0;
                         }
                         FactRow { caption: Strings.cw-grp-republic; value: root.cw-name; }
+                        FactRow { caption: Strings.const-charter-title; value: root.cw-agenda; }
                         FactRow { caption: Strings.field-member-name; value: root.cw-member; }
                         FactRow { caption: Strings.cw-grp-rule; value: "\{root.cw-threshold}-of-\{root.cw-members}"; }
                         FactRow { caption: Strings.cw-net-label; value: root.cw-net; }

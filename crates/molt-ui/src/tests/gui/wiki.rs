@@ -398,9 +398,9 @@ fn every_wiki_export_string_reads_in_both_languages() {
         assert!(!e.contains('—') && !d.contains('—'), "{key}: em dash");
     }
     // the disclosure names what the bundle actually reveals
-    for l in [en, de] {
+    for (l, contract) in [(en, "social contract"), (de, "gesellschaftsvertrag")] {
         let line = l.mem_ex_reveals.to_lowercase();
-        for token in ["relay", "chart"] {
+        for token in ["relay", contract] {
             assert!(
                 line.contains(token),
                 "the disclosure drops {token}: {}",

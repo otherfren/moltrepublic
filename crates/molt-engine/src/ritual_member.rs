@@ -381,7 +381,7 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
                 // an explicit decline is TOLD to the founder (its seat shows
                 // declined); a gate that merely closed says nothing
                 let _ = leg.send(&RitualMsg::Declined { seat: seat_no }).await;
-                return Err("the charter was declined".to_string());
+                return Err("the social contract was declined".to_string());
             }
             None => return Err("the ritual was cancelled".to_string()),
         }

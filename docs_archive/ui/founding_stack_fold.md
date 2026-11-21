@@ -21,7 +21,7 @@ Founder phases and what is current / standing in each:
 | phase | current (top) | standing (below) |
 |---|---|---|
 | P1 invites | member list, seats turning green | - |
-| P2 deliberation | charter form + features | members |
+| P2 deliberation | charter + features, read-only (written at setup, 2026-11-21) | members |
 | P3 charter out | wait note (spinner) | charter (read-only), members |
 | P4 phrase proof | `SeedConfirmStep` | charter, members |
 | P5 backups out | wait note | charter, members |

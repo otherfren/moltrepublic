@@ -1993,8 +1993,8 @@ fn org_op_label(lang: i32, op: &str) -> Option<&'static str> {
         // short noun labels, no leading "Change …"/"… ändern" verb: a
         // proposal is a change by definition, and the sidebar channel
         // list elides anything long
-        (1, "set_charter") => "Satzung",
-        (_, "set_charter") => "Charter",
+        (1, "set_charter") => "Gesellschaftsvertrag",
+        (_, "set_charter") => "Social contract",
         (1, "set_image") => "Logo",
         (_, "set_image") => "Logo",
         (1, "remove_image") => "Logo entfernen",

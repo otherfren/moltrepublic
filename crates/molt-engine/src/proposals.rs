@@ -1575,7 +1575,7 @@ impl State {
         let op = payload.get("op").and_then(Value::as_str).unwrap_or("");
         let label = match op {
             "set_name" => "Name",
-            "set_charter" => "Charter",
+            "set_charter" => "Social contract",
             "set_chat_retention" => "Chat retention",
             "set_thread_retention" => "Thread retention",
             "set_image" => "Logo",

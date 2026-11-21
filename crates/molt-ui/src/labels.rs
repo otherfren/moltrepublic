@@ -141,11 +141,11 @@ pub(crate) fn strings_founder(lang: i32) -> &'static str {
 pub(crate) fn seat_state_label(lang: i32, state: u8) -> String {
     match (lang, state) {
         (1, 4) => "versiegelt · Schlüssel gesichert",
-        (1, 3) => "hat die Satzung abgelehnt",
+        (1, 3) => "hat den Gesellschaftsvertrag abgelehnt",
         (1, 2) => "versiegelt · sichert den Schlüssel…",
         (1, _) => "Schlüssel erhalten · signiert…",
         (_, 4) => "sealed · key secured",
-        (_, 3) => "declined the charter",
+        (_, 3) => "declined the social contract",
         (_, 2) => "sealed · securing the key…",
         (_, _) => "key received · signing…",
     }

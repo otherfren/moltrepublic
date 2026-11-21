@@ -2627,7 +2627,7 @@ mod ritual_ops {
                     .create
                     .run
                     .log
-                    .push("→ every member has joined · propose the charter to seal".to_string());
+                    .push("→ every member has joined · propose the social contract to seal".to_string());
             }
             // Nostr (N4a): all-joined is the GROUP BIRTH — build the MLS
             // group, mint the rotation seed, gift-wrap every Welcome, and
@@ -2691,12 +2691,12 @@ mod ritual_ops {
             // charter, cancel and re-mint the founding.
             if ritual.charter_proposed {
                 return Err(molt_core::MoltError::Create(
-                    "the charter was already proposed - cancel the founding to change it".to_string(),
+                    "the social contract was already proposed - cancel the founding to change it".to_string(),
                 ));
             }
             if ritual.seats.iter().any(|s| s.identity.is_none()) {
                 return Err(molt_core::MoltError::Create(
-                    "every member must join before you propose the charter".to_string(),
+                    "every member must join before you propose the social contract".to_string(),
                 ));
             }
             // the vault (spec §3, §6, D14): a key from every seat, always
@@ -2734,7 +2734,7 @@ mod ritual_ops {
                 .create
                 .run
                 .log
-                .push("→ charter proposed · awaiting every member's ratification".to_string());
+                .push("→ social contract proposed · awaiting every member's ratification".to_string());
             self.maybe_seal();
             self.emit_session(molt_core::SessionScope::Create);
             Ok(molt_core::Reply::Ack)
@@ -2788,7 +2788,7 @@ mod ritual_ops {
                 view.state = 3; // declined
             }
             self.session.create.run.push_log(format!(
-                "✗ {who} declined the charter · cancel and re-mint to change it"
+                "✗ {who} declined the social contract · cancel and re-mint to change it"
             ));
             // a declined seat can never turn sealed, so this founding is over
             // for good: mark the run FAILED so the GUI leaves the waiting
@@ -2806,7 +2806,7 @@ mod ritual_ops {
                     "✗ the ritual is over - this republic must be founded anew (close and re-mint)"
                         .to_string(),
                 );
-                self.abandon_ritual(&format!("{who} declined the charter - the founding is over"));
+                self.abandon_ritual(&format!("{who} declined the social contract - the founding is over"));
             }
             self.emit_session(molt_core::SessionScope::Create);
             Ok(molt_core::Reply::Ack)
@@ -2853,7 +2853,7 @@ mod ritual_ops {
                 .create
                 .run
                 .log
-                .push("→ charter proposed · sealing the roster for ratification".to_string());
+                .push("→ social contract proposed · sealing the roster for ratification".to_string());
             // send RitualMsg::Seal (the charter to ratify) to each seat
             let msg = invite::RitualMsg::Seal {
                 proposal: proposal_json,
