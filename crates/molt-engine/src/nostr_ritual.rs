@@ -236,15 +236,17 @@ fn recover_inbox_command(delivery: RitualDelivery, generation: u64) -> Option<Co
 }
 
 /// Subscribe `net`'s 1059 inbox until a relay answers, retrying on a
-/// backoff. `None` = the engine is gone.
+/// backoff; `waiting` is told why on every failed round. `None` = the
+/// engine is gone.
 async fn readable_inbox(
     net: &RitualNet,
     what: &'static str,
     tx: &mpsc::WeakSender<Envelope>,
+    waiting: impl Fn(&'static str) -> Option<Command>,
 ) -> Option<molt_net::ritual_net::RitualInbox> {
     let mut wait = PUBLISH_RETRY_INITIAL;
     loop {
-        let why = match net.inbox().await {
+        let (why, short) = match net.inbox().await {
             Ok(mut inbox) => {
                 let st = inbox.read_state(LIVE_WAIT).await;
                 if st.any() {
@@ -253,10 +255,15 @@ async fn readable_inbox(
                     }
                     return Some(inbox);
                 }
-                "no relay answered".to_string()
+                ("no relay answered".to_string(), "no relay answers")
             }
-            Err(e) => e.to_string(),
+            Err(e) => (e.to_string(), "no relay reachable"),
         };
+        if let Some(cmd) = waiting(short) {
+            if !send_cmd(tx, cmd).await {
+                return None;
+            }
+        }
         tracing::warn!(inbox = what, error = %why, retry_in_s = wait.as_secs(), "inbox_down");
         tokio::time::sleep(wait).await;
         tx.upgrade()?;
@@ -276,7 +283,7 @@ pub(crate) fn spawn_seat_inbox(
     tx: mpsc::WeakSender<Envelope>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let Some(mut inbox) = readable_inbox(&net, "seat", &tx).await else {
+        let Some(mut inbox) = readable_inbox(&net, "seat", &tx, |_| None).await else {
             return;
         };
         loop {
@@ -323,7 +330,14 @@ pub(crate) fn spawn_recovery_inbox(
     tx: mpsc::WeakSender<Envelope>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let Some(mut inbox) = readable_inbox(&net, "recovery", &tx).await else {
+        let waiting = |reason: &str| {
+            Some(Command::NetRecoverLinkWaiting {
+                member: member.clone(),
+                reason: reason.to_string(),
+                generation: Some(generation),
+            })
+        };
+        let Some(mut inbox) = readable_inbox(&net, "recovery", &tx, waiting).await else {
             return;
         };
         let handover = invite::RecoveryHandoverV2 {

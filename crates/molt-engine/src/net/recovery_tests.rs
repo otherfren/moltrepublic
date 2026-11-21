@@ -243,3 +243,40 @@ fn a_dead_link_leaves_the_session_notice() {
     st.reset_workspace_state();
     assert_eq!(st.session.notice, "recover-note:x");
 }
+
+/// Review R8: a mint whose inbox never becomes readable keeps retrying;
+/// the pending notice names why. Any other notice stays as it is.
+#[test]
+fn a_mint_that_waits_for_a_relay_says_why() {
+    let mut st = crate::tests::plain_state();
+    let scope = Some(st.net_scope);
+    st.session.notice = "recovery-link-pending:petra".to_string();
+    st.cmd_net_recover_link_waiting("petra", "no relay answers", scope).expect("waiting");
+    assert_eq!(st.session.notice, "recovery-link-pending:petra:no relay answers");
+    st.cmd_net_recover_link_waiting("petra", "no relay reachable", scope).expect("waiting");
+    assert_eq!(st.session.notice, "recovery-link-pending:petra:no relay reachable");
+    st.session.notice = "recover-note:x".to_string();
+    st.cmd_net_recover_link_waiting("petra", "no relay answers", scope).expect("waiting");
+    assert_eq!(st.session.notice, "recover-note:x");
+}
+
+/// Review R10: right after an open the catch-up decodes the lost device's
+/// last backlog frames - heard "now" by receipt, but stamped long ago. The
+/// restore gate's reading takes the frame's own stamp (bounded by now);
+/// a receipt counts again once the catch-up grace after the open passed.
+#[test]
+fn a_backlog_frame_after_an_open_is_not_heard_now() {
+    let mut st = presence_fixture();
+    st.recovery.opened_at = T;
+    st.note_frame_heard("bob", T - 3_600);
+    st.cmd_net_peer_seen("bob".to_string(), None).expect("seen");
+    assert_eq!(st.restore_heard_at("bob"), T - 3_600, "the backlog is an hour old");
+    st.presence.clock_override = Some(T + 30);
+    st.note_frame_heard("bob", T + 29);
+    assert_eq!(st.restore_heard_at("bob"), T + 29, "a live frame is heard");
+    st.note_frame_heard("bob", T + 9_999);
+    assert_eq!(st.restore_heard_at("bob"), T + 30, "a future stamp is bounded by now");
+    st.presence.clock_override = Some(T + 500);
+    st.cmd_net_peer_seen("bob".to_string(), None).expect("seen");
+    assert_eq!(st.restore_heard_at("bob"), T + 500, "past the grace a receipt counts");
+}

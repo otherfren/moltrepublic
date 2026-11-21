@@ -938,6 +938,7 @@ impl State {
         self.recovery.repushes.clear();
         self.recovery.seal_first_seats.clear();
         self.recovery.opened_at = 0;
+        self.recovery.frame_heard.clear();
         self.chain.repush_check_at = 0;
         self.chain.ready_at.clear();
         self.chain.fallback_asked = None;

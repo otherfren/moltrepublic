@@ -118,6 +118,7 @@ impl State {
         // cover Chat and MeshAnnounced). Kind-level IGNORING further down is
         // semantics, not transport loss — it still counts as accepted.
         let fresh = self.accept_envelope(&from, envelope.seq);
+        self.note_frame_heard(&from, envelope.ts);
         // fresh OR duplicate, the sender is owed a (debounced) ACK: a dup
         // usually means our previous ack was lost or lags, and re-acking is
         // what stops its resend loop (§4.3). `or_insert` keeps the earliest

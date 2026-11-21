@@ -241,6 +241,32 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Review R10: a frame of `member` stamped `ts` arrived (the stamp is
+    /// the sender's, bounded by now).
+    pub(crate) fn note_frame_heard(&mut self, member: &str, ts: u64) {
+        let at = ts.min(self.presence_now());
+        let e = self.recovery.frame_heard.entry(member.to_string()).or_insert(0);
+        *e = (*e).max(at);
+    }
+
+    /// Review R10: when `member` was last heard, as the restore gate must
+    /// read it. A receipt stamped within the catch-up grace after this
+    /// open may be a replayed backlog frame of a lost device, so there only
+    /// the frame's own stamp counts; otherwise the later of the two.
+    #[allow(dead_code)] // restore_gate's reading; that function is wired separately
+    pub(crate) fn restore_heard_at(&self, member: &str) -> u64 {
+        const CATCH_UP_GRACE_SECS: u64 = 120;
+        let framed = self.recovery.frame_heard.get(member).copied().unwrap_or(molt_core::MemberInfo::NEVER);
+        let seen = self.member_last_seen(member);
+        let opened = self.recovery.opened_at;
+        let replayed = opened > 0 && seen >= opened && seen < opened.saturating_add(CATCH_UP_GRACE_SECS);
+        if replayed {
+            framed
+        } else {
+            framed.max(seen)
+        }
+    }
+
     /// Whether the request's seat proof verifies against the seat's
     /// anchored identity - for any ticket, minted here or not.
     #[allow(clippy::too_many_arguments)] // one request's fields, not a bag
@@ -1080,6 +1106,28 @@ impl State {
         tracing::info!(%member, "recovery link ready");
         self.session.notice = format!("recovery-link:{link}");
         self.emit_session(molt_core::SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// Review R8: the minted link's inbox is still not readable - the
+    /// pending notice says why, while it is still the one showing.
+    pub(crate) fn cmd_net_recover_link_waiting(
+        &mut self,
+        member: &str,
+        reason: &str,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_scope_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        let pending = format!("recovery-link-pending:{member}");
+        let shows = self.session.notice == pending
+            || self.session.notice.strip_prefix(&pending).is_some_and(|r| r.starts_with(':'));
+        let notice = format!("{pending}:{reason}");
+        if shows && self.session.notice != notice {
+            self.session.notice = notice;
+            self.emit_session(SessionScope::Full);
+        }
         Ok(Reply::Ack)
     }
 

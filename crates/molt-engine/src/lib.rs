@@ -1167,6 +1167,9 @@ pub(crate) struct RecoveryState {
     pub(crate) repushes: BTreeMap<(String, String), (u32, u64)>,
     /// When this workspace's group runtime came up (presence clock).
     pub(crate) opened_at: u64,
+    /// Review R10: per seat, the newest own stamp of a frame it sent
+    /// (bounded by the receipt time) - what the restore gate reads.
+    pub(crate) frame_heard: HashMap<MemberId, u64>,
     /// Recovery tickets this node has minted and is still listening for — the
     /// spend-once guard. A ticket is inserted when a recovery link is minted and
     /// removed the moment a valid request spends it, so a replayed request on a
@@ -1767,6 +1770,7 @@ impl State {
                 seal_first_seats: std::collections::HashSet::new(),
                 repushes: BTreeMap::new(),
                 opened_at: 0,
+                frame_heard: HashMap::new(),
                 tickets: HashMap::new(),
                 mesh_window: std::collections::HashSet::new(),
                 mesh_extension_at: std::collections::HashMap::new(),
@@ -2607,6 +2611,9 @@ impl State {
                 ticket,
                 generation,
             } => self.cmd_net_recover_link_failed(member, reason, ticket, generation),
+            Command::NetRecoverLinkWaiting { member, reason, generation } => {
+                self.cmd_net_recover_link_waiting(&member, &reason, generation)
+            }
             Command::NetTestS3 {
                 target,
                 endpoint,

@@ -362,7 +362,13 @@ impl State {
         // a change no vote could ever seal must not occupy the registry: it
         // would hold the pending cap and R3 for good (nothing sweeps it)
         if let Err(why) = self.sealable_membership(id, change) {
-            tracing::warn!(%id, reason = why, "refusing an unsealable membership proposal");
+            // F2: a re-served card of a restore this chain sealed is spent
+            // by its own block - expected on every catch-up
+            if self.restore_sealed(change) {
+                tracing::debug!(%id, reason = why, "membership proposal already sealed");
+            } else {
+                tracing::warn!(%id, reason = why, "refusing an unsealable membership proposal");
+            }
             return false;
         }
         // L3: bounded PER SEAT, so one member's cards never crowd out
@@ -782,6 +788,14 @@ impl State {
         if let Some(why) = self.restore_gate(&member) {
             if self.recovery.held_approvals.insert(id) {
                 tracing::warn!(%id, %member, reason = why, "restore_held");
+            }
+            return;
+        }
+        // F2: behind a peer's head, the card is judged against an old one
+        let behind = self.chain_lag().peers_ahead;
+        if behind > 0 {
+            if self.recovery.held_approvals.insert(id) {
+                tracing::info!(%id, %member, peers_ahead = behind, "restore_held reason=catching_up");
             }
             return;
         }

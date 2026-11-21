@@ -1743,3 +1743,20 @@ fn a_restored_card_does_not_seal_while_the_seat_is_active() {
     assert_eq!(walter.chain.head.as_ref().expect("head").height, 1, "sealed once the seat is silent");
     verify_chain(&walter.chain.blocks).expect("verifies");
 }
+
+/// F2: a node still catching up (a peer claims a higher head) judges a
+/// restore card against an old head - it holds its automatic approval
+/// and signs once level.
+#[test]
+fn a_node_that_is_behind_holds_its_restore_approval() {
+    let b = Builder::new(&["petra", "walter", "dora"], 3);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    walter.note_peer_height("petra", 40);
+    register_v2(&mut walter, &b, 7, &"dd".repeat(32), 0);
+    let signed = |w: &crate::State| w.chain.pending_sigs.get(&7).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
+    assert!(walter.chain.proposal_changes.contains_key(&7), "the card registers");
+    assert!(!signed(&walter), "behind: held");
+    walter.chain.peer_heights.clear();
+    walter.retry_held_restore_approvals();
+    assert!(signed(&walter), "level: signed");
+}

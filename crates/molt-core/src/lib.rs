@@ -5999,6 +5999,17 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// A minted link's inbox is not readable yet and keeps retrying
+    /// (engine-internal, review R8): the pending notice names why.
+    NetRecoverLinkWaiting {
+        /// The returning member the link is minted for.
+        member: MemberId,
+        /// Why it waits, one fact.
+        reason: String,
+        /// Workspace scope.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// The founder's off-actor SMP provisioning failed (e.g. the server is
     /// unreachable), so the founding can never seal (engine-internal). The
     /// engine fails the create run rather than leaving it stuck. Not a tool.

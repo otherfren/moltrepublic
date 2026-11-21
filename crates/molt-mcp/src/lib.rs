@@ -3380,7 +3380,7 @@ pub(crate) mod tests {
         // hook; the value itself rides the settings surface as
         // `poke_wake_command` (ADR-0007), so this stays internal only
         // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 93] = [
+        const INTERNAL: [&str; 94] = [
             // not a door of its own: chat_send/approve/decline/withdraw
             // build it from their `operator`/`agent` arguments
             "as_operator",
@@ -3495,6 +3495,8 @@ pub(crate) mod tests {
             "net_recover_requested",
             "net_recover_link_ready",
             "net_recover_link_failed",
+            // the mint's inbox reporting why it still waits (review R8)
+            "net_recover_link_waiting",
             "net_ritual_link_ready",
             "net_ritual_failed",
             // the publish task reporting its real per-relay outcome: an MCP
