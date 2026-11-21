@@ -4,7 +4,8 @@
 residual risks are being closed; B8 (acceptance on the field copies)
 and the release follow: **v0.1.0**; the lock ships as v0.1.1. B7, the fork-free lock, is NOT part of this
 release (user, 2026-11-21): its design and proven state machine are on
-master unused, the wiring is a plan (`docs/chain/chain_lock_design.md`).
+master unused, the wiring is a plan
+(`docs/chain/chain_lock_wiring_plan.md`).
 Evidence: `docs/chain/rejoin_divergence_findings.md`.
 
 ## In short
