@@ -1052,7 +1052,7 @@ mod tests {
             server: dead_q.snd.server.clone(),
             queue_id: hex::encode(&dead_q.snd.id.0),
             wrap: hex::encode(wrap.to_bytes()),
-            // any hex string — the ritual times out before the id matters
+            // any hex string — the rejoin never reaches the id
             republic_id: "f00dbabe".to_string(),
             handover: None,
         };

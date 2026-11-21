@@ -1182,7 +1182,7 @@ lexicon! {
     rlk_pending_hint: "The returning member does not need to be online - a recovery link is made for someone who is unreachable.", "Das zurückkehrende Mitglied muss dafür nicht online sein - ein Recovery-Link ist ja gerade für ein unerreichbares Mitglied gedacht.";
     rlk_failed_mesh: "The link could not be created: this device is not on the republic's mesh. Reopen the republic, then try again.", "Der Link konnte nicht erstellt werden: Dieses Gerät ist nicht im Mesh der Republik. Republik neu öffnen, dann erneut versuchen.";
     rlk_failed_prefix: "The link could not be created: ", "Der Link konnte nicht erstellt werden: ";
-    rv_running_note: "Waiting for the survivors - cancel to stop.", "Warte auf die verbliebenen Mitglieder - Abbrechen beendet.";
+    rv_running_note: "Waiting for the survivors.", "Warte auf die verbliebenen Mitglieder.";
     rv_cancel: "Abort", "Abbrechen";
     cu_title: "Catching up: block {h} of {t}", "Holt auf: Block {h} von {t}";
     cu_left: "{n} to go", "noch {n}";

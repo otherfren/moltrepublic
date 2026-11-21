@@ -1014,6 +1014,7 @@ impl RejoinIo for RelayIo {
 }
 
 /// How the coordinator admitted the seat.
+#[allow(clippy::large_enum_variant)] // one value per rejoin
 pub(crate) enum Admission {
     /// Anchor-first: the anchor verified before anything sealed.
     AnchorFirst {
