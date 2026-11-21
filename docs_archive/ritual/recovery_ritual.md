@@ -195,15 +195,57 @@ A coordinator that lost the attempt (restart) answers `link outdated`.
 Open attempts are bounded by count, not time: at most 4 per workspace,
 the least recently heard rejoiner's goes first (it then hears `link
 outdated`). An attempt also ends on its Ready, on a refused new run of
-the same rejoiner, on a replacing run on the same link and at workspace
-close; `recover_cancel` sends nothing, so a cancelled one waits for one
-of those. While open, `S` logs `recover_wait for="ready" member= since_s=
-sent= accepted=` every 60 s. The seats it restored anchor-first ride the
-engine snapshot, so a restart does not start re-pushing their anchor.
-A request without `anchor_first` (older rejoiner), an anchor too large for
-gift wraps, or an older coordinator (Welcome with no anchor before it)
-runs the seal-first order above; its anchor is re-pushed over the group
-every 10 min while the seat stays unheard.
+the same rejoiner, on a replacing run on the same link, on its
+withdrawal and at workspace close. While open, `S` logs `recover_wait
+for="ready" member= since_s= sent= accepted=` every 60 s. The seats it
+restored anchor-first ride the engine snapshot, so a restart does not
+start re-pushing their anchor. A request without `anchor_first` (older
+rejoiner), an anchor too large for gift wraps, or an older coordinator
+(Welcome with no anchor before it) runs the seal-first order above.
+
+**One run, one id (review 2026-11-22).** Every run on one link derives
+the same transport key (phrase + ticket), and relays replay stored gift
+wraps, so a frame is bound to the RUN, not the link: `attempt` = a hash
+of the run's fresh KeyPackage (`recover_attempt_id`; the seat proof binds
+the KeyPackage). `S` echoes it in `RecoverRefused`, `RecoverAnchor` and
+`RecoverProgress`; `R` carries it in `RecoverWant`, `RecoverReady` and
+`RecoverFailed`, and its request carries `started` (inside the rumor its
+own key seals, so no relay changes it). `R` drops an answer naming
+another run. `S` checks Want/Ready against the run it holds and never
+replaces that run by one it saw before on the ticket or by one that
+started earlier; it answers only a sender that proved the seat - a valid
+seat proof, or a Want/Ready for a ticket it minted (fingerprints of the
+last 64 ride the snapshot) - and keeps one answer per run and 30 min, at
+most 256. A new run on a link whose re-admission sealed hears `link
+outdated` naming it; the spending run's replay stays silent.
+
+**Withdrawal.** `recover_cancel` (or a new run) ends `R`'s task after one
+`RecoverFailed` carrying its attempt. `S` drops the open attempt, or -
+before the seal - withdraws the card through the ordinary `Withdrawn`
+frame (every survivor stops signing it) and gives the ticket back; only
+the run's own key with its own attempt id withdraws. After the seal
+nothing is undone: `R` says `already re-admitted - a new link is needed`
+when it saw the sealed report (`RecoverProgress.sealed`), and a retry on
+the link hears `link outdated`.
+
+**Anchor re-push (seal-first only).** The anchor is re-pushed over the
+group every 10 min while the seat stays unheard - by the node that
+coordinated the restore, or by the sealing line's first seat for a
+restore sealed after its own open. It ends when the seat is heard, a
+later restore of the seat sealed or is under way, or after 12 pushes;
+the count rides the snapshot. Every push is stored on the relays and a
+listening rejoiner reads all of them, so the count bounds the pusher's
+work, not the rejoiner's wait.
+
+**Mixed versions.** An older coordinator names no run: its refusal is
+shown (`⚠ refused, maybe an earlier run: …`) and `R` keeps waiting - a
+replayed refusal of an earlier run cannot be told from a fresh one
+without trusting relay timestamps; the operator cancels. Its anchor
+pieces and progress are taken as before. A B4 rejoiner without ids is
+served as before, unbound. An older rejoiner sends no withdrawal: one on
+the 15-minute deadline gives up before the Welcome and sends nothing (its
+`RecoverFailed` came only after a seal), so its card stays open until
+the consent window or a later restore of the seat ends it.
 
 **❼–❽ Catch up (option A: over the recovery channel).** The Welcome carries the
 coordinator's **whole chain from genesis** — `R` has no mesh links yet, so the
@@ -254,7 +296,8 @@ The group gets the complementary guarantees:
   *propose* re-admission; it cannot grant it.
 - **Ticket-bound, single-use, ephemeral.** The recovery link's ticket binds the
   request (seat proof) and is spent on first use; an abandoned recovery leaves no
-  trace and re-uses nothing.
+  trace and re-uses nothing. A run withdrawn before its block sealed never
+  used the ticket: it is live again for the same seat.
 - **Deliberately never persisted (decided 2026-07-11: won't-do).** The
   spend-once ticket set and `pending_recovery` stay **in-memory on purpose**.
   This fails closed: after a coordinator crash or restart no old ticket
@@ -289,7 +332,8 @@ The group gets the complementary guarantees:
   and `a_second_recovery_round_after_a_dead_first_attempt_succeeds`
   (`two_instances.rs`). On the rejoiner side nothing times out (B4): a dead
   coordinator is noticed by the operator, who cancels and retries with a
-  fresh link; a restarted one answers `link outdated`.
+  fresh link; a restarted one answers `link outdated`. A cancelled run
+  withdraws its unsealed card and the ticket is live again (§4).
 
 **MLS distribution — RE-decided (2026-07-09, supersedes the 2026-07-08 star):
 the commit rides the RUNTIME MESH.** `S` broadcasts `restore_member`'s commit to
@@ -352,6 +396,10 @@ The product never uses the seam.
   received on, the coordinator's transport). Since 2026-07-16 the mint's
   lifecycle rides the session-notice channel: `recovery-link-pending:<member>`
   on the attempt, then `recovery-link:<link>` or `recovery-link-failed:<reason>`
+  (a mint whose inbox no relay answers yet says why while it retries:
+  `recovery-link-pending:<member>:no relay answers`; the link leaves the
+  notice once its ticket is spent, withdrawn, evicted or the workspace
+  closes)
   (`mesh-not-running` when the coordinator's mesh is not up — e.g. a reopen
   without a resumable transport — or the transport error when the off-actor
   queue provisioning fails, reported by the INTERNAL
@@ -431,7 +479,12 @@ The product never uses the seam.
   `nostr_recovery.rs`: `the_coordinator_holds_still_until_the_rejoiner_is_ready`,
   `a_cancel_after_the_anchor_changes_nothing_on_the_coordinator`,
   `the_welcome_survives_five_refused_publishes`, the two mixed-version
-  pairs and `a_restarted_coordinator_answers_link_outdated`.
+  pairs and `a_restarted_coordinator_answers_link_outdated`; the run
+  binding and withdrawal in
+  `a_retry_on_the_same_link_is_not_ended_by_an_earlier_runs_refusal`,
+  `a_replayed_earlier_run_never_replaces_the_running_one`,
+  `a_cancel_after_ready_withdraws_the_unsealed_card` and
+  `a_new_run_on_a_spent_link_hears_link_outdated`.
 
 - **Recovery UI** — ✅ (2026-07-11, mint states 2026-07-16) both surfaces in
   `molt-ui`, driving the same co-equal commands. Coordinator: a per-member
