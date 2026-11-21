@@ -761,7 +761,13 @@ pub(crate) fn apply_session(
                 ui.set_rv_running(false);
                 // a phrase that does not fit the link's seat is, in the field,
                 // a member using someone else's link: say whose it is
-                let shown = if error.contains("does not derive this seat's identity key") {
+                let lex = crate::i18n::Lexicon::of(lang);
+                // a link minted before the last re-admission, or too long ago
+                let shown = if error.contains("consent is spent") {
+                    lex.rv_link_spent.to_string()
+                } else if error.contains("consent is stale") {
+                    lex.rv_link_stale.to_string()
+                } else if error.contains("does not derive this seat's identity key") {
                     // the seat the LINK names; the run's member only as a fallback
                     let link_who = ui.get_rv_kind().who;
                     let who = if link_who.is_empty() { ui.get_rv_member() } else { link_who };

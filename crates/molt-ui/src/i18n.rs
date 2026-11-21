@@ -1214,6 +1214,8 @@ lexicon! {
     rv_replaces: "Replaces local copy", "Ersetzt lokale Kopie";
     rv_new_here: "New on this device", "Neu auf diesem Gerät";
     rv_wrong_seat: "The phrase does not fit the seat of {who}.", "Die Phrase passt nicht zum Sitz von {who}.";
+    rv_link_spent: "Link outdated (made before the last re-admission) - ask for a new link.", "Link veraltet (vor der letzten Wiederaufnahme erzeugt) - neuen Link anfordern.";
+    rv_link_stale: "Link too old - ask for a new link.", "Link zu alt - neuen Link anfordern.";
     rw_link_unknown: "Not a usable molt:// link.", "Kein brauchbarer molt://-Link.";
     rw_rl_not_in_pool: "not in your pool", "nicht in deinem Pool";
     rw_rl_unconfirmed: "not confirmed", "nicht bestätigt";

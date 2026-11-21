@@ -271,3 +271,19 @@ fn a_rejoin_names_its_workspace_and_a_foreign_link() {
     apply_session(&ui, &sv, true, &chat_ui);
     assert!(ui.get_rv_error().contains("petra"), "{}", ui.get_rv_error());
 }
+
+/// A refused request whose consent was spent or is stale says the link is
+/// outdated, not the coordinator's internal words.
+#[test]
+fn an_outdated_link_says_so() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    let sv = SessionView {
+        language: "de".to_string(),
+        notice: "recover-failed:the coordinator refused the request: restore consent is spent for petra".to_string(),
+        ..SessionView::default()
+    };
+    apply_session(&ui, &sv, true, &chat_ui);
+    assert!(ui.get_rv_error().contains("Link veraltet"), "{}", ui.get_rv_error());
+}
