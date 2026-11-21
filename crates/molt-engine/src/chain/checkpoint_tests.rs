@@ -1274,3 +1274,40 @@ fn the_wallet_rule_survives_a_cut() {
     assert_eq!(walter.wallet_rule(), Some(genesis_rule));
     assert_eq!(walter.wallet_view().phase, molt_core::wallet::WalletPhase::Bounds, "2-of-2 is outside W1");
 }
+
+/// B6 (`docs/chain/rejoin_divergence_build_plan.md`): a cut drops the
+/// history a fork is healed with, so none is proposed, auto-proposed or
+/// co-signed while a peer is diverged or fork candidates are held.
+#[test]
+fn no_cut_while_a_peer_is_diverged() {
+    let mut b = grown_chain(AUTO_CHECKPOINT_MIN_LEN - 1);
+    let base = b.clone();
+    b.commit_applied(500, &["petra", "walter"]);
+    // another branch one block longer, parting at the same height
+    let mut other = base.clone();
+    other.commit_applied(600, &["petra", "walter"]);
+    other.commit_applied(601, &["petra", "walter"]);
+    let fork = other.blocks.last().expect("block").clone();
+
+    let mut petra = chain_signer("petra", &b, b.blocks.clone());
+    let upto = petra.chain.head.as_ref().expect("head").height;
+    let hash = petra.own_cut_hash(upto, petra.cut_kind(false)).expect("hash");
+    petra.receive_block_from("walter", fork.clone());
+    assert!(!petra.chain.diverged.is_empty(), "walter reads as diverged");
+    assert!(petra.cmd_propose_checkpoint().is_err(), "no manual cut");
+    // only the divergence holds the automation back
+    petra.chain.catchup_from = None;
+    seal_one(&mut petra, &b, "walter", 700);
+    assert_eq!(pending_cut(&petra), None, "no auto cut either");
+
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    walter.receive_block_from("petra", fork);
+    assert!(!walter.chain.fork_candidates.is_empty());
+    walter.receive_checkpoint_proposal(9, upto, &hash, false);
+    assert!(!walter.own_signature_stands(9), "no co-sign while forked");
+
+    walter.chain.fork_candidates.clear();
+    walter.chain.diverged.clear();
+    walter.receive_checkpoint_proposal(9, upto, &hash, false);
+    assert!(walter.own_signature_stands(9), "co-signed once healed");
+}
