@@ -179,6 +179,28 @@ So the rejoin works on v0.0.20; it fails when a relay holds more than
 locked-out nodes produce exactly that. Reading "only since the request"
 (v0.0.20) cannot help against freshly stamped resends.
 
+**Three seats (E5-E8, same day):**
+
+| run | stored group events at the request | result |
+|---|---|---|
+| E2 | 981 | success, no paging |
+| E4 | 4 544 | success, no paging |
+| early E6 | 4 741 | success, paged only after anchor and catch-up |
+| E7 (old B and C up) | 5 492 | failure |
+| E3 | 22 100 | failure |
+| E6 (old A, B, C up) | 23 668 | failure |
+| E8 (old A stopped before, only its stored frames) | ~28 200 | failure |
+
+Every failure pages (`got=5001`) before the first anchor frame; the
+boundary is the replay bound of 5 000, not the number of old nodes, and
+stored frames alone suffice. With all three old nodes up (16 min):
+nobody reads anybody, B and C included although their chains agree to
+932; zero WARN or ERROR on any seat; unreadable counters 4 955 ->
+9 074 (A), 21 555 -> 38 127 (B), 19 223 -> 34 034 (C); frames published
+31 814 (A), 2 747 (B), 6 882 (C). B never follows C's new `Restored`
+block or re-key: no two seats find back to a 2-of-3 majority by
+themselves, every restore only adds one more single-seat branch.
+
 **Self-heal, measured (E3):** both old nodes ran `self-healing via
 reattach` by themselves 30.5 min after start, at the eighth fruitless
 resend round. The requests went to the working anchors their own chains
