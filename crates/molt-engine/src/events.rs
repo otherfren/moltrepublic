@@ -615,8 +615,12 @@ impl State {
                 v
             },
             minted_tickets: self.recovery.attempts.minted.iter().cloned().collect(),
-            seal_first_seats: Vec::new(),
-            anchor_repushes: Vec::new(),
+            seal_first_seats: {
+                let mut v: Vec<(String, String)> = self.recovery.seal_first_seats.iter().cloned().collect();
+                v.sort();
+                v
+            },
+            anchor_repushes: self.recovery.repushes.iter().map(|((m, a), (n, _))| (m.clone(), a.clone(), *n)).collect(),
         }
     }
 
@@ -755,6 +759,10 @@ impl State {
         // for `reverify_all_pending` after the chain adoption
         self.chain.own_approvals.extend(dump.own_approvals.iter().copied());
         self.recovery.anchor_first_seats.extend(dump.anchor_first_seats.iter().cloned());
+        self.recovery.seal_first_seats.extend(dump.seal_first_seats.iter().cloned());
+        for (m, a, n) in &dump.anchor_repushes {
+            self.recovery.repushes.insert((m.clone(), a.clone()), (*n, 0));
+        }
         self.recovery.attempts.minted = dump
             .minted_tickets
             .iter()
@@ -927,7 +935,9 @@ impl State {
         self.chain.heal_next_at = 0;
         self.chain.heal_backoff = 0;
         self.chain.beacon_at = 0;
-        self.chain.anchor_repush.clear();
+        self.recovery.repushes.clear();
+        self.recovery.seal_first_seats.clear();
+        self.recovery.opened_at = 0;
         self.chain.repush_check_at = 0;
         self.chain.ready_at.clear();
         self.chain.fallback_asked = None;

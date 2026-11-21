@@ -46,8 +46,12 @@ const CHAIN_BEACON_SECS: u64 = 300;
 /// S4: a retry names this many recent heights one by one.
 const DENSE_KNOWN_HEADS: u64 = 64;
 /// S4a: a seal-first restore's anchor is re-pushed this often while the
-/// seat stays unheard (B4: no count, no window).
+/// seat stays unheard.
 const ANCHOR_REPUSH_SECS: u64 = 600;
+/// Review R5: re-pushes per restore, across restarts. Every push is stored
+/// on the relays and a listening rejoiner reads all of them, so the count
+/// bounds this node's work; a new link restarts everything.
+pub(super) const ANCHOR_REPUSH_MAX: u32 = 12;
 /// S4: fork candidates that never linked are dropped after this long.
 const CANDIDATE_TTL_SECS: u64 = 1_200;
 
@@ -489,44 +493,67 @@ impl State {
         self.emit_session(crate::SessionScope::Full);
     }
 
-    /// S4a: seats whose last `Restored` block sealed but which were never
-    /// heard from since get the anchor bootstrap again; an anchor-first
-    /// rejoiner already holds it (B4).
+    /// S4a, review R5: a seal-first restore whose seat was never heard
+    /// since its block gets the anchor bootstrap again - for a rejoiner
+    /// that listens on the group; an anchor-first one holds it already.
+    /// Ends on events: the seat was heard, a later restore of the seat
+    /// sealed or is under way, or [`ANCHOR_REPUSH_MAX`] pushes. Pushed by
+    /// the node that coordinated it, or by the sealing line's first seat
+    /// for a restore sealed after its own open (an older one it cannot
+    /// know anybody waits for).
     fn repush_unfinished_restores(&mut self, now: u64) {
-        if !self.first_in_line() {
-            return;
-        }
         let me = self.member();
-        let mut latest: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        let mut latest: std::collections::BTreeMap<String, (String, u64)> = std::collections::BTreeMap::new();
         for b in &self.chain.blocks {
             if let ChainChange::Membership { op: molt_core::MembershipOp::Restored, member, nostr_pk, .. } = &b.change {
-                latest.insert(member.clone(), nostr_pk.clone().unwrap_or_default());
+                latest.insert(member.clone(), (nostr_pk.clone().unwrap_or_default(), b.height));
             }
         }
-        let due: Vec<String> = latest
+        let unfinished: Vec<((String, String), u64)> = latest
             .into_iter()
-            .filter(|(m, pk)| {
-                *m != me
-                    && self.restore_never_finished(m, pk)
-                    && !self.recovery.anchor_first_seats.contains(&(m.clone(), pk.clone()))
-            })
-            .map(|(m, _)| m)
-            .filter(|m| {
-                self.chain
-                    .anchor_repush
-                    .get(m)
-                    .map_or(true, |(_, last)| now.saturating_sub(*last) >= ANCHOR_REPUSH_SECS)
-            })
+            .filter(|(m, (pk, _))| *m != me && self.restore_never_finished(m, pk))
+            .map(|(m, (pk, h))| ((m, pk), h))
             .collect();
-        if due.is_empty() {
-            return;
-        }
-        for m in &due {
-            let e = self.chain.anchor_repush.entry(m.clone()).or_insert((0, 0));
+        let before = (self.recovery.repushes.len(), self.recovery.seal_first_seats.len());
+        self.recovery.repushes.retain(|k, _| unfinished.iter().any(|(u, _)| u == k));
+        self.recovery.seal_first_seats.retain(|k| unfinished.iter().any(|(u, _)| u == k));
+        let mut changed = before != (self.recovery.repushes.len(), self.recovery.seal_first_seats.len());
+        let line = self.first_in_line();
+        let opened = self.recovery.opened_at;
+        let due: Vec<(String, String)> = unfinished
+            .into_iter()
+            .filter(|(seat, height)| {
+                let coordinated = self.recovery.seal_first_seats.contains(seat);
+                let sealed_since_open =
+                    opened > 0 && self.chain.block_ts.get(height).is_some_and(|ts| *ts >= opened);
+                // a reopen is no reason to push at once
+                let (count, last) = self.recovery.repushes.get(seat).copied().unwrap_or((0, 0));
+                !self.recovery.anchor_first_seats.contains(seat)
+                    && !self.restore_superseded(&seat.0)
+                    && (coordinated || (line && sealed_since_open))
+                    && count < ANCHOR_REPUSH_MAX
+                    && now.saturating_sub(last.max(opened)) >= ANCHOR_REPUSH_SECS
+            })
+            .map(|(seat, _)| seat)
+            .collect();
+        for seat in &due {
+            let e = self.recovery.repushes.entry(seat.clone()).or_insert((0, 0));
             *e = (e.0 + 1, now);
-            tracing::info!(member = %m, count = e.0, "anchor=repushed");
+            tracing::info!(member = %seat.0, count = e.0, max = ANCHOR_REPUSH_MAX, "anchor=repushed");
+            changed = true;
         }
-        self.serve_chain_anchor();
+        if changed {
+            self.snapshot_to_disk();
+        }
+        if !due.is_empty() {
+            self.serve_chain_anchor();
+        }
+    }
+
+    /// A newer run for the seat is under way here: the unfinished restore's
+    /// rejoiner is gone by definition.
+    fn restore_superseded(&self, member: &str) -> bool {
+        self.readmission_in_flight(member) || self.recovery.anchor_first.values().any(|a| a.member == member)
     }
 
     /// Where a fork-aware request wants serving from: one above the highest

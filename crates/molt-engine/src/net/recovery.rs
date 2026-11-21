@@ -829,6 +829,9 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return;
         };
+        if self.recovery.opened_at == 0 {
+            self.recovery.opened_at = self.presence_now();
+        }
         self.recovery.seat_inbox = Some(crate::nostr_ritual::spawn_seat_inbox(
             net,
             self.net_scope,

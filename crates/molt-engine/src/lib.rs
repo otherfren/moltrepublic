@@ -1084,9 +1084,7 @@ pub(crate) struct ChainProjection {
     pub(crate) heal_next_at: u64,
     pub(crate) heal_backoff: u64,
     pub(crate) beacon_at: u64,
-    /// S4a: anchor re-pushes per restored seat (count, last) and the next
-    /// check.
-    pub(crate) anchor_repush: HashMap<MemberId, (u32, u64)>,
+    /// S4a: the next anchor re-push check.
     pub(crate) repush_check_at: u64,
     /// S5: per proposal, the height it became sealable at here and when;
     /// and the height a fallback sealer already asked its peers about.
@@ -1163,6 +1161,12 @@ pub(crate) struct RecoveryState {
     pub(crate) quit: Option<tokio::sync::oneshot::Sender<()>>,
     /// The running rejoiner saw its re-admission seal.
     pub(crate) readmitted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Review R5: `(seat, anchor)` this node restored seal-first, and each
+    /// unfinished restore's anchor re-pushes `(count, last)`; persisted.
+    pub(crate) seal_first_seats: std::collections::HashSet<(String, String)>,
+    pub(crate) repushes: BTreeMap<(String, String), (u32, u64)>,
+    /// When this workspace's group runtime came up (presence clock).
+    pub(crate) opened_at: u64,
     /// Recovery tickets this node has minted and is still listening for — the
     /// spend-once guard. A ticket is inserted when a recovery link is minted and
     /// removed the moment a valid request spends it, so a replayed request on a
@@ -1760,6 +1764,9 @@ impl State {
                 attempts: chain::AttemptBook::default(),
                 quit: None,
                 readmitted: std::sync::Arc::default(),
+                seal_first_seats: std::collections::HashSet::new(),
+                repushes: BTreeMap::new(),
+                opened_at: 0,
                 tickets: HashMap::new(),
                 mesh_window: std::collections::HashSet::new(),
                 mesh_extension_at: std::collections::HashMap::new(),

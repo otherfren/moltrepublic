@@ -1391,6 +1391,8 @@ impl State {
         // the rejoiner's trust root, over the same 445 channel it just
         // joined - unless it verified the anchor before the seal (B4)
         if !anchor_first {
+            self.recovery.seal_first_seats.insert((member.to_string(), self.working_nostr_pk(member)));
+            self.snapshot_to_disk();
             self.serve_chain_anchor();
         }
         // …and the same quiet system line the mesh arm posts. It is encrypted
