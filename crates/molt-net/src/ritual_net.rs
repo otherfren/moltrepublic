@@ -32,7 +32,7 @@ use nostr::{
 use crate::dial::Dialer;
 use crate::envelope::{self, H_WINDOW};
 use crate::invite::RitualMsg;
-use crate::relay_runtime::{PublishReport, RelayRuntime, Subscription, SyncState};
+use crate::relay_runtime::{PublishReport, ReadState, RelayRuntime, Subscription, SyncState};
 use crate::ritual_wrap::{self, RitualWrapError};
 use crate::welcome::{self, WelcomeError, WelcomePayload};
 use crate::NetError;
@@ -338,12 +338,16 @@ impl RitualInbox {
         self.sub.synced(timeout).await
     }
 
-    /// The replay counts behind [`Self::live`] — so a caller can tell "no
-    /// relay is readable" (a provisioning failure) from "one of three lagged"
-    /// (a warning). Proceeding blind on the first is how a ritual times out
-    /// with no error anywhere.
-    pub async fn live_state(&mut self, timeout: Duration) -> SyncState {
-        self.sub.sync_state(timeout).await
+    /// Which relays answered the REQ - so a caller can tell "no relay is
+    /// readable" (a provisioning failure) from "one of three lagged" (a
+    /// warning). Needs no consumer, unlike [`Self::live`] (findings R11).
+    pub async fn read_state(&mut self, timeout: Duration) -> ReadState {
+        self.sub.read_state(timeout).await
+    }
+
+    /// [`Self::read_state`], returning at the first relay's answer.
+    pub async fn first_read(&mut self, timeout: Duration) -> ReadState {
+        self.sub.first_read(timeout).await
     }
 
     /// The next peeled delivery, or `None` when nothing arrives within
@@ -822,7 +826,8 @@ impl CatchupSub {
     }
 
     /// The per-relay replay counts behind [`Self::live`], so a caller can tell
-    /// "no relay served the range" from "one of three lagged".
+    /// "no relay served the range" from "one of three lagged". Called
+    /// between reads only: a multi-page replay ends behind a consumer.
     pub async fn live_state(&mut self, timeout: Duration) -> SyncState {
         self.sub.sync_state(timeout).await
     }
@@ -907,12 +912,16 @@ impl GroupSub {
         self.sub.synced(timeout).await
     }
 
-    /// The replay counts behind [`Self::live`] — so a caller can tell "no
-    /// relay is readable" (a provisioning failure) from "one of three lagged"
-    /// (a warning). Proceeding blind on the first is how a ritual times out
-    /// with no error anywhere.
-    pub async fn live_state(&mut self, timeout: Duration) -> SyncState {
-        self.sub.sync_state(timeout).await
+    /// Which relays answered the REQ - so a caller can tell "no relay is
+    /// readable" (a provisioning failure) from "one of three lagged" (a
+    /// warning). Needs no consumer, unlike [`Self::live`] (findings R11).
+    pub async fn read_state(&mut self, timeout: Duration) -> ReadState {
+        self.sub.read_state(timeout).await
+    }
+
+    /// [`Self::read_state`], returning at the first relay's answer.
+    pub async fn first_read(&mut self, timeout: Duration) -> ReadState {
+        self.sub.first_read(timeout).await
     }
 
     /// The next VALID kind-445 frame as `(sealed content, created_at)`, or

@@ -407,6 +407,8 @@ pub struct Subscription {
     connected: usize,
     /// How many of them finished their stored-events replay.
     eose: tokio::sync::watch::Receiver<usize>,
+    /// How many of them answered the REQ at all.
+    answered: tokio::sync::watch::Receiver<usize>,
     /// Shared health map + this subscription's relays, so teardown can clear
     /// the entries instead of leaving a stale `Up` behind (review finding).
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
@@ -457,16 +459,60 @@ impl Subscription {
     /// warning: a single lagging relay in a healthy pool must not kill a
     /// founding, but a pool where NOTHING is readable must not be proceeded
     /// through blind.
+    ///
+    /// The end of a replay longer than one page arrives only behind a
+    /// consumer (the pages after the first wait on the channel): a caller
+    /// that must not read first gates on [`Self::read_state`] instead.
     pub async fn sync_state(&mut self, timeout: Duration) -> SyncState {
-        let deadline = tokio::time::Instant::now() + timeout;
-        while *self.eose.borrow() < self.connected {
-            match tokio::time::timeout_at(deadline, self.eose.changed()).await {
-                Ok(Ok(())) => {}
-                // timeout, or every sender gone without reaching the count
-                _ => break,
-            }
+        let synced = wait_count(&mut self.eose, self.connected, timeout).await;
+        SyncState { synced, connected: self.connected }
+    }
+
+    /// Wait until every connected relay ANSWERED the REQ (a stored event or
+    /// its EOSE) - readable, whether or not anything was consumed yet.
+    pub async fn read_state(&mut self, timeout: Duration) -> ReadState {
+        let answered = wait_count(&mut self.answered, self.connected, timeout).await;
+        ReadState { answered, connected: self.connected }
+    }
+
+    /// [`Self::read_state`], returning at the first relay's answer.
+    pub async fn first_read(&mut self, timeout: Duration) -> ReadState {
+        let answered = wait_count(&mut self.answered, 1, timeout).await;
+        ReadState { answered, connected: self.connected }
+    }
+}
+
+/// Wait until the counter reaches `need`; its value at return.
+async fn wait_count(rx: &mut tokio::sync::watch::Receiver<usize>, need: usize, timeout: Duration) -> usize {
+    let deadline = tokio::time::Instant::now() + timeout;
+    while *rx.borrow() < need {
+        // timeout, or every sender gone without reaching the count
+        if !matches!(tokio::time::timeout_at(deadline, rx.changed()).await, Ok(Ok(()))) {
+            break;
         }
-        SyncState { synced: *self.eose.borrow(), connected: self.connected }
+    }
+    let n = *rx.borrow();
+    n
+}
+
+/// How many relays proved readable ([`Subscription::read_state`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadState {
+    /// Relays that answered the REQ: a stored event or EOSE.
+    pub answered: usize,
+    /// Relays that accepted the REQ at all.
+    pub connected: usize,
+}
+
+impl ReadState {
+    /// At least one relay is readable.
+    pub fn any(&self) -> bool {
+        self.answered > 0
+    }
+
+    /// Every relay that accepted the REQ answered.
+    pub fn full(&self) -> bool {
+        self.answered >= self.connected
     }
 }
 
@@ -523,6 +569,8 @@ struct SubShared {
     dedup: Arc<Mutex<DedupRing>>,
     cursors: Arc<Mutex<std::collections::HashMap<String, u64>>>,
     eose_tx: Arc<tokio::sync::watch::Sender<usize>>,
+    /// Gated relays that answered the REQ at all (a stored event or EOSE).
+    answered_tx: Arc<tokio::sync::watch::Sender<usize>>,
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
     down_reasons: Arc<Mutex<std::collections::HashMap<String, RelayDownReason>>>,
     backoff: (Duration, Duration),
@@ -556,9 +604,11 @@ impl RelayRuntime {
         // then times out against a healthy relay, and forever, because the
         // backlog only grows (found 2026-08-17, recovery rerun). The bound
         // makes it one page (+ some live headroom); a replay of several
-        // pages needs a consumer to reach its EOSE.
+        // pages needs a consumer to reach its EOSE, which is why the ritual
+        // gates wait on `read_state`, never on the EOSE (findings R11).
         let (tx, rx) = mpsc::channel(self.channel_capacity().max(1));
         let (eose_tx, eose_rx) = tokio::sync::watch::channel(0usize);
+        let (answered_tx, answered_rx) = tokio::sync::watch::channel(0usize);
         let shared = Arc::new(SubShared {
             dialer: self.dialer.clone(),
             filter,
@@ -569,6 +619,7 @@ impl RelayRuntime {
             ))),
             cursors: self.cursors.clone(),
             eose_tx: Arc::new(eose_tx),
+            answered_tx: Arc::new(answered_tx),
             health: self.health.clone(),
             down_reasons: self.down_reasons.clone(),
             backoff: self.backoff,
@@ -664,6 +715,7 @@ impl RelayRuntime {
             readers: supervisors,
             connected: gated.len(),
             eose: eose_rx,
+            answered: answered_rx,
             health: self.health.clone(),
             down_reasons: self.down_reasons.clone(),
             urls: self.urls.clone(),
@@ -760,6 +812,7 @@ async fn supervise(
     // relays that were down at subscribe time are NOT in the gate's
     // denominator, so they must never increment its numerator either
     let mut eose_counted = !counts_toward_eose;
+    let mut answer_counted = !counts_toward_eose;
     let mut replay = Replay::default();
     let mut stuck_rounds: u32 = 0;
     // the route this relay actually takes (a Local relay is dialed direct
@@ -852,7 +905,7 @@ async fn supervise(
         };
         shared.health.lock().await.insert(url.clone(), RelayHealth::Up);
         let started = tokio::time::Instant::now();
-        match read_session(&shared, &url, ws, &mut eose_counted, &mut replay).await {
+        match read_session(&shared, &url, ws, (&mut eose_counted, &mut answer_counted), &mut replay).await {
             SessionEnd::ConsumerGone => return, // nothing left to supervise
             SessionEnd::Died => {}
             SessionEnd::Paged => {
@@ -904,6 +957,14 @@ async fn supervise(
     }
 }
 
+/// Count this relay's first answer toward [`Subscription::read_state`].
+fn count_answer(shared: &SubShared, counted: &mut bool) {
+    if !*counted {
+        *counted = true;
+        shared.answered_tx.send_modify(|n| *n += 1);
+    }
+}
+
 /// How one session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionEnd {
@@ -922,7 +983,7 @@ async fn read_session(
     shared: &SubShared,
     url: &str,
     mut ws: RelayWs,
-    eose_counted: &mut bool,
+    (eose_counted, answer_counted): (&mut bool, &mut bool),
     replay: &mut Replay,
 ) -> SessionEnd {
     let (keepalive, idle_bound) = shared.sub_timing;
@@ -999,6 +1060,8 @@ async fn read_session(
                 if event.verify().is_err() {
                     continue;
                 }
+                // before the send below, which parks on a full channel
+                count_answer(shared, answer_counted);
                 // this relay DELIVERED the event, so its cursor advances
                 // (duplicates included) — but never past LOCAL NOW: the skew
                 // margin bounds what we ACCEPT, never the resume point, or a
@@ -1020,6 +1083,7 @@ async fn read_session(
             }
             Ok(RelayMessage::EndOfStoredEvents(_)) => {
                 tracing::debug!(relay = %url, counted = !*eose_counted, "relay sent EOSE");
+                count_answer(shared, answer_counted);
                 if !replaying {
                     continue;
                 }

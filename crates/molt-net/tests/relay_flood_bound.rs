@@ -254,6 +254,51 @@ async fn a_replay_cut_midway_resumes_without_a_gap() {
     assert_eq!(rt.cursors().await.get(&relay.url), Some(&(now - 10)));
 }
 
+/// Findings R11: a replay of more pages than the fan-in channel holds parks
+/// the relay task on a full channel before its EOSE. The readability gate
+/// must not need a consumer; the end of the replay does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_replay_larger_than_the_channel_is_readable_before_anyone_drains_it() {
+    let now = Timestamp::now().as_secs();
+    let store = events(300, now - 10, 1);
+    let relay = scripted_relay(store.clone(), Script::Honest).await;
+    let rt = RelayRuntime::new(dialer(), vec![relay.url.clone()])
+        .with_history_bound(50)
+        .with_backoff(Duration::from_millis(20), Duration::from_millis(200));
+    assert!(rt.channel_capacity() < store.len());
+    let mut sub = rt.clone().subscribe(filter()).await.expect("subscribe");
+
+    let st = sub.read_state(Duration::from_secs(5)).await;
+    assert!(st.full(), "the relay answered, nothing drained yet: {st:?}");
+    assert!(
+        !sub.synced(Duration::from_secs(1)).await,
+        "the end of a multi-page replay sits behind a full channel"
+    );
+
+    let got: std::collections::HashSet<_> = drain(&mut sub).await.into_iter().collect();
+    assert!(store.iter().all(|e| got.contains(&e.id)), "{} of 300", got.len());
+    assert!(sub.synced(Duration::from_secs(2)).await, "drained, the replay ends");
+}
+
+/// A connected relay that never answers keeps the gate shut, and the
+/// first-answer wait returns on the one that does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_first_answer_opens_the_gate_a_silent_relay_does_not() {
+    let now = Timestamp::now().as_secs();
+    let answering = scripted_relay(events(5, now - 10, 1), Script::Honest).await;
+    // accepts the REQ, then neither events nor EOSE
+    let silent = scripted_relay(Vec::new(), Script::SamePage).await;
+    let rt = RelayRuntime::new(dialer(), vec![answering.url.clone(), silent.url.clone()]);
+    let mut sub = rt.subscribe(filter()).await.expect("subscribe");
+
+    let began = tokio::time::Instant::now();
+    let st = sub.first_read(Duration::from_secs(20)).await;
+    assert_eq!((st.answered, st.connected), (1, 2));
+    assert!(began.elapsed() < Duration::from_secs(5), "returned at the first answer");
+    let st = sub.read_state(Duration::from_millis(500)).await;
+    assert!(st.any() && !st.full(), "the silent relay never answered: {st:?}");
+}
+
 /// The plan's scale: 12 000 stored events against the production bound
 /// (MockRelay answers at most 500 per REQ, so this one is scripted).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
