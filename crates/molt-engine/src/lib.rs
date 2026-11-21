@@ -679,6 +679,10 @@ pub(crate) struct GroupNet {
     /// The file trickle sender riding this runtime's channel
     /// (`docs_archive/files/mirroring.md` §3.2); stops with the handle.
     pub(crate) trickle: molt_net::trickle::TrickleHandle,
+    /// B3: this runtime's lock-out verdict, which quiets its re-offers.
+    pub(crate) lockout: net::LockOut,
+    /// B2: the running episode of unreadable live frames.
+    pub(crate) unreadable: net::UnreadableEpisode,
 }
 
 /// This seat's live Nostr transport material for the open workspace.
@@ -776,11 +780,6 @@ pub(crate) struct DeliveryState {
     /// B2: a merged commit removed this seat's own leaf. Derived again at
     /// open from the stored (inactive) group; reset with the workspace.
     pub(crate) evicted: bool,
-    /// The group runtime's live-unreadable count at the last presence
-    /// tick, and whether its growth was already reported (one WARN per
-    /// episode).
-    pub(crate) unreadable_seen: u64,
-    pub(crate) unreadable_warned: bool,
     /// B3: the self-heal signature was reported this session.
     pub(crate) locked_out_noted: bool,
 }

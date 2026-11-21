@@ -265,6 +265,12 @@ impl GroupHandle {
         self.reach.borrow().clone()
     }
 
+    /// Whether the last verdict called `member` silent.
+    #[must_use]
+    pub fn reach_silent(&self, member: &str) -> bool {
+        self.reach.borrow().silent.contains(member)
+    }
+
     /// The outbox's pending flag: `true` while a pass publishes own frames.
     #[must_use]
     pub fn outbox_busy(&self) -> watch::Receiver<bool> {
@@ -824,6 +830,7 @@ impl Quiet {
 }
 
 impl StallClock {
+    #[cfg(test)]
     const fn new() -> StallClock {
         StallClock::with(Backoff::new())
     }
@@ -3368,11 +3375,8 @@ mod tests {
     /// Walter (two own events, both owed to petra and zoe, who acked once at
     /// floor 0) and petra as a listener that never acks; zoe never runs.
     /// Petra's deliveries count walter's group frames: every re-offer is a
-    /// fresh encryption. Returns walter, petra, the count.
-    async fn trio(
-        first: Duration,
-        cap: Duration,
-    ) -> (GroupHandle, GroupHandle, Sink, nostr_relay_builder::MockRelay) {
+    /// fresh encryption.
+    async fn trio(first: Duration, cap: Duration) -> Trio {
         use crate::mls::MlsMember;
         use ed25519_dalek::SigningKey;
 
@@ -3407,7 +3411,7 @@ mod tests {
                 true
             })
             .await;
-        let (_wake_w, wake_w_rx) = watch::channel(0u64);
+        let (wake_w, wake_w_rx) = watch::channel(0u64);
         let (health_w, _hw) = watch::channel(GroupHealth::default());
         let walter_handle = spawn_group(
             chan(&url),
@@ -3419,11 +3423,9 @@ mod tests {
             wake_w_rx,
             health_w,
         );
-        std::mem::forget(_wake_w);
 
         let sink = Sink::default();
         let (wake_p, wake_p_rx) = watch::channel(0u64);
-        std::mem::forget(wake_p);
         let (health_p, _hp) = watch::channel(GroupHealth::default());
         let petra_handle = spawn_group(
             chan(&url),
@@ -3435,7 +3437,14 @@ mod tests {
             wake_p_rx,
             health_p,
         );
-        (walter_handle, petra_handle, sink, relay)
+        Trio { walter: walter_handle, petra: petra_handle, sink, _keep: (relay, wake_w, wake_p) }
+    }
+
+    struct Trio {
+        walter: GroupHandle,
+        petra: GroupHandle,
+        sink: Sink,
+        _keep: (nostr_relay_builder::MockRelay, watch::Sender<u64>, watch::Sender<u64>),
     }
 
     fn count(sink: &Sink) -> usize {
@@ -3470,23 +3479,25 @@ mod tests {
     }
 
     /// The first pass plus the open rounds, two frames each.
-    const OPENING: usize = 2 + 2 * OPEN_ROUNDS as usize;
+    fn opening() -> usize {
+        2 + 2 * usize::try_from(OPEN_ROUNDS).expect("small")
+    }
 
     /// **Nobody owed is listening: the re-offers stop, and resume on the
     /// event.** Field: a seat re-offered its whole tail every ten minutes,
     /// for ever, to peers that were gone or split.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_silent_peer_gets_no_re_offers_until_it_is_heard() {
-        let (walter, petra, sink, _relay) = trio(Duration::from_millis(50), Duration::from_secs(30)).await;
+        let Trio { walter, petra, sink, _keep } = trio(Duration::from_millis(50), Duration::from_secs(30)).await;
         walter.set_reach(silent(&["petra", "zoe"]));
         // rounds fire at ~0.05, 0.15, 0.35, 0.75, 1.55, 3.15 s
         tokio::time::sleep(Duration::from_secs(5)).await;
-        assert_eq!(count(&sink), OPENING, "after the open rounds nothing is re-offered to silent peers");
+        assert_eq!(count(&sink), opening(), "after the open rounds nothing is re-offered to silent peers");
 
         // petra is heard again; the next natural round would be ~1.3 s away
         walter.set_reach(silent(&["zoe"]));
         let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
-        while count(&sink) < OPENING + 2 {
+        while count(&sink) < opening() + 2 {
             assert!(tokio::time::Instant::now() < deadline, "the heard peer was not re-offered on the event");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -3498,10 +3509,10 @@ mod tests {
     /// keeps getting its resends.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_heard_slow_peer_keeps_its_resends_beside_a_silent_one() {
-        let (walter, petra, sink, _relay) = trio(Duration::from_millis(50), Duration::from_millis(200)).await;
+        let Trio { walter, petra, sink, _keep } = trio(Duration::from_millis(50), Duration::from_millis(200)).await;
         walter.set_reach(silent(&["zoe"]));
         tokio::time::sleep(Duration::from_secs(3)).await;
-        assert!(count(&sink) >= OPENING + 8, "the heard peer's resends stopped: {}", count(&sink));
+        assert!(count(&sink) >= opening() + 8, "the heard peer's resends stopped: {}", count(&sink));
         walter.shutdown().await;
         petra.shutdown().await;
     }
@@ -3510,7 +3521,7 @@ mod tests {
     /// the open rounds.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_locked_out_seat_re_offers_nothing() {
-        let (walter, petra, sink, _relay) = trio(Duration::from_millis(50), Duration::from_millis(200)).await;
+        let Trio { walter, petra, sink, _keep } = trio(Duration::from_millis(50), Duration::from_millis(200)).await;
         walter.set_reach(OutboxReach { silent: Default::default(), locked_out: true });
         tokio::time::sleep(Duration::from_secs(3)).await;
         assert_eq!(count(&sink), 2, "only the first pass went out");

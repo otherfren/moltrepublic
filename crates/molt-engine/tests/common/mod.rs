@@ -358,6 +358,9 @@ pub async fn slow_relay(slow: &SlowReplay) -> (nostr_relay_builder::LocalRelay, 
 pub struct Backlog {
     armed: Arc<std::sync::atomic::AtomicBool>,
     count: usize,
+    /// Well-formed frames under a key nobody holds (counted unreadable),
+    /// instead of malformed ones (dropped on sight).
+    sealed: bool,
     db: Arc<nostr_relay_builder::prelude::MemoryDatabase>,
 }
 
@@ -367,6 +370,7 @@ impl Backlog {
         Self {
             armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             count,
+            sealed: false,
             db: Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
                 events: true,
                 max_events: None,
@@ -378,13 +382,26 @@ impl Backlog {
         self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    pub fn sealed(count: usize) -> Self {
+        Self { sealed: true, ..Self::new(count) }
+    }
+
+    pub fn db(&self) -> Arc<nostr_relay_builder::prelude::MemoryDatabase> {
+        self.db.clone()
+    }
+
     async fn inject(&self, tags: Vec<String>) {
         use nostr_relay_builder::prelude::{EventBuilder, Keys, Kind, NostrDatabase, Tag, Timestamp};
         let keys = Keys::generate();
         let now = Timestamp::now().as_secs();
         for i in 0..self.count {
             let h = &tags[i % tags.len()];
-            let event = EventBuilder::new(Kind::Custom(445), format!("bm90IGEgZnJhbWUg{i:08}"))
+            let content = if self.sealed {
+                molt_net::envelope::seal_outer(&[9u8; 32], format!("frame {i}").as_bytes()).expect("seal")
+            } else {
+                format!("bm90IGEgZnJhbWUg{i:08}")
+            };
+            let event = EventBuilder::new(Kind::Custom(445), content)
                 .tag(Tag::parse(["h", h.as_str()]).expect("h tag"))
                 .custom_created_at(Timestamp::from_secs(now - u64::try_from(i % 300).expect("small")))
                 .sign_with_keys(&keys)

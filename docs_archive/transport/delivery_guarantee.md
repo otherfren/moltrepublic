@@ -588,3 +588,23 @@ verschickt wurde."* Umsetzung (Branch delivery-followups):
   hostage to frames that cannot exist for it — the rejoiner verified its
   anchor and then never saw a block again. Pin:
   `a_first_contact_envelope_delivers_without_a_history_to_order_against`.
+- **Re-offer only to owed peers that can hear (2026-11-21, broadcast
+  outbox).** §4.4's "peer offline → no resend tick", restored on the 445
+  channel: a stall round goes out only if some peer still owed an own
+  envelope (`ack_seen`, floor below it) is HEARD - an authenticated frame
+  decrypted within the engine's silence window (`chain_lag().silent`,
+  120 s). It rewinds only to the lowest floor among those peers. The
+  engine hands the verdict over `GroupHandle::set_reach` (1 s delivery
+  tick, and at once on `peer_seen` of a silent peer); a quiet stall
+  resumes on that event. Skipped rounds publish nothing and spend no
+  budget, but keep the ladder and count toward the 8-round `send_failed`.
+  Exceptions: the first 2 rounds after a runtime start go out regardless
+  (old stamps; a quiet live listener proves itself only by acking), and a
+  runtime start publishes one claim sheet, so a returning seat is heard
+  even when the relay kept nothing. A seat that concluded
+  `seat_locked_out` re-offers nothing until it reads a peer's frame, is
+  reopened or rejoins. The tail itself stays owed and un-compacted
+  exactly as before. Pins: `a_silent_peer_gets_no_re_offers_until_it_is_heard`,
+  `a_heard_slow_peer_keeps_its_resends_beside_a_silent_one`,
+  `a_locked_out_seat_re_offers_nothing`,
+  `crates/molt-engine/tests/nostr_outbox_quiet.rs`.
