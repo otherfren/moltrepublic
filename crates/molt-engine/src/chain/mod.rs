@@ -30,6 +30,7 @@ use crate::State;
 pub(crate) mod blob_parts;
 mod checkpoint;
 mod governance;
+mod lock;
 mod membership;
 mod projection;
 mod sync;
