@@ -1595,3 +1595,66 @@ async fn a_rejoin_over_a_slowly_replaying_relay_still_comes_back() {
         s.notice
     );
 }
+
+/// Findings R11 (live repro E3): the rejoiner waited for the end of the
+/// group replay without reading it, so a relay holding more frames in its
+/// read window than the subscription buffers never finished replaying, and
+/// the run sat silent until the deadline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejoin_drains_a_backlog_larger_than_the_subscription_buffer() {
+    let backlog = common::Backlog::new(12_000);
+    let (_relay, url) = common::backlog_relay(&backlog).await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+
+    a.execute(Command::RecoverInviteStart {
+        member: "petra".to_string(),
+    })
+    .await
+    .expect("the mint is acked");
+    let s = wait_for(&a, "the recovery link to be minted", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s
+        .notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("the mint must succeed, got {:?}", s.notice))
+        .to_string();
+
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    backlog.arm();
+    c.execute(Command::RecoverStart {
+        link,
+        phrase: petra_phrase,
+        relays: Vec::new(),
+    })
+    .await
+    .expect("recover start");
+    let s = wait_for_secs(&c, "the recovered republic to open", 180, |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
+            || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(
+        !s.notice.starts_with("recover-failed:"),
+        "the recovery failed: {:?}",
+        s.notice
+    );
+}
+
+/// The join twin of R11: founder and joiner both gated their group
+/// subscription on the end of a replay nobody read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_founding_completes_over_a_backlog_larger_than_the_subscription_buffer() {
+    let backlog = common::Backlog::new(12_000);
+    let (_relay, url) = common::backlog_relay(&backlog).await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    backlog.arm();
+    let (a, b, _, _) = found_republic(tmp.path(), &url, 2).await;
+    for w in [&a, &b] {
+        assert_eq!(read_session(w).await.screen, molt_core::Screen::Main, "the seat entered");
+    }
+}

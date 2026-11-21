@@ -124,13 +124,13 @@ pub(crate) fn spawn_founder_inbox(
         let mut inbox = loop {
             let why = match net.inbox().await {
                 Ok(mut inbox) => {
-                    let st = inbox.live_state(LIVE_WAIT).await;
+                    let st = inbox.read_state(LIVE_WAIT).await;
                     if st.any() {
                         if !st.full() {
                             tracing::warn!(
-                                synced = st.synced,
+                                answered = st.answered,
                                 connected = st.connected,
-                                "the founding inbox replayed on only some relays"
+                                "the founding inbox answered on only some relays"
                             );
                         }
                         break inbox;
@@ -370,16 +370,16 @@ pub(crate) fn spawn_recovery_inbox(
                 return;
             }
         };
-        let st = inbox.live_state(LIVE_WAIT).await;
+        let st = inbox.read_state(LIVE_WAIT).await;
         if !st.any() {
-            let _ = send_cmd(&tx, fail("no relay replayed the subscription".to_string())).await;
+            let _ = send_cmd(&tx, fail("no relay answered the subscription".to_string())).await;
             return;
         }
         if !st.full() {
             tracing::warn!(
-                synced = st.synced,
+                answered = st.answered,
                 connected = st.connected,
-                "the recovery inbox replayed on only some relays"
+                "the recovery inbox answered on only some relays"
             );
         }
         let handover = invite::RecoveryHandoverV2 {
@@ -791,7 +791,7 @@ async fn readable_group_sub(
     since: u64,
 ) -> Result<molt_net::ritual_net::GroupSub, String> {
     let mut sub = chan.subscribe_from(since).await.map_err(|e| e.to_string())?;
-    if sub.live_state(REPLAY_WAIT).await.any() {
+    if sub.read_state(REPLAY_WAIT).await.any() {
         Ok(sub)
     } else {
         Err("not readable on any relay".to_string())
@@ -1028,7 +1028,7 @@ async fn recovery_rejoin(
     // the run's one deadline, not LIVE_WAIT: an onion relay over Tor can
     // take longer to replay (field 2026-09-12)
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    if !inbox.live_state(remaining).await.any() {
+    if !inbox.first_read(remaining).await.any() {
         return Err(
             "the recovery inbox is not readable on any relay".to_string(),
         );
@@ -1219,13 +1219,27 @@ async fn recovery_rejoin(
         .subscribe_recent(asked_at.saturating_sub(RECENT_SKEW_SECS))
         .await
         .map_err(|e| format!("group subscribe: {e}"))?;
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    if !sub.live_state(remaining).await.any() {
-        return Err(
-            "the group channel is not readable on any relay - the chain cannot be \
-             fetched"
-                .to_string(),
-        );
+    // readable = a relay answered; the replay itself is read in the loop
+    // below, or a replay longer than the channel never ends (findings R11)
+    let gate_since = tokio::time::Instant::now();
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(
+                "the group channel is not readable on any relay - the chain cannot be \
+                 fetched"
+                    .to_string(),
+            );
+        }
+        if sub.first_read((deadline - now).min(RECV_SLICE)).await.any() {
+            break;
+        }
+        let secs = gate_since.elapsed().as_secs();
+        let _ = send_cmd(
+            tx,
+            Command::NetRecoverNote { note: format!("no relay answered yet ({secs} s)"), generation },
+        )
+        .await;
     }
 
     // Assemble the served ANCHOR until it verifies STANDALONE. `verify_served`
@@ -1783,7 +1797,7 @@ async fn member_join(
         loop {
             let why = match net.inbox().await {
                 Ok(mut inbox) => {
-                    if inbox.live_state(LIVE_WAIT).await.any() {
+                    if inbox.read_state(LIVE_WAIT).await.any() {
                         return Ok(inbox);
                     }
                     "not readable on any relay".to_string()
