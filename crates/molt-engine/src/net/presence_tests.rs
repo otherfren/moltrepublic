@@ -551,3 +551,45 @@ fn the_genesis_republish_ends_once_every_seat_was_heard() {
     assert!(stop.load(SeqCst), "every seat was heard");
     assert!(st.genesis_stop.is_none());
 }
+
+/// C6: an evicted seat refuses what would publish to the group or mint a
+/// recovery link - recorded here, it would never be sent. Reading, the
+/// notice and the workspace itself keep working.
+#[test]
+fn an_evicted_seat_refuses_what_it_could_never_send() {
+    use molt_core::{ChannelRef, Command, MoltError, ProposalId, Surface};
+    let b = crate::chain::test_support::Builder::new(&["petra", "walter"], 2);
+    let mut st = crate::chain::test_support::chain_signer("walter", &b, b.blocks.clone());
+    let id = crate::chain::test_support::propose(&mut st, Surface::Memory, serde_json::json!({ "op": "add_note", "title": "one" }));
+    st.delivery.evicted = true;
+    let edit = |dry_run| Command::WikiEdit {
+        edits: vec![molt_core::WikiEdit::Create { path: "a.md".to_string(), content: "# A\n".to_string() }],
+        dry_run,
+        allow_warnings: molt_core::AllowWarnings::default(),
+        supersedes: None,
+        repair_links: true,
+    };
+    let refused = [
+        Command::Chat { body: "hi".to_string(), quote: None, channel: ChannelRef::Group },
+        Command::Propose { surface: Surface::Memory, payload: serde_json::json!({ "op": "add_note", "title": "two" }) },
+        Command::Approve { proposal: ProposalId(id), note: None },
+        Command::Decline { proposal: ProposalId(id), note: None },
+        Command::Withdraw { proposal: ProposalId(id), note: None },
+        Command::ProposeCheckpoint,
+        Command::Poke { member: "petra".to_string() },
+        Command::RecoverInviteStart { member: "petra".to_string() },
+        edit(false),
+    ];
+    let (chat, cards) = (st.chat.len(), st.proposals.len());
+    for cmd in refused {
+        let what = format!("{cmd:?}");
+        let out = st.handle(cmd);
+        assert!(matches!(out, Err(MoltError::SeatEvicted)), "{what}: {out:?}");
+    }
+    assert_eq!((st.chat.len(), st.proposals.len()), (chat, cards), "nothing recorded");
+    assert_eq!(MoltError::SeatEvicted.to_string(), "seat evicted - rejoin with a link");
+    for cmd in [Command::Status, Command::ReadMembers, Command::ReadChain, Command::ClearNotice, edit(true)] {
+        let what = format!("{cmd:?}");
+        assert!(st.handle(cmd).is_ok(), "{what} passes");
+    }
+}

@@ -202,6 +202,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
             }
         ),
         E::Engine(t) => format!("Engine: {t}"),
+        E::SeatEvicted => "Sitz anderswo wiederhergestellt - mit Link neu beitreten".to_string(),
     }
 }
 

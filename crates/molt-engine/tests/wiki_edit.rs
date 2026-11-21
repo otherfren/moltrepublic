@@ -660,14 +660,14 @@ async fn a_vote_answers_with_the_record_and_late_approvals_are_fine() {
         panic!("unexpected: {reply:?}");
     };
     let vote = w.execute(Command::Approve { proposal: id, note: None }).await.expect("approves");
-    let Reply::Vote { id: vid, state, approvals, threshold, channel, held_for_secs, head } = vote else {
+    let Reply::Vote { id: vid, state, approvals, threshold, channel, held_for_secs, head, held } = vote else {
         panic!("unexpected: {vote:?}");
     };
     assert_eq!((vid, state, approvals, threshold), (id, molt_core::ProposalState::Applied, 1, 1));
     assert_eq!(channel, molt_core::ChannelRef::Patch { id });
     // this solo group is not chain-governed: nothing paces a seal, and
     // there is no chain head to name
-    assert_eq!((held_for_secs, head), (None, 0));
+    assert_eq!((held_for_secs, head, held), (None, 0, None));
     let again = w.execute(Command::Approve { proposal: id, note: None }).await.expect("a late approval is not an error");
     assert!(matches!(again, Reply::Vote { state: molt_core::ProposalState::Applied, .. }));
     let err = w

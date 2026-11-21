@@ -136,17 +136,17 @@ impl MlsChannel {
         Some(GroupFrame { ciphertext, exporter, stamp })
     }
 
+    /// Whether a merged commit removed this node's own leaf.
+    pub(crate) fn evicted(&self) -> bool {
+        self.member.lock().is_ok_and(|m| m.is_evicted())
+    }
+
     /// Ciphertext + the exporter secret of the epoch it was made at, under ONE
     /// lock, for arbitrary CONTROL plaintext (a broadcast ack).
     ///
     /// Same atomicity rule as [`Self::group_frame`], and the same reason: two
     /// calls, and a commit merging between them seals a new-epoch outer over
     /// an old-epoch inner that the receiver can then never open.
-    /// Whether a merged commit removed this node's own leaf.
-    pub(crate) fn evicted(&self) -> bool {
-        self.member.lock().is_ok_and(|m| m.is_evicted())
-    }
-
     pub(crate) fn group_control_frame(&self, plaintext: &[u8]) -> Option<GroupFrame> {
         let mut m = self.member.lock().ok()?;
         let ciphertext = m.encrypt(plaintext).ok()?;

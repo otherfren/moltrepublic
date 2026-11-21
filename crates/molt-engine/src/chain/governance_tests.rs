@@ -2788,3 +2788,209 @@ fn a_relay_change_waits_for_a_healed_chain() {
     assert_eq!(walter.chain.blocks.len(), 5, "sealed on the one chain");
     assert!(matches!(&walter.chain.blocks[4].change, ChainChange::Applied { proposal_id, .. } if *proposal_id == id));
 }
+
+/// `st` last heard `seat` at `at` (the presence view `hear` built).
+fn last_heard(st: &mut crate::State, seat: &str, at: u64) {
+    let ws = st.session.workspaces.iter_mut().find(|w| w.id == "w-b6").expect("heard");
+    ws.members.iter_mut().find(|m| m.name == seat).expect("a seat").last_seen = at;
+}
+
+fn diverge(st: &mut crate::State, seat: &str) {
+    st.chain.diverged.insert(
+        seat.to_string(),
+        molt_core::ChainDivergence { peer: seat.to_string(), since_height: 0, seen_ts: 1 },
+    );
+}
+
+/// A 2-of-3 signing seat without a Nostr transport (no pacing).
+fn signer3(member: &str, b: &Builder) -> crate::State {
+    let mut st = chain_peer_3(member, b);
+    st.identity_sk = Some(b.key(member).clone());
+    hear(&mut st, T, &ALL3);
+    st
+}
+
+/// C1: a diverged seat gone silent for good (an old device switched off)
+/// holds neither a relay change nor a cut - only it could clear its entry.
+/// While it still talks, both wait.
+#[test]
+fn a_silent_diverged_seat_holds_no_relay_change_or_cut() {
+    use super::sync::SILENT_AFTER_SECS;
+    let b = Builder::new(&ALL3, 2);
+    let mut walter = signer3("walter", &b);
+    diverge(&mut walter, "dora");
+    let id = propose(&mut walter, Surface::Organization, json!({ "op": "set_relays", "value": "wss://relay.one" }));
+    assert_eq!(walter.sign_blocker(id).as_deref(), Some(super::governance::RELAYS_WAIT));
+    assert!(!walter.own_signature_stands(id));
+    assert!(walter.cmd_propose_checkpoint().is_err(), "a talking diverged seat holds the cut");
+
+    hear(&mut walter, T + SILENT_AFTER_SECS, &["petra", "walter"]);
+    last_heard(&mut walter, "dora", T);
+    walter.cmd_net_delivery_tick().expect("tick");
+    assert!(walter.own_signature_stands(id), "the held relay decision signs");
+    sign_as(&mut walter, &b, "petra", 1, id, 1);
+    assert_eq!(applied_at(&walter, 1), Some(id), "the relay change seals");
+    walter.cmd_propose_checkpoint().expect("the cut proposes");
+}
+
+/// C2: a proposal sealable at T0 and then withdrawn leaves no "sealable
+/// since" behind - a proposal sealable hours later starts its own wait,
+/// or rank 1 seals at once beside the turn-holder.
+#[test]
+fn a_withdrawn_proposal_leaves_no_stale_wait() {
+    let b = Builder::new(&ALL3, 2);
+    let mut petra = seat3("petra", &b);
+    let one = propose(&mut petra, Surface::Memory, json!({ "op": "add_note", "title": "one" }));
+    sign_as(&mut petra, &b, "walter", 1, one, 1);
+    assert_eq!(petra.chain.blocks.len(), 1, "dora's turn first");
+    petra.cmd_withdraw(ProposalId(one), None).expect("withdraws");
+    hear(&mut petra, T + 3_600, &ALL3);
+    petra.drain_held_seals();
+    let two = propose(&mut petra, Surface::Memory, json!({ "op": "add_note", "title": "two" }));
+    sign_as(&mut petra, &b, "walter", 2, two, 1);
+    assert_eq!(petra.chain.blocks.len(), 1, "the new proposal waits dora's grace");
+}
+
+/// C3: a seat on another branch cannot seal on ours - it leaves the
+/// line, so the next seat seals at once instead of after a grace.
+#[test]
+fn a_diverged_seat_leaves_the_sealing_line() {
+    let b = Builder::new(&ALL3, 2);
+    let mut petra = seat3("petra", &b);
+    diverge(&mut petra, "dora");
+    assert_eq!(petra.turn_holder(1).as_deref(), Some("petra"));
+    note(&mut petra, "walter", 1, 5, "five");
+    sign_as(&mut petra, &b, "petra", 0, 5, 1);
+    sign_as(&mut petra, &b, "walter", 2, 5, 1);
+    assert_eq!(applied_at(&petra, 1), Some(5), "no grace for a seat that cannot seal here");
+}
+
+/// C4: an approval one block ahead, relayed under another seat's name
+/// with a junk signature, never displaces the genuine parked one - with
+/// the card known or not yet.
+#[test]
+fn junk_does_not_displace_a_parked_approval() {
+    let junk = "00".repeat(64);
+    for card_first in [true, false] {
+        let mut b = Builder::new(&ALL3, 2);
+        let mut walter = signer3("walter", &b);
+        b.commit_applied(3, &["petra", "dora"]);
+        let sig = petra_at_2(&b);
+        let approve = |by: &str, sig: &str| WorkspaceEvent::Approved {
+            id: ProposalId(4),
+            by: by.to_string(),
+            height: 2,
+            sig: sig.to_string(),
+        };
+        if card_first {
+            note(&mut walter, "petra", 1, 4, "four");
+        }
+        wire(&mut walter, "petra", 2, approve("petra", &sig));
+        wire(&mut walter, "dora", 3, approve("petra", &junk));
+        if !card_first {
+            note(&mut walter, "petra", 1, 4, "four");
+        }
+        walter.receive_block_from("dora", b.blocks[1].clone());
+        assert_eq!(walter.chain.blocks.len(), 2);
+        assert_eq!(walter.chain_approval_count(4), 1, "card first {card_first}: petra's vote stands");
+    }
+}
+
+/// C4: one seat flooding the park with relayed junk cannot crowd out
+/// another seat's approval.
+#[test]
+fn a_flood_from_one_sender_does_not_fill_the_park() {
+    let mut b = Builder::new(&ALL3, 2);
+    let mut walter = signer3("walter", &b);
+    b.commit_applied(3, &["petra", "dora"]);
+    let junk = "00".repeat(64);
+    for (seq, id) in (10..400u64).enumerate() {
+        let seq = u64::try_from(seq).expect("small") + 10;
+        let body = WorkspaceEvent::Approved { id: ProposalId(id), by: "petra".to_string(), height: 2, sig: junk.clone() };
+        wire(&mut walter, "dora", seq, body);
+    }
+    let sig = petra_at_2(&b);
+    wire(&mut walter, "petra", 2, WorkspaceEvent::Approved { id: ProposalId(4), by: "petra".to_string(), height: 2, sig });
+    note(&mut walter, "petra", 1, 4, "four");
+    walter.receive_block_from("petra", b.blocks[1].clone());
+    assert_eq!(walter.chain_approval_count(4), 1, "petra's vote was parked");
+}
+
+/// Petra's signature on card 4 ("four") at height 2.
+fn petra_at_2(b: &Builder) -> String {
+    let mut scratch = signer3("dora", b);
+    note(&mut scratch, "petra", 1, 4, "four");
+    let change = scratch.proposal_change(4).expect("change");
+    identity_sign(b.key("petra"), &approval_bytes(&b.republic_id, 2, &change))
+}
+
+/// C7: an approval parked one block ahead is released by a re-base onto
+/// another branch and counts there - not cleared with the old branch's
+/// signatures.
+#[test]
+fn a_reorg_keeps_the_approvals_it_releases_from_the_park() {
+    let base = Builder::new(&["petra", "walter"], 2);
+    let mut a = base.clone();
+    let mut c = base.clone();
+    for id in [1, 2, 3] {
+        a.commit_applied(id, &["petra", "walter"]);
+        c.commit_applied(id + 10, &["petra", "walter"]);
+    }
+    let rid = &base.republic_id;
+    let (mut win, lose) = if block_hash(rid, &a.blocks[1]) < block_hash(rid, &c.blocks[1]) { (a, c) } else { (c, a) };
+    win.commit_applied(4, &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &lose, lose.blocks.clone());
+    note(&mut walter, "petra", 1, 30, "thirty");
+    let change = walter.proposal_change(30).expect("change");
+    let sig = identity_sign(win.key("petra"), &approval_bytes(rid, 5, &change));
+    wire(&mut walter, "petra", 2, WorkspaceEvent::Approved { id: ProposalId(30), by: "petra".to_string(), height: 5, sig });
+    assert_eq!(walter.chain_approval_count(30), 0, "parked at head+2");
+    for h in [4, 3, 2, 1] {
+        walter.receive_block_from("petra", win.blocks[h].clone());
+    }
+    assert_eq!(walter.chain.blocks, win.blocks, "re-based onto the other branch");
+    assert_eq!(walter.chain_approval_count(30), 1, "the released vote counts");
+}
+
+/// C1: fork candidates need no peer to clear - they expire.
+#[test]
+fn fork_candidates_expire_without_their_sender() {
+    let mut b = Builder::new(&ALL3, 2);
+    let mut walter = signer3("walter", &b);
+    b.commit_applied(4, &["petra", "dora"]);
+    walter.chain.fork_candidates.insert(1, b.blocks[1].clone());
+    walter.chain_heal_tick();
+    assert!(walter.chain_unsettled());
+    walter.presence.clock_override = Some(T + 1_200);
+    walter.chain_heal_tick();
+    assert!(!walter.chain_unsettled(), "expired after 1200 s");
+}
+
+/// C5: an explicit approve of a relay change on a forked chain is held,
+/// not refused; the held decision survives a hard restart and is signed
+/// once the chain heals without a head move.
+#[test]
+fn an_approve_of_a_relay_change_is_held_through_a_restart() {
+    let b = Builder::new(&ALL3, 2);
+    let (mut walter, _tmp, dir) = crate::tests::stored_chain_signer(&b, "walter", &ALL3);
+    hear(&mut walter, T, &ALL3);
+    let relays = json!({ "op": "set_relays", "value": "wss://relay.one" });
+    wire(&mut walter, "petra", 1, WorkspaceEvent::Proposed { id: ProposalId(4), surface: Surface::Organization, payload: relays });
+    diverge(&mut walter, "dora");
+    let reply = walter.cmd_approve(ProposalId(4), None).expect("held, not refused");
+    let Reply::Vote { held, .. } = reply else {
+        panic!("unexpected reply {reply:?}");
+    };
+    assert_eq!(held.as_deref(), Some("held - chain diverged"));
+    assert!(!walter.own_signature_stands(4), "nothing signed on a forked chain");
+
+    let mut back = crate::tests::reopen_chain_signer(walter, &dir, &b, "walter", false);
+    assert!(back.chain.own_approvals.contains(&4), "the held decision survives the restart");
+    hear(&mut back, T, &ALL3);
+    diverge(&mut back, "dora");
+    back.sign_held_approvals();
+    assert!(!back.own_signature_stands(4), "still forked");
+    back.clear_divergence("dora");
+    assert!(back.own_signature_stands(4), "signed on the heal");
+    assert_eq!(back.chain.blocks.len(), 1, "no head move");
+}

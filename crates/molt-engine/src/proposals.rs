@@ -1102,7 +1102,9 @@ impl State {
         // counted one - and before its note, or the reason would read as a
         // vote that never left (field report v0.0.11, point 2)
         if !late && self.is_chain_governed() {
-            if let Some(why) = self.sign_blocker(proposal.0) {
+            // B5: a relay change on a forked chain is decided now, signed
+            // once the chain heals
+            if let Some(why) = self.sign_blocker(proposal.0).filter(|w| w != crate::chain::RELAYS_WAIT) {
                 return Err(MoltError::CannotSign(why));
             }
         }
@@ -1172,6 +1174,7 @@ impl State {
                     channel: molt_core::ChannelRef::Patch { id },
                     held_for_secs: self.seal_hold_secs(id.0),
                     head: self.chain.head.as_ref().map_or(0, |h| h.height),
+                    held: self.approval_held(id.0),
                 }
             }
             None => Reply::Ack,

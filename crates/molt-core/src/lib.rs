@@ -6876,6 +6876,10 @@ pub enum Reply {
         /// shows first.
         #[serde(default)]
         head: u64,
+        /// Why this seat's signature waits, the decision itself recorded
+        /// (`held - chain diverged`); `None` = signed or nothing to sign.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        held: Option<String>,
     },
     /// A `wiki_edit` dry run: the patch it WOULD propose, nothing proposed.
     WikiPreview {
@@ -8908,6 +8912,10 @@ pub enum MoltError {
     /// The engine task is gone or did not answer.
     #[error("engine: {0}")]
     Engine(String),
+    /// This seat runs on another device now: nothing this node does
+    /// reaches the group.
+    #[error("seat evicted - rejoin with a link")]
+    SeatEvicted,
 }
 
 #[cfg(test)]
