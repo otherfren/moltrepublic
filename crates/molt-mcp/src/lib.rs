@@ -3380,7 +3380,7 @@ pub(crate) mod tests {
         // hook; the value itself rides the settings surface as
         // `poke_wake_command` (ADR-0007), so this stays internal only
         // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 91] = [
+        const INTERNAL: [&str; 93] = [
             // not a door of its own: chat_send/approve/decline/withdraw
             // build it from their `operator`/`agent` arguments
             "as_operator",
@@ -3410,6 +3410,8 @@ pub(crate) mod tests {
             // who approved a re-admission)
             "net_recover_progress",
             "net_recover_peer_failed",
+            "net_recover_ready",
+            "net_recover_want",
             "net_restore_staged",
             "net_restore_failed",
             "net_export_done",

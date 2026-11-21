@@ -1780,3 +1780,392 @@ async fn a_founding_completes_over_a_backlog_larger_than_the_subscription_buffer
         assert_eq!(read_session(w).await.screen, molt_core::Screen::Main, "the seat entered");
     }
 }
+
+// ---- B4: anchor first, then seal; no fixed deadlines ----------------------
+
+async fn chain_len(w: &WalletHandle) -> usize {
+    match w.execute(Command::ReadChain).await.expect("read chain") {
+        Reply::Chain { blocks, .. } => blocks.len(),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+async fn open_proposals(w: &WalletHandle) -> usize {
+    match w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list") {
+        Reply::Proposals { proposals, .. } => {
+            proposals.iter().filter(|p| p.state == molt_core::ProposalState::Proposed).count()
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Mint a link for petra on `a` and return it.
+async fn mint_for_petra(a: &WalletHandle) -> String {
+    a.execute(Command::RecoverInviteStart { member: "petra".to_string() }).await.expect("mint");
+    let s = wait_for(a, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    s.notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("the mint must succeed: {:?}", s.notice))
+        .to_string()
+}
+
+/// The test plays the rejoiner over raw relays: its inbox, its request.
+struct ManualRejoiner {
+    net: molt_net::ritual_net::RitualNet,
+    inbox: molt_net::ritual_net::RitualInbox,
+    coordinator: String,
+    ticket: String,
+}
+
+impl ManualRejoiner {
+    async fn start(url: &str, link: &str, phrase: &str, anchor_first: bool) -> Self {
+        let h = molt_engine::RecoveryInvite::parse(link).expect("link").handover.expect("v2 handover");
+        let (sk, identity_pk) = molt_engine::member_identity(phrase).expect("seat identity");
+        let entropy = molt_storage::seed_entropy(phrase).expect("entropy");
+        let (anchor_sk, anchor) = molt_net::nostr_identity(&entropy, &h.ticket);
+        let mls = molt_net::MlsMember::new(&sk, "petra").expect("mls identity");
+        let kp_hex = hex::encode(mls.key_package().expect("key package"));
+        let relays = vec![url.to_string()];
+        let seat_proof = molt_engine::make_seat_proof(&sk, &h.ticket, &kp_hex, &h.republic_id, &anchor, &relays);
+        let consent = molt_engine::make_restore_consent(
+            &sk,
+            &h.republic_id,
+            "petra",
+            &identity_pk,
+            &anchor,
+            &relays,
+            h.consent_anchor.as_ref(),
+        );
+        let dialer = molt_net::dial::Dialer::resolve("none", "local", 0).expect("direct dialer");
+        let net = molt_net::ritual_net::RitualNet::new(dialer, relays.clone(), &anchor_sk).expect("transport");
+        let mut inbox = net.inbox().await.expect("inbox");
+        assert!(inbox.first_read(Duration::from_secs(10)).await.any(), "the inbox is readable");
+        net.send_ritual(
+            &h.npub,
+            &molt_net::invite::RitualMsg::Recover(molt_net::invite::RecoverRequest {
+                member: "petra".to_string(),
+                identity_pk,
+                key_package: kp_hex,
+                ticket: h.ticket.clone(),
+                seat_proof,
+                new_nostr_pk: anchor,
+                relays,
+                consent,
+                reply: None,
+                anchor_first,
+                version: if anchor_first { "0.0.21".to_string() } else { String::new() },
+            }),
+        )
+        .await
+        .expect("the request publishes");
+        ManualRejoiner { net, inbox, coordinator: h.npub, ticket: h.ticket }
+    }
+
+    async fn send(&self, msg: molt_net::invite::RitualMsg) {
+        self.net.send_ritual(&self.coordinator, &msg).await.expect("publish");
+    }
+
+    /// The next anchor piece / Welcome / refusal from the coordinator.
+    async fn next(&mut self, what: &str) -> molt_net::ritual_net::RitualDelivery {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            assert!(!left.is_zero(), "nothing arrived: {what}");
+            match self.inbox.recv(left).await {
+                Some(d @ molt_net::ritual_net::RitualDelivery::Welcome(..)) => return d,
+                Some(molt_net::ritual_net::RitualDelivery::Msg(molt_net::invite::RitualMsg::RecoverProgress { .. }, _)) => {}
+                Some(d @ molt_net::ritual_net::RitualDelivery::Msg(..)) => return d,
+                None => {}
+            }
+        }
+    }
+
+    /// Every anchor piece, by index.
+    async fn anchor(&mut self) -> std::collections::BTreeMap<u32, String> {
+        let mut got = std::collections::BTreeMap::new();
+        loop {
+            match self.next("the anchor").await {
+                molt_net::ritual_net::RitualDelivery::Msg(
+                    molt_net::invite::RitualMsg::RecoverAnchor { index, total, event, .. },
+                    _,
+                ) => {
+                    got.insert(index, event);
+                    if got.len() == usize::try_from(total).expect("total") {
+                        return got;
+                    }
+                }
+                other => panic!("expected an anchor piece: {other:?}"),
+            }
+        }
+    }
+}
+
+/// **B4 keystone (findings R13):** the coordinator sends the anchor first
+/// and changes nothing - head, MLS epoch, proposals - until the rejoiner's
+/// Ready; a lost piece is re-sent on `RecoverWant`; only then one
+/// `Restored` block seals, the group re-keys and the Welcome goes out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_coordinator_holds_still_until_the_rejoiner_is_ready() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let epoch = status_of(&a).await.mls_epoch;
+    assert!(epoch > 0, "the coordinator runs a group");
+
+    let mut r = ManualRejoiner::start(&url, &link, &petra_phrase, true).await;
+    let anchor = r.anchor().await;
+    assert!(!anchor.is_empty());
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(chain_len(&a).await, 1, "nothing sealed before Ready");
+    assert_eq!(status_of(&a).await.mls_epoch, epoch, "no re-key before Ready");
+    assert_eq!(open_proposals(&a).await, 0, "nothing proposed before Ready");
+
+    // a piece lost on the way is asked for by index
+    r.send(molt_net::invite::RitualMsg::RecoverWant {
+        member: "petra".to_string(),
+        ticket: r.ticket.clone(),
+        missing: vec![0],
+    })
+    .await;
+    match r.next("the re-sent piece").await {
+        molt_net::ritual_net::RitualDelivery::Msg(molt_net::invite::RitualMsg::RecoverAnchor { index, event, .. }, _) => {
+            assert_eq!(index, 0);
+            assert_eq!(Some(&event), anchor.get(&0), "the same piece again");
+        }
+        other => panic!("expected the re-sent piece: {other:?}"),
+    }
+    assert_eq!(chain_len(&a).await, 1, "a Want seals nothing");
+
+    r.send(molt_net::invite::RitualMsg::RecoverReady { member: "petra".to_string(), ticket: r.ticket.clone() }).await;
+    match r.next("the Welcome").await {
+        molt_net::ritual_net::RitualDelivery::Welcome(..) => {}
+        other => panic!("expected the Welcome: {other:?}"),
+    }
+    assert_eq!(chain_len(&a).await, 2, "one Restored block");
+    assert_eq!(status_of(&a).await.mls_epoch, epoch + 1, "one re-key");
+}
+
+/// **B4: an older rejoiner (no `anchor_first`) gets the seal-first order
+/// unchanged** from a new coordinator: no anchor gift wrap, a sealed
+/// block and the Welcome.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_older_rejoiner_still_gets_the_seal_first_order() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let mut r = ManualRejoiner::start(&url, &link, &petra_phrase, false).await;
+    match r.next("the Welcome").await {
+        molt_net::ritual_net::RitualDelivery::Welcome(..) => {}
+        other => panic!("seal-first sends the Welcome, no anchor piece: {other:?}"),
+    }
+    assert_eq!(chain_len(&a).await, 2, "sealed before the Welcome, as before");
+}
+
+/// **B4: a new rejoiner against an older (seal-first) coordinator**
+/// completes through the old order: the Welcome comes first, the anchor
+/// over the group.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_new_rejoiner_completes_against_a_seal_first_coordinator() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    a.__seal_first(true);
+    let link = mint_for_petra(&a).await;
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart { link, phrase: petra_phrase, relays: Vec::new() }).await.expect("recover start");
+    let s = wait_for(&c, "the rejoin", |s| {
+        s.notice.starts_with("recovered:") || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "rejoin: {:?}", s.notice);
+    assert!(
+        s.recover.log.iter().any(|l| l == "welcomed back - fetching the chain anchor"),
+        "the seal-first path: {:?}",
+        s.recover.log
+    );
+}
+
+/// **B4: a coordinator that restarted between the anchor and the Ready**
+/// lost the attempt; the rejoiner hears `link outdated` instead of waiting.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restarted_coordinator_answers_link_outdated() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let mut r = ManualRejoiner::start(&url, &link, &petra_phrase, true).await;
+    r.anchor().await;
+    let id = read_session(&a).await.workspaces[0].id.clone();
+    a.execute(Command::CloseWorkspace).await.expect("close");
+    a.execute(Command::OpenWorkspace { id }).await.expect("reopen");
+    r.send(molt_net::invite::RitualMsg::RecoverReady { member: "petra".to_string(), ticket: r.ticket.clone() }).await;
+    loop {
+        match r.next("the refusal").await {
+            molt_net::ritual_net::RitualDelivery::Msg(molt_net::invite::RitualMsg::RecoverRefused { reason, .. }, _) => {
+                assert_eq!(reason, "link outdated");
+                break;
+            }
+            // a piece re-sent before the restart may still trickle in
+            molt_net::ritual_net::RitualDelivery::Msg(molt_net::invite::RitualMsg::RecoverAnchor { .. }, _) => {}
+            other => panic!("expected the refusal: {other:?}"),
+        }
+    }
+    assert_eq!(chain_len(&a).await, 1, "nothing sealed");
+}
+
+/// A relay that refuses gift wraps to one key, as armed.
+#[derive(Debug, Clone, Default)]
+struct WrapGate {
+    to: std::sync::Arc<std::sync::Mutex<String>>,
+    /// Wraps to let through before refusing.
+    pass: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Wraps to refuse after that (usize::MAX = until disarmed).
+    refuse: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    refused: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl nostr_relay_builder::builder::WritePolicy for WrapGate {
+    fn admit_event<'a>(
+        &'a self,
+        event: &'a nostr_relay_builder::prelude::Event,
+        _addr: &'a std::net::SocketAddr,
+    ) -> nostr_relay_builder::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult> {
+        use std::sync::atomic::Ordering::SeqCst;
+        Box::pin(async move {
+            let to = self.to.lock().expect("lock").clone();
+            let ours = event.kind == nostr_relay_builder::prelude::Kind::GiftWrap
+                && !to.is_empty()
+                && event.tags.public_keys().any(|p| p.to_hex() == to);
+            if ours {
+                if self.pass.load(SeqCst) > 0 {
+                    self.pass.fetch_sub(1, SeqCst);
+                } else if self.refuse.load(SeqCst) > 0 {
+                    self.refuse.fetch_sub(1, SeqCst);
+                    self.refused.fetch_add(1, SeqCst);
+                    return nostr_relay_builder::builder::PolicyResult::Reject("blocked: test".to_string());
+                }
+            }
+            nostr_relay_builder::builder::PolicyResult::Accept
+        })
+    }
+}
+
+async fn gated_relay(gate: &WrapGate) -> (nostr_relay_builder::LocalRelay, String) {
+    use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions};
+    let db = std::sync::Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions { events: true, max_events: None }));
+    let relay = nostr_relay_builder::LocalRelay::new(
+        nostr_relay_builder::builder::RelayBuilder::default().database(db).write_policy(gate.clone()),
+    );
+    relay.run().await.expect("relay runs");
+    let url = relay.url().await.to_string();
+    (relay, url)
+}
+
+/// The rejoiner's new anchor for `link`, as its phrase derives it.
+fn rejoiner_anchor(link: &str, phrase: &str) -> String {
+    let h = molt_engine::RecoveryInvite::parse(link).expect("link").handover.expect("v2 handover");
+    let entropy = molt_storage::seed_entropy(phrase).expect("entropy");
+    molt_net::nostr_identity(&entropy, &h.ticket).1
+}
+
+/// **B4: a cancel after the anchor arrived leaves the coordinator as it
+/// was** - head, epoch, no open card. The rejoiner's Ready never gets
+/// through (the relay refuses it), so the cancel lands in that window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_after_the_anchor_changes_nothing_on_the_coordinator() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let gate = WrapGate::default();
+    let (_relay, url) = gated_relay(&gate).await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let epoch = status_of(&a).await.mls_epoch;
+    // the request passes, everything after it to the coordinator is refused
+    let h = molt_engine::RecoveryInvite::parse(&link).expect("link").handover.expect("v2 handover");
+    *gate.to.lock().expect("lock") = h.npub.clone();
+    gate.pass.store(1, SeqCst);
+    gate.refuse.store(usize::MAX, SeqCst);
+
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart { link, phrase: petra_phrase, relays: Vec::new() }).await.expect("recover start");
+    wait_for(&c, "the anchor to verify on the rejoiner", |s| {
+        s.recover.log.iter().any(|l| l.starts_with("chain verified up to block"))
+    })
+    .await;
+    wait_for(&c, "the Ready to be refused at least once", |_| gate.refused.load(SeqCst) > 0).await;
+    c.execute(Command::RecoverCancel).await.expect("cancel");
+    gate.refuse.store(0, SeqCst);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(chain_len(&a).await, 1, "no Restored block");
+    assert_eq!(status_of(&a).await.mls_epoch, epoch, "no re-key");
+    assert_eq!(open_proposals(&a).await, 0, "no open Restored card");
+}
+
+/// **B4: a refused attempt (wrong phrase on a link without the seat's
+/// anchored key) leaves the coordinator as it was.**
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_attempt_changes_nothing_on_the_coordinator() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, _, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let epoch = status_of(&a).await.mls_epoch;
+    let wrong = molt_storage::generate_seed_phrase().expect("a valid but foreign phrase");
+    let mut r = ManualRejoiner::start(&url, &link, &wrong, true).await;
+    match r.next("the refusal").await {
+        molt_net::ritual_net::RitualDelivery::Msg(molt_net::invite::RitualMsg::RecoverRefused { reason, .. }, _) => {
+            assert!(reason.contains("identity key"), "{reason}");
+        }
+        other => panic!("expected the refusal, no anchor: {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(chain_len(&a).await, 1);
+    assert_eq!(status_of(&a).await.mls_epoch, epoch);
+    assert_eq!(open_proposals(&a).await, 0);
+}
+
+/// **B4: the Welcome survives a relay that refuses five publishes** - it
+/// is published until a relay takes it, no attempt cap.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_welcome_survives_five_refused_publishes() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let gate = WrapGate::default();
+    let (_relay, url) = gated_relay(&gate).await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    // the one anchor piece passes; the next five wraps to the rejoiner are
+    // refused: at most the progress report and otherwise the Welcome
+    *gate.to.lock().expect("lock") = rejoiner_anchor(&link, &petra_phrase);
+    gate.pass.store(1, SeqCst);
+    gate.refuse.store(5, SeqCst);
+
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart { link, phrase: petra_phrase, relays: Vec::new() }).await.expect("recover start");
+    let s = wait_for_secs(&c, "the rejoin", 180, |s| {
+        s.notice.starts_with("recovered:") || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "rejoin: {:?}", s.notice);
+    assert_eq!(gate.refused.load(SeqCst), 5, "five publishes were refused");
+}

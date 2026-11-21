@@ -13,6 +13,13 @@ use super::*;
 /// `State::spawn_mesh_extension`).
 const MESH_EXTENSION_COOLDOWN_SECS: u64 = 60;
 
+/// B4: least time between two anchor re-sends for one attempt.
+const WANT_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// B4: the answer to a Want/Ready for an attempt this coordinator does
+/// not hold (it restarted, or the link was re-minted).
+pub(crate) const LINK_OUTDATED: &str = "link outdated";
+
 
 impl State {
     /// A returning member's recovery request reached this coordinator (recovery
@@ -38,6 +45,7 @@ impl State {
         consent: String,
         reply: String,
         sender_npub: String,
+        anchor_first: bool,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         if !self.net_scope_current(generation) {
@@ -95,7 +103,13 @@ impl State {
         // B3: a seat never restores itself - an older build's link-less
         // request is answered, never proposed
         if !ticketed {
-            self.refuse_unsolicited(&member, &canonical, &sender_npub);
+            // a build that asks anchor-first never self-services: its link
+            // is one this node forgot (a restart)
+            if anchor_first {
+                self.answer_link_outdated(&member, &ticket, &canonical);
+            } else {
+                self.refuse_unsolicited(&member, &canonical, &sender_npub);
+            }
             return Ok(Reply::Ack);
         }
         // one re-admission at a time (review R3): a pending Restored proposal
@@ -106,10 +120,65 @@ impl State {
             tracing::warn!(%member, "recovery request while a re-admission is pending - dropped");
             return Ok(Reply::Ack);
         }
-        // NB: on a verified request, verify_and_propose_restore registers the
-        // pending recovery BEFORE proposing (a lone coordinator commits the
-        // block synchronously inside the propose, which consumes that entry)
-        match self.verify_and_propose_restore(
+        // B4: the anchor first, the seal only on the rejoiner's Ready
+        if anchor_first
+            && self.transport_kind == Some(molt_core::TransportKind::Nostr)
+            && !self.seal_first.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            // a relay's replay of the request this attempt already answers
+            if self
+                .recovery
+                .anchor_first
+                .get(&ticket)
+                .is_some_and(|a| a.key_package == key_package && a.new_nostr_pk == canonical)
+            {
+                tracing::debug!(%member, "anchor-first request repeated - dropped");
+                return Ok(Reply::Ack);
+            }
+            if let Err(e) = self.check_restore_request(
+                &member,
+                &identity_pk,
+                &key_package,
+                &ticket,
+                &seat_proof,
+                &canonical,
+                &relays,
+                &consent,
+            ) {
+                self.refuse_recover_request(&member, &sender_npub, e);
+                return Ok(Reply::Ack);
+            }
+            let attempt = crate::chain::AnchorFirst {
+                member: member.to_string(),
+                identity_pk,
+                key_package,
+                seat_proof,
+                new_nostr_pk: canonical,
+                relays,
+                consent,
+                reply,
+                frames: Vec::new(),
+                resent_at: None,
+                tasks: Vec::new(),
+            };
+            // the anchor cannot travel as gift wraps: seal-first
+            if let Some(a) = self.start_anchor_first(&ticket, attempt) {
+                self.propose_restore(
+                    &member,
+                    &a.identity_pk,
+                    &a.key_package,
+                    &ticket,
+                    &a.seat_proof,
+                    &a.new_nostr_pk,
+                    &a.relays,
+                    &a.consent,
+                    &a.reply,
+                    &sender_npub,
+                );
+            }
+            return Ok(Reply::Ack);
+        }
+        self.propose_restore(
             &member,
             &identity_pk,
             &key_package,
@@ -119,47 +188,263 @@ impl State {
             &relays,
             &consent,
             &reply,
+            &sender_npub,
+        );
+        Ok(Reply::Ack)
+    }
+
+    /// Propose a verified request's `Restored` card now (the seal-first
+    /// order, or an anchor-first attempt at its Ready), spending the
+    /// ticket; a refusal answers the rejoiner. `true` = proposed.
+    #[allow(clippy::too_many_arguments)] // one request's fields, not a bag
+    fn propose_restore(
+        &mut self,
+        member: &MemberId,
+        identity_pk: &str,
+        key_package: &str,
+        ticket: &str,
+        seat_proof: &str,
+        canonical: &str,
+        relays: &[String],
+        consent: &str,
+        reply: &str,
+        sender_npub: &str,
+    ) -> bool {
+        // NB: on a verified request, verify_and_propose_restore registers the
+        // pending recovery BEFORE proposing (a lone coordinator commits the
+        // block synchronously inside the propose, which consumes that entry)
+        match self.verify_and_propose_restore(
+            member,
+            identity_pk,
+            key_package,
+            ticket,
+            seat_proof,
+            canonical,
+            relays,
+            consent,
+            reply,
         ) {
             Ok(id) => {
                 // spend the ticket only on a verified request, so a legitimate
                 // member whose first attempt failed (e.g. a truncated proof) can
                 // retry on the still-live queue
-                self.recovery.tickets.remove(&ticket);
+                self.recovery.tickets.remove(ticket);
+                self.recovery.spent_tickets.insert(ticket.to_string());
                 // a relay re-delivers the request with the ticket spent: it
                 // is the same request, not a link-less one to refuse
                 self.recovery
                     .unsolicited_cooldown
-                    .insert((member.to_string(), canonical.clone()), crate::now_secs());
+                    .insert((member.to_string(), canonical.to_string()), crate::now_secs());
                 tracing::info!(%member, "recovery seat proof verified - proposing re-admission");
                 // the first checklist frame: the rejoiner learns the roster,
                 // the threshold and the voices already counted
                 self.push_recover_progress(id);
+                true
             }
             Err(e) => {
-                // the operator must SEE the refusal (relay-pool mismatch is
-                // the common honest cause — R5 names the relay to add); a
-                // tracing-only drop left the coordinator staring at a silent
-                // screen while the rejoiner waited out its timeout
-                self.session.notice = format!("recover-refused:{member}:{e}");
-                self.emit_session(SessionScope::Full);
-                tracing::warn!(%member, error = %e, "dropping an invalid recovery request");
-                // …and so must the REJOINER (WP6, field log 2026-08-23): a
-                // wrong phrase looked like a dead coordinator for 15 minutes.
-                // Answered only here — behind the ticket + PoP gates — so an
-                // unknown ticket stays a silent drop, and the ticket is NOT
-                // spent (the same link with the right phrase still works).
-                if !sender_npub.is_empty() {
-                    self.send_recover_frame(
-                        sender_npub.clone(),
-                        molt_net::invite::RitualMsg::RecoverRefused {
-                            member: member.to_string(),
-                            reason: e,
-                        },
-                    );
-                }
+                self.refuse_recover_request(member, sender_npub, e);
+                false
             }
         }
+    }
+
+    /// A verified-sender request refused: the operator sees it, and so does
+    /// the rejoiner (WP6) - answered only behind the ticket + PoP gates, so
+    /// an unknown ticket stays a silent drop; the ticket is NOT spent (the
+    /// same link with the right phrase still works).
+    fn refuse_recover_request(&mut self, member: &str, sender_npub: &str, e: String) {
+        self.session.notice = format!("recover-refused:{member}:{e}");
+        self.emit_session(SessionScope::Full);
+        tracing::warn!(%member, error = %e, "dropping an invalid recovery request");
+        if !sender_npub.is_empty() {
+            self.send_recover_frame(
+                sender_npub.to_string(),
+                molt_net::invite::RitualMsg::RecoverRefused { member: member.to_string(), reason: e },
+            );
+        }
+    }
+
+    /// B4 step 2: send the anchor to the verified rejoiner's new key and
+    /// hold the request until its Ready. Returns the attempt back when the
+    /// anchor cannot travel as gift wraps (that request runs seal-first).
+    fn start_anchor_first(
+        &mut self,
+        ticket: &str,
+        mut attempt: crate::chain::AnchorFirst,
+    ) -> Option<crate::chain::AnchorFirst> {
+        let member = attempt.member.clone();
+        let Some(frames) = self.recover_anchor_frames() else {
+            tracing::warn!(%member, "recover_order=seal_first reason=anchor_too_large");
+            return Some(attempt);
+        };
+        let Some(net) = self.recover_net() else {
+            tracing::warn!(%member, "recover_order=seal_first reason=no_relay");
+            return Some(attempt);
+        };
+        let total = u32::try_from(frames.len()).unwrap_or(u32::MAX);
+        let msgs = frames
+            .iter()
+            .zip(0u32..)
+            .map(|(event, index)| molt_net::invite::RitualMsg::RecoverAnchor {
+                member: member.clone(),
+                index,
+                total,
+                event: event.clone(),
+            })
+            .collect();
+        attempt.frames = frames;
+        attempt.tasks.push(crate::nostr_ritual::spawn_recover_frames(
+            net,
+            attempt.new_nostr_pk.clone(),
+            msgs,
+            "anchor",
+            self.cmd_tx.clone(),
+        ));
+        if let Some(old) = self.recovery.anchor_first.insert(ticket.to_string(), attempt) {
+            old.abort();
+        }
+        tracing::info!(%member, parts = total, waiting_for = "ready", "recover_anchor=sent");
+        None
+    }
+
+    /// B4 step 3: the rejoiner misses anchor pieces - re-send them,
+    /// debounced. An attempt this node does not hold is `link outdated`.
+    pub(crate) fn cmd_net_recover_want(
+        &mut self,
+        member: &str,
+        ticket: &str,
+        missing: &[u32],
+        sender: &str,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_scope_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        let sender = molt_net::canonical_nostr_pk(sender).unwrap_or_default();
+        let Some(a) = self.recovery.anchor_first.get(ticket) else {
+            self.answer_link_outdated(member, ticket, &sender);
+            return Ok(Reply::Ack);
+        };
+        if a.member != member || a.new_nostr_pk != sender {
+            tracing::debug!(%member, "recover_want=not_from_the_rejoiner");
+            return Ok(Reply::Ack);
+        }
+        let now = tokio::time::Instant::now();
+        if a.resent_at.is_some_and(|t| now.duration_since(t) < WANT_DEBOUNCE) {
+            return Ok(Reply::Ack);
+        }
+        let total = u32::try_from(a.frames.len()).unwrap_or(u32::MAX);
+        let wanted: std::collections::BTreeSet<u32> = missing.iter().copied().filter(|i| *i < total).collect();
+        let msgs: Vec<molt_net::invite::RitualMsg> = wanted
+            .iter()
+            .filter_map(|i| {
+                let event = a.frames.get(usize::try_from(*i).ok()?)?.clone();
+                Some(molt_net::invite::RitualMsg::RecoverAnchor { member: member.to_string(), index: *i, total, event })
+            })
+            .collect();
+        if msgs.is_empty() {
+            return Ok(Reply::Ack);
+        }
+        let to = a.new_nostr_pk.clone();
+        let Some(net) = self.recover_net() else {
+            return Ok(Reply::Ack);
+        };
+        let parts = msgs.len();
+        let task = crate::nostr_ritual::spawn_recover_frames(net, to, msgs, "anchor", self.cmd_tx.clone());
+        if let Some(a) = self.recovery.anchor_first.get_mut(ticket) {
+            a.resent_at = Some(now);
+            a.tasks.retain(|t| !t.is_finished());
+            a.tasks.push(task);
+        }
+        tracing::info!(%member, parts, "recover_anchor=resent");
         Ok(Reply::Ack)
+    }
+
+    /// B4 step 4: the rejoiner verified the anchor - propose, seal and
+    /// re-key now. An attempt this node does not hold is `link outdated`.
+    pub(crate) fn cmd_net_recover_ready(
+        &mut self,
+        member: &str,
+        ticket: &str,
+        sender: &str,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_scope_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        let sender = molt_net::canonical_nostr_pk(sender).unwrap_or_default();
+        let ours = self.recovery.anchor_first.get(ticket).map(|a| a.member == member && a.new_nostr_pk == sender);
+        match ours {
+            None => {
+                self.answer_link_outdated(member, ticket, &sender);
+                return Ok(Reply::Ack);
+            }
+            Some(false) => {
+                tracing::debug!(%member, "recover_ready=not_from_the_rejoiner");
+                return Ok(Reply::Ack);
+            }
+            Some(true) => {}
+        }
+        let Some(a) = self.recovery.anchor_first.remove(ticket) else {
+            return Ok(Reply::Ack);
+        };
+        let member = member.to_string();
+        tracing::info!(%member, "recover_ready=received");
+        if !self.recovery.tickets.get(ticket).is_some_and(|m| *m == member) {
+            a.abort();
+            self.answer_link_outdated(&member, ticket, &sender);
+            return Ok(Reply::Ack);
+        }
+        if self.readmission_in_flight(&member) {
+            a.abort();
+            self.refuse_recover_request(&member, &sender, "another rejoin of this seat is running".to_string());
+            return Ok(Reply::Ack);
+        }
+        let seat = (member.clone(), a.new_nostr_pk.clone());
+        self.recovery.anchor_first_seats.insert(seat.clone());
+        let proposed = self.propose_restore(
+            &member,
+            &a.identity_pk,
+            &a.key_package,
+            ticket,
+            &a.seat_proof,
+            &a.new_nostr_pk,
+            &a.relays,
+            &a.consent,
+            &a.reply,
+            &sender,
+        );
+        if !proposed {
+            self.recovery.anchor_first_seats.remove(&seat);
+        }
+        a.abort();
+        Ok(Reply::Ack)
+    }
+
+    /// A Want/Ready for an attempt this node does not hold: a coordinator
+    /// that restarted lost it. Answered once per sender and window; a
+    /// ticket it spent itself stays silent (a relay's replay).
+    fn answer_link_outdated(&mut self, member: &str, ticket: &str, sender: &str) {
+        const OUTDATED_COOLDOWN_SECS: u64 = 1_800;
+        if sender.is_empty() || self.recovery.spent_tickets.contains(ticket) {
+            return;
+        }
+        let now = crate::now_secs();
+        let key = (format!("outdated:{member}"), sender.to_string());
+        if self
+            .recovery
+            .unsolicited_cooldown
+            .get(&key)
+            .is_some_and(|t| now.saturating_sub(*t) < OUTDATED_COOLDOWN_SECS)
+        {
+            return;
+        }
+        self.recovery.unsolicited_cooldown.insert(key, now);
+        tracing::warn!(%member, reason = LINK_OUTDATED, "recover_refused");
+        self.send_recover_frame(
+            sender.to_string(),
+            molt_net::invite::RitualMsg::RecoverRefused { member: member.to_string(), reason: LINK_OUTDATED.to_string() },
+        );
     }
 
     /// B3: answer a link-less (self-service) request - an older build
@@ -258,20 +543,7 @@ impl State {
     /// refusal answer. Nostr only (the loopback test transport carries no
     /// recovery side-channel); best-effort, off the actor.
     fn send_recover_frame(&mut self, to: String, msg: molt_net::invite::RitualMsg) {
-        if self.transport_kind != Some(molt_core::TransportKind::Nostr) {
-            return;
-        }
-        let Some(nostr) = self.nostr.as_ref() else {
-            return;
-        };
-        let relays = self.dialable_group_relays();
-        if relays.is_empty() {
-            return;
-        }
-        let Ok(dialer) = self.dialer_for() else {
-            return;
-        };
-        let Ok(net) = molt_net::ritual_net::RitualNet::new(dialer, relays, &nostr.sk) else {
+        let Some(net) = self.recover_net() else {
             return;
         };
         tokio::spawn(async move {
@@ -279,6 +551,21 @@ impl State {
                 tracing::debug!(error = %e, "recovery frame did not publish");
             }
         });
+    }
+
+    /// This seat's gift-wrap endpoint over the group's dialable relays;
+    /// `None` off Nostr (the loopback test transport has no side channel).
+    fn recover_net(&self) -> Option<molt_net::ritual_net::RitualNet> {
+        if self.transport_kind != Some(molt_core::TransportKind::Nostr) {
+            return None;
+        }
+        let nostr = self.nostr.as_ref()?;
+        let relays = self.dialable_group_relays();
+        if relays.is_empty() {
+            return None;
+        }
+        let dialer = self.dialer_for().ok()?;
+        molt_net::ritual_net::RitualNet::new(dialer, relays, &nostr.sk).ok()
     }
 
     /// Stand the STANDING seat inbox up for the open Nostr workspace

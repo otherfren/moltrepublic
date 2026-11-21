@@ -5664,7 +5664,39 @@ pub enum Command {
         /// wrap author.
         #[serde(default)]
         sender_npub: String,
+        /// The rejoiner asked for the anchor-first order: the anchor goes
+        /// out before anything is proposed.
+        #[serde(default)]
+        anchor_first: bool,
         /// Ritual incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The anchor-first rejoiner verified the served anchor (engine-
+    /// internal, from a recovery inbox): the coordinator proposes, seals
+    /// and re-keys now.
+    NetRecoverReady {
+        /// The returning seat.
+        member: MemberId,
+        /// The link's ticket.
+        ticket: String,
+        /// The gift wrap's proven author (the rejoiner's new anchor), hex.
+        sender: String,
+        /// Workspace net scope.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// The anchor-first rejoiner misses anchor pieces (engine-internal).
+    NetRecoverWant {
+        /// The returning seat.
+        member: MemberId,
+        /// The link's ticket.
+        ticket: String,
+        /// Indexes not received.
+        missing: Vec<u32>,
+        /// The gift wrap's proven author, hex.
+        sender: String,
+        /// Workspace net scope.
         #[serde(default)]
         generation: Option<u64>,
     },
@@ -5973,10 +6005,9 @@ pub enum Command {
         generation: Option<u64>,
     },
     /// The REJOINER's twin of [`Command::NetJoinNote`]: the recovery task
-    /// reporting where its bounded wait stands (the join task surfaces a
-    /// deaf relay live; recovery is the one flow whose user has already
-    /// lost their device, so it must not be silent until the absolute
-    /// deadline). Never a tool, same reason.
+    /// reporting where its wait stands (the join task surfaces a deaf
+    /// relay live; recovery is the one flow whose user has already lost
+    /// their device, so a wait is never silent). Never a tool, same reason.
     NetRecoverNote {
         /// The status line (compact, one fact).
         note: String,
@@ -8302,6 +8333,9 @@ pub struct StatusView {
     /// gone, it neither reads nor publishes. A rejoin with a link clears it.
     #[serde(default)]
     pub evicted: bool,
+    /// The group's MLS epoch (0 = no group on this node).
+    #[serde(default)]
+    pub mls_epoch: u64,
 }
 
 /// One seat's standing as this node sees it (the Organization overview).

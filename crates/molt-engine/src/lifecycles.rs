@@ -1832,7 +1832,6 @@ impl State {
             crate::nostr_ritual::RecoverCtx {
                 handover,
                 dial_relays,
-                extra_targets: Vec::new(),
                 member: inv.member.clone(),
                 phrase: task_phrase.into(),
                 generation,
@@ -2232,8 +2231,8 @@ impl State {
     /// fail immediately, so an abandoned recovery cost nothing and the
     /// asymmetry (recovery invalidates join, never the other way round) was
     /// invisible. A rejoiner task holds a 1059 inbox and a 445 subscription
-    /// for up to fifteen minutes, so the same context switches that abandon a
-    /// join must abandon this too — a forgotten task sits on relay sockets
+    /// until it ends, so the same context switches that abandon a join must
+    /// abandon this too — a forgotten task sits on relay sockets
     /// long after the human moved on.
     pub(crate) fn invalidate_recovery(&mut self) {
         self.recovery.generation += 1;
@@ -2282,7 +2281,7 @@ impl State {
     }
 
     /// The rejoiner's status line ([`Command::NetRecoverNote`]): where the
-    /// bounded recovery wait stands. Notice-borne (`recover-note:`), so the
+    /// recovery wait stands. Notice-borne (`recover-note:`), so the
     /// recover pane shows it live; a stale incarnation's note is dropped.
     pub(crate) fn cmd_net_recover_note(
         &mut self,
@@ -2302,7 +2301,7 @@ impl State {
                 1
             } else if l.starts_with("checkpoint part ") {
                 2
-            } else if l.starts_with("still waiting for the chain anchor") {
+            } else if l.starts_with("waiting for ") {
                 3
             } else {
                 0

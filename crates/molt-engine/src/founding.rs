@@ -825,6 +825,9 @@ fn spawn_founder_recv(
                 | invite::RitualMsg::RecoverProgress { .. }
                 | invite::RitualMsg::RecoverRefused { .. }
                 | invite::RitualMsg::RecoverFailed { .. }
+                | invite::RitualMsg::RecoverAnchor { .. }
+                | invite::RitualMsg::RecoverWant { .. }
+                | invite::RitualMsg::RecoverReady { .. }
                 | invite::RitualMsg::Welcome { .. } => continue,
             };
             if !crate::nostr_ritual::send_cmd(&cmd_tx, cmd).await {
@@ -876,6 +879,7 @@ pub(crate) fn recover_command(
             .and_then(|h| serde_json::to_string(h).ok())
             .unwrap_or_default(),
         sender_npub,
+        anchor_first: r.anchor_first,
         generation: Some(generation),
     }
 }

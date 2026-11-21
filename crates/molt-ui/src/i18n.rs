@@ -479,17 +479,24 @@ pub(crate) fn localize_recover_note(lang: i32, n: &str) -> String {
     if lang != 1 {
         return n.to_string();
     }
-    if let Some(m) = n
-        .strip_prefix("waiting for the coordinator's Welcome (")
-        .and_then(|r| r.strip_suffix(" min)"))
-    {
-        return format!("warte auf das Welcome des Koordinators ({m} min)");
-    }
-    if let Some(rest) = n.strip_prefix("still waiting for the chain anchor (") {
-        return match rest.split_once(" s): ") {
-            Some((secs, counts)) => format!("warte weiter auf den Chain-Anker ({secs} s): {counts}"),
-            None => format!("warte weiter auf den Chain-Anker ({rest}"),
+    if let Some((what, rest)) = n.strip_prefix("waiting for ").and_then(|r| r.split_once(" since ")) {
+        let what = match what {
+            "the coordinator" => "den Koordinator".to_string(),
+            "the Welcome" => "das Welcome".to_string(),
+            "a relay" => "ein Relay".to_string(),
+            "the chain anchor" => "den Chain-Anker".to_string(),
+            w => match w.strip_prefix("the chain anchor ") {
+                Some(count) => format!("den Chain-Anker {count}"),
+                None => w.to_string(),
+            },
         };
+        return format!("warte auf {what} seit {rest}");
+    }
+    if let Some(p) = n.strip_prefix("asked again for anchor parts ") {
+        return format!("fehlende Anker-Teile erneut angefordert: {p}");
+    }
+    if let Some(e) = n.strip_prefix("the anchor does not verify yet: ") {
+        return format!("der Anker ist noch nicht prüfbar: {e}");
     }
     if let Some(p) = n.strip_prefix("checkpoint part ") {
         return format!("Checkpoint-Teil {p}");
@@ -511,9 +518,10 @@ pub(crate) fn localize_recover_note(lang: i32, n: &str) -> String {
     }
     match n {
         "checkpoint received" => "Checkpoint empfangen".into(),
-        "request sent - waiting for the coordinator's Welcome" => {
-            "Anfrage gesendet - warte auf das Welcome des Koordinators".into()
+        "request sent - waiting for the coordinator" => {
+            "Anfrage gesendet - warte auf den Koordinator".into()
         }
+        "welcomed back" => "willkommen zurück".into(),
         "welcomed back - fetching the chain anchor" => {
             "willkommen zurück - hole den Chain-Anker".into()
         }
@@ -521,8 +529,8 @@ pub(crate) fn localize_recover_note(lang: i32, n: &str) -> String {
     }
 }
 
-/// The rejoiner's recovery FAILURE line (E6): the wrapper prefixes and
-/// the timeout sentence localize, the wrapped error rides verbatim.
+/// The rejoiner's recovery FAILURE line (E6): the wrapper prefixes
+/// localize, the wrapped error rides verbatim.
 pub(crate) fn localize_recover_failed(lang: i32, e: &str) -> String {
     if lang != 1 {
         return e.to_string();
@@ -532,11 +540,6 @@ pub(crate) fn localize_recover_failed(lang: i32, e: &str) -> String {
     }
     if let Some(t) = e.strip_prefix("mls welcome: ") {
         return format!("MLS-Welcome: {t}");
-    }
-    if e.starts_with("no Welcome arrived within 15 minutes") {
-        return "kein Welcome binnen 15 Minuten - der Koordinator muss laufen und \
-                die Rückkehr bestätigen"
-            .into();
     }
     e.to_string()
 }
@@ -1179,7 +1182,7 @@ lexicon! {
     rlk_pending_hint: "The returning member does not need to be online - a recovery link is made for someone who is unreachable.", "Das zurückkehrende Mitglied muss dafür nicht online sein - ein Recovery-Link ist ja gerade für ein unerreichbares Mitglied gedacht.";
     rlk_failed_mesh: "The link could not be created: this device is not on the republic's mesh. Reopen the republic, then try again.", "Der Link konnte nicht erstellt werden: Dieses Gerät ist nicht im Mesh der Republik. Republik neu öffnen, dann erneut versuchen.";
     rlk_failed_prefix: "The link could not be created: ", "Der Link konnte nicht erstellt werden: ";
-    rv_running_note: "Waiting for the survivors - times out after ~15 min.", "Warte auf die verbliebenen Mitglieder - Timeout nach ~15 min.";
+    rv_running_note: "Waiting for the survivors - cancel to stop.", "Warte auf die verbliebenen Mitglieder - Abbrechen beendet.";
     rv_cancel: "Abort", "Abbrechen";
     cu_title: "Catching up: block {h} of {t}", "Holt auf: Block {h} von {t}";
     cu_left: "{n} to go", "noch {n}";
@@ -1215,6 +1218,7 @@ lexicon! {
     rv_wrong_seat: "The phrase does not fit the seat of {who}.", "Die Phrase passt nicht zum Sitz von {who}.";
     rv_link_spent: "Link outdated (made before the last re-admission) - ask for a new link.", "Link veraltet (vor der letzten Wiederaufnahme erzeugt) - neuen Link anfordern.";
     rv_link_stale: "Link too old - ask for a new link.", "Link zu alt - neuen Link anfordern.";
+    rv_link_outdated: "Link outdated - ask for a new link.", "Link veraltet - neuen Link anfordern.";
     rw_link_unknown: "Not a usable molt:// link.", "Kein brauchbarer molt://-Link.";
     rw_rl_not_in_pool: "not in your pool", "nicht in deinem Pool";
     rw_rl_unconfirmed: "not confirmed", "nicht bestätigt";
@@ -1241,7 +1245,8 @@ lexicon! {
     // origin-neutral on purpose: the engine derives "detached" from the
     // directory's state (no group key, no mesh), not from HOW it got there
     toast_detached: "Workspace is detached - rejoin via a recovery link.", "Workspace ist detached - Wiederbeitritt über Recovery-Link.";
-    toast_reattaching: "Reconnecting to the republic…", "Verbinde wieder mit der Republik…";
+    toast_seat_evicted: "Seat restored elsewhere - rejoin with a link.", "Sitz anderswo wiederhergestellt - mit Link neu beitreten.";
+    toast_seat_locked_out: "Locked out of the group - rejoin with a link.", "Aus der Gruppe ausgesperrt - mit Link neu beitreten.";
     toast_backup_failed: "Backup failed:", "Backup fehlgeschlagen:";
     toast_backup_prune: "Backup stored, pruning old copies failed:", "Backup gespeichert, Aufräumen alter Kopien fehlgeschlagen:";
     // mesh self-heal Phase 4 — connection-health banner (net_health tone 1/2)

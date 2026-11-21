@@ -11,8 +11,8 @@
 >
 > **Open ritual question (carried from `welcome_rework.md`, undecided):**
 > `cmd_recover_start` has no `guard_idle` — a second start supersedes the
-> run (generation bump drops the stale task's results) but the superseded
-> task holds its relay subscriptions until its own timeout. Whether the
+> run (generation bump drops the stale task's results, the task is
+> aborted). Whether the
 > right shape is a guard or the deliberate replace-the-run touches the
 > re-mint failover semantics; decide it there, not in passing.
 
@@ -167,11 +167,31 @@ advances past the same commit before any new-epoch traffic — one coordinator,
 all apply, like the founder at founding); the **Welcome** goes to `R` on `Qᵣ`.
 
 **❻ Rejoin the group.** `R` processes the Welcome and is back inside the
-encrypted group — it can decrypt live traffic again. Its wait for the Welcome
-is bounded by `RECOVERY_WELCOME_TIMEOUT` (15 minutes — generous, because the
-window spans the survivors' **human** m-of-n approval in ❹). On expiry the
-rejoin fails visibly (a `recover-failed` notice); the retry is a fresh
-`RecoverStart` with a fresh link (§6, failover).
+encrypted group — it can decrypt live traffic again. No wait has a
+deadline (B4): a step ends on the Welcome, a refusal or `recover_cancel`,
+and says what it waits for and since when at least every 30 s.
+
+**Anchor first, then seal (B4, 2026-11-21, Nostr).** A request carrying
+`anchor_first` changes the order of ❹-❽ so a failed attempt leaves no
+block and no key behind:
+
+1. `S` runs every check of ❸/❹ (seat proof, KeyPackage binding, consent,
+   relay gate, the B3 gates) but proposes nothing; it gift-wraps the
+   chain anchor to `R`'s new key as `RecoverAnchor` pieces (blob parts of
+   at most 24 KiB + the anchor block; a wrapped piece stays under 60 KiB).
+   The attempt lives in memory, keyed by ticket.
+2. `R` verifies the anchor standalone and answers `RecoverReady`; missing
+   pieces it asks for by index (`RecoverWant`, backoff 10 s .. 120 s).
+3. On Ready `S` proposes, the block seals, `S` re-keys and publishes the
+   commit, then the Welcome, each until a relay takes it (backoff
+   2 s .. 60 s, no cap). The ticket is spent here.
+4. `R` materializes from the anchor it holds and catches up by `ChainRequest`.
+
+A coordinator that lost the attempt (restart) answers `link outdated`.
+A request without `anchor_first` (older rejoiner), an anchor too large for
+gift wraps, or an older coordinator (Welcome with no anchor before it)
+runs the seal-first order above; its anchor is re-pushed over the group
+every 10 min while the seat stays unheard.
 
 **❼–❽ Catch up (option A: over the recovery channel).** The Welcome carries the
 coordinator's **whole chain from genesis** — `R` has no mesh links yet, so the
@@ -255,10 +275,9 @@ The group gets the complementary guarantees:
   `a_second_restored_block_for_the_same_seat_verifies` and
   `a_restored_commit_without_a_pending_recovery_is_inert` (engine chain tests)
   and `a_second_recovery_round_after_a_dead_first_attempt_succeeds`
-  (`two_instances.rs`). On the rejoiner side, the wait for the Welcome is
-  bounded by `RECOVERY_WELCOME_TIMEOUT` (15 minutes, §4 ❻); on expiry the
-  rejoin fails visibly and the retry is a fresh `RecoverStart` with a fresh
-  link.
+  (`two_instances.rs`). On the rejoiner side nothing times out (B4): a dead
+  coordinator is noticed by the operator, who cancels and retries with a
+  fresh link; a restarted one answers `link outdated`.
 
 **MLS distribution — RE-decided (2026-07-09, supersedes the 2026-07-08 star):
 the commit rides the RUNTIME MESH.** `S` broadcasts `restore_member`'s commit to
@@ -393,11 +412,14 @@ The product never uses the seam.
   `a_restored_commit_without_a_pending_recovery_is_inert` (engine chain tests)
   and `a_second_recovery_round_after_a_dead_first_attempt_succeeds`
   (`two_instances.rs`).
-- **Welcome timeout** — ✅ the rejoiner's wait for the Welcome is bounded by
-  `RECOVERY_WELCOME_TIMEOUT` = 15 minutes (`recovery.rs`; generous — the window
-  spans the survivors' human m-of-n approval). On expiry the rejoin fails
-  visibly (`recover-failed`); the retry is a fresh `RecoverStart` with a fresh
-  link.
+- **No deadlines, anchor first** — ✅ (B4, 2026-11-21) the 15-minute
+  `RECOVERY_WELCOME_TIMEOUT` is gone; the anchor-first order (§4 ❻) and its
+  waits live in `nostr_ritual.rs` (`await_admission`) and `net/recovery.rs`
+  (`start_anchor_first`, `cmd_net_recover_ready`/`_want`). Keystones in
+  `nostr_recovery.rs`: `the_coordinator_holds_still_until_the_rejoiner_is_ready`,
+  `a_cancel_after_the_anchor_changes_nothing_on_the_coordinator`,
+  `the_welcome_survives_five_refused_publishes`, the two mixed-version
+  pairs and `a_restarted_coordinator_answers_link_outdated`.
 
 - **Recovery UI** — ✅ (2026-07-11, mint states 2026-07-16) both surfaces in
   `molt-ui`, driving the same co-equal commands. Coordinator: a per-member

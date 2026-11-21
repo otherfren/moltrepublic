@@ -110,7 +110,7 @@ pub use recovery::RecoveryInvite;
 pub use recovery::{run_rejoin, RejoinOutcome};
 #[doc(hidden)]
 pub use founding::{
-    make_seat_proof, member_identity, run_ritual_member, verify_seat_proof, FoundingInvite,
+    make_restore_consent, make_seat_proof, member_identity, run_ritual_member, verify_seat_proof, FoundingInvite,
     InviteMaterial, Ratifier,
 };
 pub use net::{CmdSink, FileStateStore, StorageLog};
@@ -188,6 +188,7 @@ pub struct WalletHandle {
     vault_seams: std::sync::Arc<net::vault_payload::VaultSeams>,
     wallet_seams: std::sync::Arc<wallet_run::WalletSeams>,
     seat_active: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    seal_first: std::sync::Arc<std::sync::atomic::AtomicBool>,
     farewells: Farewells,
 }
 
@@ -316,6 +317,13 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __seat_active_secs(&self, secs: u64) {
         self.seat_active.store(secs, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (B4): this coordinator ignores `anchor_first` and seals
+    /// first, as a build before B4 does.
+    #[doc(hidden)]
+    pub fn __seal_first(&self, on: bool) {
+        self.seal_first.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (vault plan S3c): this holder's receipts report a
@@ -551,6 +559,7 @@ fn spawn_actor(
     let farewells = state.farewells.clone();
     let wallet_seams = state.wallet_seams.clone();
     let seat_active = state.seat_active.clone();
+    let seal_first = state.seal_first.clone();
     if vault::receipts::lab_complain_at_spawn() {
         tracing::warn!("vault_lab=complain");
         vault_seams.lab.complain.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -579,7 +588,7 @@ fn spawn_actor(
         tracing::debug!("engine actor stopped");
     });
 
-    WalletHandle { cmd_tx, ev_tx, vault_seams, wallet_seams, seat_active, farewells }
+    WalletHandle { cmd_tx, ev_tx, vault_seams, wallet_seams, seat_active, seal_first, farewells }
 }
 
 // The one shared clock (event timestamps must not drift from the storage
@@ -1102,6 +1111,15 @@ pub(crate) struct RecoveryState {
     /// receives it): the fresh KeyPackage + reply queue, kept until the Restored
     /// block commits and the coordinator re-keys the group + sends the Welcome.
     pub(crate) pending: HashMap<String, chain::PendingRecovery>,
+    /// B4: anchor-first attempts between the served anchor and
+    /// `RecoverReady`, by ticket. Memory only: a restart forgets them and
+    /// the rejoiner's next frame is answered `link outdated`.
+    pub(crate) anchor_first: HashMap<String, chain::AnchorFirst>,
+    /// B4: tickets a `RecoverReady` spent; a relay's replay is dropped.
+    pub(crate) spent_tickets: std::collections::HashSet<String>,
+    /// B4: `(seat, new anchor)` restored anchor-first - its rejoiner holds
+    /// the anchor, so nothing re-pushes it over the group.
+    pub(crate) anchor_first_seats: std::collections::HashSet<(String, String)>,
     /// Recoveries whose card the sweep dropped as dead, one per seat: not
     /// in flight (R3), but a reorg can still seal the card.
     pub(crate) swept: HashMap<String, chain::PendingRecovery>,
@@ -1362,6 +1380,9 @@ pub(crate) struct State {
     /// B3 test seam: the restore gates' activity window, `u64::MAX` = the
     /// production default.
     pub(crate) seat_active: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// B4 test seam: coordinate every recovery seal-first, as an older
+    /// build does.
+    pub(crate) seal_first: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Grant answers and asks of the open workspace (vault plan S4).
     pub(crate) vault_grants: vault::grant::GrantRuntime,
     /// The kind-445 group runtime of an open Nostr workspace (N5.2), with the
@@ -1674,6 +1695,7 @@ impl State {
             vault_seams: std::sync::Arc::default(),
             wallet_seams: std::sync::Arc::default(),
             seat_active: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+            seal_first: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             vault_grants: vault::grant::GrantRuntime::default(),
             group_net: None,
             group_mls_parked: None,
@@ -1685,6 +1707,9 @@ impl State {
                 held_approvals: std::collections::BTreeSet::new(),
                 held_seals: std::collections::BTreeSet::new(),
                 pending: HashMap::new(),
+                anchor_first: HashMap::new(),
+                spent_tickets: std::collections::HashSet::new(),
+                anchor_first_seats: std::collections::HashSet::new(),
                 swept: HashMap::new(),
                 tickets: HashMap::new(),
                 mesh_window: std::collections::HashSet::new(),
@@ -2491,6 +2516,7 @@ impl State {
                 seat_proof,
                 reply,
                 sender_npub,
+                anchor_first,
                 generation,
             } => self.cmd_net_recover_requested(
                 member,
@@ -2503,8 +2529,15 @@ impl State {
                 consent,
                 reply,
                 sender_npub,
+                anchor_first,
                 generation,
             ),
+            Command::NetRecoverReady { member, ticket, sender, generation } => {
+                self.cmd_net_recover_ready(&member, &ticket, &sender, generation)
+            }
+            Command::NetRecoverWant { member, ticket, missing, sender, generation } => {
+                self.cmd_net_recover_want(&member, &ticket, &missing, &sender, generation)
+            }
             Command::NetRecoverLinkReady {
                 member,
                 link,
