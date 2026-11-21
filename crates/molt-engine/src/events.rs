@@ -147,10 +147,14 @@ impl State {
         if active.handle.failed() {
             self.session.notice = "storage-failed".to_string();
         } else if seq % SNAPSHOT_EVERY == 0 {
-            let snap = self.snapshot_now();
-            if let Some(active) = &self.active {
-                active.handle.snapshot(snap);
-            }
+            self.snapshot_to_disk();
+        }
+    }
+
+    /// Write a snapshot now: for state the log cannot rebuild.
+    pub(crate) fn snapshot_to_disk(&self) {
+        if let Some(active) = &self.active {
+            active.handle.snapshot(self.snapshot_now());
         }
     }
 
@@ -605,6 +609,11 @@ impl State {
                 .collect(),
             own_approvals: self.chain.own_approvals.iter().copied().collect(),
             retired_proposals: self.retired.iter().copied().collect(),
+            anchor_first_seats: {
+                let mut v: Vec<(String, String)> = self.recovery.anchor_first_seats.iter().cloned().collect();
+                v.sort();
+                v
+            },
         }
     }
 
@@ -742,6 +751,7 @@ impl State {
         // the own decision register vouches for it), every other one waits
         // for `reverify_all_pending` after the chain adoption
         self.chain.own_approvals.extend(dump.own_approvals.iter().copied());
+        self.recovery.anchor_first_seats.extend(dump.anchor_first_seats.iter().cloned());
         let me = self.member();
         for v in dump.votes {
             let mine = v.member == me && self.chain.own_approvals.contains(&v.id);

@@ -2303,6 +2303,8 @@ impl State {
                 2
             } else if l.starts_with("waiting for ") {
                 3
+            } else if l.starts_with("asked ") {
+                4
             } else {
                 0
             }

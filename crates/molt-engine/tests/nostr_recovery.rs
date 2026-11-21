@@ -1820,6 +1820,7 @@ struct ManualRejoiner {
     inbox: molt_net::ritual_net::RitualInbox,
     coordinator: String,
     ticket: String,
+    request: molt_net::invite::RitualMsg,
 }
 
 impl ManualRejoiner {
@@ -1845,9 +1846,7 @@ impl ManualRejoiner {
         let net = molt_net::ritual_net::RitualNet::new(dialer, relays.clone(), &anchor_sk).expect("transport");
         let mut inbox = net.inbox().await.expect("inbox");
         assert!(inbox.first_read(Duration::from_secs(10)).await.any(), "the inbox is readable");
-        net.send_ritual(
-            &h.npub,
-            &molt_net::invite::RitualMsg::Recover(molt_net::invite::RecoverRequest {
+        let request = molt_net::invite::RitualMsg::Recover(molt_net::invite::RecoverRequest {
                 member: "petra".to_string(),
                 identity_pk,
                 key_package: kp_hex,
@@ -1859,11 +1858,13 @@ impl ManualRejoiner {
                 reply: None,
                 anchor_first,
                 version: if anchor_first { "0.0.21".to_string() } else { String::new() },
-            }),
-        )
-        .await
-        .expect("the request publishes");
-        ManualRejoiner { net, inbox, coordinator: h.npub, ticket: h.ticket }
+        });
+        net.send_ritual(&h.npub, &request).await.expect("the request publishes");
+        ManualRejoiner { net, inbox, coordinator: h.npub, ticket: h.ticket, request }
+    }
+
+    async fn repeat_request(&self) {
+        self.send(self.request.clone()).await;
     }
 
     async fn send(&self, msg: molt_net::invite::RitualMsg) {
@@ -1951,6 +1952,37 @@ async fn the_coordinator_holds_still_until_the_rejoiner_is_ready() {
     }
     assert_eq!(chain_len(&a).await, 2, "one Restored block");
     assert_eq!(status_of(&a).await.mls_epoch, epoch + 1, "one re-key");
+}
+
+/// **A repeated request is the rejoiner asking again** (it got no piece):
+/// the whole anchor goes out again, nothing is proposed, the ticket stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_repeated_request_gets_the_anchor_again() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let mut r = ManualRejoiner::start(&url, &link, &petra_phrase, true).await;
+    let first = r.anchor().await;
+    // past the coordinator's debounce
+    tokio::time::sleep(Duration::from_secs(11)).await;
+    r.repeat_request().await;
+    let again = r.anchor().await;
+    assert_eq!(again, first, "the same anchor again");
+    assert_eq!(chain_len(&a).await, 1, "nothing sealed");
+    assert_eq!(open_proposals(&a).await, 0, "nothing proposed");
+    // the ticket is not spent: Ready still admits
+    r.send(molt_net::invite::RitualMsg::RecoverReady { member: "petra".to_string(), ticket: r.ticket.clone() }).await;
+    loop {
+        match r.next("the Welcome").await {
+            molt_net::ritual_net::RitualDelivery::Welcome(..) => break,
+            molt_net::ritual_net::RitualDelivery::Msg(molt_net::invite::RitualMsg::RecoverAnchor { .. }, _) => {}
+            other => panic!("expected the Welcome: {other:?}"),
+        }
+    }
+    assert_eq!(chain_len(&a).await, 2);
 }
 
 /// **B4: an older rejoiner (no `anchor_first`) gets the seal-first order

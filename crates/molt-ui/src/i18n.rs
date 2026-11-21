@@ -521,6 +521,7 @@ pub(crate) fn localize_recover_note(lang: i32, n: &str) -> String {
         "request sent - waiting for the coordinator" => {
             "Anfrage gesendet - warte auf den Koordinator".into()
         }
+        "asked the coordinator again" => "Koordinator erneut gefragt".into(),
         "welcomed back" => "willkommen zurück".into(),
         "welcomed back - fetching the chain anchor" => {
             "willkommen zurück - hole den Chain-Anker".into()

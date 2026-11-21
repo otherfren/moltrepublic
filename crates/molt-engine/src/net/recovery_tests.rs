@@ -69,3 +69,99 @@ fn an_announce_without_our_queue_does_not_burn_the_cooldown() {
         "a rapid repeat stays capped - the stamp is not refreshed"
     );
 }
+
+fn attempt(member: &str, touched: tokio::time::Instant) -> crate::chain::AnchorFirst {
+    crate::chain::AnchorFirst {
+        member: member.to_string(),
+        identity_pk: String::new(),
+        key_package: String::new(),
+        seat_proof: String::new(),
+        new_nostr_pk: "ab".repeat(32),
+        relays: Vec::new(),
+        consent: String::new(),
+        reply: String::new(),
+        frames: vec!["{}".to_string()],
+        resent_at: None,
+        tasks: Vec::new(),
+        opened: touched,
+        touched,
+        logged_at: None,
+        counts: std::sync::Arc::default(),
+    }
+}
+
+/// An attempt that goes silent is bounded in memory, not in time: past
+/// the cap the least recently heard rejoiner's attempt goes, and its
+/// next Ready is answered `link outdated`.
+#[test]
+fn open_anchor_attempts_are_bounded_by_count() {
+    let mut st = crate::tests::plain_state();
+    let t0 = tokio::time::Instant::now();
+    let cap = super::recovery::MAX_ANCHOR_ATTEMPTS;
+    for i in 0..=cap {
+        let at = t0 + std::time::Duration::from_secs(u64::try_from(i).expect("small"));
+        st.admit_anchor_attempt(&format!("t{i}"), attempt(&format!("m{i}"), at));
+    }
+    assert_eq!(st.recovery.anchor_first.len(), cap);
+    assert!(!st.recovery.anchor_first.contains_key("t0"), "the least recently heard went");
+    st.cmd_net_recover_ready("m0", "t0", &"ab".repeat(32), None).expect("ready");
+    assert_eq!(st.recovery.anchor_first.len(), cap, "an evicted attempt proposes nothing");
+    assert!(
+        st.recovery.unsolicited_cooldown.keys().any(|(k, _)| k == "outdated:m0"),
+        "answered link outdated"
+    );
+}
+
+/// The coordinator says once a minute what an open attempt waits for.
+#[test]
+fn an_open_attempt_logs_its_wait_every_minute() {
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if let Ok(mut b) = self.0.lock() {
+                b.extend_from_slice(buf);
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let captured = Captured::default();
+    let sink = captured.clone();
+    let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || sink.clone()).finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let mut st = crate::tests::plain_state();
+        let t0 = tokio::time::Instant::now();
+        let a = attempt("petra", t0);
+        a.counts.sent.store(3, std::sync::atomic::Ordering::Relaxed);
+        a.counts.accepted.store(2, std::sync::atomic::Ordering::Relaxed);
+        st.admit_anchor_attempt("t", a);
+        st.recover_wait_tick(t0 + std::time::Duration::from_secs(61));
+        st.recover_wait_tick(t0 + std::time::Duration::from_secs(91));
+        st.recover_wait_tick(t0 + std::time::Duration::from_secs(121));
+    });
+    let logs = String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf8");
+    let lines: Vec<&str> = logs.lines().filter(|l| l.contains("recover_wait")).collect();
+    assert_eq!(lines.len(), 2, "{logs}");
+    assert!(
+        lines[0].contains("for=\"ready\" member=petra since_s=61 sent=3 accepted=2"),
+        "{}",
+        lines[0]
+    );
+}
+
+/// A seat restored anchor-first holds its anchor: a coordinator restart,
+/// even a hard kill, must not turn on the group re-push for it.
+#[test]
+fn an_anchor_first_seat_survives_a_restart() {
+    for with_snapshot in [false, true] {
+        let b = crate::chain::test_support::Builder::new(&["petra", "walter"], 2);
+        let (mut walter, _tmp, dir) = crate::tests::stored_chain_signer(&b, "walter", &["petra", "walter"]);
+        let seat = ("petra".to_string(), "ab".repeat(32));
+        walter.note_anchor_first_seat(seat.clone());
+        let back = crate::tests::reopen_chain_signer(walter, &dir, &b, "walter", with_snapshot);
+        assert!(back.recovery.anchor_first_seats.contains(&seat), "with_snapshot={with_snapshot}");
+    }
+}

@@ -134,6 +134,7 @@ fn e6_maps_render_german_and_keep_tails() {
         localize_recover_note(1, "waiting for the chain anchor (3/9) since 12:00:03 (45s)"),
         "warte auf den Chain-Anker (3/9) seit 12:00:03 (45s)"
     );
+    assert_eq!(localize_recover_note(1, "asked the coordinator again"), "Koordinator erneut gefragt");
     assert_eq!(
         localize_recover_failed(1, "recovery request: relay refused"),
         "Recovery-Anfrage: relay refused"

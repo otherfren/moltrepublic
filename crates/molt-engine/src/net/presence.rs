@@ -345,6 +345,7 @@ impl State {
         self.recompute_net_health();
         self.note_unreadable_tick();
         self.retry_held_restore_approvals();
+        self.recover_wait_tick(tokio::time::Instant::now());
         // the mirror gossip beat (mirroring §3.4) rides this tick as well
         self.mirror_gossip_tick(self.presence_now());
         crate::vault::receipts::tick(self, self.presence_now());

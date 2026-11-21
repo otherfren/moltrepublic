@@ -182,12 +182,24 @@ block and no key behind:
    The attempt lives in memory, keyed by ticket.
 2. `R` verifies the anchor standalone and answers `RecoverReady`; missing
    pieces it asks for by index (`RecoverWant`, backoff 10 s .. 120 s).
+   With no piece and no word at all, `R` repeats its `Recover` request
+   (30 s .. 600 s); `S` treats the identical request as "send it all
+   again" (debounced 10 s), proposing and spending nothing. An older
+   coordinator drops the repeat as a relay replay.
 3. On Ready `S` proposes, the block seals, `S` re-keys and publishes the
    commit, then the Welcome, each until a relay takes it (backoff
    2 s .. 60 s, no cap). The ticket is spent here.
 4. `R` materializes from the anchor it holds and catches up by `ChainRequest`.
 
 A coordinator that lost the attempt (restart) answers `link outdated`.
+Open attempts are bounded by count, not time: at most 4 per workspace,
+the least recently heard rejoiner's goes first (it then hears `link
+outdated`). An attempt also ends on its Ready, on a refused new run of
+the same rejoiner, on a replacing run on the same link and at workspace
+close; `recover_cancel` sends nothing, so a cancelled one waits for one
+of those. While open, `S` logs `recover_wait for="ready" member= since_s=
+sent= accepted=` every 60 s. The seats it restored anchor-first ride the
+engine snapshot, so a restart does not start re-pushing their anchor.
 A request without `anchor_first` (older rejoiner), an anchor too large for
 gift wraps, or an older coordinator (Welcome with no anchor before it)
 runs the seal-first order above; its anchor is re-pushed over the group

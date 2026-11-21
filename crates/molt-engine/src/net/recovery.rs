@@ -15,6 +15,15 @@ const MESH_EXTENSION_COOLDOWN_SECS: u64 = 60;
 
 /// B4: least time between two anchor re-sends for one attempt.
 const WANT_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
+/// A repeated request re-sends the whole anchor at most this often: relays
+/// replay stored request wraps in bursts on every resubscribe.
+const REASK_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(10);
+/// Open anchor-first attempts kept per workspace; the one whose rejoiner
+/// was heard least recently goes first. Each holds a copy of the anchor,
+/// and one per seat coming back at once is plenty.
+pub(crate) const MAX_ANCHOR_ATTEMPTS: usize = 4;
+/// The coordinator's wait line while an attempt waits for Ready.
+const WAIT_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// B4: the answer to a Want/Ready for an attempt this coordinator does
 /// not hold (it restarted, or the link was re-minted).
@@ -125,14 +134,15 @@ impl State {
             && self.transport_kind == Some(molt_core::TransportKind::Nostr)
             && !self.seal_first.load(std::sync::atomic::Ordering::SeqCst)
         {
-            // a relay's replay of the request this attempt already answers
+            // the same request again: a relay's replay, or a rejoiner that
+            // got no piece and cannot name the missing ones
             if self
                 .recovery
                 .anchor_first
                 .get(&ticket)
                 .is_some_and(|a| a.key_package == key_package && a.new_nostr_pk == canonical)
             {
-                tracing::debug!(%member, "anchor-first request repeated - dropped");
+                self.resend_anchor(&ticket, None, REASK_DEBOUNCE);
                 return Ok(Reply::Ack);
             }
             if let Err(e) = self.check_restore_request(
@@ -145,9 +155,16 @@ impl State {
                 &relays,
                 &consent,
             ) {
+                // the same rejoiner's new run, refused: its open attempt is dead
+                if self.recovery.anchor_first.get(&ticket).is_some_and(|a| a.new_nostr_pk == canonical) {
+                    if let Some(a) = self.recovery.anchor_first.remove(&ticket) {
+                        a.abort();
+                    }
+                }
                 self.refuse_recover_request(&member, &sender_npub, e);
                 return Ok(Reply::Ack);
             }
+            let now = tokio::time::Instant::now();
             let attempt = crate::chain::AnchorFirst {
                 member: member.to_string(),
                 identity_pk,
@@ -158,8 +175,12 @@ impl State {
                 consent,
                 reply,
                 frames: Vec::new(),
-                resent_at: None,
+                resent_at: Some(now),
                 tasks: Vec::new(),
+                opened: now,
+                touched: now,
+                logged_at: Some(now),
+                counts: std::sync::Arc::default(),
             };
             // the anchor cannot travel as gift wraps: seal-first
             if let Some(a) = self.start_anchor_first(&ticket, attempt) {
@@ -298,13 +319,100 @@ impl State {
             attempt.new_nostr_pk.clone(),
             msgs,
             "anchor",
+            attempt.counts.clone(),
             self.cmd_tx.clone(),
         ));
+        self.admit_anchor_attempt(ticket, attempt);
+        tracing::info!(%member, parts = total, waiting_for = "ready", "recover_anchor=sent");
+        None
+    }
+
+    /// Hold an attempt, replacing the link's earlier one and evicting the
+    /// least recently heard beyond [`MAX_ANCHOR_ATTEMPTS`]. An evicted
+    /// attempt's next Want/Ready is answered `link outdated`.
+    pub(crate) fn admit_anchor_attempt(&mut self, ticket: &str, attempt: crate::chain::AnchorFirst) {
         if let Some(old) = self.recovery.anchor_first.insert(ticket.to_string(), attempt) {
             old.abort();
         }
-        tracing::info!(%member, parts = total, waiting_for = "ready", "recover_anchor=sent");
-        None
+        while self.recovery.anchor_first.len() > MAX_ANCHOR_ATTEMPTS {
+            let Some(oldest) = self
+                .recovery
+                .anchor_first
+                .iter()
+                .filter(|(t, _)| t.as_str() != ticket)
+                .min_by_key(|(_, a)| a.touched)
+                .map(|(t, _)| t.clone())
+            else {
+                break;
+            };
+            if let Some(a) = self.recovery.anchor_first.remove(&oldest) {
+                tracing::info!(member = %a.member, open = MAX_ANCHOR_ATTEMPTS, "recover_attempt=evicted");
+                a.abort();
+            }
+        }
+    }
+
+    /// Re-send anchor pieces of an attempt (`None` = all of them), at most
+    /// once per `debounce`. The rejoiner was heard: it moves to the back of
+    /// the eviction order.
+    fn resend_anchor(&mut self, ticket: &str, wanted: Option<&[u32]>, debounce: std::time::Duration) {
+        let now = tokio::time::Instant::now();
+        let Some(a) = self.recovery.anchor_first.get_mut(ticket) else {
+            return;
+        };
+        a.touched = now;
+        if a.resent_at.is_some_and(|t| now.duration_since(t) < debounce) {
+            return;
+        }
+        let total = u32::try_from(a.frames.len()).unwrap_or(u32::MAX);
+        let wanted: std::collections::BTreeSet<u32> = match wanted {
+            Some(w) => w.iter().copied().filter(|i| *i < total).collect(),
+            None => (0..total).collect(),
+        };
+        let member = a.member.clone();
+        let msgs: Vec<molt_net::invite::RitualMsg> = wanted
+            .iter()
+            .filter_map(|i| {
+                let event = a.frames.get(usize::try_from(*i).ok()?)?.clone();
+                Some(molt_net::invite::RitualMsg::RecoverAnchor { member: member.clone(), index: *i, total, event })
+            })
+            .collect();
+        if msgs.is_empty() {
+            return;
+        }
+        let to = a.new_nostr_pk.clone();
+        let counts = a.counts.clone();
+        let Some(net) = self.recover_net() else {
+            return;
+        };
+        let parts = msgs.len();
+        let task = crate::nostr_ritual::spawn_recover_frames(net, to, msgs, "anchor", counts, self.cmd_tx.clone());
+        if let Some(a) = self.recovery.anchor_first.get_mut(ticket) {
+            a.resent_at = Some(now);
+            a.tasks.retain(|t| !t.is_finished());
+            a.tasks.push(task);
+        }
+        tracing::info!(%member, parts, "recover_anchor=resent");
+    }
+
+    /// Every open anchor-first attempt says, at least once a minute, that
+    /// it still waits for the rejoiner's Ready.
+    pub(crate) fn recover_wait_tick(&mut self, now: tokio::time::Instant) {
+        use std::sync::atomic::Ordering::Relaxed;
+        for a in self.recovery.anchor_first.values_mut() {
+            if a.logged_at.is_some_and(|t| now.saturating_duration_since(t) < WAIT_LOG_EVERY) {
+                continue;
+            }
+            a.logged_at = Some(now);
+            tracing::info!(
+                "for" = "ready",
+                member = %a.member,
+                since_s = now.saturating_duration_since(a.opened).as_secs(),
+                sent = a.counts.sent.load(Relaxed),
+                accepted = a.counts.accepted.load(Relaxed),
+                "recover_wait"
+            );
+        }
     }
 
     /// B4 step 3: the rejoiner misses anchor pieces - re-send them,
@@ -329,34 +437,7 @@ impl State {
             tracing::debug!(%member, "recover_want=not_from_the_rejoiner");
             return Ok(Reply::Ack);
         }
-        let now = tokio::time::Instant::now();
-        if a.resent_at.is_some_and(|t| now.duration_since(t) < WANT_DEBOUNCE) {
-            return Ok(Reply::Ack);
-        }
-        let total = u32::try_from(a.frames.len()).unwrap_or(u32::MAX);
-        let wanted: std::collections::BTreeSet<u32> = missing.iter().copied().filter(|i| *i < total).collect();
-        let msgs: Vec<molt_net::invite::RitualMsg> = wanted
-            .iter()
-            .filter_map(|i| {
-                let event = a.frames.get(usize::try_from(*i).ok()?)?.clone();
-                Some(molt_net::invite::RitualMsg::RecoverAnchor { member: member.to_string(), index: *i, total, event })
-            })
-            .collect();
-        if msgs.is_empty() {
-            return Ok(Reply::Ack);
-        }
-        let to = a.new_nostr_pk.clone();
-        let Some(net) = self.recover_net() else {
-            return Ok(Reply::Ack);
-        };
-        let parts = msgs.len();
-        let task = crate::nostr_ritual::spawn_recover_frames(net, to, msgs, "anchor", self.cmd_tx.clone());
-        if let Some(a) = self.recovery.anchor_first.get_mut(ticket) {
-            a.resent_at = Some(now);
-            a.tasks.retain(|t| !t.is_finished());
-            a.tasks.push(task);
-        }
-        tracing::info!(%member, parts, "recover_anchor=resent");
+        self.resend_anchor(ticket, Some(missing), WANT_DEBOUNCE);
         Ok(Reply::Ack)
     }
 
@@ -401,7 +482,7 @@ impl State {
             return Ok(Reply::Ack);
         }
         let seat = (member.clone(), a.new_nostr_pk.clone());
-        self.recovery.anchor_first_seats.insert(seat.clone());
+        self.note_anchor_first_seat(seat.clone());
         let proposed = self.propose_restore(
             &member,
             &a.identity_pk,
@@ -419,6 +500,13 @@ impl State {
         }
         a.abort();
         Ok(Reply::Ack)
+    }
+
+    /// Remember a seat restored anchor-first, on disk at once.
+    pub(crate) fn note_anchor_first_seat(&mut self, seat: (String, String)) {
+        if self.recovery.anchor_first_seats.insert(seat) {
+            self.snapshot_to_disk();
+        }
     }
 
     /// A Want/Ready for an attempt this node does not hold: a coordinator
