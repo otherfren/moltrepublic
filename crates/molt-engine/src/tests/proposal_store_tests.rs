@@ -505,3 +505,28 @@ fn a_genuine_decision_line_that_outruns_the_decision_lands_once_decided() {
         .collect();
     assert_eq!(landed, vec![("petra".to_string(), body)]);
 }
+
+/// B5: an own relay change proposed on a forked chain is a decision held
+/// unsigned - no `Approved` is recorded until the heal, so a hard kill
+/// must not forget it. After the restart it is signed once the chain is
+/// settled.
+#[test]
+fn a_held_relay_approval_survives_a_restart() {
+    let b = Builder::new(&["petra", "walter"], 2);
+    let (mut walter, _tmp, dir) = stored_chain_signer(&b, "walter", &["petra", "walter"]);
+    let mut other = b.clone();
+    other.commit_applied(9, &["petra", "walter"]);
+    walter.chain.fork_candidates.insert(1, other.blocks[1].clone());
+    let id = match walter
+        .cmd_propose(Surface::Organization, json!({ "op": "set_relays", "value": "wss://relay.one" }))
+        .expect("propose")
+    {
+        Reply::Proposed { id, .. } => id.0,
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(!walter.own_signature_stands(id), "held on a forked chain");
+    let mut back = reopen_chain_signer(walter, &dir, &b, "walter", false);
+    assert!(back.chain.own_approvals.contains(&id), "the held decision survives");
+    back.cmd_net_delivery_tick().expect("tick");
+    assert!(back.own_signature_stands(id), "signed on the settled chain");
+}
