@@ -786,6 +786,10 @@ impl State {
         // one workspace deliberately does not pass through here
         self.net_scope += 1;
         self.recovery.tickets.clear();
+        // F1: the link's ticket dies here, and the link is a bearer secret
+        if self.session.notice.starts_with("recovery-link:") {
+            self.session.notice.clear();
+        }
         self.recovery.mesh_window.clear();
         self.recovery.mesh_extension_at.clear();
         self.presence.poke_at.clear();

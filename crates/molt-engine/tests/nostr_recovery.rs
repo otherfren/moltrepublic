@@ -2019,6 +2019,8 @@ async fn the_coordinator_holds_still_until_the_rejoiner_is_ready() {
     }
     assert_eq!(chain_len(&a).await, 2, "one Restored block");
     assert_eq!(status_of(&a).await.mls_epoch, epoch + 1, "one re-key");
+    // F1: the spent link no longer sits in the coordinator's notice
+    assert!(!read_session(&a).await.notice.contains("molt://recover/"), "the spent link is gone");
 }
 
 /// **A repeated request is the rejoiner asking again** (it got no piece):

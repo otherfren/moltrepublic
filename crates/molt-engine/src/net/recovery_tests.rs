@@ -208,3 +208,38 @@ fn a_minted_ticket_survives_a_restart() {
         assert!(!back.recovery.attempts.minted.iter().any(|p| p.contains("t-secret")));
     }
 }
+
+/// F1: a link is a bearer secret - the notice drops it once its ticket is
+/// spent and when the workspace closes (its ticket dies there), and keeps
+/// any other notice.
+#[test]
+fn a_dead_link_leaves_the_session_notice() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut st = crate::tests::plain_state();
+    let link = |ticket: &str| {
+        crate::recovery::RecoveryInvite {
+            republic: "Chess Club".to_string(),
+            member: "petra".to_string(),
+            ticket: ticket.to_string(),
+            server: "s".to_string(),
+            queue_id: "q".to_string(),
+            wrap: "w".to_string(),
+            republic_id: "r".to_string(),
+            handover: None,
+            consent_anchor: None,
+        }
+        .render()
+    };
+    st.session.notice = format!("recovery-link:{}", link(&"ab".repeat(32)));
+    st.clear_link_notice(&"cd".repeat(32));
+    assert!(st.session.notice.starts_with("recovery-link:"), "another link's ticket leaves it");
+    st.clear_link_notice(&"ab".repeat(32));
+    assert!(st.session.notice.is_empty(), "a spent link is gone");
+    st.session.notice = format!("recovery-link:{}", link(&"ab".repeat(32)));
+    st.reset_workspace_state();
+    assert!(st.session.notice.is_empty(), "a closed workspace's link is gone");
+    st.session.notice = "recover-note:x".to_string();
+    st.reset_workspace_state();
+    assert_eq!(st.session.notice, "recover-note:x");
+}
