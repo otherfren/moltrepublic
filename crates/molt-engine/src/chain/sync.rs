@@ -307,7 +307,8 @@ impl State {
     /// Whether this seat is first in the sealing line (S5): the one that
     /// serves what every seat could serve.
     fn first_in_line(&self) -> bool {
-        super::governance::sealer_rank(&self.member(), &self.roster(), &self.unseen_seats()) == 0
+        let next = self.chain.head.as_ref().map_or(0, |h| h.height + 1);
+        self.turn_holder(next).is_some_and(|m| m == self.member())
     }
 
     /// S4/S4a, on the delivery tick: retry a stalled catch-up with backoff,
@@ -671,8 +672,10 @@ impl State {
         }
         // every signature collected on the old branch is position-bound to
         // heights that no longer exist here; this node's own decisions
-        // re-sign at the new heights
+        // re-sign at the new heights, on a healed chain (B5)
         self.chain.pending_sigs.clear();
+        self.chain.fork_candidates.clear();
+        self.chain.diverged.clear();
         let mine: Vec<u64> = self
             .chain
             .own_approvals
@@ -687,8 +690,6 @@ impl State {
         for id in mine {
             self.chain_sign_and_gossip_approval(id);
         }
-        self.chain.fork_candidates.clear();
-        self.chain.diverged.clear();
         self.persist_chain_now();
         self.emit_session(crate::SessionScope::Full);
         // whatever the peer holds above what we adopted

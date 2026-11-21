@@ -2556,21 +2556,235 @@ fn a_vote_without_a_signing_key_is_refused_not_swallowed() {
     assert_eq!(walter.proposals.len(), cards_before, "nothing was put up");
 }
 
-/// S5: the sealing line is the roster by name without silent seats; the
-/// first seals at once, the k-th after k grace periods, asking first.
+/// S5/B6: the sealing line is the roster by name without silent seats;
+/// the first seals at once, the k-th after k grace periods, asking first.
 #[test]
 fn one_sealer_at_a_time() {
-    use super::governance::{sealer_rank, sealer_wait, SealerWait, FALLBACK_ASK_SECS, SEALER_GRACE_SECS};
-    let roster: Vec<String> = ["walter", "dora", "petra"].iter().map(|s| (*s).to_string()).collect();
-    assert_eq!(sealer_rank("dora", &roster, &[]), 0);
-    assert_eq!(sealer_rank("walter", &roster, &[]), 2);
-    let silent = vec!["dora".to_string()];
-    assert_eq!(sealer_rank("petra", &roster, &silent), 0, "a silent seat leaves the line");
-    assert_eq!(sealer_rank("dora", &roster, &silent), 0, "this seat is never silent to itself");
+    use super::governance::{sealer_wait, SealerWait, FALLBACK_ASK_SECS, SEALER_GRACE_SECS};
+    let b = Builder::new(&ALL3, 2);
+    let mut petra = seat3("petra", &b);
+    assert_eq!(petra.sealing_line(1), vec!["dora", "petra", "walter"]);
+    hear(&mut petra, T, &["walter"]);
+    assert_eq!(petra.turn_holder(1).as_deref(), Some("petra"), "a silent seat leaves the line");
+    let mut dora = seat3("dora", &b);
+    hear(&mut dora, T, &[]);
+    assert_eq!(dora.turn_holder(1).as_deref(), Some("dora"), "this seat is never silent to itself");
 
     assert_eq!(sealer_wait(0, 0), SealerWait::Seal);
     assert_eq!(sealer_wait(1, SEALER_GRACE_SECS - 1), SealerWait::Wait);
     assert_eq!(sealer_wait(1, SEALER_GRACE_SECS), SealerWait::Ask);
     assert_eq!(sealer_wait(1, SEALER_GRACE_SECS + FALLBACK_ASK_SECS), SealerWait::Seal);
     assert_eq!(sealer_wait(2, SEALER_GRACE_SECS + FALLBACK_ASK_SECS), SealerWait::Wait);
+}
+
+const T: u64 = 1_751_000_000;
+
+/// B6: `st` heard exactly `seats` at `now` - the presence view the
+/// sealing line is built from.
+fn hear(st: &mut crate::State, now: u64, seats: &[&str]) {
+    st.presence.clock_override = Some(now);
+    st.session.active_workspace = "w-b6".to_string();
+    let roster = st.roster();
+    let members = molt_core::roster_members(&roster, now, |m| {
+        if seats.contains(&m) {
+            now
+        } else {
+            molt_core::MemberInfo::NEVER
+        }
+    });
+    st.session.workspaces.retain(|w| w.id != "w-b6");
+    st.session.workspaces.push(molt_core::WorkspaceInfo {
+        id: "w-b6".to_string(),
+        name: "Chess Club".to_string(),
+        detail: "2-of-3".to_string(),
+        synced: false,
+        state: 0,
+        last_sync_min: 0,
+        sync_queue: 0,
+        s3: false,
+        size_kib: 0,
+        last_backup_min: molt_core::WorkspaceInfo::NEVER,
+        backup_copies: 0,
+        backup_error: String::new(),
+        has_seed: false,
+        net: "nostr".to_string(),
+        encrypted: false,
+        members,
+        agenda: String::new(),
+        restored: false,
+    });
+}
+
+const ALL3: [&str; 3] = ["petra", "walter", "dora"];
+
+/// A 2-of-3 signing seat on a Nostr transport that heard every seat at `T`,
+/// its head old enough that the pacing round is over.
+fn seat3(member: &str, b: &Builder) -> crate::State {
+    let mut st = chain_peer_3(member, b);
+    st.identity_sk = Some(b.key(member).clone());
+    st.nostr = Some(crate::NostrTransport {
+        sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+        relays: vec!["ws://relay.example".to_string()],
+        rotation_seed: [0u8; 32],
+    });
+    hear(&mut st, T, &ALL3);
+    st.chain.head_moved_at = T - 100;
+    st
+}
+
+/// `who` signs `id` at `height`: over the wire, or this node's own vote.
+fn sign_as(st: &mut crate::State, b: &Builder, who: &str, seq: u64, id: u64, height: u64) {
+    if who == st.member() {
+        st.chain_sign_and_gossip_approval(id);
+        return;
+    }
+    let change = st.proposal_change(id).expect("a registered change");
+    let sig = identity_sign(b.key(who), &approval_bytes(&b.republic_id, height, &change));
+    wire(st, who, seq, WorkspaceEvent::Approved { id: ProposalId(id), by: who.to_string(), height, sig });
+}
+
+fn note(st: &mut crate::State, from: &str, seq: u64, id: u64, title: &str) {
+    wire(
+        st,
+        from,
+        seq,
+        WorkspaceEvent::Proposed {
+            id: ProposalId(id),
+            surface: Surface::Memory,
+            payload: json!({ "op": "add_note", "title": title }),
+        },
+    );
+}
+
+fn applied_at(st: &crate::State, height: u64) -> Option<u64> {
+    st.chain.blocks.iter().find(|b| b.height == height).and_then(|b| match &b.change {
+        ChainChange::Applied { proposal_id, .. } => Some(*proposal_id),
+        _ => None,
+    })
+}
+
+/// B6 (D1): two proposals at one height with different signer sets - P
+/// signed by petra+walter, Q by walter+dora. The line is per HEIGHT, so
+/// every node names the same turn-holder (dora, first by name), and it
+/// seals the SMALLER id although it never signed it. Before, each
+/// proposal had its own line: petra sealed P, dora Q - a fork.
+#[test]
+fn one_turn_holder_per_height_seals_the_smallest_id() {
+    let b = Builder::new(&ALL3, 2);
+    let (p, q) = (5u64, 9u64);
+    for me in ALL3 {
+        let mut st = seat3(me, &b);
+        st.chain.head_moved_at = T;
+        let proposer = if me == "walter" { "petra" } else { "walter" };
+        note(&mut st, proposer, 1, p, "p");
+        note(&mut st, proposer, 2, q, "q");
+        let mut seq = 10;
+        for (id, who) in [(q, "walter"), (q, "dora"), (p, "petra"), (p, "walter")] {
+            seq += 1;
+            sign_as(&mut st, &b, who, seq, id, 1);
+        }
+        assert_eq!(st.chain.blocks.len(), 1, "{me}: held inside the pacing round");
+        assert_eq!(st.turn_holder(1).as_deref(), Some("dora"), "{me}: one turn-holder");
+        hear(&mut st, T + SEAL_PACE_SECS, &ALL3);
+        st.drain_held_seals();
+        if me == "dora" {
+            assert_eq!(applied_at(&st, 1), Some(p), "the turn-holder seals the smallest id");
+        } else {
+            assert_eq!(st.chain.blocks.len(), 1, "{me}: not its turn");
+        }
+    }
+}
+
+/// B6 (D2): the sealer records its own `Committed` BEFORE the approvals it
+/// re-signs for the next height - a peer judging those approvals must
+/// already hold the block, or it drops them as a future height.
+#[test]
+fn the_own_block_goes_out_before_the_re_signed_approvals() {
+    let b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let one = propose(&mut walter, Surface::Memory, json!({ "op": "add_note", "title": "one" }));
+    let _two = propose(&mut walter, Surface::Memory, json!({ "op": "add_note", "title": "two" }));
+    super::RECORDED_CHAIN.with(|r| r.borrow_mut().clear());
+    petra_signs(&mut walter, &b, 1, one, 1);
+    assert_eq!(walter.chain.blocks.len(), 2, "walter sealed");
+    let log = super::RECORDED_CHAIN.with(|r| r.borrow().clone());
+    let at = |e: (&str, u64)| log.iter().position(|x| *x == e).unwrap_or_else(|| panic!("{e:?} in {log:?}"));
+    assert!(at(("committed", 1)) < at(("approved", 2)), "{log:?}");
+}
+
+/// B6 (D3): an approval for head+2 comes from a seat one block ahead - it
+/// is parked and counts once the head moves; head+3 is refused as before.
+#[test]
+fn an_approval_one_block_ahead_is_parked_until_the_head_moves() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    note(&mut walter, "petra", 1, 4, "four");
+    b.commit_applied(3, &["petra", "walter"]);
+    let change = walter.proposal_change(4).expect("change");
+    let sig_at = |h: u64| identity_sign(b.key("petra"), &approval_bytes(&b.republic_id, h, &change));
+    assert!(!walter.receive_approval(4, "petra", 2, &sig_at(2)), "head+2 is parked, not refused");
+    assert!(walter.receive_approval(4, "petra", 3, &sig_at(3)), "head+3 is refused");
+    assert_eq!(walter.chain_approval_count(4), 0, "nothing counts yet");
+    walter.receive_block_from("petra", b.blocks[1].clone());
+    assert_eq!(walter.chain.blocks.len(), 2);
+    assert_eq!(walter.chain_approval_count(4), 1, "the parked vote counts at the new head");
+}
+
+/// B6: the turn-holder holds nothing sealable while the next seat does -
+/// the height does not stall: rank 1 asks after one grace and seals after
+/// the ask round.
+#[test]
+fn a_turn_holder_without_a_sealable_proposal_does_not_stall_the_height() {
+    use super::governance::{FALLBACK_ASK_SECS, SEALER_GRACE_SECS};
+    let b = Builder::new(&ALL3, 2);
+    let mut petra = seat3("petra", &b);
+    note(&mut petra, "walter", 1, 5, "five");
+    sign_as(&mut petra, &b, "petra", 0, 5, 1);
+    sign_as(&mut petra, &b, "walter", 2, 5, 1);
+    assert_eq!(petra.chain.blocks.len(), 1, "dora's turn first");
+    let at = |st: &mut crate::State, secs: u64| {
+        hear(st, T + secs, &ALL3);
+        st.drain_held_seals();
+    };
+    at(&mut petra, SEALER_GRACE_SECS - 1);
+    assert_eq!(petra.chain.blocks.len(), 1, "inside dora's grace");
+    at(&mut petra, SEALER_GRACE_SECS);
+    assert_eq!(petra.chain.fallback_asked, Some(1), "petra asks for a missed block");
+    assert_eq!(petra.chain.blocks.len(), 1);
+    at(&mut petra, SEALER_GRACE_SECS + FALLBACK_ASK_SECS);
+    assert_eq!(applied_at(&petra, 1), Some(5), "the fallback seals");
+}
+
+/// B5 (N6): a relay change is not signed while the chain is forked - not
+/// even the proposer's own co-signature. The decision is held and signed
+/// once the fork is decided, and the change seals on the one chain.
+#[test]
+fn a_relay_change_waits_for_a_healed_chain() {
+    let base = Builder::new(&["petra", "walter"], 2);
+    let mut a = base.clone();
+    let mut c = base.clone();
+    for id in [1, 2, 3] {
+        a.commit_applied(id, &["petra", "walter"]);
+        c.commit_applied(id + 10, &["petra", "walter"]);
+    }
+    let rid = &base.republic_id;
+    let (win, lose) = if block_hash(rid, &a.blocks[1]) < block_hash(rid, &c.blocks[1]) { (a, c) } else { (c, a) };
+    let mut walter = chain_signer("walter", &lose, lose.blocks.clone());
+    walter.receive_block_from("petra", win.blocks[3].clone());
+    assert!(!walter.chain.fork_candidates.is_empty(), "the fork is known");
+
+    let relays = json!({ "op": "set_relays", "value": "wss://relay.one" });
+    let id = propose(&mut walter, Surface::Organization, relays.clone());
+    assert!(!walter.own_signature_stands(id), "no signature on a forked chain");
+    assert_eq!(walter.sign_blocker(id).as_deref(), Some("relays wait: chain diverged"));
+
+    walter.receive_block_from("petra", win.blocks[2].clone());
+    walter.receive_block_from("petra", win.blocks[1].clone());
+    assert_eq!(walter.chain.blocks, win.blocks, "the fork is decided");
+    walter.cmd_net_delivery_tick().expect("tick");
+    assert!(walter.own_signature_stands(id), "the held decision is signed now");
+
+    petra_signs(&mut walter, &win, 1, id, 4);
+    assert_eq!(walter.chain.blocks.len(), 5, "sealed on the one chain");
+    assert!(matches!(&walter.chain.blocks[4].change, ChainChange::Applied { proposal_id, .. } if *proposal_id == id));
 }

@@ -445,7 +445,9 @@ async fn a_bystander_that_slept_through_a_recovery_still_hears_the_rejoiner() {
     })
     .await
     .expect("recover start");
-    let s = wait_for(&c, "the recovery to open", |s| {
+    // vera, heard seconds ago, holds the sealing turn (B6): walter seals as
+    // the fallback after one grace and the ask round
+    let s = wait_for_secs(&c, "the recovery to open", 150, |s| {
         (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
             || s.notice.starts_with("recover-failed:")
     })

@@ -152,6 +152,9 @@ impl State {
             tracing::debug!(%from, "dropping a delivery from a torn-down mesh");
             return Ok(Reply::Ack);
         }
+        if self.drop_seam.drops(&from, envelope.seq) {
+            return Ok(Reply::Ack);
+        }
         let known = match &self.net {
             Some(net) => net.peer_names.contains(&from),
             None => self.roster().contains(&from),
@@ -343,6 +346,7 @@ impl State {
         // A2.2: held seals land once their round has passed
         self.drain_held_seals();
         self.chain_heal_tick();
+        self.sign_held_approvals();
         self.wake_tick();
         self.wallet_run_tick(now);
         Ok(Reply::Ack)

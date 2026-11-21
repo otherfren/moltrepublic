@@ -91,6 +91,16 @@ impl State {
     /// concept §2). A lagging or failing writer surfaces honestly in the
     /// session notice.
     pub(crate) fn record(&mut self, env: EventEnvelope) {
+        #[cfg(test)]
+        match &env.body {
+            WorkspaceEvent::Committed(b) => {
+                crate::chain::RECORDED_CHAIN.with(|r| r.borrow_mut().push(("committed", b.height)));
+            }
+            WorkspaceEvent::Approved { height, .. } => {
+                crate::chain::RECORDED_CHAIN.with(|r| r.borrow_mut().push(("approved", *height)));
+            }
+            _ => {}
+        }
         self.apply(&env);
         // the demo mesh mirrors + wakes now; a real mesh's outbox is the storage
         // log, so it must be woken AFTER the append below (else its log read
@@ -896,6 +906,7 @@ impl State {
         self.chain.repush_check_at = 0;
         self.chain.ready_at.clear();
         self.chain.fallback_asked = None;
+        self.chain.parked_approvals.clear();
         self.recovery.pending.clear();
         self.recovery.swept.clear();
         self.chat.clear();

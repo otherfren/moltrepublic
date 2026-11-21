@@ -11,7 +11,7 @@
 
 mod common;
 
-use common::{found_pair, wiki_docs};
+use common::{adopt_relay, engine, found_pair, read_session, wait_for, wiki_docs};
 use std::time::Duration;
 
 use molt_core::{Command, ProposalState, Reply};
@@ -114,3 +114,153 @@ async fn concurrent_bursts_end_on_one_chain() {
     let want_docs = u64::try_from(want).expect("small");
     assert_eq!((wiki_docs(&a).await, wiki_docs(&b).await), (want_docs, want_docs), "the wikis agree");
 }
+
+/// A real 2-of-3 republic over `url`: mara founds, walter and dora join.
+async fn found_trio(root: &std::path::Path, url: &str) -> [WalletHandle; 3] {
+    let a = engine(&root.join("mara"));
+    adopt_relay(&a, url).await;
+    a.execute(Command::CreateStart {
+        name: "Drei".to_string(),
+        member: "mara".to_string(),
+        members: 3,
+        threshold: 2,
+        relays: Vec::new(),
+    })
+    .await
+    .expect("create start");
+    let s = wait_for(&a, "two seat links", |s| {
+        s.create.seats.len() >= 2
+            && s.create.seats.iter().all(|seat| molt_engine::FoundingInvite::parse(&seat.link).is_ok())
+    })
+    .await;
+    let links: Vec<String> = s.create.seats.iter().map(|seat| seat.link.clone()).collect();
+    let mut joiners = Vec::new();
+    for (name, link) in ["walter", "dora"].iter().zip(links) {
+        let w = engine(&root.join(name));
+        adopt_relay(&w, url).await;
+        w.execute(Command::JoinStart { invite: link, member: (*name).to_string(), relays: Vec::new() })
+            .await
+            .expect("join start");
+        joiners.push(w);
+    }
+    wait_for(&a, "both joins", |s| s.create.can_propose).await;
+    a.execute(Command::CreatePropose {
+        name: "Drei".to_string(),
+        agenda: String::new(),
+        features: vec!["memory".to_string()],
+    })
+    .await
+    .expect("charter proposed");
+    let seed = read_session(&a).await.create.seed.clone();
+    a.execute(Command::ConfirmSeedBackup { phrase: seed }).await.expect("founder backup");
+    for w in &joiners {
+        wait_for(w, "the charter", |s| s.join.awaiting_ratify).await;
+        w.execute(Command::JoinConfirmCharter).await.expect("ratify");
+        let seed = read_session(w).await.join.seed.clone();
+        w.execute(Command::ConfirmSeedBackup { phrase: seed }).await.expect("joiner backup");
+    }
+    wait_for(&a, "the seal", |s| s.create.run.outcome == 1).await;
+    a.execute(Command::CreateFinish).await.expect("create finish");
+    for w in &joiners {
+        wait_for(w, "the join seal", |s| s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()).await;
+        w.execute(Command::JoinFinish).await.expect("join finish");
+        wait_for(w, "the joiner to enter", |s| s.screen == molt_core::Screen::Main && !s.workspaces.is_empty())
+            .await;
+    }
+    let mut it = joiners.into_iter();
+    [a, it.next().expect("walter"), it.next().expect("dora")]
+}
+
+/// `(head hash, fork decisions)` as `w` reports them.
+async fn sync_of(w: &WalletHandle) -> (String, u64) {
+    match w.execute(Command::Status).await.expect("status") {
+        Reply::Status(s) => (s.chain_sync.head_hash.clone(), s.chain_sync.fork_decisions),
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// B6 (`docs/chain/rejoin_divergence_build_plan.md`): three seats of a
+/// 2-of-3 republic propose in bursts and approve whatever they see, while
+/// every tenth inbound frame is lost on first arrival. All three end on one
+/// head hash with no restart, and
+/// the per-height sealing line keeps fork decisions rare.
+///
+/// Fork decisions (sum over the three seats), measured 2026-11-21, five
+/// runs each: per-proposal line (before B6) 19, 19, 13, 11, 15; per-height
+/// line 0, 0, 0, 0, 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_seats_with_bursts_and_lost_frames_end_on_one_head() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_test_writer()
+        .try_init();
+    // a storing relay without the notes-per-minute limit: a burst of three
+    // seats is not what this test measures
+    use nostr_relay_builder::builder::{RateLimit, RelayBuilder};
+    use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions};
+    let db = std::sync::Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions { events: true, max_events: None }));
+    let relay = nostr_relay_builder::LocalRelay::new(
+        RelayBuilder::default()
+            .database(db)
+            .rate_limit(RateLimit { max_reqs: 500, notes_per_minute: 1_000_000 }),
+    );
+    relay.run().await.expect("relay runs");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let seats = found_trio(tmp.path(), &url).await;
+    for w in &seats {
+        w.__drop_inbound_every(10);
+    }
+
+    const BURSTS: usize = 2;
+    const PAGES: usize = 3;
+    let names = ["mara", "walter", "dora"];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(420);
+    for burst in 0..BURSTS {
+        for i in 0..PAGES {
+            for (w, name) in seats.iter().zip(names) {
+                w.execute(Command::Propose {
+                    surface: molt_core::Surface::Memory,
+                    payload: add_page(&format!("{name}/b{burst}p{i}.md"), name),
+                })
+                .await
+                .expect("proposes");
+            }
+        }
+        let want = (burst + 1) * PAGES * seats.len();
+        loop {
+            for w in &seats {
+                approve_open(w).await;
+            }
+            let chains = [chain(&seats[0]).await, chain(&seats[1]).await, chain(&seats[2]).await];
+            let applied = |c: &Vec<(u64, u64, Vec<String>)>| c.iter().filter(|(_, pid, _)| *pid != 0).count();
+            let heads = [sync_of(&seats[0]).await.0, sync_of(&seats[1]).await.0, sync_of(&seats[2]).await.0];
+            if chains.iter().all(|c| applied(c) == want) && heads[0] == heads[1] && heads[1] == heads[2] {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no common head:\nmara   {:?}\nwalter {:?}\ndora   {:?}",
+                chains[0],
+                chains[1],
+                chains[2]
+            );
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    let mut forks = 0;
+    for w in &seats {
+        forks += sync_of(w).await.1;
+    }
+    let dropped: u64 = seats.iter().map(WalletHandle::__dropped_inbound).sum();
+    eprintln!("fork_decisions={forks} dropped={dropped}");
+    assert!(dropped > 0, "the network was lossy");
+    assert!(forks <= FORKS_MAX, "fork decisions {forks} above {FORKS_MAX}");
+}
+
+/// Fork decisions the per-height line may take: a takeover after a lost
+/// block can still fork, but far below the 11 the old line never undercut.
+const FORKS_MAX: u64 = 3;

@@ -188,6 +188,7 @@ pub struct WalletHandle {
     vault_seams: std::sync::Arc<net::vault_payload::VaultSeams>,
     wallet_seams: std::sync::Arc<wallet_run::WalletSeams>,
     seat_active: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    drop_seam: std::sync::Arc<net::DropSeam>,
     farewells: Farewells,
 }
 
@@ -323,6 +324,20 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __vault_complain(&self, complain: bool) {
         self.vault_seams.lab.complain.store(complain, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: drop every `n`-th inbound peer envelope before it is
+    /// accepted, as a lossy relay would (the sender's resend re-earns it);
+    /// 0 stops dropping.
+    #[doc(hidden)]
+    pub fn __drop_inbound_every(&self, n: u64) {
+        self.drop_seam.every.store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: how many inbound envelopes the drop seam swallowed.
+    #[doc(hidden)]
+    pub fn __dropped_inbound(&self) -> u64 {
+        self.drop_seam.dropped.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -551,6 +566,7 @@ fn spawn_actor(
     let farewells = state.farewells.clone();
     let wallet_seams = state.wallet_seams.clone();
     let seat_active = state.seat_active.clone();
+    let drop_seam = state.drop_seam.clone();
     if vault::receipts::lab_complain_at_spawn() {
         tracing::warn!("vault_lab=complain");
         vault_seams.lab.complain.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -579,7 +595,7 @@ fn spawn_actor(
         tracing::debug!("engine actor stopped");
     });
 
-    WalletHandle { cmd_tx, ev_tx, vault_seams, wallet_seams, seat_active, farewells }
+    WalletHandle { cmd_tx, ev_tx, vault_seams, wallet_seams, seat_active, drop_seam, farewells }
 }
 
 // The one shared clock (event timestamps must not drift from the storage
@@ -1054,6 +1070,11 @@ pub(crate) struct ChainProjection {
     /// and the height a fallback sealer already asked its peers about.
     pub(crate) ready_at: BTreeMap<u64, (u64, u64)>,
     pub(crate) fallback_asked: Option<u64>,
+    /// B6: approvals for head+2 by (proposal, signer) -> (height, sig),
+    /// re-judged when the head moves.
+    pub(crate) parked_approvals: BTreeMap<(u64, MemberId), (u64, String)>,
+    /// B6: a nested seal runs without the smallest-id pass.
+    pub(crate) sealing_smaller: bool,
     /// Recovery feedback (R2/R3): when blocks were applied (last minute),
     /// and when the session last carried the catch-up and seat sync.
     pub(crate) applied_at: std::collections::VecDeque<u64>,
@@ -1362,6 +1383,8 @@ pub(crate) struct State {
     /// B3 test seam: the restore gates' activity window, `u64::MAX` = the
     /// production default.
     pub(crate) seat_active: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Lossy-network test seam (never a `Command`).
+    pub(crate) drop_seam: std::sync::Arc<net::DropSeam>,
     /// Grant answers and asks of the open workspace (vault plan S4).
     pub(crate) vault_grants: vault::grant::GrantRuntime,
     /// The kind-445 group runtime of an open Nostr workspace (N5.2), with the
@@ -1674,6 +1697,7 @@ impl State {
             vault_seams: std::sync::Arc::default(),
             wallet_seams: std::sync::Arc::default(),
             seat_active: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
+            drop_seam: std::sync::Arc::default(),
             vault_grants: vault::grant::GrantRuntime::default(),
             group_net: None,
             group_mls_parked: None,
