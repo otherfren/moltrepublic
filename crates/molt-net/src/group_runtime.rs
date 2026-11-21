@@ -357,6 +357,9 @@ async fn control_loop(
             _ = stop.changed() => return,
         };
         let Some(frame) = mls.group_control_frame(&plaintext) else {
+            if mls.evicted() {
+                return;
+            }
             tracing::error!("framing a control frame failed - skipped");
             continue;
         };
@@ -464,6 +467,9 @@ async fn ack_loop(
             continue;
         };
         let Some(frame) = mls.group_control_frame(&ack.to_frame()) else {
+            if mls.evicted() {
+                return;
+            }
             tracing::error!("framing a group ack failed — skipped");
             continue;
         };
@@ -848,6 +854,11 @@ where
             continue;
         }
         let Some(frame) = mls.group_frame(&env) else {
+            // evicted: nothing this node frames can be read; hold the cursor
+            if mls.evicted() {
+                persist_cursor(store, start, *published_through).await;
+                return PassOutcome::Stopped;
+            }
             // a LOCAL framing error is not resendable — skipping it is the
             // only way forward, and it is loud
             tracing::error!(seq = env.seq, "MLS-framing a group frame failed — skipped");
@@ -928,6 +939,11 @@ async fn outbox_loop<L, S, K>(
     let mut stall = StallClock::new();
     let mut held = HeldFrame::new();
     loop {
+        // an evicted seat publishes nothing: no pass, no re-offer
+        if mls.evicted() {
+            tracing::debug!(me = %cfg.member, "outbox=stopped reason=evicted");
+            return;
+        }
         match publish_pass(&channel, &mls, &cfg, &log, &store, &sink, &mut held, &busy, &mut stop).await {
             PassOutcome::Stopped => return,
             PassOutcome::Held => stall.disarm(),
@@ -1190,6 +1206,8 @@ enum Ingest {
     /// windows must be forgotten BEFORE the hold is retried — the frames in
     /// the hold are the new incarnation's).
     EpochAdvanced(Vec<MemberId>),
+    /// A commit removed this node's own leaf; the engine was told.
+    Evicted,
     /// The engine is gone.
     EngineGone,
 }
@@ -1391,6 +1409,11 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
         // retried nothing, so a frame arriving ahead of its commit was DROPPED
         MlsDecode::FutureEpoch => Ingest::FutureEpoch,
         MlsDecode::EpochAdvanced(readmitted) => Ingest::EpochAdvanced(readmitted),
+        MlsDecode::Evicted(by) => {
+            tracing::warn!(me = %me, %by, "seat_evicted");
+            sink.evicted(&by).await;
+            Ingest::Evicted
+        }
         MlsDecode::Discard => Ingest::Nothing,
         // relays replay the whole day window on every subscribe, and a
         // publisher hears its own frames back: both routine, neither the
@@ -1452,7 +1475,7 @@ impl<L: OutboxLog, S: StateStore, K: EngineSink> crate::epoch_hold::HeldIngest<(
     async fn ingest(&mut self, item: &mut (String, u64)) -> crate::epoch_hold::Held {
         use crate::epoch_hold::Held;
         match ingest_one(self.mls, self.log, self.store, self.sink, self.me, self.seen, &item.0).await {
-            Ingest::EngineGone => Held::Stop,
+            Ingest::EngineGone | Ingest::Evicted => Held::Stop,
             Ingest::FutureEpoch => Held::Still,
             Ingest::Opaque => Held::Opaque,
             // a held COMMIT merged during the retry: forget the
@@ -1528,7 +1551,8 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                     let _ = health.send(state.clone());
                 }
                 match ingest_one(&mls, &log, &store, &sink, &me, &mut seen, &content).await {
-                    Ingest::EngineGone => return,
+                    // nothing of this group decrypts here any more
+                    Ingest::EngineGone | Ingest::Evicted => return,
                     // NOT counted yet, and not dropped. On 445 the epoch shows
                     // up at the OUTER layer, not at the MLS decode: a frame
                     // sealed under an exporter we have not derived yet is
@@ -1921,6 +1945,98 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
+        handle.shutdown().await;
+    }
+
+    /// **B2: an evicted runtime tells the engine and goes quiet.** Alice
+    /// re-keys bob's seat for another device; bob's running runtime merges
+    /// the commit, reports `evicted(alice)`, and its outbox publishes
+    /// nothing after that - a later own envelope stays unpublished.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_evicted_runtime_reports_it_and_publishes_nothing() {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        use nostr_relay_builder::MockRelay;
+
+        #[derive(Clone, Default)]
+        struct EvictSink(std::sync::Arc<std::sync::Mutex<Vec<MemberId>>>);
+        impl EngineSink for EvictSink {
+            async fn deliver(&self, _f: &MemberId, _e: molt_core::EventEnvelope) -> Result<(), crate::NetError> {
+                Ok(())
+            }
+            async fn peer_seen(&self, _m: &MemberId) {}
+            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+            async fn evicted(&self, by: &MemberId) {
+                self.0.lock().expect("sink").push(by.clone());
+            }
+        }
+
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut alice = MlsMember::new(&key(1), "alice").expect("alice");
+        let mut bob = MlsMember::new(&key(2), "bob").expect("bob");
+        alice.create_group().expect("group");
+        let welcome = alice
+            .add_members(&[bob.key_package().expect("kp")])
+            .expect("add")
+            .expect("welcome");
+        bob.join_from_welcome(&welcome).expect("bob joins");
+        let (commit, _w) = alice
+            .restore_member("bob", &MlsMember::new(&key(2), "bob").expect("bob2").key_package().expect("kp"))
+            .expect("re-key bob");
+        let alice_mls = MlsChannel::new(alice);
+        let relay = MockRelay::run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let seed = [7u8; 32];
+        let alice_chan =
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url.clone()], seed);
+
+        let bob_mls = MlsChannel::new(bob);
+        let log = crate::MemLog::default();
+        let store = crate::MemStateStore::default();
+        let sink = EvictSink::default();
+        let (wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, _health) = watch::channel(GroupHealth::default());
+        let handle = spawn_group(
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], seed),
+            bob_mls.clone(),
+            GroupNetConfig::fast("bob".into(), vec!["alice".into()]),
+            log.clone(),
+            store.clone(),
+            sink.clone(),
+            wake_rx,
+            health_tx,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        let commit_frame = alice_mls
+            .group_frame(&molt_core::EventEnvelope {
+                prev_seq: 0,
+                seq: 1,
+                ts: 1_751_000_000,
+                by: "alice".to_string(),
+                body: molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&commit), stamp: 0 },
+            })
+            .expect("commit frame");
+        alice_chan
+            .publish_frame(&commit_frame.exporter, &commit_frame.ciphertext)
+            .await
+            .expect("publish the commit");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        while sink.0.lock().expect("sink").is_empty() {
+            assert!(tokio::time::Instant::now() < deadline, "the eviction never reached the sink");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(*sink.0.lock().expect("sink"), vec!["alice".to_string()]);
+        assert!(bob_mls.evicted());
+
+        log.push(molt_core::EventEnvelope { by: "bob".to_string(), ..walter_event(1) });
+        let _ = wake.send(1);
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        assert_eq!(
+            store.load().await.group.unwrap_or_default().log_seq,
+            0,
+            "nothing was published after the eviction"
+        );
+        assert!(handle.outbox.as_ref().is_some_and(tokio::task::JoinHandle::is_finished), "the outbox stopped");
         handle.shutdown().await;
     }
 

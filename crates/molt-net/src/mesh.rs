@@ -255,6 +255,7 @@ pub async fn bootstrap_over_mls<T: Transport>(
                         MlsIncoming::Commit { .. } => "commit",
                         MlsIncoming::CommitSuperseded => "superseded-commit",
                         MlsIncoming::CommitRewound { .. } => "rewound-commit",
+                        MlsIncoming::Evicted { .. } => "evicted",
                         MlsIncoming::Proposal => "proposal",
                         MlsIncoming::FutureEpoch => "future-epoch",
                     };
