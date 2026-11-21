@@ -144,6 +144,12 @@ window goes with the old order's anchor wait. Kept, as bounds and not
 deadlines: the consent window (1 024 blocks), the cooldown on
 unsolicited requests, the 3-day frame expiry.
 
+Follow-up (built 2026-11-21): the genesis re-publish ends on the event
+"every roster seat heard in the running group" (not on time; it is not
+restarted on reopen, as before); a rejoiner with no anchor piece repeats
+its request; open anchor-first attempts are capped at 4 per workspace;
+anchor-first seats and a held relay approval survive a restart.
+
 - Tests: a refused or abandoned attempt leaves the coordinator's head
   and MLS epoch unchanged; an anchor that needs 20 min (paused clock)
   still completes; a lost part is re-fetched; the Welcome survives a
