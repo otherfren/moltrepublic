@@ -57,12 +57,14 @@ Three kinds of element: **board**, **story** and **task**.
 - **Moving.** A vote may move a waiting story to another board. A story
   in progress, done or discarded does not move. Its dependencies (§5)
   move with it or are lifted in the same vote.
-- **Removing** (decided 2026-11-21). A vote may remove any task, any
-  story and any board, in whatever state - a republic must be able to
-  clear away old finished boards. A removed story takes its tasks and
-  marks with it, a removed board its stories. Only the general board
-  stays: no vote created it. The chain keeps every block; removal
-  clears the board, not the history.
+- **Removing** (decided 2026-11-21). A vote may remove a task of an
+  open story, a story that is not done, and any board in whatever
+  state - a republic must be able to clear away old finished boards.
+  A done story stays: it is the record of what was done, and it leaves
+  only together with its board. A removed story takes its tasks and
+  marks with it, a removed board its stories, the done ones included.
+  Only the general board stays: no vote created it. The chain keeps
+  every block; removal clears the board, not the history.
 
 ### 2.1 Story fields
 
@@ -191,9 +193,8 @@ waiting -> in progress -> done
 - **A blocker cannot be discarded or removed.** A vote that would
   discard or remove a story or board something still waits for is
   refused. A vote may lift or rewire the dependency in the same
-  package; the check runs on the state after it. Removing a done story
-  or a finished board is no such case: the wait is over, and the link
-  goes with it.
+  package; the check runs on the state after it. Removing a finished
+  board is no such case: the wait is over, and the link goes with it.
 - A vote may add a dependency to an in-progress story; it goes back to
   waiting.
 

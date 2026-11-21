@@ -71,7 +71,7 @@ Three findings that shape the plan:
 | D1 | How do task marks travel? | A new log event, emitted only once every roster seat has announced the capability (`seat_caps`, the mechanism of `recovery_auto_approval.md` §7e). It rides the delivery guarantee and the dump. The alternative, a control frame, is safe for old builds but has no resend and no persistence. |
 | D2 | What is the story chat on the wire? | A `Topic` channel with the reserved name `story:<id>`. No wire change; an old build shows an ordinary topic. A fourth `ChannelRef` variant would hit finding 1 and touch ~40 match sites. Cost: the topic thread rules (expiry, close line) apply to it. |
 | D3 | Is a package void when the board moved since it was drafted? | No. The Kanban voids on a stale `base_rev`; with versions handed on over days that would void almost every package. A package is void only if it no longer applies to the state it meets. `base_rev` stays as a display hint. |
-| D4 | What may a package remove? | Everything: any task, story or board, in any state (C§2). Only the general board stays. The blocker rule holds for what is still waited for. |
+| D4 | What may a package remove? | A task of an open story, a story that is not done, and any board in any state with all its stories (C§2). A done story leaves only with its board; the general board never. The blocker rule holds for what is still waited for. |
 | D5 | Tool names | `board_view`, `board_propose`, `board_mark`; `read_actions`, `wake_skill`, `test_wake` keep their names. The `quests_*` names go with the Kanban. |
 | D6 | Wake settings | Two reasons replace `kanban` and `task_start`: `board` (the three voted events of C§8) and `wait_due`. The config reader maps the old names onto them. |
 
@@ -140,10 +140,10 @@ C§10).
 |---|---|
 | unknown id, duplicate id | every referenced element exists, every new id is free |
 | closed target | no act but a removal touches a finished board, a done or discarded story, or their tasks |
-| remove | the general board is never removed; a removed story takes its tasks, a removed board its stories; links to a removed done story or finished board go with it |
+| remove | the general board and a done story are never removed by themselves; a removed story takes its tasks, a removed board its stories, done ones included; links to a removed finished board go with it |
 | move | only a waiting story moves (C§2); its `waits_for` must lie inside the target board after the package |
 | finish | a board is finished only when every story on it is terminal (C§3) |
-| blocker | a discarded story, and a removed story or board that is not done or finished, has no open dependent after the package (C§5) |
+| blocker | a discarded or removed story, and a removed board that is not finished, has no open dependent after the package (C§5) |
 | cross-board link | `waits_for` of a story names stories of its own board only |
 | cycle | none among the stories of a board, none among the boards |
 | wait story | no tasks, no criteria; `story_close` of a wait story is `done` only |
@@ -245,7 +245,8 @@ molt-ui/live-preview`); no full window build per step.
 
 **S1 - Core model and fold.** `board_fold.rs` beside the Kanban code.
 Tests first: one per fault row of §4.2; a removed finished board
-leaves no trace in the state and frees nothing it had not freed; the derived states of C§4; a
+leaves no trace in the state and frees nothing it had not freed;
+`story_remove` of a done story is void; the derived states of C§4; a
 `kanban_ops` entry is `Skipped`; a package of ten acts applies whole or
 not at all; the general board exists in the empty state; canonical
 bytes of a package are pinned.
