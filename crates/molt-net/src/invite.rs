@@ -463,6 +463,14 @@ pub struct RecoverRequest {
     /// The member's reply queue, so the coordinator can send the Welcome back.
     #[serde(default)]
     pub reply: Option<ReplyHandover>,
+    /// The rejoiner wants the chain anchor before anything is sealed
+    /// (`RecoverAnchor` → `RecoverReady` → seal). An older coordinator
+    /// ignores it and runs the seal-first order.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub anchor_first: bool,
+    /// The rejoiner's build version ("" = older than the anchor-first order).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 /// One member's seal signature over the final roster table.
@@ -601,6 +609,38 @@ pub enum RitualMsg {
         /// Why, verbatim from the coordinator's validation ladder.
         reason: String,
     },
+    /// coordinator -> returning member (anchor-first order): one piece of
+    /// the chain anchor, sent before anything is proposed. `event` is the
+    /// JSON of one anchor event (a checkpoint part, a whole checkpoint or
+    /// the anchor block), opaque here. The rejoiner verifies the whole set
+    /// standalone; the frame carries no authority.
+    RecoverAnchor {
+        /// The returning seat.
+        member: String,
+        /// Position in the anchor set, 0-based.
+        index: u32,
+        /// Size of the anchor set.
+        total: u32,
+        /// JSON of the anchor event.
+        event: String,
+    },
+    /// returning member -> coordinator: re-send these anchor pieces.
+    RecoverWant {
+        /// The returning seat.
+        member: String,
+        /// The link's ticket (the coordinator's key for the attempt).
+        ticket: String,
+        /// Indexes not received.
+        missing: Vec<u32>,
+    },
+    /// returning member -> coordinator: the anchor verified - propose,
+    /// seal and re-key now.
+    RecoverReady {
+        /// The returning seat.
+        member: String,
+        /// The link's ticket.
+        ticket: String,
+    },
     /// returning member -> coordinator: the rejoin failed after the
     /// re-admission, so the coordinator can log why. Display data only; an
     /// older coordinator drops the unknown variant.
@@ -655,6 +695,87 @@ mod tests {
         let old = r#"{"kind":"recover_progress","member":"petra","need":2,"roster":["petra"],"approved":[]}"#;
         let msg: RitualMsg = serde_json::from_str(old).expect("old frame");
         assert!(matches!(msg, RitualMsg::RecoverProgress { version, .. } if version.is_empty()));
+    }
+
+    /// B4 byte pins: the anchor-first vocabulary on the wire.
+    #[test]
+    fn the_anchor_first_frames_have_a_pinned_shape() {
+        let ready = RitualMsg::RecoverReady { member: "petra".into(), ticket: "ab".into() };
+        assert_eq!(
+            serde_json::to_string(&ready).expect("json"),
+            r#"{"kind":"recover_ready","member":"petra","ticket":"ab"}"#
+        );
+        let want = RitualMsg::RecoverWant { member: "petra".into(), ticket: "ab".into(), missing: vec![1, 3] };
+        assert_eq!(
+            serde_json::to_string(&want).expect("json"),
+            r#"{"kind":"recover_want","member":"petra","ticket":"ab","missing":[1,3]}"#
+        );
+        let part = RitualMsg::RecoverAnchor { member: "petra".into(), index: 0, total: 2, event: "{}".into() };
+        assert_eq!(
+            serde_json::to_string(&part).expect("json"),
+            r#"{"kind":"recover_anchor","member":"petra","index":0,"total":2,"event":"{}"}"#
+        );
+    }
+
+    fn request(anchor_first: bool, version: &str) -> RecoverRequest {
+        RecoverRequest {
+            member: "petra".into(),
+            identity_pk: "aa".into(),
+            key_package: "bb".into(),
+            ticket: "cc".into(),
+            seat_proof: "dd".into(),
+            new_nostr_pk: String::new(),
+            relays: Vec::new(),
+            consent: String::new(),
+            reply: None,
+            anchor_first,
+            version: version.into(),
+        }
+    }
+
+    /// The new request fields are additive: absent when unset (the old
+    /// shape byte for byte), present and named when set, and an old frame
+    /// decodes as the seal-first order.
+    #[test]
+    fn the_request_fields_are_additive() {
+        let old = r#"{"kind":"recover","member":"petra","identity_pk":"aa","key_package":"bb","ticket":"cc","seat_proof":"dd","new_nostr_pk":"","relays":[],"consent":"","reply":null}"#;
+        assert_eq!(serde_json::to_string(&RitualMsg::Recover(request(false, ""))).expect("json"), old);
+        let new = serde_json::to_string(&RitualMsg::Recover(request(true, "0.0.21"))).expect("json");
+        assert!(new.ends_with(r#""reply":null,"anchor_first":true,"version":"0.0.21"}"#), "{new}");
+        let parsed: RitualMsg = serde_json::from_str(old).expect("old frame");
+        assert!(matches!(parsed, RitualMsg::Recover(r) if !r.anchor_first && r.version.is_empty()));
+    }
+
+    /// What an older build parses with: its `RitualMsg` lacks the new
+    /// variants and its request lacks the new fields.
+    #[derive(Debug, Deserialize)]
+    #[serde(tag = "kind", rename_all = "snake_case")]
+    enum OlderRitualMsg {
+        Recover(OlderRecoverRequest),
+        #[allow(dead_code)]
+        RecoverRefused { member: String, reason: String },
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct OlderRecoverRequest {
+        member: String,
+    }
+
+    /// An older parser reads a new request (unknown fields ignored) and
+    /// fails cleanly on the new variants - the inbox skips such a wrap.
+    #[test]
+    fn an_older_parser_drops_the_new_frames() {
+        let new = serde_json::to_string(&RitualMsg::Recover(request(true, "0.0.21"))).expect("json");
+        let old: OlderRitualMsg = serde_json::from_str(&new).expect("an old build reads the request");
+        assert!(matches!(old, OlderRitualMsg::Recover(r) if r.member == "petra"));
+        for msg in [
+            RitualMsg::RecoverReady { member: "petra".into(), ticket: "ab".into() },
+            RitualMsg::RecoverWant { member: "petra".into(), ticket: "ab".into(), missing: vec![0] },
+            RitualMsg::RecoverAnchor { member: "petra".into(), index: 0, total: 1, event: "{}".into() },
+        ] {
+            let json = serde_json::to_string(&msg).expect("json");
+            assert!(serde_json::from_str::<OlderRitualMsg>(&json).is_err(), "{json}");
+        }
     }
 
     // ---- invite handover v2 (N4a step 3, nostr_n4_plan.md §3) -------------
@@ -797,6 +918,8 @@ mod tests {
                 queue_id: "ee".to_string(),
                 wrap: "ff".to_string(),
             }),
+            anchor_first: false,
+            version: String::new(),
         });
         let json = serde_json::to_string(&msg).expect("serialize");
         assert!(json.contains("\"kind\":\"recover\""), "tagged as recover: {json}");

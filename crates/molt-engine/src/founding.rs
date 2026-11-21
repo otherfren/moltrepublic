@@ -3195,6 +3195,8 @@ mod tests {
                 queue_id: "ee".to_string(),
                 wrap: "ff".to_string(),
             }),
+            anchor_first: false,
+            version: String::new(),
         };
         let Command::NetRecoverRequested {
             member,
@@ -3225,6 +3227,8 @@ mod tests {
             new_nostr_pk: String::new(),
             relays: Vec::new(),
             reply: None,
+            anchor_first: false,
+            version: String::new(),
             consent: String::new(),
         };
         let Command::NetRecoverRequested { reply, .. } = recover_command(bare, String::new(), 1) else {

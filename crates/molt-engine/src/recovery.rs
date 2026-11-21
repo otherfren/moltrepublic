@@ -610,6 +610,8 @@ pub async fn run_rejoin_with_timeout<T: Transport>(
             queue_id: hex::encode(&reply_q.snd.id.0),
             wrap: hex::encode(reply_wrap.to_bytes()),
         }),
+        anchor_first: false,
+        version: String::new(),
     });
     let payload = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
     supervisor::send_framed(

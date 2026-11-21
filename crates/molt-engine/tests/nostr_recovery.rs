@@ -1028,6 +1028,8 @@ async fn a_request_wrapped_by_another_key_is_refused_and_leaves_the_ticket_unspe
                 new_nostr_pk: anchor,
                 relays: Vec::new(),
                 reply: None,
+                anchor_first: false,
+                version: String::new(),
                 consent: String::new(),
             }),
         )
@@ -1618,6 +1620,8 @@ async fn a_link_less_request_from_an_older_build_is_refused_and_answered() {
             new_nostr_pk: anchor,
             relays: Vec::new(),
             reply: None,
+            anchor_first: false,
+            version: String::new(),
             consent: String::new(),
         }),
     )
