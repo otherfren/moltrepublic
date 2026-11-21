@@ -781,6 +781,12 @@ impl State {
         self.read_cursors.clear();
         self.forgotten_threads.clear();
         self.delivery.last_mesh_out = 0;
+        self.delivery.evicted = false;
+        self.delivery.unreadable_seen = 0;
+        self.delivery.unreadable_warned = false;
+        self.delivery.locked_out_noted = false;
+        self.recovery.held_approvals.clear();
+        self.recovery.held_seals.clear();
         // a runtime-derived Degraded belongs to the mesh that just ended —
         // it resets with its backing maps (a Down verdict is the open/config
         // path's and stays until the next resolve)

@@ -288,9 +288,7 @@ impl State {
             self.session.net_health = if self.group_net.is_some() {
                 molt_core::NetHealth::Ok
             } else {
-                molt_core::NetHealth::Down {
-                    reason: crate::session::NOSTR_RUNTIME_PENDING.to_string(),
-                }
+                self.group_down()
             };
         }
         // B2: a fresh materialization seeds the seat's read cursors (a
@@ -1700,167 +1698,6 @@ impl State {
     /// verified [`Command::NetRecoverSealed`] against that context. Until
     /// N4's Nostr transport lands there is no network to run the rejoin
     /// over, so the production path reports an honest failure right away.
-    /// The self-service reattach (`detached_reattach.md` §2.3): a workspace
-    /// that opened DETACHED with a verified chain announces its seat to the
-    /// survivors' standing inboxes and runs the ordinary rejoiner wait — no
-    /// link, no mint, no human act. One attempt per open; where the material
-    /// is missing (no seed on disk, no anchors, no confirmed ratified relay)
-    /// it returns `false` and the honest detached state stays. The ticketed
-    /// recovery link remains the manual fallback.
-    pub(crate) fn spawn_reattach(&mut self) -> bool {
-        if !self.persist {
-            return false;
-        }
-        self.recovery.link_rejoin = false;
-        let member = self.member();
-        let Some(head) = self.chain.head.as_ref() else {
-            return false;
-        };
-        let Some(anchored) = head
-            .identities
-            .iter()
-            .find(|i| i.member == member)
-            .map(|i| i.identity_pk.clone())
-        else {
-            return false;
-        };
-        let republic_id = head.republic_id.clone();
-        let ratified = self.ratified_relays();
-        if ratified.is_empty() {
-            return false;
-        }
-        // the seat's phrase, revealed from the workspace's sealed seed — a
-        // knowledge-only restore (no seed in the blob) cannot reattach
-        let Some(phrase) = self.seed_of(&self.session.active_workspace) else {
-            tracing::info!("detached workspace carries no seed - reattach needs the recovery link");
-            return false;
-        };
-        // every OTHER seat's WORKING anchor from the restored chain —
-        // possibly stale; whoever kept theirs answers
-        let targets: Vec<String> = head
-            .identities
-            .iter()
-            .filter(|i| i.member != member)
-            .map(|i| self.working_nostr_pk(&i.member))
-            .filter(|a| !a.is_empty())
-            .collect();
-        if targets.is_empty() {
-            return false;
-        }
-        // ADR-0004: dial only what this operator confirmed
-        let verdicts = molt_core::relay::diagnose_invite_relays(
-            &ratified,
-            &self.session.settings.relays,
-            self.clearnet_session,
-        );
-        let dial_relays: Vec<String> = verdicts
-            .iter()
-            .filter(|v| v.blocked.is_none())
-            .map(|v| v.url.clone())
-            .collect();
-        if dial_relays.is_empty() {
-            tracing::info!("detached workspace: no ratified relay is locally confirmed - staying detached");
-            return false;
-        }
-        let Ok(dialer) = self.dialer_for() else {
-            return false;
-        };
-        let Ok(self_ticket) = molt_net::invite::mint_ticket() else {
-            return false;
-        };
-        let Some(cmd_tx) = self.cmd_tx.upgrade() else {
-            return false;
-        };
-        self.recovery.generation += 1;
-        let generation = self.recovery.generation;
-        if let Some(task) = self.recovery.task.take() {
-            task.abort();
-        }
-        let handover = molt_net::invite::RecoveryHandoverV2 {
-            // the SELF-ticket (the founder's third-anchor pattern): salt for
-            // the fresh transport anchor, registered nowhere
-            ticket: self_ticket.clone(),
-            npub: targets[0].clone(),
-            relays: dial_relays.clone(),
-            republic_id: republic_id.clone(),
-            identity_pk: anchored,
-            // the seat's own view: a stale chain is refused at the
-            // coordinator rather than trusted (recovery_auto_approval.md §7e)
-            consent_anchor: self.consent_anchor_for(&member),
-        };
-        let republic = self
-            .replica
-            .as_ref()
-            .map(|r| r.name.clone())
-            .unwrap_or_default();
-        self.recovery.ctx = Some((
-            crate::recovery::RecoveryInvite {
-                republic,
-                member: member.clone(),
-                ticket: self_ticket,
-                server: String::new(),
-                queue_id: String::new(),
-                wrap: String::new(),
-                republic_id,
-                consent_anchor: handover.consent_anchor.clone(),
-                handover: Some(handover.clone()),
-            },
-            phrase.clone().into(),
-        ));
-        self.session.recover = molt_core::RecoverState::default();
-        let extra_targets = targets.get(1..).map(<[String]>::to_vec).unwrap_or_default();
-        self.recovery.task = Some(crate::nostr_ritual::spawn_recovery_rejoiner(
-            dialer,
-            crate::nostr_ritual::RecoverCtx {
-                handover,
-                dial_relays,
-                extra_targets,
-                member,
-                phrase: phrase.into(),
-                generation,
-            },
-            cmd_tx.downgrade(),
-        ));
-        tracing::info!("detached workspace - reattaching to the republic");
-        true
-    }
-
-    /// Self-heal a STUCK-EPOCH seat (`detached_reattach.md` §2.4): triggered
-    /// by the deaf-node signature (own outbox stalled + unopenable frames).
-    /// Runs the ordinary self-service reattach, capped per SESSION and
-    /// spaced — two devices restoring the same seat must never re-key each
-    /// other in an endless ping-pong, and a misfiring detector must cost
-    /// bounded churn.
-    pub(crate) fn maybe_self_heal_reattach(&mut self) {
-        const SPACING_SECS: u64 = 600;
-        const MAX_ATTEMPTS: u32 = 3;
-        if self.recovery.reattach_attempts >= MAX_ATTEMPTS {
-            return;
-        }
-        let now = crate::now_secs();
-        if self
-            .recovery.last_reattach
-            .is_some_and(|t| now.saturating_sub(t) < SPACING_SECS)
-        {
-            return;
-        }
-        if self.recovery.task.as_ref().is_some_and(|t| !t.is_finished()) {
-            return;
-        }
-        // stamp BEFORE trying: a spawn that cannot start (no seed, no
-        // anchors) must not retry on every health frame either
-        self.recovery.last_reattach = Some(now);
-        if self.spawn_reattach() {
-            self.recovery.reattach_attempts += 1;
-            tracing::warn!(
-                attempt = self.recovery.reattach_attempts,
-                "group key behind and outbox stalled - self-healing via reattach"
-            );
-            self.session.notice = "reattaching".to_string();
-            self.emit_session(SessionScope::Full);
-        }
-    }
-
     pub(crate) fn cmd_recover_start(
         &mut self,
         link: String,
@@ -1913,7 +1750,6 @@ impl State {
         let generation = self.recovery.generation;
         let task_phrase = phrase.clone();
         self.recovery.ctx = Some((inv.clone(), phrase.into()));
-        self.recovery.link_rejoin = true;
         // a fresh run starts with a fresh checklist (the old republic's
         // finished list must not front-run the new coordinator's report)
         self.session.notice.clear();
@@ -2402,7 +2238,6 @@ impl State {
     pub(crate) fn invalidate_recovery(&mut self) {
         self.recovery.generation += 1;
         self.recovery.ctx = None;
-        self.recovery.link_rejoin = false;
         if let Some(task) = self.recovery.task.take() {
             task.abort();
         }
@@ -2543,8 +2378,7 @@ impl State {
     /// Abort the running rejoin: the task stops and a late result of it is
     /// dropped by the bumped generation. Nothing was written yet.
     pub(crate) fn cmd_recover_cancel(&mut self) -> Result<Reply, MoltError> {
-        // only a link rejoin: a self-heal reattach shares the task slot
-        if !self.recovery.link_rejoin || !self.recovery.task.as_ref().is_some_and(|t| !t.is_finished()) {
+        if !self.recovery.task.as_ref().is_some_and(|t| !t.is_finished()) {
             return Err(MoltError::Recover("no rejoin running".to_string()));
         }
         self.invalidate_recovery();

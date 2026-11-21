@@ -1,7 +1,16 @@
 # Detached reattach: a restored seat reconnects without a fresh ritual
 
-**Status: EXECUTED 2026-08-24 — built in the same session as the decision.**
-Keystone: `nostr_recovery.rs::a_restored_workspace_reattaches_without_a_ritual`
+**Status: SUPERSEDED 2026-11-21 by B3 of
+`docs/chain/rejoin_divergence_build_plan.md`.** A node never asks for its
+own restore any more: the detached open (§2.3) and the self-heal (§2.4)
+only report (`detached` / `seat-locked-out` + a `seat_locked_out` WARN),
+and a coordinator refuses a link-less request with `rejoin needs a link`
+(§2.2's lane is gone; the seat inbox stays to answer older builds). The
+field restored live seats through this path. The ticketed link is the
+only way back. History below.
+
+**Was: EXECUTED 2026-08-24 — built in the same session as the decision.**
+Keystone (removed with B3): `nostr_recovery.rs::a_restored_workspace_reattaches_without_a_ritual`
 (export → device dies → fresh device restores the blob → OPEN alone
 reattaches; walter only hears the rejoin notice; verified red before the
 build). Builds on `recovery_auto_approval.md` (auto-approval,

@@ -526,6 +526,9 @@ impl State {
         } else if valid.len() + consented < need {
             return;
         }
+        if self.restore_seal_held(id, &change) {
+            return;
+        }
         // S5: one sealer at a time; the others wait their turn
         if !self.sealer_turn(id, target, &change, &signers) {
             self.chain.seal_held.insert(id);

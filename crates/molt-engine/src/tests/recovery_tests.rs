@@ -287,25 +287,23 @@ fn a_recover_note_speaks_only_for_the_live_incarnation() {
     );
 }
 
-/// The stuck-epoch self-heal is CAPPED and SPACED (`detached_reattach.md`
-/// §2.4): a failed spawn still stamps the clock (no per-health-frame
-/// retry), the session cap survives resets, and a running recovery task
-/// is never stacked onto.
+/// B3: the deaf-node signature (own outbox stalled, live frames no key
+/// opens) is REPORTED - `seat-locked-out`, once per session - and starts
+/// no rejoin: the field's self-heal sent restore requests for live seats.
 #[test]
-fn the_self_heal_reattach_is_capped_and_spaced() {
+fn a_locked_out_seat_reports_it_and_asks_nobody() {
     let mut st = tests::plain_state();
-    // no chain, no seed — the spawn cannot start, but the clock stamps
-    st.maybe_self_heal_reattach();
-    assert_eq!(st.recovery.reattach_attempts, 0, "a spawn that cannot start counts no attempt");
-    let first = st.recovery.last_reattach.expect("the try is stamped");
-    // immediately again: inside the spacing window nothing happens
-    st.maybe_self_heal_reattach();
-    assert_eq!(st.recovery.last_reattach, Some(first), "spaced - no re-stamp inside the window");
-    // at the session cap nothing ever fires again, even past the window
-    st.recovery.reattach_attempts = 3;
-    st.recovery.last_reattach = None;
-    st.maybe_self_heal_reattach();
-    assert_eq!(st.recovery.last_reattach, None, "the session cap is final (anti ping-pong)");
+    let me = st.member();
+    st.delivery
+        .send_stuck
+        .insert(me, "not acknowledging deliveries - still resending".to_string());
+    let deaf = molt_net::group_runtime::GroupHealth { subscribed: true, live_opaque: 5, ..Default::default() };
+    st.apply_group_health(deaf.clone());
+    assert_eq!(st.session.notice, "seat-locked-out");
+    assert!(st.recovery.task.is_none(), "no recovery request goes out");
+    st.session.notice.clear();
+    st.apply_group_health(deaf);
+    assert!(st.session.notice.is_empty(), "reported once per session");
 }
 
 /// The rejoiner's checklist (`NetRecoverProgress`): a live incarnation's
@@ -518,7 +516,6 @@ fn a_running_rejoin_can_be_cancelled() {
     let mut st = crate::tests::plain_state();
     assert!(st.cmd_recover_cancel().is_err(), "nothing to abort");
     st.recovery.task = Some(tokio::spawn(std::future::pending::<()>()));
-    st.recovery.link_rejoin = true;
     st.session.recover.member = "petra".to_string();
     let before = st.recovery.generation;
     st.cmd_recover_cancel().expect("cancel");

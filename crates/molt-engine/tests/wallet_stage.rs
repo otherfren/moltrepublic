@@ -89,6 +89,8 @@ async fn recover_c(all: &mut Vec<WalletHandle>, url: &str, tmp: &std::path::Path
     let c = all.pop().expect("c");
     c.execute(Command::CloseWorkspace).await.expect("c goes away");
     drop(c);
+    // B3: the lost seat was heard a moment ago (production: 120 s)
+    all[0].__seat_active_secs(0);
     all[0].execute(Command::RecoverInviteStart { member: "c".to_string() }).await.expect("mint");
     let s = wait_for(&all[0], "the recovery link", |s| {
         s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")

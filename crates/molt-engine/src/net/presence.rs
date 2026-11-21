@@ -7,6 +7,9 @@
 
 use super::*;
 
+/// The `net_health` reason of an evicted seat.
+pub(crate) const SEAT_EVICTED: &str = "seat evicted";
+
 /// The 0/1/2 pill derivation of the ACTIVE workspace, shared by
 /// [`State::presence_of`] (one member, on demand) and the tick's
 /// `refresh_member_pills` (every pill): THIS node is always online (it is
@@ -80,6 +83,83 @@ impl State {
             self.reset_peer_accept_window(&member);
         }
         Ok(Reply::Ack)
+    }
+
+    /// B2: a merged commit removed this seat's own leaf - its seat runs on
+    /// another device. Honoured only when the live group really is
+    /// inactive, so a stale runtime cannot silence the next workspace.
+    pub(crate) fn cmd_net_evicted(
+        &mut self,
+        by: MemberId,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        let inactive = self
+            .group_net
+            .as_ref()
+            .is_some_and(|g| g.mls.lock().is_ok_and(|m| m.is_evicted()));
+        if self.net_generation_current(generation) && inactive {
+            self.enter_evicted(&by);
+        }
+        Ok(Reply::Ack)
+    }
+
+    /// Stop the group runtime for good (no resends, no publishes), keep the
+    /// inactive group on disk so a restart stays quiet, and say so once.
+    pub(crate) fn enter_evicted(&mut self, by: &str) {
+        if let Some(group) = self.group_net.take() {
+            let mls = group.mls.clone();
+            tokio::spawn(async move { group.handle.shutdown().await });
+            let snap = mls.lock().ok().and_then(|g| g.snapshot().ok());
+            if let (Some(active), Some(snap)) = (self.active.as_ref(), snap) {
+                let _ = active.handle.merge_mls_async(snap);
+            }
+            self.group_mls_parked = Some(mls);
+        }
+        if !self.delivery.evicted {
+            self.delivery.evicted = true;
+            tracing::warn!(by, "seat_evicted");
+            self.session.notice = "seat-evicted".to_string();
+        }
+        self.session.net_health = self.group_down();
+        self.emit_session(SessionScope::Full);
+    }
+
+    /// B3: this seat cannot take part and will not ask for its own restore
+    /// (that re-keyed live seats in the field): one notice and one WARN per
+    /// session; the operator rejoins with a link.
+    pub(crate) fn note_locked_out(&mut self, reason: &str) {
+        if self.delivery.locked_out_noted {
+            return;
+        }
+        self.delivery.locked_out_noted = true;
+        tracing::warn!(reason, "seat_locked_out");
+        self.session.notice = "seat-locked-out".to_string();
+        self.emit_session(SessionScope::Full);
+    }
+
+    /// B2: live frames no held key opens, one WARN per episode. An episode
+    /// is a run of presence ticks over which the count keeps growing.
+    pub(crate) fn note_unreadable_tick(&mut self) {
+        let Some(n) = self.group_net.as_ref().map(|g| g.health.borrow().live_opaque) else {
+            return;
+        };
+        let grew = n > self.delivery.unreadable_seen;
+        if grew && !self.delivery.unreadable_warned {
+            tracing::warn!(count = n, "group_unreadable");
+        }
+        self.delivery.unreadable_warned = grew;
+        self.delivery.unreadable_seen = n;
+    }
+
+    /// The verdict of a Nostr workspace whose group runtime is not up.
+    pub(crate) fn group_down(&self) -> molt_core::NetHealth {
+        molt_core::NetHealth::Down {
+            reason: if self.delivery.evicted {
+                SEAT_EVICTED.to_string()
+            } else {
+                crate::session::NOSTR_RUNTIME_PENDING.to_string()
+            },
+        }
     }
 
     /// Transport trouble: pin the member's pill unreachable AND flag the
@@ -236,12 +316,11 @@ impl State {
             // a stuck broadcast outbox names no peer — the channel is the
             // trouble, so its reason joins the channel verdict
             parts.extend(self.delivery.send_stuck.values().cloned());
-            // SELF-HEAL (detached_reattach.md §2.4): the deaf-node signature
-            // — the OWN outbox stalls (nobody acks) while LIVE frames arrive
-            // that no held key opens. A rejoiner's history never counts, so
-            // an offline peer cannot talk it into re-keying itself.
+            // the deaf-node signature - the OWN outbox stalls (nobody acks)
+            // while LIVE frames arrive that no held key opens. B3: reported,
+            // never self-healed; the operator rejoins with a link.
             if !self.delivery.send_stuck.is_empty() && h.live_opaque > 0 {
-                self.maybe_self_heal_reattach();
+                self.note_locked_out("key_behind");
             }
             if parts.is_empty() {
                 molt_core::NetHealth::Ok
@@ -264,6 +343,8 @@ impl State {
     pub(crate) fn cmd_net_presence_tick(&mut self) -> Result<Reply, MoltError> {
         self.refresh_member_pills();
         self.recompute_net_health();
+        self.note_unreadable_tick();
+        self.retry_held_restore_approvals();
         // the mirror gossip beat (mirroring §3.4) rides this tick as well
         self.mirror_gossip_tick(self.presence_now());
         crate::vault::receipts::tick(self, self.presence_now());

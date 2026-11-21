@@ -142,6 +142,11 @@ impl MlsChannel {
     /// Same atomicity rule as [`Self::group_frame`], and the same reason: two
     /// calls, and a commit merging between them seals a new-epoch outer over
     /// an old-epoch inner that the receiver can then never open.
+    /// Whether a merged commit removed this node's own leaf.
+    pub(crate) fn evicted(&self) -> bool {
+        self.member.lock().is_ok_and(|m| m.is_evicted())
+    }
+
     pub(crate) fn group_control_frame(&self, plaintext: &[u8]) -> Option<GroupFrame> {
         let mut m = self.member.lock().ok()?;
         let ciphertext = m.encrypt(plaintext).ok()?;
@@ -283,6 +288,9 @@ impl MlsChannel {
                 self.epoch_bump.send_modify(|n| *n = n.wrapping_add(1));
                 MlsDecode::EpochAdvanced(readmitted)
             }
+            // the commit removed our own leaf: nothing this node sends or
+            // receives on this group decrypts any more
+            Ok(MlsIncoming::Evicted { by }) => MlsDecode::Evicted(by),
             // proposals: nothing to deliver
             Ok(MlsIncoming::Proposal) => MlsDecode::Discard,
             // the caller logs by class: openmls's own error lines are off
@@ -468,6 +476,8 @@ pub(crate) enum MlsDecode {
     /// epoch, so the engine forgets their old incarnation's accept window
     /// in-stream (live incident 2026-08-09 §2).
     EpochAdvanced(Vec<MemberId>),
+    /// A merged commit removed this node's own leaf; `by` committed it.
+    Evicted(MemberId),
     /// The ratchet refused the frame. [`MlsError::Stale`] and
     /// [`MlsError::OwnEcho`] are routine, anything else is worth a line.
     Failed(MlsError),
@@ -683,6 +693,12 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
     /// live incident 2026-08-09 §2). Default no-op (additive).
     fn rekeyed(&self, member: &MemberId) -> impl std::future::Future<Output = ()> + Send {
         let _ = member;
+        async {}
+    }
+    /// A merged commit by `by` removed this node's own leaf: the seat runs
+    /// on another device now. Default no-op (additive).
+    fn evicted(&self, by: &MemberId) -> impl std::future::Future<Output = ()> + Send {
+        let _ = by;
         async {}
     }
 }
@@ -1511,6 +1527,11 @@ impl<K: EngineSink> crate::epoch_hold::HeldIngest<HeldMessage> for MeshHeldInges
                 ack_all(std::mem::take(held));
                 Held::Progress
             }
+            MlsDecode::Evicted(by) => {
+                self.sink.evicted(&by).await;
+                ack_all(std::mem::take(held));
+                Held::Stop
+            }
             MlsDecode::FutureEpoch => Held::Still, // still ahead
             MlsDecode::Discard | MlsDecode::Failed(_) => Held::Opaque,
         }
@@ -1894,6 +1915,10 @@ where
                     if !drain_epoch_buffer(ch, &sink, &peer, &mut epoch_buffer).await {
                         return RecvEnd::EngineGone;
                     }
+                }
+                MlsDecode::Evicted(by) => {
+                    sink.evicted(&by).await;
+                    ack_all(acks);
                 }
                 MlsDecode::FutureEpoch => {
                     if epoch_buffer.len() >= EPOCH_BUFFER_MAX {

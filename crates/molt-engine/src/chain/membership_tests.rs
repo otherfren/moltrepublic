@@ -129,7 +129,7 @@ fn a_coordinator_re_admits_only_a_valid_seat_proof() {
     // the returning member (dora) signs the seat proof with its OWN key
     let good = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
     let id = coord
-        .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, ticket, &good, "", &[], "", "")
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &good, "", &[], "", "")
         .expect("a valid seat proof re-admits");
     assert!(matches!(
         coord.chain.proposal_changes.get(&id),
@@ -145,13 +145,13 @@ fn a_coordinator_re_admits_only_a_valid_seat_proof() {
     // a proof signed by the WRONG key (petra forging dora's) is rejected
     let forged = crate::make_seat_proof(b.key("petra"), ticket, kp_hex, &rid, "", &[]);
     assert!(coord
-        .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, ticket, &forged, "", &[], "", "")
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &forged, "", &[], "", "")
         .is_err());
 
     // a request that re-keys the seat to a DIFFERENT identity is rejected —
     // recovery re-derives the SAME key
     assert!(coord
-        .verify_and_propose_restore(true, "dora", &b.pk("walter"), kp_hex, ticket, &good, "", &[], "", "")
+        .verify_and_propose_restore("dora", &b.pk("walter"), kp_hex, ticket, &good, "", &[], "", "")
         .is_err());
 }
 
@@ -233,7 +233,6 @@ fn a_membership_proposal_is_a_visible_approvable_record() {
     let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, "", &[]);
     let id = coord
         .verify_and_propose_restore(
-            true,
             "dora",
             &b.pk("dora"),
             kp_hex,
@@ -338,7 +337,6 @@ fn a_consented_restore_is_approved_without_a_human() {
     let consent = consent_v2_for(&b, "dora", "", &[], 0, &"cc".repeat(32));
     let id = coord
         .verify_and_propose_restore(
-            true,
             "dora",
             &b.pk("dora"),
             kp_hex,
@@ -473,7 +471,7 @@ fn a_spent_or_stale_v2_consent_is_refused_at_the_coordinator() {
     let relays = vec!["wss://a".to_string()];
     let propose = |coord: &mut crate::State, ticket: &str, consent: &str| {
         let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &rid, &npk, &relays);
-        coord.verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, ticket, &proof, &npk, &relays, consent, "")
+        coord.verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &proof, &npk, &relays, consent, "")
     };
     let stale = consent_v2_for(&b, "dora", &npk, &relays, 5, &"cc".repeat(32));
     let err = propose(&mut coord, "t0", &stale).expect_err("an anchor above the head is refused");
@@ -502,7 +500,7 @@ fn a_v1_consent_is_not_cosigned_by_the_coordinator() {
     let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &rid, "", &[]);
     let consent = consent_for(&b, "dora", "");
     let id = coord
-        .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
         .expect("a v1 request still proposes");
     assert_eq!(coord.chain.head.as_ref().expect("head").height, 0, "nothing sealed");
     assert!(
@@ -601,7 +599,7 @@ fn a_swept_v2_card_drops_the_coordinators_pending_recovery() {
     let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &rid, "", &[]);
     let consent = consent_v2_for(&b, "dora", "", &[], 0, &"cc".repeat(32));
     let id = coord
-        .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
         .expect("the last fresh height proposes");
     assert!(coord.readmission_in_flight("dora"), "in flight while the card can seal");
     b.commit_applied(100 + w, &["petra", "walter", "dora"]);
@@ -630,12 +628,12 @@ fn a_swept_v2_card_keeps_a_live_siblings_pending_recovery() {
     let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &rid, "", &[]);
     let consent = consent_v2_for(&b, "dora", "", &[], 0, &"cc".repeat(32));
     let stale = coord
-        .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
         .expect("the last fresh height proposes");
     let fresh = consent_v2_for(&b, "dora", "", &[], w - 1, &"cc".repeat(32));
     let proof = crate::make_seat_proof(b.key("dora"), "u", kp_hex, &rid, "", &[]);
     let live = coord
-        .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, "u", &proof, "", &[], &fresh, "")
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "u", &proof, "", &[], &fresh, "")
         .expect("a fresh sibling proposes");
     b.commit_applied(100 + w, &["petra", "walter", "dora"]);
     let block = b.blocks.last().cloned().expect("block");
@@ -660,7 +658,7 @@ fn coordinator_with_a_foreign_card() -> (Builder, crate::State, u64, ChainChange
     let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &rid, "", &[]);
     let consent = consent_v2_for(&b, "dora", "", &[], 0, &"cc".repeat(32));
     let own = coord
-        .verify_and_propose_restore(true, "dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
         .expect("the last fresh height proposes");
     let foreign = ChainChange::Membership {
         op: MembershipOp::Restored,
@@ -791,7 +789,6 @@ fn the_coordinator_reports_the_vote_progress_for_a_pending_recovery() {
     let consent = consent_v2_for(&b, "dora", "", &[], 0, &"cc".repeat(32));
     let id = coord
         .verify_and_propose_restore(
-            true,
             "dora",
             &b.pk("dora"),
             kp_hex,
@@ -906,7 +903,6 @@ fn a_rejoin_over_a_foreign_relay_is_refused_naming_it() {
     );
     let err = coord
         .verify_and_propose_restore(
-            true,
             "dora",
             &b.pk("dora"),
             kp_hex,
@@ -941,7 +937,6 @@ fn a_rejoin_over_a_foreign_relay_is_refused_naming_it() {
     );
     let id = coord2
         .verify_and_propose_restore(
-            true,
             "dora",
             &b2.pk("dora"),
             kp_hex,
@@ -982,7 +977,6 @@ fn a_restored_commit_triggers_the_coordinators_rekey() {
     coord.recovery.pending.insert(
         "walter".to_string(),
         PendingRecovery {
-            ticketed: true,
             key_package: "beef".to_string(),
             reply: String::new(),
             card: change.clone(),
@@ -1130,7 +1124,6 @@ fn a_restored_commit_without_a_pending_recovery_is_inert() {
     node.recovery.pending.insert(
         "dora".to_string(),
         PendingRecovery {
-            ticketed: true,
             key_package: "beef".to_string(),
             reply: String::new(),
             card: ChainChange::Membership {
@@ -1225,7 +1218,7 @@ fn a_restore_with_a_key_package_not_bound_to_the_seat_is_refused() {
     let ticket = "recovery-ticket-kp";
     let try_kp = |coord: &mut crate::State, kp: &str| {
         let proof = crate::make_seat_proof(b.key("dora"), ticket, kp, &b.republic_id, "", &[]);
-        coord.verify_and_propose_restore(true, "dora", &b.pk("dora"), kp, ticket, &proof, "", &[], "", "")
+        coord.verify_and_propose_restore("dora", &b.pk("dora"), kp, ticket, &proof, "", &[], "", "")
     };
     let foreign_key = hex::encode(
         molt_net::MlsMember::new(b.key("petra"), "dora")
@@ -1552,4 +1545,196 @@ fn an_unfinished_restore_is_recognized_by_its_anchor() {
     assert!(walter.restore_never_finished("dora", &anchor));
     assert!(!walter.restore_never_finished("dora", &"cd".repeat(32)), "only its own anchor");
     assert!(!walter.restore_never_finished("petra", &anchor), "only the restored seat");
+}
+
+/// B3 fixture: `st`'s presence clock reads `now`, and it heard `member` at
+/// `at` (an active workspace entry carrying the roster's pills).
+fn heard(st: &mut crate::State, member: &str, at: u64, now: u64) {
+    st.presence.clock_override = Some(now);
+    let id = "w-gate".to_string();
+    if st.session.workspaces.iter().all(|w| w.id != id) {
+        st.session.active_workspace = id.clone();
+        let members = molt_core::roster_members(&st.roster(), now, |_| molt_core::MemberInfo::NEVER);
+        st.session.workspaces.push(molt_core::WorkspaceInfo {
+            id: id.clone(),
+            name: "Gate".to_string(),
+            detail: "2-of-3".to_string(),
+            synced: true,
+            state: 0,
+            last_sync_min: 0,
+            sync_queue: 0,
+            s3: false,
+            size_kib: 0,
+            last_backup_min: molt_core::WorkspaceInfo::NEVER,
+            backup_copies: 0,
+            backup_error: String::new(),
+            has_seed: false,
+            net: "none".to_string(),
+            encrypted: false,
+            restored: false,
+            members,
+            agenda: String::new(),
+        });
+    }
+    let entry = st.session.workspaces.iter_mut().find(|w| w.id == id).expect("entry");
+    if let Some(m) = entry.members.iter_mut().find(|m| m.name == member) {
+        m.last_seen = at;
+    } else {
+        entry.members.push(molt_core::MemberInfo { name: member.to_string(), last_seen: at, state: 0, sync: String::new() });
+    }
+}
+
+/// **B3: no restore of a seat heard seconds ago.** The field restored live
+/// seats: each re-key evicted a running node. A seat heard within the
+/// silence window is refused at ingest with `seat still active`; once it is
+/// silent, the same request proposes.
+#[test]
+fn a_restore_of_a_seat_heard_seconds_ago_is_refused() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    let kp_hex = &kp_hex_for(&b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &b.republic_id, "", &[]);
+    heard(&mut coord, "dora", 10_000 - 10, 10_000);
+    let refused = coord.verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], "", "");
+    assert_eq!(refused, Err("seat still active".to_string()));
+    assert!(coord.recovery.pending.is_empty() && coord.chain.proposal_changes.is_empty(), "nothing proposed");
+    heard(&mut coord, "dora", 10_000 - 10, 10_000 + 120);
+    coord
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], "", "")
+        .expect("a silent seat restores");
+}
+
+/// **B3: a coordinator that sees a fork restores nobody** - its restore
+/// would land on a branch the others do not hold (field N1/N2).
+#[test]
+fn a_diverged_coordinator_refuses_a_restore() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let kp_hex = &kp_hex_for(&b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &b.republic_id, "", &[]);
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    coord.chain.diverged.insert(
+        "walter".to_string(),
+        molt_core::ChainDivergence { peer: "walter".to_string(), since_height: 0, seen_ts: 1 },
+    );
+    let refused = coord.verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], "", "");
+    assert_eq!(refused, Err("chain diverged".to_string()));
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    coord.chain.fork_candidates.insert(1, b.blocks[0].clone());
+    let refused = coord.verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], "", "");
+    assert_eq!(refused, Err("chain diverged".to_string()), "an unlinked fork candidate counts");
+}
+
+/// **B3: the ingest gate answers through the ordinary refusal**: the
+/// operator's `recover-refused` notice, the ticket left unspent.
+#[test]
+fn a_ticketed_request_on_a_fork_is_refused_and_keeps_its_ticket() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let kp_hex = kp_hex_for(&b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), "t", &kp_hex, &b.republic_id, "", &[]);
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    coord.recovery.tickets.insert("t".to_string(), "dora".to_string());
+    coord.chain.diverged.insert(
+        "walter".to_string(),
+        molt_core::ChainDivergence { peer: "walter".to_string(), since_height: 0, seen_ts: 1 },
+    );
+    coord
+        .cmd_net_recover_requested(
+            "dora".to_string(),
+            b.pk("dora"),
+            kp_hex,
+            "t".to_string(),
+            proof,
+            String::new(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            None,
+        )
+        .expect("ack");
+    assert_eq!(coord.session.notice, "recover-refused:dora:chain diverged");
+    assert!(coord.recovery.tickets.contains_key("t"), "the ticket stays live");
+}
+
+/// **B3: a coordinator on a fork mints no link**, and neither does one
+/// that heard the seat seconds ago.
+#[test]
+fn a_link_is_not_minted_for_a_live_seat_or_on_a_fork() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    heard(&mut coord, "dora", 10_000 - 10, 10_000);
+    coord.cmd_recover_invite_start("dora".to_string()).expect("acked");
+    assert_eq!(coord.session.notice, "recovery-link-failed:seat still active");
+    assert!(coord.recovery.tickets.is_empty(), "no ticket minted");
+    heard(&mut coord, "dora", 10_000 - 10, 10_000 + 120);
+    coord.chain.diverged.insert(
+        "walter".to_string(),
+        molt_core::ChainDivergence { peer: "walter".to_string(), since_height: 0, seen_ts: 1 },
+    );
+    coord.cmd_recover_invite_start("dora".to_string()).expect("acked");
+    assert_eq!(coord.session.notice, "recovery-link-failed:chain diverged");
+}
+
+/// **B3: a link-less request - an older build restoring itself - is
+/// refused, never proposed**, and a relay replay of it is answered once.
+#[test]
+fn a_link_less_request_is_refused_and_never_proposed() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let kp_hex = kp_hex_for(&b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), "self", &kp_hex, &b.republic_id, "", &[]);
+    let consent = consent_v2_for(&b, "dora", "", &[], 0, &"cc".repeat(32));
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    for _ in 0..2 {
+        coord
+            .cmd_net_recover_requested(
+                "dora".to_string(),
+                b.pk("dora"),
+                kp_hex.clone(),
+                "self".to_string(),
+                proof.clone(),
+                String::new(),
+                Vec::new(),
+                consent.clone(),
+                String::new(),
+                String::new(),
+                None,
+            )
+            .expect("ack");
+    }
+    assert!(coord.chain.proposal_changes.is_empty() && coord.recovery.pending.is_empty(), "never proposed");
+    assert_eq!(coord.recovery.unsolicited_cooldown.len(), 1, "answered once");
+}
+
+/// **B3: a `Restored` card proposed elsewhere (an older peer has no gate)
+/// does not seal here while the seat is active**, and this node does not
+/// co-sign it; it seals once the seat has gone silent.
+#[test]
+fn a_restored_card_does_not_seal_while_the_seat_is_active() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut older = chain_signer("petra", &b, b.blocks.clone());
+    older.config.self_cosign = false;
+    let kp_hex = &kp_hex_for(&b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), "t", kp_hex, &b.republic_id, "", &[]);
+    let consent = consent_v2_for(&b, "dora", "", &[], 0, &"cc".repeat(32));
+    let id = older
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, "t", &proof, "", &[], &consent, "")
+        .expect("proposed");
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    heard(&mut walter, "dora", 10_000 - 10, 10_000);
+    walter.receive_membership_proposal(id, MembershipOp::Restored, "dora", &b.pk("dora"), None, Vec::new(), Some(consent));
+    assert!(
+        !walter.chain.pending_sigs.get(&id).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter")),
+        "no co-signature for the restore of a live seat"
+    );
+    let card = walter.chain.proposal_changes.get(&id).cloned().expect("card");
+    let petra_sig = molt_storage::identity_sign(b.key("petra"), &molt_core::chain::approval_bytes(&b.republic_id, 1, &card));
+    walter.receive_approval(id, "petra", 1, &petra_sig);
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 0, "held while dora is heard");
+    assert!(walter.chain.proposal_changes.contains_key(&id), "the card stays open");
+    // dora goes silent: the held approval and the held seal both go through
+    heard(&mut walter, "dora", 10_000 - 10, 10_000 + 120);
+    walter.retry_held_restore_approvals();
+    walter.drain_held_seals();
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 1, "sealed once the seat is silent");
+    verify_chain(&walter.chain.blocks).expect("verifies");
 }

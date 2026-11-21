@@ -115,6 +115,8 @@ async fn deposit_cut_recover_grant_to_the_recovered_seat_reads() {
     d.execute(Command::CloseWorkspace).await.expect("d goes away");
     drop(d);
 
+    // B3: the lost seat was heard a moment ago (production: 120 s)
+    all[0].__seat_active_secs(0);
     all[0].execute(Command::RecoverInviteStart { member: "d".to_string() }).await.expect("mint");
     let s = wait_for(&all[0], "the recovery link", |s| {
         s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")

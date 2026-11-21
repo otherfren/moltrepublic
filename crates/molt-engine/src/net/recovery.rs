@@ -2,7 +2,7 @@
 
 //! Recovery over the net, coordinator side: the recovery-inbox tasks a
 //! minted link listens on, the standing seat inbox, the request ingest
-//! (ticketed and self-service lanes), the progress frames to the
+//! (a minted link; a link-less request is refused), the progress frames to the
 //! rejoiner, the post-re-key mesh announce/extension, and the link-mint
 //! result handlers. The rejoiner's own task is `crate::recovery`.
 
@@ -26,7 +26,6 @@ impl State {
     /// the ticket is spent and before it can reach a `Restored` block —
     /// exactly like `cmd_net_join_requested`.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_net_recover_requested(
         &mut self,
         member: MemberId,
@@ -44,40 +43,13 @@ impl State {
         if !self.net_scope_current(generation) {
             return Ok(Reply::Ack);
         }
-        // TWO lanes (`detached_reattach.md` §2.2). Ticketed: the ticket must
-        // be a live one this node minted via a recovery link. Self-service:
-        // an unknown ticket is a restored seat announcing itself — accepted
-        // only on an open chain-governed group, only WITH a consent (it is
-        // the authorization), and every failure past here stays a SILENT
-        // drop (no refusal frame — an unauthenticated prober gets no oracle).
-        // a ticket is bound to the seat it was minted for (review R8): a
-        // member holding its own phrase must not spend ANOTHER seat's link
+        // the ticket must be a live one this node minted for THIS seat
+        // (review R8): a member holding its own phrase must not spend
+        // another seat's link
         let ticketed = self
             .recovery.tickets
             .get(&ticket)
             .is_some_and(|minted_for| *minted_for == member);
-        if !ticketed {
-            if !self.is_chain_governed() || self.group_net.is_none() {
-                tracing::debug!(%member, "unsolicited recovery request without an open group - dropped");
-                return Ok(Reply::Ack);
-            }
-            if consent.is_empty() {
-                tracing::warn!(%member, "unsolicited recovery request without a consent - dropped");
-                return Ok(Reply::Ack);
-            }
-        }
-        // one re-admission at a time, on BOTH lanes (review R3): a pending
-        // Restored proposal for this member means another receiver (or an
-        // earlier frame of this broadcast) already coordinates — a second,
-        // ticketed request would re-key with its KeyPackage while the first
-        // block's Welcome goes to a dead anchor, stranding the seat
-        if self.readmission_in_flight(&member) {
-            tracing::warn!(%member, ticketed, "recovery request while a re-admission is pending - dropped");
-            return Ok(Reply::Ack);
-        }
-        // NB: on a verified request, verify_and_propose_restore registers the
-        // pending recovery BEFORE proposing (a lone coordinator commits the
-        // block synchronously inside the propose, which consumes that entry)
         // NORMALIZE-OR-REJECT at the choke point, exactly like the founding
         // ingest: an anchor that is not a canonical curve point must never
         // reach a chain block, and it must not spend the ticket either. Empty
@@ -93,15 +65,13 @@ impl State {
                 }
             }
         };
-        // …and it must not collide with a seat that already holds it
-        if !canonical.is_empty() {
-            // the complete register (review C8): founding anchors, every
-            // Restored block's anchor and the blob's working anchors
-            let taken = self.anchor_seen_in_chain(&canonical);
-            if taken {
-                tracing::warn!(%member, "recovery request reuses an anchored transport key - dropped");
-                return Ok(Reply::Ack);
-            }
+        // …and it must not collide with a seat that already holds it: the
+        // complete register (review C8) - founding anchors, every Restored
+        // block's anchor and the blob's working anchors. Relays replay every
+        // stored request wrap, and an accepted request's anchor is in here.
+        if !canonical.is_empty() && self.anchor_seen_in_chain(&canonical) {
+            tracing::debug!(%member, "recovery request reuses an anchored transport key - dropped");
+            return Ok(Reply::Ack);
         }
         // PROOF-OF-POSSESSION (§2.1, the founding twin at `cmd_net_join_requested`):
         // the anchor claimed here must BE the key that sealed the gift wrap.
@@ -122,43 +92,24 @@ impl State {
             );
             return Ok(Reply::Ack);
         }
-        // self-service cooldown: relays replay 1059 wraps on every
-        // resubscribe, and the accept window does not cover them — an
-        // accepted (member, anchor) pair is served once per window
-        const UNSOLICITED_COOLDOWN_SECS: u64 = 1_800;
+        // B3: a seat never restores itself - an older build's link-less
+        // request is answered, never proposed
         if !ticketed {
-            // a request whose "new" anchor ALREADY is the member's working
-            // anchor is the LIVE incarnation, replayed by a relay after the
-            // cooldown — there is nothing to restore, and re-keying a live
-            // seat is pure epoch churn
-            if !canonical.is_empty() && self.working_nostr_pk(&member) == canonical {
-                tracing::debug!(%member, "unsolicited recovery request for the live anchor - dropped");
-                return Ok(Reply::Ack);
-            }
-            // THE CHAIN IS THE REPLAY REGISTER (field storm 2026-08-24):
-            // relays replay every stored request wrap on each resubscribe,
-            // and each once-ACCEPTED old request re-keyed the seat onto a
-            // DEAD incarnation's anchor — kicking the live one out, forever,
-            // in a loop. An anchor that was EVER anchored in this chain
-            // (genesis, any Restored block, the checkpoint's summary) can
-            // only be a replay: a genuine reattach mints a fresh salt.
-            if self.anchor_seen_in_chain(&canonical) {
-                tracing::debug!(%member, "unsolicited recovery request replays a chain-known anchor - dropped");
-                return Ok(Reply::Ack);
-            }
-            let now = crate::now_secs();
-            let key = (member.to_string(), canonical.clone());
-            if self
-                .recovery.unsolicited_cooldown
-                .get(&key)
-                .is_some_and(|t| now.saturating_sub(*t) < UNSOLICITED_COOLDOWN_SECS)
-            {
-                tracing::debug!(%member, "unsolicited recovery request within the cooldown - dropped");
-                return Ok(Reply::Ack);
-            }
+            self.refuse_unsolicited(&member, &canonical, &sender_npub);
+            return Ok(Reply::Ack);
         }
+        // one re-admission at a time (review R3): a pending Restored proposal
+        // for this member means another receiver already coordinates — a
+        // second request would re-key with its KeyPackage while the first
+        // block's Welcome goes to a dead anchor, stranding the seat
+        if self.readmission_in_flight(&member) {
+            tracing::warn!(%member, "recovery request while a re-admission is pending - dropped");
+            return Ok(Reply::Ack);
+        }
+        // NB: on a verified request, verify_and_propose_restore registers the
+        // pending recovery BEFORE proposing (a lone coordinator commits the
+        // block synchronously inside the propose, which consumes that entry)
         match self.verify_and_propose_restore(
-            ticketed,
             &member,
             &identity_pk,
             &key_package,
@@ -173,20 +124,18 @@ impl State {
                 // spend the ticket only on a verified request, so a legitimate
                 // member whose first attempt failed (e.g. a truncated proof) can
                 // retry on the still-live queue
-                if ticketed {
-                    self.recovery.tickets.remove(&ticket);
-                }
-                let now = crate::now_secs();
-                self.recovery.unsolicited_cooldown
-                    .retain(|_, t| now.saturating_sub(*t) < UNSOLICITED_COOLDOWN_SECS);
-                self.recovery.unsolicited_cooldown
-                    .insert((member.to_string(), canonical.clone()), now);
-                tracing::info!(%member, ticketed, "recovery seat proof verified - proposing re-admission");
+                self.recovery.tickets.remove(&ticket);
+                // a relay re-delivers the request with the ticket spent: it
+                // is the same request, not a link-less one to refuse
+                self.recovery
+                    .unsolicited_cooldown
+                    .insert((member.to_string(), canonical.clone()), crate::now_secs());
+                tracing::info!(%member, "recovery seat proof verified - proposing re-admission");
                 // the first checklist frame: the rejoiner learns the roster,
                 // the threshold and the voices already counted
                 self.push_recover_progress(id);
             }
-            Err(e) if ticketed => {
+            Err(e) => {
                 // the operator must SEE the refusal (relay-pool mismatch is
                 // the common honest cause — R5 names the relay to add); a
                 // tracing-only drop left the coordinator staring at a silent
@@ -209,13 +158,41 @@ impl State {
                     );
                 }
             }
-            Err(e) => {
-                // self-service lane: silent toward the wire (no oracle), one
-                // structured line for the operator's log
-                tracing::warn!(%member, error = %e, "dropping an invalid unsolicited recovery request");
-            }
         }
         Ok(Reply::Ack)
+    }
+
+    /// B3: answer a link-less (self-service) request - an older build
+    /// restoring itself - with `rejoin needs a link`, once per
+    /// `(seat, anchor)` and window: relays replay 1059 wraps on every
+    /// resubscribe. Never proposed, so a live seat is never re-keyed by it.
+    fn refuse_unsolicited(&mut self, member: &str, anchor: &str, sender_npub: &str) {
+        const UNSOLICITED_COOLDOWN_SECS: u64 = 1_800;
+        let now = crate::now_secs();
+        self.recovery
+            .unsolicited_cooldown
+            .retain(|_, t| now.saturating_sub(*t) < UNSOLICITED_COOLDOWN_SECS);
+        let key = (member.to_string(), anchor.to_string());
+        let proposed = |p: &crate::chain::PendingRecovery| {
+            matches!(&p.card, molt_core::ChainChange::Membership { nostr_pk: Some(a), .. } if a == anchor)
+        };
+        let ours = self.recovery.pending.get(member).is_some_and(proposed)
+            || self.recovery.swept.get(member).is_some_and(proposed);
+        if ours || self.recovery.unsolicited_cooldown.contains_key(&key) {
+            tracing::debug!(%member, "recovery request already answered or proposed - dropped");
+            return;
+        }
+        self.recovery.unsolicited_cooldown.insert(key, now);
+        tracing::warn!(%member, reason = crate::chain::REJOIN_NEEDS_A_LINK, "recover_refused");
+        if !sender_npub.is_empty() {
+            self.send_recover_frame(
+                sender_npub.to_string(),
+                molt_net::invite::RitualMsg::RecoverRefused {
+                    member: member.to_string(),
+                    reason: crate::chain::REJOIN_NEEDS_A_LINK.to_string(),
+                },
+            );
+        }
     }
 
     /// A returning member's rejoin failed after its re-admission: log why,
@@ -383,6 +360,10 @@ impl State {
         }
         let republic = replica.name.clone();
         let republic_id = replica.republic_id.clone();
+        // B3: no link for a seat that is running, nor from a fork
+        if let Some(why) = self.restore_gate(&member) {
+            return self.cmd_net_recover_link_failed(member, why.to_string(), String::new(), None);
+        }
         // announce the attempt on the recovery notice channel: the frontends
         // render a calm pending state until the real outcome (`recovery-link:`
         // or `recovery-link-failed:`) replaces it — and because pending and

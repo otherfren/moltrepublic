@@ -229,6 +229,15 @@ The group gets the complementary guarantees:
   verifies and nothing is replayable — the cost is availability, never
   security. A minted link dies with the coordinator's session; after a
   restart, mint again.
+- **No restore of a live seat, none by itself (B3, 2026-11-21,
+  `docs/chain/rejoin_divergence_build_plan.md`).** A coordinator refuses to
+  mint, ingest, auto-approve or seal a `Restored` for a seat it heard
+  within `SILENT_AFTER_SECS` (`seat still active`; "heard" = an
+  MLS-authenticated frame of the seat's current leaf) or while it holds a
+  divergence or fork candidates (`chain diverged`). A link-less request is
+  answered `rejoin needs a link`; no node sends one. A still-running old
+  device whose leaf a re-key removed reports `seat-evicted` and stops
+  publishing (B2).
 - **Verify-from-genesis.** `R` re-verifies the whole chain from block 0 before
   trusting any state — a survivor that served a doctored chain is caught by the
   signatures and links, so an untrusted deliverer is safe.
