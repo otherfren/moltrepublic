@@ -1,11 +1,45 @@
 # Rejoin and divergence fixes: build plan
 
-**Status: IN PROGRESS (2026-11-21).** Evidence:
-`docs/chain/rejoin_divergence_findings.md`. Decisions (user,
-2026-11-21): build B1-B8 including the fork-free lock; a locked-out node
-only reports, it never asks for a restore by itself; a restore keeps
-sealing with one survivor plus the consent, guarded; no fixed deadlines;
-the rescue (plan F-X1) is a later stage with its own design.
+**Status: IN PROGRESS (2026-11-21, evening).** B1-B3, B5, B6 and B7a
+are on master; B4 and B7b are being built; B8 (acceptance on the field
+copies) follows. Evidence: `docs/chain/rejoin_divergence_findings.md`.
+
+## In short
+
+A 2-of-3 republic could not be saved by rejoin and was re-founded. Read
+from the three seats' copies and reproduced in isolation:
+
+1. Two seats sealed different proposals at one height (a fork; it had
+   happened and healed 139 times before).
+2. Seats then "restored" each other, each alone on its own branch. Every
+   restore re-keys the group and locks the other seat's running node
+   out, silently. Three seats, three branches.
+3. The locked-out nodes never got an acknowledgement again and kept
+   re-publishing their whole outbox: tens of thousands of frames.
+4. Every later rejoiner stalled on that backlog (more than 5 000 stored
+   frames) and gave up after a fixed 15 minutes; the coordinator had
+   already sealed a block for it.
+
+| stage | what it changes | state |
+|---|---|---|
+| B1 | a rejoiner (and a founding, a join) reads a large relay backlog instead of stalling on it | on master |
+| B2 | a locked-out node notices, says so, and stops publishing | on master |
+| B3 | no restore of a seat that is still active or while the chain is forked; a node never asks for a restore by itself | on master |
+| B4 | the rejoiner gets the chain anchor BEFORE anything is sealed; no fixed deadlines | in progress |
+| B5 | a relay-list change waits until a fork has healed | on master |
+| B6 | one sealer per height (measured: fork decisions 11-19 -> 0 in a lossy three-seat test) | on master |
+| B7 | fork-free sealing (a Flexible-Paxos lock): design and proven state machine on master (B7a); wiring in progress (B7b) | partly |
+| B8 | acceptance: the three field copies with the fixed build | open |
+| later | rescue: a rejoin that cuts back to the last common block and restarts a split republic | own design, after B8 |
+
+No signed format changes; old and new builds run mixed. The fixes
+protect a seat once it runs the new build; B1 in particular acts on the
+rejoiner's side. Nothing is released yet.
+
+Decisions (user, 2026-11-21): build B1-B8 including the fork-free lock;
+a locked-out node only reports, it never asks for a restore by itself; a
+restore keeps sealing with one survivor plus the consent, guarded; no
+fixed deadlines.
 
 ## Rules for every stage
 
