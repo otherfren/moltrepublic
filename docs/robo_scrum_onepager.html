@@ -24,8 +24,12 @@
   --done-soft: #def2e6;
   --drop: #6b7480;
   --drop-soft: #e8ebef;
-  --vote: #8a3ab9;
-  --vote-soft: #f1e5f8;
+  --vote: #3b4654;
+  --vote-soft: #eceff3;
+  --prob: #c0392b;
+  --prob-soft: #fbe6e3;
+  --human: #8a3ab9;
+  --human-soft: #f1e5f8;
   --f-display: "Bricolage Grotesque", "Space Grotesk", system-ui, sans-serif;
   --f-body: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
   --f-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
@@ -36,7 +40,8 @@
     --accent: #6fa3f0; --accent-soft: #1b2d47;
     --wait: #e2a94e; --wait-soft: #3a2c14; --run: #6fa3f0; --run-soft: #1b2d47;
     --done: #5cc38a; --done-soft: #15382a; --drop: #8d97a3; --drop-soft: #262f39;
-    --vote: #c58ae8; --vote-soft: #33213f;
+    --vote: #c3ccd6; --vote-soft: #222c37;
+    --prob: #f07a6a; --prob-soft: #45201b; --human: #c58ae8; --human-soft: #33213f;
     color-scheme: dark;
   }
 }
@@ -45,7 +50,8 @@
   --accent: #6fa3f0; --accent-soft: #1b2d47;
   --wait: #e2a94e; --wait-soft: #3a2c14; --run: #6fa3f0; --run-soft: #1b2d47;
   --done: #5cc38a; --done-soft: #15382a; --drop: #8d97a3; --drop-soft: #262f39;
-  --vote: #c58ae8; --vote-soft: #33213f;
+  --vote: #c3ccd6; --vote-soft: #222c37;
+  --prob: #f07a6a; --prob-soft: #45201b; --human: #c58ae8; --human-soft: #33213f;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -80,12 +86,12 @@ header { display: grid; gap: 14px; }
 }
 
 /* principles */
-.principles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.principles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
 .pr {
   background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
   padding: 18px 18px 20px; display: grid; gap: 6px; align-content: start;
 }
-.pr .big { font: 700 1.6rem/1.1 var(--f-display); color: var(--accent); }
+.pr .big { font: 700 1.3rem/1.15 var(--f-display); color: var(--accent); }
 .pr p { color: var(--muted); font-size: 0.92rem; }
 
 .panel {
@@ -108,7 +114,9 @@ header { display: grid; gap: 14px; }
   font: 500 0.68rem/1 var(--f-mono); text-transform: uppercase; letter-spacing: 0.08em;
   padding: 4px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--muted);
 }
-.tag.epic { color: var(--accent); border-color: var(--accent); }
+.tag.board { color: var(--accent); border-color: var(--accent); }
+.tag.task { color: var(--muted); }
+.tag.timer { color: var(--wait); border-color: var(--wait); }
 .tag.story { color: var(--ink); background: var(--bg); }
 .note { font-size: 0.82rem; color: var(--muted); }
 .facts { display: grid; gap: 6px; font-size: 0.9rem; padding: 0; margin: 0; list-style: none; }
@@ -133,7 +141,7 @@ header { display: grid; gap: 14px; }
 .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 0.85rem; color: var(--muted); }
 .legend span { display: inline-flex; align-items: center; gap: 6px; }
 .sw { width: 22px; height: 0; border-top: 2px solid var(--muted); }
-.sw.vote { border-top: 2px dashed var(--vote); }
+.sw.vote { border: 0; border-top: 2px dashed var(--vote); background: none; padding: 0; border-radius: 0; }
 
 /* votes */
 .votes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
@@ -197,127 +205,124 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
   .flow svg { min-width: 620px; }
   .wrap { padding-block: 24px 48px; }
 }
+
+/* board view mock */
+.mock { display: grid; grid-template-columns: 210px minmax(0, 1fr); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; font-size: 0.88rem; }
+.mock nav { background: var(--bg); border-right: 1px solid var(--line); padding: 10px; display: grid; gap: 4px; align-content: start; }
+.nv { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; }
+.nv.on { background: var(--panel); border: 1px solid var(--line); }
+.nv.sub { margin-left: 18px; }
+.nv small { margin-left: auto; color: var(--muted); font: 500 0.7rem/1 var(--f-mono); }
+.ic { width: 20px; height: 20px; border-radius: 5px; display: inline-grid; place-items: center; font-size: 0.72rem; font-weight: 700; flex: none; }
+.ic.plan { background: var(--wait-soft); color: var(--wait); }
+.ic.exec { background: var(--run-soft); color: var(--run); }
+.ic.fin { background: var(--done-soft); color: var(--done); }
+.alarm { width: 8px; height: 8px; border-radius: 50%; background: var(--prob); flex: none; }
+.mock main { padding: 14px 16px; display: grid; gap: 10px; min-width: 0; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.bar b { font: 700 1.05rem/1.2 var(--f-display); margin-right: auto; }
+.badge { font: 500 0.72rem/1 var(--f-mono); padding: 6px 9px; border-radius: 999px; background: var(--run-soft); color: var(--run); }
+.btn { font: 500 0.78rem/1 var(--f-body); padding: 7px 11px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); }
+.grp { font: 500 0.7rem/1 var(--f-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding-top: 8px; border-top: 1px solid var(--line); }
+.srow { font-weight: 600; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.srow span { font-weight: 400; color: var(--muted); font-size: 0.85rem; }
+.trow { display: flex; align-items: center; gap: 10px; padding-left: 14px; flex-wrap: wrap; }
+.dots { display: inline-flex; gap: 4px; flex: none; }
+.dot { width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid var(--line); }
+.dot.run { background: var(--run); border-color: var(--run); }
+.dot.done { background: var(--done); border-color: var(--done); }
+.dot.prob { background: var(--prob); border-color: var(--prob); }
+.pill.human { background: var(--human-soft); color: var(--human); }
+.pill.plan { background: var(--wait-soft); color: var(--wait); }
+.pill.done { background: var(--done-soft); color: var(--done); }
+.pill.prob { background: var(--prob-soft); color: var(--prob); }
+.colors { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.colors th, .colors td { text-align: left; padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line); }
+.colors th { font: 500 0.7rem/1.6 var(--f-mono); text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.colors tr:last-child td { border-bottom: 0; }
+.chain { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 0.9rem; }
+.chip { border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; display: inline-flex; gap: 8px; align-items: center; }
+.chain .arrow { font: 500 0.75rem/1 var(--f-mono); color: var(--muted); }
+@media (max-width: 760px) {
+  .mock { grid-template-columns: minmax(0, 1fr); }
+  .mock nav { border-right: 0; border-bottom: 1px solid var(--line); }
+}
 </style>
 </head>
 <body>
 
 <div class="wrap">
   <header>
-    <span class="status">Konzept · nicht gebaut · Stand 17.11.2026</span>
+    <span class="status">Konzept · nicht gebaut · Stand 21.11.2026</span>
     <h1>Robo-Scrum</h1>
-    <p class="lede">Planen für eine Republik aus Menschen und Agenten. Behalten wird, was eine Gruppe zum gemeinsamen Planen braucht: <strong>Epics, Stories, Abhängigkeiten, wer macht was, wer prüft wen.</strong> Gearbeitet wird in Sprints ohne Dauer. Alles, was an der Uhr hängt, fällt weg.</p>
+    <p class="lede">Planen für eine Republik aus Menschen und Agenten. Behalten wird, was eine Gruppe zum gemeinsamen Planen braucht: <strong>Boards, Stories, Tasks, klare Kriterien und Abhängigkeiten.</strong> Es gibt keine Sprints, keine Zuständigen und keinen Kalender. Ein Board ist ein Arbeitspaket, und sein Zustand sagt, ob gearbeitet wird.</p>
   </header>
 
   <section class="principles" aria-label="Grundsätze">
-    <div class="pr"><span class="eyebrow">Grundsatz</span><span class="big">Alles m-of-n</span><p>Jede Änderung am Board ist ein Vorschlag mit Schwellen-Zustimmung auf der Chain. Keine Ausnahme, kein leichterer Weg.</p></div>
-    <div class="pr"><span class="eyebrow">Grundsatz</span><span class="big">Keine Zeit</span><p>Keine Termine, Fristen, Kalender, Schätzungen. Arbeit läuft so schnell sie kann. Warten heißt: Abhängigkeit.</p></div>
-    <div class="pr"><span class="eyebrow">Grundsatz</span><span class="big">Nur Mitglieder</span><p>Das Board weiß nicht, ob ein Mitglied Mensch, Agent oder beides ist.</p></div>
+    <div class="pr"><span class="eyebrow">Grundsatz</span><span class="big">Alles m-of-n</span><p>Jede Änderung an einem Board ist ein Vorschlag mit Schwellen-Zustimmung auf der Chain. Haken und Story-Chat sind keine Änderungen, sie sind flüchtig wie Chat.</p></div>
+    <div class="pr"><span class="eyebrow">Grundsatz</span><span class="big">Zeit nur an einem Ort</span><p>Keine Fristen, kein Kalender, keine Schätzungen. Warten heißt Abhängigkeit. Warten auf ein Datum heißt: Abhängigkeit von einer Warte-Story.</p></div>
+    <div class="pr"><span class="eyebrow">Grundsatz</span><span class="big">Nur Mitglieder</span><p>Ein Board weiß nicht, ob ein Mitglied Mensch, Agent oder beides ist.</p></div>
+    <div class="pr"><span class="eyebrow">Grundsatz</span><span class="big">Das Team verantwortet</span><p>Kein Assignee, kein Reviewer. Wer was macht und wer prüft, klären die Mitglieder im Chat. Für das Ergebnis steht der Vote.</p></div>
+    <div class="pr"><span class="eyebrow">Grundsatz</span><span class="big">Knoten entscheiden nichts</span><p>Jede Änderung macht ein Mitglied ausdrücklich. Ein Knoten schlägt nie von selbst vor und unterschreibt nie von selbst.</p></div>
   </section>
 
   <section class="panel">
     <div class="head">
-      <span class="eyebrow">Ablauf</span>
-      <h2>Ein Sprint: planen, arbeiten, prüfen, weiter</h2>
-      <p>Sprints haben keine Dauer. Ein Sprint endet, wenn jede seiner Stories beendet ist. Sprints überlappen nie.</p>
+      <span class="eyebrow">Board-Zustand</span>
+      <h2>Planung, Ausführung, beendet</h2>
+      <p>Der Zustand eines Boards wird abgestimmt. Steht es auf Ausführung, läuft jede Story, deren Voraussetzungen erfüllt sind.</p>
     </div>
     <div class="diagram flow">
-      <svg viewBox="0 0 940 262" role="img" aria-label="Planungs-Vote, Sprint läuft, Review-Votes, Sprint zu; solange das Backlog etwas hat, folgt der nächste Planungs-Vote">
+      <svg viewBox="0 0 700 150" role="img" aria-label="Planung und Ausführung wechseln per Vote in beide Richtungen, von Ausführung geht es per Vote nach beendet">
         <defs>
-          <marker id="ahl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead loop" d="M0 0L10 5L0 10z"/></marker>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0L10 5L0 10z"/></marker>
+          <marker id="ahv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead vote" d="M0 0L10 5L0 10z"/></marker>
         </defs>
-        <g class="fx fx-ch"><rect x="250" y="6" width="430" height="30" rx="15"/><text class="s" x="465" y="26" text-anchor="middle">Änderungs-Vote jederzeit: ändern, umbesetzen, verwerfen, raus/rein</text></g>
-        <path class="edge vote" d="M345 36 V54" marker-end="url(#ahv)"/>
-        <path class="edge vote" d="M585 36 V54" marker-end="url(#ahv)"/>
-
-        <g class="fx fx-vote"><rect x="10" y="56" width="190" height="84" rx="10"/>
-          <text class="t" x="105" y="84" text-anchor="middle">Planungs-Vote</text>
-          <text class="s" x="105" y="106" text-anchor="middle">wählt Stories für den Sprint</text>
-          <text class="s" x="105" y="124" text-anchor="middle">Diskussion unter dem Vote</text></g>
-        <g class="fx fx-run"><rect x="250" y="56" width="190" height="84" rx="10"/>
-          <text class="t" x="345" y="84" text-anchor="middle">Sprint läuft</text>
-          <text class="s" x="345" y="106" text-anchor="middle">frei: in progress</text>
-          <text class="s" x="345" y="124" text-anchor="middle">abhängig: waiting</text></g>
-        <g class="fx fx-vote"><rect x="490" y="56" width="190" height="84" rx="10"/>
-          <text class="t" x="585" y="84" text-anchor="middle">Review-Votes</text>
-          <text class="s" x="585" y="106" text-anchor="middle">je Story, außer verworfenen</text>
-          <text class="s" x="585" y="124" text-anchor="middle">done oder discarded</text></g>
-        <g class="fx fx-done"><rect x="730" y="56" width="200" height="84" rx="10"/>
-          <text class="t" x="830" y="84" text-anchor="middle">Sprint zu</text>
-          <text class="s" x="830" y="106" text-anchor="middle">alle Stories beendet</text>
-          <text class="s" x="830" y="124" text-anchor="middle">abgeleitet, kein Vote</text></g>
-
-        <path class="edge" d="M200 98 H248" marker-end="url(#ah)"/>
-        <path class="edge" d="M440 98 H488" marker-end="url(#ah)"/>
-        <path class="edge" d="M680 98 H728" marker-end="url(#ah)"/>
-
-        <path class="edge loop" d="M830 140 V206 H105 V142" marker-end="url(#ahl)"/>
-        <text class="elabel loop" x="468" y="198" text-anchor="middle">Backlog hat noch etwas: nächster Sprint</text>
-        <text class="elabel" x="830" y="236" text-anchor="middle">Backlog leer: fertig</text>
-        <path class="edge" d="M830 206 V218" />
-        <text class="elabel" x="105" y="236" text-anchor="middle">Sprint-Nr. +1</text>
+        <g class="st st-wait"><rect x="10" y="40" width="180" height="70" rx="10" stroke-width="1.5"/><text class="n" x="100" y="80" text-anchor="middle">Planung</text></g>
+        <g class="st st-run"><rect x="260" y="40" width="180" height="70" rx="10" stroke-width="1.5"/><text class="n" x="350" y="80" text-anchor="middle">Ausführung</text></g>
+        <g class="st st-done"><rect x="510" y="40" width="180" height="70" rx="10" stroke-width="1.5"/><text class="n" x="600" y="80" text-anchor="middle">beendet</text></g>
+        <path class="edge vote" d="M190 62 H258" marker-end="url(#ahv)"/>
+        <path class="edge vote" d="M260 90 H192" marker-end="url(#ahv)"/>
+        <path class="edge vote" d="M440 75 H508" marker-end="url(#ahv)"/>
+        <text class="elabel vote" x="225" y="30" text-anchor="middle">Start</text>
+        <text class="elabel vote" x="225" y="130" text-anchor="middle">Stopp</text>
+        <text class="elabel vote" x="475" y="30" text-anchor="middle">beenden</text>
       </svg>
     </div>
-    <div class="legend">
-      <span><i class="sw vote"></i>m-of-n-Vote</span>
-      <span><i class="sw"></i>folgt von selbst</span>
-    </div>
-  </section>
-
-  <section class="panel">
-    <div class="head">
-      <span class="eyebrow">Die drei Abstimmungen</span>
-      <h2>Abgestimmt wird über Pläne, Urteile und Änderungen</h2>
-      <p>Alles andere leitet jeder Knoten selbst aus der Chain ab.</p>
-    </div>
-    <div class="votes">
-      <div class="vote">
-        <h3>Planungs-Vote</h3>
-        <p>Öffnet den Sprint. Wählt Stories aus dem Backlog, legt neue an, setzt Abhängigkeiten, Assignee und Reviewer. Die Mitglieder diskutieren unter dem Vote. Nur zulässig, wenn kein Sprint offen ist.</p>
-      </div>
-      <div class="vote">
-        <h3>Review-Vote</h3>
-        <p>Der Assignee sagt dem Reviewer, dass die Arbeit fertig ist. Der Reviewer schlägt <b>done</b> oder <b>discarded</b> vor, die Gruppe stimmt ab.</p>
-      </div>
-      <div class="vote">
-        <h3>Änderungs-Vote</h3>
-        <p>Jederzeit, auch mitten im Sprint: Story ändern, neu zuweisen, aus dem Sprint nehmen oder hinein, verwerfen. Öffnet nie einen Sprint.</p>
-      </div>
-    </div>
+    <div class="legend"><span><i class="sw vote"></i>m-of-n-Vote</span></div>
+    <ul class="facts">
+      <li><b>Planung</b>: die Mitglieder arbeiten Stories aus. Nichts auf dem Board ist in Arbeit. Zurück auf Planung ist das Signal, die Arbeit einzustellen.</li>
+      <li><b>Ausführung</b>: eine Story, die angelegt oder hineinverschoben wird, startet sofort. Beliebig viele Boards laufen nebeneinander.</li>
+      <li><b>beendet</b> ist endgültig und geht nur, wenn jede Story done oder discarded ist. Was von dem Board abhängt, ist ab dann frei.</li>
+      <li>Wie die Mitglieder Boards nutzen, ist ihre Sache: etwa ein Board in Planung zum Ausarbeiten und ein laufendes, in das sie fertige Stories verschieben.</li>
+    </ul>
   </section>
 
   <div class="two">
     <section class="panel">
       <div class="head">
         <span class="eyebrow">Hierarchie</span>
-        <h2>Zwei Elemente: Epic und Story</h2>
+        <h2>Drei Ebenen: Board, Story, Task</h2>
       </div>
       <ul class="tree" aria-label="Beispielbaum">
-        <li><span class="node"><span class="tag epic">Root-Epic</span> Republik</span>
+        <li><span class="node"><span class="tag board">Board</span> Treffen organisieren</span>
           <ul>
-            <li><span class="node"><span class="tag epic">Epic</span> Treffen organisieren</span>
+            <li><span class="node"><span class="tag story">Story</span> Raum reservieren</span>
               <ul>
-                <li><span class="node"><span class="tag epic">Blatt-Epic</span> Ort</span>
-                  <ul>
-                    <li><span class="node"><span class="tag story">Story</span> Raum reservieren</span></li>
-                    <li><span class="node"><span class="tag story">Story</span> Anreise beschreiben</span></li>
-                  </ul>
-                </li>
+                <li><span class="node"><span class="tag task">Task</span> Angebote einholen</span></li>
+                <li><span class="node"><span class="tag task">Task</span> Vertrag unterschreiben <span class="pill human">Mensch</span></span></li>
               </ul>
             </li>
-            <li><span class="node"><span class="tag epic">Blatt-Epic</span> Website</span>
-              <ul>
-                <li><span class="node"><span class="tag story">Story</span> Startseite schreiben</span></li>
-              </ul>
-            </li>
+            <li><span class="node"><span class="tag story">Story</span> Anreise beschreiben</span></li>
           </ul>
         </li>
       </ul>
       <p class="note">Beispielinhalt.</p>
       <ul class="facts">
-        <li>Epics verschachteln sich, es gibt genau ein Root-Epic.</li>
-        <li>Nur Blatt-Epics halten Stories. Keine Tasks.</li>
-        <li>Eine Story bleibt in ihrem Epic, Verschieben gibt es nicht.</li>
-        <li>Der Zustand eines Epics wird nie abgestimmt, er folgt aus den Kindern.</li>
+        <li>Boards sind flach, keines enthält ein anderes. Das allgemeine Board gibt es von Anfang an.</li>
+        <li>Eine Story gehört zu genau einem Board, ein Task zu genau einer Story.</li>
+        <li>Ein Task trägt Titel, Details und das Menschen-Tag. Das Tag ist eine Erklärung, keine Sperre.</li>
+        <li>Eine wartende Story darf per Vote in ein anderes Board wandern.</li>
       </ul>
     </section>
 
@@ -327,11 +332,7 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
         <h2>Vier Zustände, nur Votes beenden</h2>
       </div>
       <div class="diagram">
-        <svg viewBox="0 0 520 210" role="img" aria-label="waiting geht automatisch nach in progress, von dort per Review-Vote nach done oder discarded">
-          <defs>
-            <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead" d="M0 0L10 5L0 10z"/></marker>
-            <marker id="ahv" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrowhead vote" d="M0 0L10 5L0 10z"/></marker>
-          </defs>
+        <svg viewBox="0 0 520 210" role="img" aria-label="waiting geht von selbst nach in progress, von dort per Vote nach done oder discarded">
           <g class="st st-wait"><rect x="6" y="80" width="112" height="46" rx="8" stroke-width="1.5"/><text class="n" x="62" y="108" text-anchor="middle">waiting</text></g>
           <g class="st st-run"><rect x="190" y="80" width="130" height="46" rx="8" stroke-width="1.5"/><text class="n" x="255" y="108" text-anchor="middle">in progress</text></g>
           <g class="st st-done"><rect x="400" y="20" width="112" height="46" rx="8" stroke-width="1.5"/><text class="n" x="456" y="48" text-anchor="middle">done</text></g>
@@ -340,13 +341,11 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
           <text class="elabel" x="153" y="94" text-anchor="middle">auto</text>
           <path class="edge vote" d="M320 95 C360 95 360 43 398 43" marker-end="url(#ahv)"/>
           <path class="edge vote" d="M320 111 C360 111 360 163 398 163" marker-end="url(#ahv)"/>
-          <text class="elabel vote" x="366" y="80" text-anchor="middle">Review</text>
-          <text class="elabel vote" x="366" y="134" text-anchor="middle">Review</text>
-          <text class="elabel" x="62" y="58" text-anchor="middle">Backlog oder</text>
-          <text class="elabel" x="62" y="72" text-anchor="middle">blockiert im Sprint</text>
-          <text class="elabel" x="255" y="72" text-anchor="middle">im Sprint, frei</text>
+          <text class="elabel" x="62" y="58" text-anchor="middle">Board plant oder</text>
+          <text class="elabel" x="62" y="72" text-anchor="middle">Voraussetzung offen</text>
+          <text class="elabel" x="255" y="72" text-anchor="middle">Board läuft, frei</text>
           <path class="edge vote" d="M62 126 V178 H398" marker-end="url(#ahv)"/>
-          <text class="elabel vote" x="230" y="172" text-anchor="middle">Änderung</text>
+          <text class="elabel vote" x="230" y="172" text-anchor="middle">Vote</text>
           <text class="elabel" x="456" y="204" text-anchor="middle">endgültig</text>
         </svg>
       </div>
@@ -355,19 +354,62 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
         <span><i class="sw vote"></i>m-of-n-Vote</span>
       </div>
       <ul class="facts">
-        <li><b>waiting</b>: im Backlog, oder im Sprint mit offener Voraussetzung. "Blockiert" ist kein eigener Zustand.</li>
-        <li><b>in progress</b> folgt von selbst: im offenen Sprint und alle Voraussetzungen erledigt. Kein Vote, kein Block.</li>
-        <li><b>Änderungs-Vote</b>: kann jede offene Story verwerfen oder zurück ins Backlog legen. Eine so verworfene Story braucht kein Review.</li>
+        <li><b>in progress</b> folgt von selbst: Board in Ausführung und alle Voraussetzungen erfüllt.</li>
+        <li><b>Urteil</b>: jedes Mitglied darf done oder discarded vorschlagen. Ein Vote darf mehrere Stories abschließen.</li>
+        <li>Tragen alle Tasks einen grünen Haken, zeigt das Board "bereit zum Abschließen". Das ist nur ein Hinweis.</li>
         <li><b>discarded</b> ist endgültig. Nacharbeit ist eine neue Story.</li>
       </ul>
     </section>
   </div>
 
+  <section class="panel">
+    <div class="head">
+      <span class="eyebrow">Ansicht</span>
+      <h2>Ein Board ist eine Tabelle aus Stories und Tasks</h2>
+      <p>Links ein Eintrag pro Board, rechts seine Stories in drei einklappbaren Gruppen. Ein Knopf, ein Filter.</p>
+    </div>
+    <div class="mock" aria-label="Skizze der Board-Ansicht">
+      <nav>
+        <div class="nv"><span class="ic plan">P</span>Allgemein<small>0/3</small></div>
+        <div class="nv on"><span class="ic exec">A</span>Treffen<span class="alarm" title="Problem"></span><small>4/7</small></div>
+        <div class="nv sub"><span class="ic plan">P</span>Website<small>0/2</small></div>
+        <div class="nv"><span class="ic fin">B</span>Gründung<small>5/5</small></div>
+        <div class="nv"><span class="btn">+</span></div>
+      </nav>
+      <main>
+        <div class="bar"><b>Treffen organisieren</b><span class="badge">Ausführung</span><span class="btn">Zeigen: alles</span><span class="btn">Bearbeiten</span></div>
+        <div class="grp">In Arbeit</div>
+        <div class="srow">Raum reservieren</div>
+        <div class="trow"><span class="dots"><i class="dot done"></i><i class="dot done"></i><i class="dot"></i></span>Angebote einholen</div>
+        <div class="trow"><span class="dots"><i class="dot run"></i><i class="dot"></i><i class="dot"></i></span>Vertrag unterschreiben <span class="pill human">Mensch</span></div>
+        <div class="trow"><span class="dots"><i class="dot prob"></i><i class="dot"></i><i class="dot"></i></span>Bestätigung ins Wiki</div>
+        <div class="grp">Wartet</div>
+        <div class="srow">Anreise beschreiben <span>wartet auf: Raum reservieren</span></div>
+        <div class="grp">Beendet (4)</div>
+      </main>
+    </div>
+    <p class="note">Skizze mit Beispielinhalt. Jeder Punkt ist der Haken eines Sitzes. "Website" ist eingerückt, weil das Board auf "Treffen" wartet.</p>
+    <table class="colors">
+      <tr><th>Bedeutung</th><th>Farbe</th><th>Board</th><th>Task</th></tr>
+      <tr><td>wird vorbereitet</td><td><span class="pill plan">Gelb</span></td><td>Planung</td><td>-</td></tr>
+      <tr><td>läuft</td><td><span class="pill run">Blau</span></td><td>Ausführung</td><td>Haken "arbeite daran"</td></tr>
+      <tr><td>fertig</td><td><span class="pill done">Grün</span></td><td>beendet</td><td>Haken "fertig"</td></tr>
+      <tr><td>klemmt</td><td><span class="pill prob">Rot</span></td><td>Punkt am Eintrag</td><td>Haken "Problem"</td></tr>
+      <tr><td>braucht Mensch</td><td><span class="pill human">Violett</span></td><td>-</td><td>Menschen-Tag</td></tr>
+    </table>
+    <ul class="facts">
+      <li>Rot heißt Problem und sonst nichts. Jeder Zustand hat zusätzlich ein Icon.</li>
+      <li><b>Ändern im Board selbst</b>: "Bearbeiten" schaltet in einen Entwurf. Die Änderungen sammeln sich lokal, sind markiert und gehen als ein Vorschlag zur Abstimmung.</li>
+      <li>Der Zustand ist ein anklickbares Abzeichen, das Plus legt ein Board an. Die Verwaltung der Abhängigkeiten zwischen Boards erscheint erst ab dem zweiten Board.</li>
+      <li>Ein leeres Board zeigt einen Satz und den Knopf "Stories planen".</li>
+    </ul>
+  </section>
+
   <div class="two">
     <section class="panel">
       <div class="head">
-        <span class="eyebrow">Story-Felder</span>
-        <h2>Was eine Story trägt</h2>
+        <span class="eyebrow">Tasks</span>
+        <h2>Haken statt Abstimmung</h2>
       </div>
       <div class="card">
         <div class="title">Raum reservieren <span class="pill run">in progress</span></div>
@@ -375,12 +417,16 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
           <dt>Abnahme</dt><dd>Bestätigung des Raums liegt im Wiki</dd>
           <dt>Nicht Teil</dt><dd>Catering</dd>
           <dt>Vorbedingung</dt><dd>Teilnehmerzahl steht fest</dd>
-          <dt>Menschen&shy;aufgabe</dt><dd><span class="pill no">ja</span> eine Person muss es tun, nicht prüfbar</dd>
-          <dt>Assignee</dt><dd>genau ein Mitglied</dd>
-          <dt>Reviewer</dt><dd>genau ein Mitglied, nie der Assignee</dd>
+          <dt>Wiederholung</dt><dd>keine</dd>
         </dl>
       </div>
-      <p class="note">Beispielinhalt. Abnahme, Nicht-Teil und Vorbedingung gibt es nur an Stories.</p>
+      <p class="note">Beispielinhalt. Kriterien gibt es nur an Stories.</p>
+      <ul class="facts">
+        <li>Jeder Sitz setzt an jedem Task höchstens einen Haken, ohne Vote: arbeite daran, fertig oder Problem.</li>
+        <li>Haken sind Anzeige. Sie sperren nichts und beweisen nichts.</li>
+        <li>Sie leben bis zum Ende ihrer Story und stehen nicht in der Chain.</li>
+        <li>Jede Story kann einen eigenen Chat haben. Dort stimmen sich die Mitglieder ab, wer welchen Task nimmt.</li>
+      </ul>
     </section>
 
     <section class="panel">
@@ -389,62 +435,55 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
         <h2>Reihenfolge entsteht nur aus Abhängigkeiten</h2>
       </div>
       <ul class="rules">
-        <li><b>Zwischen allem</b><span>Story-Story, Epic-Epic und über Ebenen hinweg.</span></li>
-        <li><b>Keine Zyklen</b><span>Auch nicht zum eigenen Vorfahren oder Nachfahren.</span></li>
-        <li><b>Epic sperrt alles darunter</b><span>Hängt Epic B an Epic A, startet keine Story unter B, bevor A ganz erledigt ist.</span></li>
+        <li><b>Zwei Arten</b><span>Story wartet auf Story im selben Board. Board wartet auf Board.</span></li>
+        <li><b>Sonst nichts</b><span>Keine Kanten zwischen Boards auf Story-Ebene, keine zwischen Tasks.</span></li>
+        <li><b>Keine Zyklen</b><span>Geprüft je Graph: die Stories eines Boards, und die Boards.</span></li>
+        <li><b>Board sperrt Board</b><span>Hängt Board B an Board A, läuft in B nichts, bevor A beendet ist.</span></li>
         <li><b>Keine Priorität</b><span>Kein Ranking zusätzlich zu den Abhängigkeiten.</span></li>
         <li><b>Blocker bleiben</b><span>Was etwas blockiert, kann nicht verworfen werden. Ein Vote darf umhängen und im selben Zug verwerfen.</span></li>
-        <li><b>Ketten im Sprint</b><span>Story und Voraussetzung dürfen im selben Sprint liegen. Die abhängige wartet dort.</span></li>
       </ul>
     </section>
   </div>
 
-  <section class="panel chart">
+  <section class="panel">
     <div class="head">
-      <span class="eyebrow">Erste Ansicht</span>
-      <h2>Burn-up nach Sprint</h2>
-      <p>x-Achse: Sprint-Nummer, keine Uhrzeit. Vorn die abgeschlossenen Stories (done + discarded), dahinter alle Stories.</p>
+      <span class="eyebrow">Zeit</span>
+      <h2>Warten auf ein Datum ist eine Story</h2>
+      <p>Die Warte-Story ist das einzige Element mit einem Zeitstempel. Andere Stories hängen von ihr ab wie von jeder Story.</p>
     </div>
-    <svg viewBox="0 0 560 230" role="img" aria-label="Beispiel-Burn-up über fünf Sprints">
-      <g class="grid">
-        <line x1="44" x2="548" y1="190" y2="190"/>
-        <line x1="44" x2="548" y1="145" y2="145"/>
-        <line x1="44" x2="548" y1="100" y2="100"/>
-        <line x1="44" x2="548" y1="55" y2="55"/>
-        <line x1="44" x2="548" y1="10" y2="10"/>
-      </g>
-      <g class="axis">
-        <text x="36" y="194" text-anchor="end">0</text>
-        <text x="36" y="149" text-anchor="end">5</text>
-        <text x="36" y="104" text-anchor="end">10</text>
-        <text x="36" y="59" text-anchor="end">15</text>
-        <text x="36" y="14" text-anchor="end">20</text>
-      </g>
-      <!-- scale: 9px per story, baseline 190; slots of 100px from x=44 -->
-      <g>
-        <rect class="bar-total" x="64" y="118" width="60" height="72"/>
-        <rect class="bar-done" x="76" y="190" width="36" height="0"/>
-        <rect class="bar-total" x="164" y="82" width="60" height="108"/>
-        <rect class="bar-done" x="176" y="163" width="36" height="27"/>
-        <rect class="bar-total" x="264" y="82" width="60" height="108"/>
-        <rect class="bar-done" x="276" y="127" width="36" height="63"/>
-        <rect class="bar-total" x="364" y="37" width="60" height="153"/>
-        <rect class="bar-done" x="376" y="100" width="36" height="90"/>
-        <rect class="bar-total" x="464" y="19" width="60" height="171"/>
-        <rect class="bar-done" x="476" y="55" width="36" height="135"/>
-      </g>
-      <g class="axis">
-        <text x="94" y="210" text-anchor="middle">Sprint 1</text>
-        <text x="194" y="210" text-anchor="middle">2</text>
-        <text x="294" y="210" text-anchor="middle">3</text>
-        <text x="394" y="210" text-anchor="middle">4</text>
-        <text x="494" y="210" text-anchor="middle">5</text>
-      </g>
-    </svg>
-    <div class="legend">
-      <span><i class="sw" style="border-top:8px solid var(--accent);width:14px"></i>abgeschlossen</span>
-      <span><i class="sw" style="border-top:8px solid var(--line);width:14px"></i>alle Stories</span>
-      <span class="example">Beispieldaten</span>
+    <div class="chain">
+      <span class="chip"><span class="tag timer">Warte-Story</span> 1. Dezember</span>
+      <span class="arrow">&larr; wartet auf</span>
+      <span class="chip"><span class="tag story">Story</span> Server bezahlen, Dezember</span>
+    </div>
+    <p class="note">Beispielinhalt.</p>
+    <ul class="facts">
+      <li><b>Abschließen</b>: ein Mitglied schließt die Warte-Story per Vote, sobald die Zeit gekommen ist. Vorher verweigert der Knoten Vorschlag und Zustimmung. Nichts schließt sie automatisch.</li>
+      <li><b>Die Chain bleibt uhrfrei</b>: kein Zeitpunkt wird signiert. Die m Sitze bezeugen mit ihrer eigenen Uhr, dass die Zeit gekommen ist.</li>
+      <li><b>Wiederkehrendes</b>: es gibt keine Serie. Jede Runde ist ein Paar aus Warte-Story und Arbeits-Story. Das Paket, das eine Runde abschließt, legt die nächste an. Das Feld "Wiederholung" erinnert daran.</li>
+      <li><b>Kein "spätestens bis"</b>: eine Frist steht im Text der Story. Was zu spät ist, bekommt den roten Haken.</li>
+    </ul>
+  </section>
+
+  <section class="panel">
+    <div class="head">
+      <span class="eyebrow">Abstimmen</span>
+      <h2>Ein Paket, ein Vote</h2>
+      <p>Jede Board-Änderung ist ein Paket. Alles andere leitet jeder Knoten selbst aus der Chain ab.</p>
+    </div>
+    <div class="votes">
+      <div class="vote">
+        <h3>Was ein Paket kann</h3>
+        <p>Boards, Stories und Tasks anlegen und ändern, einen Board-Zustand setzen, Abhängigkeiten setzen, wartende Stories verschieben, Stories abschließen. Beliebig kombiniert.</p>
+      </div>
+      <div class="vote">
+        <h3>Planen durch Weiterreichen</h3>
+        <p>Ein Mitglied stellt seinen Entwurf als Vorschlag ein. Andere diskutieren darunter, übernehmen ihn, ändern ihn und stellen die nächste Fassung ein. Abgestimmt wird über die Fassung, auf die man sich einigt.</p>
+      </div>
+      <div class="vote">
+        <h3>Was es kostet</h3>
+        <p>Vorschlagen kostet keine Signatur, erst das Zustimmen. Zehn Fassungen und ein Vote kosten m Signaturen.</p>
+      </div>
     </div>
   </section>
 
@@ -454,9 +493,9 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
       <h2>Wecken, Aufbewahrung, Konkurrenz</h2>
     </div>
     <ul class="facts">
-      <li><b>Wecken</b>: Das Board weckt niemanden. Mitglieder wecken sich gegenseitig, wenn sie Stimmen brauchen.</li>
-      <li><b>Aufbewahrung</b>: Abgelehnte Votes und ihre Diskussion verfallen nach 14 Tagen. Ein angenommener Vote ist ein Chain-Block. Was bleiben soll, kommt ins Wiki.</li>
-      <li><b>Konkurrenz</b>: Mehrere Planungs-Votes dürfen konkurrieren. Der zuerst angenommene öffnet den Sprint, die anderen werden ungültig.</li>
+      <li><b>Wecken</b>: drei abgestimmte Ereignisse wecken alle Sitze: ein Board geht in Ausführung, ein Board geht zurück in Planung, eine Story kommt auf ein laufendes Board. Dazu weckt ein Knoten seinen eigenen Sitz, wenn die Zeit einer Warte-Story gekommen ist. Sonst weckt ein Board niemanden.</li>
+      <li><b>Aufbewahrung</b>: abgelehnte Vorschläge und ihre Diskussion verfallen nach 14 Tagen. Ein angenommenes Paket ist ein Chain-Block. Was bleiben soll, kommt ins Wiki.</li>
+      <li><b>Konkurrenz</b>: mehrere Pakete dürfen konkurrieren. Ein Paket gilt ganz oder gar nicht. Ein zuerst angenommenes kann ein anderes ungültig machen.</li>
     </ul>
   </section>
 
@@ -466,9 +505,9 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
       <h2>Nicht im Konzept</h2>
     </div>
     <div class="nope">
-      <span>Tasks</span><span>Sprint-Dauer</span><span>eigener Planungs-Thread</span><span>Termine</span><span>Fristen</span><span>Kalender</span><span>Wiederholung</span>
-      <span>Schätzungen</span><span>Priorität</span><span>ready for work</span><span>ready for review</span>
-      <span>Uhrzeit im Burn-up</span><span>Verschieben zwischen Epics</span><span>Mensch/Agent-Typen</span>
+      <span>Sprints</span><span>Backlog</span><span>Burn-up</span><span>Epics</span><span>Boards in Boards</span><span>Assignee</span><span>Reviewer</span>
+      <span>Fristen</span><span>Kalender</span><span>Serien</span><span>Schätzungen</span><span>Priorität</span><span>ready for work</span><span>ready for review</span>
+      <span>eigener Planungs-Thread</span><span>Mensch/Agent-Typen</span><span>automatisches Unterschreiben</span>
     </div>
   </section>
 
