@@ -10,6 +10,56 @@ use super::*;
 /// The `net_health` reason of an evicted seat.
 pub(crate) const SEAT_EVICTED: &str = "seat evicted";
 
+/// B3: a group runtime's lock-out verdict.
+#[derive(Debug, Default)]
+pub(crate) struct LockOut {
+    pub(crate) active: bool,
+    /// `live_opaque` when the last lock-out cleared: only growth past it
+    /// is new evidence.
+    pub(crate) mark: u64,
+}
+
+/// How long the unreadable count must stand still before its episode ends:
+/// past the 600 s resend ceiling, so an older peer re-offering a tail this
+/// seat cannot read stays one episode.
+pub(crate) const UNREADABLE_QUIET_SECS: u64 = 900;
+
+/// B2: a run of growing unreadable live frames, one WARN and one INFO.
+#[derive(Debug, Default)]
+pub(crate) struct UnreadableEpisode {
+    seen: u64,
+    /// The count before the episode began; `None` = no episode.
+    base: Option<u64>,
+    grew_at: u64,
+}
+
+/// What one tick of [`UnreadableEpisode`] reports.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum UnreadableNote {
+    Started { count: u64 },
+    Ended { total: u64 },
+}
+
+impl UnreadableEpisode {
+    pub(crate) fn tick(&mut self, n: u64, now: u64) -> Option<UnreadableNote> {
+        let before = std::mem::replace(&mut self.seen, n);
+        if n > before {
+            self.grew_at = now;
+            if self.base.is_none() {
+                self.base = Some(before);
+                return Some(UnreadableNote::Started { count: n });
+            }
+            return None;
+        }
+        let base = self.base?;
+        if now.saturating_sub(self.grew_at) < UNREADABLE_QUIET_SECS {
+            return None;
+        }
+        self.base = None;
+        Some(UnreadableNote::Ended { total: n.saturating_sub(base) })
+    }
+}
+
 /// The 0/1/2 pill derivation of the ACTIVE workspace, shared by
 /// [`State::presence_of`] (one member, on demand) and the tick's
 /// `refresh_member_pills` (every pill): THIS node is always online (it is
@@ -59,7 +109,13 @@ impl State {
             self.delivery.unreachable.remove(&member);
             let now = self.presence_now();
             self.stamp_member_pill(&member, now);
+            // before the health fold, which would re-raise on the old mark
+            let cleared = self.clear_lockout(&member);
             self.recompute_net_health();
+            let was_silent = self.group_net.as_ref().is_some_and(|g| g.handle.reach_silent(&member));
+            if cleared || was_silent {
+                self.push_outbox_reach();
+            }
             self.genesis_heard(&member);
         }
         Ok(Reply::Ack)
@@ -75,6 +131,58 @@ impl State {
             stop.store(true, std::sync::atomic::Ordering::SeqCst);
         }
         tracing::info!("genesis_republish=done");
+    }
+
+    /// B3: reading a peer's frame ends this seat's lock-out; `true` when
+    /// one was active.
+    fn clear_lockout(&mut self, by: &MemberId) -> bool {
+        let Some(g) = self.group_net.as_mut() else {
+            return false;
+        };
+        if !g.lockout.active {
+            return false;
+        }
+        g.lockout.active = false;
+        g.lockout.mark = g.health.borrow().live_opaque;
+        tracing::info!(%by, "seat_locked_out_cleared");
+        true
+    }
+
+    /// This seat cannot reach its group: evicted, or locked out until it
+    /// reads a peer again. New writes would only pile up unsent.
+    pub(crate) fn cannot_reach_group(&self) -> bool {
+        self.delivery.evicted || self.group_net.as_ref().is_some_and(|g| g.lockout.active)
+    }
+
+    /// Owed peers not heard within the activity window: the chain's own
+    /// `silent` verdict, or the restore gates' test-seam window.
+    fn silent_peers(&self) -> std::collections::BTreeSet<MemberId> {
+        match self.seat_active.load(std::sync::atomic::Ordering::SeqCst) {
+            u64::MAX => self.chain_lag().silent.into_iter().map(|s| s.member).collect(),
+            window => {
+                let (now, me) = (self.presence_now(), self.member());
+                self.roster()
+                    .into_iter()
+                    .filter(|m| *m != me)
+                    .filter(|m| {
+                        let seen = self.member_last_seen(m);
+                        seen == molt_core::MemberInfo::NEVER || now.saturating_sub(seen) >= window
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Hand the group outbox who it can reach (no-op when unchanged).
+    pub(crate) fn push_outbox_reach(&mut self) {
+        let Some(g) = self.group_net.as_ref() else {
+            return;
+        };
+        let reach = molt_net::group_runtime::OutboxReach {
+            silent: self.silent_peers(),
+            locked_out: self.cannot_reach_group(),
+        };
+        g.handle.set_reach(reach);
     }
 
     /// A merged re-key commit re-admitted `member` as a new incarnation
@@ -150,18 +258,19 @@ impl State {
         self.emit_session(SessionScope::Full);
     }
 
-    /// B2: live frames no held key opens, one WARN per episode. An episode
-    /// is a run of presence ticks over which the count keeps growing.
+    /// B2: live frames no held key opens, one WARN when an episode starts
+    /// and one INFO when it ends ([`UNREADABLE_QUIET_SECS`] without growth).
     pub(crate) fn note_unreadable_tick(&mut self) {
-        let Some(n) = self.group_net.as_ref().map(|g| g.health.borrow().live_opaque) else {
+        let now = self.presence_now();
+        let Some(g) = self.group_net.as_mut() else {
             return;
         };
-        let grew = n > self.delivery.unreadable_seen;
-        if grew && !self.delivery.unreadable_warned {
-            tracing::warn!(count = n, "group_unreadable");
+        let n = g.health.borrow().live_opaque;
+        match g.unreadable.tick(n, now) {
+            Some(UnreadableNote::Started { count }) => tracing::warn!(count, "group_unreadable"),
+            Some(UnreadableNote::Ended { total }) => tracing::info!(total, "group_unreadable_end"),
+            None => {}
         }
-        self.delivery.unreadable_warned = grew;
-        self.delivery.unreadable_seen = n;
     }
 
     /// The verdict of a Nostr workspace whose group runtime is not up.
@@ -332,8 +441,13 @@ impl State {
             // the deaf-node signature - the OWN outbox stalls (nobody acks)
             // while LIVE frames arrive that no held key opens. B3: reported,
             // never self-healed; the operator rejoins with a link.
-            if !self.delivery.send_stuck.is_empty() && h.live_opaque > 0 {
+            let mark = self.group_net.as_ref().map_or(0, |g| g.lockout.mark);
+            if !self.delivery.send_stuck.is_empty() && h.live_opaque > mark {
                 self.note_locked_out("key_behind");
+                let raised = self.group_net.as_mut().is_some_and(|g| !std::mem::replace(&mut g.lockout.active, true));
+                if raised {
+                    self.push_outbox_reach();
+                }
             }
             if parts.is_empty() {
                 molt_core::NetHealth::Ok

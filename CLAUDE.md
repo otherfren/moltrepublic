@@ -412,7 +412,9 @@ cursor; EVERY supervisor build rewinds proven-acking peers to their floor
 under a bumped `resend_epoch` (fresh msg ids — epoch 0 is byte-identical to
 the legacy id), and a stalled tail rewinds itself on a 10s..600s backoff,
 going loud (send_failed) after 8 fruitless rounds but never silently giving
-up. Resends are always FRESH encryptions (cache evicted on rewind). Old
+up. On the 445 runtime a round publishes only while a peer still owed the
+tail is heard (2 open rounds per start excepted) and never on a locked-out
+seat; the tail stays owed and a heard peer resumes it at once. Resends are always FRESH encryptions (cache evicted on rewind). Old
 nodes never ack → they keep exactly the plain cursor behavior. The former
 "per-drain MLS persist" gap is closed pragmatically: `persist_mls_if_due`
 merges the live ratchet every ≤10s of traffic (riding `record()` and the

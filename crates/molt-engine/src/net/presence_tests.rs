@@ -593,3 +593,31 @@ fn an_evicted_seat_refuses_what_it_could_never_send() {
         assert!(st.handle(cmd).is_ok(), "{what} passes");
     }
 }
+
+/// B2: a counter growing in bursts with 30 s gaps is ONE episode - one
+/// WARN at its start, one INFO with the total once it stood still for the
+/// quiet period (field: 16 WARNs in 41 minutes on one seat).
+#[test]
+fn unreadable_bursts_with_gaps_are_one_episode() {
+    use crate::net::presence::{UnreadableEpisode, UnreadableNote, UNREADABLE_QUIET_SECS};
+    let mut ep = UnreadableEpisode::default();
+    let mut notes = Vec::new();
+    let mut n = 0;
+    let mut now = 1_000;
+    for burst in 0..10u64 {
+        n += 5 + burst;
+        notes.extend(ep.tick(n, now));
+        now += 30;
+        notes.extend(ep.tick(n, now));
+        now += 30;
+    }
+    let grown = n;
+    while now < 1_000 + 600 + UNREADABLE_QUIET_SECS + 60 {
+        notes.extend(ep.tick(n, now));
+        now += 30;
+    }
+    assert_eq!(
+        notes,
+        vec![UnreadableNote::Started { count: 5 }, UnreadableNote::Ended { total: grown }]
+    );
+}

@@ -333,6 +333,8 @@ impl State {
         self.save_accepted_if_due(now);
         self.persist_mls_if_due(now);
         self.flush_due_acks(now);
+        // a peer falling silent has no event of its own: this beat carries it
+        self.push_outbox_reach();
         // G7: release park entries whose predecessor pathologically never came
         self.release_stale_parked(now);
         self.release_decision_lines(now);

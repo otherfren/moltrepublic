@@ -43,7 +43,7 @@ mod mirror;
 mod wiki_base;
 mod ingest;
 mod presence;
-pub(crate) use presence::pill_state;
+pub(crate) use presence::{pill_state, LockOut, UnreadableEpisode};
 mod recovery;
 pub(crate) mod vault_base;
 pub(crate) mod vault_payload;
@@ -911,7 +911,18 @@ impl State {
                 self.session.settings.mirror_daily_bytes,
             ),
         );
-        Some(crate::GroupNet { handle, mls: mls_arc, wakeup, health, trickle })
+        // a (re)started seat speaks once: peers holding a tail for it
+        // re-offer only to a seat they hear (delivery guarantee §4.4)
+        handle.publish_ack(molt_net::group_ack::GroupAck::new(self.member(), self.delivery.accepted.clone()));
+        Some(crate::GroupNet {
+            handle,
+            mls: mls_arc,
+            wakeup,
+            health,
+            trickle,
+            lockout: crate::net::LockOut::default(),
+            unreadable: crate::net::UnreadableEpisode::default(),
+        })
     }
 
     /// [`Self::build_real_net`] over an **already-live** shared group — the

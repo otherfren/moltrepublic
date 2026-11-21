@@ -802,8 +802,6 @@ impl State {
         self.forgotten_threads.clear();
         self.delivery.last_mesh_out = 0;
         self.delivery.evicted = false;
-        self.delivery.unreadable_seen = 0;
-        self.delivery.unreadable_warned = false;
         self.delivery.locked_out_noted = false;
         self.recovery.held_approvals.clear();
         self.recovery.held_seals.clear();
