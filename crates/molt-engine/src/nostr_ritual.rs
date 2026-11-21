@@ -213,123 +213,78 @@ pub(crate) fn spawn_founder_inbox(
     })
 }
 
-/// The recovery coordinator's 1059 inbox — the recovery twin of
-/// [`spawn_founder_inbox`] (N4b §8.8 step 5b).
-///
-/// Same order, for the same reason: subscribe FIRST, prove the subscription is
-/// READABLE, and only then surface the link. A recovery link advertised over an
-/// inbox no relay would ever answer on sends the returning member to a dead
-/// address, and recovery is the one flow whose user has already lost their
-/// device — there is no second channel to notice on.
-///
-/// The inbox lives until the WORKSPACE CLOSES, which is also exactly how long
-/// its ticket stays spendable — `RECOVERY_WELCOME_TIMEOUT` is the rejoiner's
-/// wait, not a deadline on this side. It therefore holds only a WEAK sender:
-/// the loop must never keep a dropped engine's actor (writer thread,
-/// workspace flock) alive.
-/// How many times the re-key commit is offered to the relays before the
-/// recovery is declared failed. Small on purpose: this is the ONE frame in a
-/// recovery that nothing else recovers, and the alternative to a few retries
-/// is a republic split nobody is told about.
-const REKEY_PUBLISH_ATTEMPTS: u32 = 3;
-/// Wait between those attempts.
-const REKEY_PUBLISH_BACKOFF: Duration = Duration::from_secs(2);
-
-/// **Deliver a Nostr re-key** (N4b step 6c): the commit as a kind-445 at its
-/// PINNED carrier stamp, and then the gift-wrapped kind-444 Welcome to the
-/// returning seat's NEW anchor.
-///
-/// The order is load-bearing and so is the coupling:
-///
-/// - The **commit first**. It is what moves every survivor to the epoch the
-///   Welcome puts the rejoiner at. A frame that beats its commit is held and
-///   retried (N5.3c), so the order is a preference rather than a guarantee —
-///   but publishing the Welcome first would make that hold the normal path
-///   instead of the exception.
-/// - The **Welcome only if the commit landed**. The two failures are not
-///   symmetric. A Welcome without its commit puts the rejoiner at an epoch no
-///   survivor ever reaches — a split, with nothing in the product to heal it.
-///   A commit without its Welcome leaves the seat unable to return, which the
-///   re-mint failover already covers: the coordinator's next round supplies a
-///   fresh link. So the recoverable failure is the one to prefer.
-///
-/// One landed relay is enough to be durable: relays store the frame, so a
-/// survivor that was offline picks the commit up on its catch-up.
-pub(crate) fn spawn_rekey_delivery(
-    channel: GroupChannel,
-    net: RitualNet,
-    to_npub: String,
-    rekey: crate::chain::NostrRekey,
-    payload: molt_net::welcome::WelcomePayload,
-    member: String,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut published = false;
-        for attempt in 1..=REKEY_PUBLISH_ATTEMPTS {
-            match channel
-                .publish_frame_at(&rekey.prev_exporter, &rekey.commit, rekey.stamp)
-                .await
-            {
-                Ok((stamp, report)) => {
-                    tracing::info!(
-                        %member,
-                        stamp,
-                        relays = report.accepted.len(),
-                        "published the recovery re-key commit"
-                    );
-                    published = true;
-                    break;
-                }
-                Err(e) => {
-                    tracing::warn!(%member, attempt, error = %e, "the re-key commit did not publish");
-                    if attempt < REKEY_PUBLISH_ATTEMPTS {
-                        tokio::time::sleep(REKEY_PUBLISH_BACKOFF).await;
-                    }
-                }
-            }
+/// The recovery-side frames an inbox carries to the actor (the PoP
+/// comparisons live there, with every other check; this only carries the
+/// PROVEN sealer across).
+fn recover_inbox_command(delivery: RitualDelivery, generation: u64) -> Option<Command> {
+    let RitualDelivery::Msg(msg, sender) = delivery else {
+        return None;
+    };
+    Some(match msg {
+        RitualMsg::Recover(r) => crate::founding::recover_command(r, sender, generation),
+        RitualMsg::RecoverFailed { member, reason, version } => {
+            Command::NetRecoverPeerFailed { member, reason, version, sender }
         }
-        if !published {
-            // the ONE thing that matters, and the action that follows from it
-            tracing::error!(%member, "the re-key commit reached no relay - re-mint the recovery link");
-            return;
+        RitualMsg::RecoverWant { member, ticket, missing } => {
+            Command::NetRecoverWant { member, ticket, missing, sender, generation: Some(generation) }
         }
-        if let Err(e) = net.send_welcome(&to_npub, &payload).await {
-            tracing::error!(%member, error = %e, "the recovery welcome did not publish - re-mint the recovery link");
+        RitualMsg::RecoverReady { member, ticket } => {
+            Command::NetRecoverReady { member, ticket, sender, generation: Some(generation) }
         }
+        _ => return None,
     })
 }
 
+/// Subscribe `net`'s 1059 inbox until a relay answers, retrying on a
+/// backoff. `None` = the engine is gone.
+async fn readable_inbox(
+    net: &RitualNet,
+    what: &'static str,
+    tx: &mpsc::WeakSender<Envelope>,
+) -> Option<molt_net::ritual_net::RitualInbox> {
+    let mut wait = PUBLISH_RETRY_INITIAL;
+    loop {
+        let why = match net.inbox().await {
+            Ok(mut inbox) => {
+                let st = inbox.read_state(LIVE_WAIT).await;
+                if st.any() {
+                    if !st.full() {
+                        tracing::warn!(inbox = what, answered = st.answered, connected = st.connected, "inbox_partial");
+                    }
+                    return Some(inbox);
+                }
+                "no relay answered".to_string()
+            }
+            Err(e) => e.to_string(),
+        };
+        tracing::warn!(inbox = what, error = %why, retry_in_s = wait.as_secs(), "inbox_down");
+        tokio::time::sleep(wait).await;
+        tx.upgrade()?;
+        wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+    }
+}
+
 /// The STANDING seat inbox (`detached_reattach.md` §2.1): an open Nostr
-/// workspace listens on its OWN 1059 anchor for the workspace's lifetime,
-/// so a restored seat can announce itself without a minted link. Only
-/// gift-wrapped `Recover` requests are carried across — the actor's ingest
-/// ladder (ticketed AND self-service lanes) stays the one gate. Torn down
-/// with the net teardown; commands are scoped by `generation` (net scope).
+/// workspace listens on its OWN 1059 anchor for the workspace's lifetime.
+/// It carries the recovery frames - a link-less request (refused since
+/// B3) and the anchor-first rejoiner's Want/Ready, which a restarted
+/// coordinator answers `link outdated`. Torn down with the net teardown;
+/// commands are scoped by `generation` (net scope).
 pub(crate) fn spawn_seat_inbox(
     net: RitualNet,
     generation: u64,
     tx: mpsc::WeakSender<Envelope>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut inbox = match net.inbox().await {
-            Ok(i) => i,
-            Err(e) => {
-                tracing::warn!(error = %e, "seat inbox subscribe failed - self-service reattach unavailable this session");
-                return;
-            }
+        let Some(mut inbox) = readable_inbox(&net, "seat", &tx).await else {
+            return;
         };
         loop {
             let Some(delivery) = inbox.recv(RECV_SLICE).await else {
                 continue; // idle slice
             };
-            let cmd = match delivery {
-                RitualDelivery::Msg(RitualMsg::Recover(r), sender) => {
-                    crate::founding::recover_command(r, sender, generation)
-                }
-                RitualDelivery::Msg(RitualMsg::RecoverFailed { member, reason, version }, sender) => {
-                    Command::NetRecoverPeerFailed { member, reason, version, sender }
-                }
-                _ => continue,
+            let Some(cmd) = recover_inbox_command(delivery, generation) else {
+                continue;
             };
             if !send_cmd(&tx, cmd).await {
                 return;
@@ -338,6 +293,20 @@ pub(crate) fn spawn_seat_inbox(
     })
 }
 
+/// The recovery coordinator's 1059 inbox — the recovery twin of
+/// [`spawn_founder_inbox`] (N4b §8.8 step 5b).
+///
+/// Same order, for the same reason: subscribe FIRST, prove the subscription is
+/// READABLE, and only then surface the link. A recovery link advertised over an
+/// inbox no relay would ever answer on sends the returning member to a dead
+/// address, and recovery is the one flow whose user has already lost their
+/// device — there is no second channel to notice on. Until a relay answers
+/// the mint stays pending, retrying.
+///
+/// The inbox lives until the WORKSPACE CLOSES, which is also exactly how long
+/// its ticket stays spendable. It therefore holds only a WEAK sender: the
+/// loop must never keep a dropped engine's actor (writer thread, workspace
+/// flock) alive.
 #[allow(clippy::too_many_arguments)] // one mint's handover fields, not a bag
 pub(crate) fn spawn_recovery_inbox(
     net: RitualNet,
@@ -354,34 +323,9 @@ pub(crate) fn spawn_recovery_inbox(
     tx: mpsc::WeakSender<Envelope>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        // every early exit unregisters the ticket through the SAME failure
-        // lane the queue path uses, so a dead mint never leaves a live ticket
-        // behind for a replayed request to spend
-        let fail = |reason: String| Command::NetRecoverLinkFailed {
-            member: member.clone(),
-            reason,
-            ticket: ticket.clone(),
-            generation: Some(generation),
-        };
-        let mut inbox = match net.inbox().await {
-            Ok(i) => i,
-            Err(e) => {
-                let _ = send_cmd(&tx, fail(format!("relay inbox subscribe: {e}"))).await;
-                return;
-            }
-        };
-        let st = inbox.read_state(LIVE_WAIT).await;
-        if !st.any() {
-            let _ = send_cmd(&tx, fail("no relay answered the subscription".to_string())).await;
+        let Some(mut inbox) = readable_inbox(&net, "recovery", &tx).await else {
             return;
-        }
-        if !st.full() {
-            tracing::warn!(
-                answered = st.answered,
-                connected = st.connected,
-                "the recovery inbox answered on only some relays"
-            );
-        }
+        };
         let handover = invite::RecoveryHandoverV2 {
             ticket: ticket.clone(),
             npub: net.pk_hex(),
@@ -394,8 +338,16 @@ pub(crate) fn spawn_recovery_inbox(
         // queue shape when the handover cannot encode, and with the empty
         // queue fields below that fallback is `hex("\n\n\n<republic_id>")` — a
         // link that parses as nothing, handed to the operator as a success.
+        // Every early exit unregisters the ticket through the failure lane,
+        // so a dead mint never leaves a live ticket behind.
         if let Err(e) = handover.encode() {
-            let _ = send_cmd(&tx, fail(format!("rendering recovery link: {e}"))).await;
+            let fail = Command::NetRecoverLinkFailed {
+                member: member.clone(),
+                reason: format!("rendering recovery link: {e}"),
+                ticket: ticket.clone(),
+                generation: Some(generation),
+            };
+            let _ = send_cmd(&tx, fail).await;
             return;
         }
         let link = crate::recovery::RecoveryInvite {
@@ -426,18 +378,8 @@ pub(crate) fn spawn_recovery_inbox(
             let Some(delivery) = inbox.recv(RECV_SLICE).await else {
                 continue; // idle slice
             };
-            // gift-wrapped Recover requests, and a rejoiner's failure report
-            // (the PoP comparison itself lives in the ACTOR, with every other
-            // check — one validation ladder; this task only carries the
-            // PROVEN sealer across)
-            let cmd = match delivery {
-                RitualDelivery::Msg(RitualMsg::Recover(r), sender) => {
-                    crate::founding::recover_command(r, sender, generation)
-                }
-                RitualDelivery::Msg(RitualMsg::RecoverFailed { member, reason, version }, sender) => {
-                    Command::NetRecoverPeerFailed { member, reason, version, sender }
-                }
-                _ => continue,
+            let Some(cmd) = recover_inbox_command(delivery, generation) else {
+                continue;
             };
             if !send_cmd(&tx, cmd).await {
                 return;
@@ -446,42 +388,99 @@ pub(crate) fn spawn_recovery_inbox(
     })
 }
 
-/// Why the chain anchor did not verify in time, from what did arrive. An
-/// old coordinator (no version) cannot send a checkpoint larger than one
-/// frame; that is the usual cause and is named first.
-fn anchor_timeout_reason(
-    waited_min: u64,
-    blob: bool,
-    parts: Option<(u32, u32)>,
-    blocks: &[molt_core::ChainBlock],
-    verify_error: &str,
-    coordinator_version: Option<&str>,
-) -> String {
-    let mut out = format!("the chain anchor did not verify within {waited_min} min of the Welcome");
-    let checkpoint = match (blob, parts) {
-        (true, _) => "checkpoint=received".to_string(),
-        (false, Some((have, total))) => format!("checkpoint=parts {have}/{total}"),
-        (false, None) => "checkpoint=none".to_string(),
-    };
-    let heights = match (blocks.first(), blocks.last()) {
-        (Some(a), Some(b)) => format!("blocks={}..{} ({})", a.height, b.height, blocks.len()),
-        _ => "blocks=none".to_string(),
-    };
-    out.push_str(&format!(": {checkpoint} {heights}"));
-    if !verify_error.is_empty() {
-        out.push_str(&format!(" error={verify_error}"));
-    }
-    match coordinator_version {
-        // no version = 0.0.18 or older; before 0.0.18 a checkpoint over one
-        // frame was never sent, which is what "none" then means
-        Some("") if !blob && parts.is_none() => {
-            out.push_str(" coordinator=0.0.18 or older - before 0.0.18 a large checkpoint was never sent: update the coordinator")
+/// Gift-wrap each of `frames` to `to`, in order, each until a relay takes
+/// it (backoff 2 s .. 60 s, no attempt cap). Ends with the engine.
+pub(crate) fn spawn_recover_frames(
+    net: RitualNet,
+    to: String,
+    frames: Vec<RitualMsg>,
+    what: &'static str,
+    tx: mpsc::WeakSender<Envelope>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let count = frames.len();
+        for msg in frames {
+            let mut wait = PUBLISH_RETRY_INITIAL;
+            while let Err(e) = net.send_ritual(&to, &msg).await {
+                tracing::warn!(what, error = %e, retry_in_s = wait.as_secs(), "recover_frame=unsent");
+                tokio::time::sleep(wait).await;
+                if tx.upgrade().is_none() {
+                    return;
+                }
+                wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+            }
         }
-        Some("") => out.push_str(" coordinator=0.0.18 or older"),
-        Some(v) => out.push_str(&format!(" coordinator={v}")),
-        None => {}
-    }
-    out
+        tracing::info!(what, frames = count, "recover_frames=published");
+    })
+}
+
+/// **Deliver a Nostr re-key** (N4b step 6c): the commit as a kind-445 at its
+/// PINNED carrier stamp, and then the gift-wrapped kind-444 Welcome to the
+/// returning seat's NEW anchor - each until a relay takes it (backoff
+/// 2 s .. 60 s, no attempt cap; B4). Ends with the engine.
+///
+/// The order is load-bearing and so is the coupling:
+///
+/// - The **commit first**. It is what moves every survivor to the epoch the
+///   Welcome puts the rejoiner at. A frame that beats its commit is held and
+///   retried (N5.3c), so the order is a preference rather than a guarantee —
+///   but publishing the Welcome first would make that hold the normal path
+///   instead of the exception.
+/// - The **Welcome only after the commit landed**. A Welcome without its
+///   commit puts the rejoiner at an epoch no survivor ever reaches — a
+///   split, with nothing in the product to heal it.
+///
+/// One landed relay is enough to be durable: relays store the frame, so a
+/// survivor that was offline picks the commit up on its catch-up.
+pub(crate) fn spawn_rekey_delivery(
+    channel: GroupChannel,
+    net: RitualNet,
+    to_npub: String,
+    rekey: crate::chain::NostrRekey,
+    payload: molt_net::welcome::WelcomePayload,
+    member: String,
+    tx: mpsc::WeakSender<Envelope>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut wait = PUBLISH_RETRY_INITIAL;
+        let mut attempt = 0u32;
+        loop {
+            attempt = attempt.saturating_add(1);
+            match channel.publish_frame_at(&rekey.prev_exporter, &rekey.commit, rekey.stamp).await {
+                Ok((stamp, report)) => {
+                    tracing::info!(%member, stamp, relays = report.accepted.len(), "rekey_commit=published");
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(%member, attempt, error = %e, retry_in_s = wait.as_secs(), "rekey_commit=unsent");
+                }
+            }
+            tokio::time::sleep(wait).await;
+            if tx.upgrade().is_none() {
+                return;
+            }
+            wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+        }
+        let mut wait = PUBLISH_RETRY_INITIAL;
+        let mut attempt = 0u32;
+        loop {
+            attempt = attempt.saturating_add(1);
+            match net.send_welcome(&to_npub, &payload).await {
+                Ok(report) => {
+                    tracing::info!(%member, relays = report.accepted.len(), "recover_welcome=published");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(%member, attempt, error = %e, retry_in_s = wait.as_secs(), "recover_welcome=unsent");
+                }
+            }
+            tokio::time::sleep(wait).await;
+            if tx.upgrade().is_none() {
+                return;
+            }
+            wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+        }
+    })
 }
 
 /// MLS-encrypt one RitualMsg, ONCE: a retry republishes these bytes (see
@@ -546,13 +545,13 @@ impl RetryPolicy {
     };
     /// The genesis: the founder has already materialized, so this frame is
     /// the members' ONLY path into the republic. A first failure is
-    /// reported; either way it is re-published over a week for the member
-    /// that was away.
+    /// reported; either way it is re-published, every three days once the
+    /// ladder ends, until the workspace closes (B4: no end).
     pub(crate) const GENESIS: Self = Self {
         attempts: 4,
         backoff: Duration::from_millis(900),
         repeat: &[60, 300, 900, 3_600, 10_800, 21_600, 43_200, 86_400, 172_800, 259_200],
-        repeat_forever: false,
+        repeat_forever: true,
     };
 }
 
@@ -911,11 +910,6 @@ pub(crate) struct RecoverCtx {
     /// What THIS node may dial — the handover's relays intersected with this
     /// operator's own confirmed pool (ADR-0004).
     pub dial_relays: Vec<String>,
-    /// FURTHER coordinator anchors beyond `handover.npub` (the reattach
-    /// broadcast, `detached_reattach.md` §2.3): the request goes to all of
-    /// them, and the Welcome/Progress/Refused answers are accepted from any.
-    /// Empty on the ticketed single-coordinator path.
-    pub extra_targets: Vec<String>,
     pub member: String,
     /// The recovery phrase — wiped on drop (review R9).
     pub phrase: zeroize::Zeroizing<String>,
@@ -945,11 +939,21 @@ fn open_group_envelope(
     }
 }
 
-/// How long a rejoin waits on ONE addressed coordinator before it also
-/// addresses the next (`detached_reattach.md` §2.3a). Long enough for a
-/// live coordinator's first progress frame, short enough that a dead or
-/// stale anchor costs seconds, not the run.
-const REATTACH_TARGET_WAIT: Duration = Duration::from_secs(20);
+/// A waiting step says what it waits for at least this often.
+const WAIT_NOTE_EVERY: Duration = Duration::from_secs(30);
+/// The first ask for missing anchor pieces after the last one arrived;
+/// doubles up to the cap.
+const WANT_INITIAL: Duration = Duration::from_secs(10);
+const WANT_CAP: Duration = Duration::from_secs(120);
+/// `RecoverReady` is repeated this often while the Welcome is out: a
+/// coordinator that restarted answers `link outdated`.
+const READY_REPEAT_INITIAL: Duration = Duration::from_secs(60);
+const READY_REPEAT_CAP: Duration = Duration::from_secs(600);
+
+/// The wait line: what, since when, how long.
+fn wait_line(what: &str, since_unix: u64, waited: Duration) -> String {
+    format!("waiting for {what} since {} ({})", hms(since_unix), elapsed_label(waited.as_secs()))
+}
 
 /// Spawn the whole rejoiner task (the production body of
 /// `Command::RecoverStart` on a Nostr republic) — the [`spawn_member_join`]
@@ -984,18 +988,254 @@ fn join_from_coordinator_welcome(
     }
 }
 
-/// The rejoiner state machine over Nostr (N4b step 6e).
+/// The rejoiner's side of the coordinator conversation: its 1059 inbox,
+/// and gift wraps to the coordinator's anchor.
+pub(crate) trait RejoinIo {
+    /// The next delivery, `None` when nothing arrives within `budget`.
+    async fn recv(&mut self, budget: Duration) -> Option<RitualDelivery>;
+    /// Gift-wrap `msg` to the coordinator; `Err` = no relay took it.
+    async fn send(&mut self, msg: &RitualMsg) -> Result<(), String>;
+}
+
+struct RelayIo {
+    net: RitualNet,
+    inbox: molt_net::ritual_net::RitualInbox,
+    to: String,
+}
+
+impl RejoinIo for RelayIo {
+    async fn recv(&mut self, budget: Duration) -> Option<RitualDelivery> {
+        self.inbox.recv(budget).await
+    }
+
+    async fn send(&mut self, msg: &RitualMsg) -> Result<(), String> {
+        self.net.send_ritual(&self.to, msg).await.map(|_| ()).map_err(|e| e.to_string())
+    }
+}
+
+/// How the coordinator admitted the seat.
+#[allow(clippy::large_enum_variant)] // one value per rejoin
+pub(crate) enum Admission {
+    /// Anchor-first: the anchor verified before anything sealed.
+    AnchorFirst {
+        welcome: molt_net::welcome::WelcomePayload,
+        blob: Option<molt_core::CheckpointState>,
+        blocks: Vec<molt_core::ChainBlock>,
+    },
+    /// A Welcome with no anchor before it: the coordinator sealed first
+    /// (an older build, or an anchor too large for gift wraps).
+    SealFirst {
+        welcome: molt_net::welcome::WelcomePayload,
+        version: Option<String>,
+    },
+}
+
+/// The anchor pieces of an anchor-first coordinator, as they arrive.
+#[derive(Default)]
+struct AnchorCollect {
+    total: u32,
+    got: std::collections::BTreeSet<u32>,
+    parts: crate::chain::blob_parts::BlobAssembly,
+    blob: Option<molt_core::CheckpointState>,
+    block: Option<molt_core::ChainBlock>,
+    tried: bool,
+}
+
+impl AnchorCollect {
+    /// Take one piece; the step line it is worth.
+    fn accept(&mut self, index: u32, total: u32, event: &str) -> Option<String> {
+        if total == 0 || index >= total {
+            return None;
+        }
+        if total != self.total {
+            self.total = total;
+            self.got.clear();
+        }
+        self.got.insert(index);
+        match serde_json::from_str::<molt_core::WorkspaceEvent>(event).ok()? {
+            molt_core::WorkspaceEvent::CheckpointServedPart { blob_hash, index, total, data } => {
+                if let Some(b) = self.parts.accept(&blob_hash, index, total, &data) {
+                    self.blob = Some(b);
+                    self.tried = false;
+                }
+                Some(format!("checkpoint part {}/{total}", index.saturating_add(1)))
+            }
+            molt_core::WorkspaceEvent::CheckpointServed { blob } => {
+                self.blob = Some(blob);
+                self.tried = false;
+                Some("checkpoint received".to_string())
+            }
+            molt_core::WorkspaceEvent::Committed(block) => {
+                let line = format!("block {} received", block.height);
+                self.block = Some(block);
+                self.tried = false;
+                Some(line)
+            }
+            _ => None,
+        }
+    }
+
+    fn missing(&self) -> Vec<u32> {
+        (0..self.total).filter(|i| !self.got.contains(i)).collect()
+    }
+
+    /// Verify what arrived, once per new piece of evidence. `Err` forgets
+    /// every piece, so the next ask is for all of them.
+    #[allow(clippy::type_complexity)]
+    fn verify(
+        &mut self,
+        republic_id: &str,
+    ) -> Option<Result<(Option<molt_core::CheckpointState>, Vec<molt_core::ChainBlock>, u64), String>> {
+        if self.tried {
+            return None;
+        }
+        let block = self.block.clone()?;
+        if block.height != 0 && self.blob.is_none() {
+            return None;
+        }
+        self.tried = true;
+        let blob = if block.height == 0 { None } else { self.blob.clone() };
+        let blocks = vec![block];
+        let out = crate::chain::verify_served(blob.as_ref(), &blocks, Some(republic_id))
+            .map(|(head, _)| (blob, blocks, head.height));
+        if out.is_err() {
+            let total = self.total;
+            *self = Self { total, ..Self::default() };
+        }
+        Some(out)
+    }
+}
+
+/// Wait for the coordinator: the anchor first (asking again for missing
+/// pieces), `RecoverReady`, then the Welcome. A Welcome that comes first
+/// is the seal-first order. Ends only on the Welcome or a refusal.
+pub(crate) async fn await_admission(
+    io: &mut impl RejoinIo,
+    h: &molt_net::invite::RecoveryHandoverV2,
+    member: &str,
+    tx: &mpsc::WeakSender<Envelope>,
+    generation: Option<u64>,
+) -> Result<Admission, String> {
+    let note = |n: String| send_cmd(tx, Command::NetRecoverNote { note: n, generation });
+    let mut stage = (molt_net::ritual_net::unix_now(), tokio::time::Instant::now());
+    let mut last_note = tokio::time::Instant::now();
+    let mut version: Option<String> = None;
+    let mut collect = AnchorCollect::default();
+    let mut verified: Option<(Option<molt_core::CheckpointState>, Vec<molt_core::ChainBlock>)> = None;
+    let mut want_wait = WANT_INITIAL;
+    let mut want_at: Option<tokio::time::Instant> = None;
+    let mut ready_at: Option<tokio::time::Instant> = None;
+    let mut ready_fail = PUBLISH_RETRY_INITIAL;
+    let mut ready_repeat = READY_REPEAT_INITIAL;
+    let ready = RitualMsg::RecoverReady { member: member.to_string(), ticket: h.ticket.clone() };
+    loop {
+        let now = tokio::time::Instant::now();
+        if now.duration_since(last_note) >= WAIT_NOTE_EVERY {
+            last_note = now;
+            let what = match (&verified, collect.total) {
+                (Some(_), _) => "the Welcome".to_string(),
+                (None, 0) => "the coordinator".to_string(),
+                (None, total) => format!("the chain anchor ({}/{total})", collect.got.len()),
+            };
+            let _ = note(wait_line(&what, stage.0, now.duration_since(stage.1))).await;
+        }
+        if verified.is_none() && want_at.is_some_and(|at| now >= at) {
+            let missing = collect.missing();
+            if !missing.is_empty() {
+                let list: Vec<String> = missing.iter().map(|i| (i + 1).to_string()).collect();
+                let want = RitualMsg::RecoverWant { member: member.to_string(), ticket: h.ticket.clone(), missing };
+                match io.send(&want).await {
+                    Ok(()) => {
+                        let _ = note(format!("asked again for anchor parts {}", list.join(" "))).await;
+                    }
+                    Err(e) => tracing::warn!(error = %e, "recover_want=unsent"),
+                }
+            }
+            want_wait = (want_wait * 2).min(WANT_CAP);
+            want_at = Some(now + want_wait);
+        }
+        if verified.is_some() && ready_at.is_some_and(|at| now >= at) {
+            match io.send(&ready).await {
+                Ok(()) => {
+                    ready_at = Some(now + ready_repeat);
+                    ready_repeat = (ready_repeat * 2).min(READY_REPEAT_CAP);
+                }
+                Err(e) => {
+                    let _ = note(format!("⚠ the ready answer did not publish - {e} · retrying")).await;
+                    ready_at = Some(now + ready_fail);
+                    ready_fail = (ready_fail * 2).min(PUBLISH_RETRY_CAP);
+                }
+            }
+        }
+        let mut budget = WAIT_NOTE_EVERY.saturating_sub(now.duration_since(last_note));
+        for at in [want_at.filter(|_| verified.is_none()), ready_at.filter(|_| verified.is_some())].into_iter().flatten() {
+            budget = budget.min(at.saturating_duration_since(now));
+        }
+        let Some(delivery) = io.recv(budget.max(Duration::from_millis(10))).await else {
+            continue;
+        };
+        match delivery {
+            RitualDelivery::Welcome(welcome, sender) if sender == h.npub => {
+                return Ok(match verified {
+                    Some((blob, blocks)) => Admission::AnchorFirst { welcome, blob, blocks },
+                    None => Admission::SealFirst { welcome, version },
+                });
+            }
+            // the coordinator REFUSED (WP6): the ticket is not spent, a retry
+            // with the right phrase works on the same link
+            RitualDelivery::Msg(RitualMsg::RecoverRefused { reason, .. }, sender) if sender == h.npub => {
+                return Err(format!("the coordinator refused the request: {reason}"));
+            }
+            RitualDelivery::Msg(RitualMsg::RecoverProgress { member, need, roster, approved, version: v }, sender)
+                if sender == h.npub =>
+            {
+                if version.is_none() {
+                    let line = if v.is_empty() {
+                        "coordinator runs 0.0.18 or older".to_string()
+                    } else {
+                        format!("coordinator runs {v}")
+                    };
+                    let _ = note(line).await;
+                    version = Some(v);
+                }
+                let _ = send_cmd(tx, Command::NetRecoverProgress { member, need, roster, approved, generation }).await;
+            }
+            RitualDelivery::Msg(RitualMsg::RecoverAnchor { index, total, event, .. }, sender)
+                if sender == h.npub && verified.is_none() =>
+            {
+                if let Some(line) = collect.accept(index, total, &event) {
+                    let _ = note(line).await;
+                }
+                // a fresh piece pushes the next ask back
+                want_wait = WANT_INITIAL;
+                want_at = Some(tokio::time::Instant::now() + want_wait);
+                match collect.verify(&h.republic_id) {
+                    Some(Ok((blob, blocks, height))) => {
+                        let _ = note(format!("chain verified up to block {height}")).await;
+                        verified = Some((blob, blocks));
+                        ready_at = Some(tokio::time::Instant::now());
+                        stage = (molt_net::ritual_net::unix_now(), tokio::time::Instant::now());
+                    }
+                    Some(Err(e)) => {
+                        let _ = note(format!("the anchor does not verify yet: {e}")).await;
+                    }
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The rejoiner state machine over Nostr (N4b step 6e, B4).
 ///
 /// Fresh anchor from the RECOVERY ticket → 1059 inbox (readable-gated before
-/// anything is advertised) → gift-wrapped `RecoverRequest` carrying the new
-/// anchor and a seat proof over it → the 444 Welcome → back inside the MLS
-/// group → 445 subscription under the Welcome's rotation seed → assemble the
-/// coordinator's served ANCHOR until it verifies standalone → `NetRecoverSealed`.
-///
-/// **One absolute deadline** ([`crate::recovery::RECOVERY_WELCOME_TIMEOUT`])
-/// covers the whole run rather than one per phase: what the returning human
-/// is waiting on is "am I back", and a per-phase budget silently multiplies
-/// into a wait nobody predicted.
+/// anything is advertised) → gift-wrapped `RecoverRequest` (anchor-first)
+/// → the anchor pieces, verified standalone → `RecoverReady` → the 444
+/// Welcome → `NetRecoverSealed`. An older coordinator seals first and
+/// pushes the anchor over the group instead; a Welcome with no anchor
+/// before it takes that path. No step ends on time: only a refusal, a
+/// failed check or `recover_cancel` ends the run.
 async fn recovery_rejoin(
     dialer: molt_net::dial::Dialer,
     ctx: RecoverCtx,
@@ -1003,7 +1243,7 @@ async fn recovery_rejoin(
 ) -> Result<(), String> {
     let h = &ctx.handover;
     let generation = Some(ctx.generation);
-    let deadline = tokio::time::Instant::now() + crate::recovery::RECOVERY_WELCOME_TIMEOUT;
+    let note = |n: String| send_cmd(tx, Command::NetRecoverNote { note: n, generation });
 
     // The seat's identity re-derives from the phrase — resolving WHICH ritual
     // convention anchored it (founder vs joiner salt) via the link's anchored
@@ -1021,17 +1261,20 @@ async fn recovery_rejoin(
     // their device, with no second channel to notice on
     let net = RitualNet::new(dialer.clone(), ctx.dial_relays.clone(), &nostr_sk)
         .map_err(|e| format!("transport keys: {e}"))?;
-    let mut inbox = net
-        .inbox()
-        .await
-        .map_err(|e| format!("recovery inbox subscribe: {e}"))?;
-    // the run's one deadline, not LIVE_WAIT: an onion relay over Tor can
-    // take longer to replay (field 2026-09-12)
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    if !inbox.first_read(remaining).await.any() {
-        return Err(
-            "the recovery inbox is not readable on any relay".to_string(),
-        );
+    let since = (molt_net::ritual_net::unix_now(), tokio::time::Instant::now());
+    let mut wait = PUBLISH_RETRY_INITIAL;
+    let mut inbox = loop {
+        match net.inbox().await {
+            Ok(inbox) => break inbox,
+            Err(e) => {
+                let _ = note(format!("⚠ the recovery inbox is not up - {e} · retrying")).await;
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+            }
+        }
+    };
+    while !inbox.first_read(RECV_SLICE).await.any() {
+        let _ = note(wait_line("a relay", since.0, since.1.elapsed())).await;
     }
 
     // a FRESH MLS identity + KeyPackage: the coordinator removes the lost
@@ -1061,15 +1304,8 @@ async fn recovery_rejoin(
         &declared,
         h.consent_anchor.as_ref(),
     );
-    // every coordinator anchor this run addresses; answers are accepted
-    // from any of them (the reattach broadcast — one entry on the ticketed
-    // path, where the link names the one coordinator)
-    let mut targets: Vec<String> = std::iter::once(h.npub.clone())
-        .chain(ctx.extra_targets.iter().cloned())
-        .collect();
-    targets.dedup();
-    // the anchor is sent after this request: frames older than it (minus
-    // clock skew) are a backlog from epochs this seat cannot read
+    // the seal-first order's group frames are read from shortly before the
+    // request on (clock skew)
     let asked_at = molt_net::ritual_net::unix_now();
     let request = RitualMsg::Recover(invite::RecoverRequest {
         member: ctx.member.clone(),
@@ -1083,163 +1319,117 @@ async fn recovery_rejoin(
         consent,
         // Nostr replies to the gift-wrap anchor, not to a queue
         reply: None,
+        anchor_first: true,
+        version: env!("CARGO_PKG_VERSION").to_string(),
     });
-    // ONE coordinator at a time (`detached_reattach.md` §2.3a): addressing
-    // every survivor at once made two nodes re-key the same seat in a race,
-    // and the loser's laggards strand (field 2026-08-24). The next target is
-    // addressed only after a silent wait; answers are accepted only from
-    // anchors actually addressed.
-    let mut addressed: Vec<String> = Vec::new();
-    let mut next_target = 0usize;
-    while next_target < targets.len() {
-        let to = targets[next_target].clone();
-        next_target += 1;
-        match net.send_ritual(&to, &request).await {
-            Ok(_report) => {
-                addressed.push(to);
-                break;
-            }
-            Err(e) => tracing::warn!(error = %e, "recovery request to one anchor did not publish"),
-        }
+    let mut wait = PUBLISH_RETRY_INITIAL;
+    while let Err(e) = net.send_ritual(&h.npub, &request).await {
+        let _ = note(format!("⚠ the request did not publish - {e} · retrying")).await;
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(PUBLISH_RETRY_CAP);
     }
-    if addressed.is_empty() {
-        return Err("recovery request: no anchor was reachable".to_string());
-    }
+    let _ = note("request sent - waiting for the coordinator".to_string()).await;
 
-    // the rejoiner is not silent while it waits (NetRecoverNote): the wait
-    // spans the coordinator's HUMAN approval, so the status line is the
-    // difference between "working" and "looks dead until the deadline"
-    let _ = send_cmd(
-        tx,
-        Command::NetRecoverNote {
-            note: "request sent - waiting for the coordinator's Welcome".to_string(),
-            generation,
-        },
-    )
-    .await;
-    // the Welcome, from an ADDRESSED coordinator's anchor and nobody else's
-    let started = tokio::time::Instant::now();
-    let mut last_note = started;
-    let mut last_address = started;
-    // a coordinator that ANSWERED (progress/refusal) is live and working —
-    // no further coordinator is addressed past that point
-    let mut answered = false;
-    // the coordinator's build, from its first progress frame (None = none yet)
-    let mut coordinator_version: Option<String> = None;
-    let (payload, coordinator) = loop {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return Err(
-                "no Welcome arrived within 15 minutes - the coordinator must be running \
-                 and approve the return"
-                    .to_string(),
-            );
+    let mut io = RelayIo { net, inbox, to: h.npub.clone() };
+    let admission = await_admission(&mut io, h, &ctx.member, tx, generation).await?;
+    let (payload, blob, blocks) = match admission {
+        Admission::AnchorFirst { welcome, blob, blocks } => {
+            join_from_coordinator_welcome(&mut mls, &welcome.welcome)?;
+            let _ = note("welcomed back".to_string()).await;
+            (welcome, blob, blocks)
         }
-        // escalation: a silent coordinator (offline, stale anchor) must not
-        // strand the rejoin — address the next one after the quiet window
-        if !answered
-            && next_target < targets.len()
-            && now.duration_since(last_address) >= REATTACH_TARGET_WAIT
-        {
-            let to = targets[next_target].clone();
-            next_target += 1;
-            last_address = now;
-            match net.send_ritual(&to, &request).await {
-                Ok(_report) => addressed.push(to),
-                Err(e) => {
-                    tracing::warn!(error = %e, "recovery request to one anchor did not publish")
-                }
+        Admission::SealFirst { welcome, version } => {
+            join_from_coordinator_welcome(&mut mls, &welcome.welcome)?;
+            let _ = note("welcomed back - fetching the chain anchor".to_string()).await;
+            let group = Arc::new(Mutex::new(mls));
+            if let Some(v) = version {
+                tracing::info!(coordinator = %v, "recover_order=seal_first");
             }
-        }
-        // the widening ladder (the join task's cluster-F pattern): a tick a
-        // minute, so a long approval wait visibly keeps being a wait
-        if now.duration_since(last_note).as_secs() >= 60 {
-            last_note = now;
-            let mins = now.duration_since(started).as_secs() / 60;
-            let _ = send_cmd(
-                tx,
-                Command::NetRecoverNote {
-                    note: format!("waiting for the coordinator's Welcome ({mins} min)"),
-                    generation,
-                },
-            )
-            .await;
-        }
-        match inbox.recv((deadline - now).min(RECV_SLICE)).await {
-            Some(RitualDelivery::Welcome(p, sender)) if addressed.contains(&sender) => break (p, sender),
-            // the coordinator REFUSED the request (WP6): fail fast with the
-            // reason instead of sitting out the 15-minute deadline — the
-            // ticket is not spent, so a retry with the right phrase works
-            Some(RitualDelivery::Msg(RitualMsg::RecoverRefused { reason, .. }, sender))
-                if addressed.contains(&sender) =>
-            {
-                return Err(format!("the coordinator refused the request: {reason}"));
-            }
-            // the coordinator's checklist (recovery_auto_approval.md §4):
-            // who has approved, from an ADDRESSED coordinator's anchor and
-            // nobody else's — display data the session renders live
-            Some(RitualDelivery::Msg(
-                RitualMsg::RecoverProgress { member, need, roster, approved, version },
-                sender,
-            )) if addressed.contains(&sender) => {
-                answered = true;
-                if coordinator_version.is_none() {
-                    let line = if version.is_empty() {
-                        "coordinator runs 0.0.18 or older".to_string()
-                    } else {
-                        format!("coordinator runs {version}")
-                    };
-                    let _ = send_cmd(tx, Command::NetRecoverNote { note: line, generation }).await;
-                    coordinator_version = Some(version);
-                }
-                let _ = send_cmd(
-                    tx,
-                    Command::NetRecoverProgress { member, need, roster, approved, generation },
-                )
-                .await;
-                continue;
-            }
-            _ => continue,
+            let (blob, blocks) = seal_first_anchor(dialer, &ctx, &group, &welcome, asked_at, tx).await?;
+            mls = Arc::try_unwrap(group)
+                .map_err(|_| "mls handle still shared".to_string())?
+                .into_inner()
+                .map_err(|_| "mls lock poisoned".to_string())?;
+            (welcome, blob, blocks)
         }
     };
-    join_from_coordinator_welcome(&mut mls, &payload.welcome)?;
-    let _ = send_cmd(
+
+    // **Relay honesty, against the CHAIN.** The join twin compares the
+    // Welcome's relays to the invite's, which is founding-only. Here the
+    // Welcome carries the GOVERNED pool while this node holds only the
+    // anchor; later `set_relays` blocks arrive over the ordinary catch-up.
+    // A mismatch is not decidable now (a lie or a later vote) and is safe
+    // to carry: the recovered pool materializes from the verified chain
+    // alone, so a differing set is logged, never trusted.
+    let served_fold = crate::chain::effective_relays_of_served(blob.as_ref(), &blocks);
+    if payload.relays != served_fold {
+        tracing::warn!(
+            welcome = payload.relays.join(" "),
+            served = served_fold.join(" "),
+            "the Welcome's relay set differs from the served anchor's fold - \
+             a later pool vote or a lie; the chain decides on catch-up"
+        );
+    }
+
+    let snapshot = mls.snapshot().map_err(|e| format!("mls snapshot: {e}"))?;
+    let height = blocks.last().map_or(0, |b| b.height);
+    let wire = match blob {
+        Some(b) => crate::chain::ServedChainWire::Pruned { checkpoint_blob: b, blocks },
+        None => crate::chain::ServedChainWire::Full(blocks),
+    };
+    tracing::info!(member = %ctx.member, height, "rejoined and verified the chain anchor");
+    send_cmd(
         tx,
-        Command::NetRecoverNote {
-            note: "welcomed back - fetching the chain anchor".to_string(),
+        Command::NetRecoverSealed {
+            member: ctx.member.clone(),
+            chain: serde_json::to_string(&wire).map_err(|e| e.to_string())?,
+            mls: hex::encode(snapshot),
+            // a Nostr republic has no queue mesh, by design not by omission
+            mesh: Vec::new(),
+            nostr_sk: hex::encode(&*nostr_sk),
+            rotation_seed: hex::encode(payload.rotation_seed),
+            founded_ts: payload.founded_ts,
             generation,
         },
     )
     .await;
-    let group = Arc::new(Mutex::new(mls));
+    Ok(())
+}
 
+/// The seal-first order (an older coordinator): the anchor arrives over
+/// the group channel the Welcome opened, behind the coordinator's outbox.
+/// Reads from `asked_at - RECENT_SKEW_SECS` on - a read window, not a
+/// deadline: the coordinator re-pushes the anchor with fresh stamps every
+/// ten minutes while this seat stays unheard, so it always lands inside.
+async fn seal_first_anchor(
+    dialer: molt_net::dial::Dialer,
+    ctx: &RecoverCtx,
+    group: &Arc<Mutex<molt_net::MlsMember>>,
+    payload: &molt_net::welcome::WelcomePayload,
+    asked_at: u64,
+    tx: &mpsc::WeakSender<Envelope>,
+) -> Result<(Option<molt_core::CheckpointState>, Vec<molt_core::ChainBlock>), String> {
+    let h = &ctx.handover;
+    let generation = Some(ctx.generation);
+    let note = |n: String| send_cmd(tx, Command::NetRecoverNote { note: n, generation });
     // 445 under the Welcome's rotation seed, dialing only our own subset
     let chan = GroupChannel::new(dialer, ctx.dial_relays.clone(), payload.rotation_seed);
-    let mut sub = chan
-        .subscribe_recent(asked_at.saturating_sub(RECENT_SKEW_SECS))
-        .await
-        .map_err(|e| format!("group subscribe: {e}"))?;
+    let mut wait = PUBLISH_RETRY_INITIAL;
+    let mut sub = loop {
+        match chan.subscribe_recent(asked_at.saturating_sub(RECENT_SKEW_SECS)).await {
+            Ok(sub) => break sub,
+            Err(e) => {
+                let _ = note(format!("⚠ the group channel is not up - {e} · retrying")).await;
+                tokio::time::sleep(wait).await;
+                wait = (wait * 2).min(PUBLISH_RETRY_CAP);
+            }
+        }
+    };
     // readable = a relay answered; the replay itself is read in the loop
     // below, or a replay longer than the channel never ends (findings R11)
-    let gate_since = tokio::time::Instant::now();
-    loop {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            return Err(
-                "the group channel is not readable on any relay - the chain cannot be \
-                 fetched"
-                    .to_string(),
-            );
-        }
-        if sub.first_read((deadline - now).min(RECV_SLICE)).await.any() {
-            break;
-        }
-        let secs = gate_since.elapsed().as_secs();
-        let _ = send_cmd(
-            tx,
-            Command::NetRecoverNote { note: format!("no relay answered yet ({secs} s)"), generation },
-        )
-        .await;
+    let since = (molt_net::ritual_net::unix_now(), tokio::time::Instant::now());
+    while !sub.first_read(RECV_SLICE).await.any() {
+        let _ = note(wait_line("a relay", since.0, since.1.elapsed())).await;
     }
 
     // Assemble the served ANCHOR until it verifies STANDALONE. `verify_served`
@@ -1251,51 +1441,24 @@ async fn recovery_rejoin(
     let mut verified_run: (u64, usize) = (u64::MAX, 0);
     let mut parts = crate::chain::blob_parts::BlobAssembly::default();
     let mut blocks: Vec<molt_core::ChainBlock> = Vec::new();
-    let waiting_since = tokio::time::Instant::now();
-    // what arrived, for the reason if nothing verifies in time
-    let mut parts_seen: Option<(std::collections::BTreeSet<u32>, u32)> = None;
-    let mut last_verify_error = String::new();
+    let since = (molt_net::ritual_net::unix_now(), tokio::time::Instant::now());
     // a life sign every 30 s, whatever arrives: frames that cannot be read
     // must not look like silence
     let (mut frames, mut unreadable, mut other) = (0u64, 0u64, 0u64);
     let mut last_beat = tokio::time::Instant::now();
-    let note = |n: String| send_cmd(tx, Command::NetRecoverNote { note: n, generation });
-    let (head, _sealed) = loop {
-        let now = tokio::time::Instant::now();
-        if now >= deadline {
-            let reason = anchor_timeout_reason(
-                waiting_since.elapsed().as_secs() / 60,
-                blob.is_some(),
-                parts_seen.map(|(seen, total)| (u32::try_from(seen.len()).unwrap_or(u32::MAX), total)),
-                &blocks,
-                &last_verify_error,
-                coordinator_version.as_deref(),
-            );
-            // the coordinator learns it too, in its own log
-            let failed = RitualMsg::RecoverFailed {
-                member: ctx.member.clone(),
-                reason: reason.clone(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-            };
-            if let Err(e) = net.send_ritual(&coordinator, &failed).await {
-                tracing::warn!(error = %e, "recover_failed frame=unsent");
-            }
-            return Err(reason);
-        }
-        if last_beat.elapsed() >= RECV_SLICE {
+    loop {
+        if last_beat.elapsed() >= WAIT_NOTE_EVERY {
             last_beat = tokio::time::Instant::now();
-            let secs = waiting_since.elapsed().as_secs();
-            let _ = note(format!(
-                "still waiting for the chain anchor ({secs} s): frames={frames} unreadable={unreadable} other={other}"
-            ))
-            .await;
+            let line = wait_line("the chain anchor", since.0, since.1.elapsed());
+            let _ = note(format!("{line}: frames={frames} unreadable={unreadable} other={other}")).await;
         }
-        let (content, created_at) = match sub.recv((deadline - now).min(RECV_SLICE)).await {
+        let budget = WAIT_NOTE_EVERY.saturating_sub(last_beat.elapsed()).max(Duration::from_millis(10));
+        let (content, created_at) = match sub.recv(budget).await {
             molt_net::ritual_net::GroupRecv::Frame { content, created_at } => (content, created_at),
             _ => continue,
         };
         frames += 1;
-        let opened = open_group_envelope(&group, &content);
+        let opened = open_group_envelope(group, &content);
         // the first frames one by one: size, stamp and what they are
         if frames <= FRAMES_LOGGED {
             let what = opened.as_ref().map_or("unreadable", |e| event_kind(&e.body));
@@ -1316,10 +1479,6 @@ async fn recovery_rejoin(
             }
             molt_core::WorkspaceEvent::CheckpointServedPart { blob_hash, index, total, data } => {
                 let _ = note(format!("checkpoint part {}/{total}", index.saturating_add(1))).await;
-                // distinct parts of the newest blob, not frames
-                let mut seen = parts_seen.take().filter(|(_, t)| *t == total).map(|(s, _)| s).unwrap_or_default();
-                seen.insert(index);
-                parts_seen = Some((seen, total));
                 if let Some(b) = parts.accept(&blob_hash, index, total, &data) {
                     let _ = note("checkpoint received".to_string()).await;
                     blob = Some(b);
@@ -1346,13 +1505,10 @@ async fn recovery_rejoin(
                 continue;
             }
         }
-        // Only a CONSECUTIVE run can verify — and the stream is not one. The
-        // coordinator's outbox publishes whatever sits above its cursor, so
-        // the rejoiner also sees the head block the recovery just committed:
-        // on any republic longer than a couple of blocks that is the anchor
-        // plus a block several heights up, with the middle never served.
-        // Feeding the gap to `verify_served` fails forever, which reads as
-        // "the anchor never arrived" fifteen minutes later.
+        // Only a CONSECUTIVE run can verify — and the stream is not one: the
+        // coordinator's outbox also carries the head block the recovery just
+        // committed, several heights above the anchor with the middle never
+        // served.
         let run: Vec<molt_core::ChainBlock> = blocks
             .iter()
             .enumerate()
@@ -1373,67 +1529,15 @@ async fn recovery_rejoin(
         }
         verified_run = key;
         match crate::chain::verify_served(blob.as_ref(), &run, Some(&h.republic_id)) {
-            Ok(pair) => {
+            Ok(_) => {
                 let _ = note(format!("chain verified up to block {}", run[run.len() - 1].height)).await;
-                blocks = run;
-                break pair;
+                return Ok((blob, run));
             }
             Err(e) => {
                 let _ = note(format!("blocks {}-{} do not verify yet: {e}", run[0].height, run[run.len() - 1].height)).await;
-                last_verify_error = e;
             }
         }
-    };
-
-    // **Relay honesty, against the CHAIN.** The join twin compares the
-    // Welcome's relays to the invite's, which is founding-only ("the two sets
-    // are the same by construction"). Here the Welcome carries the GOVERNED
-    // pool while this node holds only the served anchor material — later
-    // `set_relays` blocks arrive over the ordinary catch-up (§3.1a). An
-    // exact match against the served fold proves honesty; a mismatch is NOT
-    // decidable now — either a lie or a legitimate later vote. Refusing on
-    // it bricked every recovery on a republic that ever voted its pool
-    // (field find 2026-08-17). The mismatch is safe to carry: the Welcome's
-    // relay list is consumed by NOTHING — the recovered pool materializes
-    // from the verified chain alone and every applied `set_relays` block
-    // adopts deterministically — so the chain stays the one authority
-    // either way; a differing set is logged, never trusted.
-    let served_fold = crate::chain::effective_relays_of_served(blob.as_ref(), &blocks);
-    if payload.relays != served_fold {
-        tracing::warn!(
-            welcome = payload.relays.join(" "),
-            served = served_fold.join(" "),
-            "the Welcome's relay set differs from the served anchor's fold - \
-             a later pool vote or a lie; the chain decides on catch-up"
-        );
     }
-
-    let snapshot = group
-        .lock()
-        .map_err(|_| "mls lock poisoned".to_string())?
-        .snapshot()
-        .map_err(|e| format!("mls snapshot: {e}"))?;
-    let wire = match blob {
-        Some(b) => crate::chain::ServedChainWire::Pruned { checkpoint_blob: b, blocks },
-        None => crate::chain::ServedChainWire::Full(blocks),
-    };
-    tracing::info!(member = %ctx.member, height = head.height, "rejoined and verified the chain anchor");
-    send_cmd(
-        tx,
-        Command::NetRecoverSealed {
-            member: ctx.member.clone(),
-            chain: serde_json::to_string(&wire).map_err(|e| e.to_string())?,
-            mls: hex::encode(snapshot),
-            // a Nostr republic has no queue mesh, by design not by omission
-            mesh: Vec::new(),
-            nostr_sk: hex::encode(&*nostr_sk),
-            rotation_seed: hex::encode(payload.rotation_seed),
-            founded_ts: payload.founded_ts,
-            generation,
-        },
-    )
-    .await;
-    Ok(())
 }
 
 /// Spawn the whole member join task (the production body of
@@ -2169,17 +2273,188 @@ mod wait_note_tests {
 }
 
 #[cfg(test)]
-mod anchor_reason_tests {
-    /// The anchor timeout names what arrived, and blames an old coordinator
-    /// by name when its version is missing.
+mod admission_tests {
+    use super::*;
+    use crate::chain::test_support::Builder;
+    use molt_core::{ChainChange, Surface, WorkspaceEvent};
+    use std::collections::VecDeque;
+
+    const COORDINATOR: &str = "c0c0";
+
+    /// A pruned anchor whose blob (~150 KB of invented notes) needs parts:
+    /// the republic id and the frames a coordinator sends.
+    fn fat_anchor() -> (String, Vec<String>) {
+        let mut b = Builder::new(&["petra", "walter"], 2);
+        b.commit_applied(1, &["petra", "walter"]);
+        let mut blob = crate::chain::checkpoint_state(&b.blocks, 1).expect("state");
+        blob.applied = vec![(
+            Surface::Memory,
+            (0..2_000u64).map(|i| (i, serde_json::json!({ "op": "add_note", "text": "x".repeat(40) }))).collect(),
+        )];
+        let anchor = b.seal(
+            2,
+            ChainChange::Checkpoint { upto: 1, state_hash: crate::chain::checkpoint_state_hash(&blob) },
+            &["petra", "walter"],
+        );
+        let mut events = crate::chain::blob_parts::blob_events(&blob, crate::chain::RECOVER_PART_MAX).expect("parts");
+        events.push(WorkspaceEvent::Committed(anchor));
+        let frames = events.iter().map(|e| serde_json::to_string(e).expect("json")).collect();
+        (b.republic_id.clone(), frames)
+    }
+
+    fn handover(republic_id: &str) -> molt_net::invite::RecoveryHandoverV2 {
+        molt_net::invite::RecoveryHandoverV2 {
+            ticket: "ab".repeat(32),
+            npub: COORDINATOR.to_string(),
+            relays: Vec::new(),
+            republic_id: republic_id.to_string(),
+            identity_pk: String::new(),
+            consent_anchor: None,
+        }
+    }
+
+    fn welcome() -> molt_net::welcome::WelcomePayload {
+        molt_net::welcome::WelcomePayload { welcome: vec![1, 2, 3], rotation_seed: [7; 32], relays: Vec::new(), founded_ts: 0 }
+    }
+
+    /// An anchor-first coordinator: the anchor after `after`, one piece
+    /// lost on the first send, the Welcome on the first Ready.
+    struct Fake {
+        frames: Vec<String>,
+        lost: Option<u32>,
+        after: Duration,
+        t0: tokio::time::Instant,
+        served: bool,
+        queue: VecDeque<RitualDelivery>,
+        wants: Vec<Vec<u32>>,
+        readies: u32,
+    }
+
+    impl Fake {
+        fn new(frames: Vec<String>, lost: Option<u32>, after: Duration) -> Self {
+            Fake { frames, lost, after, t0: tokio::time::Instant::now(), served: false, queue: VecDeque::new(), wants: Vec::new(), readies: 0 }
+        }
+
+        fn part(&self, index: u32) -> RitualDelivery {
+            let total = u32::try_from(self.frames.len()).expect("total");
+            let event = self.frames[usize::try_from(index).expect("index")].clone();
+            RitualDelivery::Msg(RitualMsg::RecoverAnchor { member: "petra".into(), index, total, event }, COORDINATOR.into())
+        }
+    }
+
+    impl RejoinIo for Fake {
+        async fn recv(&mut self, budget: Duration) -> Option<RitualDelivery> {
+            if !self.served && self.t0.elapsed() >= self.after {
+                self.served = true;
+                let total = u32::try_from(self.frames.len()).expect("total");
+                for i in (0..total).filter(|i| Some(*i) != self.lost) {
+                    let d = self.part(i);
+                    self.queue.push_back(d);
+                }
+            }
+            if let Some(d) = self.queue.pop_front() {
+                return Some(d);
+            }
+            tokio::time::sleep(budget).await;
+            None
+        }
+
+        async fn send(&mut self, msg: &RitualMsg) -> Result<(), String> {
+            match msg {
+                RitualMsg::RecoverWant { missing, .. } => {
+                    self.wants.push(missing.clone());
+                    for i in missing {
+                        let d = self.part(*i);
+                        self.queue.push_back(d);
+                    }
+                }
+                RitualMsg::RecoverReady { .. } => {
+                    self.readies += 1;
+                    if self.readies == 1 {
+                        self.queue.push_back(RitualDelivery::Welcome(welcome(), COORDINATOR.into()));
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
+
+    /// An engine stand-in that swallows the notes.
+    fn sink() -> (mpsc::Sender<Envelope>, mpsc::WeakSender<Envelope>) {
+        let (tx, mut rx) = mpsc::channel::<Envelope>(64);
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let weak = tx.downgrade();
+        (tx, weak)
+    }
+
+    /// B4: an anchor that needs twenty minutes still admits the seat - no
+    /// step ends on time.
+    #[tokio::test(start_paused = true)]
+    async fn an_anchor_twenty_minutes_late_still_admits() {
+        let (rid, frames) = fat_anchor();
+        let (_tx, weak) = sink();
+        let mut io = Fake::new(frames, None, Duration::from_secs(20 * 60));
+        let started = tokio::time::Instant::now();
+        let got = await_admission(&mut io, &handover(&rid), "petra", &weak, Some(1)).await.expect("admitted");
+        assert!(started.elapsed() >= Duration::from_secs(20 * 60));
+        let Admission::AnchorFirst { blob, blocks, .. } = got else {
+            panic!("the anchor came first");
+        };
+        assert!(blob.is_some() && blocks.len() == 1, "the pruned anchor");
+        assert_eq!(io.readies, 1);
+    }
+
+    /// B4: a piece lost on the way is asked for by index, and the seat is
+    /// admitted once it arrives.
+    #[tokio::test(start_paused = true)]
+    async fn a_lost_part_is_asked_for_again() {
+        let (rid, frames) = fat_anchor();
+        assert!(frames.len() > 3, "the blob travels in parts: {}", frames.len());
+        let (_tx, weak) = sink();
+        let mut io = Fake::new(frames, Some(2), Duration::ZERO);
+        let got = await_admission(&mut io, &handover(&rid), "petra", &weak, Some(1)).await.expect("admitted");
+        assert!(matches!(got, Admission::AnchorFirst { .. }));
+        assert_eq!(io.wants, vec![vec![2]], "one ask, for the lost piece");
+    }
+
+    /// A Welcome with no anchor before it is the seal-first order (an
+    /// older coordinator); a refusal ends the wait with its reason.
+    #[tokio::test(start_paused = true)]
+    async fn a_welcome_first_is_seal_first_and_a_refusal_ends_the_wait() {
+        let (rid, _) = fat_anchor();
+        let (_tx, weak) = sink();
+        let mut io = Fake::new(Vec::new(), None, Duration::from_secs(3600));
+        io.queue.push_back(RitualDelivery::Welcome(welcome(), COORDINATOR.into()));
+        let got = await_admission(&mut io, &handover(&rid), "petra", &weak, Some(1)).await.expect("admitted");
+        assert!(matches!(got, Admission::SealFirst { .. }));
+        // a Welcome from anybody else is not the coordinator's
+        let mut io = Fake::new(Vec::new(), None, Duration::from_secs(3600));
+        io.queue.push_back(RitualDelivery::Welcome(welcome(), "someone-else".into()));
+        io.queue.push_back(RitualDelivery::Msg(
+            RitualMsg::RecoverRefused { member: "petra".into(), reason: "link outdated".into() },
+            COORDINATOR.into(),
+        ));
+        let err = await_admission(&mut io, &handover(&rid), "petra", &weak, Some(1)).await.err();
+        assert_eq!(err.as_deref(), Some("the coordinator refused the request: link outdated"));
+    }
+
+    /// Every anchor piece of a ~150 KB blob fits the gift-wrap budget and
+    /// the pieces rebuild the blob.
     #[test]
-    fn the_anchor_timeout_says_what_arrived_and_who_is_old() {
-        let old = super::anchor_timeout_reason(3, false, None, &[], "", Some(""));
-        assert!(old.contains("within 3 min") && old.contains("checkpoint=none"), "{old}");
-        assert!(old.contains("update the coordinator"), "{old}");
-        let parts = super::anchor_timeout_reason(3, false, Some((1, 2)), &[], "", Some(""));
-        assert!(parts.contains("checkpoint=parts 1/2") && !parts.contains("update"), "{parts}");
-        let new = super::anchor_timeout_reason(9, false, None, &[], "bad prev", Some("0.0.19"));
-        assert!(new.contains("checkpoint=none") && new.contains("error=bad prev") && new.contains("coordinator=0.0.19"), "{new}");
+    fn a_large_blob_travels_in_parts_under_the_bound() {
+        let (_, frames) = fat_anchor();
+        let mut asm = crate::chain::blob_parts::BlobAssembly::default();
+        let mut whole = None;
+        let mut bytes = 0;
+        for f in &frames {
+            assert!(f.len() <= crate::chain::RECOVER_PART_MAX, "{}", f.len());
+            bytes += f.len();
+            if let Ok(WorkspaceEvent::CheckpointServedPart { blob_hash, index, total, data }) = serde_json::from_str(f) {
+                whole = asm.accept(&blob_hash, index, total, &data).or(whole);
+            }
+        }
+        assert!(bytes > 150_000, "{bytes}");
+        assert!(whole.is_some(), "the parts rebuild the blob");
     }
 }

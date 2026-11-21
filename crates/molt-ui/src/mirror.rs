@@ -209,7 +209,7 @@ pub(crate) fn rejoin_log_lines(log: &[String]) -> Vec<String> {
             1
         } else if l.starts_with("checkpoint part ") {
             2
-        } else if l.starts_with("still waiting for the chain anchor") {
+        } else if l.starts_with("waiting for ") {
             3
         } else {
             0
@@ -767,6 +767,8 @@ pub(crate) fn apply_session(
                     lex.rv_link_spent.to_string()
                 } else if error.contains("consent is stale") {
                     lex.rv_link_stale.to_string()
+                } else if error.ends_with(": link outdated") {
+                    lex.rv_link_outdated.to_string()
                 } else if error.contains("does not derive this seat's identity key") {
                     // the seat the LINK names; the run's member only as a fallback
                     let link_who = ui.get_rv_kind().who;
@@ -808,10 +810,10 @@ pub(crate) fn apply_session(
         if sv.notice == "detached" {
             // §4.4: knowledge restored, membership not — say exactly that
             ui.invoke_show_toast_error(s.get_toast_detached());
-        } else if sv.notice == "reattaching" {
-            // detached_reattach.md: the seat announces itself — a calm
-            // in-progress note, not an error
-            ui.invoke_show_toast(s.get_toast_reattaching());
+        } else if sv.notice == "seat-evicted" {
+            ui.invoke_show_toast_error(s.get_toast_seat_evicted());
+        } else if sv.notice == "seat-locked-out" {
+            ui.invoke_show_toast_error(s.get_toast_seat_locked_out());
         } else if let Some(err) = sv.notice.strip_prefix("backup-failed:") {
             // W5: a damaged key part file holds every backup until set
             // aside; the open republic's asks below, a closed one is named

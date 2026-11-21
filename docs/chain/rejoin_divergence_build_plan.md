@@ -114,6 +114,8 @@ node keeps resending its whole tail.
 
 ## B4. Anchor first, then seal; no fixed deadlines (R13, R2, R7)
 
+B4 built 2026-11-21.
+
 Today: request -> seal -> re-key -> Welcome -> anchor over the group,
 one 15 min deadline over all of it. A failed attempt leaves a block and
 a key nobody holds.

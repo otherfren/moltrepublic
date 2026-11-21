@@ -277,13 +277,13 @@ fn a_recover_note_speaks_only_for_the_live_incarnation() {
         st.session.notice
     );
     st.cmd_net_recover_note(
-        "waiting for the coordinator's Welcome (2 min)".to_string(),
+        "waiting for the Welcome since 12:00:00 (2m)".to_string(),
         Some(3),
     )
     .expect("ack");
     assert_eq!(
         st.session.notice,
-        "recover-note:waiting for the coordinator's Welcome (2 min)"
+        "recover-note:waiting for the Welcome since 12:00:00 (2m)"
     );
 }
 
@@ -542,7 +542,7 @@ fn the_rejoin_keeps_a_step_log() {
     st.cmd_net_recover_note("stale".to_string(), Some(gen + 9)).expect("stale");
     assert_eq!(st.session.recover.log.len(), 3);
     for i in 0..80 {
-        st.cmd_net_recover_note(format!("still waiting for the chain anchor ({i} s)"), g).expect("note");
+        st.cmd_net_recover_note(format!("waiting for the chain anchor since 12:00:00 ({i}s)"), g).expect("note");
     }
     assert_eq!(st.session.recover.log.len(), 4, "a run of waiting lines is one line");
     assert_eq!(st.session.recover.log[0], "welcomed back - fetching the chain anchor", "the first steps stay");

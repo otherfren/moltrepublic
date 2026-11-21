@@ -45,13 +45,11 @@ const HEAL_STUCK_SECS: u64 = 900;
 const CHAIN_BEACON_SECS: u64 = 300;
 /// S4: a retry names this many recent heights one by one.
 const DENSE_KNOWN_HEADS: u64 = 64;
-/// S4a: an unfinished restore's anchor is re-pushed this often, this many times.
+/// S4a: a seal-first restore's anchor is re-pushed this often while the
+/// seat stays unheard (B4: no count, no window).
 const ANCHOR_REPUSH_SECS: u64 = 600;
-/// S4a: re-pushes stop a day after the restore sealed (restarts included).
-const ANCHOR_REPUSH_WINDOW_SECS: u64 = 86_400;
 /// S4: fork candidates that never linked are dropped after this long.
 const CANDIDATE_TTL_SECS: u64 = 1_200;
-const ANCHOR_REPUSH_MAX: u32 = 12;
 
 /// How many `(height, hash)` samples a fork-aware catch-up request carries.
 const KNOWN_HEADS_MAX: usize = 16;
@@ -248,18 +246,6 @@ impl State {
             .collect();
         out.extend(self.known_heads().into_iter().filter(|k| k.height <= floor));
         out
-    }
-
-    /// Seconds since `member`'s latest `Restored` block sealed, as stamped.
-    fn restore_age(&self, member: &str) -> Option<u64> {
-        let height = self.chain.blocks.iter().rev().find_map(|b| match &b.change {
-            ChainChange::Membership { op: molt_core::MembershipOp::Restored, member: m, .. } if m == member => {
-                Some(b.height)
-            }
-            _ => None,
-        })?;
-        let at = self.chain.block_ts.get(&height).copied().filter(|t| *t > 0)?;
-        Some(self.presence_now().saturating_sub(at))
     }
 
     /// Whether this node holds the block at `height` with link hash `hash`.
@@ -504,7 +490,8 @@ impl State {
     }
 
     /// S4a: seats whose last `Restored` block sealed but which were never
-    /// heard from since get the anchor bootstrap again, bounded.
+    /// heard from since get the anchor bootstrap again; an anchor-first
+    /// rejoiner already holds it (B4).
     fn repush_unfinished_restores(&mut self, now: u64) {
         if !self.first_in_line() {
             return;
@@ -518,13 +505,17 @@ impl State {
         }
         let due: Vec<String> = latest
             .into_iter()
-            .filter(|(m, pk)| *m != me && self.restore_never_finished(m, pk) && self.restore_age(m).is_some_and(|age| age < ANCHOR_REPUSH_WINDOW_SECS))
+            .filter(|(m, pk)| {
+                *m != me
+                    && self.restore_never_finished(m, pk)
+                    && !self.recovery.anchor_first_seats.contains(&(m.clone(), pk.clone()))
+            })
             .map(|(m, _)| m)
             .filter(|m| {
                 self.chain
                     .anchor_repush
                     .get(m)
-                    .map_or(true, |(n, last)| *n < ANCHOR_REPUSH_MAX && now.saturating_sub(*last) >= ANCHOR_REPUSH_SECS)
+                    .map_or(true, |(_, last)| now.saturating_sub(*last) >= ANCHOR_REPUSH_SECS)
             })
             .collect();
         if due.is_empty() {

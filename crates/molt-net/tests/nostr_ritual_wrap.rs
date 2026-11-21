@@ -113,3 +113,27 @@ async fn a_wrap_sealed_by_a_key_other_than_its_claimed_author_is_refused() {
         "a rumor/seal author mismatch must refuse — the peeled sender is proven, not claimed"
     );
 }
+
+/// B4: a full anchor piece (24 KiB of event JSON, base64 data as a blob
+/// part carries it) stays under 60 KiB once gift-wrapped - two NIP-44
+/// layers grow it by about 16/9 - and still peels.
+#[tokio::test]
+async fn a_full_anchor_part_stays_under_sixty_kib_on_the_wire() {
+    use base64::Engine as _;
+    let raw: Vec<u8> = (0..18_000u32).map(|i| u8::try_from(i % 251).expect("byte")).collect();
+    let data = base64::engine::general_purpose::STANDARD.encode(&raw);
+    let event = format!(
+        r#"{{"kind":"checkpoint_served_part","blob_hash":"{}","index":7,"total":9,"data":"{data}"}}"#,
+        "ab".repeat(32)
+    );
+    assert!(event.len() <= 24 * 1024, "{}", event.len());
+    let msg = RitualMsg::RecoverAnchor { member: "petra".into(), index: 7, total: 9, event };
+    let coordinator = Keys::generate();
+    let rejoiner = Keys::generate();
+    let wrap = wrap_ritual(&coordinator, &rejoiner.public_key(), &msg).await.expect("wrap");
+    let wire = nostr::JsonUtil::as_json(&wrap).len();
+    eprintln!("anchor part: frame={} wrapped={wire}", serde_json::to_string(&msg).expect("json").len());
+    assert!(wire <= 60 * 1024, "a gift-wrapped part is {wire} B");
+    let (peeled, _) = peel_ritual(&rejoiner, &wrap).await.expect("peels");
+    assert_eq!(peeled, msg);
+}

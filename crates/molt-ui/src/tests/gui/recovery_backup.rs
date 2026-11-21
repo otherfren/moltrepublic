@@ -287,3 +287,37 @@ fn an_outdated_link_says_so() {
     apply_session(&ui, &sv, true, &chat_ui);
     assert!(ui.get_rv_error().contains("Link veraltet"), "{}", ui.get_rv_error());
 }
+
+/// B4: a coordinator that lost the attempt (restart) answers `link
+/// outdated`; the rejoiner reads one fact.
+#[test]
+fn a_lost_attempt_reads_as_an_outdated_link() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+    let sv = SessionView {
+        notice: "recover-failed:the coordinator refused the request: link outdated".to_string(),
+        ..SessionView::default()
+    };
+    apply_session(&ui, &sv, true, &chat_ui);
+    assert_eq!(ui.get_rv_error().as_str(), "Link outdated - ask for a new link.");
+}
+
+/// B2/B3 notices reach the GUI as one compact fact each, in both languages.
+#[test]
+fn an_evicted_or_locked_out_seat_says_so() {
+    i_slint_backend_testing::init_no_event_loop();
+    for (lang, notice, want) in [
+        ("en", "seat-evicted", "Seat restored elsewhere - rejoin with a link."),
+        ("de", "seat-evicted", "Sitz anderswo wiederhergestellt - mit Link neu beitreten."),
+        ("en", "seat-locked-out", "Locked out of the group - rejoin with a link."),
+        ("de", "seat-locked-out", "Aus der Gruppe ausgesperrt - mit Link neu beitreten."),
+    ] {
+        let ui = AppWindow::new().expect("headless window");
+        apply_strings(&ui, i32::from(lang == "de"));
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let sv = SessionView { language: lang.to_string(), notice: notice.to_string(), ..SessionView::default() };
+        apply_session(&ui, &sv, true, &chat_ui);
+        assert_eq!(ui.get_toast_text().as_str(), want);
+    }
+}

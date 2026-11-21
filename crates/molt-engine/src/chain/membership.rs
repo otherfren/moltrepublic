@@ -51,6 +51,41 @@ pub(crate) struct PendingRecovery {
     pub card: ChainChange,
 }
 
+/// B4: an anchor-first recovery between the served anchor and the
+/// rejoiner's `RecoverReady` - the verified request, replayed into
+/// [`State::verify_and_propose_restore`] at Ready, and the anchor pieces
+/// a `RecoverWant` re-sends. Nothing is proposed while it lives.
+pub(crate) struct AnchorFirst {
+    pub member: String,
+    pub identity_pk: String,
+    pub key_package: String,
+    pub seat_proof: String,
+    /// The rejoiner's new anchor: the only sender Want/Ready count from.
+    pub new_nostr_pk: String,
+    pub relays: Vec<String>,
+    pub consent: String,
+    pub reply: String,
+    /// JSON of each anchor event, in order.
+    pub frames: Vec<String>,
+    /// Last re-send, for the debounce.
+    pub resent_at: Option<tokio::time::Instant>,
+    /// The send tasks still retrying.
+    pub tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl AnchorFirst {
+    /// Stop the send tasks of a finished or dropped attempt.
+    pub(crate) fn abort(self) {
+        for t in self.tasks {
+            t.abort();
+        }
+    }
+}
+
+/// The most one anchor piece may serialize to: two NIP-59 layers grow it
+/// by about 16/9, which keeps a gift-wrapped part under 60 KiB.
+pub(crate) const RECOVER_PART_MAX: usize = 24 * 1024;
+
 /// What a Nostr re-key produced — everything the wire needs, keyed at the
 /// stamp the commit was made with.
 pub(crate) struct NostrRekey {
@@ -693,6 +728,48 @@ impl State {
         consent: &str,
         reply: &str,
     ) -> Result<u64, String> {
+        let (change, v2) = self.check_restore_request(
+            member,
+            requested_pk,
+            key_package_hex,
+            ticket,
+            seat_proof,
+            new_nostr_pk,
+            declared_relays,
+            consent,
+        )?;
+        let ChainChange::Membership { identity_pk: anchored, nostr_pk: anchor, relays, consent, .. } = change.clone()
+        else {
+            return Err("not a membership change".to_string());
+        };
+        self.recovery.pending.insert(
+            member.to_string(),
+            PendingRecovery {
+                key_package: key_package_hex.to_string(),
+                reply: reply.to_string(),
+                card: change,
+            },
+        );
+        // §7e: a v1 consent binds neither relays nor position - the human card
+        let cosign = self.config.self_cosign && (v2 || consent.is_none());
+        Ok(self.propose_membership_with(MembershipOp::Restored, member, &anchored, anchor, relays, consent, cosign))
+    }
+
+    /// Every check of [`Self::verify_and_propose_restore`], changing
+    /// nothing: the card the request would propose, and whether its consent
+    /// is v2. B4 runs it before the anchor goes out.
+    #[allow(clippy::too_many_arguments)] // one request's fields, not a bag
+    pub(crate) fn check_restore_request(
+        &self,
+        member: &str,
+        requested_pk: &str,
+        key_package_hex: &str,
+        ticket: &str,
+        seat_proof: &str,
+        new_nostr_pk: &str,
+        declared_relays: &[String],
+        consent: &str,
+    ) -> Result<(ChainChange, bool), String> {
         let anchored = self
             .replica
             .as_ref()
@@ -786,17 +863,21 @@ impl State {
         if let Some(why) = self.restore_gate(member) {
             return Err(why.to_string());
         }
-        self.recovery.pending.insert(
-            member.to_string(),
-            PendingRecovery {
-                key_package: key_package_hex.to_string(),
-                reply: reply.to_string(),
-                card: change,
-            },
-        );
-        // §7e: a v1 consent binds neither relays nor position - the human card
-        let cosign = self.config.self_cosign && (v2 || consent.is_none());
-        Ok(self.propose_membership_with(MembershipOp::Restored, member, &anchored, anchor, relays, consent, cosign))
+        Ok((change, v2))
+    }
+
+    /// B4: the anchor (this holder's `chain[0]`, with the blob that roots
+    /// it) as JSON events of at most [`RECOVER_PART_MAX`] each, for gift
+    /// wraps. `None` when a piece cannot fit: that request runs seal-first.
+    pub(crate) fn recover_anchor_frames(&self) -> Option<Vec<String>> {
+        let anchor = self.chain.blocks.first()?;
+        let mut events = Vec::new();
+        if let Some(blob) = self.chain.checkpoint_blob.as_ref() {
+            events.extend(super::blob_parts::blob_events(blob, RECOVER_PART_MAX)?);
+        }
+        events.push(WorkspaceEvent::Committed(anchor.clone()));
+        let frames: Vec<String> = events.iter().filter_map(|e| serde_json::to_string(e).ok()).collect();
+        (frames.len() == events.len() && frames.iter().all(|f| f.len() <= RECOVER_PART_MAX)).then_some(frames)
     }
 
     /// The live re-admission vote for a recovery THIS node coordinates
@@ -1148,6 +1229,7 @@ impl State {
                 stamp: rekey.stamp,
             },
         );
+        let anchor_first = self.recovery.anchor_first_seats.contains(&(member.to_string(), to.clone()));
         crate::nostr_ritual::spawn_rekey_delivery(
             channel,
             net,
@@ -1155,6 +1237,7 @@ impl State {
             rekey,
             payload,
             member.to_string(),
+            self.cmd_tx.clone(),
         );
         self.record(commit_env);
         // **Forget the seat's OLD accept window.** The returning member is a
@@ -1167,8 +1250,11 @@ impl State {
         // equivalent of. It does have a stronger one: this re-key runs only
         // behind a threshold-committed `Restored` block for exactly this seat.
         self.reset_peer_accept_window(&member.to_string());
-        // the rejoiner's trust root, over the same 445 channel it just joined
-        self.serve_chain_anchor();
+        // the rejoiner's trust root, over the same 445 channel it just
+        // joined - unless it verified the anchor before the seal (B4)
+        if !anchor_first {
+            self.serve_chain_anchor();
+        }
         // …and the same quiet system line the mesh arm posts. It is encrypted
         // at the NEW epoch, so it can outrun the commit that is still being
         // published — a survivor holds it and retries after the merge

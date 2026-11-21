@@ -2347,6 +2347,8 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
         seat_proof,
         relays: Vec::new(),
         reply: None,
+        anchor_first: false,
+        version: String::new(),
         consent: String::new(),
     });
     let payload = serde_json::to_vec(&request).expect("encode recover request");
@@ -2895,6 +2897,8 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
             queue_id: hex::encode(&dead_reply_q.snd.id.0),
             wrap: hex::encode(dead_reply_wrap.to_bytes()),
         }),
+        anchor_first: false,
+        version: String::new(),
     });
     supervisor::send_framed(
         &material1.transport,
@@ -4561,6 +4565,8 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
         seat_proof,
         relays: Vec::new(),
         reply: None,
+        anchor_first: false,
+        version: String::new(),
         consent: String::new(),
     });
     let payload = serde_json::to_vec(&request).expect("encode recover request");

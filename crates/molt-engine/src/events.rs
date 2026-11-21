@@ -908,6 +908,11 @@ impl State {
         self.chain.fallback_asked = None;
         self.chain.parked_approvals.clear();
         self.recovery.pending.clear();
+        for (_, attempt) in self.recovery.anchor_first.drain() {
+            attempt.abort();
+        }
+        self.recovery.spent_tickets.clear();
+        self.recovery.anchor_first_seats.clear();
         self.recovery.swept.clear();
         self.chat.clear();
         self.chat_pos.clear();

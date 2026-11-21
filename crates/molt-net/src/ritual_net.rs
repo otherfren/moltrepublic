@@ -395,6 +395,7 @@ impl RitualInbox {
 /// of the NIP-59-verified seal author — PROVEN possession of that nostr
 /// key, never an asserted field.
 #[derive(Debug)]
+#[allow(clippy::large_enum_variant)] // one delivery at a time, never stored in bulk
 pub enum RitualDelivery {
     /// A kind-446 ritual message and its proven sender.
     Msg(RitualMsg, String),

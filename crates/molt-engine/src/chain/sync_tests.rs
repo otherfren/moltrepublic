@@ -1256,7 +1256,8 @@ fn the_head_beacon_goes_out_periodically() {
 }
 
 /// S4a: a restored seat never heard from since its `Restored` block gets
-/// the anchor bootstrap again every ten minutes, at most twelve times.
+/// the anchor bootstrap again every ten minutes, for as long as it stays
+/// unheard (B4: no count, no window).
 #[test]
 fn an_unfinished_restore_gets_its_anchor_again() {
     let mut b = Builder::new(&["petra", "walter", "dora"], 2);
@@ -1272,11 +1273,27 @@ fn an_unfinished_restore_gets_its_anchor_again() {
     walter.presence.clock_override = Some(1_000 + 120);
     walter.chain_heal_tick();
     assert_eq!(walter.next_seq, pushed, "not again inside ten minutes");
-    for i in 1..30u64 {
+    for i in 1..300u64 {
         walter.presence.clock_override = Some(1_000 + i * 600);
         walter.chain_heal_tick();
     }
-    assert_eq!(walter.chain.anchor_repush.get("dora").map(|e| e.0), Some(12), "bounded");
+    assert_eq!(walter.chain.anchor_repush.get("dora").map(|e| e.0), Some(300), "two days on, still every ten minutes");
+}
+
+/// B4: an anchor-first rejoiner verified the anchor before the seal, so
+/// nothing re-pushes it over the group.
+#[test]
+fn an_anchor_first_restore_gets_no_re_push() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_restored("dora", &"ab".repeat(32), &["petra", "walter"]);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    let height = walter.chain.blocks.last().expect("block").height;
+    walter.chain.block_ts.insert(height, 500);
+    walter.recovery.anchor_first_seats.insert(("dora".to_string(), "ab".repeat(32)));
+    walter.presence.clock_override = Some(1_000);
+    let before = walter.next_seq;
+    walter.chain_heal_tick();
+    assert_eq!(walter.next_seq, before, "no anchor over the group");
 }
 
 /// Review A/H1: once the loser re-based, its next request names our head;
