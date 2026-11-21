@@ -1148,6 +1148,7 @@ impl State {
             if let (Some(chan), Some(tx)) = (ritual.nostr_chan(), self.cmd_tx.upgrade()) {
                 let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 self.genesis_stop = Some(stop.clone());
+                self.genesis_unheard = roster.iter().filter(|m| **m != c.member).cloned().collect();
                 crate::nostr_ritual::spawn_publish_frame(
                     chan,
                     crate::nostr_ritual::FramePayload::Sealed { ct, exporter },

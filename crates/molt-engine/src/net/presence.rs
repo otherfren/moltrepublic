@@ -60,8 +60,21 @@ impl State {
             let now = self.presence_now();
             self.stamp_member_pill(&member, now);
             self.recompute_net_health();
+            self.genesis_heard(&member);
         }
         Ok(Reply::Ack)
+    }
+
+    /// End the genesis re-publish once every other seat spoke in the
+    /// running group: a seat there already holds the genesis.
+    fn genesis_heard(&mut self, member: &str) {
+        if self.genesis_stop.is_none() || !self.genesis_unheard.remove(member) || !self.genesis_unheard.is_empty() {
+            return;
+        }
+        if let Some(stop) = self.genesis_stop.take() {
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        tracing::info!("genesis_republish=done");
     }
 
     /// A merged re-key commit re-admitted `member` as a new incarnation
