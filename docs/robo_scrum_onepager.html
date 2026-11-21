@@ -212,6 +212,11 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
 .nv { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; }
 .nv.on { background: var(--panel); border: 1px solid var(--line); }
 .nvnote { margin: -4px 0 2px 36px; font-size: 0.78rem; color: var(--muted); }
+.prog { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; flex: 1; min-width: 80px; }
+.prog i { display: block; height: 100%; background: var(--done); }
+.prog.nvp { height: 3px; margin: -2px 8px 4px 36px; flex: none; }
+.progrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.progrow span { font: 500 0.74rem/1 var(--f-mono); color: var(--muted); }
 .grp.first { border-top: 0; padding-top: 2px; }
 .nv small { margin-left: auto; color: var(--muted); font: 500 0.7rem/1 var(--f-mono); }
 .ic { width: 20px; height: 20px; border-radius: 5px; display: inline-grid; place-items: center; font-size: 0.72rem; font-weight: 700; flex: none; }
@@ -372,16 +377,18 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
     <div class="mock" aria-label="Skizze der Board-Ansicht">
       <nav>
         <div class="grp first">Planung</div>
-        <div class="nv"><span class="ic plan">P</span>Allgemein<small>0/3</small></div>
-        <div class="nv"><span class="ic plan">P</span>Website<small>0/2</small></div>
+        <div class="nv"><span class="ic plan">P</span>Allgemein<small>0/9</small></div>
+        <div class="nv"><span class="ic plan">P</span>Website<small>0/5</small></div>
         <div class="nvnote">wartet auf: Treffen</div>
         <div class="grp">Ausführung</div>
-        <div class="nv on"><span class="ic exec">A</span>Treffen<span class="alarm" title="Problem"></span><small>4/7</small></div>
+        <div class="nv on"><span class="ic exec">A</span>Treffen<span class="alarm" title="Problem"></span><small>12/20</small></div>
+        <div class="prog nvp"><i style="width:60%"></i></div>
         <div class="grp">Beendet (1)</div>
         <div class="nv"><span class="btn">+</span></div>
       </nav>
       <main>
         <div class="bar"><b>Treffen organisieren</b><span class="badge">Ausführung</span><span class="btn">Zeigen: alles</span><span class="btn">Bearbeiten</span></div>
+        <div class="progrow"><div class="prog"><i style="width:60%"></i></div><span>12 von 20 Tasks · 4 von 7 Stories</span></div>
         <div class="grp">In Arbeit</div>
         <div class="srow">Raum reservieren</div>
         <div class="trow"><span class="dots"><i class="dot done"></i><i class="dot done"></i><i class="dot"></i></span>Angebote einholen</div>
@@ -402,6 +409,7 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
       <tr><td>braucht Mensch</td><td><span class="pill human">Violett</span></td><td>-</td><td>Menschen-Tag</td></tr>
     </table>
     <ul class="facts">
+      <li><b>Fortschritt</b> zählt Tasks, im Navigator und oben im Board. Fertig ist ein Task, wenn seine Story done ist, oder wenn er Grün trägt und kein Rot. Tasks verworfener Stories fallen heraus. Die Zahl ist Anzeige, kein Beschluss.</li>
       <li>Rot heißt Problem und sonst nichts. Jeder Zustand hat zusätzlich ein Icon.</li>
       <li><b>Ändern im Board selbst</b>: "Bearbeiten" schaltet in einen Entwurf. Die Änderungen sammeln sich lokal, sind markiert und gehen als ein Vorschlag zur Abstimmung.</li>
       <li>Der Zustand ist ein anklickbares Abzeichen, das Plus legt ein Board an. Die Verwaltung der Abhängigkeiten zwischen Boards erscheint erst ab dem zweiten Board.</li>

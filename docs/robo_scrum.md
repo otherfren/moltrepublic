@@ -224,10 +224,23 @@ empty area.
   state - planning on top, then execution, then finished. A group
   without a board shows no heading; the finished group is folded and
   shows its count. An entry carries the icon and colour of its state
-  and its progress - finished stories of all stories. A board that
+  and its progress (below). A board that
   waits for another says so in a second line ("waits for: ..."); there
   is no indentation. An entry carries a red dot while a task on its
   board has a problem mark.
+- **Progress** counts tasks, in two places: a thin bar with the number
+  on the navigation entry, and a wider bar in the board's head with
+  both numbers - finished tasks of all tasks, finished stories of all
+  stories. A task counts as finished when
+  - its story is done, whatever marks it had;
+  - or its story is open and it carries at least one green mark and no
+    red one.
+
+  The tasks of a discarded story leave the total. The verdict beats the
+  marks, so closing a story never moves the bar back; red beats green.
+  The task number is a display, not a decision: while a story is open
+  it comes from marks, so two nodes may briefly differ. A board whose
+  stories have no tasks shows the story number only.
 - **One colour, one meaning**, on boards and tasks alike; the icon
   carries the meaning too, so colour never stands alone:
 
