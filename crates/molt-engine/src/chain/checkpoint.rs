@@ -79,7 +79,8 @@ impl State {
                 .chain.proposal_changes
                 .values()
                 .any(|c| CutKind::of(c).is_some());
-        if vote_open || self.vault_base_pending() || self.wiki_base_pending() {
+        // B6: a cut drops the history a fork heals with
+        if vote_open || self.vault_base_pending() || self.wiki_base_pending() || self.chain_unsettled() {
             return;
         }
         match self.cmd_propose_checkpoint() {
@@ -105,6 +106,9 @@ impl State {
         // plan 1.3.15: a node missing a base cannot fold it
         if self.vault_base_pending() {
             return Err(self.vault_base_pending_error());
+        }
+        if self.chain_unsettled() {
+            return Err(molt_core::MoltError::BadPayload(super::governance::CUT_WAIT.into()));
         }
         let Some(head) = self.chain.head.as_ref() else {
             return Err(molt_core::MoltError::BadPayload("no chain head".into()));
@@ -174,6 +178,11 @@ impl State {
         };
         if head.height != upto {
             tracing::debug!(%id, upto, head = head.height, "ignoring a checkpoint cut that is not our head");
+            return;
+        }
+        // B6: not registered either - a co-sign after the heal re-earns it
+        if self.chain_unsettled() {
+            tracing::info!(id, upto, "cut=refused reason=chain_diverged");
             return;
         }
         // the variant comes from OUR genesis; `folded` is the wiki choice

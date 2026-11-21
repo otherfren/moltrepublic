@@ -159,4 +159,8 @@ thread_local! {
     /// the write is a BLOCKING round-trip to the storage writer, so "once per
     /// batch" is a claim worth asserting rather than describing.
     pub(crate) static CHAIN_PERSISTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+
+    /// Test-only record order of chain gossip: ("committed" | "approved", height).
+    pub(crate) static RECORDED_CHAIN: std::cell::RefCell<Vec<(&'static str, u64)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }

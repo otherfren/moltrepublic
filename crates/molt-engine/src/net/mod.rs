@@ -52,6 +52,40 @@ pub(crate) use ingest::CHAIN_SERVE_DEBOUNCE_SECS;
 pub(crate) use ingest::PARKED_READS_PER_FRAME;
 pub(crate) use ingest::WIRE_STAMP_SKEW_SECS;
 
+/// Lossy-network test seam: every `every`-th first arrival is dropped; a
+/// resent copy passes, as after a relay's transient loss.
+#[derive(Debug, Default)]
+pub(crate) struct DropSeam {
+    pub(crate) every: std::sync::atomic::AtomicU64,
+    pub(crate) seen: std::sync::atomic::AtomicU64,
+    pub(crate) dropped: std::sync::atomic::AtomicU64,
+    lost: Mutex<std::collections::HashSet<(MemberId, u64)>>,
+}
+
+impl DropSeam {
+    /// Whether this arrival of `from`'s envelope `seq` is lost.
+    pub(crate) fn drops(&self, from: &str, seq: u64) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let every = self.every.load(SeqCst);
+        if every == 0 {
+            return false;
+        }
+        let Ok(mut lost) = self.lost.lock() else {
+            return false;
+        };
+        let key = (from.to_string(), seq);
+        if lost.contains(&key) {
+            return false;
+        }
+        let drop = self.seen.fetch_add(1, SeqCst) % every == every - 1;
+        if drop {
+            lost.insert(key);
+            self.dropped.fetch_add(1, SeqCst);
+        }
+        drop
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // EngineSink / OutboxLog / StateStore implementations
