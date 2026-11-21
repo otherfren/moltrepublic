@@ -8908,6 +8908,10 @@ pub enum MoltError {
     /// The engine task is gone or did not answer.
     #[error("engine: {0}")]
     Engine(String),
+    /// This seat runs on another device now: nothing this node does
+    /// reaches the group.
+    #[error("seat evicted - rejoin with a link")]
+    SeatEvicted,
 }
 
 #[cfg(test)]

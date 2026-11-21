@@ -1883,6 +1883,9 @@ impl State {
 
     /// Dispatch one command to its module.
     fn handle(&mut self, cmd: Command) -> Result<Reply, MoltError> {
+        if self.delivery.evicted && needs_the_group(&cmd) {
+            return Err(MoltError::SeatEvicted);
+        }
         match cmd {
             Command::AsOperator { operator, inner } => self.cmd_as_operator(operator, *inner),
             // chat.rs
@@ -2676,6 +2679,38 @@ impl State {
                 generation,
             } => self.cmd_net_mesh_ready(mesh, mls_snapshot, generation),
         }
+    }
+}
+
+/// C6: what an evicted seat refuses - a command that publishes to the
+/// group or mints a recovery link would be recorded here and never sent.
+/// Read receipts pass: they are a by-product of reading.
+fn needs_the_group(cmd: &Command) -> bool {
+    match cmd {
+        Command::WikiEdit { dry_run, .. } => !dry_run,
+        _ => matches!(
+            cmd,
+            Command::Chat { .. }
+                | Command::ReactChat { .. }
+                | Command::DeleteChat { .. }
+                | Command::ShareFile { .. }
+                | Command::RemoveFile { .. }
+                | Command::DownloadFile { .. }
+                | Command::Poke { .. }
+                | Command::Propose { .. }
+                | Command::Approve { .. }
+                | Command::Decline { .. }
+                | Command::Withdraw { .. }
+                | Command::ProposeCheckpoint
+                | Command::VaultSeal { .. }
+                | Command::VaultReseal { .. }
+                | Command::VaultGrant { .. }
+                | Command::VaultRead { .. }
+                | Command::WalletInit
+                | Command::WalletConsent { .. }
+                | Command::WalletRetry
+                | Command::RecoverInviteStart { .. }
+        ),
     }
 }
 

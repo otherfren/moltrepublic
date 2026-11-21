@@ -1531,6 +1531,9 @@ async fn a_seat_restored_while_its_old_node_runs_is_told_and_goes_quiet() {
     // the coordinator restores a seat it still hears: an older build's
     // behaviour, or the operator's mistake (the window is 0 here)
     let (a, b, v, petra_phrase) = found_three(tmp.path(), &url).await;
+    // a stale or forged eviction report to a seat whose group is live
+    v.execute(Command::NetEvicted { by: "walter".to_string(), generation: None }).await.expect("ack");
+    assert!(!status_of(&v).await.evicted, "a live group is not evicted by a report");
 
     a.execute(Command::RecoverInviteStart { member: "petra".to_string() }).await.expect("mint");
     let s = wait_for(&a, "the recovery link", |s| {
@@ -1567,21 +1570,34 @@ async fn a_seat_restored_while_its_old_node_runs_is_told_and_goes_quiet() {
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
     let before = count.0.load(std::sync::atomic::Ordering::SeqCst);
-    for i in 0..3 {
-        b.execute(Command::Chat {
-            body: format!("from the replaced device {i}"),
-            quote: None,
-            channel: molt_core::ChannelRef::Group,
-        })
-        .await
-        .expect("chat is still recorded locally");
-    }
+    let chat = || Command::Chat {
+        body: "from the replaced device".to_string(),
+        quote: None,
+        channel: molt_core::ChannelRef::Group,
+    };
+    let refused = b.execute(chat()).await;
+    assert!(matches!(refused, Err(molt_core::MoltError::SeatEvicted)), "never sent, so refused: {refused:?}");
     // past the first resend round (10 s)
     tokio::time::sleep(Duration::from_secs(12)).await;
     assert_eq!(
         count.0.load(std::sync::atomic::Ordering::SeqCst),
         before,
         "the evicted node published nothing"
+    );
+
+    // a restart of the evicted node stays quiet and says so again
+    let id = read_session(&b).await.active_workspace;
+    b.execute(Command::ClearNotice).await.expect("clear");
+    b.execute(Command::CloseWorkspace).await.expect("close");
+    b.execute(Command::OpenWorkspace { id }).await.expect("reopen");
+    wait_for(&b, "the reopened node to name its eviction", |s| s.notice == "seat-evicted").await;
+    assert!(status_of(&b).await.evicted, "still evicted after the restart");
+    assert!(matches!(b.execute(chat()).await, Err(molt_core::MoltError::SeatEvicted)));
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(
+        count.0.load(std::sync::atomic::Ordering::SeqCst),
+        before,
+        "the reopened evicted node published nothing"
     );
 }
 
