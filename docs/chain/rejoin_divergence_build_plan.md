@@ -1,8 +1,11 @@
 # Rejoin and divergence fixes: build plan
 
-**Status: IN PROGRESS (2026-11-21, evening).** B1-B3, B5, B6 and B7a
-are on master; B4 and B7b are being built; B8 (acceptance on the field
-copies) follows. Evidence: `docs/chain/rejoin_divergence_findings.md`.
+**Status: IN PROGRESS (2026-11-21, night).** B1-B6 are on master; their
+residual risks are being closed; B8 (acceptance on the field copies)
+and the release follow. B7, the fork-free lock, is NOT part of this
+release (user, 2026-11-21): its design and proven state machine are on
+master unused, the wiring is a plan (`docs/chain/chain_lock_design.md`).
+Evidence: `docs/chain/rejoin_divergence_findings.md`.
 
 ## In short
 
@@ -25,18 +28,19 @@ from the three seats' copies and reproduced in isolation:
 | B1 | a rejoiner (and a founding, a join) reads a large relay backlog instead of stalling on it | on master |
 | B2 | a locked-out node notices, says so, and stops publishing | on master |
 | B3 | no restore of a seat that is still active or while the chain is forked; a node never asks for a restore by itself | on master |
-| B4 | the rejoiner gets the chain anchor BEFORE anything is sealed; no fixed deadlines | in progress |
+| B4 | the rejoiner gets the chain anchor BEFORE anything is sealed; no fixed deadlines | on master |
 | B5 | a relay-list change waits until a fork has healed | on master |
 | B6 | one sealer per height (measured: fork decisions 11-19 -> 0 in a lossy three-seat test) | on master |
-| B7 | fork-free sealing (a Flexible-Paxos lock): design and proven state machine on master (B7a); wiring in progress (B7b) | partly |
-| B8 | acceptance: the three field copies with the fixed build | open |
+| B7 | fork-free sealing (a Flexible-Paxos lock): design and proven state machine on master, not wired, not active | planned, after this release |
+| B8 | acceptance: the three field copies with the fixed build, then the release | in progress |
 | later | rescue: a rejoin that cuts back to the last common block and restarts a split republic | own design, after B8 |
 
 No signed format changes; old and new builds run mixed. The fixes
 protect a seat once it runs the new build; B1 in particular acts on the
 rejoiner's side. Nothing is released yet.
 
-Decisions (user, 2026-11-21): build B1-B8 including the fork-free lock;
+Decisions (user, 2026-11-21): build B1-B6 and B8 and release them; the
+fork-free lock follows as its own stage;
 a locked-out node only reports, it never asks for a restore by itself; a
 restore keeps sealing with one survivor plus the consent, guarded; no
 fixed deadlines.
@@ -219,6 +223,6 @@ live-preview build of `moltd` from master:
 
 ## Order and hand-over
 
-Wave 1 in parallel (disjoint files): B1; B2+B3; B5+B6; B7a.
-Wave 2: B4 (on B1-B3); B7b (on B6, B7a). Then review, B8, and the
-status lines of this doc, the findings and the previous plan.
+Built in two waves (B1; B2+B3; B5+B6; B7a - then B4). Open: the
+residual risks of B4, the review, B8, the release, and the status lines
+of this doc, the findings and the previous plan. B7b is planned work.
