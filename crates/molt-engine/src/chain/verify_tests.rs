@@ -762,13 +762,23 @@ fn a_threshold_restored_block_re_admits_a_member() {
         .clone();
     walter.receive_approval(id, "petra", 1, &petra_sig);
     walter.chain_sign_and_gossip_approval(id);
+    // B3: walter's own running node never seals a restore of itself
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 0);
+    let walter_sig = walter
+        .chain.pending_sigs
+        .get(&id)
+        .and_then(|p| p.sigs.iter().find(|a| a.member == "walter"))
+        .expect("walter signed")
+        .sig
+        .clone();
+    petra.receive_approval(id, "walter", 1, &walter_sig);
 
     // the Restored block seals at 2-of-2
-    let head = walter.chain.head.as_ref().expect("head");
+    let head = petra.chain.head.as_ref().expect("head");
     assert_eq!(head.height, 1);
     assert!(
         matches!(
-            walter.chain.blocks.last().expect("block").change,
+            petra.chain.blocks.last().expect("block").change,
             ChainChange::Membership {
                 op: MembershipOp::Restored,
                 ..

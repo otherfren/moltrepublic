@@ -30,16 +30,10 @@ pub(crate) struct RecoverProgressReport {
     pub to: Option<String>,
 }
 
-/// The group's rejoin notification — the one thing members see, so it says
-/// WHICH door the seat came back through (`detached_reattach.md` §6): a
-/// survivor-minted link, or the self-service reattach from a restored
-/// backup.
-fn rejoin_note(ticketed: bool, member: &str) -> String {
-    if ticketed {
-        format!("🔑 {member} rejoined the republic after recovery")
-    } else {
-        format!("🔁 {member} reconnected from a restored backup")
-    }
+/// The group's rejoin notification - the one thing members see. Since B3
+/// every rejoin comes through a survivor-minted link.
+fn rejoin_note(member: &str) -> String {
+    format!("🔑 {member} rejoined the republic after recovery")
 }
 
 /// A recovery in flight on the coordinator: the returning member's fresh MLS
@@ -49,9 +43,6 @@ fn rejoin_note(ticketed: bool, member: &str) -> String {
 /// Welcome back to `reply`.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingRecovery {
-    /// Whether the request came over a minted link (`false` = the
-    /// self-service reattach) — chooses the group's notification line.
-    pub ticketed: bool,
     /// The returning member's fresh MLS KeyPackage, hex.
     pub key_package: String,
     /// The reply queue the Welcome goes back to (mesh arm).
@@ -111,6 +102,12 @@ pub(crate) fn nostr_rekey(
 
 /// Pending consented restores one seat may hold: a retry or two.
 const CONSENTED_PER_SEAT: usize = 3;
+
+/// B3 refusals: the seat was heard recently / this node sees a fork / a
+/// link-less request from an older build.
+pub(crate) const SEAT_STILL_ACTIVE: &str = "seat still active";
+pub(crate) const CHAIN_DIVERGED: &str = "chain diverged";
+pub(crate) const REJOIN_NEEDS_A_LINK: &str = "rejoin needs a link";
 
 impl State {
     /// Propose a membership change (re-admit a returning member, or add a seat)
@@ -417,6 +414,61 @@ impl State {
         true
     }
 
+    /// B3: why a restore of `member` must wait on this node, `None` when it
+    /// may go ahead. A seat heard within the window is running somewhere,
+    /// so a restore would only evict it ("heard" = an MLS-authenticated
+    /// frame of its current leaf; an evicted old device sends none). A
+    /// diverged coordinator would restore onto a branch the others lack.
+    pub(crate) fn restore_gate(&self, member: &str) -> Option<&'static str> {
+        let window = match self.seat_active.load(std::sync::atomic::Ordering::SeqCst) {
+            u64::MAX => super::sync::SILENT_AFTER_SECS,
+            secs => secs,
+        };
+        let active = if member == self.member() {
+            !self.delivery.evicted
+        } else {
+            let seen = self.member_last_seen(member);
+            seen != molt_core::MemberInfo::NEVER && self.presence_now().saturating_sub(seen) < window
+        };
+        if active {
+            return Some(SEAT_STILL_ACTIVE);
+        }
+        if !self.chain.diverged.is_empty() || !self.chain.fork_candidates.is_empty() {
+            return Some(CHAIN_DIVERGED);
+        }
+        None
+    }
+
+    /// B3, the sealer's hook: hold a `Restored` card while
+    /// [`Self::restore_gate`] refuses it. The card stays open; the delivery
+    /// tick retries it like any held seal.
+    pub(crate) fn restore_seal_held(&mut self, id: u64, change: &ChainChange) -> bool {
+        let ChainChange::Membership { op: MembershipOp::Restored, member, .. } = change else {
+            return false;
+        };
+        let Some(why) = self.restore_gate(member) else {
+            self.recovery.held_seals.remove(&id);
+            return false;
+        };
+        if self.recovery.held_seals.insert(id) {
+            tracing::warn!(%id, %member, reason = why, "restore_held");
+        }
+        self.chain.seal_held.insert(id);
+        true
+    }
+
+    /// B3: retry the auto-approvals a gate held back (presence tick).
+    pub(crate) fn retry_held_restore_approvals(&mut self) {
+        let held: Vec<u64> = self.recovery.held_approvals.iter().copied().collect();
+        for id in held {
+            if self.chain.proposal_changes.contains_key(&id) {
+                self.auto_approve_restore(id);
+            } else {
+                self.recovery.held_approvals.remove(&id);
+            }
+        }
+    }
+
     /// A re-admission of `member` is in flight (R3): one this node
     /// coordinates, or a pending consented restore that can still seal.
     /// A consent-less card does not count - any member could plant one.
@@ -600,6 +652,14 @@ impl State {
             }
             None => return,
         }
+        // B3: never co-sign the restore of a live seat or on a fork
+        if let Some(why) = self.restore_gate(&member) {
+            if self.recovery.held_approvals.insert(id) {
+                tracing::warn!(%id, %member, reason = why, "restore_held");
+            }
+            return;
+        }
+        self.recovery.held_approvals.remove(&id);
         // replay guard: one signature per member per height
         if self.own_signature_stands(id) {
             return;
@@ -623,7 +683,6 @@ impl State {
     #[allow(clippy::too_many_arguments)] // one verified request's fields, not a bag
     pub(crate) fn verify_and_propose_restore(
         &mut self,
-        ticketed: bool,
         member: &str,
         requested_pk: &str,
         key_package_hex: &str,
@@ -723,10 +782,13 @@ impl State {
                 return Err(format!("{named} is in nobody else's pool - add it first"));
             }
         }
+        // B3: behind the proof, so only the seat's phrase holder learns it
+        if let Some(why) = self.restore_gate(member) {
+            return Err(why.to_string());
+        }
         self.recovery.pending.insert(
             member.to_string(),
             PendingRecovery {
-                ticketed,
                 key_package: key_package_hex.to_string(),
                 reply: reply.to_string(),
                 card: change,
@@ -906,13 +968,12 @@ impl State {
         let Some(pending) = self.recovery.pending.remove(member) else {
             return;
         };
-        let ticketed = pending.ticketed;
         let Ok(kp) = hex::decode(&pending.key_package) else {
             tracing::warn!(%member, "recovery KeyPackage is not valid hex");
             return;
         };
         if self.group_net.is_some() {
-            self.coordinator_rekey_nostr(ticketed, member, &kp);
+            self.coordinator_rekey_nostr(member, &kp);
             return;
         }
         match self.net.as_ref().and_then(|n| n.restore_member_on_group(member, &kp)) {
@@ -953,7 +1014,7 @@ impl State {
                 // system line, not as the coordinator speaking.
                 if let Err(e) = self.post_message_with_kind(
                     me,
-                    rejoin_note(ticketed, member),
+                    rejoin_note(member),
                     None,
                     molt_core::ChannelRef::Group,
                     molt_core::ChatKind::System,
@@ -1001,7 +1062,7 @@ impl State {
     /// Steps 2 and 3 are off the actor; 1 and 4 are on it. Every failure is
     /// named — a recovery that quietly does nothing leaves a member locked out
     /// with no way to find out why.
-    fn coordinator_rekey_nostr(&mut self, ticketed: bool, member: &str, key_package: &[u8]) {
+    fn coordinator_rekey_nostr(&mut self, member: &str, key_package: &[u8]) {
         // **Everything that can fail is resolved BEFORE the group is touched.**
         //
         // `nostr_rekey` advances the epoch and evicts the old leaf, and there
@@ -1115,7 +1176,7 @@ impl State {
         let me = self.member();
         if let Err(e) = self.post_message_with_kind(
             me,
-            rejoin_note(ticketed, member),
+            rejoin_note(member),
             None,
             molt_core::ChannelRef::Group,
             molt_core::ChatKind::System,

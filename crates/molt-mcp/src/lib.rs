@@ -2275,7 +2275,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "status",
             command: "status",
             scope: Scope::Seat,
-            description: "Read a one-shot status summary of the group and surfaces. `founded_ts` is the founder's founding stamp, the same on every copy. `surfaces[].implemented` says a real engine stands behind a surface; the others are listed and gated but carry nothing yet. `chain_lag.peers_ahead` = how many blocks the furthest peer claims beyond this node's head (0 = level; anything else means votes cast here would not count, and approve/decline refuse); `chain_lag.silent` lists seats unheard-of, with the age of the last sighting (0 = never seen, age unknown). `chain_diverged` is the other failure and a different one: a peer on another branch. `chain_sync` = how this node syncs: `head_hash`, the open catch-up (`catchup_from`, `catchup_since`; 0 = none), buffered blocks of another branch (`fork_candidates`, `fork_lowest`, `fork_highest`), `fork_decisions` since open and `last_fork` (peer, height, outcome kept|rebased|relinked|dropped|tip_swapped, both short hashes), and `blob_bytes` against `blob_cap` (a checkpoint blob over the cap cannot be served in one frame). `seats` = one row per seat: `last_seen` (0 = never), `height` (this node's head for itself, else the highest a peer reported - a floor, a quiet seat may be further; null = never reported), `signed` (highest height it signed for), `files` (persistent shares it holds whole, of `persistent_files`).",
+            description: "Read a one-shot status summary of the group and surfaces. `founded_ts` is the founder's founding stamp, the same on every copy. `surfaces[].implemented` says a real engine stands behind a surface; the others are listed and gated but carry nothing yet. `chain_lag.peers_ahead` = how many blocks the furthest peer claims beyond this node's head (0 = level; anything else means votes cast here would not count, and approve/decline refuse); `chain_lag.silent` lists seats unheard-of, with the age of the last sighting (0 = never seen, age unknown). `chain_diverged` is the other failure and a different one: a peer on another branch. `chain_sync` = how this node syncs: `head_hash`, the open catch-up (`catchup_from`, `catchup_since`; 0 = none), buffered blocks of another branch (`fork_candidates`, `fork_lowest`, `fork_highest`), `fork_decisions` since open and `last_fork` (peer, height, outcome kept|rebased|relinked|dropped|tip_swapped, both short hashes), and `blob_bytes` against `blob_cap` (a checkpoint blob over the cap cannot be served in one frame). `seats` = one row per seat: `last_seen` (0 = never), `height` (this node's head for itself, else the highest a peer reported - a floor, a quiet seat may be further; null = never reported), `signed` (highest height it signed for), `files` (persistent shares it holds whole, of `persistent_files`). `evicted` = this seat was re-keyed for another device: it neither reads nor publishes until a rejoin with a link.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::Status),
         },
@@ -3084,7 +3084,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "recover_invite_start",
             command: "recover_invite_start",
             scope: Scope::Seat,
-            description: "As a surviving member, mint a single-use recovery link for a fellow member who lost their device (a manually-granted re-admission for an existing seat). The returning member does NOT need to be online. The engine listens for their request - on Nostr over the republic's relays, on the legacy shape over a fresh mesh queue - and the outcome arrives on the session notice (read_session): 'recovery-link:<link>' with the molt://recover/… link to share off-band, or 'recovery-link-failed:<reason>' naming what this node is missing. The returning member proves its seat with a re-derived-identity signature, then the group re-admits it by threshold.",
+            description: "As a surviving member, mint a single-use recovery link for a fellow member who lost their device (a manually-granted re-admission for an existing seat). The returning member does NOT need to be online. The engine listens for their request - on Nostr over the republic's relays, on the legacy shape over a fresh mesh queue - and the outcome arrives on the session notice (read_session): 'recovery-link:<link>' with the molt://recover/… link to share off-band, or 'recovery-link-failed:<reason>' naming what this node is missing. The returning member proves its seat with a re-derived-identity signature, then the group re-admits it by threshold. Refused with 'seat still active' while this node heard the seat in the last 2 minutes, and with 'chain diverged' while it holds a fork.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -3380,7 +3380,7 @@ pub(crate) mod tests {
         // hook; the value itself rides the settings surface as
         // `poke_wake_command` (ADR-0007), so this stays internal only
         // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 90] = [
+        const INTERNAL: [&str; 91] = [
             // not a door of its own: chat_send/approve/decline/withdraw
             // build it from their `operator`/`agent` arguments
             "as_operator",
@@ -3477,6 +3477,9 @@ pub(crate) mod tests {
             "net_delivered",
             "net_peer_seen",
             "net_peer_rekeyed",
+            // the transport reporting this seat's own eviction: a client
+            // must not be able to silence a running node with it
+            "net_evicted",
             "net_send_failed",
             "net_link_up",
             "net_link_down",

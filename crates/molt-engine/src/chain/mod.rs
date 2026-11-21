@@ -140,7 +140,7 @@ pub(crate) fn is_base_entry_op(payload: &serde_json::Value) -> bool {
     )
 }
 pub(crate) use governance::PendingApproval;
-pub(crate) use membership::{NostrRekey, PendingRecovery, RecoverProgressReport};
+pub(crate) use membership::{NostrRekey, PendingRecovery, RecoverProgressReport, REJOIN_NEEDS_A_LINK};
 
 use verify::*;
 

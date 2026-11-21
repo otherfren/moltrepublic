@@ -257,6 +257,15 @@ impl EngineSink for CmdSink {
             .await;
     }
 
+    async fn evicted(&self, by: &MemberId) {
+        let _ = self
+            .execute(Command::NetEvicted {
+                by: by.clone(),
+                generation: self.generation,
+            })
+            .await;
+    }
+
     async fn send_failed(&self, member: &MemberId, reason: &str) {
         let _ = self
             .execute(Command::NetSendFailed {
@@ -765,9 +774,7 @@ impl State {
             let _ = active.handle.merge_mls_async(snap);
         }
         self.group_mls_parked = Some(mls);
-        self.session.net_health = molt_core::NetHealth::Down {
-            reason: crate::session::NOSTR_RUNTIME_PENDING.to_string(),
-        };
+        self.session.net_health = self.group_down();
     }
 
     /// Bring up the kind-445 GROUP runtime of a Nostr workspace (N5.2).
@@ -815,6 +822,12 @@ impl State {
         &mut self,
         mls_arc: std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>,
     ) -> Option<crate::GroupNet> {
+        // an evicted group (a restart after B2) stays down: nothing it
+        // frames can be read, and its outbox would only re-offer
+        if mls_arc.lock().is_ok_and(|m| m.is_evicted()) {
+            self.delivery.evicted = true;
+            return None;
+        }
         let relays = self.dialable_group_relays();
         self.arm_mls_roster_authority(&mls_arc);
         let active = self.active.as_ref()?;

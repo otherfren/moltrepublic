@@ -187,6 +187,7 @@ pub struct WalletHandle {
     ev_tx: broadcast::Sender<Event>,
     vault_seams: std::sync::Arc<net::vault_payload::VaultSeams>,
     wallet_seams: std::sync::Arc<wallet_run::WalletSeams>,
+    seat_active: std::sync::Arc<std::sync::atomic::AtomicU64>,
     farewells: Farewells,
 }
 
@@ -307,6 +308,14 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __wallet_run(&self) -> Option<[u8; 32]> {
         self.wallet_seams.current.lock().ok().and_then(|c| *c)
+    }
+
+    /// Test seam (B3): a seat heard within `secs` counts as still active
+    /// for the restore gates (production: 120 s). A test that drops a
+    /// node and restores it at once sets 0.
+    #[doc(hidden)]
+    pub fn __seat_active_secs(&self, secs: u64) {
+        self.seat_active.store(secs, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (vault plan S3c): this holder's receipts report a
@@ -541,6 +550,7 @@ fn spawn_actor(
     let vault_seams = state.vault_seams.clone();
     let farewells = state.farewells.clone();
     let wallet_seams = state.wallet_seams.clone();
+    let seat_active = state.seat_active.clone();
     if vault::receipts::lab_complain_at_spawn() {
         tracing::warn!("vault_lab=complain");
         vault_seams.lab.complain.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -569,7 +579,7 @@ fn spawn_actor(
         tracing::debug!("engine actor stopped");
     });
 
-    WalletHandle { cmd_tx, ev_tx, vault_seams, wallet_seams, farewells }
+    WalletHandle { cmd_tx, ev_tx, vault_seams, wallet_seams, seat_active, farewells }
 }
 
 // The one shared clock (event timestamps must not drift from the storage
@@ -729,6 +739,16 @@ pub(crate) struct DeliveryState {
     /// MLS-ratchet persist (`persist_mls_if_due` — "did anything go out since
     /// the last snapshot?"). Runtime-only; reset with the workspace.
     pub(crate) last_mesh_out: u64,
+    /// B2: a merged commit removed this seat's own leaf. Derived again at
+    /// open from the stored (inactive) group; reset with the workspace.
+    pub(crate) evicted: bool,
+    /// The group runtime's live-unreadable count at the last presence
+    /// tick, and whether its growth was already reported (one WARN per
+    /// episode).
+    pub(crate) unreadable_seen: u64,
+    pub(crate) unreadable_warned: bool,
+    /// B3: the self-heal signature was reported this session.
+    pub(crate) locked_out_noted: bool,
 }
 
 /// Presence bookkeeping of the open workspace: the test-only clock seam every
@@ -1051,7 +1071,7 @@ pub(crate) struct ChainProjection {
 /// Recovery on both sides of the open workspace: what this seat coordinates
 /// (pending re-admissions, the spend-once tickets, the announce window and
 /// extension cooldown, the standing seat inbox and the per-link inboxes, the
-/// self-heal reattach cap) and what it runs as the rejoiner (the task, its
+/// held auto-approvals) and what it runs as the rejoiner (the task, its
 /// generation, the parsed link + phrase, the transport slot, the test-only
 /// material sink). The phrase in `ctx` is `Zeroizing`; this struct
 /// deliberately derives nothing, so it can never be printed.
@@ -1065,21 +1085,18 @@ pub(crate) struct RecoveryState {
     /// every mint would add another.
     pub(crate) inboxes: Vec<tokio::task::JoinHandle<()>>,
     /// The STANDING seat inbox (`detached_reattach.md` §2.1): an open Nostr
-    /// workspace's own-anchor 1059 subscription, so a restored seat can
-    /// announce itself without a minted link. Torn down with the net.
+    /// workspace's own-anchor 1059 subscription. Since B3 it only answers an
+    /// older build's link-less request with a refusal. Torn down with the net.
     pub(crate) seat_inbox: Option<tokio::task::JoinHandle<()>>,
-    /// Self-heal bookkeeping (`detached_reattach.md` §2.4): how often this
-    /// session already re-attached itself out of a stuck epoch, and when it
-    /// last tried. Session-lifetime cap — two devices restoring the same
-    /// seat would otherwise re-key each other in an endless ping-pong.
-    pub(crate) reattach_attempts: u32,
-    /// A link rejoin (`RecoverStart`) runs, not a self-heal reattach.
-    pub(crate) link_rejoin: bool,
-    pub(crate) last_reattach: Option<u64>,
-    /// Self-service reattach cooldown (`detached_reattach.md` §2.2): a
-    /// `(member, new_anchor) → unix stamp` map that swallows relay replays
-    /// of an accepted request (the accept window does not cover 1059 wraps).
+    /// `(member, new_anchor) → unix stamp` of the last refusal sent to a
+    /// link-less request: relays replay 1059 wraps on every resubscribe,
+    /// and each replay is answered at most once per window.
     pub(crate) unsolicited_cooldown: std::collections::HashMap<(String, String), u64>,
+    /// B3: consented restores this node held back from auto-approving while
+    /// a gate held; retried on the presence tick.
+    pub(crate) held_approvals: std::collections::BTreeSet<u64>,
+    /// B3: `Restored` cards whose seal a gate holds, already reported.
+    pub(crate) held_seals: std::collections::BTreeSet<u64>,
     /// Recoveries this node is coordinating, keyed by the returning **member**
     /// (so the trigger fires whether this node commits the Restored block or
     /// receives it): the fresh KeyPackage + reply queue, kept until the Restored
@@ -1342,6 +1359,9 @@ pub(crate) struct State {
     pub(crate) vault_seams: std::sync::Arc<net::vault_payload::VaultSeams>,
     /// The purse run's test seams (never a `Command`).
     pub(crate) wallet_seams: std::sync::Arc<wallet_run::WalletSeams>,
+    /// B3 test seam: the restore gates' activity window, `u64::MAX` = the
+    /// production default.
+    pub(crate) seat_active: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Grant answers and asks of the open workspace (vault plan S4).
     pub(crate) vault_grants: vault::grant::GrantRuntime,
     /// The kind-445 group runtime of an open Nostr workspace (N5.2), with the
@@ -1653,6 +1673,7 @@ impl State {
             nostr: None,
             vault_seams: std::sync::Arc::default(),
             wallet_seams: std::sync::Arc::default(),
+            seat_active: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
             vault_grants: vault::grant::GrantRuntime::default(),
             group_net: None,
             group_mls_parked: None,
@@ -1660,10 +1681,9 @@ impl State {
             recovery: RecoveryState {
                 inboxes: Vec::new(),
                 seat_inbox: None,
-                reattach_attempts: 0,
-                link_rejoin: false,
-                last_reattach: None,
                 unsolicited_cooldown: std::collections::HashMap::new(),
+                held_approvals: std::collections::BTreeSet::new(),
+                held_seals: std::collections::BTreeSet::new(),
                 pending: HashMap::new(),
                 swept: HashMap::new(),
                 tickets: HashMap::new(),
@@ -2161,6 +2181,7 @@ impl State {
             Command::NetPeerRekeyed { member, generation } => {
                 self.cmd_net_peer_rekeyed(member, generation)
             }
+            Command::NetEvicted { by, generation } => self.cmd_net_evicted(by, generation),
             Command::NetSendFailed {
                 member,
                 reason,

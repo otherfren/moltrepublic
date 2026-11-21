@@ -2312,6 +2312,8 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
 
     // the surviving coordinator mints a recovery link for member-b — a real
     // dedicated queue on its running mesh transport, listening for the request
+    // B3: the lost seat was heard a moment ago (production: 120 s)
+    a.__seat_active_secs(0);
     a.execute(Command::RecoverInviteStart {
         member: "member-b".to_string(),
     })
@@ -2480,6 +2482,8 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
 
     // ❶ the surviving coordinator mints the recovery link
     announce_v2(&a, &["member-b"]).await;
+    // B3: the lost seat was heard a moment ago (production: 120 s)
+    a.__seat_active_secs(0);
     a.execute(Command::RecoverInviteStart {
         member: "member-b".to_string(),
     })
@@ -2825,6 +2829,8 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
 
     // ── ROUND 1: the recovery attempt that DIES from the rejoiner's side ──
     announce_v2(&a, &["member-b"]).await;
+    // B3: the lost seat was heard a moment ago (production: 120 s)
+    a.__seat_active_secs(0);
     a.execute(Command::RecoverInviteStart {
         member: "member-b".to_string(),
     })
@@ -2923,6 +2929,8 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
     // a second mint for the same seat works while round 1's queue still
     // listens, and a second single-use ticket coexists with the first
     announce_v2(&a, &["member-b"]).await;
+    // B3: the lost seat was heard a moment ago (production: 120 s)
+    a.__seat_active_secs(0);
     a.execute(Command::RecoverInviteStart {
         member: "member-b".to_string(),
     })
@@ -3148,6 +3156,8 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
 
     // the coordinator mints; the rejoiner drives the real recovery
     announce_v2(&a, &["member-b", "member-c"]).await;
+    // B3: the lost seat was heard a moment ago (production: 120 s)
+    a.__seat_active_secs(0);
     a.execute(Command::RecoverInviteStart {
         member: "member-b".to_string(),
     })
@@ -4212,6 +4222,8 @@ async fn a_malformed_announce_does_not_burn_the_recovery_window() {
     // mint + full rejoin WITHOUT the built-in mesh phase — the test drives the
     // announces itself so it can inject a malformed one first
     announce_v2(&a, &["member-b"]).await;
+    // B3: the lost seat was heard a moment ago (production: 120 s)
+    a.__seat_active_secs(0);
     a.execute(Command::RecoverInviteStart {
         member: "member-b".to_string(),
     })
@@ -4418,6 +4430,8 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
 
     // ❶ the coordinator mints the recovery link for lost member-c — its recv
     // loop starts NOW, before any rebuild
+    // B3: the lost seat was heard a moment ago (production: 120 s)
+    a.__seat_active_secs(0);
     a.execute(Command::RecoverInviteStart {
         member: "member-c".to_string(),
     })
@@ -4924,6 +4938,8 @@ async fn a_link_mint_without_a_running_mesh_reports_calmly_instead_of_erroring()
 
     // the human's decision is acked, not errored; the outcome is the calm
     // notice — the returning member's presence never entered the picture
+    // B3: the lost seat was heard a moment ago (production: 120 s)
+    a.__seat_active_secs(0);
     a.execute(Command::RecoverInviteStart {
         member: "member-b".to_string(),
     })

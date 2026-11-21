@@ -138,6 +138,11 @@ async fn found_republic(
     })
     .await;
     every_seat_announced(&[&a, &b]).await;
+    // B3: these tests restore a seat heard a moment ago (production waits
+    // until it is silent for 120 s)
+    for w in [&a, &b] {
+        w.__seat_active_secs(0);
+    }
     (a, b, petra_phrase, walter_phrase)
 }
 
@@ -352,6 +357,10 @@ async fn found_three_at(
         .await;
     }
     every_seat_announced(&[&a, &b, &v]).await;
+    // B3: restored a moment after the loss (see `found_republic`)
+    for w in [&a, &b, &v] {
+        w.__seat_active_secs(0);
+    }
     (a, b, v, petra_phrase)
 }
 
@@ -1383,15 +1392,13 @@ async fn a_recovery_keeps_the_key_parts_of_the_local_copy() {
     }
 }
 
-/// **Detached reattach keystone (`detached_reattach.md`, user decision
-/// 2026-08-24): a restored workspace reconnects to the live republic with
-/// NO ritual — no link, no `RecoverInviteStart`, nobody clicking.** petra's
-/// workspace is exported, her device dies, a fresh device restores the blob
-/// and merely OPENS it: the seat announces itself to the survivors' standing
-/// inboxes, walter's node verifies + auto-approves + re-keys, and the group
-/// hears the rejoin notice. The survivors are notified, never asked.
+/// **B3 (was the detached-reattach keystone): a restored workspace asks
+/// nobody for its own restore.** petra's workspace is exported, her device
+/// dies, a fresh device restores the blob and opens it: it stays honestly
+/// detached and sends no request - the field's self-service restores
+/// re-keyed live seats. The operator rejoins with a link.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_restored_workspace_reattaches_without_a_ritual() {
+async fn a_restored_workspace_stays_detached_and_rejoins_with_a_link() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -1401,7 +1408,7 @@ async fn a_restored_workspace_reattaches_without_a_ritual() {
     let relay = MockRelay::run().await.expect("in-process relay");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
-    let (a, b, _petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
 
     // petra's knowledge leaves the device as a manual export…
     let ws_id = read_session(&b).await.workspaces[0].id.clone();
@@ -1434,118 +1441,229 @@ async fn a_restored_workspace_reattaches_without_a_ritual() {
     wait_for(&c, "the restore to stage and verify", |s| s.restore.run.outcome == 1).await;
     c.execute(Command::RestoreFinish).await.expect("restore finish");
 
-    // the seat comes back by itself: the reattach ends in the recovery seal
-    let s = wait_for(&c, "the reattach to go live", |s| {
+    // the seat stays detached and sends nothing: walter proposes nothing
+    let s = read_session(&c).await;
+    assert_eq!(s.notice, "detached", "no reattach runs by itself");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    match a.execute(Command::ReadChain).await.expect("read chain") {
+        Reply::Chain { blocks, .. } => assert_eq!(blocks.len(), 1, "no restore without a link: {blocks:?}"),
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // the operator rejoins with a link
+    a.execute(Command::RecoverInviteStart { member: "petra".to_string() }).await.expect("mint");
+    let s = wait_for(&a, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s
+        .notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("the mint must succeed: {:?}", s.notice))
+        .to_string();
+    c.execute(Command::RecoverStart { link, phrase: petra_phrase, relays: Vec::new() })
+        .await
+        .expect("recover start");
+    let s = wait_for(&c, "the rejoin to go live", |s| {
         s.notice.starts_with("recovered:") || s.notice.starts_with("recover-failed:")
     })
     .await;
-    assert!(
-        !s.notice.starts_with("recover-failed:"),
-        "the reattach must succeed: {:?}",
-        s.notice
-    );
-    assert_eq!(s.screen, molt_core::Screen::Main);
+    assert!(!s.notice.starts_with("recover-failed:"), "the link rejoin: {:?}", s.notice);
+}
 
-    // the survivors were NOTIFIED, never asked: walter's group chat carries
-    // the rejoin system line
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let seen = read_chat_bodies(&a).await;
-        // the SELF-SERVICE door has its own line (detached_reattach.md §6)
-        if seen.iter().any(|m| m.contains("reconnected from a restored backup")) {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "walter never heard the rejoin notice"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
+/// A relay that stores events and counts the kind-445 frames it admits.
+#[derive(Debug, Clone, Default)]
+struct Count445(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl nostr_relay_builder::builder::WritePolicy for Count445 {
+    fn admit_event<'a>(
+        &'a self,
+        event: &'a nostr_relay_builder::prelude::Event,
+        _addr: &'a std::net::SocketAddr,
+    ) -> nostr_relay_builder::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult> {
+        Box::pin(async move {
+            if event.kind == nostr_relay_builder::prelude::Kind::Custom(445) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            nostr_relay_builder::builder::PolicyResult::Accept
+        })
     }
 }
 
-/// **The field case 2026-08-24: a reattach into a THREE-member republic must
-/// leave all three exchanging chat.** The first build addressed every
-/// survivor at once — two coordinators could race the same re-admission and
-/// the losing side's laggard stranded on an old epoch (deaf both ways, the
-/// "frames past the key ring" report). Sequential targeting addresses ONE
-/// coordinator at a time, so exactly one re-key happens on the happy path.
+async fn counting_relay(count: &Count445) -> (nostr_relay_builder::LocalRelay, String) {
+    use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions};
+    let db = std::sync::Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions { events: true, max_events: None }));
+    let relay = nostr_relay_builder::LocalRelay::new(
+        nostr_relay_builder::builder::RelayBuilder::default().database(db).write_policy(count.clone()),
+    );
+    relay.run().await.expect("relay runs");
+    let url = relay.url().await.to_string();
+    (relay, url)
+}
+
+async fn status_of(w: &WalletHandle) -> molt_core::StatusView {
+    match w.execute(Command::Status).await.expect("status") {
+        Reply::Status(s) => s,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// **B2 (field R12): a seat restored while its old node still runs.** The
+/// re-key removes the old node's leaf; the old node used to merge it as an
+/// ordinary re-key and re-offer its tail forever. Now it says
+/// `seat-evicted`, reports `evicted` in `status`, and publishes nothing;
+/// the bystander sees an ordinary re-key and raises nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_three_member_reattach_leaves_everyone_talking() {
+async fn a_seat_restored_while_its_old_node_runs_is_told_and_goes_quiet() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
         )
         .try_init();
-    let relay = MockRelay::run().await.expect("in-process relay");
-    let url = relay.url().await.to_string();
+    let count = Count445::default();
+    let (_relay, url) = counting_relay(&count).await;
     let tmp = tempfile::tempdir().expect("tmp");
-    let (a, b, v, _petra_phrase) = found_three_at(tmp.path(), &url, 2).await;
+    // the coordinator restores a seat it still hears: an older build's
+    // behaviour, or the operator's mistake (the window is 0 here)
+    let (a, b, v, petra_phrase) = found_three(tmp.path(), &url).await;
 
-    let ws_id = read_session(&b).await.workspaces[0].id.clone();
-    let blob = tmp.path().join("petra.molt.enc");
-    b.execute(Command::ExportWorkspace {
-        id: ws_id,
-        dest: blob.display().to_string(),
-        passphrase: "super-secret-pass".to_string(),
-    })
-    .await
-    .expect("export kickoff");
-    wait_for(&b, "the export to finish", |s| {
-        !s.export.running && s.export.result == "ok"
+    a.execute(Command::RecoverInviteStart { member: "petra".to_string() }).await.expect("mint");
+    let s = wait_for(&a, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
     })
     .await;
-    drop(b);
-
-    let c = engine(&tmp.path().join("restored"));
+    let link = s
+        .notice
+        .strip_prefix("recovery-link:")
+        .unwrap_or_else(|| panic!("the mint must succeed: {:?}", s.notice))
+        .to_string();
+    let c = engine(&tmp.path().join("rejoiner"));
     adopt_relay(&c, &url).await;
-    c.execute(Command::RestoreStart {
-        way: "file".to_string(),
-        target: blob.display().to_string(),
-        secret: "super-secret-pass".to_string(),
-        replace: false,
-    })
-    .await
-    .expect("restore start");
-    wait_for(&c, "the restore to verify", |s| s.restore.run.outcome == 1).await;
-    c.execute(Command::RestoreFinish).await.expect("restore finish");
-    let s = wait_for(&c, "the reattach to go live", |s| {
-        s.notice.starts_with("recovered:") || s.notice.starts_with("recover-failed:")
+    c.execute(Command::RecoverStart { link, phrase: petra_phrase, relays: Vec::new() })
+        .await
+        .expect("recover start");
+    let s = wait_for(&c, "the rejoin", |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()) || s.notice.starts_with("recover-failed:")
     })
     .await;
-    assert!(!s.notice.starts_with("recover-failed:"), "reattach: {:?}", s.notice);
+    assert!(!s.notice.starts_with("recover-failed:"), "rejoin: {:?}", s.notice);
 
-    // every ordered pair converges: each node speaks, all three hear all
-    for (i, w) in [&a, &v, &c].into_iter().enumerate() {
-        w.execute(Command::Chat {
-            body: format!("after the comeback {i}"),
+    // the old node learns it was replaced
+    let s = wait_for(&b, "the old node to learn its eviction", |s| s.notice == "seat-evicted").await;
+    assert_eq!(s.net_health, molt_core::NetHealth::Down { reason: "seat evicted".to_string() });
+    assert!(status_of(&b).await.evicted, "status says evicted");
+    // the bystander merged an ordinary re-key
+    assert!(!status_of(&v).await.evicted);
+    assert_ne!(read_session(&v).await.notice, "seat-evicted");
+
+    // everyone else goes quiet; the old node alone keeps writing
+    for w in [&a, &v, &c] {
+        w.execute(Command::CloseWorkspace).await.expect("close");
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let before = count.0.load(std::sync::atomic::Ordering::SeqCst);
+    for i in 0..3 {
+        b.execute(Command::Chat {
+            body: format!("from the replaced device {i}"),
             quote: None,
             channel: molt_core::ChannelRef::Group,
         })
         .await
-        .expect("chat");
+        .expect("chat is still recorded locally");
     }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
-    loop {
-        let mut missing = Vec::new();
-        for (who, w) in [("walter", &a), ("vera", &v), ("petra", &c)] {
-            let seen = read_chat_bodies(w).await;
-            for i in 0..3 {
-                if !seen.iter().any(|m| m.contains(&format!("after the comeback {i}"))) {
-                    missing.push(format!("{who}:{i}"));
-                }
-            }
+    // past the first resend round (10 s)
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    assert_eq!(
+        count.0.load(std::sync::atomic::Ordering::SeqCst),
+        before,
+        "the evicted node published nothing"
+    );
+}
+
+/// **B3: a link-less request - what an older build's self-heal sends - is
+/// refused with `rejoin needs a link` and answered**, never proposed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_less_request_from_an_older_build_is_refused_and_answered() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    // walter's working anchor, as the older node's chain names it
+    a.execute(Command::RecoverInviteStart { member: "petra".to_string() }).await.expect("mint");
+    let s = wait_for(&a, "a link naming walter's anchor", |s| s.notice.starts_with("recovery-link:")).await;
+    let link = s.notice.strip_prefix("recovery-link:").expect("link").to_string();
+    let h = molt_engine::RecoveryInvite::parse(&link).expect("link").handover.expect("v2 handover");
+
+    // the older build's self-service request: a self-minted ticket
+    let self_ticket = "self-minted-ticket";
+    let (sk, identity_pk) = molt_engine::member_identity(&petra_phrase).expect("seat identity");
+    let entropy = molt_storage::seed_entropy(&petra_phrase).expect("entropy");
+    let (anchor_sk, anchor) = molt_net::nostr_identity(&entropy, self_ticket);
+    let mls = molt_net::MlsMember::new(&sk, "petra").expect("mls identity");
+    let kp_hex = hex::encode(mls.key_package().expect("key package"));
+    let seat_proof = molt_engine::make_seat_proof(&sk, self_ticket, &kp_hex, &h.republic_id, &anchor, &[]);
+    let dialer = molt_net::dial::Dialer::resolve("none", "local", 0).expect("direct dialer");
+    let old = molt_net::ritual_net::RitualNet::new(dialer, vec![url.clone()], &anchor_sk).expect("transport");
+    let mut inbox = old.inbox().await.expect("inbox");
+    old.send_ritual(
+        &h.npub,
+        &molt_net::invite::RitualMsg::Recover(molt_net::invite::RecoverRequest {
+            member: "petra".to_string(),
+            identity_pk,
+            key_package: kp_hex,
+            ticket: self_ticket.to_string(),
+            seat_proof,
+            new_nostr_pk: anchor,
+            relays: Vec::new(),
+            reply: None,
+            consent: String::new(),
+        }),
+    )
+    .await
+    .expect("publish");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let reason = loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!left.is_zero(), "the older node never got an answer");
+        if let Some(molt_net::ritual_net::RitualDelivery::Msg(
+            molt_net::invite::RitualMsg::RecoverRefused { reason, .. },
+            _,
+        )) = inbox.recv(left).await
+        {
+            break reason;
         }
-        if missing.is_empty() {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "three-way chat never converged after the reattach — a raced double \
-             re-key strands a laggard: missing {missing:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(reason, "rejoin needs a link");
+    match a.execute(Command::ReadChain).await.expect("read chain") {
+        Reply::Chain { blocks, .. } => assert_eq!(blocks.len(), 1, "never proposed: {blocks:?}"),
+        other => panic!("unexpected: {other:?}"),
     }
+}
+
+/// **B3: no link for a seat heard seconds ago**, at the production window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_link_for_a_seat_heard_seconds_ago_is_refused() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, _, _) = found_republic(tmp.path(), &url, 2).await;
+    a.__seat_active_secs(u64::MAX);
+    b.execute(Command::Chat { body: "still here".to_string(), quote: None, channel: molt_core::ChannelRef::Group })
+        .await
+        .expect("petra speaks");
+    wait_for(&a, "walter to hear petra", |s| {
+        s.workspaces.iter().any(|w| w.members.iter().any(|m| m.name == "petra" && m.last_seen > 0))
+    })
+    .await;
+    a.execute(Command::RecoverInviteStart { member: "petra".to_string() }).await.expect("mint");
+    let s = wait_for(&a, "the mint's answer", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    assert_eq!(s.notice, "recovery-link-failed:seat still active");
 }
 
 /// **Field failure 2026-09-12:** the rejoiner gave a relay a flat 10 s to

@@ -4719,6 +4719,7 @@ impl State {
             chain_sync: Box::new(self.chain_sync()),
             seats: self.seat_syncs(&persistent),
             persistent_files: u32::try_from(persistent.len()).unwrap_or(u32::MAX),
+            evicted: self.delivery.evicted,
         }
     }
 }

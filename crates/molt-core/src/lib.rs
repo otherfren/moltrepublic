@@ -4356,6 +4356,16 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// A merged MLS commit removed THIS node's own leaf: its seat was
+    /// re-keyed for another device (engine-internal, from the transport).
+    /// The engine stops the group runtime and raises `seat-evicted`.
+    NetEvicted {
+        /// The committer.
+        by: MemberId,
+        /// Mesh incarnation (see [`Command::NetDelivered`]).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// Periodic presence aging (engine-internal ticker): re-derive the
     /// member pills' 0/1/2 state from their real last-seen stamps so a
     /// silent member ages online → stale → offline without any traffic.
@@ -8288,6 +8298,10 @@ pub struct StatusView {
     /// Persistent shares in the republic (what [`SeatSync::files`] counts of).
     #[serde(default)]
     pub persistent_files: u32,
+    /// This node's seat was re-keyed for another device: its group key is
+    /// gone, it neither reads nor publishes. A rejoin with a link clears it.
+    #[serde(default)]
+    pub evicted: bool,
 }
 
 /// One seat's standing as this node sees it (the Organization overview).

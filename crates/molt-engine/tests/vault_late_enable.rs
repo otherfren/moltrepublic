@@ -115,6 +115,8 @@ async fn enable_then_cut_then_recover_and_read() {
     let d = all.pop().expect("d");
     d.execute(Command::CloseWorkspace).await.expect("d goes away");
     drop(d);
+    // B3: the lost seat was heard a moment ago (production: 120 s)
+    all[0].__seat_active_secs(0);
     all[0].execute(Command::RecoverInviteStart { member: "d".to_string() }).await.expect("mint");
     let s = wait_for(&all[0], "the recovery link", |s| {
         s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
