@@ -351,6 +351,86 @@ pub async fn slow_relay(slow: &SlowReplay) -> (nostr_relay_builder::LocalRelay, 
     (relay, url)
 }
 
+/// Once armed, the first kind-445 REQ stores `count` unreadable frames under
+/// that REQ's `h` tags, stamped over the last five minutes: the resend flood
+/// of a republic's locked-out nodes (findings R11/R12).
+#[derive(Debug, Clone)]
+pub struct Backlog {
+    armed: Arc<std::sync::atomic::AtomicBool>,
+    count: usize,
+    db: Arc<nostr_relay_builder::prelude::MemoryDatabase>,
+}
+
+impl Backlog {
+    pub fn new(count: usize) -> Self {
+        use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions};
+        Self {
+            armed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            count,
+            db: Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
+                events: true,
+                max_events: None,
+            })),
+        }
+    }
+
+    pub fn arm(&self) {
+        self.armed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    async fn inject(&self, tags: Vec<String>) {
+        use nostr_relay_builder::prelude::{EventBuilder, Keys, Kind, NostrDatabase, Tag, Timestamp};
+        let keys = Keys::generate();
+        let now = Timestamp::now().as_secs();
+        for i in 0..self.count {
+            let h = &tags[i % tags.len()];
+            let event = EventBuilder::new(Kind::Custom(445), format!("bm90IGEgZnJhbWUg{i:08}"))
+                .tag(Tag::parse(["h", h.as_str()]).expect("h tag"))
+                .custom_created_at(Timestamp::from_secs(now - u64::try_from(i % 300).expect("small")))
+                .sign_with_keys(&keys)
+                .expect("sign");
+            self.db.save_event(&event).await.expect("store");
+        }
+    }
+}
+
+impl nostr_relay_builder::builder::QueryPolicy for Backlog {
+    fn admit_query<'a>(
+        &'a self,
+        query: &'a nostr_relay_builder::prelude::Filter,
+        _addr: &'a std::net::SocketAddr,
+    ) -> nostr_relay_builder::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult>
+    {
+        Box::pin(async move {
+            use nostr_relay_builder::prelude::{Alphabet, SingleLetterTag};
+            let group = query.kinds.as_ref().is_some_and(|ks| ks.iter().any(|k| k.as_u16() == 445));
+            let tags: Vec<String> = query
+                .generic_tags
+                .get(&SingleLetterTag::lowercase(Alphabet::H))
+                .map(|t| t.iter().cloned().collect())
+                .unwrap_or_default();
+            if group && !tags.is_empty() && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                self.inject(tags).await;
+            }
+            nostr_relay_builder::builder::PolicyResult::Accept
+        })
+    }
+}
+
+/// A storing relay that replays everything it holds per REQ (MockRelay
+/// stops at 500), with `backlog` behind it.
+pub async fn backlog_relay(backlog: &Backlog) -> (nostr_relay_builder::LocalRelay, String) {
+    let relay = nostr_relay_builder::LocalRelay::new(
+        nostr_relay_builder::builder::RelayBuilder::default()
+            .database(backlog.db.clone())
+            .default_filter_limit(100_000)
+            .query_policy(backlog.clone()),
+    );
+    relay.run().await.expect("relay runs");
+    let url = relay.url().await.to_string();
+    (relay, url)
+}
+
 /// Hard-kill the engine (drop, never `CloseWorkspace`) and wait until its
 /// writer thread released the workspace LOCK. Returns the workspace dir.
 pub async fn hard_kill(a: WalletHandle, root: &Path, id: &str) -> std::path::PathBuf {
@@ -419,10 +499,11 @@ pub async fn wait_for_secs(
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "timed out waiting for: {what}\nsession: notice={:?} create.log={:?} join.log={:?}",
+            "timed out waiting for: {what}\nsession: notice={:?} create.log={:?} join.log={:?} recover.log={:?}",
             s.notice,
             s.create.run.log,
-            s.join.run.log
+            s.join.run.log,
+            s.recover.log
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
