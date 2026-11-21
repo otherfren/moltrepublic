@@ -220,12 +220,14 @@ Every board change is a package: one proposal, one vote.
 The current Kanban failed at its view: a wall of filter buttons over an
 empty area.
 
-- **Navigation**: one entry per board on the left, with the icon and
-  colour of its state and its progress - finished stories of all
-  stories. A board that waits for another is indented under it; that
-  is display only, and one waiting for two sits under the first and
-  names the second. An entry carries a red dot while a task on its board has a
-  problem mark.
+- **Navigation**: one entry per board on the left, in three groups by
+  state - planning on top, then execution, then finished. A group
+  without a board shows no heading; the finished group is folded and
+  shows its count. An entry carries the icon and colour of its state
+  and its progress - finished stories of all stories. A board that
+  waits for another says so in a second line ("waits for: ..."); there
+  is no indentation. An entry carries a red dot while a task on its
+  board has a problem mark.
 - **One colour, one meaning**, on boards and tasks alike; the icon
   carries the meaning too, so colour never stands alone:
 

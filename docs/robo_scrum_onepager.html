@@ -211,7 +211,8 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
 .mock nav { background: var(--bg); border-right: 1px solid var(--line); padding: 10px; display: grid; gap: 4px; align-content: start; }
 .nv { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; }
 .nv.on { background: var(--panel); border: 1px solid var(--line); }
-.nv.sub { margin-left: 18px; }
+.nvnote { margin: -4px 0 2px 36px; font-size: 0.78rem; color: var(--muted); }
+.grp.first { border-top: 0; padding-top: 2px; }
 .nv small { margin-left: auto; color: var(--muted); font: 500 0.7rem/1 var(--f-mono); }
 .ic { width: 20px; height: 20px; border-radius: 5px; display: inline-grid; place-items: center; font-size: 0.72rem; font-weight: 700; flex: none; }
 .ic.plan { background: var(--wait-soft); color: var(--wait); }
@@ -366,14 +367,17 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
     <div class="head">
       <span class="eyebrow">Ansicht</span>
       <h2>Ein Board ist eine Tabelle aus Stories und Tasks</h2>
-      <p>Links ein Eintrag pro Board, rechts seine Stories in drei einklappbaren Gruppen. Ein Knopf, ein Filter.</p>
+      <p>Links die Boards in drei Gruppen nach Zustand, rechts die Stories des Boards in drei einklappbaren Gruppen. Ein Knopf, ein Filter.</p>
     </div>
     <div class="mock" aria-label="Skizze der Board-Ansicht">
       <nav>
+        <div class="grp first">Planung</div>
         <div class="nv"><span class="ic plan">P</span>Allgemein<small>0/3</small></div>
+        <div class="nv"><span class="ic plan">P</span>Website<small>0/2</small></div>
+        <div class="nvnote">wartet auf: Treffen</div>
+        <div class="grp">Ausführung</div>
         <div class="nv on"><span class="ic exec">A</span>Treffen<span class="alarm" title="Problem"></span><small>4/7</small></div>
-        <div class="nv sub"><span class="ic plan">P</span>Website<small>0/2</small></div>
-        <div class="nv"><span class="ic fin">B</span>Gründung<small>5/5</small></div>
+        <div class="grp">Beendet (1)</div>
         <div class="nv"><span class="btn">+</span></div>
       </nav>
       <main>
@@ -388,7 +392,7 @@ footer { font-size: 0.85rem; color: var(--muted); display: grid; gap: 6px; max-w
         <div class="grp">Beendet (4)</div>
       </main>
     </div>
-    <p class="note">Skizze mit Beispielinhalt. Jeder Punkt ist der Haken eines Sitzes. "Website" ist eingerückt, weil das Board auf "Treffen" wartet.</p>
+    <p class="note">Skizze mit Beispielinhalt. Jeder Punkt ist der Haken eines Sitzes. Links stehen die Boards nach Zustand: Planung, Ausführung, beendet (eingeklappt).</p>
     <table class="colors">
       <tr><th>Bedeutung</th><th>Farbe</th><th>Board</th><th>Task</th></tr>
       <tr><td>wird vorbereitet</td><td><span class="pill plan">Gelb</span></td><td>Planung</td><td>-</td></tr>
