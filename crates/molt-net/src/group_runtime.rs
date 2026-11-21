@@ -57,6 +57,40 @@ const LIVE_SKEW_SECS: u64 = 120;
 /// one attempt anyway.
 const CONTROL_QUEUE: usize = 64;
 
+/// Re-offer rounds after a runtime start that go out even to peers the
+/// engine calls silent: a fresh node's stamps come from its last session,
+/// and a quiet live listener only proves itself by acking a round.
+const OPEN_ROUNDS: u32 = 2;
+
+/// Test seam for the stall backoff, packed ms `first << 32 | cap` (`0` =
+/// production).
+static RESEND_BACKOFF_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test seam: the stall backoff's first delay and ceiling for every runtime
+/// configured afterwards in this process.
+#[doc(hidden)]
+pub fn __set_resend_backoff(first: Duration, cap: Duration) {
+    let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX).min(0xffff_ffff);
+    RESEND_BACKOFF_MS.store((ms(first) << 32) | ms(cap), std::sync::atomic::Ordering::SeqCst);
+}
+
+fn resend_backoff() -> (Duration, Duration) {
+    match RESEND_BACKOFF_MS.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => (Duration::from_secs(RESEND_AFTER_SECS), Duration::from_secs(RESEND_MAX_BACKOFF_SECS)),
+        v => (Duration::from_millis(v >> 32), Duration::from_millis(v & 0xffff_ffff)),
+    }
+}
+
+/// Who the outbox may re-offer to, as the engine sees it. The default
+/// (nobody silent, not locked out) holds until the engine's first verdict.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutboxReach {
+    /// Peers not heard within the engine's silence window.
+    pub silent: std::collections::BTreeSet<MemberId>,
+    /// This seat concluded it is locked out of the group.
+    pub locked_out: bool,
+}
+
 /// Resend rounds allowed per hour.
 ///
 /// A broadcast resend costs one publish per relay and every member re-reads
@@ -76,29 +110,43 @@ pub struct GroupNetConfig {
     pub retry_base: Duration,
     /// Retry ceiling.
     pub retry_cap: Duration,
+    /// First stall backoff before an unacked tail is re-offered.
+    pub resend_after: Duration,
+    /// Ceiling of the stall backoff.
+    pub resend_cap: Duration,
 }
 
 impl GroupNetConfig {
     /// Production timings.
     #[must_use]
     pub fn new(member: MemberId, members: Vec<MemberId>) -> Self {
+        let (resend_after, resend_cap) = resend_backoff();
         Self {
             member,
             members,
             retry_base: Duration::from_secs(1),
             retry_cap: Duration::from_secs(120),
+            resend_after,
+            resend_cap,
         }
     }
 
-    /// Millisecond timings for tests.
+    /// Millisecond publish retries for tests (the stall backoff stays).
     #[must_use]
     pub fn fast(member: MemberId, members: Vec<MemberId>) -> Self {
         Self {
-            member,
-            members,
             retry_base: Duration::from_millis(20),
             retry_cap: Duration::from_millis(200),
+            ..Self::new(member, members)
         }
+    }
+
+    /// The same, with its own stall backoff.
+    #[must_use]
+    pub fn with_resend(mut self, first: Duration, cap: Duration) -> Self {
+        self.resend_after = first;
+        self.resend_cap = cap;
+        self
     }
 }
 
@@ -139,6 +187,8 @@ pub struct GroupHandle {
     /// Bounded and dropped-when-full, because each is worth exactly one
     /// best-effort attempt.
     controls: mpsc::Sender<Vec<u8>>,
+    /// The engine's latest verdict on who can be reached: state, so a watch.
+    reach: watch::Sender<OutboxReach>,
     /// Whether the outbox is mid-pass with own frames to publish - what
     /// the file trickle yields to (mirroring §3.2).
     busy: watch::Receiver<bool>,
@@ -200,6 +250,21 @@ impl GroupHandle {
         queued
     }
 
+    /// Hand the outbox the engine's reach verdict; `true` when it changed.
+    pub fn set_reach(&self, reach: OutboxReach) -> bool {
+        self.reach.send_if_modified(|r| {
+            let changed = *r != reach;
+            *r = reach;
+            changed
+        })
+    }
+
+    /// The verdict last handed over.
+    #[must_use]
+    pub fn reach(&self) -> OutboxReach {
+        self.reach.borrow().clone()
+    }
+
     /// The outbox's pending flag: `true` while a pass publishes own frames.
     #[must_use]
     pub fn outbox_busy(&self) -> watch::Receiver<bool> {
@@ -239,15 +304,52 @@ pub(crate) fn group_floor(state: &TransportState, cfg: &GroupNetConfig) -> Optio
 /// PER-PEER semantics and must never run here: on a broadcast channel there is
 /// one publish position, and rewinding it per peer would republish the tail
 /// once per member.
+#[cfg(test)]
 pub(crate) fn rewind_group(state: &mut TransportState, cfg: &GroupNetConfig) {
     let Some(floor) = group_floor(state, cfg) else {
         return; // nobody has ever acked — nothing is proven, so nothing rewinds
     };
+    rewind_group_to(state, floor);
+}
+
+/// Pull the broadcast cursor back to `floor`, never forward.
+fn rewind_group_to(state: &mut TransportState, floor: u64) {
     let mut cur = state.group.unwrap_or_default();
     if floor < cur.log_seq {
         cur.log_seq = floor;
         state.group = Some(cur);
     }
+}
+
+/// The floor a re-offer round rewinds to: the lowest among the peers still
+/// owed an own-ackable envelope of `envs` that the round may reach (all of
+/// them during the open rounds). `Ok(None)` = nobody is owed any more,
+/// `Err` = a quiet round.
+fn reachable_floor(
+    state: &TransportState,
+    cfg: &GroupNetConfig,
+    envs: &[EventEnvelope],
+    reach: &OutboxReach,
+    open: bool,
+) -> Result<Option<u64>, Quiet> {
+    let owed: Vec<(&MemberId, u64)> = cfg
+        .members
+        .iter()
+        .filter_map(|m| state.outbound.get(m).filter(|c| c.ack_seen).map(|c| (m, c.acked_floor)))
+        .filter(|(_, f)| envs.iter().any(|e| e.seq > *f && crate::supervisor::own_ackable(&cfg.member, e)))
+        .collect();
+    if owed.is_empty() {
+        return Ok(None);
+    }
+    if reach.locked_out {
+        return Err(Quiet::LockedOut);
+    }
+    owed.iter()
+        .filter(|(m, _)| open || !reach.silent.contains(*m))
+        .map(|(_, f)| *f)
+        .min()
+        .map(Some)
+        .ok_or(Quiet::PeersSilent)
 }
 
 /// Start a node's kind-445 group runtime.
@@ -303,6 +405,7 @@ where
         stop_rx.clone(),
     ));
     let (busy_tx, busy) = watch::channel(false);
+    let (reach, reach_rx) = watch::channel(OutboxReach::default());
     let outbox = tokio::spawn(outbox_loop(
         channel.clone(),
         mls.clone(),
@@ -312,6 +415,7 @@ where
         sink.clone(),
         wakeup,
         ack_wake.clone(),
+        reach_rx,
         busy_tx,
         stop_rx.clone(),
     ));
@@ -330,6 +434,7 @@ where
         stop,
         acks,
         controls,
+        reach,
         busy,
         outbox: Some(outbox),
         inbox: Some(inbox),
@@ -582,6 +687,8 @@ enum StallRound {
     NoFloor,
     /// The hourly budget is spent and no heal evidence buys a round.
     Spent(u64),
+    /// Nobody owed the tail can be reached.
+    Quiet(Quiet),
     /// A round was granted (`heal` = the evidence-driven one) and the
     /// cursor rewound to the floor.
     Granted { floor: u64, heal: bool },
@@ -594,32 +701,36 @@ enum StallRound {
 /// stall clock must not inflate or reset each other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Backoff {
-    secs: u64,
+    cur: Duration,
+    first: Duration,
+    cap: Duration,
 }
 
 impl Backoff {
     const fn new() -> Backoff {
-        Backoff {
-            secs: RESEND_AFTER_SECS,
-        }
+        Backoff::with(Duration::from_secs(RESEND_AFTER_SECS), Duration::from_secs(RESEND_MAX_BACKOFF_SECS))
+    }
+
+    const fn with(first: Duration, cap: Duration) -> Backoff {
+        Backoff { cur: first, first, cap }
     }
 
     fn reset(&mut self) {
-        self.secs = RESEND_AFTER_SECS;
+        self.cur = self.first;
     }
 
     /// Double toward the ceiling; returns the new delay in seconds.
     fn escalate(&mut self) -> u64 {
-        self.secs = self.secs.saturating_mul(2).min(RESEND_MAX_BACKOFF_SECS);
-        self.secs
+        self.cur = self.cur.saturating_mul(2).min(self.cap);
+        self.secs()
     }
 
     fn secs(&self) -> u64 {
-        self.secs
+        self.cur.as_secs()
     }
 
     fn delay(&self) -> Duration {
-        Duration::from_secs(self.secs)
+        self.cur
     }
 }
 
@@ -688,16 +799,44 @@ struct StallClock {
     /// The stall was reported on the health surface (G4).
     reported: bool,
     since: Option<tokio::time::Instant>,
+    /// Rounds that went out since this runtime started.
+    granted: u32,
+    /// The last round was skipped: nobody owed can be reached.
+    quiet: Option<Quiet>,
+}
+
+/// Why a round was skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Quiet {
+    /// Every peer still owed the tail is silent.
+    PeersSilent,
+    /// This seat concluded it is locked out.
+    LockedOut,
+}
+
+impl Quiet {
+    fn reason(self) -> &'static str {
+        match self {
+            Quiet::PeersSilent => "peers_silent",
+            Quiet::LockedOut => "locked_out",
+        }
+    }
 }
 
 impl StallClock {
     const fn new() -> StallClock {
+        StallClock::with(Backoff::new())
+    }
+
+    const fn with(backoff: Backoff) -> StallClock {
         StallClock {
             last_floor: None,
-            backoff: Backoff::new(),
+            backoff,
             rounds_without_progress: 0,
             reported: false,
             since: None,
+            granted: 0,
+            quiet: None,
         }
     }
 
@@ -929,6 +1068,7 @@ async fn outbox_loop<L, S, K>(
     sink: K,
     mut wakeup: watch::Receiver<u64>,
     ack_wake: std::sync::Arc<tokio::sync::Notify>,
+    mut reach: watch::Receiver<OutboxReach>,
     busy: watch::Sender<bool>,
     mut stop: watch::Receiver<bool>,
 ) where
@@ -936,7 +1076,7 @@ async fn outbox_loop<L, S, K>(
     S: StateStore,
     K: EngineSink,
 {
-    let mut stall = StallClock::new();
+    let mut stall = StallClock::with(Backoff::with(cfg.resend_after, cfg.resend_cap));
     let mut held = HeldFrame::new();
     loop {
         // an evicted seat publishes nothing: no pass, no re-offer
@@ -968,15 +1108,13 @@ async fn outbox_loop<L, S, K>(
         // "deliveries keep going unacknowledged" on a perfectly healthy
         // republic. The mesh learned this as its own-ackable span guard;
         // this is the same rule.
-        let tail = match floor {
-            Some(f) if cursor > f => log
-                .read_from(f + 1)
-                .await
-                .iter()
-                .any(|e| crate::supervisor::own_ackable(&cfg.member, e)),
-            _ => false,
+        let envs = match floor {
+            Some(f) if cursor > f => log.read_from(f + 1).await,
+            _ => Vec::new(),
         };
+        let tail = envs.iter().any(|e| crate::supervisor::own_ackable(&cfg.member, e));
         if stall_decision(tail, &held) == Action::Idle {
+            stall.quiet = None;
             tracing::debug!(
                 me = %cfg.member,
                 ?floor,
@@ -1019,22 +1157,32 @@ async fn outbox_loop<L, S, K>(
             "outbox tail unacked — stall clock running"
         );
         let deadline = stall.deadline(tokio::time::Instant::now());
-        let fired = tokio::select! {
+        let quiet = stall.quiet.is_some();
+        let (fired, by_event) = tokio::select! {
             r = wakeup.changed() => {
                 if r.is_err() {
                     return;
                 }
-                false // new work first; the stall clock keeps running
+                (false, false) // new work first; the stall clock keeps running
             }
             // a floor advance de-escalates at the loop top; the anchored
             // clock is kept by `deadline`, so a sheet can never starve it
-            () = ack_wake.notified() => false,
+            () = ack_wake.notified() => (false, false),
+            // a quiet stall resumes the moment the engine hears an owed peer
+            r = reach.changed(), if quiet => {
+                if r.is_err() {
+                    return;
+                }
+                (true, true)
+            }
             _ = stop.changed() => return,
-            () = tokio::time::sleep_until(deadline) => true,
+            () = tokio::time::sleep_until(deadline) => (true, false),
         };
         if !fired {
             continue;
         }
+        let reach_now = reach.borrow_and_update().clone();
+        let open = stall.granted < OPEN_ROUNDS;
         // decide and rewind as ONE state step (M7): the floor may have moved
         // during a sleep of up to ten minutes — rewinding to a stale
         // snapshot would re-offer what has since been confirmed — and a
@@ -1042,16 +1190,24 @@ async fn outbox_loop<L, S, K>(
         // Every group frame is a FRESH encryption (`group_frame` bypasses
         // the fan-out cache), so there is no stale-ciphertext eviction to do
         // and no resend epoch to bump — a relay-level duplicate dedups at
-        // each receiver's AcceptedWindow. Through `rewind_group`, not by
-        // assignment: one definition of "pull the broadcast cursor back to
-        // what is proven", and it is the one the unit tests pin.
+        // each receiver's AcceptedWindow. Through `rewind_group_to`, not by
+        // assignment: one definition of "pull the broadcast cursor back",
+        // and it is the one the unit tests pin. The floor is the lowest
+        // among the owed peers this round may reach (`reachable_floor`).
         let mut round = StallRound::NoFloor;
         let now_wall = wall_secs();
         store
             .update(|state| {
-                let Some(f) = group_floor(state, &cfg) else {
-                    round = StallRound::NoFloor;
-                    return false;
+                let f = match reachable_floor(state, &cfg, &envs, &reach_now, open) {
+                    Ok(Some(f)) => f,
+                    Ok(None) => {
+                        round = StallRound::NoFloor;
+                        return false;
+                    }
+                    Err(q) => {
+                        round = StallRound::Quiet(q);
+                        return false;
+                    }
                 };
                 let mut cur = state.group.unwrap_or_default();
                 let heal = if consume_resend_round(&mut cur, now_wall) {
@@ -1065,7 +1221,7 @@ async fn outbox_loop<L, S, K>(
                     return false;
                 };
                 state.group = Some(cur); // the consumed budget
-                rewind_group(state, &cfg);
+                rewind_group_to(state, f);
                 round = StallRound::Granted { floor: f, heal };
                 true
             })
@@ -1073,6 +1229,24 @@ async fn outbox_loop<L, S, K>(
         let f = match round {
             StallRound::NoFloor => {
                 stall.disarm();
+                continue;
+            }
+            // nobody owed can be reached: no publish, no budget. The ladder
+            // and the loud count go on, so `send_failed` stays reachable.
+            StallRound::Quiet(_) if by_event => continue,
+            StallRound::Quiet(q) => {
+                if stall.quiet == Some(q) {
+                    tracing::debug!(me = %cfg.member, reason = q.reason(), "outbox=quiet");
+                } else {
+                    tracing::info!(me = %cfg.member, reason = q.reason(), ?floor, cursor, "outbox=quiet");
+                }
+                stall.quiet = Some(q);
+                if stall.round_granted() {
+                    for m in &cfg.members {
+                        sink.send_failed(m, "not acknowledging deliveries").await;
+                    }
+                }
+                stall.escalate(tokio::time::Instant::now());
                 continue;
             }
             StallRound::Spent(f) => {
@@ -1084,6 +1258,10 @@ async fn outbox_loop<L, S, K>(
                 continue;
             }
             StallRound::Granted { floor, heal } => {
+                if let Some(q) = stall.quiet.take() {
+                    tracing::info!(me = %cfg.member, was = q.reason(), floor, "outbox=resumed");
+                }
+                stall.granted = stall.granted.saturating_add(1);
                 if heal {
                     tracing::info!(
                         floor,
@@ -3185,5 +3363,164 @@ mod tests {
         let got = sink.0.lock().expect("sink").clone();
         assert_eq!(got, vec![("alice".to_string(), ask("alice", 'b'))], "only the honest frame passes");
         handle.shutdown().await;
+    }
+
+    /// Walter (two own events, both owed to petra and zoe, who acked once at
+    /// floor 0) and petra as a listener that never acks; zoe never runs.
+    /// Petra's deliveries count walter's group frames: every re-offer is a
+    /// fresh encryption. Returns walter, petra, the count.
+    async fn trio(
+        first: Duration,
+        cap: Duration,
+    ) -> (GroupHandle, GroupHandle, Sink, nostr_relay_builder::MockRelay) {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut walter = MlsMember::new(&key(1), "walter").expect("walter");
+        let petra = MlsMember::new(&key(2), "petra").expect("petra");
+        let zoe = MlsMember::new(&key(3), "zoe").expect("zoe");
+        walter.create_group().expect("group");
+        let welcome = walter
+            .add_members(&[petra.key_package().expect("kp"), zoe.key_package().expect("kp")])
+            .expect("add")
+            .expect("a welcome");
+        let mut petra = petra;
+        petra.join_from_welcome(&welcome).expect("petra joins");
+
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let chan = |u: &str| {
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![u.into()], [7u8; 32])
+        };
+
+        let log = crate::MemLog::default();
+        for seq in 1..=2u64 {
+            log.push(walter_event(seq));
+        }
+        let store = crate::MemStateStore::default();
+        store
+            .update(|st| {
+                for m in ["petra", "zoe"] {
+                    st.outbound.insert(m.into(), OutboundCursor { ack_seen: true, ..Default::default() });
+                }
+                true
+            })
+            .await;
+        let (_wake_w, wake_w_rx) = watch::channel(0u64);
+        let (health_w, _hw) = watch::channel(GroupHealth::default());
+        let walter_handle = spawn_group(
+            chan(&url),
+            MlsChannel::new(walter),
+            GroupNetConfig::fast("walter".into(), vec!["petra".into(), "zoe".into()]).with_resend(first, cap),
+            log,
+            store,
+            NullSink,
+            wake_w_rx,
+            health_w,
+        );
+        std::mem::forget(_wake_w);
+
+        let sink = Sink::default();
+        let (wake_p, wake_p_rx) = watch::channel(0u64);
+        std::mem::forget(wake_p);
+        let (health_p, _hp) = watch::channel(GroupHealth::default());
+        let petra_handle = spawn_group(
+            chan(&url),
+            MlsChannel::new(petra),
+            GroupNetConfig::fast("petra".into(), vec!["walter".into(), "zoe".into()]),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            sink.clone(),
+            wake_p_rx,
+            health_p,
+        );
+        (walter_handle, petra_handle, sink, relay)
+    }
+
+    fn count(sink: &Sink) -> usize {
+        sink.0.lock().expect("sink").len()
+    }
+
+    fn silent(names: &[&str]) -> OutboxReach {
+        OutboxReach { silent: names.iter().map(|n| (*n).to_string()).collect(), locked_out: false }
+    }
+
+    /// A round rewinds to the lowest floor it may reach: zoe (silent) pins
+    /// the floor at 1, petra (heard) at 3, so the round starts at 3 - and
+    /// the open rounds still reach back to zoe.
+    #[test]
+    fn a_round_rewinds_only_as_far_as_a_reachable_peer() {
+        let mut st = TransportState::default();
+        st.outbound.insert("zoe".into(), OutboundCursor { acked_floor: 1, ack_seen: true, ..Default::default() });
+        st.outbound.insert("petra".into(), OutboundCursor { acked_floor: 3, ack_seen: true, ..Default::default() });
+        let envs: Vec<_> = (2..=5).map(walter_event).collect();
+        let reach = silent(&["zoe"]);
+        assert_eq!(reachable_floor(&st, &cfg(), &envs, &reach, false), Ok(Some(3)));
+        assert_eq!(reachable_floor(&st, &cfg(), &envs, &reach, true), Ok(Some(1)));
+        assert_eq!(
+            reachable_floor(&st, &cfg(), &envs, &silent(&["zoe", "petra"]), false),
+            Err(Quiet::PeersSilent)
+        );
+        let locked = OutboxReach { locked_out: true, ..Default::default() };
+        assert_eq!(reachable_floor(&st, &cfg(), &envs, &locked, true), Err(Quiet::LockedOut));
+        st.outbound.insert("zoe".into(), OutboundCursor { acked_floor: 5, ack_seen: true, ..Default::default() });
+        st.outbound.insert("petra".into(), OutboundCursor { acked_floor: 5, ack_seen: true, ..Default::default() });
+        assert_eq!(reachable_floor(&st, &cfg(), &envs, &locked, false), Ok(None), "nobody owed");
+    }
+
+    /// The first pass plus the open rounds, two frames each.
+    const OPENING: usize = 2 + 2 * OPEN_ROUNDS as usize;
+
+    /// **Nobody owed is listening: the re-offers stop, and resume on the
+    /// event.** Field: a seat re-offered its whole tail every ten minutes,
+    /// for ever, to peers that were gone or split.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_silent_peer_gets_no_re_offers_until_it_is_heard() {
+        let (walter, petra, sink, _relay) = trio(Duration::from_millis(50), Duration::from_secs(30)).await;
+        walter.set_reach(silent(&["petra", "zoe"]));
+        // rounds fire at ~0.05, 0.15, 0.35, 0.75, 1.55, 3.15 s
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(count(&sink), OPENING, "after the open rounds nothing is re-offered to silent peers");
+
+        // petra is heard again; the next natural round would be ~1.3 s away
+        walter.set_reach(silent(&["zoe"]));
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+        while count(&sink) < OPENING + 2 {
+            assert!(tokio::time::Instant::now() < deadline, "the heard peer was not re-offered on the event");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        walter.shutdown().await;
+        petra.shutdown().await;
+    }
+
+    /// Case (b): one peer gone for good, one heard but slow. The slow one
+    /// keeps getting its resends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_heard_slow_peer_keeps_its_resends_beside_a_silent_one() {
+        let (walter, petra, sink, _relay) = trio(Duration::from_millis(50), Duration::from_millis(200)).await;
+        walter.set_reach(silent(&["zoe"]));
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(count(&sink) >= OPENING + 8, "the heard peer's resends stopped: {}", count(&sink));
+        walter.shutdown().await;
+        petra.shutdown().await;
+    }
+
+    /// A seat that concluded it is locked out re-offers nothing, not even
+    /// the open rounds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_locked_out_seat_re_offers_nothing() {
+        let (walter, petra, sink, _relay) = trio(Duration::from_millis(50), Duration::from_millis(200)).await;
+        walter.set_reach(OutboxReach { silent: Default::default(), locked_out: true });
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert_eq!(count(&sink), 2, "only the first pass went out");
+        walter.set_reach(OutboxReach::default());
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(800);
+        while count(&sink) < 4 {
+            assert!(tokio::time::Instant::now() < deadline, "the lifted lock-out did not resume the re-offer");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        walter.shutdown().await;
+        petra.shutdown().await;
     }
 }
