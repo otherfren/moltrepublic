@@ -118,6 +118,9 @@ async fn concurrent_bursts_end_on_one_chain() {
 /// A real 2-of-3 republic over `url`: mara founds, walter and dora join.
 async fn found_trio(root: &std::path::Path, url: &str) -> [WalletHandle; 3] {
     let a = engine(&root.join("mara"));
+    // B6 alone: every seat an older build (the lock's keystone is
+    // tests/chain_lock.rs)
+    a.__lock_cap_off(true);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
         name: "Drei".to_string(),
@@ -137,6 +140,7 @@ async fn found_trio(root: &std::path::Path, url: &str) -> [WalletHandle; 3] {
     let mut joiners = Vec::new();
     for (name, link) in ["walter", "dora"].iter().zip(links) {
         let w = engine(&root.join(name));
+        w.__lock_cap_off(true);
         adopt_relay(&w, url).await;
         w.execute(Command::JoinStart { invite: link, member: (*name).to_string(), relays: Vec::new() })
             .await

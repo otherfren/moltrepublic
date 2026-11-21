@@ -1520,6 +1520,11 @@ impl State {
         // put the retracted signature straight back (review 2026-08-25)
         if is_own {
             self.chain.own_approvals.remove(&id);
+            self.chain.lock.intent_sent.remove(&id);
+        }
+        // B7: the intent goes with it (D2)
+        if let Some(i) = self.chain.lock.intents.get_mut(&id) {
+            i.remove(by);
         }
         p.decliners.push(by.to_string());
         let outcome = if p.decliners.len() > veto_room {
@@ -1824,11 +1829,14 @@ impl State {
         // reader-relative: chain governance knows exactly who signed; on the
         // single-operator path the ONLY approval this node can ever record
         // is its own (self-cosign or the one explicit approve)
+        // B7: at a locked height the standing voice is the intent
+        let intents = self.chain.lock.intents.get(&id);
         let mut approved_by_me = if self.is_chain_governed() {
             let me = self.member();
             self.chain.pending_sigs
                 .get(&id)
                 .is_some_and(|s| s.verified.contains(&me))
+                || intents.is_some_and(|i| i.contains(&me))
         } else {
             Self::operator_approved(p)
         };
@@ -1858,7 +1866,7 @@ impl State {
             .into_iter()
             .map(|member| {
                 let approved = if chain {
-                    signed.is_some_and(|s| s.contains(&member))
+                    signed.is_some_and(|s| s.contains(&member)) || intents.is_some_and(|i| i.contains(&member))
                 } else {
                     member == me && Self::operator_approved(p)
                 };

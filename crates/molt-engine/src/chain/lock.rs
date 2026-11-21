@@ -10,7 +10,8 @@
 //!   the forced value or the caller's own.
 //! - [`Tally`]: same-ballot acceptances; `accepted` names the signers once a
 //!   value is sealable. Signatures of different ballots never combine.
-#![allow(dead_code)] // wired in B7b
+//!
+//! The engine wiring is `lock_wire.rs`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -167,6 +168,24 @@ impl Acceptor {
             .map_or(true, |bases| bases.values().all(|s| s.promised.is_none() && s.accepted.is_none()))
     }
 
+    /// This seat signed freely at `height`.
+    pub(crate) fn signed_freely(&self, height: u64) -> bool {
+        self.free.contains(&height)
+    }
+
+    /// Trade promise-only state at `height` for a free mark - only sound
+    /// once the free signers there leave the lock no quorum (the caller's
+    /// check, chain_lock_design.md §14). `false` = this seat accepted a
+    /// value there and keeps it.
+    pub(crate) fn release_to_free(&mut self, height: u64) -> bool {
+        if self.slots.get(&height).is_some_and(|bases| bases.values().any(|s| s.accepted.is_some())) {
+            return false;
+        }
+        self.slots.remove(&height);
+        self.free.insert(height);
+        true
+    }
+
     /// Record a B6 signature at `height`. `None` = refused (lock state
     /// there); `Some(persist)` otherwise.
     pub(crate) fn sign_freely(&mut self, height: u64) -> Option<bool> {
@@ -194,10 +213,21 @@ impl Acceptor {
         promised.max(accepted).saturating_add(1)
     }
 
+    /// The digests of every value accepted at an open slot.
+    pub(crate) fn accepted_digests(&self) -> BTreeSet<String> {
+        self.slots
+            .values()
+            .flat_map(|bases| bases.values())
+            .filter_map(|s| s.accepted.as_ref().map(|(_, v)| v.digest.clone()))
+            .collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn promised(&self, slot: &Slot) -> Option<&Ballot> {
         self.state(slot)?.promised.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn accepted(&self, slot: &Slot) -> Option<&(Ballot, Value)> {
         self.state(slot)?.accepted.as_ref()
     }

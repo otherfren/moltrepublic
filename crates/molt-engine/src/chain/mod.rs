@@ -31,6 +31,7 @@ pub(crate) mod blob_parts;
 mod checkpoint;
 mod governance;
 mod lock;
+mod lock_wire;
 mod membership;
 mod projection;
 mod sync;
@@ -141,6 +142,7 @@ pub(crate) fn is_base_entry_op(payload: &serde_json::Value) -> bool {
     )
 }
 pub(crate) use governance::PendingApproval;
+pub(crate) use lock_wire::{LockMode, LockRuntime, LockSeams};
 pub(crate) use membership::{NostrRekey, PendingRecovery, RecoverProgressReport, REJOIN_NEEDS_A_LINK};
 
 use verify::*;

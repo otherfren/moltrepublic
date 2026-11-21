@@ -1558,6 +1558,8 @@ impl State {
         });
         let wallet_records = opened.read_wallet_keys();
         let wallet_scan = opened.read_wallet_scan();
+        // B7: the lock's promises, loaded before the transport starts
+        let chain_lock = opened.read_chain_lock().map_err(|e| e.to_string());
         // point of no return: swap the actor state to the new workspace
         self.close_active_storage();
         self.reset_workspace_state();
@@ -1601,6 +1603,8 @@ impl State {
             // now, or every restored vote reads `open`
             self.reverify_all_pending();
         }
+        let lock_marker = self.active.as_ref().is_some_and(|a| a.prefs.chain_lock);
+        self.load_chain_lock(chain_lock, lock_marker);
         // …and the tree behind the chain's own commitment. Checked against
         // it here: bytes that do not answer the commitment are deleted, and
         // the holder goes base-pending rather than reading a wrong wiki.
