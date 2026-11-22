@@ -629,3 +629,53 @@ Not done: a 2-of-2
 republic whose seat is amnesiac waits for that seat's floor to pass,
 which only another block moves (§13 Q4). The rejoiner's checklist now
 counts the survivors' intents.
+
+### Review round (2026-11-22, two reviewers, findings S1-S6, W1-W10)
+
+Both reviews found the safety machinery sound; the findings were
+liveness and the downgrade boundary. Each fix has a red-first test.
+
+- **S1/W1, an acceptance is a promise kept.** A value this seat already
+  accepted at the slot is accepted again at a higher ballot without the
+  approval gates (withdrawn, declined, a check turned false): it may be
+  chosen with every `LockAccepted` lost. The lock file keeps the whole
+  change of each accepted value, so a withdrawn card stays resolvable.
+- **S2/W3, a downgrade cannot open a locked workspace.** The first lock
+  write raises the manifest to version 4 (`STORAGE_VERSION_LOCK`); older
+  builds (ceiling 3) refuse it at the gate, sealing keeps it. Nothing is
+  written, marked or amnesia-gated before the chain enables the lock, so
+  a pre-lock republic stays openable by older builds until its vote.
+  Defence in depth: a seat seen with lock state at a height is never
+  counted free there; a seat that finds its own free signature beside
+  its lock state at open goes passive at that height
+  (`lock=passive reason=conflict`). Residual: lock frames of a seat that
+  were all lost, followed by a downgrade from a backup the marker never
+  saw.
+- **S3, a forced value waits for a fuller hearing for one retransmit
+  interval** while seats are unheard (its holders keep a value nobody
+  chose alive), then goes out anyway so the holders of a chosen value
+  complete it. A registered restore's subject counts as heard holding
+  nothing (§4.2).
+- **S4/W4, one rule for phase 1.** The `Prepare` is re-sent, ready or
+  not, at a doubling interval to 600 s (reset by a new promise); every
+  run goes stale after its backoff.
+- **S5.** Seats known free are heard as free; promisers and free seats
+  stay disjoint.
+- **W2.** The leader skips a card the gates refuse now (relay wait, a
+  restore gate, vault/wallet checks); one unsealable card no longer
+  starves a height.
+- **W5** voices before digests; **W6** marks unwritten at open mean
+  amnesia; **W7** no amnesia where the lock is not enabled; **W8** the
+  restore label counts intents; **W9** an `Accept` before its card is
+  retried; **W10** activation reads the same on full, pruned, re-anchored,
+  restored and reopened seats (pinned).
+- **Simulation:** withholding acceptors (values withdrawn after an
+  acceptance or a choice): every shape decides; without S1, or waiting for
+  every seat forever, it stalls. Not modelled: the downgrade (the storage
+  gate closes it), head moves and pruning (pinned in the engine tests).
+- **Not closed (S6):** a filesystem backup that restores the chain AND
+  an older but readable lock file is not detected as amnesia (binding
+  the file to its head does not catch it either: both are equally old).
+  The floor stays the FIRST peer report on purpose: peers report with
+  every block, so a highest-report floor would move with the live chain
+  and never be passed.
