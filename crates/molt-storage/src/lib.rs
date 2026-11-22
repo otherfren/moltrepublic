@@ -1729,6 +1729,15 @@ impl OpenedWorkspace {
     /// once — the additive-only stop for older binaries (they refuse the
     /// whole workspace at the manifest gate instead of running chainless
     /// on a partial view). Idempotent.
+    pub fn bump_lock_version(&mut self) -> Result<(), StorageError> {
+        if self.manifest.version >= molt_core::STORAGE_VERSION_LOCK {
+            return Ok(());
+        }
+        self.manifest.version = molt_core::STORAGE_VERSION_LOCK;
+        write_manifest(&self.dir, &self.manifest)
+    }
+
+    /// WP4b stage 5 (see [`Self::bump_lock_version`] for the lock's twin).
     pub fn bump_pruned_version(&mut self) -> Result<(), StorageError> {
         if self.manifest.version >= molt_core::STORAGE_VERSION_PRUNED {
             return Ok(());
@@ -2871,7 +2880,7 @@ pub fn create_workspace(
 /// accident, and the typed [`StorageError::Sealed`] routes every frontend
 /// to the decrypt flow).
 fn openable_gate(manifest: &WorkspaceManifest) -> Result<(), StorageError> {
-    if manifest.version > molt_core::STORAGE_VERSION_SEALED {
+    if manifest.version > molt_core::STORAGE_VERSION_LOCK {
         return Err(StorageError::NewerVersion(manifest.version));
     }
     // both sealed shapes route to the decrypt flow: S6 (unseal) and the S7
@@ -4520,7 +4529,7 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         let _ = ack.send(ok);
                     }
                     Ok(WriterMsg::PersistChainLock { bytes, ack }) => {
-                        let wrote = ws.write_chain_lock(&bytes);
+                        let wrote = ws.write_chain_lock(&bytes).and_then(|()| ws.bump_lock_version());
                         if let Err(e) = &wrote {
                             tracing::error!(error = %e, "chain_lock=unwritten");
                         }
@@ -5740,6 +5749,12 @@ mod tests {
         drop(handle);
         let (ws, _) = open_eventually(&dir);
         assert_eq!(ws.read_chain_lock().expect("read").as_deref(), Some(&br#"{"free":[8]}"#[..]));
+        // W3: the first lock write raises the manifest past what an older
+        // build opens - it would ignore the promises in this file
+        assert_eq!(ws.manifest.version, molt_core::STORAGE_VERSION_LOCK);
+        const {
+            assert!(molt_core::STORAGE_VERSION_LOCK > molt_core::STORAGE_VERSION_SEALED);
+        }
     }
 
     fn open_eventually(dir: &Path) -> (OpenedWorkspace, LoadedState) {
@@ -6055,7 +6070,7 @@ mod tests {
         let mut m = read_manifest(&dir).expect("manifest");
         // one past everything this build understands (S6 raised the ceiling
         // to STORAGE_VERSION_SEALED)
-        m.version = molt_core::STORAGE_VERSION_SEALED + 1;
+        m.version = molt_core::STORAGE_VERSION_LOCK + 1;
         {
             let text = toml::to_string_pretty(&m).expect("render");
             fs::write(dir.join("manifest.toml"), text).expect("write");

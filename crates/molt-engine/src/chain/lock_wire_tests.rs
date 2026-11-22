@@ -162,9 +162,10 @@ fn sent_kinds(st: &crate::State) -> Vec<&'static str> {
 fn the_gate_keeps_free_signing_and_the_lock_apart_per_height() {
     let b = Builder::new(&SEATS, 2);
     let mut walter = seat("walter", &b);
-    walter.chain.lock.enabled_override = Some(false);
+    // dora signed freely at 1: in 2-of-3 that leaves the lock no decision
+    walter.lock_note_free("dora", 1);
     let id = note(&mut walter, "free");
-    assert_eq!(own_sigs(&walter), 1, "a free seat signs (B6)");
+    assert_eq!(own_sigs(&walter), 1, "a free height signs (B6)");
     assert!(walter.chain.lock.acceptor.signed_freely(1), "the free mark");
     assert!(walter.chain.lock.disk.is_some(), "durable before the frame");
     walter.chain.lock.outbox.clear();
@@ -177,7 +178,6 @@ fn the_gate_keeps_free_signing_and_the_lock_apart_per_height() {
     let base = mara.lock_slot().expect("slot").base;
     wire(&mut mara, "dora", 1, WorkspaceEvent::LockPrepare { height: 1, base, round: 1 });
     assert_eq!(sent_kinds(&mara), vec!["promise"]);
-    mara.chain.lock.enabled_override = Some(false);
     assert!(!mara.lock_sign_freely(1), "the gate refuses a free signature over a promise");
     mara.chain.lock.outbox.clear();
     note(&mut mara, "after the promise");
@@ -241,8 +241,8 @@ fn a_failed_lock_write_sends_nothing() {
     assert!(sent_kinds(&mara).is_empty(), "no promise left");
     assert_eq!(mara.chain.lock.acceptor.promised(&slot), None, "rolled back");
     assert_eq!(mara.chain.lock.disk, None, "nothing written");
-    // the same for a free signature
-    mara.chain.lock.enabled_override = Some(false);
+    // the same for a free mark: the release that cannot be written is not made
+    mara.lock_note_free("walter", 1);
     note(&mut mara, "free");
     assert_eq!(own_sigs(&mara), 0, "no signature without its durable mark");
     assert!(!mara.chain.lock.acceptor.signed_freely(1));
@@ -296,8 +296,7 @@ fn amnesia_answers_nothing_up_to_the_floor() {
     mara.chain.lock.enabled_override = Some(true);
     let slot = mara.lock_slot().expect("slot");
     wire(&mut mara, "dora", 1, WorkspaceEvent::LockPrepare { height: 1, base: slot.base, round: 1 });
-    mara.chain.lock.enabled_override = Some(false);
-    note(&mut mara, "free");
+    assert!(!mara.lock_sign_freely(1), "no free signature up to the floor");
     assert!(sent_kinds(&mara).is_empty(), "nothing answered: {:?}", sent_kinds(&mara));
     assert_eq!(own_sigs(&mara), 0);
     // a peer reports height 1: floor = 2
@@ -509,7 +508,12 @@ fn a_consented_restore_needs_both_survivors_in_two_of_three() {
         } else {
             assert_eq!(net.heights(), vec![0, 0, 0], "one survivor alone does not seal");
             let sync = net.seats[1].chain_sync();
-            assert_eq!(sync.lock_wait, "promises 1/2 missing dora", "{sync:?}");
+            // the run in flight waits for dora's promise, or it yielded to
+            // dora's ballot: either way the status names what is missing
+            assert!(
+                sync.lock_wait == "promises 1/2 missing dora" || sync.lock_wait == "leader dora",
+                "{sync:?}"
+            );
         }
     }
 }
@@ -627,8 +631,8 @@ fn a_value_split_between_a_free_and_two_lock_voices_waits() {
             .iter()
             .map(|m| {
                 let mut st = genesis_seat(m, &b, b.blocks.clone());
-                st.chain.lock.enabled_override = Some(lock && *m != "walter");
-                st.lock_force(lock);
+                st.chain.lock.enabled_override = Some(lock);
+                st.lock_force(lock && *m != "walter");
                 hear(&mut st, T, &names);
                 st
             })
@@ -862,4 +866,147 @@ fn an_accepted_value_is_accepted_again_after_a_withdraw_or_decline() {
         let other = note(&mut dora, "y");
         let _ = other;
     }
+}
+
+/// S2 (i): walter accepted at height 1 (its `LockAccepted` reached mara),
+/// then a downgraded walter signs another card freely there. A seat seen
+/// with lock state is not free: mara keeps her promise, no release.
+#[test]
+fn a_seat_seen_locked_is_never_counted_free_there() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    let v = note(&mut mara, "v");
+    let w = note(&mut mara, "w");
+    let base = mara.lock_slot().expect("slot").base;
+    wire(&mut mara, "dora", 1, WorkspaceEvent::LockPrepare { height: 1, base: base.clone(), round: 1 });
+    assert!(!mara.chain.lock.acceptor.may_sign_freely(1), "mara promised");
+    let change_v = mara.proposal_change(v).expect("v");
+    let digest = mara.lock_value(1, &change_v).expect("value").digest;
+    let sig_v = identity_sign(b.key("walter"), &approval_bytes(&b.republic_id, 1, &change_v));
+    wire(
+        &mut mara,
+        "walter",
+        2,
+        WorkspaceEvent::LockAccepted { height: 1, base, round: 1, leader: "dora".into(), digest, sig: sig_v },
+    );
+    let change_w = mara.proposal_change(w).expect("w");
+    let sig_w = identity_sign(b.key("walter"), &approval_bytes(&b.republic_id, 1, &change_w));
+    wire(&mut mara, "walter", 3, WorkspaceEvent::Approved { id: ProposalId(w), by: "walter".into(), height: 1, sig: sig_w });
+    assert!(!mara.chain.lock.acceptor.signed_freely(1), "walter is not free at 1");
+    assert!(!mara.chain.lock.acceptor.may_sign_freely(1), "the promise stands");
+}
+
+/// S2 (ii): an older build ran on this seat and signed freely at a height
+/// where its lock file holds a promise. Back on this build the seat is
+/// passive there: no free signature, no promise, no acceptance.
+#[test]
+fn own_free_signature_beside_lock_state_makes_the_height_passive() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    let base = mara.lock_slot().expect("slot").base;
+    wire(&mut mara, "dora", 1, WorkspaceEvent::LockPrepare { height: 1, base: base.clone(), round: 1 });
+    let disk = mara.chain.lock.disk.clone().expect("the promise is on disk");
+    // the downgraded build ignores the file and signs freely
+    mara.lock_force(false);
+    let id = note(&mut mara, "free");
+    assert_eq!(own_sigs(&mara), 1, "a free signature at 1");
+    // back on this build
+    mara.lock_force(true);
+    mara.load_chain_lock(Ok(Some(disk)), true);
+    assert!(mara.chain.lock.passive.contains(&1), "passive at 1");
+    mara.chain.lock.outbox.clear();
+    assert!(!mara.lock_sign_freely(1));
+    wire(&mut mara, "walter", 2, WorkspaceEvent::LockPrepare { height: 1, base, round: 7 });
+    assert!(sent_kinds(&mara).is_empty(), "no promise at a passive height: {:?}", sent_kinds(&mara));
+    let _ = id;
+}
+
+/// W2: a card every seat would refuse now (a relay change while the chain
+/// is unsettled) does not starve the height: the leader picks the next
+/// ready card.
+#[test]
+fn a_card_held_by_a_gate_does_not_starve_the_height() {
+    let mut b = Builder::new(&SEATS, 2);
+    b.commit_applied(1, &["dora", "mara"]);
+    let mut dora = seat("dora", &b);
+    let relays = propose(&mut dora, Surface::Organization, json!({ "op": "set_relays", "value": "wss://relay.example" }));
+    let page = note(&mut dora, "page");
+    assert!(relays < page);
+    dora.lock_note_intent(relays, "mara");
+    dora.lock_note_intent(page, "mara");
+    dora.chain.fork_candidates.insert(9, b.blocks[1].clone());
+    let slot = dora.lock_slot().expect("slot");
+    let chosen = dora.lock_choose(&slot, None).map(|(id, _, _)| id);
+    assert_eq!(chosen, Some(page), "the relay card waits for the heal, the page does not");
+}
+
+/// W4/S4: a leader that cannot complete phase 1 re-sends its `Prepare` at
+/// a doubling interval, not every 15 s for good.
+#[test]
+fn phase_one_backs_off() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let mut now = T;
+    dora.presence.clock_override = Some(now);
+    dora.lock_start(0);
+    for _ in 0..360 {
+        now += 10;
+        hear(&mut dora, now, &SEATS);
+        dora.lock_tick();
+    }
+    let prepares = sent_kinds(&dora).iter().filter(|k| **k == "prepare").count();
+    assert!(prepares < 60, "{prepares} prepares in an hour");
+    assert!(prepares > 3, "still asking: {prepares}");
+}
+
+/// S3: a forced value this leader would withhold (its card withdrawn here)
+/// is not proposed on the first Q1 promises while seats are unheard; a
+/// fuller hearing frees the slot.
+#[test]
+fn a_forced_value_waits_for_a_fuller_hearing() {
+    let names = ["dora", "erik", "mara", "nils", "walter"];
+    let b = Builder::new(&names, 3);
+    let mut dora = genesis_seat("dora", &b, b.blocks.clone());
+    dora.chain.lock.enabled_override = Some(true);
+    dora.lock_force(true);
+    hear(&mut dora, T, &names);
+    let v = note(&mut dora, "v");
+    let change = dora.proposal_change(v).expect("change");
+    let digest = dora.lock_value(1, &change).expect("value").digest;
+    dora.cmd_withdraw(ProposalId(v), None).expect("withdrawn");
+    dora.chain.lock.outbox.clear();
+    dora.lock_start(0);
+    let (base, round) = {
+        let run = dora.chain.lock.run.as_ref().expect("dora leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    let promise = |st: &mut crate::State, from: &str, seq: u64, holds: bool| {
+        let accepted = holds.then(|| molt_core::chain::LockAcceptedValue {
+            round: 1,
+            leader: "mara".into(),
+            need: 3,
+            digest: digest.clone(),
+            id: v,
+            change: None,
+        });
+        wire(st, from, seq, WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round, leader: "dora".into(), accepted });
+    };
+    promise(&mut dora, "erik", 1, true);
+    promise(&mut dora, "nils", 2, false);
+    assert!(!sent_kinds(&dora).contains(&"accept"), "three of five heard: v may be chosen, dora withholds it, she waits");
+    promise(&mut dora, "mara", 3, false);
+    promise(&mut dora, "walter", 4, false);
+    assert!(!sent_kinds(&dora).contains(&"accept"), "all heard: v was not chosen, nothing else is ready");
+    assert!(dora.chain.lock.run.as_ref().is_some_and(|r| r.leader.forced().is_none()), "the slot is free");
+}
+
+/// W6: free marks made at open that cannot be written leave the seat
+/// amnesiac, not signing at those heights from memory only.
+#[test]
+fn a_failed_write_at_open_means_amnesia() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    mara.chain.lock.fail_writes = true;
+    mara.load_chain_lock(Ok(None), false);
+    assert_eq!(mara.chain.lock.amnesia, Some(None));
 }

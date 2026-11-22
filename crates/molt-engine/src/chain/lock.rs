@@ -296,8 +296,15 @@ impl Leader {
     /// A promise for this ballot (others are ignored; duplicates count once).
     pub(crate) fn promise(&mut self, from: &str, ballot: &Ballot, accepted: Option<(Ballot, Value)>) {
         if *ballot == self.ballot {
+            // the two sets stay disjoint: a promiser is not also "free"
+            self.free.remove(from);
             self.promises.insert(from.to_string(), accepted);
         }
+    }
+
+    /// Seats heard as free (never also promisers).
+    pub(crate) fn free_count(&self) -> usize {
+        self.free.len()
     }
 
     /// Phase 1 is complete.

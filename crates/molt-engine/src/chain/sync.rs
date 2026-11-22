@@ -432,7 +432,7 @@ impl State {
         }
         let open = self.chain.proposal_changes.iter().find_map(|(id, c)| match c {
             ChainChange::Membership { op: molt_core::MembershipOp::Restored, member: m, .. }
-                if m == member && self.chain.pending_sigs.contains_key(id) =>
+                if m == member && (self.chain.pending_sigs.contains_key(id) || self.chain.lock.intents.contains_key(id)) =>
             {
                 Some(*id)
             }

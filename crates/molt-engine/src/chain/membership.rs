@@ -622,6 +622,18 @@ impl State {
         now.saturating_sub(since) < settle
     }
 
+    /// F1, read-only: `change` is no restore, or no settle runs for it here.
+    pub(crate) fn restore_settled(&self, id: u64, change: &ChainChange) -> bool {
+        if !matches!(change, ChainChange::Membership { op: MembershipOp::Restored, .. }) || self.nostr.is_none() {
+            return true;
+        }
+        let settle = match self.lock_seams.settle_secs.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => RESTORE_SETTLE_SECS,
+            s => s,
+        };
+        self.recovery.settle.get(&id).map_or(true, |since| self.presence_now().saturating_sub(*since) >= settle)
+    }
+
     /// F1: retry the auto-approvals the settle held back (delivery tick).
     pub(crate) fn retry_settled_restore_approvals(&mut self) {
         let ids: Vec<u64> =

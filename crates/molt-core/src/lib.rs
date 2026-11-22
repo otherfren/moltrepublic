@@ -1743,6 +1743,13 @@ pub const STORAGE_VERSION_PRUNED: u32 = 2;
 /// newness.
 pub const STORAGE_VERSION_SEALED: u32 = 3;
 
+/// The manifest version a workspace is RAISED to on its first sealing-lock
+/// write (`docs/chain/chain_lock_design.md` §8): an older binary ignores
+/// `chain_lock.state` and would sign freely where this seat promised or
+/// accepted - a fork - so it refuses the whole workspace at the manifest
+/// gate instead. The highest version this build opens.
+pub const STORAGE_VERSION_LOCK: u32 = 4;
+
 /// [`CryptoParams::sealed`] marker of the default at-rest state: key material
 /// device-sealed under `~/.moltrepublic/device.key` (`keys/workspace.key` +
 /// `keys/seed.sealed` present). Shared vocabulary with the export blob's

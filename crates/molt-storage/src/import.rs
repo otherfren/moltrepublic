@@ -150,7 +150,7 @@ pub fn import_stage(
             manifest.format
         )));
     }
-    if manifest.version > molt_core::STORAGE_VERSION_SEALED {
+    if manifest.version > molt_core::STORAGE_VERSION_LOCK {
         return Err(StorageError::NewerVersion(manifest.version));
     }
     if manifest.workspace.id != archive.header.workspace_id {

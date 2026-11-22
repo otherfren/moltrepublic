@@ -72,8 +72,11 @@ async fn adopt_relay(w: &WalletHandle, url: &str) {
         .expect("session unlock");
 }
 
-async fn found_two_of_two(root: &std::path::Path, url: &str) -> (WalletHandle, WalletHandle) {
+/// A 2-of-2 republic; `pre_lock` founds it without the sealing lock (no
+/// lock frames on the wire).
+async fn found_two_of_two_as(root: &std::path::Path, url: &str, pre_lock: bool) -> (WalletHandle, WalletHandle) {
     let a = engine(&root.join("founder"));
+    a.__found_pre_lock(pre_lock);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
         name: "Chess Club".to_string(),
@@ -168,7 +171,10 @@ async fn a_message_missed_while_away_is_resent_until_it_lands() {
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
 
-    let (a, b) = found_two_of_two(tmp.path(), &url).await;
+    // no lock: a lock frame from walter right after petra's return would
+    // expose the hole at once and the gap fetch would fill it - the resend
+    // this keystone proves would never be needed
+    let (a, b) = found_two_of_two_as(tmp.path(), &url, true).await;
     let ws_b = read_session(&b).await.active_workspace.clone();
 
     // petra must have acked at least once, or walter has no proven floor and
