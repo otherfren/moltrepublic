@@ -62,6 +62,15 @@ is on screen - a GUI rule, `select_view files/uploads` is always accepted. The s
 set is **sorted + deduped** (canonicalized at every ingest, like the relay
 tokens in `cmd_propose`).
 
+**One key that is not a surface (B7, 2026-11-22): `chain-lock`** turns the
+sealing lock on (`docs/chain/chain_lock_design.md` §8). Every founding of a
+build that knows it adds it to the ratified set - part of the charter, not
+a wizard checkbox (the wizard and the ratify card show only the surface
+keys); an older republic adds it by a `set_features` vote, which a seat
+proposes or signs only once every seat announced the lock capability. The
+union fold keeps it like any key; an older build refuses it at a founding
+and in its own proposals, and reads it unchanged in a chain.
+
 ### D2 — The ratified selection lives in the signed roster bytes: `molt-roster-v5`, conditional
 
 The feature set is charter content, so it goes where the agenda and the relay

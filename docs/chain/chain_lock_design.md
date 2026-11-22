@@ -1,9 +1,9 @@
 # The chain lock: fork-free sealing (B7)
 
-**Status: WIRED, OFF BY DEFAULT (B7a pure state machine, B7b wiring,
-2026-11-22, on a branch); activation by an agreed height is proposed in
-`docs/chain/chain_lock_wiring_plan.md` §8 and awaits a decision;
-deviations in §14.** Modules:
+**Status: BUILT on a branch (B7a pure state machine, B7b wiring,
+2026-11-22): the lock runs where the chain enabled it - every founding of
+this build, or an older republic after a `set_features` vote (§8);
+deviations in §14; plan `docs/chain/chain_lock_wiring_plan.md`.** Modules:
 `crates/molt-engine/src/chain/lock.rs` (simulation in `lock_tests.rs`),
 the wiring `chain/lock_wire.rs` (`lock_wire_tests.rs`), over a relay
 `crates/molt-engine/tests/chain_lock.rs`. Plan: `docs/chain/rejoin_divergence_build_plan.md`
@@ -272,42 +272,85 @@ LockNack     { height, base, round, leader,
 What an old (v0.0.20) node sees: unsigned `Approved` (ignored), lock
 frames (dropped), `Committed` blocks (verified and adopted as today).
 
-## 8. Activation per height
+## 8. Activation per height (user decision 2026-11-22, as built)
 
-Capability `molt-chain-lock-v1`, announced in the status frame beside
-`RESTORE_CONSENT_V2_CAP` (`own_caps`), remembered in `seat_caps`.
+The chain decides, not a belief: the lock runs at height h iff the
+effective feature set at h - 1 holds the key `chain-lock`
+(`molt_core::chain::CHAIN_LOCK_FEATURE`, `State::lock_enabled`).
 
-A seat's mode at height h:
+- **A republic founded with this build** ratifies the key with its
+  charter (`founding.rs`: added to every proposed feature set, not a
+  wizard choice). It is in the genesis, so height 1 is the first locked
+  height.
+- **An older republic** enables it by an explicit `set_features` vote
+  (value `chain-lock` plus the kept features); the lock runs from the
+  height after that block.
 
-1. lock state at h exists -> lock;
-2. a free mark at h exists -> free;
-3. else lock iff every roster seat at the slot's base announced the
-   capability (and the seat is not amnesiac at h), free otherwise.
+Verdict on the vehicle (research 2026-11-22): the feature set fits.
+- Typed as canonical strings: sorted, deduped, length-prefixed in
+  roster-v5 and in the checkpoint's founding run.
+- The key changes their content, never a layout or tag. A table
+  without it keeps its bytes (pins `roster_canonical_bytes_v5_*`,
+  `the_lock_is_a_feature_key_in_the_unchanged_v5_layout`).
+- `set_features` is not a last-write-wins slot, so a cut keeps every
+  entry and a pruned holder's union equals a full holder's. No start
+  height needs carrying: the mode is only ever asked for head+1, and
+  the head's effective set answers it (pinned on a full and a pruned
+  holder).
+- No new `ChainChange`, no new frame.
+- The one cost: the first feature key that is not a surface key
+  (`charter_features.md` D1).
 
-The mode decides only what the seat INITIATES (start a ballot, or sign
-freely). An acceptor always answers lock frames, subject to the
-exclusivity below; a free-believing seat that promised at h simply
-waits for the lock there.
+What an older build (v0.1.0, v0.0.20) does:
 
-**Exclusivity, per seat and height (persisted):** a seat that signed
-freely at h never promises or accepts at h; a seat with lock state at h
-never signs freely at h. That makes a half-and-half height safe without
-any agreement on the mode: a lock decision at h needs a promise set P of
-n - m + 1 seats, none of which ever signs freely at h, so at most m - 1
-free signatures exist at h and no free block can seal - and the other
-way round, m free signers leave only n - m seats to promise, fewer than
-Q1. Without the marks, one honest seat signing freely next to its lock
-signatures lets a free sealer combine it with others into a second block.
+| where | older build |
+|---|---|
+| founding with the key | refuses to ratify (`verify_canonical_features`: unknown feature) - the founding fails honestly, no mixed republic is born |
+| reading a chain whose genesis or a block carries it | verifies and folds it unchanged (the genesis check does not validate the vocabulary; `fold_one` does not validate org payloads; the union fold keeps the unknown key) - same bytes, same hashes, no fork |
+| a checkpoint blob carrying it | hashes it as one more string, identical |
+| proposing it | refused (`validate_org_payload`: unknown feature) |
+| after activation | keeps signing freely and drops lock frames (§8 boundary below) |
 
-Boundaries:
+This is milder than the "new surface strands an older seat" precedent:
+nothing stops, nothing hashes differently; an older seat merely does not
+take part in the lock and is expected to update.
 
-- An old seat appears (a seat restored onto an old build; its status
-  lacks the capability): new heights go free; a height already touched
-  by the lock finishes under it (it needs Q1 and `need` among the
-  capable seats).
-- A seat gains the capability: heights not yet touched go locked as each
-  seat learns it; mixed beliefs are covered by exclusivity.
-- A new roster seat (Joined) is free until it announces.
+**Guard on enabling.** A seat neither proposes nor signs the enabling
+vote unless every other roster seat announced the capability
+(`lock_enable_blocker`, reason `a seat runs a build without the lock`):
+the approver check keeps the threshold from being reached past an
+older seat; the proposer check keeps a card that nobody may sign off the
+board. An older build cannot propose the key at all. The capability is
+otherwise information only.
+
+**The boundary.** The enabling block E at height h is sealed under the
+old rules (free signatures, B6). A seat decides the mode for h + 1 only
+once its head is E, and then it is locked; a seat whose head is still
+h - 1 signs at h, not h + 1. So no height is half-run among honest seats
+on one lineage. A B6 fork at h (one branch with E, one without) gives
+two lineages and therefore two slots; R1 heals it, and a free signature
+given at h + 1 on the losing branch is still covered by the per-height
+free mark (exclusivity), so it can never join a lock quorum.
+
+**Seats without the lock after activation** (an older build, or a seat
+restored onto one): they sign freely and answer no lock frame.
+- Safety: exclusivity, as before. A lock decision needs n - m + 1
+  promises from seats that never sign freely there, so at most m - 1
+  free signatures exist at that height.
+- Liveness: the lock decides while n - m + 1 capable seats promise and
+  `need` of them approve. Where the free seats leave it no quorum, the
+  release rule (§14) turns the height free and B6 decides.
+- Pinned: `a_seat_without_the_lock_after_activation_neither_stalls_nor_forks`
+  (one head, fork decisions no more than B6 on the same schedule) and
+  `one_older_seat_after_activation_still_ends_on_one_head`.
+
+**Deleted:** activation by capability (`lock_all_capable` deciding the
+mode, and the "every seat announced it" belief), the default switch
+`CHAIN_LOCK_DEFAULT_ON`. **Kept:** the free/lock exclusivity per height,
+the release rule (now only a liveness bridge for older-build seats and a
+fork across the boundary, no longer an activation mechanism), and the
+re-signing of standing intents when a height turns free (a seat whose
+build loses the lock).
 
 ## 9. Interplay with the existing machinery
 
@@ -483,19 +526,16 @@ Where the wiring differs from §1-§13, and why.
   reordered free signatures); releasing on the first free signer still
   forks (2-of-5, seed 137).
 
-  **Residual (not closed): a straddled value.** With `|F|` below the
-  threshold a card whose voices are split between free and lock seats
-  can have m voices and still not seal: in 3-of-5, one free voice and
-  two lock voices give neither path three (`a_value_split_between_a_free_and_two_lock_voices_waits`).
-  B6 alone seals it. The height decides once a third lock seat approves,
-  another free seat appears, or another card is ready (the straddled one
-  then gets its own height, where every seat runs the lock). It is NOT
-  rare: right after a founding no seat knows the others' capability yet,
-  so the first approvals are free, the next ones lock intents. The vault
-  suite (2-of-4, a deposit proposed right after founding) stalls at
-  height 1 this way in every test that waits for a commit. It is why the
-  capability stays off by default: activation must become one agreed
-  height (a chain block names it, or the founding fixes it), not a race.
+  **The straddle, and why activation became chain state.** With
+  activation by capability, a card whose voices split between free and
+  lock seats could have m voices and still not seal (3-of-5: one free,
+  two lock; `a_value_split_between_a_free_and_two_lock_voices_waits` pins
+  the mechanism with a forced belief). It was not rare: right after a
+  founding no seat knew the others' capability, and the vault suite
+  (2-of-4) stalled at height 1 in 13 tests. Since §8 is chain state no
+  two honest seats of one lineage disagree on the mode, so the straddle
+  needs a seat on an older build; the release rule then turns such a
+  height free once the free seats leave the lock no quorum.
 - **Amnesia needs a marker (§6).** "No lock file = amnesia" would make
   every seat of an upgraded republic amnesiac at head+1 at once, and the
   height never decides. `prefs.chain_lock` is set after the first
@@ -551,13 +591,14 @@ Where the wiring differs from §1-§13, and why.
   seconds ago, led the height and the survivor waited a full grace:
   every recovery test timed out). A seal held by the restore gate is
   retried on the tick.
-- **Off by default** (`CHAIN_LOCK_DEFAULT_ON`): off, a seat writes no
-  lock file, keeps no free marks, counts no intents - B6 exactly.
+- **A build without the lock** (the test seam `__lock_cap_off(true)`)
+  writes no lock file, keeps no free marks, counts no intents - B6
+  exactly, which is what an older build does.
 - **A capability change is announced at once** (the mirror declaration is
   re-sent when this seat's lock capability flips), not on the next
   repeat.
 
-Not done: activation without a race (the straddle above). A 2-of-2
+Not done: a 2-of-2
 republic whose seat is amnesiac waits for that seat's floor to pass,
 which only another block moves (§13 Q4). The rejoiner's checklist now
 counts the survivors' intents.
