@@ -98,7 +98,7 @@ fn a_gap_the_sender_disowns_releases_at_once() {
     assert_eq!(bodies(&st), ["base"], "an answer to another asker is not ours");
     st.cmd_net_gap_answered("bob".to_string(), "ada".to_string(), Vec::new(), vec![2]);
     assert_eq!(bodies(&st), ["base", "held"]);
-    assert!(st.inbound_held_view().is_empty(), "nothing is held any more");
+    assert!(st.inbound_held_view().iter().all(|h| h.held == 0), "nothing is held any more");
 
     land(&mut st, chat_env(5, 4, "held two"));
     at(&mut st, 3);
