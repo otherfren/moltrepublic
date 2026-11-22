@@ -387,6 +387,11 @@ async fn a_bystander_that_slept_through_a_recovery_still_hears_the_rejoiner() {
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
     let (a, b, v, petra_phrase) = found_three(tmp.path(), &url).await;
+    // one survivor restores while the other sleeps: B6 only (under the
+    // lock a 2-of-3 restore needs both survivors' promises)
+    for w in [&a, &b, &v] {
+        w.__lock_cap_off(true);
+    }
 
     // petra's FIRST incarnation burns a SPAN of its seq space (seqs are log
     // positions, so a batch of own sends occupies a consecutive stretch),
@@ -437,6 +442,7 @@ async fn a_bystander_that_slept_through_a_recovery_still_hears_the_rejoiner() {
         .unwrap_or_else(|| panic!("the mint must succeed: {:?}", s.notice))
         .to_string();
     let c = engine(&tmp.path().join("rejoiner"));
+    c.__lock_cap_off(true);
     adopt_relay(&c, &url).await;
     c.execute(Command::RecoverStart {
         link,

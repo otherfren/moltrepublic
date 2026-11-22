@@ -293,9 +293,10 @@ async fn lossy_trio(lock: bool) -> Measured {
     let frames = db.count(Filter::new()).await.expect("count") - frames_before;
     let blocks = chain(&seats[0]).await.len() - height_before;
     eprintln!(
-        "lock={lock} fork_decisions={forks} dropped={dropped} secs={} frames={frames} blocks={blocks} frames_per_block={:.1}",
+        "lock={lock} fork_decisions={forks} dropped={dropped} secs={} frames={frames} blocks={blocks} frames_per_block={}.{}",
         started.elapsed().as_secs(),
-        frames as f64 / blocks.max(1) as f64
+        frames / blocks.max(1),
+        frames * 10 / blocks.max(1) % 10
     );
     assert!(dropped > 0, "the network was lossy");
     Measured { forks }

@@ -488,9 +488,13 @@ Where the wiring differs from §1-§13, and why.
   two lock voices give neither path three (`a_value_split_between_a_free_and_two_lock_voices_waits`).
   B6 alone seals it. The height decides once a third lock seat approves,
   another free seat appears, or another card is ready (the straddled one
-  then gets its own height, where every seat runs the lock). It needs an
-  activation race at that very height and n >= 4 with m >= 2; it is why
-  the capability stays off by default until decided.
+  then gets its own height, where every seat runs the lock). It is NOT
+  rare: right after a founding no seat knows the others' capability yet,
+  so the first approvals are free, the next ones lock intents. The vault
+  suite (2-of-4, a deposit proposed right after founding) stalls at
+  height 1 this way in every test that waits for a commit. It is why the
+  capability stays off by default: activation must become one agreed
+  height (a chain block names it, or the founding fixes it), not a race.
 - **Amnesia needs a marker (§6).** "No lock file = amnesia" would make
   every seat of an upgraded republic amnesiac at head+1 at once, and the
   height never decides. `prefs.chain_lock` is set after the first
@@ -527,21 +531,32 @@ Where the wiring differs from §1-§13, and why.
   opens its ballot `min(FALLBACK_ASK_SECS, grace)` later.
 - **Intents** are every `Approved` whose envelope author is the voter
   (signed or not); an unsigned one is kept in the own log (R12), and the
-  own intents are re-served with the open governance. The display count
-  is the larger of verified signatures and standing voices.
+  own intents are re-served with the open governance. At a locked height
+  the display count is the larger of verified signatures and standing
+  voices; at a free height it stays B6's verified count. A seat known to
+  have signed freely at the slot's height does not count toward making a
+  value ready (it can never accept).
 - **Lineage**: extended by one block when the head moves by one non-cut
   block, recomputed otherwise (relink, tie-break, reorg, cut, adopt).
 - **Status**: `chain_sync.lock_active`, `lock_ballot` (`round:leader`,
-  highest seen at head+1), `lock_wait` (`promises k/q`, `acceptances
-  k/need`, `leader <seat>`, `amnesia`). Logs: `lock=prepare|promised|
-  propose|accepted|nack|yield|retry|takeover_ask|takeover|sealed|
-  amnesia_floor|amnesia_over|unwritten height= ballot=`.
+  highest seen at head+1), `lock_wait` (`promises k/q missing <seats>`,
+  `acceptances k/need`, `leader <seat>`, `amnesia`). Logs: `lock=prepare|
+  promised|propose|accepted|nack|yield|retry|takeover_ask|takeover|
+  sealed|released|wait|amnesia_floor|amnesia_over|unwritten height=
+  ballot=`; a restore waiting for promises logs `lock=wait
+  reason=restore_needs_promises missing=` at INFO.
+- **The line leaves a restore's subject out** (§5 as designed; the
+  first wiring used B6's line unchanged, so the lost seat, still "heard"
+  seconds ago, led the height and the survivor waited a full grace:
+  every recovery test timed out). A seal held by the restore gate is
+  retried on the tick.
+- **Off by default** (`CHAIN_LOCK_DEFAULT_ON`): off, a seat writes no
+  lock file, keeps no free marks, counts no intents - B6 exactly.
 - **A capability change is announced at once** (the mirror declaration is
   re-sent when this seat's lock capability flips), not on the next
   repeat.
 
-Not done: the rejoiner's checklist (`recover_progress_for`, B4's file)
-still counts verified signatures, so under the lock the survivors'
-voices show only once the restore sealed. A 2-of-2 republic whose seat
-is amnesiac waits for that seat's floor to pass, which only another
-block moves (§13 Q4).
+Not done: activation without a race (the straddle above). A 2-of-2
+republic whose seat is amnesiac waits for that seat's floor to pass,
+which only another block moves (§13 Q4). The rejoiner's checklist now
+counts the survivors' intents.

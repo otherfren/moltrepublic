@@ -395,7 +395,7 @@ async fn a_consented_restore_under_the_lock_needs_both_survivors() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     loop {
         let s = status(&mara).await;
-        if s.chain_sync.lock_wait == "promises 1/2" {
+        if s.chain_sync.lock_wait == "promises 1/2 missing walter" {
             break;
         }
         assert!(tokio::time::Instant::now() < deadline, "no visible wait: {:?}", s.chain_sync);

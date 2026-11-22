@@ -201,7 +201,12 @@ impl State {
         // could inflate progress with junk a peer gossiped
         let signed = self.chain.pending_sigs.get(&id).map(|p| p.verified.len()).unwrap_or(0);
         // B7: at a locked height intents are the voices (§9)
-        signed.max(self.lock_voices(id))
+        let next = self.chain.head.as_ref().map_or(1, |h| h.height + 1);
+        if self.lock_mode(next) == LockMode::Lock {
+            signed.max(self.lock_voices(id))
+        } else {
+            signed
+        }
     }
 
     /// The replay guard every AUTOMATIC co-sign runs (a consented restore,

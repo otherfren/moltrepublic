@@ -921,6 +921,8 @@ impl State {
             return false;
         }
         if self.restore_seal_held(id, &change) {
+            // the tick retries it once the gate opens
+            self.chain.lock.learned = Some(Learned { slot: slot.clone(), sealable: s.clone(), since: 0, id, change });
             return false;
         }
         let Some(head) = self.chain.head.clone() else { return false };
@@ -1173,6 +1175,13 @@ impl State {
         self.lock_drive();
     }
 
+    /// B6's sealing line without a registered restore's subject (§5): its
+    /// old device is gone and must not lead.
+    fn lock_line(&self, height: u64) -> Vec<String> {
+        let subjects = self.lock_restore_subjects();
+        self.sealing_line(height).into_iter().filter(|m| !subjects.contains(m)).collect()
+    }
+
     /// Intents changed or the head moved: the leader proposes what became
     /// ready; the default leader opens a ballot when it holds none.
     pub(crate) fn lock_drive(&mut self) {
@@ -1185,7 +1194,7 @@ impl State {
         }
         let Some(next) = self.chain.head.as_ref().map(|h| h.height + 1) else { return };
         let backing_off = self.chain.lock.wait.as_ref().is_some_and(|w| w.height == next && w.attempt > 0);
-        if !backing_off && self.turn_holder(next).as_deref() == Some(self.member().as_str()) {
+        if !backing_off && self.lock_line(next).first() == Some(&self.member()) {
             self.lock_start(0);
         }
     }
@@ -1234,7 +1243,7 @@ impl State {
             return;
         }
         let me = self.member();
-        let line = self.sealing_line(slot.height);
+        let line = self.lock_line(slot.height);
         let rank = u64::try_from(line.iter().position(|m| *m == me).unwrap_or(line.len())).unwrap_or(u64::MAX);
         let ready = self.lock_choose(&slot, None).is_some();
         if rank > 0 && !ready {

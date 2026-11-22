@@ -1,12 +1,14 @@
 # The chain lock: wiring plan (release v0.1.1)
 
-**Status: PLAN (2026-11-21). Not in v0.1.0.** Design:
-`docs/chain/chain_lock_design.md`. On master, unused: the pure state
-machine `crates/molt-engine/src/chain/lock.rs` with its simulation. A
-first wiring attempt was stopped by a plan change and is kept as two WIP
-commits on the branch `wip/chain-lock-wiring` (base: the B5+B6 merge).
-That branch has the lock ON and a red suite: it is material, not a
-candidate.
+**Status: WIRED, OFF BY DEFAULT (2026-11-22).** Design:
+`docs/chain/chain_lock_design.md` (§14 "As built"). The wiring is on a
+worktree branch based on master after R10; the first attempt's two WIP
+commits (`wip/chain-lock-wiring`) are merged into it. The lock runs only
+where `CHAIN_LOCK_DEFAULT_ON` (`chain/lock_wire.rs`) or the test seam
+`__lock_cap_off(false)` turns it on; with it off a seat is B6 exactly.
+The default stays off because the release rule as first built had a
+liveness counterexample (§5) and the corrected rule leaves one residual
+that needs a product decision.
 
 ## 1. What the lock is for
 
@@ -17,7 +19,7 @@ different blocks at one height impossible among honest seats: a seat
 signs a position only for the value its leader announced, and a new
 leader must first learn what was accepted. Signed bytes do not change.
 
-## 2. What the first attempt built (branch only)
+## 2. What exists
 
 - Wire: five additive events (`LockPrepare`, `LockPromise`,
   `LockAccept`, `LockAccepted`, `LockNack`), not owed by the delivery
@@ -26,54 +28,89 @@ leader must first learn what was accepted. Signed bytes do not change.
 - Storage: a sealed `chain_lock.state` with its own key, written
   blocking and atomically, excluded from exports.
 - Engine (`chain/lock_wire.rs`): one gate for free signing, one for lock
-  acceptance; every acceptor change is persisted before its frame, and
+  acceptance; every acceptor change is persisted before its frame and
   rolled back when the write fails; intents instead of position
   signatures at locked heights; leader, takeover, forced value, seal;
-  lineage with a cache.
-- Position signing has exactly two production call sites, the free
-  approval and the lock acceptance; all paths (approve, proposer
-  co-sign, re-base, reorg re-sign, held approvals, cut, restore,
-  membership, wallet, vault) reach one of them through the mode gate.
-- Tests: 15 wiring unit tests and 7 integration tests green once, among
-  them three seats with bursts and loss at zero forks.
+  lineage with a cache; the corrected release rule.
+- Position signing has exactly two production call sites (§3).
 
-## 3. What the attempt found (design corrections)
+## 3. Position-signing paths (re-derived on the merged tree)
 
-| # | finding | resolution to carry over |
+Production `identity_sign` over `approval_bytes`: `governance.rs`
+`chain_sign_and_gossip_approval` (behind `lock_sign_freely`) and
+`lock_wire.rs` `lock_acceptor_accept` (behind `lock_step`). Everything
+else (founding roster, recovery test fixtures, vault deposits) signs
+other bytes or is test code. Callers of the first door:
+
+| path | entry | at a locked height |
 |---|---|---|
-| 1 | **Activation can stall a height.** Capabilities arrive at different times; one seat already promised while another still signs freely. Safe, but in 2-of-2 neither path can decide. About 30 tests stalled. | A release rule: when at least n - m seats are known to have signed freely at the height, a seat holding only promises trades them, durably, for a free mark. Proven by a seeded simulation (releasing on the first free signer forks). To REVIEW, and preferably replaced by deterministic activation: the lock starts at a height named by a chain block. |
-| 2 | "No lock file = amnesia" stalls every upgraded republic at once. | A marker in the workspace prefs says the lock ever ran here. Residual: an export from a pre-lock build imported after the lock ran. |
-| 3 | A forced cut must wait for all n promises before it is re-proposed. | Built. |
-| 4 | A promise must name the proposal id; the acceptor holds only a digest. | A digest -> (id, change) sidecar in the lock file. |
-| 5 | Intents are lost across snapshots. | Dumped with the engine state (additive). |
-| 6 | The reopen's re-base verdict dated cards by own signatures only. | Extended to intents; unverified. |
-| 7 | A takeover fired on an idle height. | A non-default seat's clock starts once it holds a sealable value. |
-| 8 | The rejoiner's progress list counts verified signatures only, so under the lock it shows voices after the seal. | Count intents in `recover_progress_for`. |
-| 9 | 2-of-2 with an amnesiac seat waits until a block passes its floor. | Open (design question 4). |
-| 10 | About twice the frames per block. | Measure against real relays before release. |
+| approve | `proposals.rs` `cmd_approve` | intent |
+| proposer's own approval | `proposals.rs` `propose_payload` | intent |
+| membership propose / restore auto-approve | `membership.rs` `propose_membership_with`, `auto_approve_restore` | intent; the accept re-checks consent, `restore_gate`, `sign_blocker` |
+| cut propose / co-sign | `checkpoint.rs` `cmd_propose_checkpoint`, `receive_checkpoint_proposal` | intent; the accept re-checks the hash |
+| re-base after a head move | `governance.rs` `rebase_pending_approvals` | nothing re-signed (intents stand) |
+| B5 held approvals after a heal | `governance.rs` `sign_held_approvals` | intent |
+| reorg re-sign | `sync.rs` `try_reorg` | intent |
+| wallet co-sign | `wallet.rs` `wallet_review`, `wallet_run.rs` `wallet_cosign_review` | intent; the accept re-checks |
+| release re-sign | `lock_wire.rs` `lock_try_release` | free (the mark is written by the release) |
+
+`sign_blocker` (B5 relay wait, evicted seat, chain behind) runs before
+the mode gate, so a held approval consumes no free mark. The verified
+park (`park_approval`) and relay approvals (`receive_approval_via`) only
+receive; lock signatures never enter `pending_sigs`, so no re-serve can
+turn one into an `Approved`.
 
 ## 4. Steps
 
-1. Rebase the branch onto master (B4 and the residual fixes touched the
-   recovery files and `molt-core`); make it compile.
-2. Advertise the capability only behind a default-off switch with a test
-   seam: master behaviour stays B6 and the whole suite is green. Merge
-   that state.
-3. Decide activation (finding 1): review the release rule's proof, or
-   build "active from the height a block names". Design first.
-4. With the lock on in tests: triage the recovery set (9 failing, see
-   finding 8) and the hard-kill re-base test (finding 6).
-5. Each integration test five times; record timings and fork counts
-   against B6 alone.
-6. Traffic measurement over Tor against a real relay (finding 10).
+1. Merge the WIP onto master: done (conflicts were additive: dump
+   fields, the seam beside `seal_first`, re-exports).
+2. Re-derive the signing paths: done (§3).
+3. Review the release rule: a counterexample found and corrected (§5).
+4. Suite with the lock off: green. With the lock on: see §6.
+5. Lossy trio and lock integration tests, five runs each: see §7.
+6. Traffic measurement over Tor against a real relay: open.
 7. Clippy 0 per crate; the GUI check through the live-preview chain;
-   `molt-net` and `molt-mcp` suites.
-8. Acceptance on the field copies: three seats on the lock under load,
-   and one v0.1.0 seat mixed in (no stall, no extra fork, the lock stays
-   off for those heights).
-9. Switch the default on; release v0.1.1.
+   `molt-net` and `molt-mcp` suites: see §6.
+8. Acceptance on field copies: open.
+9. Switch the default on: blocked on the decision in §5.
 
-Open product question for step 9: under the active lock a restore needs
-promises from n - m + 1 seats, so in 2-of-3 BOTH survivors must be
-reachable to bring the third back. One survivor alone can no longer do
-it; that case belongs to the rescue stage (analysis plan F-X1).
+## 5. The release rule (review result)
+
+The rule as first wired (promise-only state, `|F| >= n - m`) is safe but
+not live: 2-of-2 and 3-of-3 stall for good when the leader already
+accepted, 2-of-5 when two seats signed freely (phase 1 can never
+complete, the rule waits for three). Pinned at seeds 2, 1, 0. Corrected:
+release all lock state once `|F| >= min(m, n - m + a)`; proof in design
+§14; 16 shapes x 800 seeds with a liveness phase pass.
+
+Blocking the default: a card whose voices straddle a free seat and lock
+seats (3-of-5: one free, two lock) waits for more lock voices where B6
+would seal (design §14, pinned). Not rare: after a founding the first
+approvals are free (no capability known yet), the next ones intents;
+the vault suite (2-of-4) stalls at height 1 in every test that waits
+for a commit. Proposed correction: replace the race by one agreed
+activation height - the founding fixes it for a new republic (every
+founder runs the build), a chain block names it for an existing one -
+so no honest seat signs freely at a height another locks. The release
+rule then only serves a seat restored onto an older build.
+
+## 6. Suite with the lock on (the default flipped locally)
+
+`molt-engine`: 1 316 passed, 32 failed before the fixes below.
+
+| failures | cause | fix |
+|---|---|---|
+| 16 `nostr_recovery` | the restore's subject led the height (B6's line), the survivor waited a full grace | the lock line leaves it out; held restore seals retried |
+| 1 of them, `a_bystander_that_slept_through_a_recovery_still_hears_the_rejoiner` | one survivor restores while the other sleeps: impossible under the lock by decision | runs on the capability-off seam |
+| 13 vault (`vault_complaints` 6, `vault_deposit` 1, `vault_grant` 4, `vault_late_enable` 1, `vault_recovery` 1) | the straddle at height 1 (§5) | none: blocks the default |
+| `a_reorg_keeps_the_approvals_it_releases_from_the_park` | intents displayed at a free height | intents count only at locked heights |
+| `a_consented_restore_under_the_lock_needs_both_survivors` | the wait text names the missing seat now | expectation updated |
+
+After the fixes: `nostr_recovery` 33/33; the 13 vault failures remain.
+`checkpoint_under_load` (red in the first attempt) passes with the lock
+on.
+
+Also open: under the active lock a restore needs promises from
+n - m + 1 seats, so in 2-of-3 BOTH survivors must be reachable to bring
+the third back (the status shows `promises 1/2 missing <seat>`, the log
+`lock=wait reason=restore_needs_promises`).
