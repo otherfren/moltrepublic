@@ -253,7 +253,6 @@ impl State {
     /// read it. A receipt stamped within the catch-up grace after this
     /// open may be a replayed backlog frame of a lost device, so there only
     /// the frame's own stamp counts; otherwise the later of the two.
-    #[allow(dead_code)] // restore_gate's reading; that function is wired separately
     pub(crate) fn restore_heard_at(&self, member: &str) -> u64 {
         const CATCH_UP_GRACE_SECS: u64 = 120;
         let framed = self.recovery.frame_heard.get(member).copied().unwrap_or(molt_core::MemberInfo::NEVER);

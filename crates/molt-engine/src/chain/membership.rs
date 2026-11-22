@@ -555,7 +555,7 @@ impl State {
         let active = if member == self.member() {
             !self.delivery.evicted
         } else {
-            let seen = self.member_last_seen(member);
+            let seen = self.restore_heard_at(member);
             seen != molt_core::MemberInfo::NEVER && self.presence_now().saturating_sub(seen) < window
         };
         if active {
