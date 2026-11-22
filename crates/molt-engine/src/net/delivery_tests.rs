@@ -404,6 +404,7 @@ fn intents_wait_behind_a_gap_and_lock_frames_never_do() {
             need: 2,
             id: ProposalId(1),
             change: None,
+            forced: false,
         },
         WorkspaceEvent::LockAccepted {
             height: 1,

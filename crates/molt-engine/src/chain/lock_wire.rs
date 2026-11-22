@@ -75,6 +75,8 @@ struct Run {
     ids: BTreeMap<String, (u64, Option<ChainChange>)>,
     /// The proposed value's id and wire change.
     value: Option<(u64, Option<ChainChange>)>,
+    /// Phase 1 forced the proposed value.
+    forced: bool,
     started: u64,
     sent_at: u64,
     attempt: u32,
@@ -132,7 +134,7 @@ pub(crate) struct LockRuntime {
     /// An `Accept` this seat withheld at head+1 (a restore settling, an
     /// intent not yet cast): retried on the tick, not only on the
     /// leader's next resend - the leader's own acceptance has no resend.
-    retry_accept: Option<(Slot, Ballot, Value, u64, Option<ChainChange>)>,
+    retry_accept: Option<(Slot, Ballot, Value, u64, Option<ChainChange>, bool)>,
     /// Seats seen with lock state at a height (a promise, an acceptance,
     /// a leader's frame): never counted free there - a seat that later
     /// signs freely at that height was downgraded, not free (S2).
@@ -945,6 +947,7 @@ impl State {
             promised: BTreeSet::from([me.clone()]),
             ids: BTreeMap::new(),
             value: None,
+            forced: false,
             started: now,
             sent_at: now,
             attempt,
@@ -1044,8 +1047,10 @@ impl State {
         let Some(run) = self.chain.lock.run.as_mut() else { return };
         let Some(value) = run.leader.propose(own) else { return };
         run.value = Some((id, change.clone()));
+        run.forced = forced.is_some();
         run.sent_at = now;
-        tracing::info!(height = slot.height, ballot = %fmt_ballot(&ballot), id, forced = forced.is_some(), "lock=propose");
+        let is_forced = run.forced;
+        tracing::info!(height = slot.height, ballot = %fmt_ballot(&ballot), id, forced = is_forced, "lock=propose");
         self.lock_send(WorkspaceEvent::LockAccept {
             height: slot.height,
             base: slot.base.clone(),
@@ -1054,19 +1059,61 @@ impl State {
             need: need_u64(&value),
             id: ProposalId(id),
             change: change.clone(),
+            forced: is_forced,
         });
         if self.lock_seam(&self.lock_seams.stop_after_accept) {
             self.lock_seams.stopped.store(true, SeqCst);
             tracing::warn!(height = slot.height, "lock=stopped seam=stop_after_accept");
             return;
         }
-        self.lock_acceptor_accept(&slot, &ballot, &value, id, change);
+        self.lock_acceptor_accept(&slot, &ballot, &value, id, change, is_forced);
+    }
+
+    /// The approver rule (T1): `id` was withdrawn or retired here, and this
+    /// seat's intent for it stood - a leader forced to it may complete it.
+    /// Never for a seat that declined (a decline drops the intent).
+    fn lock_forced_approver(&self, id: u64) -> bool {
+        let me = self.member();
+        let Some(p) = self.proposals.get(&id) else { return false };
+        (p.withdrawn || p.state != ProposalState::Proposed)
+            && !p.decliners.contains(&me)
+            && self.chain.lock.intents.get(&id).is_some_and(|i| i.contains(&me))
+    }
+
+    /// The gates a forced value still passes: the ones without which the
+    /// block would not verify or apply - a valid restore consent at the
+    /// height, a cut of this height with this seat's state hash. The
+    /// withdrawal, the settle, the seat-still-active gate and the local
+    /// checks do not hold here.
+    fn lock_forced_invalid(&self, change: &ChainChange, height: u64) -> Option<String> {
+        if self.identity_sk.is_none() {
+            return Some("no signing key".into());
+        }
+        if matches!(change, ChainChange::Membership { op: MembershipOp::Restored, consent: Some(_), .. }) {
+            if let Err(why) = self.restore_consent_at(change, height) {
+                return Some(why.to_string());
+            }
+        }
+        if let Some((upto, hash, kind)) = CutKind::of(change) {
+            if upto + 1 != height || self.own_cut_hash(upto, kind).ok().as_deref() != Some(hash) {
+                return Some("cut mismatch".into());
+            }
+        }
+        None
     }
 
     /// **Phase 2b, the second door**: accept `value` at `ballot` only for a
     /// change this seat approves, at or above its promise, durable before
     /// the signature leaves.
-    fn lock_acceptor_accept(&mut self, slot: &Slot, ballot: &Ballot, value: &Value, id: u64, wire: Option<ChainChange>) {
+    fn lock_acceptor_accept(
+        &mut self,
+        slot: &Slot,
+        ballot: &Ballot,
+        value: &Value,
+        id: u64,
+        wire: Option<ChainChange>,
+        forced: bool,
+    ) {
         if self.lock_slot().as_ref() != Some(slot)
             || self.lock_amnesiac_at(slot.height)
             || self.chain.lock.passive.contains(&slot.height)
@@ -1082,11 +1129,17 @@ impl State {
         // W1: a value this seat already accepted may be chosen; accepting it
         // again is a promise kept, not a new vote - no approval gate applies
         let kept = self.chain.lock.acceptor.holds(slot, value);
+        // T1: a forced value this seat approved before it was withdrawn
+        let approver = forced && !kept && self.lock_forced_approver(id);
         let stored = || self.chain.lock.values.get(&value.digest).and_then(|(_, c)| c.clone());
-        let Some(change) = self.proposal_change(id).or_else(|| if kept { stored() } else { None }) else {
+        let Some(change) = self
+            .proposal_change(id)
+            .or_else(|| if kept { stored() } else { None })
+            .or_else(|| if approver { wire.clone() } else { None })
+        else {
             tracing::debug!(height = slot.height, id, "lock=withheld reason=unknown");
             // W9: the card may still be on its way
-            self.chain.lock.retry_accept = Some((slot.clone(), ballot.clone(), value.clone(), id, wire));
+            self.chain.lock.retry_accept = Some((slot.clone(), ballot.clone(), value.clone(), id, wire, forced));
             return;
         };
         if self.lock_value(slot.height, &change).as_ref() != Some(value) {
@@ -1098,6 +1151,8 @@ impl State {
         // right behind the card wins here too
         let withheld = if kept {
             None
+        } else if approver {
+            self.lock_forced_invalid(&change, slot.height)
         } else if matches!(change, ChainChange::Membership { op: MembershipOp::Restored, .. })
             && self.restore_settling(id)
         {
@@ -1107,7 +1162,8 @@ impl State {
         };
         if let Some(why) = withheld {
             tracing::debug!(height = slot.height, id, reason = %why, "lock=withheld");
-            self.chain.lock.retry_accept = Some((slot.clone(), ballot.clone(), value.clone(), id, wire_change(&change)));
+            self.chain.lock.retry_accept =
+                Some((slot.clone(), ballot.clone(), value.clone(), id, wire_change(&change), forced));
             return;
         }
         if self.chain.lock.retry_accept.as_ref().is_some_and(|r| r.0 == *slot) {
@@ -1328,6 +1384,7 @@ impl State {
         need: u64,
         id: u64,
         change: Option<ChainChange>,
+        forced: bool,
     ) {
         if !self.lock_listens() || !self.lock_rostered(from) || from == self.member() {
             return;
@@ -1337,7 +1394,7 @@ impl State {
         self.lock_note_accepting(height, from);
         self.lock_saw(&slot, &ballot);
         let value = Value { digest, need: usize::try_from(need).unwrap_or(usize::MAX) };
-        self.lock_acceptor_accept(&slot, &ballot, &value, id, change);
+        self.lock_acceptor_accept(&slot, &ballot, &value, id, change, forced);
     }
 
     #[allow(clippy::too_many_arguments)] // one wire frame's fields
@@ -1535,9 +1592,9 @@ impl State {
         if self.lock_mode(slot.height) != LockMode::Lock || self.lock_amnesiac_at(slot.height) {
             return;
         }
-        if let Some((s, b, v, id, change)) = self.chain.lock.retry_accept.take() {
+        if let Some((s, b, v, id, change, forced)) = self.chain.lock.retry_accept.take() {
             if s == slot {
-                self.lock_acceptor_accept(&s, &b, &v, id, change);
+                self.lock_acceptor_accept(&s, &b, &v, id, change, forced);
             }
         }
         let now = self.presence_now();
@@ -1653,6 +1710,7 @@ impl State {
         run.sent_at = now;
         run.resends = run.resends.saturating_add(1);
         let (slot, ballot) = (run.leader.slot.clone(), run.leader.ballot.clone());
+        let forced = run.forced;
         let body = match (run.leader.proposed().cloned(), run.value.clone()) {
             (Some(v), Some((id, change))) => WorkspaceEvent::LockAccept {
                 height: slot.height,
@@ -1662,6 +1720,7 @@ impl State {
                 digest: v.digest,
                 id: ProposalId(id),
                 change,
+                forced,
             },
             // phase 1 (only while busy, see the tick): a missing promise may
             // still free a forced value or complete a cut's hearing (S3, S4)

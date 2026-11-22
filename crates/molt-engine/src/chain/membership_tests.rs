@@ -2271,6 +2271,7 @@ fn under_the_lock_a_restore_is_accepted_only_after_its_settle() {
                 need: u64::try_from(value.need).expect("small"),
                 id: ProposalId(id),
                 change: Some(change.clone()),
+                forced: false,
             },
         );
     };
@@ -2335,6 +2336,7 @@ fn a_chosen_restore_seals_after_its_withdrawal() {
             need: u64::try_from(value.need).expect("small"),
             id: ProposalId(id),
             change: Some(change.clone()),
+            forced: false,
         },
     );
     assert!(

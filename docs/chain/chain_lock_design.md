@@ -692,15 +692,27 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   `sealed-after-withdrawal:<id>`. Once the card is retired the leader
   cannot resolve a `LockAccepted` for it, so only a seat holding the
   value seals it - slower, not a stall.
-- **T1, the price of the per-value excusal.** A lost seat counts as a
-  voice that may hold any ordinary value at the slot. A value fewer than
-  `need` survivors hold, that the others then refuse (withdrawn), stays
-  forced while the lost seat is silent: the height halts. Nothing
-  unsticks it automatically - not the restore, which needs that height.
-  The simulation measures it (with a withdrawal every ~30 steps: 4-28 %
-  of runs with a lost seat; none without one). Before T1 the lost seat
-  counted as free and the same schedule could fork once its device came
-  back; safety wins. Open for a decision.
+- **T1, the approver rule.** A lost seat counts as a voice that may hold
+  any ordinary value at the slot, so a value fewer than `need` survivors
+  hold can stay forced while the lost seat is silent. A seat whose intent
+  for a card stood accepts it when a leader is FORCED to it (`LockAccept
+  { forced: true }`), although the card was withdrawn since; a leader
+  only proposes a card with m intents, so the forced value can always
+  complete. A seat that never approved, or declined, does not. On the
+  forced path only the validity gates hold (a restore consent valid at
+  the height, a cut of this height with this seat's state hash, a
+  signing key); the withdrawal, the settle, the seat-still-active gate
+  and the local vault/wallet checks do not. **A withdrawal under the
+  lock means "do not choose this if it is not yet under way"**; once a
+  leader proposed it, it may still seal and is reported
+  (`sealed-after-withdrawal`, for a restore
+  `restore-sealed-after-withdrawal` with no re-key). Residual: a forced
+  value that fails a validity gate on every approver (a cut whose hash
+  no longer matches, a consent out of its window) stays forced - S1 has
+  no "cannot accept" answer that the hearing would count. Simulation:
+  12 configs x 1,500 seeds with lost seats coming back and withdrawals,
+  no fork, no undecided slot; without the rule 4-28 % of the runs with a
+  lost seat halt (`simulation_with_withdrawals_decides_every_slot`).
 - **R8.** Intents that outrun their card survive a head move (up to
   1,024 unknown ids, oldest first out); a retired card's go.
 - **W2/R5.** The leader skips a card the chain-wide gates refuse now

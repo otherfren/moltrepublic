@@ -1886,7 +1886,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "withdraw",
             command: "withdraw",
             scope: Scope::Seat,
-            description: "Pull back a proposal THIS seat proposed (proposer only - anyone else is refused): it turns terminal on every node without forging any vote, and the card reads \"pulled back\". Only works while the vote is still pending. Pass `note` to post the reason into the proposal's discussion in the same call: it lands BEFORE the retraction. The reply is the record, like approve/decline.",
+            description: "Pull back a proposal THIS seat proposed (proposer only - anyone else is refused): it turns terminal on every node without forging any vote, and the card reads \"pulled back\". Only works while the vote is still pending. Under the chain lock a card already under way at its height may still seal: its approvers complete it, the record reads applied and withdrawn, and this seat is told. Pass `note` to post the reason into the proposal's discussion in the same call: it lands BEFORE the retraction. The reply is the record, like approve/decline.",
             schema: || {
                 let mut v = json!({
                     "type": "object",

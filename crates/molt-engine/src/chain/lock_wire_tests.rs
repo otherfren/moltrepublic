@@ -280,7 +280,7 @@ fn a_restarted_seat_keeps_its_promise() {
         &mut again,
         "dora",
         2,
-        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 4, digest, need: 2, id: ProposalId(id), change: None },
+        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 4, digest, need: 2, id: ProposalId(id), change: None, forced: false },
     );
     assert_eq!(sent_kinds(&again), vec!["nack", "nack"], "the lower ballot is refused twice");
 }
@@ -843,6 +843,7 @@ fn an_accepted_value_is_accepted_again_after_a_withdraw_or_decline() {
                     need: 2,
                     id: ProposalId(id),
                     change: None,
+                    forced: false,
                 },
             );
         };
@@ -1373,4 +1374,66 @@ fn stale_cards_take_turns() {
         }
     }
     assert_eq!(proposed, vec![Some(first), Some(second), Some(first), Some(second)]);
+}
+
+/// T1's residual, closed by the approver rule: walter is lost; mara alone
+/// accepted dora's card w, then dora withdrew it. w is forced (walter may
+/// hold it). A seat whose intent for w stood accepts it when the leader
+/// is forced to it, so the height decides: w seals and its proposer is
+/// told. A seat that never approved w does not accept it.
+#[test]
+fn a_forced_withdrawn_value_completes_with_its_approvers() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    hear(&mut dora, T, &["dora", "mara"]);
+    let w = note(&mut dora, "w");
+    dora.lock_note_intent(w, "mara");
+    let change = dora.proposal_change(w).expect("w");
+    let value = dora.lock_value(1, &change).expect("value");
+    dora.cmd_withdraw(ProposalId(w), None).expect("withdrawn");
+    dora.chain.lock.outbox.clear();
+    dora.lock_start(0);
+    let (base, round) = {
+        let run = dora.chain.lock.run.as_ref().expect("dora leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    let held = molt_core::chain::LockAcceptedValue {
+        round: 1,
+        leader: "walter".into(),
+        digest: value.digest.clone(),
+        need: u64::try_from(value.need).expect("small"),
+        id: w,
+        change: None,
+    };
+    wire(&mut dora, "mara", 1, WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round, leader: "dora".into(), accepted: Some(held) });
+    // S3: one interval for a fuller hearing, walter stays silent
+    dora.presence.clock_override = Some(T + 60);
+    hear(&mut dora, T + 60, &["dora", "mara"]);
+    dora.lock_tick();
+    let forced_out = dora.chain.lock.outbox.iter().any(|e| matches!(&e.body, WorkspaceEvent::LockAccept { forced: true, digest, .. } if *digest == value.digest));
+    assert!(forced_out, "w proposed as forced: {:?}", sent_kinds(&dora));
+    assert!(sent_kinds(&dora).contains(&"accepted"), "dora's intent stood: she accepts the withdrawn w");
+    let sig = identity_sign(b.key("mara"), &approval_bytes(&b.republic_id, 1, &change));
+    wire(&mut dora, "mara", 2, WorkspaceEvent::LockAccepted { height: 1, base: base.clone(), round, leader: "dora".into(), digest: value.digest.clone(), sig });
+    assert_eq!(dora.chain.head.as_ref().map(|h| h.height), Some(1), "the height decided");
+    assert_eq!(dora.session.notice, format!("sealed-after-withdrawal:{w}"));
+
+    // walter never approved w: a forced Accept does not make him accept it
+    let mut walter = seat("walter", &b);
+    let mut x = seat("dora", &b);
+    let w2 = note(&mut x, "w");
+    let change2 = x.proposal_change(w2).expect("w");
+    let ChainChange::Applied { payload, .. } = change2.clone() else { panic!("applied") };
+    assert!(walter.receive_proposed(w2, Surface::Memory, payload, "dora"));
+    wire(&mut walter, "dora", 1, WorkspaceEvent::Withdrawn { id: ProposalId(w2), by: "dora".into() });
+    let slot = walter.lock_slot().expect("slot");
+    let v2 = walter.lock_value(1, &change2).expect("value");
+    walter.chain.lock.outbox.clear();
+    wire(
+        &mut walter,
+        "dora",
+        2,
+        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 5, digest: v2.digest, need: 2, id: ProposalId(w2), change: None, forced: true },
+    );
+    assert!(!sent_kinds(&walter).contains(&"accepted"), "no intent, no acceptance: {:?}", sent_kinds(&walter));
 }
