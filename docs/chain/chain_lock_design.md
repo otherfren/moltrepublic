@@ -659,9 +659,11 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   chose alive), then goes out anyway so the holders of a chosen value
   complete it. A registered restore's subject counts as heard holding
   nothing (§4.2).
-- **S4/W4, one rule for phase 1.** The `Prepare` is re-sent, ready or
-  not, at a doubling interval to 600 s (reset by a new promise); every
-  run goes stale after its backoff.
+- **S4/W4, one rule for phase 1.** A busy run (promises missing, a forced
+  value waiting, a value out) re-sends at a doubling interval to 600 s
+  (reset by a new promise) and goes stale after its backoff. An idle
+  leader - promises in hand, nothing to propose - sends nothing (the
+  first version of this rule did, and `nostr_outbox_quiet` caught it).
 - **S5.** Seats known free are heard as free; promisers and free seats
   stay disjoint.
 - **W2.** The leader skips a card the gates refuse now (relay wait, a

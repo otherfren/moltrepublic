@@ -182,6 +182,15 @@ human vote); it now waits for the announcements, as the recovery tests do.
 | lock | 0, 0, 0, 0, 0 | 21, 94, 5, 36, 80 | 16.9, 21.6, 16.7, 17.8, 19.5 |
 | B6 | 0, 0, 0, 0, 0 | 92, 90, 90, 90, 89 | 49.7, 48.0, 49.5, 53.0, 50.3 |
 
+After the review round and the master merges (`7d1055ec`), five more runs:
+
+| | fork decisions | seconds | frames per block |
+|---|---|---|---|
+| lock | 0, 0, 0, 0, 0 | 50, 47, 38, 35, 50 | 20.4, 22.5, 20.3, 19.2, 19.5 |
+| B6 | 0, 0, 0, 0, 0 | 90, 90, 90, 89, 92 | 55.0, 56.0, 52.5, 57.4, 53.8 |
+
+`chain_lock.rs` there: 8/8 in five of five runs, 40-48 s.
+
 `chain_lock.rs` (8 tests, in parallel - each founds its own republic on
 its own relay): 8/8 in five of five runs, 39-45 s per run (before: 512-600
 s, two tests sitting out 120 s and 240 s deadlines). The keystone: 0 fork
