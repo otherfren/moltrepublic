@@ -114,3 +114,29 @@ Also open: under the active lock a restore needs promises from
 n - m + 1 seats, so in 2-of-3 BOTH survivors must be reachable to bring
 the third back (the status shows `promises 1/2 missing <seat>`, the log
 `lock=wait reason=restore_needs_promises`).
+
+## 7. Measured (2026-11-22, loopback relay, 4-core box shared with a release build)
+
+`chain_convergence.rs`, 2-of-3, two bursts of nine pages, 10 % inbound
+loss, five runs each. Frames = every event the relay stored during the
+bursts (votes, lock frames, blocks, acks, presence), per sealed block.
+
+| | fork decisions | seconds | frames per block |
+|---|---|---|---|
+| lock | 0, 0, 0, 0, 0 | 93, 93, 78, 74, 83 | 24.0, 24.2, 23.3, 22.8, 23.7 |
+| B6 | 0, 0, 0, 0, 0 | 111, 112, 110, 114, 123 | 55.5, 52.3, 50.8, 50.5, 50.4 |
+
+The first attempt's estimate (about twice the frames) does not hold on
+this relay: the lock sends fewer than half, because B6's re-signed
+approvals and re-serves after every head move disappear. Not yet
+measured over Tor against a real relay.
+
+`chain_lock.rs` (7 tests), five runs: 7/7 in four; in one run, under
+load, `a_capability_that_flips_mid_run_neither_stalls_nor_forks` found no
+common head within 300 s. Cause: approvals cast as unsigned intents while
+the lock ran were never signed when the height turned free (a B6 re-base
+re-signs collected signatures only). Fixed: the tick signs standing
+intents freely once per height that turns free; the flip test then
+passed 12 of 12 under the same load (1 of 8 failed before).
+The keystone (bursts, loss) had 0 fork decisions in all five runs,
+63-85 s.

@@ -658,6 +658,29 @@ fn a_value_split_between_a_free_and_two_lock_voices_waits() {
     }
 }
 
+/// A capability goes away while an approval is only an intent: once
+/// head+1 is free, the tick signs the standing intent freely (a B6
+/// re-base re-signs collected signatures only), on both sides.
+#[test]
+fn an_intent_is_signed_freely_once_the_height_goes_free() {
+    let b = Builder::new(&SEATS, 2);
+    let mut walter = seat("walter", &b);
+    let id = note(&mut walter, "one");
+    assert_eq!(own_sigs(&walter), 0, "an intent first");
+    walter.chain.lock.all_capable = Some(false);
+    walter.lock_tick();
+    assert_eq!(own_sigs(&walter), 1, "signed freely once the height is free");
+    walter.lock_tick();
+    assert_eq!(sent_kinds(&walter).iter().filter(|k| **k == "signed").count(), 1, "once");
+    // the seat that itself lost the capability does the same
+    let mut mara = seat("mara", &b);
+    let id2 = note(&mut mara, "two");
+    mara.lock_force(false);
+    mara.lock_tick();
+    assert_eq!(own_sigs(&mara), 1);
+    let _ = (id, id2);
+}
+
 /// Deliver each seat's recorded frames to the other.
 fn swap(seats: &mut [crate::State; 2]) {
     for from in 0..2 {

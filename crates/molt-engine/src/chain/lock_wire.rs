@@ -121,6 +121,8 @@ pub(crate) struct LockRuntime {
     lineage: Option<(u64, String, [u8; 32])>,
     /// The capability state this seat last announced.
     pub(crate) announced: Option<bool>,
+    /// The head+1 whose standing intents were last re-expressed freely.
+    freed_at: Option<u64>,
     /// Seats known to have signed freely at a height (a verified free
     /// signature or a free `Nack`).
     free_seen: BTreeMap<u64, BTreeSet<String>>,
@@ -402,6 +404,30 @@ impl State {
             .filter(|id| !self.own_signature_stands_freely(*id, height))
             .collect();
         for id in standing {
+            self.chain_sign_and_gossip_approval(id);
+        }
+    }
+
+    /// `height` went free while this seat's approvals are unsigned intents
+    /// (a capability changed): sign them freely, once per height. A B6
+    /// re-base re-signs only collected signatures, never an intent.
+    fn lock_free_standing_intents(&mut self, height: u64) {
+        if self.chain.lock.freed_at == Some(height) || self.lock_mode(height) != LockMode::Free {
+            return;
+        }
+        self.chain.lock.freed_at = Some(height);
+        let intents: Vec<u64> = self
+            .chain
+            .lock
+            .intent_sent
+            .iter()
+            .copied()
+            .filter(|id| self.chain.own_approvals.contains(id))
+            .filter(|id| self.proposals.get(id).map_or(true, |p| p.state == ProposalState::Proposed))
+            .filter(|id| !self.own_signature_stands_freely(*id, height))
+            .collect();
+        for id in intents {
+            tracing::debug!(height, id, "lock=intent_signed_freely");
             self.chain_sign_and_gossip_approval(id);
         }
     }
@@ -1213,6 +1239,12 @@ impl State {
     /// The delivery tick: retransmit, retry a stalled ballot, seal what
     /// another leader left, and take over by rank (§5).
     pub(crate) fn lock_tick(&mut self) {
+        if !self.is_chain_governed() {
+            return;
+        }
+        if let Some(next) = self.chain.head.as_ref().map(|h| h.height + 1) {
+            self.lock_free_standing_intents(next);
+        }
         if !self.lock_listens() {
             return;
         }
