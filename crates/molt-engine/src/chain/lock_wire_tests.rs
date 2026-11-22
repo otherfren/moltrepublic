@@ -694,11 +694,13 @@ fn the_chain_decides_where_the_lock_runs() {
     use molt_core::chain::CHAIN_LOCK_FEATURE;
     let founded = Builder::new_with_features(&SEATS, 2, &[CHAIN_LOCK_FEATURE, "memory"], false);
     let st = genesis_seat("mara", &founded, founded.blocks.clone());
+    st.lock_force(true);
     assert_eq!((st.lock_mode(1), st.lock_since()), (LockMode::Lock, 1), "locked from the founding");
 
     let mut old = Builder::new(&SEATS, 2);
     old.commit_applied(1, &["dora", "mara"]);
     let mut full = genesis_seat("mara", &old, old.blocks.clone());
+    full.lock_force(true);
     assert_eq!((full.lock_mode(2), full.lock_since()), (LockMode::Free, 0), "B6 before the vote");
     old.commit_org(5, "set_features", CHAIN_LOCK_FEATURE, &["dora", "mara"]);
     full.receive_block_from("dora", old.blocks[2].clone());
@@ -708,6 +710,7 @@ fn the_chain_decides_where_the_lock_runs() {
     let state = checkpoint_state(&old.blocks, 2).expect("state at the cut");
     old.commit(ChainChange::Checkpoint { upto: 2, state_hash: checkpoint_state_hash(&state) }, &SEATS);
     let mut late = genesis_seat("walter", &old, old.blocks[..1].to_vec());
+    late.lock_force(true);
     late.chain.pending_blocks.insert(3, old.blocks[3].clone());
     late.receive_checkpoint_blob(state);
     assert_eq!(late.chain.head.as_ref().expect("head").height, 3, "anchored on the cut");
@@ -1463,4 +1466,44 @@ fn a_marker_the_chain_does_not_back_is_cleared_at_open() {
     mara.chain.lock.outbox.clear();
     wire(&mut mara, "dora", 1, WorkspaceEvent::LockPrepare { height: 1, base, round: 1 });
     assert!(sent_kinds(&mara).contains(&"promise"), "{:?}", sent_kinds(&mara));
+}
+
+/// The switch off (the release build): lock frames from a peer change
+/// nothing - no promise, no state, no file - and the enabling vote is
+/// refused at both doors with the reason.
+#[test]
+fn a_dark_build_ignores_lock_frames_and_refuses_the_vote() {
+    use molt_core::chain::CHAIN_LOCK_FEATURE;
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = genesis_seat("mara", &b, b.blocks.clone());
+    assert!(!mara.lock_cap_on(), "dark by default");
+    let base = mara.lock_slot().expect("slot").base;
+    wire(&mut mara, "dora", 1, WorkspaceEvent::LockPrepare { height: 1, base, round: 1 });
+    assert!(sent_kinds(&mara).is_empty(), "nothing sent");
+    assert!(mara.chain.lock.acceptor.may_sign_freely(1), "no lock state");
+    assert!(mara.chain.lock.disk.is_none(), "nothing written");
+    let enable = json!({ "op": "set_features", "value": format!("{CHAIN_LOCK_FEATURE} memory") });
+    let err = mara.cmd_propose(Surface::Organization, enable.clone()).expect_err("refused at propose");
+    assert!(err.to_string().contains(LOCK_NOT_AVAILABLE), "{err}");
+    let mut dora = genesis_seat("dora", &b, b.blocks.clone());
+    dora.lock_force(true);
+    dora.chain.lock.caps_override = Some(true);
+    let id = propose(&mut dora, Surface::Organization, enable);
+    let ChainChange::Applied { payload, .. } = dora.proposal_change(id).expect("change") else { panic!("org") };
+    assert!(mara.receive_proposed(id, Surface::Organization, payload, "dora"));
+    assert_eq!(mara.sign_blocker(id).as_deref(), Some(LOCK_NOT_AVAILABLE), "refused at approve");
+}
+
+/// The switch off on a chain that carries the key (a dev build founded
+/// it): this build signs nothing there and says why; it still reads.
+#[test]
+fn a_dark_build_signs_nothing_on_a_locked_chain() {
+    use molt_core::chain::CHAIN_LOCK_FEATURE;
+    let b = Builder::new_with_features(&SEATS, 2, &[CHAIN_LOCK_FEATURE, "memory"], false);
+    let mut mara = genesis_seat("mara", &b, b.blocks.clone());
+    let id = note(&mut mara, "x");
+    assert_eq!(mara.sign_blocker(id).as_deref(), Some(LOCK_CHAIN_UNSUPPORTED));
+    assert_eq!(own_sigs(&mara), 0, "no free signature beside the lock");
+    assert!(sent_kinds(&mara).is_empty(), "no lock frame: {:?}", sent_kinds(&mara));
+    assert_eq!(mara.lock_status().2, LOCK_CHAIN_UNSUPPORTED, "the status says why");
 }

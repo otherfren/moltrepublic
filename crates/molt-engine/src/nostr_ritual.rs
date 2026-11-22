@@ -85,6 +85,8 @@ pub(crate) struct JoinCtx {
     /// The recovery phrase — wiped on drop (review R9).
     pub phrase: zeroize::Zeroizing<String>,
     pub generation: u64,
+    /// This build runs the chain lock: the JoinRequest declares it.
+    pub lock: bool,
 }
 
 /// How many `Committed` frames the rejoiner buffers while it waits for a
@@ -2017,7 +2019,10 @@ async fn member_join(
     let dial_relays = ctx.dial_relays;
 
     // the joiner's identity — derived exactly as the ritual anchors it
-    let seat = MemberSeat::derive(h.seat, &h.ticket, &ctx.phrase)?;
+    let mut seat = MemberSeat::derive(h.seat, &h.ticket, &ctx.phrase)?;
+    if ctx.lock {
+        seat.caps.push(molt_core::chain::CHAIN_LOCK_CAP.to_string());
+    }
 
     // endpoint + inbox BEFORE announcing (subscribe-before-advertise)
     let net = RitualNet::new(dialer.clone(), dial_relays.clone(), &seat.nostr_sk)

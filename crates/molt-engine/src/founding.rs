@@ -1730,7 +1730,9 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     ratify: Option<Ratifier>,
     cancel: Option<mpsc::Receiver<()>>,
 ) -> Result<JoinOutcome, String> {
-    let seat = MemberSeat::derive(m.seat, &m.ticket, &phrase)?;
+    let mut seat = MemberSeat::derive(m.seat, &m.ticket, &phrase)?;
+    // the loopback twin (tests) runs this build: it declares the lock
+    seat.caps.push(molt_core::chain::CHAIN_LOCK_CAP.to_string());
     // subscribe BEFORE the JoinRequest advertises the queue
     let reply_q = m.transport.create_queue().await.map_err(|e| e.to_string())?;
     let reply_wrap = WrapKey::fresh().map_err(|e| e.to_string())?;
@@ -2397,7 +2399,10 @@ mod ritual_ops {
             // build would sign it freely. Told on both sides, the ticket
             // stays usable after an update.
             let lock = molt_core::chain::CHAIN_LOCK_CAP;
-            if !self.lock_seams.found_pre_lock.load(std::sync::atomic::Ordering::SeqCst) && !caps.iter().any(|c| c == lock) {
+            if self.lock_cap_on()
+                && !self.lock_seams.found_pre_lock.load(std::sync::atomic::Ordering::SeqCst)
+                && !caps.iter().any(|c| c == lock)
+            {
                 tracing::warn!(seat, %member, "founding join rejected: no chain lock");
                 let why = "this founding needs a newer build (chain lock) - update and use the link again";
                 self.tell_activator(idx, seat, &member, &nostr_pk, &reply, why.to_string());
@@ -2702,7 +2707,7 @@ mod ritual_ops {
             // B7: every founding of this build ratifies the lock - part of
             // the charter, not a choice
             let mut features = features;
-            if !self.lock_seams.found_pre_lock.load(std::sync::atomic::Ordering::SeqCst) {
+            if self.lock_cap_on() && !self.lock_seams.found_pre_lock.load(std::sync::atomic::Ordering::SeqCst) {
                 features.push(molt_core::chain::CHAIN_LOCK_FEATURE.to_string());
             }
             let features =
@@ -4139,6 +4144,7 @@ mod tests {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
         let _guard = rt.enter();
         let mut st = crate::tests::plain_state();
+        st.lock_force(true);
         let (founder_sk, founder_pk) = molt_storage::derive_identity_key(&[9u8; 32], "f");
         let hub = LoopbackHub::calm();
         st.net_ritual = Some(RitualRuntime {

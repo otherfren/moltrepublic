@@ -22,6 +22,18 @@ use super::*;
 /// The enabling vote waits: a seat runs a build without the lock.
 pub(crate) const LOCK_NOT_EVERYWHERE: &str = "a seat runs a build without the lock";
 
+/// The chain lock ships DARK (not available in release builds) pending
+/// review: off, a founding ratifies no `chain-lock`, a `set_features`
+/// naming it is refused, the capability is not announced, and a chain that
+/// carries the key is not signed on. A test seam turns it on per engine.
+pub(crate) const CHAIN_LOCK_AVAILABLE: bool = false;
+
+/// The refusal while the lock is dark.
+pub(crate) const LOCK_NOT_AVAILABLE: &str = "Strict Order Mode is not available in this build";
+
+/// Why this build signs nothing on a chain that runs the lock.
+pub(crate) const LOCK_CHAIN_UNSUPPORTED: &str = "this republic uses Strict Order Mode - needs a newer build";
+
 /// A leader re-sends its open phase this often (§7).
 pub(crate) const LOCK_RETRANSMIT_SECS: u64 = 15;
 /// The cap of a leader's retry backoff (§5).
@@ -30,8 +42,9 @@ const LOCK_BACKOFF_MAX_SECS: u64 = 600;
 /// Test seams of the lock (never a `Command`).
 #[derive(Default)]
 pub(crate) struct LockSeams {
-    /// 0/1 = this build, 2 = an older build (no capability, every lock
-    /// frame ignored, free signatures only).
+    /// 0 = this build ([`CHAIN_LOCK_AVAILABLE`]), 1 = the lock on (the
+    /// test seam), 2 = an older build (no capability, every lock frame
+    /// ignored, free signatures only).
     pub(crate) cap: std::sync::atomic::AtomicU8,
     /// The next founding leaves the lock out of the charter (a republic
     /// founded before the lock existed).
@@ -223,7 +236,17 @@ impl State {
 
     /// This build runs the lock (an older-build seam turns it off).
     pub(crate) fn lock_cap_on(&self) -> bool {
-        self.lock_seams.cap.load(SeqCst) != 2
+        match self.lock_seams.cap.load(SeqCst) {
+            1 => true,
+            2 => false,
+            _ => CHAIN_LOCK_AVAILABLE,
+        }
+    }
+
+    /// G: this build cannot take part in a chain that runs the lock - it
+    /// signs nothing there (like a reader meeting a newer chain).
+    pub(crate) fn lock_chain_unsupported(&self) -> bool {
+        self.lock_seams.cap.load(SeqCst) == 0 && !CHAIN_LOCK_AVAILABLE && self.lock_enabled()
     }
 
     #[cfg(test)]
@@ -386,7 +409,7 @@ impl State {
         }
         let me = self.member();
         if !self.lock_cap_on() {
-            return Some(format!("{me} runs a build without the lock"));
+            return Some(LOCK_NOT_AVAILABLE.to_string());
         }
         let cap = molt_core::chain::CHAIN_LOCK_CAP;
         let known = self.active.as_ref().map(|a| &a.prefs.seat_caps);
@@ -1745,6 +1768,9 @@ impl State {
             Err(e) => Err(e),
         };
         let on = self.lock_cap_on() && self.lock_enabled();
+        if self.lock_chain_unsupported() {
+            tracing::warn!(reason = LOCK_CHAIN_UNSUPPORTED, "chain_unsupported");
+        }
         // T3: the marker means "the lock wrote here"; on a chain without
         // the lock and with no file it cannot be true (a pre-lock import)
         if marker && !self.lock_enabled() && matches!(parsed, Ok(None)) {
@@ -1844,7 +1870,8 @@ impl State {
             .map(fmt_ballot)
             .unwrap_or_default();
         if !active {
-            return (false, ballot, String::new());
+            let wait = if self.lock_chain_unsupported() { LOCK_CHAIN_UNSUPPORTED.to_string() } else { String::new() };
+            return (false, ballot, wait);
         }
         let wait = if self.lock_amnesiac_at(next) {
             "amnesia".to_string()
