@@ -126,6 +126,10 @@ pub(crate) struct LockRuntime {
     pub(crate) announced: Option<bool>,
     /// The head+1 whose standing intents were last re-expressed freely.
     freed_at: Option<u64>,
+    /// An `Accept` this seat withheld at head+1 (a restore settling, an
+    /// intent not yet cast): retried on the tick, not only on the
+    /// leader's next resend - the leader's own acceptance has no resend.
+    retry_accept: Option<(Slot, Ballot, Value, u64, Option<ChainChange>)>,
     /// Seats known to have signed freely at a height (a verified free
     /// signature or a free `Nack`).
     free_seen: BTreeMap<u64, BTreeSet<String>>,
@@ -925,13 +929,20 @@ impl State {
         self.chain.lock.known.insert((slot.height, value.digest.clone()), (id, change.clone()));
         // F1: a restore settles before this seat accepts it, so a withdrawal
         // right behind the card wins here too
-        if matches!(change, ChainChange::Membership { op: MembershipOp::Restored, .. }) && self.restore_settling(id) {
-            tracing::debug!(height = slot.height, id, "lock=withheld reason=settling");
+        let withheld = if matches!(change, ChainChange::Membership { op: MembershipOp::Restored, .. })
+            && self.restore_settling(id)
+        {
+            Some("settling".to_string())
+        } else {
+            self.lock_withheld(id, &change, slot.height)
+        };
+        if let Some(why) = withheld {
+            tracing::debug!(height = slot.height, id, reason = %why, "lock=withheld");
+            self.chain.lock.retry_accept = Some((slot.clone(), ballot.clone(), value.clone(), id, wire_change(&change)));
             return;
         }
-        if let Some(why) = self.lock_withheld(id, &change, slot.height) {
-            tracing::debug!(height = slot.height, id, reason = %why, "lock=withheld");
-            return;
+        if self.chain.lock.retry_accept.as_ref().is_some_and(|r| r.0 == *slot) {
+            self.chain.lock.retry_accept = None;
         }
         let special = wire_change(&change);
         let step = self.lock_step(|a| a.accept(slot, ballot, value), Some((value.digest.clone(), id, special)));
@@ -1308,6 +1319,11 @@ impl State {
         self.lock_try_release(slot.height);
         if self.lock_mode(slot.height) != LockMode::Lock || self.lock_amnesiac_at(slot.height) {
             return;
+        }
+        if let Some((s, b, v, id, change)) = self.chain.lock.retry_accept.take() {
+            if s == slot {
+                self.lock_acceptor_accept(&s, &b, &v, id, change);
+            }
         }
         let now = self.presence_now();
         let grace = self.lock_grace();
