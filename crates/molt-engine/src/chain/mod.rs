@@ -31,6 +31,8 @@ pub(crate) mod blob_parts;
 mod checkpoint;
 mod governance;
 mod lock;
+#[cfg(test)]
+mod lock_explore_tests;
 mod lock_wire;
 mod membership;
 mod projection;
