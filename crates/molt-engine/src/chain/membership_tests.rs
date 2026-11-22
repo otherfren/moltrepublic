@@ -1817,6 +1817,25 @@ fn a_node_that_is_behind_holds_its_restore_approval() {
     assert!(signed(&walter), "level: signed");
 }
 
+/// F2 with a claim that went stale: once the peer reports a head level
+/// with this node, the held restore approval goes through.
+#[test]
+fn a_restore_held_on_a_claim_the_peer_since_lowered_is_signed() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 3);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let far = vec![molt_core::HeightHash { height: 40, hash: "ee".repeat(32) }];
+    wire(&mut walter, "petra", 10, WorkspaceEvent::ChainRequest { from_height: 41, known: far });
+    register_v2(&mut walter, &b, 7, &"dd".repeat(32), 0);
+    let signed = |w: &crate::State| w.chain.pending_sigs.get(&7).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
+    assert!(!signed(&walter), "behind: held");
+    let level = walter.known_heads();
+    wire(&mut walter, "petra", 11, WorkspaceEvent::ChainRequest { from_height: 1, known: level });
+    walter.retry_held_restore_approvals();
+    assert!(signed(&walter), "the peer's newer head is level: signed");
+}
+
 /// The `MembershipProposed` frame of a v2 card for dora, as petra (the
 /// coordinator) sends it, and the change it registers.
 fn dora_card_frame(b: &Builder, id: u64) -> (molt_core::WorkspaceEvent, ChainChange) {

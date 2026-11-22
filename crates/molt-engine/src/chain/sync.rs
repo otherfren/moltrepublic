@@ -31,6 +31,17 @@ fn applied_id(block: &ChainBlock) -> u64 {
     }
 }
 
+/// A5: what a peer's report says about its height.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeerClaim {
+    /// "My head is h" (a catch-up request or beacon, a vote refusal, a
+    /// lock nack): sets the claim, so a peer that reorged reads lower.
+    Head,
+    /// "A block at h exists" (a block, a re-serve, a cut proposal): only
+    /// raises it.
+    Holds,
+}
+
 /// The first 12 hex characters of a hash, for logs and status.
 fn short_hash(hash: &str) -> &str {
     hash.get(..12).unwrap_or(hash)
@@ -79,8 +90,15 @@ impl State {
     /// branch can flag ITS sender (A2.1): a `prev` this node does not hold at
     /// head+1, a tip contender on a foreign `prev`, or any contender below
     /// the tip. A block from that peer that extends the chain clears it.
+    #[cfg(test)]
     pub(crate) fn receive_block_from(&mut self, from: &str, block: ChainBlock) {
-        self.note_peer_height(from, block.height);
+        self.receive_block_at(from, None, block);
+    }
+
+    /// [`Self::receive_block_from`] with the frame's sender log seq, so a
+    /// delayed old block cannot outrank a newer head report.
+    pub(crate) fn receive_block_at(&mut self, from: &str, seq: Option<u64>, block: ChainBlock) {
+        self.note_peer_claim(from, block.height, seq, PeerClaim::Holds);
         let Some(head) = self.chain.head.clone() else {
             // a headless rejoiner (total device loss) bootstraps its chain from
             // the genesis a survivor serves, then drains whatever else arrived
@@ -386,15 +404,7 @@ impl State {
         }
         let head = self.chain.head.as_ref().map_or(0, |h| h.height);
         // a peer on another branch claims heights this node will never reach
-        let target = self
-            .chain
-            .peer_heights
-            .iter()
-            .filter(|(p, _)| !self.chain.diverged.contains_key(*p))
-            .map(|(_, h)| *h)
-            .max()
-            .unwrap_or(0)
-            .max(head);
+        let target = self.counted_peer_heights().map(|(_, h)| h).max().unwrap_or(0).max(head);
         let catchup = molt_core::CatchUp {
             head,
             target,
@@ -1012,16 +1022,57 @@ impl State {
         }
     }
 
-    /// A5: remember the highest height `from` has claimed. Monotone per
-    /// peer, so one late re-serve of an old block cannot make a peer look
-    /// like it fell behind.
+    /// A5: a height `from` claimed outside any wire frame (raise only).
+    #[cfg(test)]
     pub(crate) fn note_peer_height(&mut self, from: &str, height: u64) {
+        self.note_peer_claim(from, height, None, PeerClaim::Holds);
+    }
+
+    /// A5: what `from` reported in the frame at its log `seq`. A frame no
+    /// newer than the last one counted is ignored, so a delayed old frame
+    /// cannot re-pin a peer that has since reported lower.
+    pub(crate) fn note_peer_claim(&mut self, from: &str, height: u64, seq: Option<u64>, claim: PeerClaim) {
         if from.is_empty() || from == self.member() {
             return;
         }
-        let e = self.chain.peer_heights.entry(from.to_string()).or_insert(0);
-        *e = (*e).max(height);
         self.lock_note_peer_height(height);
+        if let Some(seq) = seq {
+            if self.chain.peer_claim_seq.get(from).is_some_and(|last| seq <= *last) {
+                return;
+            }
+            self.chain.peer_claim_seq.insert(from.to_string(), seq);
+        }
+        let e = self.chain.peer_heights.entry(from.to_string()).or_insert(0);
+        *e = match claim {
+            PeerClaim::Head => height,
+            PeerClaim::Holds => (*e).max(height),
+        };
+    }
+
+    /// A5: a new incarnation of `member` restarts its seq space and its head.
+    pub(crate) fn forget_peer_claim(&mut self, member: &str) {
+        self.chain.peer_heights.remove(member);
+        self.chain.peer_claim_seq.remove(member);
+    }
+
+    /// The claims that count: roster seats on this node's branch - a peer
+    /// on another branch claims heights this node will never reach.
+    fn counted_peer_heights(&self) -> impl Iterator<Item = (&molt_core::MemberId, u64)> + '_ {
+        let roster = self.roster();
+        self.chain
+            .peer_heights
+            .iter()
+            .filter(move |(p, _)| !self.chain.diverged.contains_key(*p) && roster.contains(*p))
+            .map(|(p, h)| (p, *h))
+    }
+
+    /// A6: the furthest counted peer above this node's head, if any.
+    pub(crate) fn furthest_peer_ahead(&self) -> Option<(molt_core::MemberId, u64)> {
+        let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        self.counted_peer_heights()
+            .filter(|(_, h)| *h > head)
+            .max_by(|(pa, ha), (pb, hb)| ha.cmp(hb).then_with(|| pb.cmp(pa)))
+            .map(|(p, h)| (p.clone(), h))
     }
 
     /// S1: the sync state `status` reports.
@@ -1031,7 +1082,10 @@ impl State {
                 .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX))
         });
         let (lock_active, lock_ballot, lock_wait) = self.lock_status();
+        let (ahead_peer, ahead_height) = self.furthest_peer_ahead().unwrap_or_default();
         molt_core::ChainSync {
+            ahead_peer,
+            ahead_height,
             lock_active,
             lock_ballot,
             lock_wait,
@@ -1054,14 +1108,7 @@ impl State {
     /// answers a different question (contradiction, not distance).
     pub(crate) fn chain_lag(&self) -> molt_core::ChainLag {
         let head = self.chain.head.as_ref().map_or(0, |h| h.height);
-        let peers_ahead = self
-            .chain
-            .peer_heights
-            .values()
-            .copied()
-            .max()
-            .unwrap_or(0)
-            .saturating_sub(head);
+        let peers_ahead = self.furthest_peer_ahead().map_or(0, |(_, h)| h.saturating_sub(head));
         let now = self.presence_now();
         let founded = self.replica.as_ref().map_or(0, |r| r.founded_ts);
         let me = self.member();
@@ -1161,6 +1208,11 @@ impl State {
     pub(crate) fn clear_divergence(&mut self, from: &str) {
         if self.chain.diverged.remove(from).is_some() {
             tracing::info!(%from, "peer is back on this branch");
+            // what it claimed above our head was on the branch it left
+            let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+            if let Some(h) = self.chain.peer_heights.get_mut(from) {
+                *h = (*h).min(head);
+            }
             self.sign_held_approvals();
             self.emit_session(crate::SessionScope::Full);
         }

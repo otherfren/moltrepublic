@@ -1388,12 +1388,12 @@ impl State {
         round: u64,
         leader: String,
         promised: Option<molt_core::chain::LockBallot>,
-        head: u64,
+        (head, seq): (u64, u64),
     ) {
         if !self.lock_listens() || !self.lock_rostered(from) {
             return;
         }
-        self.note_peer_height(from, head);
+        self.note_peer_claim(from, head, Some(seq), super::PeerClaim::Head);
         let slot = Slot { height, base };
         match promised {
             Some(p) => {

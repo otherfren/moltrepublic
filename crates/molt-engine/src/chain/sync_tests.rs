@@ -881,7 +881,7 @@ fn a_vote_is_refused_while_the_peers_are_ahead() {
     let err = res.expect_err("a lagging vote is refused");
     assert!(logs.contains("vote=refused_lagging") && logs.contains("peers_ahead="), "the error log keeps it: {logs}");
     assert!(
-        matches!(err, molt_core::MoltError::ChainLagging { peers_ahead } if peers_ahead >= 2),
+        matches!(&err, molt_core::MoltError::ChainLagging { peers_ahead, peer } if *peers_ahead >= 2 && peer == "petra"),
         "the refusal names the distance: {err:?}"
     );
 }
@@ -1406,4 +1406,122 @@ fn the_session_carries_catch_up_and_seat_sync() {
     assert_eq!(walter.seat_sync_label("dora", 6), "behind:2:6");
     assert_eq!(walter.seat_sync_label("petra", 6), "");
     assert_eq!(walter.seat_sync_label("walter", 6), "", "never for the own seat");
+}
+
+/// A6 claims: a seat at head 1 of a three-seat republic, holding its key.
+fn a6_seat(b: &Builder) -> crate::State {
+    let mut walter = chain_peer("walter", b, b.blocks.clone());
+    walter.identity_sk = Some(b.key("walter").clone());
+    walter
+}
+
+/// A fresh proposal from petra, approved by `walter`.
+fn a6_vote(walter: &mut crate::State, id: u64) -> Result<molt_core::Reply, molt_core::MoltError> {
+    walter.receive_proposed(id, Surface::Memory, json!({ "op": "add_note", "id": id }), "petra");
+    walter.cmd_approve(molt_core::ProposalId(id), None)
+}
+
+/// A catch-up request (or beacon) naming `height` as the sender's head.
+fn head_report(height: u64) -> WorkspaceEvent {
+    let known = vec![molt_core::HeightHash { height, hash: "ee".repeat(32) }];
+    WorkspaceEvent::ChainRequest { from_height: height + 1, known }
+}
+
+/// A6 + F-H3: a peer on another branch claims heights this node will never
+/// reach - its claim does not refuse a vote here.
+#[test]
+fn a_diverged_peers_higher_claim_does_not_refuse_a_vote() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "dora"]);
+    let mut walter = a6_seat(&b);
+    walter.chain.diverged.insert(
+        "dora".to_string(),
+        molt_core::ChainDivergence { peer: "dora".to_string(), since_height: 1, seen_ts: 0 },
+    );
+    wire(&mut walter, "dora", 10, head_report(9));
+    assert_eq!(walter.chain_lag().peers_ahead, 0);
+    assert!(a6_vote(&mut walter, 7).is_ok(), "a diverged claim refuses nothing");
+}
+
+/// A6: a peer that reported head+2 and then, after losing a tie-break,
+/// its real head level with ours no longer refuses a vote - the claim is
+/// its LATEST head, not its historical maximum.
+#[test]
+fn a_peer_that_reports_a_lower_head_no_longer_refuses_a_vote() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "dora"]);
+    let mut walter = a6_seat(&b);
+    wire(&mut walter, "petra", 10, head_report(3));
+    assert!(a6_vote(&mut walter, 7).is_err(), "two blocks behind: refused");
+    let level = walter.known_heads();
+    wire(&mut walter, "petra", 11, WorkspaceEvent::ChainRequest { from_height: 2, known: level });
+    assert_eq!(walter.chain_lag().peers_ahead, 0, "{:?}", walter.chain.peer_heights);
+    assert!(a6_vote(&mut walter, 8).is_ok(), "level again: the vote counts");
+}
+
+/// A6: a frame older than the peer's newest head report - a delayed block
+/// or an old beacon - cannot re-pin the seat.
+#[test]
+fn a_delayed_old_frame_does_not_re_pin_a_lowered_claim() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "dora"]);
+    let mut walter = a6_seat(&b);
+    let level = walter.known_heads();
+    wire(&mut walter, "petra", 20, WorkspaceEvent::ChainRequest { from_height: 2, known: level });
+    b.commit_applied(2, &["petra", "dora"]);
+    b.commit_applied(3, &["petra", "dora"]);
+    let old = b.blocks.last().expect("a block").clone();
+    wire(&mut walter, "petra", 12, WorkspaceEvent::Committed(old));
+    wire(&mut walter, "petra", 13, head_report(3));
+    assert_eq!(walter.chain_lag().peers_ahead, 0, "{:?}", walter.chain.peer_heights);
+    assert!(a6_vote(&mut walter, 7).is_ok());
+    assert_eq!(walter.chain.peer_heights.get("petra"), Some(&1));
+}
+
+/// A6 KEEPS ITS PURPOSE: a seat really behind a peer on its own lineage is
+/// refused, the refusal and `chain_sync` name the peer, and once the
+/// blocks arrive the vote counts.
+#[test]
+fn a_seat_really_behind_is_refused_until_it_caught_up() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "dora"]);
+    let mut walter = a6_seat(&b);
+    b.commit_applied(2, &["petra", "dora"]);
+    b.commit_applied(3, &["petra", "dora"]);
+    let petra = chain_peer("petra", &b, b.blocks.clone());
+    wire(&mut walter, "petra", 10, WorkspaceEvent::ChainRequest { from_height: 4, known: petra.known_heads() });
+    let err = a6_vote(&mut walter, 7).expect_err("behind: refused");
+    assert_eq!(err.to_string(), "behind petra by 2 block(s) - this vote would not count");
+    let sync = walter.chain_sync();
+    assert_eq!((sync.ahead_peer.as_str(), sync.ahead_height), ("petra", 3));
+    for (seq, block) in (11..).zip(&b.blocks[2..]) {
+        wire(&mut walter, "petra", seq, WorkspaceEvent::Committed(block.clone()));
+    }
+    assert_eq!(walter.chain.head.as_ref().expect("a head").height, 3);
+    assert!(walter.cmd_approve(molt_core::ProposalId(7), None).is_ok(), "caught up: the vote counts");
+    assert_eq!(walter.chain_sync().ahead_peer, "");
+}
+
+/// A6: a re-keyed seat is a new incarnation whose log seq restarts - the
+/// old incarnation's claim and its seq mark must not outlive it.
+#[test]
+fn a_new_incarnation_starts_with_no_claim() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "dora"]);
+    let mut walter = a6_seat(&b);
+    wire(&mut walter, "dora", 500, head_report(6));
+    walter.reset_peer_accept_window(&"dora".to_string());
+    let level = walter.known_heads();
+    wire(&mut walter, "dora", 1, WorkspaceEvent::ChainRequest { from_height: 2, known: level });
+    assert!(a6_vote(&mut walter, 7).is_ok(), "the new incarnation is level");
 }

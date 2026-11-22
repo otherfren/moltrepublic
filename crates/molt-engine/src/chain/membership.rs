@@ -859,10 +859,9 @@ impl State {
             return;
         }
         // F2: behind a peer's head, the card is judged against an old one
-        let behind = self.chain_lag().peers_ahead;
-        if behind > 0 {
+        if let Some((peer, peer_head)) = self.furthest_peer_ahead() {
             if self.recovery.held_approvals.insert(id) {
-                tracing::info!(%id, %member, peers_ahead = behind, "restore_held reason=catching_up");
+                tracing::info!(%id, %member, %peer, peer_head, "restore_held reason=catching_up");
             }
             return;
         }

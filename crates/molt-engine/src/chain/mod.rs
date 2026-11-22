@@ -148,6 +148,7 @@ pub(crate) use membership::{AnchorFirst, AttemptBook, NostrRekey, MINTED_TICKETS
 #[cfg(test)]
 pub(crate) use membership::RECOVER_PART_MAX;
 pub(crate) use lock_wire::{LockMode, LockRuntime, LockSeams, LOCK_CHAIN_UNSUPPORTED};
+pub(crate) use sync::PeerClaim;
 
 use verify::*;
 
