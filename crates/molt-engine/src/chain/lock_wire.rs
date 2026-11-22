@@ -1745,6 +1745,15 @@ impl State {
             Err(e) => Err(e),
         };
         let on = self.lock_cap_on() && self.lock_enabled();
+        // T3: the marker means "the lock wrote here"; on a chain without
+        // the lock and with no file it cannot be true (a pre-lock import)
+        if marker && !self.lock_enabled() && matches!(parsed, Ok(None)) {
+            if let Some(a) = self.active.as_mut() {
+                a.prefs.chain_lock = false;
+                a.handle.set_prefs(a.prefs.clone());
+                tracing::info!("lock=marker_cleared reason=no_lock_on_chain");
+            }
+        }
         match parsed {
             Ok(Some(file)) => {
                 self.chain.lock.acceptor = file.acceptor;

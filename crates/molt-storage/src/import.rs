@@ -62,6 +62,34 @@ pub struct ImportStaging {
     seed: Option<Zeroizing<Vec<u8>>>,
 }
 
+impl ImportStaging {
+    /// The imported chain carries [`molt_core::chain::CHAIN_LOCK_FEATURE`]:
+    /// in the genesis, a checkpoint's state or a `set_features` block.
+    /// Conservative (a cut's state is searched whole); a false yes only
+    /// sets a marker the first open clears.
+    fn runs_lock(&self) -> bool {
+        let key = molt_core::chain::CHAIN_LOCK_FEATURE;
+        if let molt_core::WorkspaceEvent::Founded { features: Some(f), .. } = &self.genesis.body {
+            if f.iter().any(|k| k == key) {
+                return true;
+            }
+        }
+        if self.checkpoint.as_ref().is_some_and(|c| serde_json::to_string(c).is_ok_and(|s| s.contains(key))) {
+            return true;
+        }
+        self.chain.iter().any(|b| match &b.change {
+            molt_core::ChainChange::Applied { surface: molt_core::Surface::Organization, payload, .. } => {
+                payload.get("op").and_then(serde_json::Value::as_str) == Some("set_features")
+                    && payload
+                        .get("value")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|v| v.split_whitespace().any(|k| k == key))
+            }
+            _ => false,
+        })
+    }
+}
+
 /// The commit hook the caller uses to trash an existing same-id dir on an
 /// explicit replace (design P2) — kept as a parameter-free bool because the
 /// trash path is fixed (`trash_workspace`).
@@ -518,8 +546,10 @@ impl ImportStaging {
         }
         // the lock file never travels: a restored seat may have promised
         // after the export was made, so it opens amnesiac (the marker
-        // without the file) wherever its chain runs the lock
-        if !prefs.chain_lock {
+        // without the file) - where the imported chain runs the lock (T3:
+        // a pre-lock import marked would halt an n-of-n republic once the
+        // lock is enabled; the open clears a marker the chain does not back)
+        if !prefs.chain_lock && self.runs_lock() {
             prefs.chain_lock = true;
             changed = true;
         }
@@ -718,10 +748,14 @@ mod tests {
     /// A populated workspace under `root` (chain.state included) — the
     /// export fixture. Returns `(root, ws_dir, seed, id)`.
     fn make_ws(tmp: &Path) -> (PathBuf, PathBuf, Vec<u8>, String) {
+        make_ws_from(tmp, &founded_genesis())
+    }
+
+    fn make_ws_from(tmp: &Path, genesis: &EventEnvelope) -> (PathBuf, PathBuf, Vec<u8>, String) {
         let root = tmp.join("src-root");
         let seed =
             crate::seed_entropy(&crate::generate_seed_phrase().expect("gen")).expect("entropy");
-        let ws = crate::create_workspace(&root, &seed, &founded_genesis()).expect("create");
+        let ws = crate::create_workspace(&root, &seed, genesis).expect("create");
         ws.write_chain(None, &[]).expect("chain.state");
         let id = ws.manifest.workspace.id.clone();
         let dir = ws.dir().to_path_buf();
@@ -769,24 +803,29 @@ mod tests {
         assert!(crate::read_prefs(&dir).shared_files.is_empty(), "paths dropped");
     }
 
-    /// S6 at the product's own restore: the lock file never travels, and a
-    /// restored workspace carries the lock marker even when its export was
-    /// made before the lock first wrote - the marker without the file is
-    /// amnesia, so the restored seat answers no lock frame and signs
-    /// nothing freely up to the floor (where its chain runs the lock).
+    /// S6 at the product's own restore: the lock file never travels; a
+    /// restored workspace whose chain runs the lock carries the marker even
+    /// when its export was made before the lock first wrote (the marker
+    /// without the file is amnesia). T3: a pre-lock chain gets no marker -
+    /// an amnesiac seat would halt an n-of-n republic once the lock is on.
     #[test]
-    fn a_restored_workspace_is_amnesiac_for_the_lock() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let (src_root, src_dir, _seed, _id) = make_ws(tmp.path());
-        assert!(!crate::read_prefs(&src_dir).chain_lock, "an export made before the lock wrote");
-        std::fs::write(src_dir.join(crate::CHAIN_LOCK_FILE), b"held promises").expect("plant");
-        let blob = blob_of(&src_root, &src_dir, &ExportKey::passphrase(PASS));
-        let dest_root = tmp.path().join("dest-root");
-        std::fs::create_dir_all(&dest_root).expect("dest root");
-        let staging = import_stage(&dest_root, &blob, PASS).expect("stage");
-        let dir = staging.commit(&dest_root, false, None).expect("commit");
-        assert!(!dir.join(crate::CHAIN_LOCK_FILE).exists(), "the lock file never travels");
-        assert!(crate::read_prefs(&dir).chain_lock, "the marker is set: amnesia at the first open");
+    fn a_restored_workspace_is_amnesiac_only_where_its_chain_runs_the_lock() {
+        for locked in [false, true] {
+            let tmp = tempfile::tempdir().expect("tmp");
+            let mut genesis = founded_genesis();
+            if let WorkspaceEvent::Founded { features, .. } = &mut genesis.body {
+                *features = locked.then(|| vec![molt_core::chain::CHAIN_LOCK_FEATURE.to_string()]);
+            }
+            let (src_root, src_dir, _seed, _id) = make_ws_from(tmp.path(), &genesis);
+            std::fs::write(src_dir.join(crate::CHAIN_LOCK_FILE), b"held promises").expect("plant");
+            let blob = blob_of(&src_root, &src_dir, &ExportKey::passphrase(PASS));
+            let dest_root = tmp.path().join("dest-root");
+            std::fs::create_dir_all(&dest_root).expect("dest root");
+            let staging = import_stage(&dest_root, &blob, PASS).expect("stage");
+            let dir = staging.commit(&dest_root, false, None).expect("commit");
+            assert!(!dir.join(crate::CHAIN_LOCK_FILE).exists(), "the lock file never travels");
+            assert_eq!(crate::read_prefs(&dir).chain_lock, locked, "the marker where the chain runs the lock");
+        }
     }
 
     /// `make_ws` plus a folded wiki base written under the workspace's own

@@ -1437,3 +1437,30 @@ fn a_forced_withdrawn_value_completes_with_its_approvers() {
     );
     assert!(!sent_kinds(&walter).contains(&"accepted"), "no intent, no acceptance: {:?}", sent_kinds(&walter));
 }
+
+/// Review T3: a seat imported in pre-lock times carries the lock marker
+/// but no lock file. Opened while its chain runs no lock, the marker is
+/// cleared; after the enabling vote it reopens as a fresh acceptor, not
+/// amnesiac, and promises - an n-of-n republic is not halted.
+#[test]
+fn a_marker_the_chain_does_not_back_is_cleared_at_open() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&SEATS, 3);
+    let (mut mara, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "mara", &SEATS);
+    mara.lock_force(true);
+    mara.active.as_mut().expect("active").prefs.chain_lock = true;
+    mara.chain.lock.enabled_override = Some(false);
+    mara.load_chain_lock(Ok(None), true);
+    assert!(!mara.active.as_ref().expect("active").prefs.chain_lock, "cleared: the lock never wrote here");
+    // the enabling vote sealed; the seat closed before its first lock write
+    mara.chain.lock.enabled_override = Some(true);
+    let marker = mara.active.as_ref().expect("active").prefs.chain_lock;
+    mara.load_chain_lock(Ok(None), marker);
+    assert_eq!(mara.chain.lock.amnesia, None, "a fresh acceptor, not amnesiac");
+    hear(&mut mara, T, &SEATS);
+    let base = mara.lock_slot().expect("slot").base;
+    mara.chain.lock.outbox.clear();
+    wire(&mut mara, "dora", 1, WorkspaceEvent::LockPrepare { height: 1, base, round: 1 });
+    assert!(sent_kinds(&mara).contains(&"promise"), "{:?}", sent_kinds(&mara));
+}

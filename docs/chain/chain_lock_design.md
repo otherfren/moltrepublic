@@ -563,8 +563,11 @@ Where the wiring differs from §1-§13, and why.
   ones) are marked free at their heights before anything else, so a
   build without the lock that ran in between leaves no gap. With the lock
   off nothing is written and nothing is passive. An import sets the
-  marker whatever the export carried, so a restored workspace opens
-  amnesiac where its chain runs the lock (S6 below); it also opens
+  marker where the imported chain runs the lock, whatever the export
+  carried, so such a restored workspace opens amnesiac (S6 below); an
+  open with the lock off and no file clears a marker (T3: "the marker"
+  means "the lock wrote here" - a pre-lock import marked anyway would
+  turn amnesiac at the enabling vote and halt an n-of-n republic). It also opens
   detached and comes back only through the recovery ritual. Residual: two live
   copies of one workspace (a copied directory run twice) - B2/B3's
   territory, like a live old device.
@@ -741,7 +744,8 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   amnesiac - passive up to the first peer height it hears - which is the
   safe state. The product's own paths cannot produce the case: an export
   (file or S3 backup) never carries the lock file, and an import sets the
-  marker, so every restored workspace opens amnesiac where its chain runs
-  the lock (`a_restored_workspace_is_amnesiac_for_the_lock`). The floor
+  marker where the imported chain runs the lock, so such a restored
+  workspace opens amnesiac
+  (`a_restored_workspace_is_amnesiac_only_where_its_chain_runs_the_lock`). The floor
   stays the FIRST peer report: peers report with every block, so a
   highest-report floor would move with the live chain and never be passed.
