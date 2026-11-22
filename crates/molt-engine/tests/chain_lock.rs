@@ -252,8 +252,10 @@ async fn a_stopped_leader_is_completed_with_the_same_change() {
     let tmp = tempfile::tempdir().expect("tmp");
     let ([mara, walter, dora], _) = found_trio(tmp.path(), &url).await;
     lock_on(&[&mara, &walter, &dora], true).await;
+    // dora must be the one that leads: a grace long enough that a slow
+    // machine does not let mara or walter take the slot over first
     for w in [&mara, &walter, &dora] {
-        w.__lock_timing(5, 3);
+        w.__lock_timing(15, 3);
     }
     dora.__lock_stop_after_accept();
     let Reply::Proposed { id, .. } = mara
