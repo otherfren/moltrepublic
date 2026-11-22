@@ -1663,3 +1663,48 @@ fn a_nav_taller_than_the_window_scrolls_to_its_last_row() {
         "the last view sits above the footer: {lb}"
     );
 }
+
+/// **The catch-up bar is one slim row, at any window height and scale.**
+/// It took about half the content area (reported 2026-11-22).
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_catch_up_bar_is_one_slim_row() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.set_screen(AppScreen::Main);
+    ui.set_active_workspace("a".into());
+    ui.set_selected_surface("chat".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "chat".into(),
+        ..SurfaceTab::default()
+    }])));
+    ui.set_catchup_show(true);
+    ui.set_catchup_title("Catching up: block 412 of 936".into());
+    ui.set_catchup_detail("524 to go · 120 blocks/min · asking peers".into());
+    ui.set_catchup_progress(0.44);
+    apply_strings(&ui, 0);
+    let _shown = show_headless(&ui);
+    let size = |id: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, id)
+            .find(|e| e.size().height > 0.0)
+            .map(|e| e.size())
+            .unwrap_or_else(|| panic!("{id} renders"))
+    };
+    let mut bad = Vec::new();
+    for font in [14.0_f32, 21.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        for h in [600_u32, 1200] {
+            ui.window().set_size(slint::PhysicalSize::new(1200, h));
+            rail_settled();
+            let bar = size("AppWindow::cu-bar");
+            // a generous body line height at this font
+            let line = font * 1.4;
+            let content = size("AppWindow::surf-area").height;
+            eprintln!("font={font} h={h} bar={} line={line} content={content}", bar.height);
+            if bar.height > 2.5 * line || content < 0.85 * (content + bar.height) {
+                bad.push(format!("font={font} h={h} bar={} line={line} content={content}", bar.height));
+            }
+        }
+    }
+    assert!(bad.is_empty(), "the catch-up bar is too tall: {bad:#?}");
+}
