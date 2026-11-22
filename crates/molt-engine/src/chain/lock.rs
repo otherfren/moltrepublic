@@ -390,3 +390,7 @@ impl Tally {
 #[cfg(test)]
 #[path = "lock_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "lock_sim.rs"]
+mod sim;
