@@ -5981,10 +5981,11 @@ mod tests {
     /// number is ignored, never the active segment.
     #[test]
     fn segment_floor_ignores_the_reserved_markers() {
-        assert_eq!(RESERVED_SEGMENT_FLOOR, WIKI_DRAFT_SEGMENT);
+        assert_eq!(RESERVED_SEGMENT_FLOOR, CHAIN_LOCK_SEGMENT);
         const {
             assert!(
-                WIKI_DRAFT_SEGMENT < PREFS_SEALED_SEGMENT
+                CHAIN_LOCK_SEGMENT < WIKI_DRAFT_SEGMENT
+                    && WIKI_DRAFT_SEGMENT < PREFS_SEALED_SEGMENT
                     && PREFS_SEALED_SEGMENT < WALLET_SCAN_SEGMENT
                     && WALLET_SCAN_SEGMENT < WALLET_KEYS_SEGMENT
                     && WALLET_KEYS_SEGMENT < KANBAN_DRAFT_SEGMENT
@@ -5997,6 +5998,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = make_ws(tmp.path(), 2);
         for no in [
+            CHAIN_LOCK_SEGMENT,
             WIKI_DRAFT_SEGMENT,
             PREFS_SEALED_SEGMENT,
             WALLET_SCAN_SEGMENT,
@@ -6010,7 +6012,7 @@ mod tests {
         }
         let (ws, loaded) = open_workspace(&dir).expect("opens despite the planted files");
         assert_eq!(loaded.tail.len(), 3);
-        assert!(ws.seg_no < WIKI_DRAFT_SEGMENT);
+        assert!(ws.seg_no < CHAIN_LOCK_SEGMENT);
     }
 
     /// WP4b stage 5: the FIRST pruned chain persist raises the manifest
