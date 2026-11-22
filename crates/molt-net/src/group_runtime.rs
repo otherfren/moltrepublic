@@ -66,8 +66,9 @@ const OPEN_ROUNDS: u32 = 2;
 /// (the asker re-asks).
 const GAP_QUEUE: usize = 16;
 
-/// One targeted resend per asker per this long: the bound that keeps a gap
-/// want from becoming a resend amplifier outside the hourly budget.
+/// A gap answer's budget window per asker: each seq at most once and
+/// `GAP_MAX_SEQS` frames in all - the bound that keeps a gap want from
+/// becoming a resend amplifier outside the hourly budget.
 const GAP_ANSWER_EVERY: Duration = Duration::from_secs(10);
 
 /// Test seam for the stall backoff, packed ms `first << 32 | cap` (`0` =
@@ -486,7 +487,9 @@ where
 /// Answer gap wants: re-publish exactly the named own envelopes as fresh
 /// frames, then one [`crate::gap::GapAnswer`] naming what went out and
 /// what is not owed. Seqs past the publish cursor are the outbox's and
-/// left out. Per asker at most one answer per [`GAP_ANSWER_EVERY`].
+/// left out. Per asker, a seq is re-published at most once per
+/// [`GAP_ANSWER_EVERY`], and at most [`crate::gap::GAP_MAX_SEQS`] frames go
+/// out per such window.
 async fn gap_loop<L: OutboxLog, S: StateStore>(
     channel: GroupChannel,
     mls: MlsChannel,
@@ -496,7 +499,8 @@ async fn gap_loop<L: OutboxLog, S: StateStore>(
     mut rx: mpsc::Receiver<(MemberId, Vec<u64>)>,
     mut stop: watch::Receiver<bool>,
 ) {
-    let mut answered: std::collections::HashMap<MemberId, tokio::time::Instant> =
+    // per asker: the window's start, frames spent in it, seqs resent in it
+    let mut budget: std::collections::HashMap<MemberId, (tokio::time::Instant, usize, Vec<u64>)> =
         std::collections::HashMap::new();
     loop {
         let (to, mut seqs) = tokio::select! {
@@ -507,15 +511,20 @@ async fn gap_loop<L: OutboxLog, S: StateStore>(
             _ = stop.changed() => return,
         };
         let now = tokio::time::Instant::now();
-        if answered.get(&to).is_some_and(|t| now.duration_since(*t) < GAP_ANSWER_EVERY) {
-            tracing::debug!(%to, "gap_want=debounced");
-            continue;
+        let window = budget.entry(to.clone()).or_insert((now, 0, Vec::new()));
+        if now.duration_since(window.0) >= GAP_ANSWER_EVERY {
+            *window = (now, 0, Vec::new());
         }
-        answered.insert(to.clone(), now);
         seqs.sort_unstable();
         seqs.dedup();
-        seqs.truncate(crate::gap::GAP_MAX_SEQS);
-        let Some(&lo) = seqs.first() else { continue };
+        seqs.retain(|s| !window.2.contains(s));
+        seqs.truncate(crate::gap::GAP_MAX_SEQS.saturating_sub(window.1));
+        let Some(&lo) = seqs.first() else {
+            tracing::debug!(%to, "gap_want=debounced");
+            continue;
+        };
+        window.1 += seqs.len();
+        window.2.extend_from_slice(&seqs);
         let cursor = store.load().await.group.unwrap_or_default().log_seq;
         let envs = log.read_from(lo).await;
         let (mut resent, mut gone) = (Vec::new(), Vec::new());

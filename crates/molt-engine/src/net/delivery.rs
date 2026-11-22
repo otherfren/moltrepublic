@@ -66,6 +66,9 @@ pub(crate) struct SenderHold {
     since: Option<u64>,
     logged: bool,
     unordered: u32,
+    /// The sender answers gap wants: its duplicates are targeted resends
+    /// for other askers, never evidence about our gaps.
+    answers: bool,
 }
 
 impl SenderHold {
@@ -74,8 +77,25 @@ impl SenderHold {
         self.missing.range(..seq).next().is_some() || self.held.range(..seq).next().is_some()
     }
 
-    /// Evidence that every missing seq below `seq` was passed over.
+    /// Track `seq` as missing unless held or settled already.
+    fn note_missing(&mut self, seq: u64, now: u64) {
+        if self.held.contains_key(&seq) || self.settled.contains(&seq) {
+            return;
+        }
+        self.missing.entry(seq).or_insert(Gap { since: now, asked_at: None, settle_at: None });
+        if self.missing.len() > SETTLED_MAX {
+            if let Some((&lowest, _)) = self.missing.first_key_value() {
+                self.settle(lowest);
+            }
+        }
+    }
+
+    /// Evidence from an older sender's resend round that every missing seq
+    /// below `seq` was passed over.
     fn passed(&mut self, seq: u64, now: u64) {
+        if self.answers {
+            return;
+        }
         for gap in self.missing.range_mut(..seq).map(|(_, g)| g) {
             gap.settle_at.get_or_insert(now + GAP_PASS_GRACE_SECS);
         }
@@ -274,40 +294,61 @@ impl State {
             return Ok(Reply::Ack);
         }
         hold.missing.remove(&envelope.seq);
-        let prev = envelope.prev_seq;
-        if prev_missing && !hold.held.contains_key(&prev) && !hold.settled.contains(&prev) {
-            hold.missing.entry(prev).or_insert(Gap { since: now, asked_at: None, settle_at: None });
-            if hold.missing.len() > SETTLED_MAX {
-                if let Some((&lowest, _)) = hold.missing.first_key_value() {
-                    hold.settle(lowest);
-                }
-            }
+        if prev_missing {
+            hold.note_missing(envelope.prev_seq, now);
         }
-        if order_sensitive(&envelope.body) && hold.blocks(envelope.seq) {
+        // accepting this seq slides the window: a held one that would age
+        // below it reads as accepted and could never be applied after
+        let aging: Vec<u64> = hold
+            .held
+            .range(..=envelope.seq.saturating_sub(molt_core::ACCEPT_WINDOW_BITS))
+            .map(|(s, _)| *s)
+            .collect();
+        let aged: Vec<EventEnvelope> = aging.iter().filter_map(|s| hold.held.remove(s)).collect();
+        let blocked = order_sensitive(&envelope.body) && hold.blocks(envelope.seq);
+        for env in aged {
+            self.release_unordered(&from, env, "aged");
+        }
+        if blocked {
+            let Some(hold) = self.delivery.inbound.get_mut(&from) else { return Ok(Reply::Ack) };
             hold.since.get_or_insert(now);
             hold.held.insert(envelope.seq, envelope);
             let overflow = if hold.held.len() > HOLD_MAX { hold.held.pop_first() } else { None };
             self.delivery.ack_due.entry(from.clone()).or_insert(now + ACK_DEBOUNCE_SECS);
             if let Some((_, oldest)) = overflow {
-                self.release_unordered(&from, oldest);
+                self.release_unordered(&from, oldest, "full");
             }
             return Ok(Reply::Ack);
         }
-        let reply = self.deliver_gated(from.clone(), envelope);
+        let reply = self.deliver_tracked(&from, envelope);
         self.drain_held(&from, "arrived");
         reply
     }
 
-    /// Deliver a held envelope past its gap (cap overflow), counted for
-    /// the episode's summary line.
-    fn release_unordered(&mut self, from: &MemberId, env: EventEnvelope) {
+    /// [`Self::deliver_gated`], and a seq it left unaccepted (the D7
+    /// decline park) stays missing, so the stances behind it keep waiting.
+    fn deliver_tracked(&mut self, from: &MemberId, env: EventEnvelope) -> Result<Reply, MoltError> {
+        let seq = env.seq;
+        let reply = self.deliver_gated(from.clone(), env);
+        if !self.delivery.accepted.get(from).is_some_and(|w| w.is_accepted(seq)) {
+            let now = self.presence_now();
+            if let Some(hold) = self.delivery.inbound.get_mut(from) {
+                hold.note_missing(seq, now);
+            }
+        }
+        reply
+    }
+
+    /// Deliver a held envelope past its gap (cap overflow, window aging),
+    /// counted for the episode's summary line.
+    fn release_unordered(&mut self, from: &MemberId, env: EventEnvelope, why: &str) {
         if let Some(hold) = self.delivery.inbound.get_mut(from) {
             if hold.unordered == 0 {
-                tracing::warn!(member = %from, held = HOLD_MAX, "inbound_hold_full");
+                tracing::warn!(member = %from, held = hold.held.len(), why, "inbound_released_unordered");
             }
             hold.unordered = hold.unordered.saturating_add(1);
         }
-        let _ = self.deliver_gated(from.clone(), env);
+        let _ = self.deliver_tracked(from, env);
     }
 
     /// Deliver, in seq order, every held envelope from `from` that no
@@ -322,7 +363,7 @@ impl State {
             };
             match next {
                 Some(env) => {
-                    let _ = self.deliver_gated(from.clone(), env);
+                    let _ = self.deliver_tracked(from, env);
                 }
                 None => break,
             }
@@ -339,7 +380,7 @@ impl State {
         }
         hold.logged = false;
         hold.unordered = 0;
-        if hold.idle() && hold.settled.is_empty() {
+        if hold.idle() && hold.settled.is_empty() && !hold.answers {
             self.delivery.inbound.remove(from);
         }
     }
@@ -433,6 +474,7 @@ impl State {
         }
         let now = self.presence_now();
         let Some(hold) = self.delivery.inbound.get_mut(&from) else { return };
+        hold.answers = true;
         for s in &resent {
             if let Some(g) = hold.missing.get_mut(s) {
                 g.settle_at.get_or_insert(now + GAP_PASS_GRACE_SECS);

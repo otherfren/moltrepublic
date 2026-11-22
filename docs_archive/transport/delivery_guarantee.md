@@ -634,13 +634,16 @@ not hold for it. The gap want below is what reaches it.
   a missing seq is a `prev_seq` that is neither accepted nor held.
 - **Ask.** A seq missing for 2 s is named in a `GapWant` control frame
   (`\x00molt-gapwant-v1`, ≤ 64 seqs, re-asked every 10 s). The named
-  sender re-publishes exactly those own envelopes as fresh frames (at most
-  one answer per asker per 10 s, never past its publish cursor, outside the
-  hourly budget) and then sends a `GapAnswer` (`\x00molt-gapans-v1`):
+  sender re-publishes exactly those own envelopes as fresh frames (per
+  asker each seq at most once and 64 frames in all per 10 s, never past its
+  publish cursor, outside the hourly budget) and then sends a `GapAnswer`
+  (`\x00molt-gapans-v1`):
   `resent` and `gone` (not an own ackable envelope of its log).
 - **Release** (whichever first): the seq arrives; the sender answers it
   `gone` (at once); it was `resent` yet is absent 5 s later; a resend round
-  passed over it (a duplicate above it arrived) and it is absent 5 s later;
+  passed over it (a duplicate above it arrived, counted only for a sender
+  that never answered a want - an answering sender's duplicates are
+  targeted resends for others) and it is absent 5 s later;
   the window aged it out; 60 s after it went missing - the bound for a
   sender that answers nothing, six times the first rung of its ladder. A
   settled seq is remembered and never held for again; arriving later it is
@@ -650,11 +653,14 @@ not hold for it. The gap want below is what reaches it.
   relays no longer hold is asked for like any other: the author still has
   its log. Only order-sensitive kinds can wait at all, and at most 60 s.
 - **Cap.** 512 held per sender; past it the OLDEST held envelope is
-  delivered out of order - nothing is shed, the window is honest.
+  delivered out of order - nothing is shed, the window is honest. So is a
+  held one about to age below the accept window (it would read as
+  accepted and never apply). A delivery left unaccepted (the D7 decline
+  park) stays missing, so the stances behind it keep waiting.
 - **Visibility.** `inbound_held member= missing_seq= held= since_s=` once
   per episode (after 2 s), `inbound_held_cleared member= since_s= via=
   unordered=` when it ends, `inbound_gap_skipped member= missing_seq= via=`
-  per settled seq (WARN for the fallback), `inbound_hold_full` once;
+  per settled seq (WARN for the fallback), `inbound_released_unordered why=full|aged` once;
   `StatusView.inbound_held` lists the held streams.
 - **Mixed versions.** An older build drops both tags as unknown control
   frames: as a receiver it keeps its old park, as a sender it never answers
@@ -664,5 +670,8 @@ Pins: `net::delivery_tests` (`a_gap_holds_only_order_sensitive_kinds`,
 `a_gap_the_sender_disowns_releases_at_once`,
 `an_unanswered_gap_falls_back_far_below_the_old_valve`,
 `a_resend_round_passing_the_gap_settles_it`,
-`a_flood_behind_a_gap_loses_nothing`),
+`a_flood_behind_a_gap_loses_nothing`,
+`a_held_envelope_is_applied_before_it_ages_out_of_the_window`,
+`an_answering_senders_duplicates_are_no_evidence`),
+`group_runtime::tests::a_gap_want_is_answered_with_exactly_the_missing_frames`,
 `crates/molt-engine/tests/nostr_inbound_gap.rs`.

@@ -154,6 +154,36 @@ fn a_resend_round_passing_the_gap_settles_it() {
     assert_eq!(bodies(&st), ["base", "held"]);
 }
 
+/// A held envelope the window is about to age out is applied first: once
+/// below the window it would read as accepted and be dropped as a
+/// duplicate, and the sender would never offer it again.
+#[test]
+fn a_held_envelope_is_applied_before_it_ages_out_of_the_window() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, chat_env(3, 2, "held"));
+    for seq in 4..=1100 {
+        land(&mut st, request_env(seq, seq - 1));
+    }
+    st.cmd_net_delivery_tick().expect("tick");
+    assert_eq!(bodies(&st), ["base", "held"], "applied, not swallowed");
+}
+
+/// A sender that answers gap wants re-publishes for other askers too: its
+/// duplicates say nothing about our gap.
+#[test]
+fn an_answering_senders_duplicates_are_no_evidence() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, request_env(3, 2));
+    land(&mut st, chat_env(4, 3, "held"));
+    st.cmd_net_gap_answered("bob".to_string(), "ada".to_string(), Vec::new(), Vec::new());
+    land(&mut st, request_env(3, 2)); // a resend for another asker
+    at(&mut st, 20);
+    st.cmd_net_delivery_tick().expect("tick");
+    assert_eq!(bodies(&st), ["base"], "still waiting for the asked seq");
+}
+
 /// More than the hold's cap behind one gap: nothing is shed - the overflow
 /// is delivered (out of order) instead of being dropped onto a resend that
 /// may never come.
