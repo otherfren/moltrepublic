@@ -298,19 +298,34 @@ impl State {
         Some(Value { digest: change_digest(&self.republic_id(), height, change), need })
     }
 
-    /// Seats whose consented restore is registered: never counted as
-    /// promisers (§4.2) nor as a restore's acceptors.
+    /// Seats whose consented restore is registered, or held by the lock at
+    /// head+1 (R2: a withdrawn card the lock may still choose): never
+    /// counted as promisers (§4.2) nor as a restore's acceptors.
     fn lock_restore_subjects(&self) -> BTreeSet<String> {
-        self.chain
-            .proposal_changes
-            .values()
-            .filter_map(|c| match c {
-                ChainChange::Membership { op: MembershipOp::Restored, member, consent: Some(_), .. } => {
-                    Some(member.clone())
-                }
+        fn subject(c: &ChainChange) -> Option<&String> {
+            match c {
+                ChainChange::Membership { op: MembershipOp::Restored, member, consent: Some(_), .. } => Some(member),
                 _ => None,
-            })
-            .collect()
+            }
+        }
+        let mut out: BTreeSet<String> = self.chain.proposal_changes.values().filter_map(subject).cloned().collect();
+        let Some(next) = self.chain.head.as_ref().map(|h| h.height + 1) else { return out };
+        let rid = self.republic_id();
+        let lock = &self.chain.lock;
+        let held = lock
+            .values
+            .iter()
+            .filter_map(|(d, (_, c))| Some((d, c.as_ref()?)))
+            .chain(lock.run.iter().flat_map(|r| r.ids.iter().filter_map(|(d, (_, c))| Some((d, c.as_ref()?)))))
+            .chain(lock.known.iter().filter(|((h, _), _)| *h == next).map(|((_, d), (_, c))| (d, c)));
+        for (digest, change) in held {
+            if let Some(m) = subject(change) {
+                if !out.contains(m) && change_digest(&rid, next, change) == *digest {
+                    out.insert(m.clone());
+                }
+            }
+        }
+        out
     }
 
     /// The chain enabled the lock at head+1 (§8 as built): the effective
@@ -1234,6 +1249,13 @@ impl State {
             run.resends = 0;
         }
         run.leader.promise(from, &ballot, acc);
+        // R2: a restore a promise names makes its subject no unheard voice
+        let subjects = self.lock_restore_subjects();
+        if let Some(run) = self.chain.lock.run.as_mut() {
+            for m in &subjects {
+                run.leader.heard_free(m);
+            }
+        }
         self.lock_try_propose();
     }
 

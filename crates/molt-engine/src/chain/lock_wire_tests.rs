@@ -1077,3 +1077,49 @@ fn a_pre_lock_republic_writes_no_lock_state() {
     assert!(mara.chain.lock.disk.is_none(), "nothing persisted");
     assert!(!mara.chain.lock.acceptor.signed_freely(1), "no free mark");
 }
+
+/// Review R2: a restore withdrawn after ONE survivor accepted it is not
+/// forced on a leader who heard every survivor - the lost seat is still
+/// the subject of the restore the lock holds, so it is no unheard voice.
+#[test]
+fn a_withdrawn_restore_held_by_one_survivor_is_not_forced() {
+    const FIVE: [&str; 5] = ["dora", "mara", "olga", "paul", "walter"];
+    let b = Builder::new(&FIVE, 3);
+    let mut olga = genesis_seat("olga", &b, b.blocks.clone());
+    olga.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
+    let rid = b.republic_id.clone();
+    let kp_hex = kp_hex_for(&b, "walter");
+    let proof = crate::make_seat_proof(b.key("walter"), "ticket", &kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(&b, "walter", "", &[], 0, &"cc".repeat(32));
+    let id = olga
+        .verify_and_propose_restore("walter", &b.pk("walter"), &kp_hex, "ticket", &proof, "", &[], &consent, "")
+        .expect("proposed");
+    let change = olga.chain.proposal_changes.get(&id).cloned().expect("the restore");
+
+    // the card is gone at dora (withdrawn); mara alone accepted it earlier
+    let mut dora = genesis_seat("dora", &b, b.blocks.clone());
+    dora.chain.lock.enabled_override = Some(true);
+    dora.lock_force(true);
+    hear(&mut dora, T, &FIVE[..4]);
+    let value = dora.lock_value(1, &change).expect("a value");
+    dora.lock_start(0);
+    let (base, round) = {
+        let run = dora.chain.lock.run.as_ref().expect("dora leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    let held = molt_core::chain::LockAcceptedValue {
+        round: 1,
+        leader: "olga".into(),
+        digest: value.digest.clone(),
+        need: u64::try_from(value.need).expect("small"),
+        id,
+        change: Some(change),
+    };
+    for (seq, (from, accepted)) in [("mara", Some(held)), ("olga", None), ("paul", None)].into_iter().enumerate() {
+        let promise = WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round, leader: "dora".into(), accepted };
+        wire(&mut dora, from, u64::try_from(seq).expect("small") + 1, promise);
+    }
+    let run = dora.chain.lock.run.as_ref().expect("still leading");
+    assert!(run.leader.ready(), "every survivor promised");
+    assert_eq!(run.leader.forced(), None, "one holder and the restored seat cannot have chosen it");
+}
