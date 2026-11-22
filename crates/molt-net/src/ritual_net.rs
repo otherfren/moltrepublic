@@ -927,6 +927,12 @@ impl GroupSub {
         self.sub.replayed()
     }
 
+    /// Whether a stored replay is still coming in (see
+    /// [`crate::relay_runtime::Subscription::replaying`]).
+    pub fn replaying(&self) -> bool {
+        self.sub.replaying()
+    }
+
     /// Best-effort replay gate, like [`RitualInbox::live`].
     pub async fn live(&mut self, timeout: Duration) -> bool {
         self.sub.synced(timeout).await

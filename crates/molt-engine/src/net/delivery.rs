@@ -571,8 +571,16 @@ impl State {
     /// rest - named seqs, and the listing of what lies above the frontier.
     pub(crate) fn inbound_gap_tick(&mut self, now: u64) {
         let me = self.member();
-        // a stored replay still running fills its gaps itself, newest first
-        let replaying = self.group_net.as_ref().is_some_and(|g| g.health.borrow().catching_up);
+        // a stored replay still coming in fills its gaps itself, newest
+        // first: ask only once every relay's replay ended and was read
+        let replaying = self.group_net.as_ref().is_some_and(|g| g.health.borrow().replaying);
+        let quiet_since = if replaying {
+            self.delivery.replay_quiet_since = None;
+            now
+        } else {
+            *self.delivery.replay_quiet_since.get_or_insert(now)
+        };
+        let replaying = replaying || now.saturating_sub(quiet_since) < GAP_ASK_AFTER_SECS;
         let members: Vec<MemberId> = self.delivery.inbound.keys().cloned().collect();
         for m in members {
             // a listing complete up to some seq: raise there
@@ -664,7 +672,7 @@ impl State {
                 if !ask.is_empty() {
                     let want = molt_net::gap::GapWant::new(me.clone(), m.clone(), ask.clone());
                     if group.handle.publish_control(want.to_frame()) {
-                        tracing::debug!(member = %m, seqs = ask.len(), "gap_want");
+                        tracing::debug!(member = %m, seqs = ?ask, "gap_want");
                         for s in &ask {
                             if let Some(g) = hold.missing.get_mut(s) {
                                 g.asked_at = Some(now);

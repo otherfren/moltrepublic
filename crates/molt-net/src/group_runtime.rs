@@ -87,6 +87,16 @@ pub fn __gap_republished() -> u64 {
     GAP_REPUBLISHED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Test seam: gap wants that reached an answering runtime in this process.
+static GAP_ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test seam: how many gap wants reached an answering runtime in this
+/// process.
+#[doc(hidden)]
+pub fn __gap_asked() -> u64 {
+    GAP_ASKED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// What one asker wants answered, coalesced: a flood overwrites only its
 /// own entry.
 #[derive(Debug, Default)]
@@ -208,6 +218,9 @@ pub struct GroupHealth {
     pub live_opaque: u64,
     /// The subscription's first stored-events replay has not finished.
     pub catching_up: bool,
+    /// A stored replay - the first or a reconnect's - is still coming in
+    /// and not yet read through.
+    pub replaying: bool,
 }
 
 /// A running group runtime.
@@ -270,6 +283,7 @@ impl GroupHandle {
     /// Queue a targeted resend of `seqs` for `to` (delivery guarantee
     /// §10); `false` = dropped, the queue is full - the asker asks again.
     pub fn answer_gap(&self, to: MemberId, seqs: Vec<u64>, range: Option<(u64, u64)>) -> bool {
+        GAP_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let Ok(mut pending) = self.gaps.pending.lock() else { return false };
         let ask = pending.entry(to).or_default();
         ask.seqs.extend(seqs);
@@ -1919,6 +1933,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                 opaque_frames: 0,
                 live_opaque: 0,
                 catching_up: false,
+                replaying: false,
             });
             return;
         }
@@ -1932,6 +1947,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
         opaque_frames: 0,
         live_opaque: 0,
         catching_up: true,
+        replaying: true,
     };
     let _ = health.send(state.clone());
     // frames whose commit has not arrived yet — see `retry_epoch_hold`
@@ -1941,6 +1957,11 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
     loop {
         if state.catching_up && sub.replayed() {
             state.catching_up = false;
+            let _ = health.send(state.clone());
+        }
+        let replaying = sub.replaying();
+        if state.replaying != replaying {
+            state.replaying = replaying;
             let _ = health.send(state.clone());
         }
         let recv = tokio::select! {

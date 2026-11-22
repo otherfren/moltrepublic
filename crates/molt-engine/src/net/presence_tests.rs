@@ -162,6 +162,7 @@ fn group_channel_health_names_relays_live_losses_and_catch_up() {
             opaque_frames: opaque,
             live_opaque: live,
             catching_up,
+            replaying: catching_up,
         }
     };
     st.apply_group_health(h(Some("relay ws://r refused the sub"), 0, 0, false));
