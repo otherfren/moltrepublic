@@ -305,7 +305,8 @@ What an older build (v0.1.0, v0.0.20) does:
 
 | where | older build |
 |---|---|
-| founding with the key | refuses to ratify (`verify_canonical_features`: unknown feature) - the founding fails honestly, no mixed republic is born |
+| joining a founding of this build | refused at the join, both sides told: the founder logs `<seat> runs a build without the lock - refused` and sends the activator `LinkSpent` with the reason (the joiner declares no lock capability in its `JoinRequest`); the ticket stays usable after an update. Without that gate the member would refuse to ratify silently (`verify_canonical_features`) and the ritual would hang |
+| founding as the founder | founds without the key: a pre-lock republic, enabled later by vote |
 | reading a chain whose genesis or a block carries it | verifies and folds it unchanged (the genesis check does not validate the vocabulary; `fold_one` does not validate org payloads; the union fold keeps the unknown key) - same bytes, same hashes, no fork |
 | a checkpoint blob carrying it | hashes it as one more string, identical |
 | proposing it | refused (`validate_org_payload`: unknown feature) |
@@ -317,11 +318,23 @@ take part in the lock and is expected to update.
 
 **Guard on enabling.** A seat neither proposes nor signs the enabling
 vote unless every other roster seat announced the capability
-(`lock_enable_blocker`, reason `a seat runs a build without the lock`):
+(`lock_enable_blocker`; the reason names the seat: `<seat> runs a build
+without the lock`, or `<seat> has not announced`):
 the approver check keeps the threshold from being reached past an
 older seat; the proposer check keeps a card that nobody may sign off the
 board. An older build cannot propose the key at all. The capability is
-otherwise information only.
+otherwise information only. The lock cannot be switched off: like the
+vault, a `set_features` value need not name it and the union fold keeps
+it (refusing such a card would break every caller that lists only the
+surfaces, the GUI among them).
+
+**Capabilities reach every seat** (R10). A seat declares at open, on a
+change, and again whenever a peer asks (`MirrorWho`) or a seat is
+restored or joins; a seat lacking a roster peer's declaration asks,
+backing off from 10 s to an hour. A declaration without a capability is
+kept as such (`declared without` differs from `unheard`). Without this
+a restored seat learned the others' capabilities only at their 6 h
+repeat and could not approve the enabling vote.
 
 **The boundary.** The enabling block E at height h is sealed under the
 old rules (free signatures, B6). A seat decides the mode for h + 1 only
@@ -544,11 +557,10 @@ Where the wiring differs from §1-§13, and why.
   every open with the lock on, the replayed own signatures (always free
   ones) are marked free at their heights before anything else, so a
   build without the lock that ran in between leaves no gap. With the lock
-  off nothing is written and nothing is passive. An export made before
-  the lock ran carries no marker and looks like a fresh upgrade - but an
-  imported workspace opens detached and comes back only through the
-  recovery ritual, whose restored seat is §4.2's Z with a fresh acceptor,
-  so no forgotten promise of the old device is ever asked for. Residual: two live
+  off nothing is written and nothing is passive. An import sets the
+  marker whatever the export carried, so a restored workspace opens
+  amnesiac where its chain runs the lock (S6 below); it also opens
+  detached and comes back only through the recovery ritual. Residual: two live
   copies of one workspace (a copied directory run twice) - B2/B3's
   territory, like a live old device.
 - **The amnesia floor** is fixed by the first peer height this seat hears
@@ -648,8 +660,10 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   builds (ceiling 3) refuse it at the gate, sealing keeps it. Nothing is
   written, marked or amnesia-gated before the chain enables the lock, so
   a pre-lock republic stays openable by older builds until its vote.
-  Defence in depth: a seat seen with lock state at a height is never
-  counted free there; a seat that finds its own free signature beside
+  Defence in depth: a seat seen ACCEPTING at a height is never counted
+  free there; one seen only promising counts once the seats already
+  known free kill the lock for a seat holding nothing - the release rule
+  it applies to itself, so a sound cascade never stalls (review R4); a seat that finds its own free signature beside
   its lock state at open goes passive at that height
   (`lock=passive reason=conflict`). Residual: lock frames of a seat that
   were all lost, followed by a downgrade from a backup the marker never
@@ -666,9 +680,23 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   first version of this rule did, and `nostr_outbox_quiet` caught it).
 - **S5.** Seats known free are heard as free; promisers and free seats
   stay disjoint.
-- **W2.** The leader skips a card the gates refuse now (relay wait, a
-  restore gate, vault/wallet checks); one unsealable card no longer
-  starves a height.
+- **R6.** A free signature given on a lineage without the enabling
+  block is marked free when the head moves onto one that runs the lock,
+  before any lock reply there - what §8's per-height free mark claims.
+- **R7.** A card withdrawn after the lock chose it seals anyway: the
+  record reads applied and withdrawn, and its proposer gets
+  `sealed-after-withdrawal:<id>`. Once the card is retired the leader
+  cannot resolve a `LockAccepted` for it, so only a seat holding the
+  value seals it - slower, not a stall.
+- **R8.** Intents that outrun their card survive a head move (up to
+  1,024 unknown ids, oldest first out); a retired card's go.
+- **W2/R5.** The leader skips a card the chain-wide gates refuse now
+  (relay wait, a restore gate and consent, a cut's hash); a seat's own
+  vault/wallet checks only stop its acceptance, since another seat may
+  pass them. A card whose ballot went stale without reaching need (every
+  acceptor withholding, e.g. a wallet daemon down) waits at that height
+  while another card is ready; when all went stale they rotate again. A
+  forced value is never skipped.
 - **W5** voices before digests; **W6** marks unwritten at open mean
   amnesia; **W7** no amnesia where the lock is not enabled; **W8** the
   restore label counts intents; **W9** an `Accept` before its card is
@@ -678,9 +706,15 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   acceptance or a choice): every shape decides; without S1, or waiting for
   every seat forever, it stalls. Not modelled: the downgrade (the storage
   gate closes it), head moves and pruning (pinned in the engine tests).
-- **Not closed (S6):** a filesystem backup that restores the chain AND
-  an older but readable lock file is not detected as amnesia (binding
-  the file to its head does not catch it either: both are equally old).
-  The floor stays the FIRST peer report on purpose: peers report with
-  every block, so a highest-report floor would move with the live chain
-  and never be passed.
+- **S6, a residual outside the crash model.** A filesystem backup that
+  restores the chain AND an older but readable `chain_lock.state` is not
+  detected: the seat may re-promise a slot whose acceptance it lost. An
+  operator who restores such a backup must DELETE `chain_lock.state`
+  (never restore it): with the marker set and the file gone the seat is
+  amnesiac - passive up to the first peer height it hears - which is the
+  safe state. The product's own paths cannot produce the case: an export
+  (file or S3 backup) never carries the lock file, and an import sets the
+  marker, so every restored workspace opens amnesiac where its chain runs
+  the lock (`a_restored_workspace_is_amnesiac_for_the_lock`). The floor
+  stays the FIRST peer report: peers report with every block, so a
+  highest-report floor would move with the live chain and never be passed.

@@ -147,7 +147,7 @@ pub(crate) use governance::{ParkedApproval, PendingApproval, RELAYS_WAIT};
 pub(crate) use membership::{AnchorFirst, AttemptBook, NostrRekey, MINTED_TICKETS, RecoverSendCounts, PendingRecovery, RecoverProgressReport, REJOIN_NEEDS_A_LINK};
 #[cfg(test)]
 pub(crate) use membership::RECOVER_PART_MAX;
-pub(crate) use lock_wire::{LockMode, LockRuntime, LockSeams, LOCK_NOT_EVERYWHERE};
+pub(crate) use lock_wire::{LockMode, LockRuntime, LockSeams};
 
 use verify::*;
 

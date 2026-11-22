@@ -737,6 +737,10 @@ pub(crate) static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
         &["✗ Einladung ", ": dieser Transport-Schlüssel wird schon von einem anderen Sitz benutzt - abgelehnt"],
     ),
     (
+        &["✗ invite ", ": ", " runs a build without the lock - refused"],
+        &["✗ Einladung ", ": ", " nutzt einen Build ohne Kettensperre - abgelehnt"],
+    ),
+    (
         &["✗ invite ", ": no usable reply address in the request - refused"],
         &["✗ Einladung ", ": keine nutzbare Antwort-Adresse in der Anfrage - abgelehnt"],
     ),

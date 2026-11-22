@@ -420,6 +420,10 @@ pub struct JoinRequest {
     /// check binds it). Empty from an older joiner, and then absent.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub vault_pk: String,
+    /// The joiner build's capabilities (not MAC-bound). Empty from an
+    /// older joiner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<String>,
 }
 
 /// A total-loss member's activation of a recovery link (recovery_ritual.md §4):
@@ -1113,6 +1117,7 @@ mod tests {
                 key_package: "cc".repeat(20),
                 relays: Vec::new(),
                 vault_pk: String::new(),
+                caps: Vec::new(),
             }),
             RitualMsg::Seal {
                 proposal: "{\"name\":\"Guild\"}".into(),

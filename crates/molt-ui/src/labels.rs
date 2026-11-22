@@ -190,6 +190,11 @@ pub(crate) fn vote_refused_copy(lang: i32, rest: &str) -> String {
     }
 }
 
+/// R7: a withdrawn card of this seat sealed anyway.
+pub(crate) fn sealed_after_withdrawal_copy(lang: i32) -> String {
+    if lang == 1 { "Zurückgezogener Vorschlag wurde besiegelt.".to_string() } else { "Withdrawn proposal sealed anyway.".to_string() }
+}
+
 /// D1: a withdrawn restore of `member` sealed elsewhere; the seat has no
 /// working device until it rejoins with a new link.
 pub(crate) fn restore_sealed_after_withdrawal_copy(lang: i32, member: &str) -> String {

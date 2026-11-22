@@ -926,6 +926,11 @@ pub(crate) struct FilePlane {
     pub(crate) mirror_status_last: Vec<molt_core::MirrorHold>,
     pub(crate) mirror_who_answered: u64,
     pub(crate) mirror_who_asked: bool,
+    /// R10: a declaration owed (a peer asked, the audience changed), and
+    /// the next ask for capabilities this seat lacks, with its backoff.
+    pub(crate) mirror_decl_due: bool,
+    pub(crate) mirror_caps_ask_at: u64,
+    pub(crate) mirror_caps_backoff: u64,
     /// The mirror worker (§3.3): the running fetch per series, the series
     /// waiting for the sharer's stamp, the planning beat, the one notice.
     pub(crate) mirror_fetches: HashMap<molt_core::MessageId, tokio::task::AbortHandle>,
@@ -1783,6 +1788,9 @@ impl State {
                 mirror_status_last: Vec::new(),
                 mirror_who_answered: 0,
                 mirror_who_asked: false,
+                mirror_decl_due: false,
+                mirror_caps_ask_at: 0,
+                mirror_caps_backoff: 0,
                 mirror_fetches: HashMap::new(),
                 mirror_pending: HashMap::new(),
                 mirror_planned_at: 0,
@@ -2510,6 +2518,7 @@ impl State {
                 key_package,
                 relays,
                 vault_pk,
+                caps,
                 generation,
             } => self.cmd_net_join_requested(
                 seat,
@@ -2522,6 +2531,7 @@ impl State {
                 key_package,
                 relays,
                 vault_pk,
+                caps,
                 generation,
             ),
             Command::NetSealSigned {

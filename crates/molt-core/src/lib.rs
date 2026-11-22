@@ -5721,6 +5721,10 @@ pub enum Command {
         /// older joiner.
         #[serde(default)]
         vault_pk: String,
+        /// The joiner build's capabilities (display-grade, not MAC-bound).
+        /// Empty from an older joiner.
+        #[serde(default)]
+        caps: Vec<String>,
         /// Ritual incarnation (stale ritual commands are dropped).
         #[serde(default)]
         generation: Option<u64>,

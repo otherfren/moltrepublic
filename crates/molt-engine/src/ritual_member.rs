@@ -312,6 +312,7 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
         key_package: hex::encode(&key_package),
         relays: leg.declared_relays(),
         vault_pk: vault_pk.clone(),
+        caps: vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
     });
     // a failed announce is not fatal: the resend below is the retry
     if let Err(e) = leg.send(&join).await {

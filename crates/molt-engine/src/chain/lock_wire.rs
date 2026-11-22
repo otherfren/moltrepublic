@@ -64,6 +64,9 @@ struct LockFile {
     values: BTreeMap<String, (u64, Option<ChainChange>)>,
 }
 
+/// Intents kept for cards not yet seen (R8); the oldest ids go first.
+const LOCK_EARLY_INTENTS_MAX: usize = 1024;
+
 /// One ballot this seat leads.
 struct Run {
     leader: Leader,
@@ -134,6 +137,11 @@ pub(crate) struct LockRuntime {
     /// a leader's frame): never counted free there - a seat that later
     /// signs freely at that height was downgraded, not free (S2).
     locked_seen: BTreeMap<u64, BTreeSet<String>>,
+    /// Cards proposed freely at a height whose ballot went stale there:
+    /// skipped while another card is ready (R5).
+    stale_ids: BTreeMap<u64, BTreeSet<u64>>,
+    /// The seats among them seen holding an acceptance there.
+    accepted_seen: BTreeMap<u64, BTreeSet<String>>,
     /// Heights where this seat holds its own free signature beside lock
     /// state (a downgraded build ran here): it neither promises, accepts
     /// nor signs there.
@@ -298,19 +306,34 @@ impl State {
         Some(Value { digest: change_digest(&self.republic_id(), height, change), need })
     }
 
-    /// Seats whose consented restore is registered: never counted as
-    /// promisers (§4.2) nor as a restore's acceptors.
+    /// Seats whose consented restore is registered, or held by the lock at
+    /// head+1 (R2: a withdrawn card the lock may still choose): never
+    /// counted as promisers (§4.2) nor as a restore's acceptors.
     fn lock_restore_subjects(&self) -> BTreeSet<String> {
-        self.chain
-            .proposal_changes
-            .values()
-            .filter_map(|c| match c {
-                ChainChange::Membership { op: MembershipOp::Restored, member, consent: Some(_), .. } => {
-                    Some(member.clone())
-                }
+        fn subject(c: &ChainChange) -> Option<&String> {
+            match c {
+                ChainChange::Membership { op: MembershipOp::Restored, member, consent: Some(_), .. } => Some(member),
                 _ => None,
-            })
-            .collect()
+            }
+        }
+        let mut out: BTreeSet<String> = self.chain.proposal_changes.values().filter_map(subject).cloned().collect();
+        let Some(next) = self.chain.head.as_ref().map(|h| h.height + 1) else { return out };
+        let rid = self.republic_id();
+        let lock = &self.chain.lock;
+        let held = lock
+            .values
+            .iter()
+            .filter_map(|(d, (_, c))| Some((d, c.as_ref()?)))
+            .chain(lock.run.iter().flat_map(|r| r.ids.iter().filter_map(|(d, (_, c))| Some((d, c.as_ref()?)))))
+            .chain(lock.known.iter().filter(|((h, _), _)| *h == next).map(|((_, d), (_, c))| (d, c)));
+        for (digest, change) in held {
+            if let Some(m) = subject(change) {
+                if !out.contains(m) && change_digest(&rid, next, change) == *digest {
+                    out.insert(m.clone());
+                }
+            }
+        }
+        out
     }
 
     /// The chain enabled the lock at head+1 (§8 as built): the effective
@@ -351,25 +374,32 @@ impl State {
 
     /// Every other roster seat announced [`molt_core::chain::CHAIN_LOCK_CAP`]
     /// (information only: it gates the enabling vote, never the mode).
-    pub(crate) fn lock_all_capable(&self) -> bool {
+    /// The first seat that keeps the lock off, and why (R9): this seat's
+    /// own build, a seat announced without the lock, or one never heard.
+    pub(crate) fn lock_not_capable(&self) -> Option<String> {
         #[cfg(test)]
         if let Some(all) = self.chain.lock.caps_override {
-            return all;
+            return (!all).then(|| LOCK_NOT_EVERYWHERE.to_string());
         }
         let me = self.member();
+        if !self.lock_cap_on() {
+            return Some(format!("{me} runs a build without the lock"));
+        }
         let cap = molt_core::chain::CHAIN_LOCK_CAP;
         let known = self.active.as_ref().map(|a| &a.prefs.seat_caps);
         let Some(head) = self.chain.head.as_ref() else {
-            return false;
+            return Some(LOCK_NOT_EVERYWHERE.to_string());
         };
-        head.identities.iter().all(|i| {
-            i.member == me || known.and_then(|k| k.get(&i.member)).is_some_and(|c| c.iter().any(|c| c == cap))
+        head.identities.iter().filter(|i| i.member != me).find_map(|i| match known.and_then(|k| k.get(&i.member)) {
+            None => Some(format!("{} has not announced", i.member)),
+            Some(c) if !c.iter().any(|c| c == cap) => Some(format!("{} runs a build without the lock", i.member)),
+            Some(_) => None,
         })
     }
 
     /// Why this seat neither proposes nor approves enabling the lock now:
     /// a seat it knows of runs a build without it.
-    pub(crate) fn lock_enable_blocker(&self, change: &ChainChange) -> Option<&'static str> {
+    pub(crate) fn lock_enable_blocker(&self, change: &ChainChange) -> Option<String> {
         let ChainChange::Applied { surface: Surface::Organization, payload, .. } = change else {
             return None;
         };
@@ -378,7 +408,10 @@ impl State {
                 .get("value")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|v| v.split_whitespace().any(|k| k == molt_core::chain::CHAIN_LOCK_FEATURE));
-        (enables && !(self.lock_cap_on() && self.lock_all_capable())).then_some(LOCK_NOT_EVERYWHERE)
+        if !enables {
+            return None;
+        }
+        self.lock_not_capable()
     }
 
     /// §8: lock state here -> lock; a free mark (or a dead lock, §14) ->
@@ -404,36 +437,30 @@ impl State {
     /// Other seats known to have signed freely at `height`; a registered
     /// restore's subject never counts (§4.2: its old device is gone).
     fn lock_free_count(&self, height: u64) -> usize {
-        let me = self.member();
-        let subjects = self.lock_restore_subjects();
-        self.chain
-            .lock
-            .free_seen
-            .get(&height)
-            .map_or(0, |f| {
-                let locked = self.chain.lock.locked_seen.get(&height);
-                f.iter()
-                    .filter(|m| **m != me && !subjects.contains(*m) && !locked.is_some_and(|l| l.contains(*m)))
-                    .count()
-            })
+        self.lock_known_free(height).len()
     }
 
-    /// The other seats known free at `height` (S2: never one seen locked).
+    /// The other seats known free at `height`. A seat seen with lock state
+    /// there counts only as a sound release (S2/R4): one seen merely
+    /// promising once the others known free kill the lock for a seat
+    /// holding nothing; one seen accepting never.
     fn lock_known_free(&self, height: u64) -> Vec<String> {
         let me = self.member();
         let subjects = self.lock_restore_subjects();
-        let locked = self.chain.lock.locked_seen.get(&height);
-        self.chain
-            .lock
-            .free_seen
-            .get(&height)
-            .map(|f| {
-                f.iter()
-                    .filter(|m| **m != me && !subjects.contains(*m) && !locked.is_some_and(|l| l.contains(*m)))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default()
+        let lock = &self.chain.lock;
+        let Some(seen) = lock.free_seen.get(&height) else { return Vec::new() };
+        let locked = lock.locked_seen.get(&height);
+        let accepted = lock.accepted_seen.get(&height);
+        let (mut free, mut cascade): (Vec<String>, Vec<String>) = seen
+            .iter()
+            .filter(|m| **m != me && !subjects.contains(*m) && !accepted.is_some_and(|a| a.contains(*m)))
+            .cloned()
+            .partition(|m| !locked.is_some_and(|l| l.contains(m)));
+        let Some(q) = self.lock_quorum() else { return free };
+        if q.lock_dead(free.len(), false) {
+            free.append(&mut cascade);
+        }
+        free
     }
 
     /// §14: the free signers at `height` leave the lock no decision there
@@ -445,7 +472,8 @@ impl State {
 
     /// `member` signed freely at `height` (verified, or its free `Nack`).
     pub(crate) fn lock_note_free(&mut self, member: &str, height: u64) {
-        if !self.lock_cap_on() || !self.lock_rostered(member) || member == self.member() {
+        // R3: a chain without the lock keeps no lock state (W7)
+        if !self.lock_cap_on() || !self.lock_enabled() || !self.lock_rostered(member) || member == self.member() {
             return;
         }
         if self.chain.lock.free_seen.entry(height).or_default().insert(member.to_string()) {
@@ -460,6 +488,7 @@ impl State {
         let next = self.chain.head.as_ref().map_or(0, |h| h.height + 1);
         // an amnesiac seat may have forgotten an acceptance: it stays passive
         if height != next
+            || !self.lock_enabled()
             || self.chain.lock.acceptor.signed_freely(height)
             || self.lock_amnesiac_at(height)
             || !self.lock_dead_at(height)
@@ -700,6 +729,20 @@ impl State {
     /// The B6 choice (§5): the smallest open id whose intents reach its
     /// `need`; a cut only with every seat's promise in hand (§4.1).
     fn lock_choose(&self, slot: &Slot, promised: Option<&BTreeSet<String>>) -> Option<(u64, ChainChange, Value)> {
+        let stale = self.chain.lock.stale_ids.get(&slot.height);
+        // R5: a card whose ballot went stale waits while another is ready;
+        // once every ready card went stale they all come round again
+        self.lock_choose_skipping(slot, promised, stale).or_else(|| {
+            stale.filter(|s| !s.is_empty()).and_then(|_| self.lock_choose_skipping(slot, promised, None))
+        })
+    }
+
+    fn lock_choose_skipping(
+        &self,
+        slot: &Slot,
+        promised: Option<&BTreeSet<String>>,
+        skip: Option<&BTreeSet<u64>>,
+    ) -> Option<(u64, ChainChange, Value)> {
         let q = self.lock_quorum()?;
         let subjects = self.lock_restore_subjects();
         // a seat that signed freely here never accepts: its intent cannot help
@@ -712,7 +755,9 @@ impl State {
             .collect();
         ids.extend(self.chain.proposal_changes.keys().copied());
         for id in ids {
-            if self.proposals.get(&id).is_some_and(|p| p.state != ProposalState::Proposed) {
+            if skip.is_some_and(|s| s.contains(&id))
+                || self.proposals.get(&id).is_some_and(|p| p.state != ProposalState::Proposed)
+            {
                 continue;
             }
             // W5: the cheap count first; the change and its digest only for
@@ -834,6 +879,11 @@ impl State {
     /// `member` holds lock state at `height` (it sent a lock frame there).
     fn lock_note_locked(&mut self, height: u64, member: &str) {
         self.chain.lock.locked_seen.entry(height).or_default().insert(member.to_string());
+    }
+
+    fn lock_note_accepting(&mut self, height: u64, member: &str) {
+        self.lock_note_locked(height, member);
+        self.chain.lock.accepted_seen.entry(height).or_default().insert(member.to_string());
     }
 
     /// Record a ballot seen at `slot`; a higher foreign one stops this
@@ -1105,7 +1155,7 @@ impl State {
         if self.lock_seam(&self.lock_seams.stopped) || self.lock_slot().as_ref() != Some(slot) {
             return false;
         }
-        if self.restore_seal_held(id, &change) {
+        if self.restore_seal_held(id, &change, false) {
             // the tick retries it once the gate opens
             self.chain.lock.learned = Some(Learned { slot: slot.clone(), sealable: s.clone(), since: 0, id, change });
             return false;
@@ -1210,7 +1260,11 @@ impl State {
         }
         let slot = Slot { height, base };
         let ballot = Ballot { round, leader };
-        self.lock_note_locked(height, from);
+        if accepted.is_some() {
+            self.lock_note_accepting(height, from);
+        } else {
+            self.lock_note_locked(height, from);
+        }
         self.lock_saw(&slot, &ballot);
         if ballot.leader != self.member() || self.lock_restore_subjects().contains(from) {
             return;
@@ -1232,6 +1286,13 @@ impl State {
             run.resends = 0;
         }
         run.leader.promise(from, &ballot, acc);
+        // R2: a restore a promise names makes its subject no unheard voice
+        let subjects = self.lock_restore_subjects();
+        if let Some(run) = self.chain.lock.run.as_mut() {
+            for m in &subjects {
+                run.leader.heard_free(m);
+            }
+        }
         self.lock_try_propose();
     }
 
@@ -1252,7 +1313,7 @@ impl State {
         }
         let slot = Slot { height, base };
         let ballot = Ballot { round, leader: from.to_string() };
-        self.lock_note_locked(height, from);
+        self.lock_note_accepting(height, from);
         self.lock_saw(&slot, &ballot);
         let value = Value { digest, need: usize::try_from(need).unwrap_or(usize::MAX) };
         self.lock_acceptor_accept(&slot, &ballot, &value, id, change);
@@ -1274,7 +1335,7 @@ impl State {
         }
         let slot = Slot { height, base };
         let ballot = Ballot { round, leader };
-        self.lock_note_locked(height, from);
+        self.lock_note_accepting(height, from);
         self.lock_saw(&slot, &ballot);
         if self.lock_slot().as_ref() != Some(&slot) {
             return;
@@ -1346,6 +1407,8 @@ impl State {
         lock.known.retain(|(h, _), _| *h > head);
         lock.free_seen.retain(|h, _| *h > head);
         lock.locked_seen.retain(|h, _| *h > head);
+        lock.accepted_seen.retain(|h, _| *h > head);
+        lock.stale_ids.retain(|h, _| *h > head);
         lock.passive.retain(|h| *h > head);
         if lock.learned.as_ref().is_some_and(|l| l.slot.height <= head) {
             lock.learned = None;
@@ -1358,7 +1421,15 @@ impl State {
             .map(|(id, _)| *id)
             .chain(self.chain.proposal_changes.keys().copied())
             .collect();
-        self.chain.lock.intents.retain(|id, _| open.contains(id));
+        self.lock_mark_after_move(head);
+        // R8: an intent may outrun its card; only a retired card's go
+        let known: BTreeSet<u64> = self.proposals.keys().copied().collect();
+        self.chain.lock.intents.retain(|id, _| open.contains(id) || !known.contains(id));
+        let unknown: Vec<u64> =
+            self.chain.lock.intents.keys().filter(|id| !known.contains(id) && !open.contains(id)).copied().collect();
+        for id in unknown.iter().take(unknown.len().saturating_sub(LOCK_EARLY_INTENTS_MAX)) {
+            self.chain.lock.intents.remove(id);
+        }
         self.chain.lock.intent_sent.retain(|id| open.contains(id));
         self.chain.lock.intent_at.retain(|id, _| open.contains(id));
         let slot = self.lock_slot();
@@ -1393,6 +1464,22 @@ impl State {
             return;
         }
         let Some(next) = self.chain.head.as_ref().map(|h| h.height + 1) else { return };
+        // a backoff after yielding to a seat that is now being restored
+        // waits on a ballot nobody will finish (§4.2: its old device is gone)
+        let subjects = self.lock_restore_subjects();
+        let yielded_to_gone = self
+            .chain
+            .lock
+            .seen
+            .iter()
+            .filter(|(s, _)| s.height == next)
+            .map(|(_, b)| b)
+            .max()
+            .is_some_and(|b| subjects.contains(&b.leader));
+        if yielded_to_gone && self.chain.lock.wait.as_ref().is_some_and(|w| w.attempt > 0) {
+            tracing::info!(height = next, "lock=backoff_dropped reason=restore_subject");
+            self.chain.lock.wait = None;
+        }
         let backing_off = self.chain.lock.wait.as_ref().is_some_and(|w| w.height == next && w.attempt > 0);
         if !backing_off && self.lock_line(next).first() == Some(&self.member()) {
             self.lock_start(0);
@@ -1450,6 +1537,7 @@ impl State {
             let interval = self.lock_retransmit().saturating_mul(1 << run.resends.min(10)).min(LOCK_BACKOFF_MAX_SECS);
             let resend = busy && now >= run.sent_at + interval;
             let attempt = run.attempt;
+            let free_pick = run.value.as_ref().filter(|_| run.leader.forced().is_none()).map(|(id, _)| *id);
             // S3: a forced value that waited for a fuller hearing goes out
             // once its interval has passed
             if run.leader.ready() && run.leader.proposed().is_none() && !stale {
@@ -1459,6 +1547,9 @@ impl State {
                 return;
             }
             if stale {
+                if let Some(id) = free_pick {
+                    self.chain.lock.stale_ids.entry(slot.height).or_default().insert(id);
+                }
                 tracing::info!(height = slot.height, attempt = attempt + 1, "lock=retry");
                 self.chain.lock.run = None;
                 self.lock_start(attempt + 1);
@@ -1595,24 +1686,49 @@ impl State {
         }
         // own replayed signatures were free ones (a build without the lock
         // ran here, or none ever wrote the file): mark them first
+        let before = self.chain.lock.acceptor.clone();
+        self.lock_mark_own_free(0);
+        if self.is_chain_governed() && (self.chain.lock.acceptor != before || !marker) && !self.persist_lock() {
+            // W6: marks that never reached the disk would let a free
+            // signature out unwritten
+            self.chain.lock.acceptor = before;
+            self.chain.lock.amnesia = Some(None);
+            tracing::warn!("lock=amnesia reason=unwritten");
+        }
+    }
+
+    /// Own signatures above `above` were given freely: mark them (or go
+    /// passive where lock state conflicts).
+    fn lock_mark_own_free(&mut self, above: u64) {
         let me = self.member();
         let own: Vec<u64> = self
             .chain
             .pending_sigs
             .values()
-            .filter(|p| p.sigs.iter().any(|a| a.member == me))
+            .filter(|p| p.height > above && p.sigs.iter().any(|a| a.member == me))
             .map(|p| p.height)
             .collect();
-        let before = self.chain.lock.acceptor.clone();
         for h in own {
+            if self.chain.lock.acceptor.signed_freely(h) || self.chain.lock.passive.contains(&h) {
+                continue;
+            }
             if self.chain.lock.acceptor.sign_freely(h).is_none() {
                 tracing::warn!(height = h, "lock=passive reason=conflict");
                 self.chain.lock.passive.insert(h);
             }
         }
-        if self.is_chain_governed() && (self.chain.lock.acceptor != before || !marker) && !self.persist_lock() {
-            // W6: marks that never reached the disk would let a free
-            // signature out unwritten
+    }
+
+    /// R6: a free signature given where the lock was not enabled (the losing
+    /// side of a fork at the enabling height) is marked before any lock
+    /// reply once the head reaches a lineage that runs the lock.
+    fn lock_mark_after_move(&mut self, head: u64) {
+        if !self.lock_cap_on() || !self.lock_enabled() || self.chain.lock.amnesia.is_some() || !self.is_chain_governed() {
+            return;
+        }
+        let before = self.chain.lock.acceptor.clone();
+        self.lock_mark_own_free(head);
+        if self.chain.lock.acceptor != before && !self.persist_lock() {
             self.chain.lock.acceptor = before;
             self.chain.lock.amnesia = Some(None);
             tracing::warn!("lock=amnesia reason=unwritten");

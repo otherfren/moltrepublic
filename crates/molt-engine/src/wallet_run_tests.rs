@@ -935,17 +935,19 @@ fn a_declined_founding_card_is_no_consent() {
     assert!(!c.wallet_consents(INIT), "declined: asked in the run");
 }
 
-/// Design §3.2/W10: the ratification consents to the founding's init
-/// only; a later card is asked for.
+/// Design §3.2: the ratification consents to every init card seen before
+/// one applies (two seats may both auto-propose; the lock seals whichever
+/// is ready first); after one applied, see
+/// `a_founding_seat_consents_to_every_init_card_before_one_applies`.
 #[test]
-fn founding_consent_covers_only_the_founding_init() {
+fn founding_consent_covers_every_init_card_until_one_applies() {
     let mut c = armed_seat("c");
     land_card(&mut c, 1, INIT, 3000);
     assert!(c.chain.own_approvals.contains(&INIT), "the founding's card is approved");
     land_card(&mut c, 2, 9, 3000);
-    assert!(!c.chain.own_approvals.contains(&9), "a later card is not");
+    assert!(c.chain.own_approvals.contains(&9), "the other founding card too");
     assert!(c.wallet_consents(INIT));
-    assert!(!c.wallet_consents(9));
+    assert!(c.wallet_consents(9));
 }
 
 /// Plan §7.8: own status every 30 s and on change, never on every beat.

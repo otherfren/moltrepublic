@@ -1034,3 +1034,252 @@ fn an_idle_leader_is_silent() {
     }
     assert!(sent_kinds(&dora).is_empty(), "an idle leader sent {:?}", sent_kinds(&dora));
 }
+
+/// A seat yielded to the ballot of a seat that is then lost and restored:
+/// its backoff waits on a ballot nobody will finish. Once the restore is
+/// registered the backoff is dropped and the next seat in line leads.
+#[test]
+fn a_backoff_after_yielding_to_a_restored_seat_is_dropped() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    hear(&mut dora, T, &["dora", "mara"]);
+    dora.lock_start(0);
+    let base = dora.lock_slot().expect("slot").base;
+    // walter, about to be lost, took the height over at a higher ballot
+    wire(&mut dora, "walter", 1, WorkspaceEvent::LockPrepare { height: 1, base, round: 9 });
+    assert!(dora.chain.lock.run.is_none(), "dora yielded");
+    assert!(dora.chain.lock.wait.as_ref().is_some_and(|w| w.attempt > 0), "and backs off");
+    // walter's device is gone: the restore gate does not wait for it
+    dora.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
+    let rid = b.republic_id.clone();
+    let ticket = "ticket";
+    let kp_hex = kp_hex_for(&b, "walter");
+    let proof = crate::make_seat_proof(b.key("walter"), ticket, &kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(&b, "walter", "", &[], 0, &"cc".repeat(32));
+    dora.verify_and_propose_restore("walter", &b.pk("walter"), &kp_hex, ticket, &proof, "", &[], &consent, "")
+        .expect("proposed");
+    dora.lock_tick();
+    let run = dora.chain.lock.run.as_ref().expect("dora leads again at once");
+    assert!(run.leader.ballot.round > 9, "above walter's ballot");
+}
+
+/// Review R3: where the chain does not run the lock, a peer's free
+/// signature writes no lock state - no file, no manifest bump, no marker.
+#[test]
+fn a_pre_lock_republic_writes_no_lock_state() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    mara.chain.lock.enabled_override = Some(false);
+    for m in ["walter", "dora"] {
+        mara.lock_note_free(m, 1);
+    }
+    mara.lock_tick();
+    assert!(mara.chain.lock.disk.is_none(), "nothing persisted");
+    assert!(!mara.chain.lock.acceptor.signed_freely(1), "no free mark");
+}
+
+/// Review R2: a restore withdrawn after ONE survivor accepted it is not
+/// forced on a leader who heard every survivor - the lost seat is still
+/// the subject of the restore the lock holds, so it is no unheard voice.
+#[test]
+fn a_withdrawn_restore_held_by_one_survivor_is_not_forced() {
+    const FIVE: [&str; 5] = ["dora", "mara", "olga", "paul", "walter"];
+    let b = Builder::new(&FIVE, 3);
+    let mut olga = genesis_seat("olga", &b, b.blocks.clone());
+    olga.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
+    let rid = b.republic_id.clone();
+    let kp_hex = kp_hex_for(&b, "walter");
+    let proof = crate::make_seat_proof(b.key("walter"), "ticket", &kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(&b, "walter", "", &[], 0, &"cc".repeat(32));
+    let id = olga
+        .verify_and_propose_restore("walter", &b.pk("walter"), &kp_hex, "ticket", &proof, "", &[], &consent, "")
+        .expect("proposed");
+    let change = olga.chain.proposal_changes.get(&id).cloned().expect("the restore");
+
+    // the card is gone at dora (withdrawn); mara alone accepted it earlier
+    let mut dora = genesis_seat("dora", &b, b.blocks.clone());
+    dora.chain.lock.enabled_override = Some(true);
+    dora.lock_force(true);
+    hear(&mut dora, T, &FIVE[..4]);
+    let value = dora.lock_value(1, &change).expect("a value");
+    dora.lock_start(0);
+    let (base, round) = {
+        let run = dora.chain.lock.run.as_ref().expect("dora leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    let held = molt_core::chain::LockAcceptedValue {
+        round: 1,
+        leader: "olga".into(),
+        digest: value.digest.clone(),
+        need: u64::try_from(value.need).expect("small"),
+        id,
+        change: Some(change),
+    };
+    for (seq, (from, accepted)) in [("mara", Some(held)), ("olga", None), ("paul", None)].into_iter().enumerate() {
+        let promise = WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round, leader: "dora".into(), accepted };
+        wire(&mut dora, from, u64::try_from(seq).expect("small") + 1, promise);
+    }
+    let run = dora.chain.lock.run.as_ref().expect("still leading");
+    assert!(run.leader.ready(), "every survivor promised");
+    assert_eq!(run.leader.forced(), None, "one holder and the restored seat cannot have chosen it");
+}
+
+/// Review R4: 3-of-4, o on an older build signs w freely; b only
+/// promised, then released soundly (one free signer kills the lock for a
+/// seat holding nothing) and signed v freely. a, who accepted v, counts
+/// b free - a cascaded release - and does not stall. A seat seen
+/// ACCEPTING is still never counted (S2 (i)).
+#[test]
+fn seats_seen_promising_that_released_soundly_count_free() {
+    const FOUR: [&str; 4] = ["a", "b", "c", "o"];
+    let b = Builder::new(&FOUR, 3);
+    let mut a = genesis_seat("a", &b, b.blocks.clone());
+    a.chain.lock.enabled_override = Some(true);
+    a.lock_force(true);
+    hear(&mut a, T, &FOUR);
+    let v = note(&mut a, "v");
+    let w = note(&mut a, "w");
+    for (seq, from) in [(1, "b"), (2, "c")] {
+        wire(&mut a, from, seq, WorkspaceEvent::Approved { id: ProposalId(v), by: from.into(), height: 1, sig: String::new() });
+    }
+    a.lock_start(0);
+    let (base, round) = {
+        let run = a.chain.lock.run.as_ref().expect("a leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    for (seq, from) in [(3, "b"), (4, "c")] {
+        let promise = WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round, leader: "a".into(), accepted: None };
+        wire(&mut a, from, seq, promise);
+    }
+    assert!(a.chain.lock.acceptor.holds_acceptance(1), "a accepted its value");
+    let change_v = a.proposal_change(v).expect("v");
+    let change_w = a.proposal_change(w).expect("w");
+    let free = |a: &mut crate::State, from: &str, seq: u64, id: u64, change: &ChainChange| {
+        let sig = identity_sign(b.key(from), &approval_bytes(&b.republic_id, 1, change));
+        wire(a, from, seq, WorkspaceEvent::Approved { id: ProposalId(id), by: from.into(), height: 1, sig });
+    };
+    free(&mut a, "o", 5, w, &change_w);
+    assert!(!a.chain.lock.acceptor.signed_freely(1), "o alone: a quorum with a's acceptance is still possible");
+    free(&mut a, "b", 6, v, &change_v);
+    assert!(a.chain.lock.acceptor.signed_freely(1), "o and b free leave two lock seats: a releases");
+}
+
+/// Review R5: a card every acceptor withholds (a wallet init while the
+/// daemon is down) goes stale; the next ballot proposes the next ready
+/// card instead of the same one again. Once every ready card went stale
+/// the first comes round again.
+#[test]
+fn a_stale_proposal_rotates_to_the_next_card() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let first = note(&mut dora, "first");
+    let second = note(&mut dora, "second");
+    dora.lock_note_intent(first, "mara");
+    dora.lock_note_intent(second, "mara");
+    // dora's own local check withholds too (no acceptance anywhere)
+    dora.chain.own_approvals.clear();
+    let mut now = T;
+    let mut seq = 0;
+    let mut proposed = Vec::new();
+    for attempt in 0..3 {
+        if attempt == 0 {
+            dora.lock_start(0);
+        }
+        let (base, round) = {
+            let run = dora.chain.lock.run.as_ref().expect("dora leads");
+            (run.leader.slot.base.clone(), run.leader.ballot.round)
+        };
+        seq += 1;
+        wire(&mut dora, "mara", seq, WorkspaceEvent::LockPromise { height: 1, base, round, leader: "dora".into(), accepted: None });
+        proposed.push(dora.chain.lock.run.as_ref().and_then(|r| r.value.as_ref()).map(|(id, _)| *id));
+        // mara withholds: the run goes stale and the next ballot starts
+        let started = dora.chain.lock.run.as_ref().map(|r| r.leader.ballot.round);
+        while dora.chain.lock.run.as_ref().map(|r| r.leader.ballot.round) == started {
+            now += 10;
+            hear(&mut dora, now, &SEATS);
+            dora.lock_tick();
+        }
+    }
+    assert_eq!(proposed, vec![Some(first), Some(second), Some(first)]);
+}
+
+/// Review R6: mara signed a card freely at 1 on a lineage without the
+/// enabling block, then re-based onto one that runs the lock. Her free
+/// signature is marked before any lock reply: she promises nothing there.
+#[test]
+fn a_free_signature_from_before_the_lock_is_marked_on_the_head_move() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    mara.chain.lock.enabled_override = Some(false);
+    note(&mut mara, "y");
+    assert_eq!(own_sigs(&mara), 1, "a free signature at 1, no mark");
+    assert!(!mara.chain.lock.acceptor.signed_freely(1));
+    mara.chain.lock.enabled_override = Some(true);
+    mara.lock_on_head_moved();
+    assert!(mara.chain.lock.acceptor.signed_freely(1), "marked free");
+    mara.chain.lock.outbox.clear();
+    let base = mara.lock_slot().expect("slot").base;
+    wire(&mut mara, "walter", 1, WorkspaceEvent::LockPrepare { height: 1, base, round: 3 });
+    assert!(!sent_kinds(&mara).contains(&"promise"), "no promise: {:?}", sent_kinds(&mara));
+}
+
+/// Review R7: an own card withdrawn after the lock chose it seals anyway;
+/// the proposer is told, the record reads applied and withdrawn.
+#[test]
+fn an_own_card_sealed_after_its_withdrawal_is_reported() {
+    let mut b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let id = note(&mut dora, "x");
+    dora.cmd_withdraw(ProposalId(id), None).expect("withdrawn");
+    let block = b.commit_card(&dora, id, &["mara", "walter"]);
+    dora.receive_block_from("mara", block);
+    let p = dora.proposals.get(&id).expect("record");
+    assert_eq!(p.state, ProposalState::Applied);
+    assert!(p.withdrawn);
+    assert_eq!(dora.session.notice, format!("sealed-after-withdrawal:{id}"));
+}
+
+/// Review R8: an intent that outran its card survives a head move; a
+/// retired card's intents do not.
+#[test]
+fn an_intent_before_its_card_survives_a_head_move() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let retired = note(&mut dora, "gone");
+    dora.cmd_withdraw(ProposalId(retired), None).expect("withdrawn");
+    dora.lock_note_intent(retired, "mara");
+    dora.lock_note_intent(77, "mara");
+    dora.lock_on_head_moved();
+    assert!(dora.chain.lock.intents.contains_key(&77), "the card is still on its way");
+    assert!(!dora.chain.lock.intents.contains_key(&retired), "a retired card's intent goes");
+}
+
+/// Review R9: the enabling vote's refusal names the seat to chase; and
+/// the lock, once enabled, cannot be voted off (like the vault, a value
+/// need not name it - the union keeps it).
+#[test]
+fn the_enabling_refusal_names_the_seat_and_the_lock_stays_on() {
+    use molt_core::chain::{CHAIN_LOCK_CAP, CHAIN_LOCK_FEATURE};
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&SEATS, 2);
+    let (mut mara, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "mara", &SEATS);
+    mara.lock_force(true);
+    let enable = json!({ "op": "set_features", "value": format!("{CHAIN_LOCK_FEATURE} memory") });
+    let caps = |st: &mut crate::State, seat: &str, with: bool| {
+        let list = if with { vec![CHAIN_LOCK_CAP.to_string()] } else { Vec::new() };
+        st.active.as_mut().expect("active").prefs.seat_caps.insert(seat.to_string(), list);
+    };
+    caps(&mut mara, "dora", true);
+    let err = mara.cmd_propose(Surface::Organization, enable.clone()).expect_err("refused");
+    assert_eq!(err.to_string(), "bad payload: walter has not announced");
+    caps(&mut mara, "walter", false);
+    let err = mara.cmd_propose(Surface::Organization, enable).expect_err("refused");
+    assert_eq!(err.to_string(), "bad payload: walter runs a build without the lock");
+
+    let b = Builder::new_with_features(&SEATS, 2, &["memory", CHAIN_LOCK_FEATURE], false);
+    let mut dora = genesis_seat("dora", &b, b.blocks.clone());
+    let id = propose(&mut dora, Surface::Organization, json!({ "op": "set_features", "value": "memory quests" }));
+    assert!(dora.proposals.contains_key(&id));
+    assert!(dora.lock_enabled(), "still on");
+}

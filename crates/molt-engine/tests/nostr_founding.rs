@@ -1714,6 +1714,7 @@ async fn a_failed_re_activation_leaves_the_honest_seat_intact() {
                 relays: Vec::new(),
                 // a current build's request: refused for the key it claims
                 vault_pk: molt_vault::vault_keypair(&[6u8; 32]).1,
+                caps: vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
             }),
         )
         .await

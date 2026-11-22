@@ -22,6 +22,12 @@ const STATUS_MIN_SECS: u64 = 60;
 const STATUS_REPEAT_SECS: u64 = 5 * 60;
 /// A holder answers a `MirrorWho` at most this often.
 const WHO_ANSWER_SECS: u64 = 3_600;
+/// An owed declaration waits at least this long after the last one.
+const DECL_MIN_SECS: u64 = 5;
+/// The first and the longest pause between two asks for missing
+/// capabilities.
+const CAPS_ASK_MIN_SECS: u64 = 10;
+const CAPS_ASK_MAX_SECS: u64 = 3_600;
 /// A half-collected status generation is dropped after this.
 const PAGES_STALE_SECS: u64 = 600;
 /// A `FileWanted` the worker sent for a series' stamp is asked again
@@ -102,9 +108,41 @@ impl State {
         let sent = self.files.mirror_decl_sent;
         // B7: a changed lock capability is news at once
         let cap_changed = self.chain.lock.announced != Some(self.lock_cap_on());
-        if sent == 0 || cap_changed || now.saturating_sub(sent) >= DECL_REPEAT_SECS {
+        let owed = self.files.mirror_decl_due && now.saturating_sub(sent) >= DECL_MIN_SECS;
+        if sent == 0 || cap_changed || owed || now.saturating_sub(sent) >= DECL_REPEAT_SECS {
             self.send_mirror_decl(now);
         }
+        self.ask_missing_caps(now);
+    }
+
+    /// R10: a seat lacking a roster peer's capabilities asks for the
+    /// declarations (a `MirrorWho`; this build answers with its
+    /// declaration), backing off to an hour while one stays silent.
+    fn ask_missing_caps(&mut self, now: u64) {
+        if now < self.files.mirror_caps_ask_at || self.seats_without_caps().is_empty() {
+            return;
+        }
+        let frame = MirrorWhoFrame { v: molt_net::mirror_gossip::MIRROR_V, by: self.member() };
+        if self.publish_mirror_frame(frame.to_frame()) {
+            let backoff = self.files.mirror_caps_backoff.clamp(CAPS_ASK_MIN_SECS / 2, CAPS_ASK_MAX_SECS / 2) * 2;
+            self.files.mirror_caps_backoff = backoff;
+            self.files.mirror_caps_ask_at = now + backoff;
+        }
+    }
+
+    /// Roster seats this seat has no declaration from.
+    pub(crate) fn seats_without_caps(&self) -> Vec<MemberId> {
+        let me = self.member();
+        let known = self.active.as_ref().map(|a| &a.prefs.seat_caps);
+        self.roster().into_iter().filter(|m| *m != me && !known.is_some_and(|k| k.contains_key(m))).collect()
+    }
+
+    /// R10: the audience changed (a seat restored or joined): declare again
+    /// and ask for what is missing, at once.
+    pub(crate) fn mirror_audience_changed(&mut self) {
+        self.files.mirror_decl_due = true;
+        self.files.mirror_caps_ask_at = 0;
+        self.files.mirror_caps_backoff = 0;
     }
 
     /// This seat's declaration, as the members see it.
@@ -127,6 +165,7 @@ impl State {
             caps: own_caps(self.lock_cap_on()),
         };
         if self.publish_mirror_frame(frame.to_frame()) {
+            self.files.mirror_decl_due = false;
             self.chain.lock.announced = Some(self.lock_cap_on());
             // never 0, the "not yet sent" mark
             self.files.mirror_decl_sent = now.max(1);
@@ -657,14 +696,11 @@ impl State {
         caps.retain(|c| ours.contains(c));
         caps.sort();
         caps.dedup();
-        if a.prefs.seat_caps.get(from).map_or(caps.is_empty(), |known| *known == caps) {
+        // an empty list is kept: "declared without" differs from "unheard"
+        if a.prefs.seat_caps.get(from) == Some(&caps) {
             return;
         }
-        if caps.is_empty() {
-            a.prefs.seat_caps.remove(from);
-        } else {
-            a.prefs.seat_caps.insert(from.clone(), caps);
-        }
+        a.prefs.seat_caps.insert(from.clone(), caps);
         a.handle.set_prefs(a.prefs.clone());
     }
 
@@ -719,6 +755,9 @@ impl State {
         if *from == self.member() {
             return Ok(Reply::Ack);
         }
+        // R10: the asker may lack this seat's capabilities (it joined after
+        // the last declaration)
+        self.files.mirror_decl_due = true;
         let now = crate::now_secs();
         if now.saturating_sub(self.files.mirror_who_answered) >= WHO_ANSWER_SECS
             && !self.own_mirror_holds().is_empty()
