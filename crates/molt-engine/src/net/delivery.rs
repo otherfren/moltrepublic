@@ -305,7 +305,9 @@ impl State {
             .map(|(s, _)| *s)
             .collect();
         let aged: Vec<EventEnvelope> = aging.iter().filter_map(|s| hold.held.remove(s)).collect();
-        let blocked = order_sensitive(&envelope.body) && hold.blocks(envelope.seq);
+        // `prev_seq == 0`: a pre-G7 sender or a chain start, unordered as ever
+        let blocked =
+            envelope.prev_seq != 0 && order_sensitive(&envelope.body) && hold.blocks(envelope.seq);
         for env in aged {
             self.release_unordered(&from, env, "aged");
         }
