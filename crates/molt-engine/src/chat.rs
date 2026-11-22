@@ -1535,7 +1535,7 @@ mod tests {
         assert_eq!(st.chat[1].body, "A");
         assert_eq!(st.chat[2].body, "B", "order is the sender's, not arrival");
         assert!(st.delivery.accepted["peer-2"].is_accepted(10) && st.delivery.accepted["peer-2"].is_accepted(12));
-        assert!(st.delivery.ordered_park.is_empty(), "the park drained");
+        assert!(st.inbound_held_view().is_empty(), "the hold drained");
     }
 
     /// A fresh, VISIBLE chat message (recent ts — `land_chat`'s epoch-old
@@ -1776,7 +1776,7 @@ mod tests {
         assert_eq!(st.chat.len(), 1, "parked, not applied");
         // a recovery reset forgets the old incarnation's park
         st.reset_peer_accept_window(&"peer-2".to_string());
-        assert!(st.delivery.ordered_park.is_empty(), "the reset clears the park");
+        assert!(st.delivery.inbound.is_empty(), "the reset clears the hold");
 
         // the reset also forgot the history, so re-seed before parking again;
         // the valve releases it (loudly) after the giveup window
@@ -1799,11 +1799,11 @@ mod tests {
         .expect("delivered");
         assert_eq!(st.chat.len(), 2);
         st.cmd_net_delivered("peer-2".to_string(), orphan, None).expect("delivered");
-        st.release_stale_parked(1_750_000_000 + 10);
-        assert_eq!(st.chat.len(), 2, "inside the window it stays held");
-        st.release_stale_parked(1_750_000_000 + crate::net::ORDERED_PARK_GIVEUP_SECS + 1);
-        assert_eq!(st.chat.len(), 3, "the valve releases rather than wedges");
-        assert!(st.delivery.ordered_park.is_empty());
+        st.inbound_gap_tick(1_750_000_000 + 10);
+        assert_eq!(st.chat.len(), 2, "inside the bound it stays held");
+        st.inbound_gap_tick(1_750_000_000 + crate::net::GAP_FALLBACK_SECS + 1);
+        assert_eq!(st.chat.len(), 3, "the bound releases rather than wedges");
+        assert!(st.inbound_held_view().is_empty());
     }
 
     // ---- read receipts (Lesebestätigung) ---------------------------------

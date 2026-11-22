@@ -24,14 +24,95 @@ pub(super) const ACK_DEBOUNCE_SECS: u64 = 3;
 /// hard-kill regression window.
 const MLS_PERSIST_SECS: u64 = 10;
 
-/// G7 in-order hold: parked out-of-order envelopes per sender, before the
-/// newest is shed onto the resend machinery.
-const ORDERED_PARK_MAX: usize = 512;
+/// G7: held envelopes per sender; past it the oldest is delivered out of
+/// order rather than shed (§10).
+const HOLD_MAX: usize = 512;
 
-/// G7 pathology valve: a parked envelope whose predecessor never arrived is
-/// released UNORDERED (loudly) after this long. The resend backoff caps at
-/// 600 s, so an honest predecessor always lands well inside the window.
-pub(crate) const ORDERED_PARK_GIVEUP_SECS: u64 = 900;
+/// A seq missing this long is asked for; younger gaps are mostly a
+/// newest-first relay replay filling itself.
+const GAP_ASK_AFTER_SECS: u64 = 2;
+
+/// Re-ask a sender's still-missing seqs this often.
+const GAP_ASK_EVERY_SECS: u64 = 10;
+
+/// Relay skew after evidence that the gap will not fill (the sender
+/// re-published it, or a resend round passed over it): settled after this.
+pub(crate) const GAP_PASS_GRACE_SECS: u64 = 5;
+
+/// The bound for a sender that answers nothing (an older build): six times
+/// the first rung of its resend ladder, so its first rounds land inside it.
+pub(crate) const GAP_FALLBACK_SECS: u64 = 60;
+
+/// Settled gaps remembered per sender, so a late duplicate never reopens one.
+const SETTLED_MAX: usize = 1024;
+
+/// One missing seq of a sender's stream.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Gap {
+    since: u64,
+    asked_at: Option<u64>,
+    /// Evidence it will not fill: settled at this instant.
+    settle_at: Option<u64>,
+}
+
+/// G7 per sender (§10): what is missing and what waits for it.
+#[derive(Debug, Default)]
+pub(crate) struct SenderHold {
+    missing: std::collections::BTreeMap<u64, Gap>,
+    held: std::collections::BTreeMap<u64, EventEnvelope>,
+    settled: std::collections::BTreeSet<u64>,
+    /// The current hold episode: start, logged, envelopes released out of order.
+    since: Option<u64>,
+    logged: bool,
+    unordered: u32,
+}
+
+impl SenderHold {
+    /// Whether an order-sensitive envelope at `seq` must wait.
+    fn blocks(&self, seq: u64) -> bool {
+        self.missing.range(..seq).next().is_some() || self.held.range(..seq).next().is_some()
+    }
+
+    /// Evidence that every missing seq below `seq` was passed over.
+    fn passed(&mut self, seq: u64, now: u64) {
+        for gap in self.missing.range_mut(..seq).map(|(_, g)| g) {
+            gap.settle_at.get_or_insert(now + GAP_PASS_GRACE_SECS);
+        }
+    }
+
+    fn settle(&mut self, seq: u64) -> bool {
+        if self.missing.remove(&seq).is_none() {
+            return false;
+        }
+        self.settled.insert(seq);
+        while self.settled.len() > SETTLED_MAX {
+            self.settled.pop_first();
+        }
+        true
+    }
+
+    fn idle(&self) -> bool {
+        self.missing.is_empty() && self.held.is_empty()
+    }
+}
+
+/// Whether an envelope's effect depends on its sender's earlier envelopes:
+/// the chat stream (arrival is display order; a reaction toggles) and a
+/// member's stances (newest wins). Everything else is keyed, buffered or
+/// idempotent on its own and never waits.
+fn order_sensitive(body: &WorkspaceEvent) -> bool {
+    matches!(
+        body,
+        WorkspaceEvent::Chat(_)
+            | WorkspaceEvent::ChatReacted { .. }
+            | WorkspaceEvent::ChatDeleted { .. }
+            | WorkspaceEvent::ChatRead { .. }
+            | WorkspaceEvent::FileRemoved { .. }
+            | WorkspaceEvent::Approved { .. }
+            | WorkspaceEvent::Declined { .. }
+            | WorkspaceEvent::Withdrawn { .. }
+    )
+}
 
 
 impl State {
@@ -54,9 +135,9 @@ impl State {
         }
         // any pending ack deadline refers to the OLD window — drop it too
         self.delivery.ack_due.remove(member);
-        // parked successors chain into the OLD incarnation's seq space; the
+        // held successors chain into the OLD incarnation's seq space; the
         // new incarnation resends its own history anyway (G7)
-        self.delivery.ordered_park.remove(member);
+        self.delivery.inbound.remove(member);
     }
 
     /// Mark `seq` from `from` as engine-accepted (delivery guarantee §4.2 —
@@ -152,7 +233,7 @@ impl State {
             tracing::debug!(%from, "dropping a delivery from a torn-down mesh");
             return Ok(Reply::Ack);
         }
-        if self.drop_seam.drops(&from, envelope.seq) {
+        if self.drop_seam.drops(&from, envelope.seq) || self.drop_seam.drops_chat(&envelope.body) {
             return Ok(Reply::Ack);
         }
         let known = match &self.net {
@@ -167,114 +248,208 @@ impl State {
             tracing::warn!(%from, claimed = %envelope.by, "dropping a delivery whose author does not match its link");
             return Ok(Reply::Ack);
         }
-        // G7 in-order hold (delivery guarantee): an envelope whose stamped
-        // predecessor is not in the accept window yet is PARKED, un-marked —
-        // the sender keeps it unacked (its floor stalls below it) and the
-        // resend machinery re-earns it after any crash. A resent predecessor
-        // can therefore never become visible AFTER its successor. `prev_seq
-        // == 0` (pre-G7 sender / chain start) delivers unordered as before.
-        //
-        // Fresh-incarnation rule (N4b §3.1a): a sender we hold NO accepted
-        // history with cannot be ordered against that history. A rejoiner or
-        // late joiner enters the broadcast mid-stream, and the predecessors
-        // were published at epochs its exporter ring can never open — parking
-        // would hold the whole catch-up hostage to frames that cannot exist
-        // for it. The first envelope delivers as the ordering baseline.
-        let has_history = self.delivery.accepted.get(&from).is_some_and(|w| w.high > 0);
-        if envelope.prev_seq != 0
+        // G7 in-order hold (§10). A sender we hold NO accepted history
+        // with cannot be ordered against that history (N4b §3.1a: a
+        // rejoiner enters mid-stream): its first envelope is the baseline.
+        let window = self.delivery.accepted.get(&from);
+        let has_history = window.is_some_and(|w| w.high > 0);
+        let is_dup = window.is_some_and(|w| w.is_accepted(envelope.seq));
+        let prev_missing = envelope.prev_seq != 0
             && has_history
-            && !self
-                .delivery.accepted
-                .get(&from)
-                .is_some_and(|w| w.is_accepted(envelope.prev_seq))
-        {
-            self.park_ordered(&from, envelope);
+            && !window.is_some_and(|w| w.is_accepted(envelope.prev_seq));
+        if !has_history {
+            return self.deliver_gated(from, envelope);
+        }
+        let now = self.presence_now();
+        let hold = self.delivery.inbound.entry(from.clone()).or_default();
+        if is_dup || hold.held.contains_key(&envelope.seq) {
+            // a resend round passed here: whatever is still missing below
+            // was not re-published
+            hold.passed(envelope.seq, now);
+            if is_dup {
+                return self.deliver_gated(from, envelope);
+            }
+            self.delivery.ack_due.entry(from).or_insert(now + ACK_DEBOUNCE_SECS);
+            return Ok(Reply::Ack);
+        }
+        hold.missing.remove(&envelope.seq);
+        let prev = envelope.prev_seq;
+        if prev_missing && !hold.held.contains_key(&prev) && !hold.settled.contains(&prev) {
+            hold.missing.entry(prev).or_insert(Gap { since: now, asked_at: None, settle_at: None });
+        }
+        if order_sensitive(&envelope.body) && hold.blocks(envelope.seq) {
+            hold.since.get_or_insert(now);
+            hold.held.insert(envelope.seq, envelope);
+            let overflow = if hold.held.len() > HOLD_MAX { hold.held.pop_first() } else { None };
+            self.delivery.ack_due.entry(from.clone()).or_insert(now + ACK_DEBOUNCE_SECS);
+            if let Some((_, oldest)) = overflow {
+                self.release_unordered(&from, oldest);
+            }
             return Ok(Reply::Ack);
         }
         let reply = self.deliver_gated(from.clone(), envelope);
-        // successors that were waiting on what just landed drain IN ORDER;
-        // each drained envelope can itself unlock the next
-        while let Some(next) = self.take_ready_parked(&from) {
-            let _ = self.deliver_gated(from.clone(), next);
-        }
+        self.drain_held(&from, "arrived");
         reply
     }
 
-    /// G7: park an out-of-order envelope (bounded per sender, dup-tolerant),
-    /// and arm an ACK — the reported window tells the sender exactly which
-    /// predecessor is missing, so its resend closes the gap fast.
-    pub(crate) fn park_ordered(&mut self, from: &MemberId, envelope: EventEnvelope) {
-        let park = self.delivery.ordered_park.entry(from.clone()).or_default();
-        if park.len() >= ORDERED_PARK_MAX && !park.contains_key(&envelope.seq) {
-            // shed the NEWEST (furthest from deliverable) — the resend
-            // machinery re-offers it once the chain caught up
-            if let Some((&last, _)) = park.iter().next_back() {
-                if envelope.seq > last {
-                    tracing::debug!(%from, seq = envelope.seq, "ordered park full - shedding onto the resend");
-                    return;
+    /// Deliver a held envelope past its gap (cap overflow), counted for
+    /// the episode's summary line.
+    fn release_unordered(&mut self, from: &MemberId, env: EventEnvelope) {
+        if let Some(hold) = self.delivery.inbound.get_mut(from) {
+            if hold.unordered == 0 {
+                tracing::warn!(member = %from, held = HOLD_MAX, "inbound_hold_full");
+            }
+            hold.unordered = hold.unordered.saturating_add(1);
+        }
+        let _ = self.deliver_gated(from.clone(), env);
+    }
+
+    /// Deliver, in seq order, every held envelope from `from` that no
+    /// longer has a missing seq below it; close the episode once nothing
+    /// is held.
+    fn drain_held(&mut self, from: &MemberId, via: &str) {
+        loop {
+            let Some(hold) = self.delivery.inbound.get_mut(from) else { return };
+            let next = match hold.held.first_key_value() {
+                Some((&seq, _)) if hold.missing.range(..seq).next().is_none() => hold.held.remove(&seq),
+                _ => None,
+            };
+            match next {
+                Some(env) => {
+                    let _ = self.deliver_gated(from.clone(), env);
                 }
-                park.remove(&last);
+                None => break,
             }
         }
-        tracing::debug!(%from, seq = envelope.seq, prev = envelope.prev_seq, "holding an out-of-order envelope for its predecessor");
         let now = self.presence_now();
-        self.delivery.ordered_park
-            .entry(from.clone())
-            .or_default()
-            .entry(envelope.seq)
-            .or_insert((envelope, now));
-        let due = now + ACK_DEBOUNCE_SECS;
-        self.delivery.ack_due.entry(from.clone()).or_insert(due);
-    }
-
-    /// G7: the next parked envelope from `from` whose predecessor is now
-    /// accepted (ascending seq = chain order), if any.
-    fn take_ready_parked(&mut self, from: &MemberId) -> Option<EventEnvelope> {
-        let ready = {
-            let park = self.delivery.ordered_park.get(from)?;
-            park.iter()
-                .find(|(_, (env, _))| {
-                    env.prev_seq == 0
-                        || self
-                            .delivery.accepted
-                            .get(from)
-                            .is_some_and(|w| w.is_accepted(env.prev_seq))
-                })
-                .map(|(seq, _)| *seq)?
-        };
-        let park = self.delivery.ordered_park.get_mut(from)?;
-        let (env, _) = park.remove(&ready)?;
-        if park.is_empty() {
-            self.delivery.ordered_park.remove(from);
+        let Some(hold) = self.delivery.inbound.get_mut(from) else { return };
+        if !hold.held.is_empty() {
+            return;
         }
-        Some(env)
-    }
-
-    /// G7 pathology valve (rides the delivery tick): a parked envelope whose
-    /// predecessor never arrives — a buggy or lying chain — is released
-    /// UNORDERED after [`ORDERED_PARK_GIVEUP_SECS`], loudly. Within the
-    /// valve window a real predecessor always lands first (the resend
-    /// backoff caps at 600 s), so honest chains never trip it.
-    pub(crate) fn release_stale_parked(&mut self, now: u64) {
-        let stale: Vec<(MemberId, u64)> = self
-            .delivery.ordered_park
-            .iter()
-            .flat_map(|(m, park)| {
-                park.iter()
-                    .filter(|(_, (_, at))| now.saturating_sub(*at) > ORDERED_PARK_GIVEUP_SECS)
-                    .map(|(seq, _)| (m.clone(), *seq))
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        for (member, seq) in stale {
-            let Some(park) = self.delivery.ordered_park.get_mut(&member) else { continue };
-            let Some((env, _)) = park.remove(&seq) else { continue };
-            if park.is_empty() {
-                self.delivery.ordered_park.remove(&member);
+        if let Some(since) = hold.since.take() {
+            if hold.logged || hold.unordered > 0 {
+                tracing::info!(member = %from, since_s = now.saturating_sub(since), via, unordered = hold.unordered, "inbound_held_cleared");
             }
-            tracing::warn!(%member, seq, prev = env.prev_seq, "a parked envelope's predecessor never arrived - releasing it unordered");
-            let _ = self.deliver_gated(member.clone(), env);
         }
+        hold.logged = false;
+        hold.unordered = 0;
+        if hold.idle() && hold.settled.is_empty() {
+            self.delivery.inbound.remove(from);
+        }
+    }
+
+    /// Settle `seq` of `from`'s stream as never coming, then drain.
+    fn settle_gap(&mut self, from: &MemberId, seq: u64, via: &str) {
+        let Some(hold) = self.delivery.inbound.get_mut(from) else { return };
+        if hold.settle(seq) {
+            if via == "fallback" {
+                tracing::warn!(member = %from, missing_seq = seq, held = hold.held.len(), via, "inbound_gap_skipped");
+            } else {
+                tracing::info!(member = %from, missing_seq = seq, held = hold.held.len(), via, "inbound_gap_skipped");
+            }
+        }
+        self.drain_held(from, via);
+    }
+
+    /// G7 beat (§10): forget gaps the window filled or aged out, settle
+    /// the ones with evidence or past the bound, ask for the rest.
+    pub(crate) fn inbound_gap_tick(&mut self, now: u64) {
+        let me = self.member();
+        let members: Vec<MemberId> = self.delivery.inbound.keys().cloned().collect();
+        for m in members {
+            let window = self.delivery.accepted.get(&m).cloned().unwrap_or_default();
+            let Some(hold) = self.delivery.inbound.get_mut(&m) else { continue };
+            let filled: Vec<u64> =
+                hold.missing.keys().copied().filter(|s| window.is_accepted(*s)).collect();
+            for s in filled {
+                hold.missing.remove(&s);
+            }
+            let mut settle: Vec<(u64, &str)> = Vec::new();
+            let mut ask: Vec<u64> = Vec::new();
+            for (&seq, gap) in &hold.missing {
+                if gap.settle_at.is_some_and(|t| now >= t) {
+                    settle.push((seq, "resend_passed"));
+                } else if now.saturating_sub(gap.since) >= GAP_FALLBACK_SECS {
+                    settle.push((seq, "fallback"));
+                } else if now.saturating_sub(gap.since) >= GAP_ASK_AFTER_SECS
+                    && gap.asked_at.is_none_or(|t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
+                {
+                    ask.push(seq);
+                }
+            }
+            if !hold.held.is_empty() && !hold.logged {
+                if let (Some(since), Some((&missing_seq, _))) = (hold.since, hold.missing.first_key_value()) {
+                    if now.saturating_sub(since) >= GAP_ASK_AFTER_SECS {
+                        hold.logged = true;
+                        tracing::info!(member = %m, missing_seq, held = hold.held.len(), since_s = now - since, "inbound_held");
+                    }
+                }
+            }
+            ask.truncate(molt_net::gap::GAP_MAX_SEQS);
+            if !ask.is_empty() {
+                if let Some(group) = self.group_net.as_ref() {
+                    let want = molt_net::gap::GapWant::new(me.clone(), m.clone(), ask.clone());
+                    if group.handle.publish_control(want.to_frame()) {
+                        tracing::debug!(member = %m, seqs = ask.len(), "gap_want");
+                        for s in &ask {
+                            if let Some(g) = hold.missing.get_mut(s) {
+                                g.asked_at = Some(now);
+                            }
+                        }
+                    }
+                }
+            }
+            for (seq, via) in settle {
+                self.settle_gap(&m, seq, via);
+            }
+            self.drain_held(&m, "filled");
+        }
+    }
+
+    /// A gap want reached this node: only the named sender answers, with a
+    /// targeted resend off the actor (§10).
+    pub(crate) fn cmd_net_gap_wanted(&mut self, from: &MemberId, of: &MemberId, seqs: Vec<u64>) {
+        if *of != self.member() || !self.roster().contains(from) {
+            return;
+        }
+        if let Some(group) = self.group_net.as_ref() {
+            if !group.handle.answer_gap(from.clone(), seqs) {
+                tracing::debug!(%from, "gap_want=dropped reason=queue_full");
+            }
+        }
+    }
+
+    /// The sender answered our gap want: `gone` never comes, `resent` must
+    /// land within the skew grace or it never will.
+    pub(crate) fn cmd_net_gap_answered(&mut self, from: MemberId, to: MemberId, resent: Vec<u64>, gone: Vec<u64>) {
+        if to != self.member() {
+            return;
+        }
+        let now = self.presence_now();
+        let Some(hold) = self.delivery.inbound.get_mut(&from) else { return };
+        for s in &resent {
+            if let Some(g) = hold.missing.get_mut(s) {
+                g.settle_at.get_or_insert(now + GAP_PASS_GRACE_SECS);
+            }
+        }
+        for s in gone {
+            self.settle_gap(&from, s, "gone");
+        }
+    }
+
+    /// The held streams, for the status view.
+    pub(crate) fn inbound_held_view(&self) -> Vec<molt_core::InboundHeld> {
+        self.delivery
+            .inbound
+            .iter()
+            .filter(|(_, h)| !h.held.is_empty())
+            .map(|(m, h)| molt_core::InboundHeld {
+                member: m.clone(),
+                missing_seq: h.missing.keys().next().copied().unwrap_or(0),
+                held: u32::try_from(h.held.len()).unwrap_or(u32::MAX),
+                since: h.since.unwrap_or(0),
+            })
+            .collect()
     }
 
     /// Publish ONE claim sheet covering every member we owe an ack.
@@ -335,8 +510,8 @@ impl State {
         self.flush_due_acks(now);
         // a peer falling silent has no event of its own: this beat carries it
         self.push_outbox_reach();
-        // G7: release park entries whose predecessor pathologically never came
-        self.release_stale_parked(now);
+        // G7: settle or ask for the gaps a held stream waits on
+        self.inbound_gap_tick(now);
         self.release_decision_lines(now);
         // the mirror worker's planning beat (mirroring §3.3; gated inside)
         self.mirror_worker_tick(now);
