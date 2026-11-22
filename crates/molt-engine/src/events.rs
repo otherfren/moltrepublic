@@ -327,13 +327,14 @@ impl State {
                         tracing::warn!(id = id.0, "replaying a Proposed whose id names another change");
                     }
                 }
-                // `by` is the recording envelope's author — the same value
-                // the live wire path stamps (a WP2 re-serve re-wraps under
-                // the serving peer, so both paths agree and replay stays
-                // deterministic)
+                // the same attribution the live wire path runs, from the
+                // recording envelope's author, so replay stays deterministic
                 self.proposals
                     .entry(id.0)
                     .or_insert_with(|| ProposalRecord::new(*surface, payload.clone(), env.by.clone()));
+                if self.proposals.get(&id.0).is_some_and(|p| p.surface == *surface && p.payload == *payload) {
+                    self.attribute_card(id.0, &env.by);
+                }
                 self.next_id = self.next_id.max(id.0.saturating_add(1));
                 let _ = self.register_parked_declines(id.0);
                 let _ = self.register_parked_withdrawal(id.0);

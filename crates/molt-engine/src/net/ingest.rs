@@ -413,7 +413,8 @@ impl State {
                     // wake a sleeping agent harness if this seat's vote is
                     // now awaited (debounced; no-op without a wake command)
                     self.maybe_wake_pending(&from);
-                    self.emit(molt_core::Event::Proposed { id, surface, by: from.clone() });
+                    let by = self.proposals.get(&id.0).map_or_else(|| from.clone(), |p| p.by.clone());
+                    self.emit(molt_core::Event::Proposed { id, surface, by });
                     // the parked voices this card is about to make real —
                     // read BEFORE the drain empties the park, so each can be
                     // kept in the log under its own seat below
