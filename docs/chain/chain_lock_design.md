@@ -586,6 +586,14 @@ Where the wiring differs from §1-§13, and why.
   sealed|released|wait|amnesia_floor|amnesia_over|unwritten height=
   ballot=`; a restore waiting for promises logs `lock=wait
   reason=restore_needs_promises missing=` at INFO.
+- **A withheld acceptance is retried on the tick** (a restore settling, an
+  intent not cast yet): the leader's own acceptance has no resend, and
+  waiting for the leader's 15 s resend made every settled restore late.
+- **A restore settles before the lock accepts it** (`RESTORE_SETTLE_SECS`,
+  as the B6 approval and seal do): a withdrawal right behind the card wins.
+- **Gap hold** (inbound): an intent is a stance and waits behind a gap
+  like any `Approved`; the five lock frames carry their ballot and never
+  wait.
 - **The line leaves a restore's subject out** (§5 as designed; the
   first wiring used B6's line unchanged, so the lost seat, still "heard"
   seconds ago, led the height and the survivor waited a full grace:

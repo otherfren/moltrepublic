@@ -170,3 +170,24 @@ accepts a `Restored` value only after the settle; intents wait behind a
 gap as stances, lock frames never wait. `a_consented_restore_under_the_lock_needs_both_survivors`
 minted its link before every seat announced and got a v1 consent (a
 human vote); it now waits for the announcements, as the recovery tests do.
+
+## 10. Measured on the chain-activation build (2026-11-22)
+
+`chain_convergence.rs`, 2-of-3, two bursts, 10 % inbound loss, five runs
+(lock: a republic founded with this build; B6: founded pre-lock):
+
+| | fork decisions | seconds | frames per block |
+|---|---|---|---|
+| lock | 0, 0, 0, 0, 0 | 21, 94, 5, 36, 80 | 16.9, 21.6, 16.7, 17.8, 19.5 |
+| B6 | 0, 0, 0, 0, 0 | 92, 90, 90, 90, 89 | 49.7, 48.0, 49.5, 53.0, 50.3 |
+
+`chain_lock.rs` (8 tests, in parallel - each founds its own republic on
+its own relay): 8/8 in five of five runs, 39-45 s per run (before: 512-600
+s, two tests sitting out 120 s and 240 s deadlines). The keystone: 0 fork
+decisions every run. Waits driven through seams: the fallback grace of
+both sealing lines (`__lock_timing`, now also B6's sealer turn) - the
+enabling-vote test went from 118 s to 32 s; the restore settle step has
+`__restore_settle_secs` (unused by default).
+
+`vault_late_enable` `enable_then_cut_then_recover_and_read`, three runs
+each: lock 68, 54, 29 s; B6 39, 35, 36 s.
