@@ -1507,3 +1507,57 @@ fn a_dark_build_signs_nothing_on_a_locked_chain() {
     assert!(sent_kinds(&mara).is_empty(), "no lock frame: {:?}", sent_kinds(&mara));
     assert_eq!(mara.lock_status().2, LOCK_CHAIN_UNSUPPORTED, "the status says why");
 }
+
+/// dora leads height 1 and accepts her card with mara's promise; the
+/// block for it then arrives. `(dora, slot, value)`.
+fn accepted_then_sealed(b: &mut Builder, fail_chain: bool) -> (crate::State, Slot, Value) {
+    let mut dora = seat("dora", b);
+    let id = note(&mut dora, "x");
+    dora.lock_note_intent(id, "mara");
+    dora.lock_start(0);
+    let (slot, round) = {
+        let run = dora.chain.lock.run.as_ref().expect("dora leads");
+        (run.leader.slot.clone(), run.leader.ballot.round)
+    };
+    wire(&mut dora, "mara", 1, WorkspaceEvent::LockPromise { height: 1, base: slot.base.clone(), round, leader: "dora".into(), accepted: None });
+    let value = dora.lock_value(1, &dora.proposal_change(id).expect("change")).expect("value");
+    assert!(dora.chain.lock.acceptor.holds(&slot, &value), "dora accepted x at 1");
+    dora.chain.lock.fail_chain_writes = fail_chain;
+    let block = b.commit_card(&dora, id, &["dora", "mara"]);
+    dora.receive_block_from("mara", block);
+    assert_eq!(dora.chain.head.as_ref().map(|h| h.height), Some(1));
+    (dora, slot, value)
+}
+
+/// B-F1: the lock never forgets a slot the DURABLE chain does not cover:
+/// the block at 1 did not reach the disk, so a crash would reopen at 0 -
+/// the acceptance at (1, L) must still be on record.
+#[test]
+fn a_slot_above_the_durable_chain_is_never_forgotten() {
+    let mut b = Builder::new(&SEATS, 2);
+    let (dora, slot, value) = accepted_then_sealed(&mut b, true);
+    assert!(dora.chain.lock.acceptor.holds(&slot, &value), "kept: the chain write failed");
+}
+
+/// D-F1: a slot below the head is kept for a window - a reorg may lead
+/// back onto this lineage, and the seat must still report what it
+/// accepted there.
+#[test]
+fn a_slot_below_the_head_is_kept_for_a_reorg_back() {
+    let mut b = Builder::new(&SEATS, 2);
+    let (dora, slot, value) = accepted_then_sealed(&mut b, false);
+    assert!(dora.chain.lock.acceptor.holds(&slot, &value), "kept inside the window");
+}
+
+/// B-F1 at open: a lock file settled past the chain on disk (whatever
+/// the cause) means the seat may have forgotten something: amnesia.
+#[test]
+fn a_lock_file_ahead_of_the_chain_means_amnesia() {
+    let b = Builder::new(&SEATS, 2);
+    let mara = seat("mara", &b);
+    let mut file: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&LockFile::default()).expect("json")).expect("value");
+    file["floor"] = serde_json::json!(5);
+    let mut mara = mara;
+    mara.load_chain_lock(Ok(Some(serde_json::to_vec(&file).expect("bytes"))), true);
+    assert_eq!(mara.chain.lock.amnesia, Some(None), "settled past the chain: amnesia");
+}

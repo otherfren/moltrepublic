@@ -993,20 +993,30 @@ impl State {
     /// synchronous — `persist_chain_blocking` waits on the writer's ack — so
     /// a catch-up draining N blocks used to sit through N blocking
     /// whole-chain writes inside one uninterruptible actor turn. Losing a
-    /// batch to a crash costs a re-fetch and nothing else: any survivor
-    /// re-serves the blocks on the next catch-up.
+    /// batch to a crash costs a re-fetch: any survivor re-serves the blocks
+    /// on the next catch-up - and, under the lock, the slots above the
+    /// chain on disk stay in the lock file (`durable_head`, B-F1).
     pub(super) fn persist_chain_now(&mut self) -> bool {
         if let Some(base) = self.chain.pool_adopt_base.take() {
             self.adopt_ratified_relays(&base);
         }
         #[cfg(test)]
         CHAIN_PERSISTS.with(|c| c.set(c.get() + 1));
+        #[cfg(test)]
+        if self.chain.lock.fail_chain_writes {
+            return false;
+        }
         let Some(active) = &self.active else {
+            self.chain.lock.durable_head = self.chain.head.as_ref().map_or(0, |h| h.height);
             return true;
         };
         let durable = active
             .handle
             .persist_chain_blocking(self.chain.checkpoint_blob.clone(), self.chain.blocks.clone());
+        if durable {
+            // B-F1: the lock may now forget what this chain covers
+            self.chain.lock.durable_head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        }
         if !durable {
             // The writer also raises its `failed` flag, which the next
             // `record` turns into the operator's "storage-failed" notice.

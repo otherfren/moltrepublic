@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::governance::{FALLBACK_ASK_SECS, SEALER_GRACE_SECS};
-use super::lock::{Acceptor, Ballot, Leader, Quorum, Reply, Sealable, Slot, Step, Tally, Value};
+use super::lock::{Acceptor, Ballot, Leader, Quorum, Reply, Sealable, Slot, Step, Tally, Value, SLOT_KEEP};
 use super::*;
 
 /// The enabling vote waits: a seat runs a build without the lock.
@@ -75,6 +75,10 @@ struct LockFile {
     acceptor: Acceptor,
     #[serde(default)]
     values: BTreeMap<String, (u64, Option<ChainChange>)>,
+    /// The height up to which slots were forgotten (B-F1): a file whose
+    /// floor is above the chain on disk forgot what the chain still needs.
+    #[serde(default)]
+    floor: u64,
 }
 
 /// Intents kept for cards not yet seen (R8); the oldest ids go first.
@@ -180,6 +184,13 @@ pub(crate) struct LockRuntime {
     /// Test: every write fails.
     #[cfg(test)]
     pub(crate) fail_writes: bool,
+    /// Test seam: the chain write fails (ENOSPC, a crash before it).
+    #[cfg(test)]
+    pub(crate) fail_chain_writes: bool,
+    /// The chain height known on disk (B-F1): nothing above it is forgotten.
+    pub(crate) durable_head: u64,
+    /// The height up to which slots were forgotten (persisted).
+    floor: u64,
 }
 
 fn digest_raw(rid: &str, block: &ChainBlock) -> [u8; 32] {
@@ -588,7 +599,11 @@ impl State {
 
     /// Write the acceptor durably; `false` = it did not reach the disk.
     fn persist_lock(&mut self) -> bool {
-        let file = LockFile { acceptor: self.chain.lock.acceptor.clone(), values: self.chain.lock.values.clone() };
+        let file = LockFile {
+            acceptor: self.chain.lock.acceptor.clone(),
+            values: self.chain.lock.values.clone(),
+            floor: self.chain.lock.floor,
+        };
         let Ok(bytes) = serde_json::to_vec(&file) else {
             return false;
         };
@@ -1248,9 +1263,10 @@ impl State {
         let Some(sealable) = self.chain.lock.tallies.entry(slot.clone()).or_default().accepted(from, ballot, &value) else {
             return;
         };
+        let current = self.lock_slot();
         if ballot.leader == self.member() {
             self.lock_seal(slot, &sealable, id, change);
-        } else if self.chain.lock.learned.is_none() {
+        } else if self.chain.lock.learned.as_ref().map_or(true, |l| Some(&l.slot) != current.as_ref()) {
             let since = self.presence_now();
             self.chain.lock.learned = Some(Learned { slot: slot.clone(), sealable, since, id, change });
         }
@@ -1498,8 +1514,20 @@ impl State {
     /// leader open the next slot at once (§5).
     pub(crate) fn lock_on_head_moved(&mut self) {
         let Some(head) = self.chain.head.as_ref().map(|h| h.height) else { return };
+        // B-F1/D-F1: never forget a slot that can still be contended - one
+        // above the chain on disk, or inside the reorg window above the
+        // last cut (the only finality the fork rule has)
+        let cut = self
+            .chain
+            .blocks
+            .iter()
+            .rev()
+            .find(|b| b.height == 0 || CutKind::of(&b.change).is_some())
+            .map_or(0, |b| b.height);
         let lock = &mut self.chain.lock;
-        lock.acceptor.settle(head);
+        let floor = lock.durable_head.min(cut.max(head.saturating_sub(SLOT_KEEP)));
+        lock.acceptor.settle(floor, head);
+        lock.floor = lock.floor.max(floor);
         let held = lock.acceptor.accepted_digests();
         lock.values.retain(|d, _| held.contains(d));
         lock.sigs.retain(|(s, _, _), _| s.height > head);
@@ -1767,6 +1795,9 @@ impl State {
             Ok(None) => Ok(None),
             Err(e) => Err(e),
         };
+        // the chain just read from disk is the durable one
+        let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        self.chain.lock.durable_head = head;
         let on = self.lock_cap_on() && self.lock_enabled();
         if self.lock_chain_unsupported() {
             tracing::warn!(reason = LOCK_CHAIN_UNSUPPORTED, "chain_unsupported");
@@ -1781,9 +1812,16 @@ impl State {
             }
         }
         match parsed {
+            Ok(Some(file)) if file.floor > head && on => {
+                // B-F1: the file forgot slots the chain on disk still needs
+                tracing::warn!(floor = file.floor, head, "lock=amnesia reason=ahead_of_chain");
+                self.chain.lock.amnesia = Some(None);
+                return;
+            }
             Ok(Some(file)) => {
                 self.chain.lock.acceptor = file.acceptor;
                 self.chain.lock.values = file.values;
+                self.chain.lock.floor = file.floor;
             }
             Ok(None) if marker && on => {
                 tracing::warn!("lock=amnesia reason=no_file");

@@ -106,6 +106,11 @@ pub(crate) struct Acceptor {
 /// height, and a free signature stays valid on every branch.
 pub(crate) const FREE_MARK_KEEP: u64 = 4096;
 
+/// How far below the head a slot's promise and acceptance are kept
+/// (D-F1): a reorg may lead back onto a lineage, and the seat must still
+/// report what it accepted there. Below a cut nothing is contended.
+pub(crate) const SLOT_KEEP: u64 = 256;
+
 impl Acceptor {
     fn state(&self, slot: &Slot) -> Option<&SlotState> {
         self.slots.get(&slot.height)?.get(&slot.base)
@@ -225,11 +230,12 @@ impl Acceptor {
         Some(self.free.insert(height))
     }
 
-    /// The head moved to `head`: drop decided slots and old free marks.
-    /// Returns whether anything changed.
-    pub(crate) fn settle(&mut self, head: u64) -> bool {
+    /// Forget slots at or below `floor` (final, or outside the reorg
+    /// window, and covered by the durable chain) and free marks older than
+    /// [`FREE_MARK_KEEP`] below `head`. Returns whether anything changed.
+    pub(crate) fn settle(&mut self, floor: u64, head: u64) -> bool {
         let before = (self.slots.len(), self.free.len());
-        self.slots.retain(|h, _| *h > head);
+        self.slots.retain(|h, _| *h > floor);
         let floor = head.saturating_sub(FREE_MARK_KEEP);
         self.free.retain(|h| *h > floor);
         before != (self.slots.len(), self.free.len())

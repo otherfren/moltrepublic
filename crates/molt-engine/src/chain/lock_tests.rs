@@ -153,13 +153,13 @@ fn settle_drops_decided_slots_and_keeps_recent_free_marks() {
     a.prepare(&slot(10), &b(1, "x"));
     a.prepare(&slot(11), &b(1, "x"));
     a.sign_freely(9);
-    assert!(a.settle(10));
+    assert!(a.settle(10, 10));
     assert!(a.promised(&slot(10)).is_none());
     assert!(a.promised(&slot(11)).is_some());
     assert!(!a.may_sign_freely(11));
     // the free mark survives a head move (a reorg may re-open the height)
     assert!(matches!(a.prepare(&slot(9), &b(1, "x")).reply, Reply::Nack { promised: None, .. }));
-    a.settle(9 + FREE_MARK_KEEP);
+    a.settle(9 + FREE_MARK_KEEP, 9 + FREE_MARK_KEEP);
     assert!(matches!(a.prepare(&slot(9), &b(1, "x")).reply, Reply::Promise { .. }));
 }
 

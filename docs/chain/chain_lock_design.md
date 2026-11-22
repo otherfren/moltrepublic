@@ -743,6 +743,21 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   12 configs x 1,500 seeds with lost seats coming back and withdrawals,
   no fork, no undecided slot; without the rule 4-28 % of the runs with a
   lost seat halt (`simulation_with_withdrawals_decides_every_slot`).
+- **B-F1/D-F1, a seat never forgets what it promised or accepted at a
+  slot that can still be contended.** A head move forgets slots only up
+  to `min(durable_head, max(last cut, head - SLOT_KEEP))`: never above
+  the chain on disk (the lock file is written before the chain in every
+  receive path, so a crash or a failing chain write would otherwise leave
+  a promise forgotten that the reopened chain still needs), and never
+  inside the reorg window (attestation variants let a seat leave a
+  lineage and come back below its old head). The lock file records the
+  floor it forgot up to; a file whose floor is above the chain on disk
+  opens amnesiac (`lock=amnesia reason=ahead_of_chain`). Finality: the
+  fork rule has no depth bound, so only a cut is final; `SLOT_KEEP` = 256
+  heights (about 40 KiB of lock file at one slot per height) is the
+  residual - a reorg deeper than that onto a lineage this seat held state
+  on. A learner's tally for a slot that is no longer head+1 gives way to
+  the current one.
 - **R8.** Intents that outrun their card survive a head move (up to
   1,024 unknown ids, oldest first out); a retired card's go.
 - **W2/R5.** The leader skips a card the chain-wide gates refuse now

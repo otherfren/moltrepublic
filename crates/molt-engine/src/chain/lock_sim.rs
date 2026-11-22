@@ -26,6 +26,9 @@
 //! | persist before the frame; crash between loses both        | `step_acceptor` |
 //! | withdrawal by the proposer                                | `Msg::Withdraw`, lossy |
 //!
+//! | B-F1: a slot above the durable chain is never forgotten   | not modelled (no chain here): `a_slot_above_the_durable_chain_is_never_forgotten`, `a_lock_file_ahead_of_the_chain_means_amnesia` |
+//! | D-F1: a slot inside the reorg window is kept              | not modelled (no lineages here): `a_slot_below_the_head_is_kept_for_a_reorg_back` |
+//!
 //! Not modelled (covered elsewhere): free signers and the release rule
 //! (`lock_tests.rs` mixed runs), cuts, lineages/forks below, amnesia.
 
