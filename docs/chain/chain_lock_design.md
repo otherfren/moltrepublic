@@ -3,7 +3,7 @@
 **Status: DESIGN + pure state machine BUILT (B7a, 2026-11-21); wiring
 PLANNED for v0.1.1 (`docs/chain/chain_lock_wiring_plan.md`, which also
 lists corrections to this design).** Module: `crates/molt-engine/src/chain/lock.rs`, simulation in
-`chain/lock_tests.rs`. Plan: `docs/chain/rejoin_divergence_build_plan.md`
+`chain/lock_tests.rs`. Plan: `docs_archive/chain/rejoin_divergence_build_plan.md`
 B7; research: `docs/chain/chain_divergence_plan.md` S6. Threat model:
 honest seats, faulty network (loss, delay, duplication, reordering,
 restarts). No signed layout changes.
