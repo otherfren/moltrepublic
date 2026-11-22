@@ -103,15 +103,48 @@ fn free_signing_and_the_lock_exclude_each_other_per_height() {
 }
 
 #[test]
-fn only_promise_only_state_is_released_into_a_free_mark() {
+fn state_is_released_into_a_free_mark_only_where_the_lock_is_dead() {
+    let q23 = Quorum { n: 3, m: 2 };
     let mut a = Acceptor::default();
     a.prepare(&slot(3), &b(2, "x"));
-    assert!(a.release_to_free(3));
+    assert!(!a.release_to_free(3, q23, 0), "no free seat known");
+    assert!(a.release_to_free(3, q23, 1));
     assert!(a.signed_freely(3));
     assert!(matches!(a.prepare(&slot(3), &b(9, "y")).reply, Reply::Nack { promised: None, .. }));
     a.accept(&slot(4), &b(1, "x"), &v("p", 2));
-    assert!(!a.release_to_free(4), "an acceptance is never released");
-    assert!(!a.signed_freely(4));
+    assert!(!a.release_to_free(4, q23, 1), "the own acceptance may still complete a quorum");
+    assert!(a.release_to_free(4, q23, 2));
+    assert!(a.signed_freely(4));
+}
+
+#[test]
+fn the_lock_is_dead_once_phase_one_or_phase_two_cannot_complete() {
+    let dead = |n, m, free, acc| q(n, m).lock_dead(free, acc);
+    // 2-of-2 and 3-of-3: one free seat ends it, even for an acceptor
+    assert!(dead(2, 2, 1, false) && dead(2, 2, 1, true));
+    assert!(dead(3, 3, 1, true));
+    // 2-of-3: one free seat for a promiser, two for an acceptor
+    assert!(dead(3, 2, 1, false) && !dead(3, 2, 1, true) && dead(3, 2, 2, true));
+    // 2-of-5: two free seats leave three, short of the four promises
+    assert!(!dead(5, 2, 1, false) && dead(5, 2, 2, false) && dead(5, 2, 2, true));
+    // 3-of-5 and 4-of-7
+    assert!(!dead(5, 3, 1, false) && dead(5, 3, 2, false) && !dead(5, 3, 2, true) && dead(5, 3, 3, true));
+    assert!(!dead(7, 4, 2, false) && dead(7, 4, 3, false) && dead(7, 4, 4, true));
+    assert!(!dead(3, 2, 0, false), "never without a free seat");
+}
+
+#[test]
+fn a_free_answer_counts_as_heard_for_the_forced_value() {
+    // 2-of-5: one acceptor holds p, the fifth seat answered "free": p
+    // cannot have two acceptors left unheard, so the leader is free
+    let mut l = Leader::new(slot(1), q(5, 2), b(3, "a"));
+    for s in ["a", "b", "c"] {
+        l.promise(s, &b(3, "a"), None);
+    }
+    l.promise("d", &b(3, "a"), Some((b(1, "d"), v("p", 2))));
+    assert_eq!(l.forced(), Some(v("p", 2)), "e unheard may hold p");
+    l.heard_free("e");
+    assert_eq!(l.forced(), None);
 }
 
 #[test]
@@ -271,18 +304,20 @@ enum Msg {
     Accept { slot: Slot, ballot: Ballot, value: Value },
     Reply { from: usize, reply: Reply },
     Decided { slot: Slot, value: Value },
-    /// A B6 signature `from` gave at `height` (§14 runs only).
-    Free { from: usize, height: u64, value: Value },
+    /// A B6 signature `from` gave at `height` (mixed runs only).
+    Free { from: usize, height: u64 },
 }
 
-/// How the §14 runs release promises.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// How the mixed runs release lock state into a free mark.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Release {
     /// Never: no seat signs freely.
     Off,
-    /// Once the free signers leave the lock no quorum (`|F| >= n - m`).
-    Rule,
-    /// The control: on the first free signer.
+    /// The WIP branch's rule: promise-only state, `|F| >= n - m`.
+    Shipped,
+    /// [`Acceptor::release_to_free`] as built now.
+    Corrected,
+    /// The control: promise-only state on the first free signer.
     Eager,
 }
 
@@ -291,12 +326,17 @@ struct Config {
     n: usize,
     m: usize,
     heights: u64,
-    /// Seats that never act (a restored seat's lost device).
+    /// Seats that never act (a restored seat's lost device); the last ones.
     dead: usize,
     /// Percent of wishes that are cuts (need n).
     cuts: u64,
     /// Percent of wishes that are consented restores (need m - 1).
     restores: u64,
+    /// Seats on an older build (sign freely, drop every lock frame), just
+    /// before the dead ones.
+    old: usize,
+    /// The step the old seats appear at.
+    old_from: usize,
 }
 
 struct Seat {
@@ -325,6 +365,8 @@ struct Outcome {
     /// Slots decided by the lock, and slots with a free-sealable value.
     lock_chosen: usize,
     free_sealable: usize,
+    /// Releases that happened (mixed runs).
+    releases: usize,
 }
 
 struct Sim {
@@ -339,6 +381,8 @@ struct Sim {
     /// Ghost: every free signature, by height.
     free_ghost: BTreeMap<u64, BTreeMap<Value, BTreeSet<usize>>>,
     release: Release,
+    releases: usize,
+    step: usize,
     drop: u64,
     dup: u64,
     crash: u64,
@@ -372,6 +416,8 @@ impl Sim {
             learned_twice: 0,
             free_ghost: BTreeMap::new(),
             release: Release::Off,
+            releases: 0,
+            step: 0,
             drop: 15,
             dup: 10,
             crash: 2,
@@ -382,15 +428,28 @@ impl Sim {
         Quorum { n: self.cfg.n, m: self.cfg.m }
     }
 
+    /// Runs this build: answers lock frames, may lead.
+    fn runs_lock(&self, i: usize) -> bool {
+        i < self.cfg.n - self.cfg.dead - self.cfg.old
+    }
+
+    fn is_old(&self, i: usize) -> bool {
+        !self.runs_lock(i) && i < self.cfg.n - self.cfg.dead
+    }
+
     fn live(&self, i: usize) -> bool {
-        i < self.cfg.n - self.cfg.dead
+        self.runs_lock(i) || (self.is_old(i) && self.step >= self.cfg.old_from)
+    }
+
+    fn acting(&self) -> usize {
+        self.cfg.n - self.cfg.dead
     }
 
     fn slot(h: u64) -> Slot {
         Slot { height: h, base: format!("l{h}") }
     }
 
-    fn wish(&mut self, seat: usize, h: u64) -> Value {
+    fn kind(&mut self) -> (&'static str, usize) {
         let roll = self.rng.next_u64() % 100;
         let (kind, need) = if roll < self.cfg.cuts {
             ("cut", self.cfg.n)
@@ -399,7 +458,12 @@ impl Sim {
         } else {
             ("change", self.cfg.m)
         };
-        Value { digest: format!("{kind}-{h}-{seat}-{}", self.rng.below(3)), need: need.max(1) }
+        (kind, need.max(1))
+    }
+
+    fn wish(&mut self, seat: usize, h: u64) -> Value {
+        let (kind, need) = self.kind();
+        Value { digest: format!("{kind}-{h}-{seat}-{}", self.rng.below(3)), need }
     }
 
     fn send_all(&mut self, from: usize, msg: &Msg) {
@@ -474,6 +538,13 @@ impl Sim {
     }
 
     fn deliver(&mut self, i: usize, msg: Msg) {
+        if !self.live(i) {
+            return;
+        }
+        if !self.runs_lock(i) && !matches!(msg, Msg::Decided { .. }) {
+            // an older build drops every lock frame
+            return;
+        }
         match msg {
             Msg::Prepare { slot, ballot } => {
                 let seen = self.seats[i].seen_round.entry(slot.height).or_default();
@@ -493,38 +564,61 @@ impl Sim {
             }
             Msg::Reply { from, reply } => self.on_reply(i, from, reply),
             Msg::Decided { slot, value } => self.decide(i, &slot, &value, false),
-            Msg::Free { from, height, value: _ } => {
-                self.seats[i].free_known.entry(height).or_default().insert(from);
-                let known = self.seats[i].free_known.get(&height).map_or(0, BTreeSet::len);
-                let dead = match self.release {
-                    Release::Off => false,
-                    Release::Rule => known >= self.cfg.n - self.cfg.m,
-                    Release::Eager => true,
-                };
-                if dead && !self.seats[i].acceptor.signed_freely(height) {
-                    self.sign_freely(i, height, true);
-                }
-            }
+            Msg::Free { from, height } => self.note_free(i, from, height),
         }
     }
 
-    /// Seat `i` signs a wish freely at `height`, releasing promise-only
-    /// state first when `release`; durable before the signature leaves.
-    fn sign_freely(&mut self, i: usize, height: u64, release: bool) {
+    /// Seat `i` learned that `from` signed freely at `height`.
+    fn note_free(&mut self, i: usize, from: usize, height: u64) {
+        if from == i {
+            return;
+        }
+        self.seats[i].free_known.entry(height).or_default().insert(from);
+        self.maybe_release(i, height);
+    }
+
+    /// The release rule under test, at seat `i` and `height`.
+    fn maybe_release(&mut self, i: usize, height: u64) {
+        if !self.runs_lock(i) || self.seats[i].acceptor.signed_freely(height) {
+            return;
+        }
+        let free = self.seats[i].free_known.get(&height).map_or(0, BTreeSet::len);
+        let q = self.quorum();
         let acc = &mut self.seats[i].acceptor;
-        let ok = if acc.may_sign_freely(height) {
-            acc.sign_freely(height).is_some()
-        } else {
-            release && acc.release_to_free(height)
+        let released = match self.release {
+            Release::Off => false,
+            Release::Shipped => free > 0 && free >= q.n - q.m && acc.release_promises_only(height),
+            Release::Corrected => acc.release_to_free(height, q, free),
+            Release::Eager => free > 0 && acc.release_promises_only(height),
         };
-        if !ok {
+        if released {
+            self.releases += 1;
+            self.persist_free(i, height);
+        }
+    }
+
+    /// The race: seat `i` still believes `height` free and signs there
+    /// (refused where it holds lock state).
+    fn sign_freely(&mut self, i: usize, height: u64) {
+        if self.seats[i].acceptor.sign_freely(height).is_none() {
+            return;
+        }
+        self.persist_free(i, height);
+    }
+
+    /// The free mark reaches the disk before the signature leaves; a crash
+    /// in between loses both.
+    fn persist_free(&mut self, i: usize, height: u64) {
+        if self.rng.chance(self.crash) {
+            self.restart(i);
             return;
         }
         self.seats[i].disk = serde_json::to_string(&self.seats[i].acceptor).expect("serializes");
         // free signers agree among themselves; a lock value never equals one
-        let value = Value { digest: format!("free-{height}-{}", self.rng.below(2)), need: self.cfg.m };
-        self.free_ghost.entry(height).or_default().entry(value.clone()).or_default().insert(i);
-        self.send_all(i, &Msg::Free { from: i, height, value });
+        let (kind, need) = self.kind();
+        let value = Value { digest: format!("free-{kind}-{height}-{}", self.rng.below(2)), need };
+        self.free_ghost.entry(height).or_default().entry(value).or_default().insert(i);
+        self.send_all(i, &Msg::Free { from: i, height });
     }
 
     fn on_reply(&mut self, i: usize, from: usize, reply: Reply) {
@@ -551,33 +645,51 @@ impl Sim {
                     self.decide(i, &slot, &s.value, true);
                 }
             }
-            Reply::Nack { slot, promised, .. } => {
-                if let Some(p) = promised {
+            Reply::Nack { slot, promised, .. } => match promised {
+                Some(p) => {
                     let seen = self.seats[i].seen_round.entry(slot.height).or_default();
                     *seen = (*seen).max(p.round);
                 }
-            }
+                None if self.release != Release::Off => {
+                    if let Some(leader) = self.seats[i].leaders.get_mut(&slot.height) {
+                        if from != i {
+                            leader.heard_free(&from_name);
+                        }
+                    }
+                    self.note_free(i, from, slot.height);
+                }
+                None => {}
+            },
         }
     }
 
     fn chaos(&mut self, steps: usize) {
         for _ in 0..steps {
+            self.step += 1;
             let roll = self.rng.next_u64() % 100;
             if roll < 8 || self.net.is_empty() {
                 // a seat times out and takes over a height it has not decided
-                let i = self.rng.below(self.cfg.n - self.cfg.dead);
+                let i = self.rng.below(self.acting());
                 let h = 1 + self.rng.next_u64() % self.cfg.heights;
-                if !self.seats[i].decided.contains_key(&h) {
+                if self.seats[i].decided.contains_key(&h) {
+                    continue;
+                }
+                if self.runs_lock(i) {
                     self.start_ballot(i, h);
+                } else if self.live(i) {
+                    self.sign_freely(i, h);
                 }
             } else if roll < 8 + self.crash {
-                let i = self.rng.below(self.cfg.n - self.cfg.dead);
+                let i = self.rng.below(self.cfg.n - self.cfg.dead - self.cfg.old);
                 self.restart(i);
             } else if self.release != Release::Off && roll < 14 + self.crash {
-                // an activation race: a seat that still believes the height free
-                let i = self.rng.below(self.cfg.n - self.cfg.dead);
+                // an activation race: a seat that still believes the height
+                // free, or whose belief flipped since
+                let i = self.rng.below(self.acting());
                 let h = 1 + self.rng.next_u64() % self.cfg.heights;
-                self.sign_freely(i, h, false);
+                if self.live(i) {
+                    self.sign_freely(i, h);
+                }
             } else {
                 let k = self.rng.below(self.net.len());
                 let (to, msg) = if self.rng.chance(self.dup) { self.net[k].clone() } else { self.net.swap_remove(k) };
@@ -588,6 +700,26 @@ impl Sim {
         }
     }
 
+    fn drain(&mut self) {
+        while !self.net.is_empty() {
+            let k = self.rng.below(self.net.len());
+            let (to, msg) = self.net.swap_remove(k);
+            self.deliver(to, msg);
+        }
+    }
+
+    fn undecided(&self) -> Vec<u64> {
+        (1..=self.cfg.heights)
+            .filter(|h| {
+                let live: Vec<usize> = (0..self.cfg.n).filter(|i| self.live(*i)).collect();
+                let decided = live.iter().all(|i| self.seats[*i].decided.contains_key(h));
+                // every seat free: B6 decides from here
+                let free = live.iter().all(|i| self.seats[*i].acceptor.signed_freely(*h));
+                !decided && !free
+            })
+            .collect()
+    }
+
     /// Reliable delivery, no crashes, one leader retrying: every height
     /// must decide on every live seat.
     fn settle(&mut self) -> usize {
@@ -595,13 +727,8 @@ impl Sim {
         self.dup = 0;
         self.crash = 0;
         for _ in 0..12 {
-            while !self.net.is_empty() {
-                let k = self.rng.below(self.net.len());
-                let (to, msg) = self.net.swap_remove(k);
-                self.deliver(to, msg);
-            }
-            let undecided: Vec<u64> =
-                (1..=self.cfg.heights).filter(|h| (0..self.cfg.n - self.cfg.dead).any(|i| !self.seats[i].decided.contains_key(h))).collect();
+            self.drain();
+            let undecided = self.undecided();
             if undecided.is_empty() {
                 return 0;
             }
@@ -613,11 +740,50 @@ impl Sim {
                 }
             }
         }
-        (1..=self.cfg.heights).filter(|h| (0..self.cfg.n - self.cfg.dead).any(|i| !self.seats[i].decided.contains_key(h))).count()
+        self.undecided().len()
+    }
+
+    /// Mixed liveness: reliable delivery, and every seat's belief settled
+    /// (an old seat present: new heights go free; otherwise lock). Lock
+    /// state finishes under the lock or is released; free seats re-serve
+    /// their signatures (B6), the lowest non-free seat leads.
+    fn settle_mixed(&mut self) -> usize {
+        self.drop = 0;
+        self.dup = 0;
+        self.crash = 0;
+        self.step = self.step.max(self.cfg.old_from);
+        let old_present = self.cfg.old > 0;
+        for _ in 0..40 {
+            self.drain();
+            let undecided = self.undecided();
+            if undecided.is_empty() {
+                return 0;
+            }
+            for h in undecided {
+                if let Some(i) = (0..self.cfg.n).find(|i| self.live(*i) && self.seats[*i].decided.contains_key(&h)) {
+                    let value = self.seats[i].decided[&h].clone();
+                    self.send_all(i, &Msg::Decided { slot: Self::slot(h), value });
+                    continue;
+                }
+                for i in 0..self.acting() {
+                    let believes_free = !self.runs_lock(i) || old_present;
+                    if believes_free || self.seats[i].acceptor.signed_freely(h) {
+                        self.sign_freely(i, h);
+                    }
+                }
+                for i in 0..self.acting() {
+                    self.maybe_release(i, h);
+                }
+                if let Some(i) = (0..self.acting()).find(|i| self.runs_lock(*i) && !self.seats[*i].acceptor.signed_freely(h)) {
+                    self.start_ballot(i, h);
+                }
+            }
+        }
+        self.undecided().len()
     }
 
     fn outcome(&self) -> Outcome {
-        let mut out = Outcome { learned_twice: self.learned_twice, ..Outcome::default() };
+        let mut out = Outcome { learned_twice: self.learned_twice, releases: self.releases, ..Outcome::default() };
         for by in self.ghost.values() {
             let chosen: BTreeSet<&Value> = by.iter().filter(|((_, v), who)| who.len() >= v.need).map(|((_, v), _)| v).collect();
             if chosen.len() > 1 {
@@ -668,8 +834,11 @@ fn run(cfg: Config, seed: u64, skip_promise_check: bool, liveness: bool) -> Outc
 
 const SEEDS: u64 = 1500;
 
+fn plain(n: usize, m: usize) -> Config {
+    Config { n, m, heights: 3, dead: 0, cuts: 0, restores: 0, old: 0, old_from: 0 }
+}
+
 fn configs() -> Vec<(&'static str, Config)> {
-    let plain = |n, m| Config { n, m, heights: 3, dead: 0, cuts: 0, restores: 0 };
     vec![
         ("2-of-3", plain(3, 2)),
         ("3-of-5", plain(5, 3)),
@@ -721,29 +890,87 @@ fn run_mixed(cfg: Config, seed: u64, release: Release) -> Outcome {
     let mut sim = Sim::new(cfg, seed, false);
     sim.release = release;
     sim.chaos(400);
-    sim.outcome()
+    let mut out = sim.outcome();
+    out.undecided = sim.settle_mixed();
+    let after = sim.outcome();
+    out.forks = out.forks.max(after.forks);
+    out.lock_vs_free = out.lock_vs_free.max(after.lock_vs_free);
+    out.lock_chosen = after.lock_chosen;
+    out.free_sealable = after.free_sealable;
+    out.learned_twice = after.learned_twice;
+    out.releases = after.releases;
+    out
 }
 
-/// §14: seats that still sign freely (an activation race) beside the
-/// lock, and promise-only seats releasing once `|F| >= n - m`: never a
-/// lock-chosen value beside a different free-sealable one, never two lock
-/// values. Releasing on the first free signer instead must fork.
+const MIXED_SEEDS: u64 = 800;
+
+fn mixed_configs() -> Vec<(&'static str, Config)> {
+    vec![
+        ("2-of-2", plain(2, 2)),
+        ("2-of-3", plain(3, 2)),
+        ("3-of-3", plain(3, 3)),
+        ("3-of-4", plain(4, 3)),
+        ("2-of-5", plain(5, 2)),
+        ("3-of-5", plain(5, 3)),
+        ("4-of-7", plain(7, 4)),
+        ("2-of-3 with cuts", Config { cuts: 40, ..plain(3, 2) }),
+        ("3-of-5 with cuts", Config { cuts: 40, ..plain(5, 3) }),
+        ("2-of-3 restoring a lost seat", Config { dead: 1, restores: 50, ..plain(3, 2) }),
+        ("3-of-5 restoring a lost seat", Config { dead: 1, restores: 50, ..plain(5, 3) }),
+        ("4-of-7 restoring a lost seat", Config { dead: 1, restores: 50, ..plain(7, 4) }),
+        ("2-of-3, an old seat appears mid-run", Config { old: 1, old_from: 150, ..plain(3, 2) }),
+        ("3-of-5, an old seat from the start", Config { old: 1, ..plain(5, 3) }),
+        ("4-of-7, two old seats appear mid-run", Config { old: 2, old_from: 200, ..plain(7, 4) }),
+        ("3-of-5 restoring onto an old build", Config { dead: 1, old: 1, old_from: 100, restores: 50, ..plain(5, 3) }),
+    ]
+}
+
+/// §14 as built: seats that sign freely beside the lock (activation races,
+/// flipping beliefs, old builds appearing mid-height, crashes inside a
+/// release), with reliable delivery at the end. Never two lock values,
+/// never a lock value beside a different free-sealable one, and every
+/// height decides - by the lock, or by every seat going free (B6).
 #[test]
-fn simulation_with_free_signers_and_the_release_rule_never_forks() {
-    let plain = |n, m| Config { n, m, heights: 3, dead: 0, cuts: 0, restores: 0 };
-    for (name, cfg) in [("2-of-3", plain(3, 2)), ("3-of-5", plain(5, 3)), ("2-of-5", plain(5, 2)), ("2-of-2", plain(2, 2)), ("3-of-3", plain(3, 3))] {
-        let (mut chosen, mut free) = (0, 0);
-        for seed in 0..SEEDS {
-            let out = run_mixed(cfg, seed, Release::Rule);
+fn simulation_with_free_signers_and_the_release_rule_never_forks_and_decides() {
+    for (name, cfg) in mixed_configs() {
+        let (mut chosen, mut free, mut released) = (0, 0, 0);
+        for seed in 0..MIXED_SEEDS {
+            let out = run_mixed(cfg, seed, Release::Corrected);
             assert_eq!(out.forks, 0, "{name}: lock fork at seed {seed}");
+            assert_eq!(out.learned_twice, 0, "{name}: a seat learned two values at seed {seed}");
             assert_eq!(out.lock_vs_free, 0, "{name}: lock beside free at seed {seed}");
+            assert_eq!(out.undecided, 0, "{name}: undecided at seed {seed}");
             chosen += out.lock_chosen;
             free += out.free_sealable;
+            released += out.releases;
         }
         assert!(chosen > 0 && free > 0, "{name}: both paths decided somewhere ({chosen}, {free})");
-        eprintln!("{name}: lock-decided slots {chosen}, free-sealable slots {free}");
+        eprintln!("{name}: lock-decided {chosen}, free-sealable {free}, releases {released}");
     }
-    let found = (0..SEEDS).find(|seed| run_mixed(plain(5, 2), *seed, Release::Eager).lock_vs_free > 0);
+}
+
+/// The counterexamples to the rule first shipped on the WIP branch: safe,
+/// but a height can stall for good. 2-of-2: the leader accepted its value,
+/// the other seat signed freely, and an acceptance was never released.
+/// 2-of-5: two free seats leave three, short of the four promises phase 1
+/// needs, while `|F| >= n - m` asks for three.
+#[test]
+fn the_shipped_release_rule_stalls_and_the_corrected_one_decides() {
+    for (name, cfg) in [("2-of-2", plain(2, 2)), ("2-of-5", plain(5, 2)), ("3-of-3", plain(3, 3))] {
+        let stalled = (0..MIXED_SEEDS).find(|seed| {
+            let out = run_mixed(cfg, *seed, Release::Shipped);
+            assert_eq!(out.forks + out.lock_vs_free, 0, "{name}: the shipped rule forked at seed {seed}");
+            out.undecided > 0
+        });
+        let seed = stalled.unwrap_or_else(|| panic!("{name}: no stall of the shipped rule in {MIXED_SEEDS} seeds"));
+        eprintln!("{name}: shipped rule stalls at seed {seed}");
+        assert_eq!(run_mixed(cfg, seed, Release::Corrected).undecided, 0, "{name}: seed {seed}");
+    }
+}
+
+#[test]
+fn releasing_on_the_first_free_signer_forks() {
+    let found = (0..MIXED_SEEDS).find(|seed| run_mixed(plain(5, 2), *seed, Release::Eager).lock_vs_free > 0);
     assert!(found.is_some(), "the eager control found no fork");
     eprintln!("eager release fork at seed {found:?}");
 }

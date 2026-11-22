@@ -9,7 +9,14 @@
 
 mod common;
 
-use common::{adopt_relay, engine, hard_kill, read_session, wait_for};
+use common::{adopt_relay, hard_kill, read_session, wait_for};
+
+/// A node that runs the lock whatever the build default.
+fn engine(dir: &std::path::Path) -> WalletHandle {
+    let w = common::engine(dir);
+    w.__lock_cap_off(false);
+    w
+}
 use std::time::Duration;
 
 use molt_core::{Command, ProposalState, Reply, StatusView};

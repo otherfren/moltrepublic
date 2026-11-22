@@ -353,11 +353,12 @@ impl WalletHandle {
         self.drop_seam.dropped.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    /// Test seam (B7): this seat behaves like an older build - it
-    /// announces no lock capability and ignores every lock frame.
+    /// Test seam (B7): `true` = this seat behaves like an older build (no
+    /// lock capability, every lock frame ignored); `false` = it runs the
+    /// lock whatever the build default.
     #[doc(hidden)]
     pub fn __lock_cap_off(&self, off: bool) {
-        self.lock_seams.cap_off.store(off, std::sync::atomic::Ordering::SeqCst);
+        self.lock_seams.cap.store(if off { 2 } else { 1 }, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (B7): the takeover grace and the retransmit interval in

@@ -51,6 +51,7 @@ fn hear(st: &mut crate::State, now: u64, seats: &[&str]) {
 fn seat(member: &str, b: &Builder) -> crate::State {
     let mut st = genesis_seat(member, b, b.blocks.clone());
     st.chain.lock.all_capable = Some(true);
+    st.lock_force(true);
     hear(&mut st, T, &SEATS);
     st
 }
@@ -361,7 +362,7 @@ fn the_lineage_is_one_for_full_pruned_and_relinked_holders() {
 fn an_older_node_ignores_an_unsigned_approval() {
     let b = Builder::new(&SEATS, 2);
     let mut old = seat("mara", &b);
-    old.lock_seams.cap_off.store(true, std::sync::atomic::Ordering::SeqCst);
+    old.lock_force(false);
     let id = note(&mut old, "card");
     old.chain.lock.outbox.clear();
     assert!(!old.receive_approval(id, "dora", 1, ""), "not a refused future height either");
@@ -542,7 +543,7 @@ fn a_refused_cut_frees_the_slot_for_the_next_proposal() {
 #[test]
 fn a_height_split_by_activation_still_decides() {
     let b = Builder::new(&["dora", "mara"], 2);
-    let mut dora = seat("dora", &b);
+    let dora = seat("dora", &b);
     let mut mara = seat("mara", &b);
     mara.chain.lock.all_capable = Some(false);
     let id = note(&mut mara, "split");
@@ -558,6 +559,36 @@ fn a_height_split_by_activation_still_decides() {
     assert_eq!(dora.chain.head, mara.chain.head);
     assert_eq!(applied_id(&dora, 1), Some(id));
     assert!(dora.chain.lock.acceptor.signed_freely(1), "dora released its promise into a free mark");
+}
+
+/// The counterexample to the first release rule (`lock_tests`): in 2-of-2
+/// the leader already ACCEPTED its value when the other seat signed
+/// freely. No lock value can be chosen without that seat any more, so the
+/// acceptance is released too and the height decides freely.
+#[test]
+fn an_acceptance_is_released_once_no_quorum_can_complete_it() {
+    let b = Builder::new(&["dora", "mara"], 2);
+    let dora = seat("dora", &b);
+    let mara = seat("mara", &b);
+    let mut seats = [dora, mara];
+    let id = note(&mut seats[1], "split");
+    swap(&mut seats);
+    seats[0].chain_sign_and_gossip_approval(id);
+    let slot = seats[0].lock_slot().expect("slot");
+    assert!(seats[0].chain.lock.acceptor.accepted(&slot).is_some(), "dora proposed and accepted");
+    // mara has not heard dora yet and now believes the height free
+    seats[0].chain.lock.outbox.clear();
+    seats[1].chain.lock.all_capable = Some(false);
+    seats[1].chain.lock.intent_sent.clear();
+    seats[1].chain_sign_and_gossip_approval(id);
+    assert_eq!(own_sigs(&seats[1]), 1, "mara signed freely");
+    for _ in 0..8 {
+        swap(&mut seats);
+    }
+    let [dora, mara] = seats;
+    assert!(dora.chain.lock.acceptor.signed_freely(1), "the acceptance was released");
+    assert_eq!(mara.chain.head.as_ref().expect("head").height, 1, "the height decided");
+    assert_eq!(dora.chain.head, mara.chain.head);
 }
 
 /// Deliver each seat's recorded frames to the other.
@@ -579,6 +610,7 @@ fn one_free_signer_in_three_of_five_releases_nothing() {
     let b = Builder::new(&names, 3);
     let mut dora = genesis_seat("dora", &b, b.blocks.clone());
     dora.chain.lock.all_capable = Some(true);
+    dora.lock_force(true);
     hear(&mut dora, T, &names);
     let id = note(&mut dora, "x");
     assert!(dora.chain.lock.run.is_some(), "dora leads and promised itself");

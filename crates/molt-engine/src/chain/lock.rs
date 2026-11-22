@@ -53,6 +53,15 @@ impl Quorum {
     pub(crate) fn promises(self) -> usize {
         self.n.saturating_sub(self.m).saturating_add(1)
     }
+
+    /// §14: with `free` OTHER seats known to have signed freely at a height,
+    /// no lock value can ever be chosen there once this seat leaves: either
+    /// the non-free seats cannot answer phase 1 (`free >= m`), or they are
+    /// too few to accept m (`free >= n - m`, plus one when this seat's own
+    /// acceptance still counts among them).
+    pub(crate) fn lock_dead(self, free: usize, holds_acceptance: bool) -> bool {
+        free > 0 && free >= self.m.min(self.n.saturating_sub(self.m) + usize::from(holds_acceptance))
+    }
 }
 
 /// An acceptor's answer.
@@ -173,12 +182,28 @@ impl Acceptor {
         self.free.contains(&height)
     }
 
-    /// Trade promise-only state at `height` for a free mark - only sound
-    /// once the free signers there leave the lock no quorum (the caller's
-    /// check, chain_lock_design.md §14). `false` = this seat accepted a
-    /// value there and keeps it.
-    pub(crate) fn release_to_free(&mut self, height: u64) -> bool {
-        if self.slots.get(&height).is_some_and(|bases| bases.values().any(|s| s.accepted.is_some())) {
+    /// This seat accepted a value at `height` (on any lineage).
+    pub(crate) fn holds_acceptance(&self, height: u64) -> bool {
+        self.slots.get(&height).is_some_and(|bases| bases.values().any(|s| s.accepted.is_some()))
+    }
+
+    /// Trade every lock state at `height` for a free mark once `free` other
+    /// seats known free there leave the lock dead ([`Quorum::lock_dead`],
+    /// chain_lock_design.md §14). `true` = changed, persist first.
+    pub(crate) fn release_to_free(&mut self, height: u64, q: Quorum, free: usize) -> bool {
+        if self.free.contains(&height) || !q.lock_dead(free, self.holds_acceptance(height)) {
+            return false;
+        }
+        self.slots.remove(&height);
+        self.free.insert(height);
+        true
+    }
+
+    /// The rule as first shipped on the WIP branch (promise-only state,
+    /// `free >= n - m`), kept as the simulation's control.
+    #[cfg(test)]
+    pub(crate) fn release_promises_only(&mut self, height: u64) -> bool {
+        if self.holds_acceptance(height) {
             return false;
         }
         self.slots.remove(&height);
@@ -245,12 +270,22 @@ pub(crate) struct Leader {
     pub ballot: Ballot,
     quorum: Quorum,
     promises: BTreeMap<String, Option<(Ballot, Value)>>,
+    /// Seats that answered "signed freely here": they hold no acceptance
+    /// that can be part of a chosen value.
+    free: BTreeSet<String>,
     proposed: Option<Value>,
 }
 
 impl Leader {
     pub(crate) fn new(slot: Slot, quorum: Quorum, ballot: Ballot) -> Self {
-        Self { slot, ballot, quorum, promises: BTreeMap::new(), proposed: None }
+        Self { slot, ballot, quorum, promises: BTreeMap::new(), free: BTreeSet::new(), proposed: None }
+    }
+
+    /// A free `Nack` from `from`: heard, holding nothing that counts.
+    pub(crate) fn heard_free(&mut self, from: &str) {
+        if !self.promises.contains_key(from) {
+            self.free.insert(from.to_string());
+        }
     }
 
     /// A promise for this ballot (others are ignored; duplicates count once).
@@ -271,7 +306,7 @@ impl Leader {
     pub(crate) fn forced(&self) -> Option<Value> {
         let (_, top) = self.promises.values().flatten().max()?;
         let holding = self.promises.values().flatten().filter(|(_, v)| v == top).count();
-        let unheard = self.quorum.n.saturating_sub(self.promises.len());
+        let unheard = self.quorum.n.saturating_sub(self.promises.len() + self.free.len());
         (holding + unheard >= top.need).then(|| top.clone())
     }
 
