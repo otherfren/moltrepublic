@@ -1123,3 +1123,43 @@ fn a_withdrawn_restore_held_by_one_survivor_is_not_forced() {
     assert!(run.leader.ready(), "every survivor promised");
     assert_eq!(run.leader.forced(), None, "one holder and the restored seat cannot have chosen it");
 }
+
+/// Review R4: 3-of-4, o on an older build signs w freely; b only
+/// promised, then released soundly (one free signer kills the lock for a
+/// seat holding nothing) and signed v freely. a, who accepted v, counts
+/// b free - a cascaded release - and does not stall. A seat seen
+/// ACCEPTING is still never counted (S2 (i)).
+#[test]
+fn seats_seen_promising_that_released_soundly_count_free() {
+    const FOUR: [&str; 4] = ["a", "b", "c", "o"];
+    let b = Builder::new(&FOUR, 3);
+    let mut a = genesis_seat("a", &b, b.blocks.clone());
+    a.chain.lock.enabled_override = Some(true);
+    a.lock_force(true);
+    hear(&mut a, T, &FOUR);
+    let v = note(&mut a, "v");
+    let w = note(&mut a, "w");
+    for (seq, from) in [(1, "b"), (2, "c")] {
+        wire(&mut a, from, seq, WorkspaceEvent::Approved { id: ProposalId(v), by: from.into(), height: 1, sig: String::new() });
+    }
+    a.lock_start(0);
+    let (base, round) = {
+        let run = a.chain.lock.run.as_ref().expect("a leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    for (seq, from) in [(3, "b"), (4, "c")] {
+        let promise = WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round, leader: "a".into(), accepted: None };
+        wire(&mut a, from, seq, promise);
+    }
+    assert!(a.chain.lock.acceptor.holds_acceptance(1), "a accepted its value");
+    let change_v = a.proposal_change(v).expect("v");
+    let change_w = a.proposal_change(w).expect("w");
+    let free = |a: &mut crate::State, from: &str, seq: u64, id: u64, change: &ChainChange| {
+        let sig = identity_sign(b.key(from), &approval_bytes(&b.republic_id, 1, change));
+        wire(a, from, seq, WorkspaceEvent::Approved { id: ProposalId(id), by: from.into(), height: 1, sig });
+    };
+    free(&mut a, "o", 5, w, &change_w);
+    assert!(!a.chain.lock.acceptor.signed_freely(1), "o alone: a quorum with a's acceptance is still possible");
+    free(&mut a, "b", 6, v, &change_v);
+    assert!(a.chain.lock.acceptor.signed_freely(1), "o and b free leave two lock seats: a releases");
+}

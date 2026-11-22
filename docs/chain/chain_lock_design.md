@@ -647,8 +647,10 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   builds (ceiling 3) refuse it at the gate, sealing keeps it. Nothing is
   written, marked or amnesia-gated before the chain enables the lock, so
   a pre-lock republic stays openable by older builds until its vote.
-  Defence in depth: a seat seen with lock state at a height is never
-  counted free there; a seat that finds its own free signature beside
+  Defence in depth: a seat seen ACCEPTING at a height is never counted
+  free there; one seen only promising counts once the seats already
+  known free kill the lock for a seat holding nothing - the release rule
+  it applies to itself, so a sound cascade never stalls (review R4); a seat that finds its own free signature beside
   its lock state at open goes passive at that height
   (`lock=passive reason=conflict`). Residual: lock frames of a seat that
   were all lost, followed by a downgrade from a backup the marker never

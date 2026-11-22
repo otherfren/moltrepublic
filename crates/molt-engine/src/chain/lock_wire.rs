@@ -134,6 +134,8 @@ pub(crate) struct LockRuntime {
     /// a leader's frame): never counted free there - a seat that later
     /// signs freely at that height was downgraded, not free (S2).
     locked_seen: BTreeMap<u64, BTreeSet<String>>,
+    /// The seats among them seen holding an acceptance there.
+    accepted_seen: BTreeMap<u64, BTreeSet<String>>,
     /// Heights where this seat holds its own free signature beside lock
     /// state (a downgraded build ran here): it neither promises, accepts
     /// nor signs there.
@@ -419,36 +421,30 @@ impl State {
     /// Other seats known to have signed freely at `height`; a registered
     /// restore's subject never counts (§4.2: its old device is gone).
     fn lock_free_count(&self, height: u64) -> usize {
-        let me = self.member();
-        let subjects = self.lock_restore_subjects();
-        self.chain
-            .lock
-            .free_seen
-            .get(&height)
-            .map_or(0, |f| {
-                let locked = self.chain.lock.locked_seen.get(&height);
-                f.iter()
-                    .filter(|m| **m != me && !subjects.contains(*m) && !locked.is_some_and(|l| l.contains(*m)))
-                    .count()
-            })
+        self.lock_known_free(height).len()
     }
 
-    /// The other seats known free at `height` (S2: never one seen locked).
+    /// The other seats known free at `height`. A seat seen with lock state
+    /// there counts only as a sound release (S2/R4): one seen merely
+    /// promising once the others known free kill the lock for a seat
+    /// holding nothing; one seen accepting never.
     fn lock_known_free(&self, height: u64) -> Vec<String> {
         let me = self.member();
         let subjects = self.lock_restore_subjects();
-        let locked = self.chain.lock.locked_seen.get(&height);
-        self.chain
-            .lock
-            .free_seen
-            .get(&height)
-            .map(|f| {
-                f.iter()
-                    .filter(|m| **m != me && !subjects.contains(*m) && !locked.is_some_and(|l| l.contains(*m)))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default()
+        let lock = &self.chain.lock;
+        let Some(seen) = lock.free_seen.get(&height) else { return Vec::new() };
+        let locked = lock.locked_seen.get(&height);
+        let accepted = lock.accepted_seen.get(&height);
+        let (mut free, mut cascade): (Vec<String>, Vec<String>) = seen
+            .iter()
+            .filter(|m| **m != me && !subjects.contains(*m) && !accepted.is_some_and(|a| a.contains(*m)))
+            .cloned()
+            .partition(|m| !locked.is_some_and(|l| l.contains(m)));
+        let Some(q) = self.lock_quorum() else { return free };
+        if q.lock_dead(free.len(), false) {
+            free.append(&mut cascade);
+        }
+        free
     }
 
     /// §14: the free signers at `height` leave the lock no decision there
@@ -853,6 +849,11 @@ impl State {
         self.chain.lock.locked_seen.entry(height).or_default().insert(member.to_string());
     }
 
+    fn lock_note_accepting(&mut self, height: u64, member: &str) {
+        self.lock_note_locked(height, member);
+        self.chain.lock.accepted_seen.entry(height).or_default().insert(member.to_string());
+    }
+
     /// Record a ballot seen at `slot`; a higher foreign one stops this
     /// seat's own run there and restarts the takeover wait.
     fn lock_saw(&mut self, slot: &Slot, ballot: &Ballot) {
@@ -1227,7 +1228,11 @@ impl State {
         }
         let slot = Slot { height, base };
         let ballot = Ballot { round, leader };
-        self.lock_note_locked(height, from);
+        if accepted.is_some() {
+            self.lock_note_accepting(height, from);
+        } else {
+            self.lock_note_locked(height, from);
+        }
         self.lock_saw(&slot, &ballot);
         if ballot.leader != self.member() || self.lock_restore_subjects().contains(from) {
             return;
@@ -1276,7 +1281,7 @@ impl State {
         }
         let slot = Slot { height, base };
         let ballot = Ballot { round, leader: from.to_string() };
-        self.lock_note_locked(height, from);
+        self.lock_note_accepting(height, from);
         self.lock_saw(&slot, &ballot);
         let value = Value { digest, need: usize::try_from(need).unwrap_or(usize::MAX) };
         self.lock_acceptor_accept(&slot, &ballot, &value, id, change);
@@ -1298,7 +1303,7 @@ impl State {
         }
         let slot = Slot { height, base };
         let ballot = Ballot { round, leader };
-        self.lock_note_locked(height, from);
+        self.lock_note_accepting(height, from);
         self.lock_saw(&slot, &ballot);
         if self.lock_slot().as_ref() != Some(&slot) {
             return;
@@ -1370,6 +1375,7 @@ impl State {
         lock.known.retain(|(h, _), _| *h > head);
         lock.free_seen.retain(|h, _| *h > head);
         lock.locked_seen.retain(|h, _| *h > head);
+        lock.accepted_seen.retain(|h, _| *h > head);
         lock.passive.retain(|h| *h > head);
         if lock.learned.as_ref().is_some_and(|l| l.slot.height <= head) {
             lock.learned = None;
