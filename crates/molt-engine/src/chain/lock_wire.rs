@@ -918,7 +918,11 @@ impl State {
                 self.lock_register(id, c);
             }
         }
-        let Some(change) = self.proposal_change(id) else {
+        // W1: a value this seat already accepted may be chosen; accepting it
+        // again is a promise kept, not a new vote - no approval gate applies
+        let kept = self.chain.lock.acceptor.holds(slot, value);
+        let stored = || self.chain.lock.values.get(&value.digest).and_then(|(_, c)| c.clone());
+        let Some(change) = self.proposal_change(id).or_else(|| if kept { stored() } else { None }) else {
             tracing::debug!(height = slot.height, id, "lock=withheld reason=unknown");
             return;
         };
@@ -929,7 +933,9 @@ impl State {
         self.chain.lock.known.insert((slot.height, value.digest.clone()), (id, change.clone()));
         // F1: a restore settles before this seat accepts it, so a withdrawal
         // right behind the card wins here too
-        let withheld = if matches!(change, ChainChange::Membership { op: MembershipOp::Restored, .. })
+        let withheld = if kept {
+            None
+        } else if matches!(change, ChainChange::Membership { op: MembershipOp::Restored, .. })
             && self.restore_settling(id)
         {
             Some("settling".to_string())

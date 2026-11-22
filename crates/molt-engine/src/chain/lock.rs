@@ -182,6 +182,11 @@ impl Acceptor {
         self.free.contains(&height)
     }
 
+    /// This seat already accepted exactly `value` at `slot`.
+    pub(crate) fn holds(&self, slot: &Slot, value: &Value) -> bool {
+        self.state(slot).and_then(|s| s.accepted.as_ref()).is_some_and(|(_, v)| v == value)
+    }
+
     /// This seat accepted a value at `height` (on any lineage).
     pub(crate) fn holds_acceptance(&self, height: u64) -> bool {
         self.slots.get(&height).is_some_and(|bases| bases.values().any(|s| s.accepted.is_some()))

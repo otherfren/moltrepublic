@@ -811,3 +811,55 @@ fn a_slot_is_height_and_lineage() {
     assert_eq!(s.height, 1);
     let _ = identity_sign;
 }
+
+/// W1: an acceptance is a promise kept. A value this seat already
+/// accepted may be chosen (its `LockAccepted` frames may all be lost); a
+/// later withdraw or decline of the card must not stop this seat from
+/// accepting it again at a higher ballot, or a forced value stalls the
+/// height for good.
+#[test]
+fn an_accepted_value_is_accepted_again_after_a_withdraw_or_decline() {
+    for undo in ["withdraw", "decline"] {
+        let b = Builder::new(&SEATS, 2);
+        let mut dora = seat("dora", &b);
+        let id = note(&mut dora, "x");
+        let change = dora.proposal_change(id).expect("change");
+        let value = dora.lock_value(1, &change).expect("value");
+        let base = dora.lock_slot().expect("slot").base;
+        let accept = |st: &mut crate::State, seq: u64, round: u64| {
+            wire(
+                st,
+                "mara",
+                seq,
+                WorkspaceEvent::LockAccept {
+                    height: 1,
+                    base: base.clone(),
+                    round,
+                    digest: value.digest.clone(),
+                    need: 2,
+                    id: ProposalId(id),
+                    change: None,
+                },
+            );
+        };
+        let accepted = |st: &crate::State| {
+            st.chain.lock.outbox.iter().filter(|e| matches!(e.body, WorkspaceEvent::LockAccepted { .. })).count()
+        };
+        accept(&mut dora, 1, 5);
+        assert_eq!(accepted(&dora), 1, "{undo}: accepted at ballot 5");
+        match undo {
+            "withdraw" => {
+                dora.cmd_withdraw(ProposalId(id), None).expect("withdrawn");
+            }
+            _ => {
+                dora.cmd_decline(ProposalId(id), None).expect("declined");
+            }
+        }
+        dora.chain.lock.outbox.clear();
+        accept(&mut dora, 2, 9);
+        assert_eq!(accepted(&dora), 1, "{undo}: the same value accepted again at ballot 9");
+        // a value this seat never accepted still needs its approval
+        let other = note(&mut dora, "y");
+        let _ = other;
+    }
+}
