@@ -812,6 +812,8 @@ pub(crate) struct DeliveryState {
     pub(crate) inbound: std::collections::HashMap<MemberId, net::SenderHold>,
     /// Test override of `HOLD_BYTES_MAX` (`None` = the constant).
     pub(crate) hold_bytes_cap: Option<usize>,
+    /// Since when no stored replay is coming in (gap wants wait for it).
+    pub(crate) replay_quiet_since: Option<u64>,
     /// `presence_now` of the last persisted accept-window save (debounce).
     pub(crate) accepted_saved_at: u64,
     /// `presence_now` of the last debounced live MLS-ratchet merge into
