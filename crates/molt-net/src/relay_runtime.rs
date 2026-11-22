@@ -410,6 +410,9 @@ pub struct Subscription {
     /// How many of them answered the REQ at all, and how many relays that
     /// came up after the subscribe did.
     answered: tokio::sync::watch::Receiver<(usize, usize)>,
+    /// Which relays are mid stored-replay, and how far the consumer read.
+    replay: Arc<ReplayGauge>,
+    received: u64,
     /// Shared health map + this subscription's relays, so teardown can clear
     /// the entries instead of leaving a stale `Up` behind (review finding).
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
@@ -427,7 +430,19 @@ impl Subscription {
     /// `timeout` (also `None` once every reader has ended and the buffer is
     /// drained).
     pub async fn recv(&mut self, timeout: Duration) -> Option<Event> {
-        tokio::time::timeout(timeout, self.rx.recv()).await.ok().flatten()
+        let got = tokio::time::timeout(timeout, self.rx.recv()).await.ok().flatten();
+        if got.is_some() {
+            self.received += 1;
+        }
+        got
+    }
+
+    /// Whether a stored replay is still coming in: a relay has not ended
+    /// its replay (EOSE, or given up as stuck), or the consumer has not yet
+    /// read what was queued up to such an end. Re-arms with every
+    /// reconnect's replay.
+    pub fn replaying(&self) -> bool {
+        self.replay.open() || self.received < self.replay.drained_at()
     }
 
     /// Wait until EVERY connected relay sent EOSE (MDK port #6) — only then
@@ -586,6 +601,7 @@ struct SubShared {
     eose_tx: Arc<tokio::sync::watch::Sender<usize>>,
     /// Gated relays that answered the REQ at all (a stored event or EOSE).
     answered_tx: Arc<tokio::sync::watch::Sender<(usize, usize)>>,
+    replay: Arc<ReplayGauge>,
     health: Arc<Mutex<std::collections::HashMap<String, RelayHealth>>>,
     down_reasons: Arc<Mutex<std::collections::HashMap<String, RelayDownReason>>>,
     backoff: (Duration, Duration),
@@ -624,6 +640,7 @@ impl RelayRuntime {
         let (tx, rx) = mpsc::channel(self.channel_capacity().max(1));
         let (eose_tx, eose_rx) = tokio::sync::watch::channel(0usize);
         let (answered_tx, answered_rx) = tokio::sync::watch::channel((0usize, 0usize));
+        let replay = Arc::new(ReplayGauge::default());
         let shared = Arc::new(SubShared {
             dialer: self.dialer.clone(),
             filter,
@@ -635,6 +652,7 @@ impl RelayRuntime {
             cursors: self.cursors.clone(),
             eose_tx: Arc::new(eose_tx),
             answered_tx: Arc::new(answered_tx),
+            replay: replay.clone(),
             health: self.health.clone(),
             down_reasons: self.down_reasons.clone(),
             backoff: self.backoff,
@@ -731,6 +749,8 @@ impl RelayRuntime {
             connected: gated.len(),
             eose: eose_rx,
             answered: answered_rx,
+            replay,
+            received: 0,
             health: self.health.clone(),
             down_reasons: self.down_reasons.clone(),
             urls: self.urls.clone(),
@@ -924,7 +944,9 @@ async fn supervise(
         let started = tokio::time::Instant::now();
         match read_session(&shared, &url, ws, (&mut eose_counted, &mut answer), &mut replay).await {
             SessionEnd::ConsumerGone => return, // nothing left to supervise
-            SessionEnd::Died => {}
+            // a dead relay replays again on its reconnect; meanwhile it
+            // holds nothing up
+            SessionEnd::Died => shared.replay.end(&url),
             SessionEnd::Paged => {
                 // the next page follows promptly; the backoff is for failures
                 shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
@@ -938,6 +960,7 @@ async fn supervise(
                 stuck_rounds += 1;
                 if stuck_rounds >= MAX_STUCK_ROUNDS {
                     tracing::warn!(relay = %url, rounds = stuck_rounds, "relay replay stuck - not read again");
+                    shared.replay.end(&url);
                     return;
                 }
                 tokio::time::sleep(cap).await;
@@ -989,6 +1012,41 @@ fn count_answer(shared: &SubShared, answer: &mut Answer) {
     }
 }
 
+/// Per subscription: the relays mid stored-replay, the events queued so
+/// far, and the queue position the last ended replay reached.
+#[derive(Debug, Default)]
+struct ReplayGauge {
+    open: std::sync::Mutex<std::collections::HashSet<String>>,
+    sent: std::sync::atomic::AtomicU64,
+    drained: std::sync::atomic::AtomicU64,
+}
+
+impl ReplayGauge {
+    fn open(&self) -> bool {
+        self.open.lock().is_ok_and(|o| !o.is_empty())
+    }
+
+    fn drained_at(&self) -> u64 {
+        self.drained.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn begin(&self, url: &str) {
+        if let Ok(mut o) = self.open.lock() {
+            o.insert(url.to_string());
+        }
+    }
+
+    /// `url`'s replay ended (or is given up): everything queued so far
+    /// belongs to the replay the consumer must read first.
+    fn end(&self, url: &str) {
+        if let Ok(mut o) = self.open.lock() {
+            o.remove(url);
+        }
+        let sent = self.sent.load(std::sync::atomic::Ordering::SeqCst);
+        self.drained.fetch_max(sent, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// How one session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionEnd {
@@ -1016,6 +1074,7 @@ async fn read_session(
     // the stored replay runs until EOSE; after it the stream is live group
     // traffic, bounded by the group itself, and never counted
     let mut replaying = true;
+    shared.replay.begin(url);
     // stored events of this page, and the oldest verified one
     let mut stored_seen: usize = 0;
     let mut page_oldest: Option<u64> = None;
@@ -1101,8 +1160,11 @@ async fn read_session(
                     advance_cursor(shared, url, stamp).await;
                 }
                 let fresh = shared.dedup.lock().await.fresh(event.id);
-                if fresh && shared.tx.send(event.into_owned()).await.is_err() {
-                    return SessionEnd::ConsumerGone;
+                if fresh {
+                    if shared.tx.send(event.into_owned()).await.is_err() {
+                        return SessionEnd::ConsumerGone;
+                    }
+                    shared.replay.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 }
             }
             Ok(RelayMessage::EndOfStoredEvents(_)) => {
@@ -1121,6 +1183,9 @@ async fn read_session(
                 if !*eose_counted {
                     *eose_counted = true;
                     shared.eose_tx.send_modify(|n| *n += 1);
+                }
+                if !paged {
+                    shared.replay.end(url);
                 }
                 if paged {
                     // the pages carried an `until`, so no live event can

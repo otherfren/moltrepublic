@@ -27,17 +27,30 @@ fn backed_off_senders() {
     molt_net::group_runtime::__set_resend_backoff(Duration::from_secs(600), Duration::from_secs(600));
 }
 
-async fn store_relay() -> (LocalRelay, String) {
+async fn store_relay() -> (LocalRelay, std::sync::Arc<MemoryDatabase>, String) {
     let db = std::sync::Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions {
         events: true,
         max_events: None,
     }));
-    let relay = LocalRelay::new(RelayBuilder::default().database(db).rate_limit(
+    let relay = LocalRelay::new(RelayBuilder::default().database(db.clone()).rate_limit(
         nostr_relay_builder::builder::RateLimit { max_reqs: 500, notes_per_minute: 1_000_000 },
     ));
     relay.run().await.expect("relay runs");
     let url = relay.url().await.to_string();
-    (relay, url)
+    (relay, db, url)
+}
+
+/// The densest second of stored 445 frames. At a page bound's worth in
+/// one second the relay replay skips the rest of that second (`relay replay
+/// skipped one second`) and those frames come only by a gap want - not
+/// what these tests measure.
+async fn densest_second(db: &MemoryDatabase) -> usize {
+    let events = db.query(Filter::new().kind(Kind::Custom(molt_net::kinds::KIND_GROUP))).await.expect("query");
+    let mut per: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    for e in events.iter() {
+        *per.entry(e.created_at.as_secs()).or_default() += 1;
+    }
+    per.values().copied().max().unwrap_or(0)
 }
 
 async fn say(w: &WalletHandle, body: &str) {
@@ -85,12 +98,12 @@ fn in_order(have: &[String], want: &[String]) {
 /// G1 at the engine: a node away while its peer spoke far more than the
 /// accept window reads a paged, newest-first replay whose head is not a
 /// chat. Everything lands once, in the sender's order, from what the relay
-/// sent - the sender re-publishes (next to) nothing.
+/// sent - the sender re-publishes nothing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_long_paged_replay_lands_whole_without_a_resend() {
     backed_off_senders();
     molt_net::ritual_net::__set_group_history_bound(400);
-    let (_relay, url) = store_relay().await;
+    let (_relay, db, url) = store_relay().await;
     let tmp = tempfile::tempdir().expect("tmp");
     let (a, b) = found_pair(tmp.path(), &[&url], "Gap").await;
     say(&a, "warm").await;
@@ -116,7 +129,7 @@ async fn a_long_paged_replay_lands_whole_without_a_resend() {
     let want: Vec<String> = (1..=1300).map(|i| format!("m{i}")).collect();
     for body in &want {
         say(&a, body).await;
-        tokio::time::sleep(Duration::from_millis(4)).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     // the head is not a chat
     a.execute(Command::Propose {
@@ -127,6 +140,7 @@ async fn a_long_paged_replay_lands_whole_without_a_resend() {
     .expect("propose");
     tokio::time::sleep(Duration::from_secs(3)).await;
     let before = molt_net::group_runtime::__gap_republished();
+    assert!(densest_second(&db).await < 400, "precondition: no second holds a page");
 
     b.execute(Command::OpenWorkspace { id: ws_b }).await.expect("reopen b");
     let took = shows_all(&b, &want, Duration::from_secs(120)).await;
@@ -135,9 +149,7 @@ async fn a_long_paged_replay_lands_whole_without_a_resend() {
     in_order(&bodies(&b).await, &want);
     let republished = molt_net::group_runtime::__gap_republished() - before;
     eprintln!("long_replay_republished={republished}");
-    // the replay carries the backlog; a frame consumed around the close may
-    // still need one targeted resend
-    assert!(republished <= 2, "the backlog came from the replay, not from resends: {republished}");
+    assert_eq!(republished, 0, "the backlog came from the replay, not from resends");
 
     a.execute(Command::CloseWorkspace).await.expect("close a");
     b.execute(Command::CloseWorkspace).await.expect("close b");

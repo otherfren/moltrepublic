@@ -670,7 +670,16 @@ unseen owed seq loses it silently.
   park.
 - **Ask.** `GapWant` (`\x00molt-gapwant-v1`): named seqs (≤ 64, a seq
   missing for 2 s, re-asked every 10 s), or `range (after, upto]` (≤ 1024)
-  whenever something is known above C. The sender re-publishes named own
+  whenever something is known above C. No want goes out while a stored
+  replay is coming in (`GroupHealth.replaying`): a relay's replay is open
+  from its REQ until its final EOSE (all pages and the tail), until it is
+  given up as stuck (3 rounds), or until its session dies (a reconnect
+  opens it again), and it counts as in until the consumer has read every
+  frame queued up to that end; then 2 s. Asking earlier made the sender
+  re-publish what the relay was about to deliver: an EOSE arrives while
+  the last page is still queued unread. What a finished replay still
+  lacks is a real hole - among them the rest of a second that held more
+  stored frames than one page (`relay replay skipped one second`). The sender re-publishes named own
   envelopes as fresh frames and answers `GapAnswer` (`\x00molt-gapans-v1`)
   `resent`/`gone`; a range is answered with `listing {after, through,
   own}` (≤ 256 seqs, never past its publish cursor), nothing re-published.
@@ -682,8 +691,10 @@ unseen owed seq loses it silently.
   since_s= via= unordered= shed= lost=`; `inbound_gap_skipped` per seq
   settled for order (WARN for the 60 s); `inbound_hold_shed` once per
   episode. `StatusView.inbound_held`: per sender `frontier`, `missing_seq`,
-  `missing`, `held`, `bytes`, `since` - a rising frontier is a catch-up,
-  a frontier that stands still with `held` growing is stuck. The restore
+  `missing`, `held`, `bytes`, `since`; a row appears too while accepted
+  links hang above the frontier. During a long catch-up the frontier
+  rises page by page and `held` drains; a frontier that stands still while
+  `held` grows is stuck. The restore
   settle (`recovery_auto_approval.md`) keeps waiting while the
   coordinator's stream has a missing or held seq here.
 - **Mixed versions.** An older build drops both tags as unknown control
@@ -708,4 +719,6 @@ Pins: `net::delivery_tests` (`a_newest_first_replay_past_the_window_loses_nothin
 `a_gap_want_is_ours_only_from_the_roster_for_our_stream`),
 `group_runtime::tests::a_gap_want_is_answered_with_exactly_the_missing_frames`,
 `chain::membership_tests::a_restore_keeps_settling_while_the_coordinators_stream_has_a_gap`,
-`crates/molt-engine/tests/nostr_inbound_gap.rs`.
+`crates/molt-engine/tests/nostr_inbound_gap.rs`,
+`crates/molt-engine/tests/nostr_long_replay.rs`,
+`crates/molt-engine/tests/nostr_slow_replay.rs`.
