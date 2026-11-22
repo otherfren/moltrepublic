@@ -64,6 +64,9 @@ struct LockFile {
     values: BTreeMap<String, (u64, Option<ChainChange>)>,
 }
 
+/// Intents kept for cards not yet seen (R8); the oldest ids go first.
+const LOCK_EARLY_INTENTS_MAX: usize = 1024;
+
 /// One ballot this seat leads.
 struct Run {
     leader: Leader,
@@ -371,25 +374,32 @@ impl State {
 
     /// Every other roster seat announced [`molt_core::chain::CHAIN_LOCK_CAP`]
     /// (information only: it gates the enabling vote, never the mode).
-    pub(crate) fn lock_all_capable(&self) -> bool {
+    /// The first seat that keeps the lock off, and why (R9): this seat's
+    /// own build, a seat announced without the lock, or one never heard.
+    pub(crate) fn lock_not_capable(&self) -> Option<String> {
         #[cfg(test)]
         if let Some(all) = self.chain.lock.caps_override {
-            return all;
+            return (!all).then(|| LOCK_NOT_EVERYWHERE.to_string());
         }
         let me = self.member();
+        if !self.lock_cap_on() {
+            return Some(format!("{me} runs a build without the lock"));
+        }
         let cap = molt_core::chain::CHAIN_LOCK_CAP;
         let known = self.active.as_ref().map(|a| &a.prefs.seat_caps);
         let Some(head) = self.chain.head.as_ref() else {
-            return false;
+            return Some(LOCK_NOT_EVERYWHERE.to_string());
         };
-        head.identities.iter().all(|i| {
-            i.member == me || known.and_then(|k| k.get(&i.member)).is_some_and(|c| c.iter().any(|c| c == cap))
+        head.identities.iter().filter(|i| i.member != me).find_map(|i| match known.and_then(|k| k.get(&i.member)) {
+            None => Some(format!("{} has not announced", i.member)),
+            Some(c) if !c.iter().any(|c| c == cap) => Some(format!("{} runs a build without the lock", i.member)),
+            Some(_) => None,
         })
     }
 
     /// Why this seat neither proposes nor approves enabling the lock now:
     /// a seat it knows of runs a build without it.
-    pub(crate) fn lock_enable_blocker(&self, change: &ChainChange) -> Option<&'static str> {
+    pub(crate) fn lock_enable_blocker(&self, change: &ChainChange) -> Option<String> {
         let ChainChange::Applied { surface: Surface::Organization, payload, .. } = change else {
             return None;
         };
@@ -398,7 +408,10 @@ impl State {
                 .get("value")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|v| v.split_whitespace().any(|k| k == molt_core::chain::CHAIN_LOCK_FEATURE));
-        (enables && !(self.lock_cap_on() && self.lock_all_capable())).then_some(LOCK_NOT_EVERYWHERE)
+        if !enables {
+            return None;
+        }
+        self.lock_not_capable()
     }
 
     /// §8: lock state here -> lock; a free mark (or a dead lock, §14) ->
@@ -1409,7 +1422,14 @@ impl State {
             .chain(self.chain.proposal_changes.keys().copied())
             .collect();
         self.lock_mark_after_move(head);
-        self.chain.lock.intents.retain(|id, _| open.contains(id));
+        // R8: an intent may outrun its card; only a retired card's go
+        let known: BTreeSet<u64> = self.proposals.keys().copied().collect();
+        self.chain.lock.intents.retain(|id, _| open.contains(id) || !known.contains(id));
+        let unknown: Vec<u64> =
+            self.chain.lock.intents.keys().filter(|id| !known.contains(id) && !open.contains(id)).copied().collect();
+        for id in unknown.iter().take(unknown.len().saturating_sub(LOCK_EARLY_INTENTS_MAX)) {
+            self.chain.lock.intents.remove(id);
+        }
         self.chain.lock.intent_sent.retain(|id| open.contains(id));
         self.chain.lock.intent_at.retain(|id, _| open.contains(id));
         let slot = self.lock_slot();

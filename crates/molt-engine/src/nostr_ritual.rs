@@ -204,6 +204,7 @@ pub(crate) fn spawn_founder_inbox(
                 key_package: j.key_package,
                 relays: j.relays,
                 vault_pk: j.vault_pk,
+                caps: j.caps,
                 generation: Some(generation),
             };
             if !send_cmd(&tx, cmd).await {

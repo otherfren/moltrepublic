@@ -514,3 +514,78 @@ async fn a_vote_enables_the_lock_in_an_older_republic() {
     let forks = burst(&[&mara, &walter, &dora], &names, "post", 1, 7, 300).await;
     assert_eq!(forks, 0, "no fork under the lock");
 }
+
+/// Review R10: a seat restored after the others announced learns their
+/// capabilities within seconds (it asks; they answer with their
+/// declaration), so it approves the enabling vote - no 6 h repeat, no
+/// restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restored_seat_learns_every_capability_and_approves_the_enabling_vote() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let ([mara, walter, dora], dora_phrase) = found_trio_as(tmp.path(), &url, true).await;
+    every_seat_announced(&[&mara, &walter, &dora]).await;
+    for w in [&mara, &walter] {
+        w.__seat_active_secs(0);
+    }
+    drop(dora);
+    mara.execute(Command::RecoverInviteStart { member: "dora".to_string() }).await.expect("mint");
+    let s = wait_for(&mara, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s.notice.strip_prefix("recovery-link:").unwrap_or_else(|| panic!("mint: {:?}", s.notice)).to_string();
+    let dora = engine(&tmp.path().join("dora-new"));
+    adopt_relay(&dora, &url).await;
+    dora.execute(Command::RecoverStart { link, phrase: dora_phrase, relays: Vec::new() }).await.expect("recover start");
+    let s = wait_for(&dora, "dora is back", |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()) || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "{:?}", s.notice);
+
+    let enable = serde_json::json!({ "op": "set_features", "value": "chain-lock memory" });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match mara.execute(Command::Propose { surface: molt_core::Surface::Organization, payload: enable.clone() }).await {
+            Ok(_) => break,
+            Err(e) => assert!(tokio::time::Instant::now() < deadline, "the vote was never put up: {e}"),
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // the restored seat's approval is the one that counts here
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut last = String::new();
+    loop {
+        let Reply::Proposals { proposals, .. } = dora.execute(Command::LIST_ALL_PROPOSALS).await.expect("list") else {
+            panic!("proposals");
+        };
+        if let Some(p) = proposals.iter().find(|p| p.state == ProposalState::Proposed) {
+            match dora.execute(Command::Approve { proposal: p.id, note: None }).await {
+                Ok(_) => break,
+                Err(e) => last = e.to_string(),
+            }
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the restored seat never approved: {last}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    lock_on(&[&mara, &walter, &dora], true).await;
+
+    // a restarted coordinator mints a v2-consent link at once: the
+    // capabilities it learned survive the restart
+    let ws = read_session(&mara).await.active_workspace.clone();
+    let _dir = hard_kill(mara, &tmp.path().join("mara"), &ws).await;
+    let mara = engine(&tmp.path().join("mara"));
+    adopt_relay(&mara, &url).await;
+    mara.execute(Command::OpenWorkspace { id: ws }).await.expect("mara reopens");
+    mara.__seat_active_secs(0);
+    mara.execute(Command::RecoverInviteStart { member: "walter".to_string() }).await.expect("mint");
+    let s = wait_for(&mara, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s.notice.strip_prefix("recovery-link:").unwrap_or_else(|| panic!("mint: {:?}", s.notice));
+    let invite = molt_engine::RecoveryInvite::parse(link).expect("a link");
+    assert!(invite.consent_anchor.is_some(), "a v2 consent right after the restart");
+}

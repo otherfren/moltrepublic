@@ -786,6 +786,7 @@ fn spawn_founder_recv(
                     key_package: j.key_package,
                     relays: j.relays,
                     vault_pk: j.vault_pk,
+                    caps: j.caps,
                     generation: Some(generation),
                 },
                 invite::RitualMsg::Signed(s) => Command::NetSealSigned {
@@ -2094,6 +2095,38 @@ mod ritual_ops {
         /// from "the invitee never tried", which an operator cannot debug),
         /// the session pushed, the frame acked — a refusal is never an
         /// error on the actor.
+        /// Refuse an activation TO the activator (`LinkSpent` with the
+        /// reason; every build shows it) - over its OWN claimed transport
+        /// address: the gift-wrap anchor on Nostr (canonicalized; an invalid
+        /// one gets no reply), the advertised reply queue on loopback.
+        fn tell_activator(&self, idx: usize, seat: u32, member: &str, nostr_pk: &str, reply: &str, why: String) {
+            if let Some(nostr) = self.net_ritual.as_ref().and_then(|r| r.nostr.as_ref()) {
+                if let Ok(target) = molt_net::canonical_nostr_pk(nostr_pk) {
+                    let net = nostr.net.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = net
+                            .send_ritual(&target, &invite::RitualMsg::LinkSpent { seat, reason: why })
+                            .await
+                        {
+                            tracing::warn!(error = %e, "link-spent notice did not publish");
+                        }
+                    });
+                }
+            } else if let (Some((snd, wrap)), Some(ritual)) =
+                (parse_reply_handover(reply), &self.net_ritual)
+            {
+                if let Ok(payload) =
+                    serde_json::to_vec(&invite::RitualMsg::LinkSpent { seat, reason: why })
+                {
+                    let transport = ritual.transport.clone();
+                    let id = ritual.next_msg_id(&format!("spent-{idx}-{member}"));
+                    tokio::spawn(async move {
+                        let _ = supervisor::send_framed(&transport, &snd, &wrap, id, &payload).await;
+                    });
+                }
+            }
+        }
+
         fn refuse_join(
             &mut self,
             idx: usize,
@@ -2254,35 +2287,8 @@ mod ritual_ops {
                  your own, unused link"
                     .to_string()
             };
-            // tell the second activator its link is spent — over its OWN
-            // claimed transport address: the gift-wrap anchor on Nostr
-            // (canonicalized; an invalid one gets no reply), the advertised
-            // reply queue on loopback
-            if let Some(nostr) = self.net_ritual.as_ref().and_then(|r| r.nostr.as_ref()) {
-                if let Ok(target) = molt_net::canonical_nostr_pk(nostr_pk) {
-                    let net = nostr.net.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = net
-                            .send_ritual(&target, &invite::RitualMsg::LinkSpent { seat, reason: why })
-                            .await
-                        {
-                            tracing::warn!(error = %e, "link-spent notice did not publish");
-                        }
-                    });
-                }
-            } else if let (Some((snd, wrap)), Some(ritual)) =
-                (parse_reply_handover(reply), &self.net_ritual)
-            {
-                if let Ok(payload) =
-                    serde_json::to_vec(&invite::RitualMsg::LinkSpent { seat, reason: why })
-                {
-                    let transport = ritual.transport.clone();
-                    let id = ritual.next_msg_id(&format!("spent-{idx}-{member}"));
-                    tokio::spawn(async move {
-                        let _ = supervisor::send_framed(&transport, &snd, &wrap, id, &payload).await;
-                    });
-                }
-            }
+            // tell the second activator its link is spent
+            self.tell_activator(idx, seat, member, nostr_pk, reply, why);
             let line = if same_person {
                 format!(
                     "✗ invite {}: the group already formed around the first activation - \
@@ -2318,6 +2324,7 @@ mod ritual_ops {
             key_package: String,
             relays: Vec<String>,
             vault_pk: String,
+            caps: Vec<String>,
             generation: Option<u64>,
         ) -> Result<molt_core::Reply, molt_core::MoltError> {
             if !self.ritual_generation_current(generation) {
@@ -2385,6 +2392,16 @@ mod ritual_ops {
             if let Err(e) = check_handle_charset(&member) {
                 tracing::warn!(seat, "founding join rejected: handle charset");
                 return self.refuse_join(idx, format!("{e} - refused, the ticket stays usable"));
+            }
+            // B7: this founding runs the chain lock from height 1; an older
+            // build would sign it freely. Told on both sides, the ticket
+            // stays usable after an update.
+            let lock = molt_core::chain::CHAIN_LOCK_CAP;
+            if !self.lock_seams.found_pre_lock.load(std::sync::atomic::Ordering::SeqCst) && !caps.iter().any(|c| c == lock) {
+                tracing::warn!(seat, %member, "founding join rejected: no chain lock");
+                let why = "this founding needs a newer build (chain lock) - update and use the link again";
+                self.tell_activator(idx, seat, &member, &nostr_pk, &reply, why.to_string());
+                return self.refuse_join(idx, format!("{member} runs a build without the lock - refused"));
             }
             // only a ticket holder gets lines naming it: everything above
             // is unauthenticated and logs fixed text at most once per seat
@@ -3889,6 +3906,7 @@ mod tests {
                 String::new(),
                 vec!["wss://elsewhere".to_string()],
                 String::new(),
+                vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
                 None,
             )
             .expect("handler never errors");
@@ -3972,6 +3990,7 @@ mod tests {
                 kp.to_string(),
                 Vec::new(),
                 crate::vault::seat_vault_key(member.as_bytes(), npk, pk).1,
+                vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
                 None,
             )
             .expect("handler never errors");
@@ -4087,6 +4106,7 @@ mod tests {
                 kp,
                 Vec::new(),
                 crate::vault::seat_vault_key(member.as_bytes(), &npk, &pk).1,
+                vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
                 None,
             )
             .expect("handler never errors");
@@ -4109,6 +4129,74 @@ mod tests {
 
         join(&mut st, "Jerome", "t0");
         assert_eq!(anchored(&st).expect("the retry anchors").member, "Jerome");
+    }
+
+    /// A joiner on a build without the chain lock is refused visibly on the
+    /// founder's log (and told over its reply address); the ticket stays
+    /// usable for the updated build.
+    #[test]
+    fn a_join_from_a_build_without_the_lock_is_refused_visibly() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        let _guard = rt.enter();
+        let mut st = crate::tests::plain_state();
+        let (founder_sk, founder_pk) = molt_storage::derive_identity_key(&[9u8; 32], "f");
+        let hub = LoopbackHub::calm();
+        st.net_ritual = Some(RitualRuntime {
+            transport: hub.transport(),
+            name: "R".to_string(),
+            agenda: String::new(),
+            charter_proposed: false,
+            founded_ts: 0,
+            features: None,
+            rule_m: 2,
+            rule_n: 2,
+            founder: MemberIdentity {
+                member: "founder".to_string(),
+                identity_pk: founder_pk,
+                nostr_pk: npk_founder(),
+                vault_pk: String::new(),
+            },
+            founder_sk,
+            founder_nostr_sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+            seats: vec![bare_seat("t0")],
+            generation: 0,
+            _sim: Vec::new(),
+            seq: std::sync::atomic::AtomicU64::new(0),
+            nostr: None,
+        });
+        let reply = serde_json::to_string(&invite::ReplyHandover {
+            server: String::new(),
+            queue_id: "aa".to_string(),
+            wrap: "ef".repeat(32),
+        })
+        .expect("handover json");
+        let npk = molt_net::nostr_identity(b"j-entropy", "t0").1;
+        let (sk, pk) = molt_storage::derive_identity_key(&[5u8; 32], "bob");
+        let kp = hex::encode(molt_net::MlsMember::new(&sk, "bob").expect("mls").key_package().expect("kp"));
+        let join = |st: &mut State, caps: Vec<String>| {
+            st.cmd_net_join_requested(
+                0,
+                "bob".to_string(),
+                pk.clone(),
+                npk.clone(),
+                invite::join_mac("t0", "bob", &pk, &npk),
+                reply.clone(),
+                String::new(),
+                kp.clone(),
+                Vec::new(),
+                crate::vault::seat_vault_key(b"bob", &npk, &pk).1,
+                caps,
+                None,
+            )
+            .expect("handler never errors");
+        };
+        let anchored = |st: &State| st.net_ritual.as_ref().expect("ritual").seats[0].identity.clone();
+        join(&mut st, Vec::new());
+        assert!(anchored(&st).is_none(), "not anchored");
+        let line = "✗ invite 1: bob runs a build without the lock - refused".to_string();
+        assert!(st.session.create.run.log.contains(&line), "{:?}", st.session.create.run.log);
+        join(&mut st, vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]);
+        assert_eq!(anchored(&st).expect("the updated build anchors").member, "bob");
     }
 
     /// N1 PIN — sign-what-you-see closes at the GENESIS: the roster a member
@@ -4717,6 +4805,7 @@ mod tests {
                 kp.clone(),
                 Vec::new(),
                 vpk.to_string(),
+                vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
                 None,
             )
             .expect("handler never errors");
@@ -4763,6 +4852,7 @@ mod tests {
             kp,
             Vec::new(),
             String::new(),
+            vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
             None,
         )
         .expect("handler never errors");

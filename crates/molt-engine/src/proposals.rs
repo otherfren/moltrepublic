@@ -904,10 +904,10 @@ impl State {
                 return Err(MoltError::BadPayload("already enabled".into()));
             }
             // B7: a card no seat could approve yet is not put up
-            if proposed.contains(molt_core::chain::CHAIN_LOCK_FEATURE)
-                && !(self.lock_cap_on() && self.lock_all_capable())
-            {
-                return Err(MoltError::BadPayload(crate::chain::LOCK_NOT_EVERYWHERE.into()));
+            if proposed.contains(molt_core::chain::CHAIN_LOCK_FEATURE) {
+                if let Some(why) = self.lock_not_capable() {
+                    return Err(MoltError::BadPayload(why));
+                }
             }
         }
         // the proposer co-signs below: a seat that cannot sign must not put

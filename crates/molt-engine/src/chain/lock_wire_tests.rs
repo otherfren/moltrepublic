@@ -1222,3 +1222,64 @@ fn a_free_signature_from_before_the_lock_is_marked_on_the_head_move() {
     wire(&mut mara, "walter", 1, WorkspaceEvent::LockPrepare { height: 1, base, round: 3 });
     assert!(!sent_kinds(&mara).contains(&"promise"), "no promise: {:?}", sent_kinds(&mara));
 }
+
+/// Review R7: an own card withdrawn after the lock chose it seals anyway;
+/// the proposer is told, the record reads applied and withdrawn.
+#[test]
+fn an_own_card_sealed_after_its_withdrawal_is_reported() {
+    let mut b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let id = note(&mut dora, "x");
+    dora.cmd_withdraw(ProposalId(id), None).expect("withdrawn");
+    let block = b.commit_card(&dora, id, &["mara", "walter"]);
+    dora.receive_block_from("mara", block);
+    let p = dora.proposals.get(&id).expect("record");
+    assert_eq!(p.state, ProposalState::Applied);
+    assert!(p.withdrawn);
+    assert_eq!(dora.session.notice, format!("sealed-after-withdrawal:{id}"));
+}
+
+/// Review R8: an intent that outran its card survives a head move; a
+/// retired card's intents do not.
+#[test]
+fn an_intent_before_its_card_survives_a_head_move() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let retired = note(&mut dora, "gone");
+    dora.cmd_withdraw(ProposalId(retired), None).expect("withdrawn");
+    dora.lock_note_intent(retired, "mara");
+    dora.lock_note_intent(77, "mara");
+    dora.lock_on_head_moved();
+    assert!(dora.chain.lock.intents.contains_key(&77), "the card is still on its way");
+    assert!(!dora.chain.lock.intents.contains_key(&retired), "a retired card's intent goes");
+}
+
+/// Review R9: the enabling vote's refusal names the seat to chase; and
+/// the lock, once enabled, cannot be voted off (like the vault, a value
+/// need not name it - the union keeps it).
+#[test]
+fn the_enabling_refusal_names_the_seat_and_the_lock_stays_on() {
+    use molt_core::chain::{CHAIN_LOCK_CAP, CHAIN_LOCK_FEATURE};
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&SEATS, 2);
+    let (mut mara, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "mara", &SEATS);
+    mara.lock_force(true);
+    let enable = json!({ "op": "set_features", "value": format!("{CHAIN_LOCK_FEATURE} memory") });
+    let caps = |st: &mut crate::State, seat: &str, with: bool| {
+        let list = if with { vec![CHAIN_LOCK_CAP.to_string()] } else { Vec::new() };
+        st.active.as_mut().expect("active").prefs.seat_caps.insert(seat.to_string(), list);
+    };
+    caps(&mut mara, "dora", true);
+    let err = mara.cmd_propose(Surface::Organization, enable.clone()).expect_err("refused");
+    assert_eq!(err.to_string(), "bad payload: walter has not announced");
+    caps(&mut mara, "walter", false);
+    let err = mara.cmd_propose(Surface::Organization, enable).expect_err("refused");
+    assert_eq!(err.to_string(), "bad payload: walter runs a build without the lock");
+
+    let b = Builder::new_with_features(&SEATS, 2, &["memory", CHAIN_LOCK_FEATURE], false);
+    let mut dora = genesis_seat("dora", &b, b.blocks.clone());
+    let id = propose(&mut dora, Surface::Organization, json!({ "op": "set_features", "value": "memory quests" }));
+    assert!(dora.proposals.contains_key(&id));
+    assert!(dora.lock_enabled(), "still on");
+}

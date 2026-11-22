@@ -251,7 +251,7 @@ impl State {
             return Some("base still loading".to_string());
         }
         if let Some(why) = self.lock_enable_blocker(&change) {
-            return Some(why.to_string());
+            return Some(why);
         }
         if self.chain_unsettled() {
             if CutKind::of(&change).is_some() {
@@ -1053,15 +1053,24 @@ impl State {
                 // a block for a proposal this node never heard of (lost
                 // gossip, late join) still yields a full accepted card
                 self.ensure_applied_record(*proposal_id, *surface, payload.clone());
+                let me = self.member();
+                let mut sealed_withdrawn = false;
                 if let Some(p) = self.proposals.get_mut(proposal_id) {
                     // A1 guard: the card is that decision only if it carries
                     // that change - an own card under a colliding id must
                     // not read as a success it never had
                     if p.payload == *payload || p.by.is_empty() {
                         p.settle_applied();
+                        // R7: the lock chose it before the withdrawal; the
+                        // record keeps `withdrawn` (replay sets no flag either)
+                        sealed_withdrawn = p.withdrawn && p.by == me;
                     } else {
                         tracing::warn!(id = proposal_id, "a block names an id whose local card is another change");
                     }
+                }
+                if sealed_withdrawn {
+                    tracing::warn!(id = proposal_id, "sealed_after_withdrawal");
+                    self.session.notice = format!("sealed-after-withdrawal:{proposal_id}");
                 }
                 // the Memory base moved: the supersede walk retires the
                 // OTHER pending patches it left behind (deterministic - the
@@ -1215,6 +1224,8 @@ impl State {
         let ChainChange::Membership { op, member, .. } = sealed else {
             return;
         };
+        // R10: a new device behind a seat: everyone declares again for it
+        self.mirror_audience_changed();
         let ids: Vec<u64> = self
             .proposals
             .iter()

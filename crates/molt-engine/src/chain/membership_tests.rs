@@ -1480,7 +1480,7 @@ fn only_known_capabilities_reach_the_prefs() {
     announce(&mut petra, "dora", &junk.iter().map(String::as_str).collect::<Vec<_>>());
     let known = &petra.active.as_ref().expect("active").prefs.seat_caps;
     assert_eq!(known.get("walter"), Some(&vec![cap.to_string()]));
-    assert!(!known.contains_key("dora"), "unknown capabilities only = none");
+    assert_eq!(known.get("dora"), Some(&Vec::new()), "unknown capabilities only = declared without any");
     let active = petra.active.take().expect("active");
     active.handle.close(None);
     assert_eq!(molt_storage::read_prefs(&dir).seat_caps.get("walter"), Some(&vec![cap.to_string()]));
