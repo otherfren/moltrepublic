@@ -607,7 +607,7 @@ impl State {
 
     /// F1: whether `id` is still inside its settle here, counted from the
     /// first time this node judged it. Off without a real transport.
-    fn restore_settling(&mut self, id: u64) -> bool {
+    pub(crate) fn restore_settling(&mut self, id: u64) -> bool {
         if self.nostr.is_none() {
             return false;
         }
@@ -622,6 +622,18 @@ impl State {
         };
         now.saturating_sub(since) < settle
             || self.proposals.get(&id).is_some_and(|p| self.inbound_held_from(&p.by))
+    }
+
+    /// F1, read-only: `change` is no restore, or no settle runs for it here.
+    pub(crate) fn restore_settled(&self, id: u64, change: &ChainChange) -> bool {
+        if !matches!(change, ChainChange::Membership { op: MembershipOp::Restored, .. }) || self.nostr.is_none() {
+            return true;
+        }
+        let settle = match self.drop_seam.restore_settle.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => RESTORE_SETTLE_SECS,
+            v => v - 1,
+        };
+        self.recovery.settle.get(&id).map_or(true, |since| self.presence_now().saturating_sub(*since) >= settle)
     }
 
     /// F1: retry the auto-approvals the settle held back (delivery tick).
@@ -1149,6 +1161,10 @@ impl State {
             .get(&id)
             .map(|p| p.verified.iter().cloned().collect())
             .unwrap_or_default();
+        // B7: under the lock a survivor's voice is its intent until the seal
+        if let Some(intents) = self.chain.lock.intents.get(&id) {
+            approved.extend(intents.iter().filter(|m| roster.contains(m) && *m != member).cloned());
+        }
         if consent.is_some() {
             approved.insert(member.clone());
         }

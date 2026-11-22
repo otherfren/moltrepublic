@@ -127,8 +127,10 @@ async fn wait_long(
 }
 
 /// A real 2-of-3 republic over `url`: mara founds, walter and dora join.
-async fn found_trio(root: &std::path::Path, url: &str) -> [WalletHandle; 3] {
+async fn found_trio(root: &std::path::Path, url: &str, lock: bool) -> [WalletHandle; 3] {
     let a = engine(&root.join("mara"));
+    // B6 alone: a republic founded before the lock existed
+    a.__found_pre_lock(!lock);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
         name: "Drei".to_string(),
@@ -201,6 +203,24 @@ async fn sync_of(w: &WalletHandle) -> (String, u64) {
 /// line 0, 0, 0, 0, 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_seats_with_bursts_and_lost_frames_end_on_one_head() {
+    let m = lossy_trio(false).await;
+    assert!(m.forks <= FORKS_MAX, "fork decisions {} above {FORKS_MAX}", m.forks);
+}
+
+/// The same run with every seat on the lock (B7): no fork decision at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_seats_under_the_lock_with_bursts_and_lost_frames_never_fork() {
+    let m = lossy_trio(true).await;
+    assert_eq!(m.forks, 0, "no fork under the lock");
+}
+
+struct Measured {
+    forks: u64,
+}
+
+/// Found a trio, run two bursts under 10 % inbound loss until one head;
+/// prints fork decisions, duration and relay frames per sealed block.
+async fn lossy_trio(lock: bool) -> Measured {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -211,21 +231,22 @@ async fn three_seats_with_bursts_and_lost_frames_end_on_one_head() {
     // a storing relay without the notes-per-minute limit: a burst of three
     // seats is not what this test measures
     use nostr_relay_builder::builder::{RateLimit, RelayBuilder};
-    use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions};
+    use nostr_relay_builder::prelude::{Filter, MemoryDatabase, MemoryDatabaseOptions, NostrDatabase};
     let db = std::sync::Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions { events: true, max_events: None }));
     let relay = nostr_relay_builder::LocalRelay::new(
         RelayBuilder::default()
-            .database(db)
+            .database(db.clone())
             .rate_limit(RateLimit { max_reqs: 500, notes_per_minute: 1_000_000 }),
     );
     relay.run().await.expect("relay runs");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
-    let seats = found_trio(tmp.path(), &url).await;
+    let seats = found_trio(tmp.path(), &url, lock).await;
     for w in &seats {
         w.__drop_inbound_every(10);
     }
-
+    let frames_before = db.count(Filter::new()).await.expect("count");
+    let height_before = chain(&seats[0]).await.len();
     const BURSTS: usize = 2;
     const PAGES: usize = 3;
     let names = ["mara", "walter", "dora"];
@@ -269,9 +290,16 @@ async fn three_seats_with_bursts_and_lost_frames_end_on_one_head() {
         forks += sync_of(w).await.1;
     }
     let dropped: u64 = seats.iter().map(WalletHandle::__dropped_inbound).sum();
-    eprintln!("fork_decisions={forks} dropped={dropped} secs={}", started.elapsed().as_secs());
+    let frames = db.count(Filter::new()).await.expect("count") - frames_before;
+    let blocks = chain(&seats[0]).await.len() - height_before;
+    eprintln!(
+        "lock={lock} fork_decisions={forks} dropped={dropped} secs={} frames={frames} blocks={blocks} frames_per_block={}.{}",
+        started.elapsed().as_secs(),
+        frames / blocks.max(1),
+        frames * 10 / blocks.max(1) % 10
+    );
     assert!(dropped > 0, "the network was lossy");
-    assert!(forks <= FORKS_MAX, "fork decisions {forks} above {FORKS_MAX}");
+    Measured { forks }
 }
 
 /// Fork decisions the per-height line may take: a takeover after a lost

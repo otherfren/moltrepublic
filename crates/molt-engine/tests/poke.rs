@@ -142,16 +142,27 @@ two" }),
     // member's sink (which only ever sees application envelopes) gains
     // NOTHING. What proves the wire crossing is the inbound leg below.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    let after = member_sink.messages();
-    assert_eq!(
-        after.len(),
-        settled,
+    // the sealing lock's own frames (the leader opening the next height)
+    // may arrive meanwhile; they are not the poke
+    let after: Vec<_> = member_sink
+        .messages()
+        .into_iter()
+        .skip(settled)
+        .filter(|(_, env)| {
+            !matches!(
+                env.body,
+                WorkspaceEvent::LockPrepare { .. }
+                    | WorkspaceEvent::LockPromise { .. }
+                    | WorkspaceEvent::LockAccept { .. }
+                    | WorkspaceEvent::LockAccepted { .. }
+                    | WorkspaceEvent::LockNack { .. }
+            )
+        })
+        .collect();
+    assert!(
+        after.is_empty(),
         "a poke must not appear as an application envelope: {:?}",
-        after
-            .iter()
-            .skip(settled)
-            .map(|(_, env)| &env.body)
-            .collect::<Vec<_>>()
+        after.iter().map(|(_, env)| &env.body).collect::<Vec<_>>()
     );
 
     // inbound leg: member-b pokes the founder over the SAME control-frame

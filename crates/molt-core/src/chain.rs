@@ -369,6 +369,43 @@ pub const RESTORE_CONSENT_WINDOW: u64 = 1024;
 /// consent; a v2 anchor is minted only once every seat announced it.
 pub const RESTORE_CONSENT_V2_CAP: &str = "molt-restore-consent-v2";
 
+/// The capability a seat announces when its build runs the sealing lock
+/// (`docs/chain/chain_lock_design.md` §8).
+pub const CHAIN_LOCK_CAP: &str = "molt-chain-lock-v1";
+
+/// The feature key that turns the sealing lock on: ratified at every
+/// founding of a build that knows it, added to an older republic by a
+/// `set_features` vote. Not a surface key (the one exception to
+/// `charter_features.md` D1).
+pub const CHAIN_LOCK_FEATURE: &str = "chain-lock";
+
+/// A lock ballot on the wire: ordered by round, then leader name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockBallot {
+    /// The round.
+    pub round: u64,
+    /// The seat leading it.
+    pub leader: String,
+}
+
+/// What a promising seat last accepted at the slot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockAcceptedValue {
+    /// The ballot it accepted at.
+    pub round: u64,
+    /// That ballot's leader.
+    pub leader: String,
+    /// sha256 (hex) of the change's approval bytes at the slot's height.
+    pub digest: String,
+    /// Live acceptances that seal it.
+    pub need: u64,
+    /// The proposal id the change is voted under.
+    pub id: u64,
+    /// The change itself for a membership change or a cut.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<ChainChange>,
+}
+
 /// What a v2 restore consent anchors to: the chain height its signer saw
 /// and the seat's working transport anchor the restore replaces. Minted
 /// into the recovery link (a total-loss rejoiner holds no chain).

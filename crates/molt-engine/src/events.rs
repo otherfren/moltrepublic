@@ -101,6 +101,10 @@ impl State {
             }
             _ => {}
         }
+        #[cfg(test)]
+        if env.by == self.member() && crate::net::crosses_wire(&env.body) {
+            self.chain.lock.outbox.push(env.clone());
+        }
         self.apply(&env);
         // the demo mesh mirrors + wakes now; a real mesh's outbox is the storage
         // log, so it must be woken AFTER the append below (else its log read
@@ -350,16 +354,25 @@ impl State {
                 if mine {
                     self.chain.own_approvals.insert(id.0);
                 }
+                // B7: a vote its own author recorded is a standing intent
+                if env.by == *by {
+                    self.lock_note_intent(id.0, by);
+                    if mine && sig.is_empty() {
+                        self.chain.lock.intent_sent.insert(id.0);
+                        self.chain.lock.intent_at.entry(id.0).or_insert(*height);
+                    }
+                }
                 // R12: the signature collection is ephemeral too, and the
                 // reopen rebuilds it from here. An own-authored own
                 // signature is genuine by construction (nothing else writes
                 // one into this log); every other one waits for
                 // `reverify_all_pending`, run once the chain is adopted.
+                // only an own vote dates the card on THIS seat - a B7
+                // intent carries the head+1 it was cast at, like a signature
+                if mine && self.chain.adoption_pending && (*height > 0 || !sig.is_empty()) {
+                    self.note_replay_held(id.0, *height);
+                }
                 if !sig.is_empty() {
-                    // only an own signature dates the card on THIS seat
-                    if mine && self.chain.adoption_pending {
-                        self.note_replay_held(id.0, *height);
-                    }
                     self.collect_sig(id.0, *height, by, sig, mine);
                     // `collect_sig` only CLEARS the old verdict — the
                     // verified mark is the caller's, as in every signing path
@@ -482,7 +495,12 @@ impl State {
             | WorkspaceEvent::MeshAnnounced { .. }
             | WorkspaceEvent::FileRequested { .. }
             | WorkspaceEvent::FileWanted { .. }
-            | WorkspaceEvent::FileServed { .. } => {
+            | WorkspaceEvent::FileServed { .. }
+            | WorkspaceEvent::LockPrepare { .. }
+            | WorkspaceEvent::LockPromise { .. }
+            | WorkspaceEvent::LockAccept { .. }
+            | WorkspaceEvent::LockAccepted { .. }
+            | WorkspaceEvent::LockNack { .. } => {
                 // chain transport/coordination frames (a catch-up request, a
                 // raw MLS re-key commit, a relayed mesh announce, a file
                 // fetch request) ride the log only to reach
@@ -621,6 +639,7 @@ impl State {
                 v
             },
             anchor_repushes: self.recovery.repushes.iter().map(|((m, a), (n, _))| (m.clone(), a.clone(), *n)).collect(),
+            intents: self.lock_dumped_intents(),
             parked_withdrawals: {
                 let mut v: Vec<(u64, String, u64)> =
                     self.chain.pending_withdrawals.iter().map(|(id, (by, ts))| (*id, by.clone(), *ts)).collect();
@@ -780,6 +799,7 @@ impl State {
             .rev()
             .cloned()
             .collect();
+        self.lock_restore_intents(&dump.intents);
         let me = self.member();
         for v in dump.votes {
             let mine = v.member == me && self.chain.own_approvals.contains(&v.id);
@@ -895,6 +915,7 @@ impl State {
         self.files.vault_base = crate::net::vault_base::VaultBasePlane::default();
         self.chain.pending_sigs.clear();
         self.chain.own_approvals.clear();
+        self.chain.lock = crate::chain::LockRuntime::default();
         self.chain.served_at.clear();
         self.chain.refused_at.clear();
         // the chain PROJECTIONS too (review E5): a chainless workspace opened

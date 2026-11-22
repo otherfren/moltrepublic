@@ -10,7 +10,8 @@
 //!   the forced value or the caller's own.
 //! - [`Tally`]: same-ballot acceptances; `accepted` names the signers once a
 //!   value is sealable. Signatures of different ballots never combine.
-#![allow(dead_code)] // wired in B7b
+//!
+//! The engine wiring is `lock_wire.rs`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -51,6 +52,15 @@ impl Quorum {
     /// Q1 = n - m + 1: intersects every m-quorum (and every larger one).
     pub(crate) fn promises(self) -> usize {
         self.n.saturating_sub(self.m).saturating_add(1)
+    }
+
+    /// §14: with `free` OTHER seats known to have signed freely at a height,
+    /// no lock value can ever be chosen there once this seat leaves: either
+    /// the non-free seats cannot answer phase 1 (`free >= m`), or they are
+    /// too few to accept m (`free >= n - m`, plus one when this seat's own
+    /// acceptance still counts among them).
+    pub(crate) fn lock_dead(self, free: usize, holds_acceptance: bool) -> bool {
+        free > 0 && free >= self.m.min(self.n.saturating_sub(self.m) + usize::from(holds_acceptance))
     }
 }
 
@@ -167,6 +177,45 @@ impl Acceptor {
             .map_or(true, |bases| bases.values().all(|s| s.promised.is_none() && s.accepted.is_none()))
     }
 
+    /// This seat signed freely at `height`.
+    pub(crate) fn signed_freely(&self, height: u64) -> bool {
+        self.free.contains(&height)
+    }
+
+    /// This seat already accepted exactly `value` at `slot`.
+    pub(crate) fn holds(&self, slot: &Slot, value: &Value) -> bool {
+        self.state(slot).and_then(|s| s.accepted.as_ref()).is_some_and(|(_, v)| v == value)
+    }
+
+    /// This seat accepted a value at `height` (on any lineage).
+    pub(crate) fn holds_acceptance(&self, height: u64) -> bool {
+        self.slots.get(&height).is_some_and(|bases| bases.values().any(|s| s.accepted.is_some()))
+    }
+
+    /// Trade every lock state at `height` for a free mark once `free` other
+    /// seats known free there leave the lock dead ([`Quorum::lock_dead`],
+    /// chain_lock_design.md §14). `true` = changed, persist first.
+    pub(crate) fn release_to_free(&mut self, height: u64, q: Quorum, free: usize) -> bool {
+        if self.free.contains(&height) || !q.lock_dead(free, self.holds_acceptance(height)) {
+            return false;
+        }
+        self.slots.remove(&height);
+        self.free.insert(height);
+        true
+    }
+
+    /// The rule as first shipped on the WIP branch (promise-only state,
+    /// `free >= n - m`), kept as the simulation's control.
+    #[cfg(test)]
+    pub(crate) fn release_promises_only(&mut self, height: u64) -> bool {
+        if self.holds_acceptance(height) {
+            return false;
+        }
+        self.slots.remove(&height);
+        self.free.insert(height);
+        true
+    }
+
     /// Record a B6 signature at `height`. `None` = refused (lock state
     /// there); `Some(persist)` otherwise.
     pub(crate) fn sign_freely(&mut self, height: u64) -> Option<bool> {
@@ -194,10 +243,21 @@ impl Acceptor {
         promised.max(accepted).saturating_add(1)
     }
 
+    /// The digests of every value accepted at an open slot.
+    pub(crate) fn accepted_digests(&self) -> BTreeSet<String> {
+        self.slots
+            .values()
+            .flat_map(|bases| bases.values())
+            .filter_map(|s| s.accepted.as_ref().map(|(_, v)| v.digest.clone()))
+            .collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn promised(&self, slot: &Slot) -> Option<&Ballot> {
         self.state(slot)?.promised.as_ref()
     }
 
+    #[cfg(test)]
     pub(crate) fn accepted(&self, slot: &Slot) -> Option<&(Ballot, Value)> {
         self.state(slot)?.accepted.as_ref()
     }
@@ -215,19 +275,36 @@ pub(crate) struct Leader {
     pub ballot: Ballot,
     quorum: Quorum,
     promises: BTreeMap<String, Option<(Ballot, Value)>>,
+    /// Seats that answered "signed freely here": they hold no acceptance
+    /// that can be part of a chosen value.
+    free: BTreeSet<String>,
     proposed: Option<Value>,
 }
 
 impl Leader {
     pub(crate) fn new(slot: Slot, quorum: Quorum, ballot: Ballot) -> Self {
-        Self { slot, ballot, quorum, promises: BTreeMap::new(), proposed: None }
+        Self { slot, ballot, quorum, promises: BTreeMap::new(), free: BTreeSet::new(), proposed: None }
+    }
+
+    /// A free `Nack` from `from`: heard, holding nothing that counts.
+    pub(crate) fn heard_free(&mut self, from: &str) {
+        if !self.promises.contains_key(from) {
+            self.free.insert(from.to_string());
+        }
     }
 
     /// A promise for this ballot (others are ignored; duplicates count once).
     pub(crate) fn promise(&mut self, from: &str, ballot: &Ballot, accepted: Option<(Ballot, Value)>) {
         if *ballot == self.ballot {
+            // the two sets stay disjoint: a promiser is not also "free"
+            self.free.remove(from);
             self.promises.insert(from.to_string(), accepted);
         }
+    }
+
+    /// Seats heard: promisers and seats heard as free.
+    pub(crate) fn heard(&self) -> usize {
+        self.promises.len() + self.free.len()
     }
 
     /// Phase 1 is complete.
@@ -241,7 +318,7 @@ impl Leader {
     pub(crate) fn forced(&self) -> Option<Value> {
         let (_, top) = self.promises.values().flatten().max()?;
         let holding = self.promises.values().flatten().filter(|(_, v)| v == top).count();
-        let unheard = self.quorum.n.saturating_sub(self.promises.len());
+        let unheard = self.quorum.n.saturating_sub(self.promises.len() + self.free.len());
         (holding + unheard >= top.need).then(|| top.clone())
     }
 

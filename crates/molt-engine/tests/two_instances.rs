@@ -204,7 +204,7 @@ async fn founding_ritual_completes_across_two_instances() {
     assert_eq!(agenda, "hold the line", "the ratified charter is in the genesis");
     assert_eq!(
         features.as_deref(),
-        Some(["memory".to_string(), "wallet".to_string()].as_slice()),
+        Some(["chain-lock".to_string(), "memory".to_string(), "wallet".to_string()].as_slice()),
         "the ratified feature selection is in the genesis, canonicalized"
     );
     assert_eq!(identities.len(), 2, "founder + member-b");
@@ -386,7 +386,8 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
     let (name, agenda, features) = prop_rx.recv().await.expect("charter surfaced to the joiner");
     assert_eq!(name, "Pact");
     assert_eq!(agenda, "the pact: tend the commons, share the harvest");
-    assert_eq!(features.as_deref(), Some(["memory".to_string()].as_slice()));
+    // every founding of this build ratifies the lock (B7)
+    assert_eq!(features.as_deref(), Some(["chain-lock".to_string(), "memory".to_string()].as_slice()));
 
     // the gate holds: with B not yet confirmed, the founding has not sealed
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1663,6 +1664,9 @@ async fn a_reopened_member_recovers_open_proposals_from_the_mesh() {
     };
     let (a, material_rx) =
         molt_engine::__spawn_manual_founding_bootstrap(molt_core::GroupConfig::demo(), session_a);
+    // pins the B6 re-serve of a collected signature (under the lock an
+    // approval is an unsigned intent)
+    a.__found_pre_lock(true);
     a.execute(Command::CreateStart {
         name: "Guild".to_string(),
         member: "founder-a".to_string(),
@@ -3062,6 +3066,9 @@ async fn recovery_distributes_the_rekey_commit_to_a_live_survivor() {
             molt_core::GroupConfig::demo(),
             session_a,
         );
+    // the live survivor is a hand-driven stub that never promises: a
+    // one-survivor restore, B6 only
+    a.__found_pre_lock(true);
     a.execute(Command::CreateStart {
         name: "Guild".to_string(),
         member: "founder-a".to_string(),

@@ -273,7 +273,19 @@ async fn found_three_at(
     url: &str,
     threshold: u8,
 ) -> (WalletHandle, WalletHandle, WalletHandle, String) {
+    found_three_as(root, url, threshold, false).await
+}
+
+/// [`found_three_at`]; `pre_lock` founds a republic as before the sealing
+/// lock existed (B6 only).
+async fn found_three_as(
+    root: &std::path::Path,
+    url: &str,
+    threshold: u8,
+    pre_lock: bool,
+) -> (WalletHandle, WalletHandle, WalletHandle, String) {
     let a = engine(&root.join("founder"));
+    a.__found_pre_lock(pre_lock);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
         name: "Chess Club".to_string(),
@@ -386,7 +398,9 @@ async fn a_bystander_that_slept_through_a_recovery_still_hears_the_rejoiner() {
     let relay = MockRelay::run().await.expect("in-process relay");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
-    let (a, b, v, petra_phrase) = found_three(tmp.path(), &url).await;
+    // one survivor restores while the other sleeps: B6 only (under the
+    // lock a 2-of-3 restore needs both survivors' promises)
+    let (a, b, v, petra_phrase) = found_three_as(tmp.path(), &url, 2, true).await;
 
     // petra's FIRST incarnation burns a SPAN of its seq space (seqs are log
     // positions, so a batch of own sends occupies a consecutive stretch),
@@ -2385,7 +2399,9 @@ async fn a_cancel_after_ready_withdraws_the_unsealed_card() {
     let relay = MockRelay::run().await.expect("in-process relay");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
-    let (a, b, v, petra_phrase) = found_three_at(tmp.path(), &url, 3).await;
+    // a B6 race: vera seals with walter's pre-collected signature; under
+    // the lock nothing seals without walter accepting in a ballot
+    let (a, b, v, petra_phrase) = found_three_as(tmp.path(), &url, 3, true).await;
     v.__seat_active_secs(u64::MAX);
     b.execute(Command::Chat { body: "still here".to_string(), quote: None, channel: molt_core::ChannelRef::Group })
         .await
@@ -2472,7 +2488,10 @@ async fn without_a_settle_the_bystander_seals_before_the_cancel() {
     let relay = MockRelay::run().await.expect("in-process relay");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
-    let (a, b, v, petra_phrase) = found_three(tmp.path(), &url).await;
+    // a B6 race: the bystander seals on sight with the coordinator's
+    // collected signature; under the lock nothing seals without both
+    // survivors accepting in one ballot (the settle twin covers the lock)
+    let (a, b, v, petra_phrase) = found_three_as(tmp.path(), &url, 2, true).await;
     drop(b);
     a.__restore_settle_secs(Some(0));
     v.__restore_settle_secs(Some(0));
@@ -2583,7 +2602,9 @@ async fn a_restore_sealed_after_its_withdrawal_is_reported_and_a_new_link_heals_
         (relay, url)
     };
     let tmp = tempfile::tempdir().expect("tmp");
-    let (a, b, v, petra_phrase) = found_three_at(tmp.path(), &url, 3).await;
+    // a B6 race: vera seals with walter's pre-collected signature; under
+    // the lock nothing seals without walter accepting in a ballot
+    let (a, b, v, petra_phrase) = found_three_as(tmp.path(), &url, 3, true).await;
     v.__seat_active_secs(u64::MAX);
     b.execute(Command::Chat { body: "still here".to_string(), quote: None, channel: molt_core::ChannelRef::Group })
         .await

@@ -1903,9 +1903,7 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
             "set_features" => relay_pool_diff(&p.current, &p.proposed)
                 .into_iter()
                 .map(|(sign, key)| {
-                    let label = Surface::parse(&key)
-                        .map(|sf| surface_name(lang, sf).to_string())
-                        .unwrap_or(key);
+                    let label = crate::labels::feature_name(lang, &key);
                     (if sign == RELAY_ROW_REMOVED { RELAY_ROW_KEPT } else { sign }, label)
                 })
                 .collect(),

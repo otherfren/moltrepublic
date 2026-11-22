@@ -206,7 +206,7 @@ impl SenderHold {
 /// the chat stream (arrival is display order; a reaction toggles) and a
 /// member's stances (newest wins). A withdrawal is terminal and parks on
 /// its own card's id, so it needs no order beyond that.
-fn order_sensitive(body: &WorkspaceEvent) -> bool {
+pub(super) fn order_sensitive(body: &WorkspaceEvent) -> bool {
     matches!(
         body,
         WorkspaceEvent::Chat(_)
@@ -881,6 +881,7 @@ impl State {
         self.retry_settled_restore_approvals();
         // A2.2: held seals land once their round has passed
         self.drain_held_seals();
+        self.lock_tick();
         self.chain_heal_tick();
         self.sign_held_approvals();
         self.wake_tick();

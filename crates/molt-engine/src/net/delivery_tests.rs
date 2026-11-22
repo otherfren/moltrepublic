@@ -382,3 +382,65 @@ fn a_cut_round_passes_only_what_lies_below_it() {
     land(&mut st, request_env(5, 4));
     assert_eq!(st.delivery.accepted["bob"].frontier, 6);
 }
+
+/// B7 behind an inbound gap: an intent is a stance (an `Approved` without
+/// a signature) and waits like one; the five lock frames carry their
+/// ballot and are idempotent in any order, so none of them waits.
+#[test]
+fn intents_wait_behind_a_gap_and_lock_frames_never_do() {
+    use molt_core::{ProposalId, WorkspaceEvent};
+    use super::delivery::order_sensitive;
+    let intent = WorkspaceEvent::Approved { id: ProposalId(1), by: "a".into(), height: 1, sig: String::new() };
+    assert!(order_sensitive(&intent));
+    let base = "ab".to_string();
+    let lock = [
+        WorkspaceEvent::LockPrepare { height: 1, base: base.clone(), round: 1 },
+        WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round: 1, leader: "a".into(), accepted: None },
+        WorkspaceEvent::LockAccept {
+            height: 1,
+            base: base.clone(),
+            round: 1,
+            digest: "d".into(),
+            need: 2,
+            id: ProposalId(1),
+            change: None,
+        },
+        WorkspaceEvent::LockAccepted {
+            height: 1,
+            base: base.clone(),
+            round: 1,
+            leader: "a".into(),
+            digest: "d".into(),
+            sig: "s".into(),
+        },
+        WorkspaceEvent::LockNack { height: 1, base, round: 1, leader: "a".into(), promised: None, head: 0 },
+    ];
+    assert!(lock.iter().all(|f| !order_sensitive(f)));
+}
+
+fn bob_env(seq: u64, prev: u64, body: molt_core::WorkspaceEvent) -> molt_core::EventEnvelope {
+    molt_core::EventEnvelope { seq, ts: T, by: "bob".to_string(), body, prev_seq: prev }
+}
+
+/// B7 behind a real gap (the frontier, 2026-11-22): a lock frame behind a
+/// missing seq is accepted at once; an intent (an unsigned `Approved`)
+/// waits like any stance until the hole closes. Far ahead of the frontier
+/// (more than the accept window) a lock frame is buffered like every
+/// envelope and applied bottom-up - stale by then and ignored, never
+/// reordered into a decision.
+#[test]
+fn behind_a_gap_a_lock_frame_passes_and_an_intent_waits() {
+    use molt_core::{ProposalId, WorkspaceEvent};
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, bob_env(3, 2, WorkspaceEvent::LockPrepare { height: 1, base: "ab".into(), round: 1 }));
+    assert!(accepted(&st, 3), "a lock frame does not wait for seq 2");
+    let intent = WorkspaceEvent::Approved { id: ProposalId(1), by: "bob".into(), height: 1, sig: String::new() };
+    land(&mut st, bob_env(4, 3, intent));
+    assert!(!accepted(&st, 4), "the intent waits behind the hole");
+    land(&mut st, chat_env(2, 1, "the hole"));
+    assert!(accepted(&st, 4), "the hole closed, the intent applied");
+    let far = 3 + 2000;
+    land(&mut st, bob_env(far, far - 1, WorkspaceEvent::LockPrepare { height: 9, base: "ab".into(), round: 1 }));
+    assert!(!accepted(&st, far), "far ahead of the frontier even a lock frame is buffered");
+}

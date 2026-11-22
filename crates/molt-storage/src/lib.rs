@@ -219,9 +219,14 @@ const WALLET_SCAN_SEGMENT: u64 = u64::MAX - 10;
 const PREFS_SEALED_SEGMENT: u64 = u64::MAX - 11;
 /// AAD segment marker for `wiki_draft.json`.
 const WIKI_DRAFT_SEGMENT: u64 = u64::MAX - 12;
+/// AAD segment marker for [`CHAIN_LOCK_FILE`].
+const CHAIN_LOCK_SEGMENT: u64 = u64::MAX - 13;
 /// The lowest reserved marker — a log file numbered at or above it is
 /// ignored (see [`list_sorted`]).
-const RESERVED_SEGMENT_FLOOR: u64 = WIKI_DRAFT_SEGMENT;
+const RESERVED_SEGMENT_FLOOR: u64 = CHAIN_LOCK_SEGMENT;
+/// B7: this seat's sealing-lock promises (`docs/chain/chain_lock_design.md`
+/// §6) - local, sealed, never exported.
+pub const CHAIN_LOCK_FILE: &str = "chain_lock.state";
 /// The content-bearing prefs of a phrase-sealed dir, sealed under the
 /// workspace key while `prefs.toml` keeps only the local switches.
 pub const PREFS_SEALED_FILE: &str = "prefs.sealed";
@@ -1724,6 +1729,15 @@ impl OpenedWorkspace {
     /// once — the additive-only stop for older binaries (they refuse the
     /// whole workspace at the manifest gate instead of running chainless
     /// on a partial view). Idempotent.
+    pub fn bump_lock_version(&mut self) -> Result<(), StorageError> {
+        if self.manifest.version >= molt_core::STORAGE_VERSION_LOCK {
+            return Ok(());
+        }
+        self.manifest.version = molt_core::STORAGE_VERSION_LOCK;
+        write_manifest(&self.dir, &self.manifest)
+    }
+
+    /// WP4b stage 5 (see [`Self::bump_lock_version`] for the lock's twin).
     pub fn bump_pruned_version(&mut self) -> Result<(), StorageError> {
         if self.manifest.version >= molt_core::STORAGE_VERSION_PRUNED {
             return Ok(());
@@ -1842,6 +1856,25 @@ impl OpenedWorkspace {
     pub fn write_kanban_draft(&self, draft: &str) -> Result<(), StorageError> {
         let key = kanban_draft_key(&self.key, &self.id);
         self.write_sealed_draft(KANBAN_DRAFT_FILE, &key, KANBAN_DRAFT_SEGMENT, draft)
+    }
+
+    /// The sealing lock's state ([`CHAIN_LOCK_FILE`]); `None` = no file.
+    ///
+    /// # Errors
+    /// Unreadable, over the cap, or a frame that does not authenticate.
+    pub fn read_chain_lock(&self) -> Result<Option<Vec<u8>>, StorageError> {
+        let data = match read_capped(&self.dir.join(CHAIN_LOCK_FILE), READ_CAP_STATE, CHAIN_LOCK_FILE) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(StorageError::Corrupt(format!("reading {CHAIN_LOCK_FILE}: {e}"))),
+        };
+        decrypt_state_file(&chain_lock_key(&self.key, &self.id), &self.id, CHAIN_LOCK_SEGMENT, &data).map(Some)
+    }
+
+    /// Rewrite [`CHAIN_LOCK_FILE`] (atomic, sealed).
+    pub fn write_chain_lock(&self, bytes: &[u8]) -> Result<(), StorageError> {
+        let frame = encode_frame(&chain_lock_key(&self.key, &self.id), &self.id, CHAIN_LOCK_SEGMENT, 0, bytes)?;
+        write_atomic(&self.dir, CHAIN_LOCK_FILE, &frame, true)
     }
 
     /// Rewrite `kanban_wakes.json` (atomic, sealed).
@@ -2217,6 +2250,11 @@ fn kanban_draft_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
 /// The `wiki_draft.json` sub-key.
 fn wiki_draft_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(hkdf32(ws_key, "molt-wiki-draft", id))
+}
+
+/// The [`CHAIN_LOCK_FILE`] sub-key.
+fn chain_lock_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hkdf32(ws_key, "molt-chain-lock", id))
 }
 
 /// The `wallet_keys.state` sub-key.
@@ -2851,7 +2889,7 @@ pub fn create_workspace(
 /// accident, and the typed [`StorageError::Sealed`] routes every frontend
 /// to the decrypt flow).
 fn openable_gate(manifest: &WorkspaceManifest) -> Result<(), StorageError> {
-    if manifest.version > molt_core::STORAGE_VERSION_SEALED {
+    if manifest.version > molt_core::STORAGE_VERSION_LOCK {
         return Err(StorageError::NewerVersion(manifest.version));
     }
     // both sealed shapes route to the decrypt flow: S6 (unseal) and the S7
@@ -3545,6 +3583,11 @@ enum WriterMsg {
         blocks: Vec<molt_core::ChainBlock>,
         ack: mpsc::SyncSender<bool>,
     },
+    /// Rewrite [`CHAIN_LOCK_FILE`], acking when durable (B7 §6).
+    PersistChainLock {
+        bytes: Vec<u8>,
+        ack: mpsc::SyncSender<bool>,
+    },
     /// Append one keys record, acking when durable (wallet design I4).
     PersistWalletKeys {
         record: Zeroizing<Vec<u8>>,
@@ -3920,6 +3963,14 @@ impl StorageHandle {
         blocks: Vec<molt_core::ChainBlock>,
     ) -> bool {
         self.send_acked(|ack| WriterMsg::PersistChain { blob, blocks, ack })
+    }
+
+    /// Rewrite the sealing lock's state and BLOCK until it is durable: the
+    /// promise, acceptance or free signature it records may leave only
+    /// after this returned `true` (B7 §6; the I4 precedent below).
+    #[must_use]
+    pub fn persist_chain_lock_blocking(&self, bytes: Vec<u8>) -> bool {
+        self.send_acked(|ack| WriterMsg::PersistChainLock { bytes, ack })
     }
 
     /// Append a keys record and BLOCK until it is durable: the attestation
@@ -4490,6 +4541,13 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             ok = false;
                         }
                         let _ = ack.send(ok);
+                    }
+                    Ok(WriterMsg::PersistChainLock { bytes, ack }) => {
+                        let wrote = ws.write_chain_lock(&bytes).and_then(|()| ws.bump_lock_version());
+                        if let Err(e) = &wrote {
+                            tracing::error!(error = %e, "chain_lock=unwritten");
+                        }
+                        let _ = ack.send(wrote.is_ok());
                     }
                     Ok(WriterMsg::PersistWalletKeys { record, ack }) => {
                         let wrote = ws.append_wallet_keys(&record).and_then(|()| ws.sync());
@@ -5690,6 +5748,40 @@ mod tests {
     /// §6.1: the fired `task_start` keys live sealed beside the state,
     /// local to this node; absent reads as none fired.
     #[test]
+    fn the_chain_lock_round_trips_sealed_and_durably() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        assert_eq!(ws.read_chain_lock().expect("read"), None, "absent = no file");
+        ws.write_chain_lock(br#"{"free":[7]}"#).expect("write");
+        assert_eq!(ws.read_chain_lock().expect("read").as_deref(), Some(&br#"{"free":[7]}"#[..]));
+        let raw = fs::read(ws.dir().join(CHAIN_LOCK_FILE)).expect("raw");
+        assert!(!raw.windows(b"free".len()).any(|w| w == b"free"), "sealed at rest");
+        let dir = ws.dir().to_path_buf();
+        let handle = start_writer(ws);
+        assert!(handle.persist_chain_lock_blocking(br#"{"free":[8]}"#.to_vec()), "acked when durable");
+        drop(handle);
+        let (ws, _) = open_eventually(&dir);
+        assert_eq!(ws.read_chain_lock().expect("read").as_deref(), Some(&br#"{"free":[8]}"#[..]));
+        // W3: the first lock write raises the manifest past what an older
+        // build opens - it would ignore the promises in this file
+        assert_eq!(ws.manifest.version, molt_core::STORAGE_VERSION_LOCK);
+        const {
+            assert!(molt_core::STORAGE_VERSION_LOCK > molt_core::STORAGE_VERSION_SEALED);
+        }
+    }
+
+    fn open_eventually(dir: &Path) -> (OpenedWorkspace, LoadedState) {
+        for _ in 0..200 {
+            if let Ok(o) = open_workspace(dir) {
+                return o;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the writer never released the workspace");
+    }
+
+    #[test]
     fn the_kanban_wakes_round_trip_sealed() {
         let tmp = tempfile::tempdir().expect("tmp");
         let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
@@ -5918,10 +6010,11 @@ mod tests {
     /// number is ignored, never the active segment.
     #[test]
     fn segment_floor_ignores_the_reserved_markers() {
-        assert_eq!(RESERVED_SEGMENT_FLOOR, WIKI_DRAFT_SEGMENT);
+        assert_eq!(RESERVED_SEGMENT_FLOOR, CHAIN_LOCK_SEGMENT);
         const {
             assert!(
-                WIKI_DRAFT_SEGMENT < PREFS_SEALED_SEGMENT
+                CHAIN_LOCK_SEGMENT < WIKI_DRAFT_SEGMENT
+                    && WIKI_DRAFT_SEGMENT < PREFS_SEALED_SEGMENT
                     && PREFS_SEALED_SEGMENT < WALLET_SCAN_SEGMENT
                     && WALLET_SCAN_SEGMENT < WALLET_KEYS_SEGMENT
                     && WALLET_KEYS_SEGMENT < KANBAN_DRAFT_SEGMENT
@@ -5934,6 +6027,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = make_ws(tmp.path(), 2);
         for no in [
+            CHAIN_LOCK_SEGMENT,
             WIKI_DRAFT_SEGMENT,
             PREFS_SEALED_SEGMENT,
             WALLET_SCAN_SEGMENT,
@@ -5947,7 +6041,7 @@ mod tests {
         }
         let (ws, loaded) = open_workspace(&dir).expect("opens despite the planted files");
         assert_eq!(loaded.tail.len(), 3);
-        assert!(ws.seg_no < WIKI_DRAFT_SEGMENT);
+        assert!(ws.seg_no < CHAIN_LOCK_SEGMENT);
     }
 
     /// WP4b stage 5: the FIRST pruned chain persist raises the manifest
@@ -5990,7 +6084,7 @@ mod tests {
         let mut m = read_manifest(&dir).expect("manifest");
         // one past everything this build understands (S6 raised the ceiling
         // to STORAGE_VERSION_SEALED)
-        m.version = molt_core::STORAGE_VERSION_SEALED + 1;
+        m.version = molt_core::STORAGE_VERSION_LOCK + 1;
         {
             let text = toml::to_string_pretty(&m).expect("render");
             fs::write(dir.join("manifest.toml"), text).expect("write");

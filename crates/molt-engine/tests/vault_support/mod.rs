@@ -105,6 +105,19 @@ pub async fn found_n_at(
     found_n_prepared(root, url, n, m, features, &[]).await
 }
 
+/// [`found_n_at`] for a republic founded before the sealing lock existed
+/// (B6 only).
+#[allow(dead_code)] // not every test binary that includes this module uses it
+pub async fn found_n_pre_lock(
+    root: &std::path::Path,
+    url: &str,
+    n: u8,
+    m: u8,
+    features: &[&str],
+) -> Vec<WalletHandle> {
+    found_n_with(root, url, n, m, features, &[], true).await
+}
+
 /// [`found_n_at`], each seat `NAMES[i]` patched with `patches[i]` (`null`:
 /// none) before the founding starts.
 pub async fn found_n_prepared(
@@ -115,6 +128,18 @@ pub async fn found_n_prepared(
     features: &[&str],
     patches: &[serde_json::Value],
 ) -> Vec<WalletHandle> {
+    found_n_with(root, url, n, m, features, patches, false).await
+}
+
+async fn found_n_with(
+    root: &std::path::Path,
+    url: &str,
+    n: u8,
+    m: u8,
+    features: &[&str],
+    patches: &[serde_json::Value],
+    pre_lock: bool,
+) -> Vec<WalletHandle> {
     let prepare = |w: WalletHandle, i: usize| async move {
         adopt_relay(&w, url).await;
         if let Some(patch) = patches.get(i).filter(|p| !p.is_null()) {
@@ -123,6 +148,7 @@ pub async fn found_n_prepared(
         w
     };
     let a = prepare(engine(&root.join(NAMES[0])), 0).await;
+    a.__found_pre_lock(pre_lock);
     a.execute(Command::CreateStart {
         name: "R".to_string(),
         member: NAMES[0].to_string(),

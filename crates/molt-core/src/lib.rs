@@ -172,6 +172,9 @@ impl Surface {
     /// diagnosis (it is not "unknown", it is not optional), anything the
     /// vocabulary does not name is refused.
     fn check_feature_key(key: &str) -> Result<(), String> {
+        if key == crate::chain::CHAIN_LOCK_FEATURE {
+            return Ok(());
+        }
         match Surface::parse(key) {
             Some(sf) if sf.is_charter_feature() => Ok(()),
             Some(_) => Err(format!("{key} is always on")),
@@ -1740,6 +1743,13 @@ pub const STORAGE_VERSION_PRUNED: u32 = 2;
 /// newness.
 pub const STORAGE_VERSION_SEALED: u32 = 3;
 
+/// The manifest version a workspace is RAISED to on its first sealing-lock
+/// write (`docs/chain/chain_lock_design.md` §8): an older binary ignores
+/// `chain_lock.state` and would sign freely where this seat promised or
+/// accepted - a fork - so it refuses the whole workspace at the manifest
+/// gate instead. The highest version this build opens.
+pub const STORAGE_VERSION_LOCK: u32 = 4;
+
 /// [`CryptoParams::sealed`] marker of the default at-rest state: key material
 /// device-sealed under `~/.moltrepublic/device.key` (`keys/workspace.key` +
 /// `keys/seed.sealed` present). Shared vocabulary with the export blob's
@@ -1930,6 +1940,10 @@ pub struct WorkspacePrefs {
     /// memory, so a restart and a restored backup keep it.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub seat_caps: std::collections::BTreeMap<String, Vec<String>>,
+    /// B7: this seat has kept a `chain_lock.state`. Set, with the file
+    /// missing, means the seat may have promised and forgot (§6 amnesia).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chain_lock: bool,
 }
 
 impl Default for WorkspacePrefs {
@@ -1948,6 +1962,7 @@ impl Default for WorkspacePrefs {
             last_seen: std::collections::BTreeMap::new(),
             seat_caps: std::collections::BTreeMap::new(),
             mirror_dir: String::new(),
+            chain_lock: false,
         }
     }
 }
@@ -3296,6 +3311,82 @@ pub enum WorkspaceEvent {
         /// The withdrawing proposer.
         by: MemberId,
     },
+    // B7 sealing lock (`docs/chain/chain_lock_design.md` §7): transport-only,
+    // never owed ([`unowed_on_the_wire`]); an older build drops each frame.
+    /// Phase 1a: the sender leads `round` at slot `(height, base)`.
+    LockPrepare {
+        /// The slot's height.
+        height: u64,
+        /// The slot's lineage (§3.1).
+        base: String,
+        /// The ballot's round; its leader is the sender.
+        round: u64,
+    },
+    /// Phase 1b: the sender promised the ballot `(round, leader)`.
+    LockPromise {
+        /// The slot's height.
+        height: u64,
+        /// The slot's lineage.
+        base: String,
+        /// The ballot's round.
+        round: u64,
+        /// The ballot's leader.
+        leader: MemberId,
+        /// What the sender last accepted at the slot.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accepted: Option<chain::LockAcceptedValue>,
+    },
+    /// Phase 2a: the sender (the leader) proposes one value at its ballot.
+    LockAccept {
+        /// The slot's height.
+        height: u64,
+        /// The slot's lineage.
+        base: String,
+        /// The ballot's round.
+        round: u64,
+        /// sha256 (hex) of the change's approval bytes at `height`.
+        digest: String,
+        /// Live acceptances that seal it.
+        need: u64,
+        /// The proposal id the change is voted under.
+        id: ProposalId,
+        /// The change itself for a membership change or a cut.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<chain::ChainChange>,
+    },
+    /// Phase 2b: the sender accepted `digest` at the ballot; `sig` is its
+    /// ordinary position signature over the change's approval bytes.
+    LockAccepted {
+        /// The slot's height.
+        height: u64,
+        /// The slot's lineage.
+        base: String,
+        /// The ballot's round.
+        round: u64,
+        /// The ballot's leader.
+        leader: MemberId,
+        /// The accepted value's digest.
+        digest: String,
+        /// The position signature.
+        sig: String,
+    },
+    /// The sender refused the ballot: a higher one is promised, or
+    /// (`promised: None`) it signed freely at the height.
+    LockNack {
+        /// The slot's height.
+        height: u64,
+        /// The slot's lineage.
+        base: String,
+        /// The refused ballot's round.
+        round: u64,
+        /// The refused ballot's leader.
+        leader: MemberId,
+        /// The ballot the sender promised instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        promised: Option<chain::LockBallot>,
+        /// The sender's head height.
+        head: u64,
+    },
 }
 
 /// The lenient twin of [`EventEnvelope`]: serde fails the whole envelope on
@@ -3536,6 +3627,11 @@ pub struct EngineStateDump {
     /// the re-push count survives a restart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub anchor_repushes: Vec<(MemberId, String, u32)>,
+    /// B7: the standing unsigned approve intents (`sig` empty; `height`
+    /// the head+1 an own intent was cast at, 0 for a peer's), covered by
+    /// the snapshot like [`Self::votes`]. Additive; empty skips.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intents: Vec<DumpedVote>,
     /// `(proposal, proposer, stamp)` of withdrawals whose card has not
     /// arrived yet: the card must arrive withdrawn after a restart too.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -8470,9 +8566,20 @@ pub struct SeatSync {
 /// Whether an own envelope stays out of the delivery guarantee and the G7
 /// order chain: an `MlsCommit` never reaches a peer's engine, a
 /// `CheckpointServedPart` is re-served on demand and an older build cannot
-/// parse it. Owing either would wedge every successor at the receiver.
+/// parse it. Owing either would wedge every successor at the receiver. The
+/// lock frames likewise: an older build cannot parse them, and the leader
+/// retransmits on its own timer.
 pub fn unowed_on_the_wire(body: &WorkspaceEvent) -> bool {
-    matches!(body, WorkspaceEvent::MlsCommit { .. } | WorkspaceEvent::CheckpointServedPart { .. })
+    matches!(
+        body,
+        WorkspaceEvent::MlsCommit { .. }
+            | WorkspaceEvent::CheckpointServedPart { .. }
+            | WorkspaceEvent::LockPrepare { .. }
+            | WorkspaceEvent::LockPromise { .. }
+            | WorkspaceEvent::LockAccept { .. }
+            | WorkspaceEvent::LockAccepted { .. }
+            | WorkspaceEvent::LockNack { .. }
+    )
 }
 
 /// How far this node trails the highest height a peer reported
@@ -8554,6 +8661,19 @@ pub struct ChainSync {
     /// The most one transport frame carries for a served blob.
     #[serde(default)]
     pub blob_cap: u64,
+    /// B7: the sealing lock runs at head+1.
+    #[serde(default)]
+    pub lock_active: bool,
+    /// B7: the highest ballot seen at head+1, `round:leader` ("" = none).
+    #[serde(default)]
+    pub lock_ballot: String,
+    /// B7: why head+1 waits under the lock ("" = it does not).
+    #[serde(default)]
+    pub lock_wait: String,
+    /// B7: the first locked height this holder can see (1 = since the
+    /// founding; 0 = the chain has not enabled the lock).
+    #[serde(default)]
+    pub lock_since: u64,
 }
 
 /// One fork decision ([`ChainSync::last_fork`]).
@@ -9761,6 +9881,27 @@ mod tests {
     /// which field moved. The conditional rule is load-bearing: `None`
     /// must stay byte-identical to v4 (the v4 pin above proves that), and
     /// `Some([])` must be a DIFFERENT table than `None`.
+    /// B7: the lock is one more feature key - accepted, sorted like any
+    /// other, carried in the roster-v5 feature run (layout and tag
+    /// unchanged; a table without it keeps its bytes).
+    #[test]
+    fn the_lock_is_a_feature_key_in_the_unchanged_v5_layout() {
+        let lock = crate::chain::CHAIN_LOCK_FEATURE.to_string();
+        let keys = canonical_features(&["memory".to_string(), lock.clone()]).expect("known keys");
+        assert_eq!(keys, vec![lock.clone(), "memory".to_string()]);
+        verify_canonical_features(&keys).expect("canonical");
+        let table = [MemberIdentity {
+            member: "alice".to_string(),
+            identity_pk: "aa".repeat(32),
+            nostr_pk: "cc".repeat(32),
+            vault_pk: String::new(),
+        }];
+        let plain = roster_canonical_bytes("f00", 1, 1, &table, "charter", &[], Some(&["memory".to_string()]));
+        let locked = roster_canonical_bytes("f00", 1, 1, &table, "charter", &[], Some(&keys));
+        assert!(locked.starts_with(b"molt-roster-v5\0") && plain.starts_with(b"molt-roster-v5\0"));
+        assert_eq!(locked.len(), plain.len() + 4 + lock.len(), "one more length-prefixed key, nothing else");
+    }
+
     #[test]
     fn roster_canonical_bytes_v5_binds_the_feature_set() {
         let table = vec![MemberIdentity {
@@ -9899,6 +10040,119 @@ mod tests {
         let raw: RawEnvelope = serde_json::from_str(newer).expect("raw fallback");
         assert_eq!(raw.seq, 8);
         assert_eq!(raw.body["type"], serde_json::json!("hologram"));
+    }
+
+    /// The five lock frames, as the wire carries them (B7 §7).
+    fn lock_frames() -> Vec<(WorkspaceEvent, &'static str)> {
+        let cut = chain::ChainChange::Checkpoint { upto: 4, state_hash: "ab".repeat(32) };
+        vec![
+            (
+                WorkspaceEvent::LockPrepare { height: 5, base: "b".into(), round: 2 },
+                r#"{"type":"lock_prepare","height":5,"base":"b","round":2}"#,
+            ),
+            (
+                WorkspaceEvent::LockPromise {
+                    height: 5,
+                    base: "b".into(),
+                    round: 2,
+                    leader: "dora".into(),
+                    accepted: Some(chain::LockAcceptedValue {
+                        round: 1,
+                        leader: "mara".into(),
+                        digest: "d".into(),
+                        need: 2,
+                        id: 7,
+                        change: None,
+                    }),
+                },
+                r#"{"type":"lock_promise","height":5,"base":"b","round":2,"leader":"dora","accepted":{"round":1,"leader":"mara","digest":"d","need":2,"id":7}}"#,
+            ),
+            (
+                WorkspaceEvent::LockAccept {
+                    height: 5,
+                    base: "b".into(),
+                    round: 2,
+                    digest: "d".into(),
+                    need: 3,
+                    id: ProposalId(9),
+                    change: Some(cut),
+                },
+                r#"{"type":"lock_accept","height":5,"base":"b","round":2,"digest":"d","need":3,"id":9,"change":{"kind":"checkpoint","upto":4,"state_hash":"abababababababababababababababababababababababababababababababab"}}"#,
+            ),
+            (
+                WorkspaceEvent::LockAccepted {
+                    height: 5,
+                    base: "b".into(),
+                    round: 2,
+                    leader: "dora".into(),
+                    digest: "d".into(),
+                    sig: "s".into(),
+                },
+                r#"{"type":"lock_accepted","height":5,"base":"b","round":2,"leader":"dora","digest":"d","sig":"s"}"#,
+            ),
+            (
+                WorkspaceEvent::LockNack {
+                    height: 5,
+                    base: "b".into(),
+                    round: 2,
+                    leader: "dora".into(),
+                    promised: Some(chain::LockBallot { round: 3, leader: "mara".into() }),
+                    head: 4,
+                },
+                r#"{"type":"lock_nack","height":5,"base":"b","round":2,"leader":"dora","promised":{"round":3,"leader":"mara"},"head":4}"#,
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_lock_frames_are_byte_pinned_and_unowed() {
+        for (ev, want) in lock_frames() {
+            assert_eq!(serde_json::to_string(&ev).expect("json"), want);
+            let back: WorkspaceEvent = serde_json::from_str(want).expect("decodes");
+            assert_eq!(back, ev);
+            assert!(unowed_on_the_wire(&ev), "{want}: never owed");
+        }
+        // the intent at a locked height is an ordinary Approved with no signature
+        let intent = WorkspaceEvent::Approved { id: ProposalId(3), by: "dora".into(), height: 6, sig: String::new() };
+        assert_eq!(
+            serde_json::to_string(&intent).expect("json"),
+            r#"{"type":"approved","id":3,"by":"dora","height":6,"sig":""}"#
+        );
+        assert!(!unowed_on_the_wire(&intent), "an intent is owed like any vote");
+    }
+
+    /// The `type` tags of `WorkspaceEvent` before B7 (origin/master,
+    /// 2026-11-21): what an older build's deserializer knows.
+    const PRE_LOCK_TAGS: [&str; 25] = [
+        "founded", "member_joined", "chat", "chat_reacted", "chat_deleted", "file_removed",
+        "chat_read", "proposed", "approved", "vote_refused", "declined", "applied", "member_seen",
+        "committed", "chain_request", "membership_proposed", "checkpoint_proposed",
+        "checkpoint_served", "checkpoint_served_part", "file_requested", "file_wanted",
+        "file_served", "mls_commit", "mesh_announced", "withdrawn",
+    ];
+
+    /// An older build drops each lock frame: its `type` is none the old
+    /// enum knows, so the typed decode fails (the frame is discarded at
+    /// `MlsChannel::decode`, nothing is written or stopped); the old tags
+    /// still decode here, so the list is the real old shape.
+    #[test]
+    fn an_older_build_drops_every_lock_frame() {
+        for tag in PRE_LOCK_TAGS {
+            let probe = format!(r#"{{"seq":1,"ts":1,"by":"x","body":{{"type":"{tag}"}}}}"#);
+            if let Err(e) = serde_json::from_str::<EventEnvelope>(&probe) {
+                assert!(!e.to_string().contains("unknown variant"), "{tag} is a variant here: {e}");
+            }
+        }
+        for (ev, _) in lock_frames() {
+            let env = EventEnvelope { seq: 9, ts: 1, by: "dora".into(), body: ev, prev_seq: 0 };
+            let wire = serde_json::to_string(&env).expect("json");
+            let raw: RawEnvelope = serde_json::from_str(&wire).expect("raw");
+            let tag = raw.body["type"].as_str().expect("tagged").to_string();
+            assert!(!PRE_LOCK_TAGS.contains(&tag.as_str()), "{tag} collides with an old variant");
+            let renamed = wire.replace(&format!(r#""type":"{tag}""#), r#""type":"hologram""#);
+            let err = serde_json::from_str::<EventEnvelope>(&renamed).map(|_| ()).expect_err("an unknown tag").to_string();
+            assert!(err.contains("unknown variant"), "{tag}: an unknown tag fails the whole envelope: {err}");
+        }
     }
 
     /// The boot group of a production node is honest: one member, no
