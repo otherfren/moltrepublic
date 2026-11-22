@@ -1408,6 +1408,7 @@ impl State {
             .map(|(id, _)| *id)
             .chain(self.chain.proposal_changes.keys().copied())
             .collect();
+        self.lock_mark_after_move(head);
         self.chain.lock.intents.retain(|id, _| open.contains(id));
         self.chain.lock.intent_sent.retain(|id| open.contains(id));
         self.chain.lock.intent_at.retain(|id, _| open.contains(id));
@@ -1665,24 +1666,49 @@ impl State {
         }
         // own replayed signatures were free ones (a build without the lock
         // ran here, or none ever wrote the file): mark them first
+        let before = self.chain.lock.acceptor.clone();
+        self.lock_mark_own_free(0);
+        if self.is_chain_governed() && (self.chain.lock.acceptor != before || !marker) && !self.persist_lock() {
+            // W6: marks that never reached the disk would let a free
+            // signature out unwritten
+            self.chain.lock.acceptor = before;
+            self.chain.lock.amnesia = Some(None);
+            tracing::warn!("lock=amnesia reason=unwritten");
+        }
+    }
+
+    /// Own signatures above `above` were given freely: mark them (or go
+    /// passive where lock state conflicts).
+    fn lock_mark_own_free(&mut self, above: u64) {
         let me = self.member();
         let own: Vec<u64> = self
             .chain
             .pending_sigs
             .values()
-            .filter(|p| p.sigs.iter().any(|a| a.member == me))
+            .filter(|p| p.height > above && p.sigs.iter().any(|a| a.member == me))
             .map(|p| p.height)
             .collect();
-        let before = self.chain.lock.acceptor.clone();
         for h in own {
+            if self.chain.lock.acceptor.signed_freely(h) || self.chain.lock.passive.contains(&h) {
+                continue;
+            }
             if self.chain.lock.acceptor.sign_freely(h).is_none() {
                 tracing::warn!(height = h, "lock=passive reason=conflict");
                 self.chain.lock.passive.insert(h);
             }
         }
-        if self.is_chain_governed() && (self.chain.lock.acceptor != before || !marker) && !self.persist_lock() {
-            // W6: marks that never reached the disk would let a free
-            // signature out unwritten
+    }
+
+    /// R6: a free signature given where the lock was not enabled (the losing
+    /// side of a fork at the enabling height) is marked before any lock
+    /// reply once the head reaches a lineage that runs the lock.
+    fn lock_mark_after_move(&mut self, head: u64) {
+        if !self.lock_cap_on() || !self.lock_enabled() || self.chain.lock.amnesia.is_some() || !self.is_chain_governed() {
+            return;
+        }
+        let before = self.chain.lock.acceptor.clone();
+        self.lock_mark_own_free(head);
+        if self.chain.lock.acceptor != before && !self.persist_lock() {
             self.chain.lock.acceptor = before;
             self.chain.lock.amnesia = Some(None);
             tracing::warn!("lock=amnesia reason=unwritten");

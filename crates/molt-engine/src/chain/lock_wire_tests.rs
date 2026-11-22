@@ -1202,3 +1202,23 @@ fn a_stale_proposal_rotates_to_the_next_card() {
     }
     assert_eq!(proposed, vec![Some(first), Some(second), Some(first)]);
 }
+
+/// Review R6: mara signed a card freely at 1 on a lineage without the
+/// enabling block, then re-based onto one that runs the lock. Her free
+/// signature is marked before any lock reply: she promises nothing there.
+#[test]
+fn a_free_signature_from_before_the_lock_is_marked_on_the_head_move() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    mara.chain.lock.enabled_override = Some(false);
+    note(&mut mara, "y");
+    assert_eq!(own_sigs(&mara), 1, "a free signature at 1, no mark");
+    assert!(!mara.chain.lock.acceptor.signed_freely(1));
+    mara.chain.lock.enabled_override = Some(true);
+    mara.lock_on_head_moved();
+    assert!(mara.chain.lock.acceptor.signed_freely(1), "marked free");
+    mara.chain.lock.outbox.clear();
+    let base = mara.lock_slot().expect("slot").base;
+    wire(&mut mara, "walter", 1, WorkspaceEvent::LockPrepare { height: 1, base, round: 3 });
+    assert!(!sent_kinds(&mara).contains(&"promise"), "no promise: {:?}", sent_kinds(&mara));
+}

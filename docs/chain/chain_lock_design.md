@@ -667,6 +667,9 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   first version of this rule did, and `nostr_outbox_quiet` caught it).
 - **S5.** Seats known free are heard as free; promisers and free seats
   stay disjoint.
+- **R6.** A free signature given on a lineage without the enabling
+  block is marked free when the head moves onto one that runs the lock,
+  before any lock reply there - what §8's per-height free mark claims.
 - **W2/R5.** The leader skips a card the chain-wide gates refuse now
   (relay wait, a restore gate and consent, a cut's hash); a seat's own
   vault/wallet checks only stop its acceptance, since another seat may
