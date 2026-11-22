@@ -147,3 +147,26 @@ older build does in each case, the boundary argument and what was
 deleted are in the design's §8. The 13 vault tests that stalled on the
 activation race found fresh republics, so they now run locked from
 height 1 with no race.
+
+## 9. Suite with the lock on by default (chain activation, 2026-11-22)
+
+Every founding runs under the lock now. First full `molt-engine` run:
+1 348 passed, 12 failed; each traced:
+
+| test | cause | resolution |
+|---|---|---|
+| `the_feature_set_is_bound_into_what_every_member_signs`, `founding_ritual_completes_across_two_instances`, `vault_late_enable` charter check | the charter carries `chain-lock` | expectation updated (the decision) |
+| `a_poke_crosses_the_mesh_and_wakes_the_opted_in_target` | counted the leader's `LockPrepare` as an application envelope | lock frames left out of that count |
+| `a_reopened_member_recovers_open_proposals_from_the_mesh` | pins the B6 re-serve of a collected signature | founds pre-lock |
+| `recovery_distributes_the_rekey_commit_to_a_live_survivor` | its "live survivor" is a stub that never promises | founds pre-lock |
+| `a_restore_sealed_after_its_withdrawal_is_reported_and_a_new_link_heals_it` | a B6 race: sealed with a pre-collected signature | founds pre-lock |
+| `a_bystander_that_slept_through_a_recovery_still_hears_the_rejoiner` | one survivor restores alone | founds pre-lock |
+| `a_forged_depositor_is_refused_by_approver_and_verifier` | colluders reaching m pin the slot (design §14) | founds pre-lock; residual documented |
+| `a_withdrawn_relay_is_not_redialed_by_the_running_republic`, `wallet_stage`/`wallet_scan` `the_fork_pauses...`, `a_backup_restore_keeps_the_share`, `enable_then_cut_then_recover_and_read` | load (two suites and a GUI run on four cores) | green alone, repeatedly |
+| `a_payment_confirms_after_20_blocks_and_a_reorg_rewinds_it` | two founding wallet inits race; the lock's leader can pick the card a seat never claimed (design §14) | open: 2 of 7 locked runs, 0 of 8 B6 runs; a consent change for decision |
+
+After the master merge (restore settle, open-card cap, gap hold): the lock
+accepts a `Restored` value only after the settle; intents wait behind a
+gap as stances, lock frames never wait. `a_consented_restore_under_the_lock_needs_both_survivors`
+minted its link before every seat announced and got a v1 consent (a
+human vote); it now waits for the announcements, as the recovery tests do.
