@@ -62,6 +62,8 @@ pub(crate) struct DropSeam {
     pub(crate) dropped: std::sync::atomic::AtomicU64,
     lost: Mutex<std::collections::HashSet<(MemberId, u64)>>,
     chat: Mutex<Option<String>>,
+    /// The restore settle in seconds plus one (`0` = the constant).
+    pub(crate) restore_settle: std::sync::atomic::AtomicU64,
 }
 
 impl DropSeam {
@@ -188,6 +190,7 @@ impl EngineSink for CmdSink {
                 from: member.clone(),
                 of: w.of.clone(),
                 seqs: w.seqs.clone(),
+                range: w.range,
                 generation: self.generation,
             },
             molt_net::gap::GapFrame::Answer(a) => Command::NetGapAnswered {
@@ -195,6 +198,7 @@ impl EngineSink for CmdSink {
                 to: a.to.clone(),
                 resent: a.resent.clone(),
                 gone: a.gone.clone(),
+                listing: a.listing.as_ref().map(|l| (l.after, l.through, l.own.clone())),
                 generation: self.generation,
             },
         };
@@ -398,6 +402,10 @@ impl StorageLog {
 impl supervisor::OutboxLog for StorageLog {
     async fn read_from(&self, from_seq: u64) -> Vec<EventEnvelope> {
         self.handle.read_log_from(from_seq).await
+    }
+
+    async fn read_range(&self, from_seq: u64, to_seq: u64) -> Vec<EventEnvelope> {
+        self.handle.read_log_range(from_seq, to_seq).await
     }
 }
 
@@ -952,7 +960,8 @@ impl State {
         );
         // a (re)started seat speaks once: peers holding a tail for it
         // re-offer only to a seat they hear (delivery guarantee §4.4)
-        handle.publish_ack(molt_net::group_ack::GroupAck::new(self.member(), self.delivery.accepted.clone()));
+        let sheet = self.delivery.accepted.iter().map(|(m, w)| (m.clone(), w.for_sheet())).collect();
+        handle.publish_ack(molt_net::group_ack::GroupAck::new(self.member(), sheet));
         Some(crate::GroupNet {
             handle,
             mls: mls_arc,

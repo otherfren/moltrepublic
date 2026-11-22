@@ -24,28 +24,36 @@ pub(super) const ACK_DEBOUNCE_SECS: u64 = 3;
 /// hard-kill regression window.
 const MLS_PERSIST_SECS: u64 = 10;
 
-/// G7: held envelopes per sender; past it the oldest is delivered out of
-/// order rather than shed (§10).
-const HOLD_MAX: usize = 512;
+/// G7 (§10): bytes of decrypted, not yet applied envelopes kept across all
+/// senders; past it the highest seq of the largest buffer is shed (it stays
+/// owed: the listing and the sender's rounds bring it back).
+pub(crate) const HOLD_BYTES_MAX: usize = 64 * 1024 * 1024;
 
 /// A seq missing this long is asked for; younger gaps are mostly a
 /// newest-first relay replay filling itself.
 const GAP_ASK_AFTER_SECS: u64 = 2;
 
-/// Re-ask a sender's still-missing seqs this often.
+/// Re-ask a sender's still-missing seqs (and its listing) this often.
 const GAP_ASK_EVERY_SECS: u64 = 10;
 
 /// Relay skew after evidence that the gap will not fill (the sender
 /// re-published it, or a resend round passed over it): settled after this.
 pub(crate) const GAP_PASS_GRACE_SECS: u64 = 5;
 
-/// The bound for a sender that answers nothing (an older build): six times
-/// the first rung of its resend ladder, so its first rounds land inside it.
+/// The ordering bound for a sender that answers nothing (an older build):
+/// six times the first rung of its resend ladder. Order only - never the
+/// frontier.
 pub(crate) const GAP_FALLBACK_SECS: u64 = 60;
 
 /// Missing and settled seqs tracked per sender (each); past it the lowest
 /// missing one is settled.
 const SETTLED_MAX: usize = 1024;
+
+/// Seqs above the frontier remembered as seen this session, per sender.
+const SESSION_MAX: usize = 65_536;
+
+/// Re-publications of a listed seq that never landed before it is given up.
+const LISTED_TRIES: u8 = 3;
 
 /// One missing seq of a sender's stream.
 #[derive(Debug, Clone, Copy)]
@@ -56,22 +64,69 @@ pub(crate) struct Gap {
     settle_at: Option<u64>,
 }
 
-/// G7 per sender (§10): what is missing and what waits for it.
+/// The sender's complete list of its own seqs in `(frontier, through]`.
+#[derive(Debug, Default)]
+struct Listing {
+    through: u64,
+    own: std::collections::BTreeSet<u64>,
+    /// Per listed seq: re-publications that did not land.
+    tries: std::collections::BTreeMap<u64, u8>,
+}
+
+/// G7 per sender (§10).
+///
+/// `frontier`: every envelope the sender owes at or below it is accepted or
+/// proven unfillable, so nothing is accepted above `frontier +
+/// ACCEPT_WINDOW_BITS` - the window can never age out an owed seq, and the
+/// ack sheet never reports one as accepted. `held` keeps decrypted
+/// envelopes that may not be applied yet, unaccepted: above that cap, or
+/// order-sensitive behind a missing seq.
 #[derive(Debug, Default)]
 pub(crate) struct SenderHold {
+    frontier: u64,
+    /// Accepted envelopes above the frontier, `prev_seq -> seq`.
+    ahead: std::collections::BTreeMap<u64, u64>,
     missing: std::collections::BTreeMap<u64, Gap>,
-    held: std::collections::BTreeMap<u64, EventEnvelope>,
+    held: std::collections::BTreeMap<u64, (EventEnvelope, usize)>,
+    bytes: usize,
     settled: std::collections::BTreeSet<u64>,
-    /// The current hold episode: start, logged, envelopes released out of order.
+    /// Delivered but left unaccepted (the D7 decline park).
+    refused: std::collections::BTreeSet<u64>,
+    listing: Option<Listing>,
+    listing_asked_at: Option<u64>,
+    /// Seqs above the frontier received in THIS session. A second arrival
+    /// of one is a fresh encryption (MLS refuses to open a consumed frame
+    /// twice), so only the sender's resend round can produce it - unlike a
+    /// stored frame re-read after a restart from a ratchet persisted late.
+    session: std::collections::BTreeSet<u64>,
+    /// An older sender's resend round passed (a repeat arrived), and the
+    /// lowest repeat seen since.
+    passed_at: Option<u64>,
+    passed_low: u64,
+    /// The current hold episode: start, logged, released out of order,
+    /// shed, given up.
     since: Option<u64>,
     logged: bool,
     unordered: u32,
+    shed: u32,
+    lost: u32,
     /// The sender answers gap wants: its duplicates are targeted resends
     /// for other askers, never evidence about our gaps.
     answers: bool,
 }
 
 impl SenderHold {
+    fn new(frontier: u64, links: Vec<(u64, u64)>) -> SenderHold {
+        let mut hold = SenderHold { frontier, ..SenderHold::default() };
+        hold.ahead = links.into_iter().filter(|(_, s)| *s > frontier).collect();
+        hold.raise(frontier);
+        hold
+    }
+
+    fn cap(&self) -> u64 {
+        self.frontier.saturating_add(molt_core::ACCEPT_WINDOW_BITS)
+    }
+
     /// Whether an order-sensitive envelope at `seq` must wait.
     fn blocks(&self, seq: u64) -> bool {
         self.missing.range(..seq).next().is_some() || self.held.range(..seq).next().is_some()
@@ -79,7 +134,7 @@ impl SenderHold {
 
     /// Track `seq` as missing unless held or settled already.
     fn note_missing(&mut self, seq: u64, now: u64) {
-        if self.held.contains_key(&seq) || self.settled.contains(&seq) {
+        if seq <= self.frontier || self.held.contains_key(&seq) || self.settled.contains(&seq) {
             return;
         }
         self.missing.entry(seq).or_insert(Gap { since: now, asked_at: None, settle_at: None });
@@ -90,17 +145,22 @@ impl SenderHold {
         }
     }
 
-    /// Evidence from an older sender's resend round that every missing seq
-    /// below `seq` was passed over.
+    /// Evidence from an older sender's resend round.
     fn passed(&mut self, seq: u64, now: u64) {
-        if self.answers {
+        if self.answers || seq <= self.frontier || !self.session.contains(&seq) {
             return;
         }
+        if self.passed_at.is_none() {
+            self.passed_low = seq;
+        }
+        self.passed_at.get_or_insert(now);
+        self.passed_low = self.passed_low.min(seq);
         for gap in self.missing.range_mut(..seq).map(|(_, g)| g) {
             gap.settle_at.get_or_insert(now + GAP_PASS_GRACE_SECS);
         }
     }
 
+    /// Order only: `seq` no longer holds what is behind it.
     fn settle(&mut self, seq: u64) -> bool {
         if self.missing.remove(&seq).is_none() {
             return false;
@@ -112,15 +172,40 @@ impl SenderHold {
         true
     }
 
-    fn idle(&self) -> bool {
-        self.missing.is_empty() && self.held.is_empty()
+    /// Chain `seq` (accepted, predecessor `prev`) onto the frontier.
+    fn link(&mut self, prev: u64, seq: u64) {
+        if prev == 0 || prev <= self.frontier {
+            self.raise(seq);
+        } else {
+            self.ahead.insert(prev, seq);
+        }
+    }
+
+    /// Move the frontier up to `to` and on through every accepted envelope
+    /// chained to it.
+    fn raise(&mut self, to: u64) {
+        self.frontier = self.frontier.max(to);
+        while let Some((&p, &s)) = self.ahead.first_key_value() {
+            if p > self.frontier {
+                break;
+            }
+            self.ahead.pop_first();
+            self.frontier = self.frontier.max(s);
+        }
+        let f = self.frontier;
+        self.missing.retain(|s, _| *s > f);
+        self.session.retain(|s| *s > f);
+        self.refused.retain(|s| *s > f);
+        if self.listing.as_ref().is_some_and(|l| l.through <= f) {
+            self.listing = None;
+        }
     }
 }
 
 /// Whether an envelope's effect depends on its sender's earlier envelopes:
 /// the chat stream (arrival is display order; a reaction toggles) and a
-/// member's stances (newest wins). Everything else is keyed, buffered or
-/// idempotent on its own and never waits.
+/// member's stances (newest wins). A withdrawal is terminal and parks on
+/// its own card's id, so it needs no order beyond that.
 fn order_sensitive(body: &WorkspaceEvent) -> bool {
     matches!(
         body,
@@ -131,7 +216,6 @@ fn order_sensitive(body: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::FileRemoved { .. }
             | WorkspaceEvent::Approved { .. }
             | WorkspaceEvent::Declined { .. }
-            | WorkspaceEvent::Withdrawn { .. }
     )
 }
 
@@ -278,14 +362,14 @@ impl State {
         let prev_missing = envelope.prev_seq != 0
             && has_history
             && !window.is_some_and(|w| w.is_accepted(envelope.prev_seq));
+        let start = window.map_or(0, |w| if w.frontier > 0 { w.frontier } else { w.high });
+        let links = window.map(|w| w.links.clone()).unwrap_or_default();
         if !has_history {
             return self.deliver_gated(from, envelope);
         }
         let now = self.presence_now();
-        let hold = self.delivery.inbound.entry(from.clone()).or_default();
+        let hold = self.delivery.inbound.entry(from.clone()).or_insert_with(|| SenderHold::new(start, links));
         if is_dup || hold.held.contains_key(&envelope.seq) {
-            // a resend round passed here: whatever is still missing below
-            // was not re-published
             hold.passed(envelope.seq, now);
             if is_dup {
                 return self.deliver_gated(from, envelope);
@@ -294,81 +378,111 @@ impl State {
             return Ok(Reply::Ack);
         }
         hold.missing.remove(&envelope.seq);
+        hold.session.insert(envelope.seq);
+        // a sender naming endless far-ahead seqs keeps only its lowest
+        while hold.session.len() > SESSION_MAX {
+            hold.session.pop_last();
+        }
         if prev_missing {
             hold.note_missing(envelope.prev_seq, now);
         }
-        // accepting this seq slides the window: a held one that would age
-        // below it reads as accepted and could never be applied after
-        let aging: Vec<u64> = hold
-            .held
-            .range(..=envelope.seq.saturating_sub(molt_core::ACCEPT_WINDOW_BITS))
-            .map(|(s, _)| *s)
-            .collect();
-        let aged: Vec<EventEnvelope> = aging.iter().filter_map(|s| hold.held.remove(s)).collect();
         // `prev_seq == 0`: a pre-G7 sender or a chain start, unordered as ever
-        let blocked =
-            envelope.prev_seq != 0 && order_sensitive(&envelope.body) && hold.blocks(envelope.seq);
-        for env in aged {
-            self.release_unordered(&from, env, "aged");
-        }
-        if blocked {
-            let Some(hold) = self.delivery.inbound.get_mut(&from) else { return Ok(Reply::Ack) };
-            hold.since.get_or_insert(now);
-            hold.held.insert(envelope.seq, envelope);
-            let overflow = if hold.held.len() > HOLD_MAX { hold.held.pop_first() } else { None };
-            self.delivery.ack_due.entry(from.clone()).or_insert(now + ACK_DEBOUNCE_SECS);
-            if let Some((_, oldest)) = overflow {
-                self.release_unordered(&from, oldest, "full");
-            }
+        let wait = envelope.seq > hold.cap()
+            || (envelope.prev_seq != 0 && order_sensitive(&envelope.body) && hold.blocks(envelope.seq));
+        if wait {
+            self.hold_envelope(&from, envelope, now);
             return Ok(Reply::Ack);
         }
         let reply = self.deliver_tracked(&from, envelope);
-        self.drain_held(&from, "arrived");
+        self.apply_ready(&from, "arrived");
         reply
     }
 
-    /// [`Self::deliver_gated`], and a seq it left unaccepted (the D7
-    /// decline park) stays missing, so the stances behind it keep waiting.
-    fn deliver_tracked(&mut self, from: &MemberId, env: EventEnvelope) -> Result<Reply, MoltError> {
-        let seq = env.seq;
-        let reply = self.deliver_gated(from.clone(), env);
-        if !self.delivery.accepted.get(from).is_some_and(|w| w.is_accepted(seq)) {
-            let now = self.presence_now();
-            if let Some(hold) = self.delivery.inbound.get_mut(from) {
-                hold.note_missing(seq, now);
-            }
-        }
-        reply
-    }
-
-    /// Deliver a held envelope past its gap (cap overflow, window aging),
-    /// counted for the episode's summary line.
-    fn release_unordered(&mut self, from: &MemberId, env: EventEnvelope, why: &str) {
+    /// Keep a decrypted envelope unaccepted until it may be applied; past
+    /// [`HOLD_BYTES_MAX`] shed the highest seq of the largest buffer.
+    fn hold_envelope(&mut self, from: &MemberId, env: EventEnvelope, now: u64) {
+        let size = serde_json::to_vec(&env).map_or(1024, |b| b.len());
         if let Some(hold) = self.delivery.inbound.get_mut(from) {
-            if hold.unordered == 0 {
-                tracing::warn!(member = %from, held = hold.held.len(), why, "inbound_released_unordered");
-            }
-            hold.unordered = hold.unordered.saturating_add(1);
+            hold.since.get_or_insert(now);
+            hold.bytes += size;
+            hold.held.insert(env.seq, (env, size));
         }
-        let _ = self.deliver_tracked(from, env);
+        self.delivery.ack_due.entry(from.clone()).or_insert(now + ACK_DEBOUNCE_SECS);
+        let max = self.delivery.hold_bytes_cap.unwrap_or(HOLD_BYTES_MAX);
+        while self.delivery.inbound.values().map(|h| h.bytes).sum::<usize>() > max {
+            let Some((member, hold)) = self.delivery.inbound.iter_mut().max_by_key(|(_, h)| h.bytes) else { break };
+            let Some((seq, (_, size))) = hold.held.pop_last() else { break };
+            hold.bytes = hold.bytes.saturating_sub(size);
+            // owed again: what it held back keeps waiting for it
+            hold.note_missing(seq, now);
+            if hold.shed == 0 {
+                tracing::warn!(member = %member, seq, held = hold.held.len(), "inbound_hold_shed");
+            }
+            hold.shed = hold.shed.saturating_add(1);
+        }
     }
 
-    /// Deliver, in seq order, every held envelope from `from` that no
-    /// longer has a missing seq below it; close the episode once nothing
-    /// is held.
-    fn drain_held(&mut self, from: &MemberId, via: &str) {
+    /// [`Self::deliver_gated`], then chain the seq onto the frontier; one
+    /// left unaccepted (the D7 decline park) stays missing and refused.
+    fn deliver_tracked(&mut self, from: &MemberId, env: EventEnvelope) -> Result<Reply, MoltError> {
+        let (seq, prev) = (env.seq, env.prev_seq);
+        let reply = self.deliver_gated(from.clone(), env);
+        let accepted = self.delivery.accepted.get(from).is_some_and(|w| w.is_accepted(seq));
+        let now = self.presence_now();
+        let Some(hold) = self.delivery.inbound.get_mut(from) else { return reply };
+        if accepted {
+            hold.refused.remove(&seq);
+            hold.link(prev, seq);
+            self.store_frontier(from);
+        } else {
+            hold.refused.insert(seq);
+            hold.note_missing(seq, now);
+        }
+        reply
+    }
+
+    /// Persist the frontier and the links above it with the window they
+    /// guard.
+    fn store_frontier(&mut self, from: &MemberId) {
+        let Some((f, links)) = self
+            .delivery
+            .inbound
+            .get(from)
+            .map(|h| (h.frontier, h.ahead.iter().map(|(p, s)| (*p, *s)).collect::<Vec<_>>()))
+        else {
+            return;
+        };
+        if let Some(w) = self.delivery.accepted.get_mut(from) {
+            if w.frontier != f || w.links != links {
+                w.frontier = f;
+                w.links = links;
+                self.delivery.accepted_dirty = true;
+            }
+        }
+    }
+
+    /// Apply, in seq order, every held envelope from `from` that may be
+    /// applied now: at or below the cap, and - if order-sensitive - with no
+    /// missing seq below it. Close the episode once nothing is held.
+    fn apply_ready(&mut self, from: &MemberId, via: &str) {
         loop {
             let Some(hold) = self.delivery.inbound.get_mut(from) else { return };
-            let next = match hold.held.first_key_value() {
-                Some((&seq, _)) if hold.missing.range(..seq).next().is_none() => hold.held.remove(&seq),
-                _ => None,
+            let cap = hold.cap();
+            let first_missing = hold.missing.keys().next().copied().unwrap_or(u64::MAX);
+            let open = cap.min(first_missing.saturating_sub(1));
+            let next = match hold.held.range(..=open).next() {
+                Some((&s, _)) => Some(s),
+                // past a missing seq only what needs no order
+                None => hold
+                    .held
+                    .range(..=cap)
+                    .find(|(_, (e, _))| e.prev_seq == 0 || !order_sensitive(&e.body))
+                    .map(|(s, _)| *s),
             };
-            match next {
-                Some(env) => {
-                    let _ = self.deliver_tracked(from, env);
-                }
-                None => break,
-            }
+            let Some(seq) = next else { break };
+            let Some((env, size)) = hold.held.remove(&seq) else { break };
+            hold.bytes = hold.bytes.saturating_sub(size);
+            let _ = self.deliver_tracked(from, env);
         }
         let now = self.presence_now();
         let Some(hold) = self.delivery.inbound.get_mut(from) else { return };
@@ -376,67 +490,178 @@ impl State {
             return;
         }
         if let Some(since) = hold.since.take() {
-            if hold.logged || hold.unordered > 0 {
-                tracing::info!(member = %from, since_s = now.saturating_sub(since), via, unordered = hold.unordered, "inbound_held_cleared");
+            if hold.logged || hold.unordered > 0 || hold.shed > 0 || hold.lost > 0 {
+                tracing::info!(
+                    member = %from,
+                    since_s = now.saturating_sub(since),
+                    via,
+                    unordered = hold.unordered,
+                    shed = hold.shed,
+                    lost = hold.lost,
+                    "inbound_held_cleared"
+                );
             }
         }
         hold.logged = false;
         hold.unordered = 0;
-        if hold.idle() && hold.settled.is_empty() && !hold.answers {
-            self.delivery.inbound.remove(from);
-        }
+        hold.shed = 0;
+        hold.lost = 0;
     }
 
-    /// Settle `seq` of `from`'s stream as never coming, then drain.
+    /// Order only: `seq` of `from`'s stream no longer holds what is behind
+    /// it, then apply.
     fn settle_gap(&mut self, from: &MemberId, seq: u64, via: &str) {
         let Some(hold) = self.delivery.inbound.get_mut(from) else { return };
         if hold.settle(seq) {
+            if hold.held.range(seq..).next().is_some() {
+                hold.unordered = hold.unordered.saturating_add(1);
+            }
             if via == "fallback" {
                 tracing::warn!(member = %from, missing_seq = seq, held = hold.held.len(), via, "inbound_gap_skipped");
             } else {
                 tracing::info!(member = %from, missing_seq = seq, held = hold.held.len(), via, "inbound_gap_skipped");
             }
         }
-        self.drain_held(from, via);
+        self.apply_ready(from, via);
     }
 
-    /// G7 beat (§10): forget gaps the window filled or aged out, settle
-    /// the ones with evidence or past the bound, ask for the rest.
+    /// Give up every owed seq of `from` at or below `to` that never came,
+    /// loudly, and raise the frontier there.
+    fn give_up_through(&mut self, from: &MemberId, to: u64, via: &str) {
+        let window = self.delivery.accepted.get(from).cloned().unwrap_or_default();
+        let Some(hold) = self.delivery.inbound.get_mut(from) else { return };
+        if to <= hold.frontier {
+            return;
+        }
+        let gone: Vec<u64> = hold
+            .missing
+            .range(..=to)
+            .map(|(s, _)| *s)
+            .chain(hold.listing.iter().flat_map(|l| l.own.range(..=to).copied()))
+            .filter(|s| !window.is_accepted(*s) && !hold.held.contains_key(s))
+            .collect::<std::collections::BTreeSet<u64>>()
+            .into_iter()
+            .collect();
+        if !gone.is_empty() {
+            let n = u32::try_from(gone.len()).unwrap_or(u32::MAX);
+            hold.lost = hold.lost.saturating_add(n);
+            tracing::warn!(member = %from, count = gone.len(), first = gone[0], via, "inbound_gap_lost");
+        }
+        hold.raise(to);
+        self.store_frontier(from);
+        self.apply_ready(from, via);
+    }
+
+    /// Where a sender's listing lets the frontier go: up to the first
+    /// listed seq that is neither accepted nor held.
+    fn listing_reach(&self, from: &MemberId) -> Option<u64> {
+        let hold = self.delivery.inbound.get(from)?;
+        let listing = hold.listing.as_ref()?;
+        let window = self.delivery.accepted.get(from)?;
+        let open = listing
+            .own
+            .iter()
+            .find(|s| !window.is_accepted(**s) && !hold.held.contains_key(s))
+            .copied();
+        Some(open.map_or(listing.through, |s| s - 1))
+    }
+
+    /// G7 beat (§10): advance frontiers on listings and resend evidence,
+    /// settle ordering gaps with evidence or past the bound, ask for the
+    /// rest - named seqs, and the listing of what lies above the frontier.
     pub(crate) fn inbound_gap_tick(&mut self, now: u64) {
         let me = self.member();
+        // a stored replay still running fills its gaps itself, newest first
+        let replaying = self.group_net.as_ref().is_some_and(|g| g.health.borrow().catching_up);
         let members: Vec<MemberId> = self.delivery.inbound.keys().cloned().collect();
         for m in members {
+            // a listing complete up to some seq: raise there
+            if let Some(reach) = self.listing_reach(&m) {
+                if let Some(hold) = self.delivery.inbound.get_mut(&m) {
+                    if reach > hold.frontier {
+                        hold.raise(reach);
+                        self.store_frontier(&m);
+                        self.apply_ready(&m, "listed");
+                    }
+                }
+            }
             let window = self.delivery.accepted.get(&m).cloned().unwrap_or_default();
             let Some(hold) = self.delivery.inbound.get_mut(&m) else { continue };
-            let filled: Vec<u64> =
-                hold.missing.keys().copied().filter(|s| window.is_accepted(*s)).collect();
+            // an older sender's round passed: below its top, what did not
+            // come will not; the frontier may go as far as the held ones
+            let mut jump = None;
+            if let Some(at) = hold.passed_at {
+                if now >= at + GAP_PASS_GRACE_SECS {
+                    if !hold.answers {
+                        let lowest_held = hold.held.keys().next().map_or(u64::MAX, |s| s - 1);
+                        let lowest_refused = hold.refused.iter().next().map_or(u64::MAX, |s| s - 1);
+                        // a round starts at the sender's floor and goes up:
+                        // only below its lowest re-offer is a seq proven
+                        // outside it
+                        let below_round = hold.passed_low.saturating_sub(1);
+                        jump = Some(hold.cap().min(below_round).min(lowest_held).min(lowest_refused));
+                    }
+                    hold.passed_at = None;
+                }
+            }
+            // listed seqs whose re-publication did not land count a try
+            let mut given_up = Vec::new();
+            if let Some(l) = hold.listing.as_mut() {
+                for (&seq, gap) in hold.missing.iter_mut() {
+                    if l.own.contains(&seq) && gap.settle_at.is_some_and(|t| now >= t) && !window.is_accepted(seq) {
+                        gap.settle_at = None;
+                        let tries = l.tries.entry(seq).or_insert(0);
+                        *tries += 1;
+                        if *tries >= LISTED_TRIES {
+                            given_up.push(seq);
+                        }
+                    }
+                }
+            }
+            let filled: Vec<u64> = hold.missing.keys().copied().filter(|s| window.is_accepted(*s)).collect();
             for s in filled {
                 hold.missing.remove(&s);
             }
             let mut settle: Vec<(u64, &str)> = Vec::new();
             let mut ask: Vec<u64> = Vec::new();
             for (&seq, gap) in &hold.missing {
-                if gap.settle_at.is_some_and(|t| now >= t) {
+                let refused = hold.refused.contains(&seq);
+                let listed = hold.listing.as_ref().is_some_and(|l| l.own.contains(&seq));
+                if !refused && !listed && gap.settle_at.is_some_and(|t| now >= t) {
                     settle.push((seq, "resend_passed"));
                 } else if now.saturating_sub(gap.since) >= GAP_FALLBACK_SECS {
                     settle.push((seq, "fallback"));
-                } else if now.saturating_sub(gap.since) >= GAP_ASK_AFTER_SECS
+                } else if !refused
+                    && now.saturating_sub(gap.since) >= GAP_ASK_AFTER_SECS
                     && gap.asked_at.map_or(true, |t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
                 {
                     ask.push(seq);
                 }
             }
             if !hold.held.is_empty() && !hold.logged {
-                if let (Some(since), Some((&missing_seq, _))) = (hold.since, hold.missing.first_key_value()) {
+                if let Some(since) = hold.since {
                     if now.saturating_sub(since) >= GAP_ASK_AFTER_SECS {
                         hold.logged = true;
-                        tracing::info!(member = %m, missing_seq, held = hold.held.len(), since_s = now - since, "inbound_held");
+                        let missing_seq = hold.missing.keys().next().copied().unwrap_or(hold.frontier + 1);
+                        tracing::info!(member = %m, missing_seq, held = hold.held.len(), frontier = hold.frontier, since_s = now - since, "inbound_held");
                     }
                 }
             }
+            // anything known above the frontier: ask for the listing of it
+            let above = !hold.ahead.is_empty() || !hold.held.is_empty() || !hold.missing.is_empty();
+            let list_due = above
+                && hold.listing.is_none()
+                && hold.listing_asked_at.map_or(true, |t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
+                && hold.since.map_or(true, |s| now.saturating_sub(s) >= GAP_ASK_AFTER_SECS);
             ask.truncate(molt_net::gap::GAP_MAX_SEQS);
-            if !ask.is_empty() {
-                if let Some(group) = self.group_net.as_ref() {
+            if let Some(group) = self.group_net.as_ref().filter(|_| !replaying) {
+                if list_due {
+                    let want = molt_net::gap::GapWant::range(me.clone(), m.clone(), hold.frontier, hold.cap());
+                    if group.handle.publish_control(want.to_frame()) {
+                        hold.listing_asked_at = Some(now);
+                    }
+                }
+                if !ask.is_empty() {
                     let want = molt_net::gap::GapWant::new(me.clone(), m.clone(), ask.clone());
                     if group.handle.publish_control(want.to_frame()) {
                         tracing::debug!(member = %m, seqs = ask.len(), "gap_want");
@@ -448,28 +673,50 @@ impl State {
                     }
                 }
             }
+            for seq in given_up {
+                if let Some(hold) = self.delivery.inbound.get_mut(&m) {
+                    if let Some(l) = hold.listing.as_mut() {
+                        l.own.remove(&seq);
+                    }
+                    hold.missing.remove(&seq);
+                    hold.lost = hold.lost.saturating_add(1);
+                }
+                tracing::warn!(member = %m, count = 1, first = seq, via = "resent_absent", "inbound_gap_lost");
+            }
+            if let Some(to) = jump {
+                self.give_up_through(&m, to, "resend_passed");
+            }
             for (seq, via) in settle {
                 self.settle_gap(&m, seq, via);
             }
-            self.drain_held(&m, "filled");
+            self.apply_ready(&m, "filled");
         }
     }
 
-    /// A gap want reached this node: only the named sender answers, with a
-    /// targeted resend off the actor (§10).
-    pub(crate) fn cmd_net_gap_wanted(&mut self, from: &MemberId, of: &MemberId, seqs: Vec<u64>) {
-        if *of != self.member() || !self.roster().contains(from) {
+    /// A gap want reached this node: only the named sender answers, off
+    /// the actor (§10).
+    pub(crate) fn cmd_net_gap_wanted(
+        &mut self,
+        from: &MemberId,
+        of: &MemberId,
+        seqs: Vec<u64>,
+        range: Option<(u64, u64)>,
+    ) {
+        if !self.gap_want_is_ours(from, of) {
             return;
         }
         if let Some(group) = self.group_net.as_ref() {
-            if !group.handle.answer_gap(from.clone(), seqs) {
-                tracing::debug!(%from, "gap_want=dropped reason=queue_full");
-            }
+            group.handle.answer_gap(from.clone(), seqs, range);
         }
     }
 
+    /// Only a roster member's want, and only for this node's own stream.
+    pub(crate) fn gap_want_is_ours(&self, from: &MemberId, of: &MemberId) -> bool {
+        *of == self.member() && *from != self.member() && self.roster().contains(from)
+    }
+
     /// The sender answered our gap want: `gone` never comes, `resent` must
-    /// land within the skew grace or it never will.
+    /// land within the skew grace.
     pub(crate) fn cmd_net_gap_answered(&mut self, from: MemberId, to: MemberId, resent: Vec<u64>, gone: Vec<u64>) {
         if to != self.member() {
             return;
@@ -477,14 +724,64 @@ impl State {
         let now = self.presence_now();
         let Some(hold) = self.delivery.inbound.get_mut(&from) else { return };
         hold.answers = true;
+        hold.passed_at = None;
         for s in &resent {
             if let Some(g) = hold.missing.get_mut(s) {
                 g.settle_at.get_or_insert(now + GAP_PASS_GRACE_SECS);
             }
         }
         for s in gone {
+            if let Some(l) = self.delivery.inbound.get_mut(&from).and_then(|h| h.listing.as_mut()) {
+                l.own.remove(&s);
+            }
             self.settle_gap(&from, s, "gone");
         }
+    }
+
+    /// The sender listed its own seqs in `(after, through]`: what is not
+    /// listed is not owed, what is listed and not here is asked for.
+    pub(crate) fn cmd_net_gap_listed(&mut self, from: &MemberId, to: &MemberId, after: u64, through: u64, own: Vec<u64>) {
+        if *to != self.member() {
+            return;
+        }
+        let now = self.presence_now();
+        let window = self.delivery.accepted.get(from).cloned().unwrap_or_default();
+        let Some(hold) = self.delivery.inbound.get_mut(from) else { return };
+        hold.answers = true;
+        hold.passed_at = None;
+        if after > hold.frontier || through <= hold.frontier {
+            return;
+        }
+        let own: std::collections::BTreeSet<u64> = own.into_iter().filter(|s| *s > hold.frontier && *s <= through).collect();
+        let unlisted: Vec<u64> = hold.missing.range(..=through).map(|(s, _)| *s).filter(|s| !own.contains(s)).collect();
+        for s in &own {
+            if !window.is_accepted(*s) && !hold.refused.contains(s) {
+                hold.note_missing(*s, now);
+            }
+        }
+        hold.listing = Some(Listing { through, own, tries: std::collections::BTreeMap::new() });
+        for s in unlisted {
+            self.settle_gap(from, s, "gone");
+        }
+        if let Some(reach) = self.listing_reach(from) {
+            if let Some(hold) = self.delivery.inbound.get_mut(from) {
+                if reach > hold.frontier {
+                    hold.raise(reach);
+                    self.store_frontier(from);
+                }
+            }
+        }
+        self.apply_ready(from, "listed");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inbound_held_has(&self, member: &str, seq: u64) -> bool {
+        self.delivery.inbound.get(member).is_some_and(|h| h.held.contains_key(&seq))
+    }
+
+    /// Whether `member`'s inbound stream is held behind a gap here.
+    pub(crate) fn inbound_held_from(&self, member: &str) -> bool {
+        self.delivery.inbound.get(member).is_some_and(|h| !h.held.is_empty() || !h.missing.is_empty())
     }
 
     /// The held streams, for the status view.
@@ -492,12 +789,15 @@ impl State {
         self.delivery
             .inbound
             .iter()
-            .filter(|(_, h)| !h.held.is_empty())
+            .filter(|(_, h)| !h.held.is_empty() || !h.missing.is_empty() || !h.ahead.is_empty())
             .map(|(m, h)| molt_core::InboundHeld {
                 member: m.clone(),
-                missing_seq: h.missing.keys().next().copied().unwrap_or(0),
+                missing_seq: h.missing.keys().next().copied().unwrap_or(h.frontier + 1),
                 held: u32::try_from(h.held.len()).unwrap_or(u32::MAX),
                 since: h.since.unwrap_or(0),
+                frontier: h.frontier,
+                bytes: u64::try_from(h.bytes).unwrap_or(u64::MAX),
+                missing: u32::try_from(h.missing.len()).unwrap_or(u32::MAX),
             })
             .collect()
     }
@@ -531,7 +831,7 @@ impl State {
             .collect();
         for m in subjects {
             if let Some(win) = self.delivery.accepted.get(&m) {
-                claims.insert(m, win.clone());
+                claims.insert(m, win.for_sheet());
             }
         }
         if claims.is_empty() {
@@ -637,7 +937,7 @@ impl State {
             let Some(peer) = peers.iter().find(|p| p.member == member) else {
                 continue; // no leg to this member right now
             };
-            let Ok(mut payload) = serde_json::to_vec(window) else {
+            let Ok(mut payload) = serde_json::to_vec(&window.for_sheet()) else {
                 continue;
             };
             let mut frame = molt_net::MESH_ACK_TAG.to_vec();
