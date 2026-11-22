@@ -358,7 +358,7 @@ impl State {
 
     /// `member` signed freely at `height` (verified, or its free `Nack`).
     pub(crate) fn lock_note_free(&mut self, member: &str, height: u64) {
-        if !self.lock_rostered(member) || member == self.member() {
+        if !self.lock_cap_on() || !self.lock_rostered(member) || member == self.member() {
             return;
         }
         if self.chain.lock.free_seen.entry(height).or_default().insert(member.to_string()) {
@@ -473,6 +473,9 @@ impl State {
     /// refused where this seat holds lock state or is amnesiac; the free
     /// mark is durable before `true`.
     pub(crate) fn lock_sign_freely(&mut self, height: u64) -> bool {
+        if !self.lock_cap_on() {
+            return true;
+        }
         if self.lock_amnesiac_at(height) {
             tracing::info!(height, "lock=passive reason=amnesia");
             return false;
@@ -503,7 +506,7 @@ impl State {
 
     /// Record `member`'s standing intent for `id`.
     pub(crate) fn lock_note_intent(&mut self, id: u64, member: &str) {
-        if self.lock_rostered(member) || self.roster().iter().any(|m| m == member) {
+        if self.lock_cap_on() && (self.lock_rostered(member) || self.roster().iter().any(|m| m == member)) {
             self.chain.lock.intents.entry(id).or_default().insert(member.to_string());
         }
     }
@@ -567,6 +570,9 @@ impl State {
     /// Distinct standing voices for `id`: intents and verified signatures,
     /// current decliners left out (the display count at a locked height).
     pub(crate) fn lock_voices(&self, id: u64) -> usize {
+        if !self.lock_cap_on() {
+            return 0;
+        }
         let decliners: Vec<String> = self.proposals.get(&id).map(|p| p.decliners.clone()).unwrap_or_default();
         let mut voices: BTreeSet<&String> = self.chain.lock.intents.get(&id).map(|s| s.iter().collect()).unwrap_or_default();
         if let Some(p) = self.chain.pending_sigs.get(&id) {
@@ -1266,7 +1272,35 @@ impl State {
         self.lock_start(w.attempt);
     }
 
+    /// Roster seats whose promise this run still lacks (a restore's subject
+    /// and free seats never promise).
+    fn lock_missing_promises(&self, run: &Run) -> Vec<String> {
+        let subjects = self.lock_restore_subjects();
+        let free = self.chain.lock.free_seen.get(&run.leader.slot.height);
+        self.chain
+            .head
+            .as_ref()
+            .map(|h| {
+                h.identities
+                    .iter()
+                    .map(|i| i.member.clone())
+                    .filter(|m| !run.promised.contains(m) && !subjects.contains(m) && !free.is_some_and(|f| f.contains(m)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn lock_resend(&mut self, now: u64) {
+        if let Some(run) = self.chain.lock.run.as_ref().filter(|r| !r.leader.ready()) {
+            let missing = self.lock_missing_promises(run).join(",");
+            let height = run.leader.slot.height;
+            // under the lock a restore needs n - m + 1 promises (§4.2)
+            if self.lock_restore_subjects().is_empty() {
+                tracing::debug!(height, %missing, "lock=wait");
+            } else {
+                tracing::info!(height, %missing, reason = "restore_needs_promises", "lock=wait");
+            }
+        }
         let Some(run) = self.chain.lock.run.as_mut() else { return };
         run.sent_at = now;
         let (slot, ballot) = (run.leader.slot.clone(), run.leader.ballot.clone());
@@ -1303,38 +1337,46 @@ impl State {
             Ok(None) => Ok(None),
             Err(e) => Err(e),
         };
+        let on = self.lock_cap_on();
         match parsed {
             Ok(Some(file)) => {
                 self.chain.lock.acceptor = file.acceptor;
                 self.chain.lock.values = file.values;
-                if !marker {
-                    self.persist_lock();
-                }
             }
-            Ok(None) if marker => {
+            Ok(None) if marker && on => {
                 tracing::warn!("lock=amnesia reason=no_file");
                 self.chain.lock.amnesia = Some(None);
+                return;
             }
-            Ok(None) => {
-                let me = self.member();
-                let own: Vec<u64> = self
-                    .chain
-                    .pending_sigs
-                    .values()
-                    .filter(|p| p.sigs.iter().any(|a| a.member == me))
-                    .map(|p| p.height)
-                    .collect();
-                for h in own {
-                    self.chain.lock.acceptor.sign_freely(h);
-                }
-                if self.is_chain_governed() {
-                    self.persist_lock();
-                }
-            }
-            Err(e) => {
+            Ok(None) => {}
+            Err(e) if on => {
                 tracing::warn!(error = %e, "lock=amnesia reason=unreadable");
                 self.chain.lock.amnesia = Some(None);
+                return;
             }
+            Err(_) => {}
+        }
+        if !on {
+            return;
+        }
+        // own replayed signatures were free ones (a build without the lock
+        // ran here, or none ever wrote the file): mark them first
+        let me = self.member();
+        let own: Vec<u64> = self
+            .chain
+            .pending_sigs
+            .values()
+            .filter(|p| p.sigs.iter().any(|a| a.member == me))
+            .map(|p| p.height)
+            .collect();
+        let before = self.chain.lock.acceptor.clone();
+        for h in own {
+            if self.chain.lock.acceptor.sign_freely(h).is_none() {
+                tracing::warn!(height = h, "lock=conflict reason=free_beside_lock_state");
+            }
+        }
+        if self.is_chain_governed() && (self.chain.lock.acceptor != before || !marker) {
+            self.persist_lock();
         }
     }
 
@@ -1365,7 +1407,8 @@ impl State {
             match run.leader.proposed() {
                 None if !run.leader.ready() => {
                     let want = self.lock_quorum().map_or(0, Quorum::promises);
-                    format!("promises {}/{want}", run.promised.len())
+                    let missing = self.lock_missing_promises(run).join(",");
+                    format!("promises {}/{want} missing {missing}", run.promised.len())
                 }
                 None => String::new(),
                 Some(v) => {

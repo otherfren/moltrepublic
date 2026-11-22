@@ -356,6 +356,29 @@ fn the_lineage_is_one_for_full_pruned_and_relinked_holders() {
     }
 }
 
+/// A seat that catches up through a served checkpoint (blob + anchor +
+/// suffix, no history below the cut) names the same slot as a full holder.
+#[test]
+fn a_seat_caught_up_through_a_served_checkpoint_names_the_same_slot() {
+    let mut b = Builder::new(&SEATS, 2);
+    b.commit_applied(1, &["dora", "mara"]);
+    b.commit_applied(2, &["dora", "mara"]);
+    let state = checkpoint_state(&b.blocks, 2).expect("state at the cut");
+    b.commit(ChainChange::Checkpoint { upto: 2, state_hash: checkpoint_state_hash(&state) }, &SEATS);
+    b.commit_applied(4, &["mara", "walter"]);
+    let mut full = seat("mara", &b);
+    let mut late = genesis_seat("walter", &b, b.blocks[..1].to_vec());
+    late.chain.lock.all_capable = Some(true);
+    late.lock_force(true);
+    for block in &b.blocks[3..] {
+        late.chain.pending_blocks.insert(block.height, block.clone());
+    }
+    late.receive_checkpoint_blob(state);
+    assert_eq!(late.chain.head.as_ref().expect("head").height, 4, "re-anchored on the served cut");
+    assert_eq!(late.chain.blocks.len(), 2, "no history below the cut");
+    assert_eq!(late.lock_slot(), full.lock_slot(), "one slot for the full and the caught-up holder");
+}
+
 /// What an older node does with an intent: nothing (`receive_approval`
 /// returns early on an empty signature), and it keeps none of it.
 #[test]
@@ -486,7 +509,7 @@ fn a_consented_restore_needs_both_survivors_in_two_of_three() {
         } else {
             assert_eq!(net.heights(), vec![0, 0, 0], "one survivor alone does not seal");
             let sync = net.seats[1].chain_sync();
-            assert_eq!(sync.lock_wait, "promises 1/2", "{sync:?}");
+            assert_eq!(sync.lock_wait, "promises 1/2 missing dora", "{sync:?}");
         }
     }
 }
@@ -589,6 +612,50 @@ fn an_acceptance_is_released_once_no_quorum_can_complete_it() {
     assert!(dora.chain.lock.acceptor.signed_freely(1), "the acceptance was released");
     assert_eq!(mara.chain.head.as_ref().expect("head").height, 1, "the height decided");
     assert_eq!(dora.chain.head, mara.chain.head);
+}
+
+/// The residual the release rule does not close (design §14): 3-of-5, one
+/// seat signed freely in an activation race, two lock seats approve the
+/// same card. Three voices, but neither path has three: the height waits
+/// for a third lock voice. B6 alone seals the same votes at once.
+#[test]
+fn a_value_split_between_a_free_and_two_lock_voices_waits() {
+    let names = ["dora", "erik", "mara", "nils", "walter"];
+    let b = Builder::new(&names, 3);
+    for lock in [true, false] {
+        let seats: Vec<crate::State> = names
+            .iter()
+            .map(|m| {
+                let mut st = genesis_seat(m, &b, b.blocks.clone());
+                st.chain.lock.all_capable = Some(lock && *m != "walter");
+                st.lock_force(lock);
+                hear(&mut st, T, &names);
+                st
+            })
+            .collect();
+        let mut net = Net { seats, down: Vec::new() };
+        let id = note(&mut net.seats[4], "split");
+        net.pump();
+        net.seats[0].chain_sign_and_gossip_approval(id);
+        net.seats[2].chain_sign_and_gossip_approval(id);
+        net.pump();
+        let mut now = T;
+        for _ in 0..30 {
+            now += 10;
+            for s in &mut net.seats {
+                hear(s, now, &names);
+                s.lock_tick();
+            }
+            net.pump();
+        }
+        let heights = net.heights();
+        if lock {
+            assert_eq!(heights, vec![0; 5], "the lock waits");
+            assert!(net.seats[0].chain.lock.run.is_some(), "dora still leads the height");
+        } else {
+            assert_eq!(heights, vec![1; 5], "B6 seals the three voices");
+        }
+    }
 }
 
 /// Deliver each seat's recorded frames to the other.

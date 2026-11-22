@@ -436,34 +436,76 @@ Where the wiring differs from §1-§13, and why.
   `auto_approve_restore`, the wallet/vault paths) calls that function.
   `serve_open_governance` and `reserve_signatures` only re-send
   signatures that already exist.
-- **A split height must still decide (added; review it).** Activation is
-  not simultaneous: one seat already runs the lock at h (its own
-  `Prepare` is a promise), another still believes h free and signs
-  freely. Exclusivity keeps that safe, but nothing makes it live: in
-  2-of-2 neither path can ever reach its quorum, and the first full
-  suite run with the lock on stalled 30+ tests this way. Rule: let F be
-  the seats known to have signed freely at h (a verified free signature,
-  or a free `Nack`). Once F is non-empty and `|F| >= n - m`, a seat whose
-  lock state at h is promises only (`Acceptor::release_to_free`; an
-  acceptance is never released) trades it durably for a free mark, and a
-  seat without lock state there goes free. Proof: a value chosen by the
-  lock has `need` acceptors, none ever in F and none the releasing seat
-  (it only promised), so `n - |F| - 1 >= m` for an ordinary value; for a
-  restore of Z the acceptors also exclude Z, so `n - |F| - 2 >= max(m -
-  1, 1)`. Both contradict `|F| >= n - m`. The same
-  counts bound every later ballot: after the release fewer than `need`
-  non-free acceptors remain. Pinned by
-  `simulation_with_free_signers_and_the_release_rule_never_forks` (free
-  signers racing the lock, crashes, 1 500 seeds per shape, 2-of-2 to
-  2-of-5); releasing on the first free signer instead forks (2-of-5).
+- **A split height must still decide: the release rule (corrected
+  2026-11-22).** Activation is not simultaneous: one seat already runs
+  the lock at h (its own `Prepare` is a promise), another still believes
+  h free and signs freely. Exclusivity keeps that safe, but nothing makes
+  it live. Let F be the OTHER seats known to have signed freely at h (a
+  verified free signature, or a free `Nack`; a registered restore's
+  subject never counts). A seat r trades ALL its lock state at h durably
+  for a free mark (`Acceptor::release_to_free`) once the lock is dead
+  there (`Quorum::lock_dead`):
+
+  `F non-empty and |F| >= min(m, n - m + a)`, a = 1 if r holds an
+  acceptance at h, else 0.
+
+  Proof. A free seat never promises nor accepts at h afterwards, and an
+  acceptance is never followed by a free signature unless released.
+  (T1) `|F| >= n - m + a`: a chosen value needs `need >= m` acceptors at
+  one ballot (a consented restore m - 1 among the seats other than its
+  subject Z, Z not in F), none in F, and r's own only if it holds one, so
+  at most `n - |F| - (1 - a) < m` (restore: `< m - 1`) - nothing can ever
+  be chosen. (T2) `|F| >= m`: order the releases in time. Before the
+  first one every free seat never had lock state, so every promise set
+  lies in the `n - |F| < n - m + 1` non-free seats: no ballot ever
+  completes phase 1, nothing is accepted, nothing chosen. Every later
+  release happens where an earlier sound release already made the lock
+  dead. Releasing an acceptance does not break lock-vs-lock either: it
+  only happens where nothing can be chosen.
+  Lock-vs-lock with free seats around stays Paxos: free seats are
+  unheard (or heard as holding nothing, `Leader::heard_free`, sound
+  because a released acceptance belongs to a dead slot).
+
+  **The first rule was wrong (counterexamples, pinned).** As first wired
+  it released promise-only state at `|F| >= n - m`. Safe, but a height
+  could stall for good: 2-of-2 / 3-of-3 when the leader had already
+  accepted its value (an acceptance was never released), and 2-of-5 with
+  two free seats (three non-free seats can never give the four promises
+  phase 1 needs, while the rule waited for three free). The seeded
+  simulation finds them at seeds 2 (2-of-2), 1 (2-of-5), 0 (3-of-3)
+  (`the_shipped_release_rule_stalls_and_the_corrected_one_decides`), the
+  engine twin is `an_acceptance_is_released_once_no_quorum_can_complete_it`.
+  The corrected rule passes 16 shapes x 800 seeds with a liveness phase
+  (`simulation_with_free_signers_and_the_release_rule_never_forks_and_decides`:
+  2-of-2 to 4-of-7, cuts, consented restores, old builds appearing
+  mid-run, crashes between a release and its write, duplicated and
+  reordered free signatures); releasing on the first free signer still
+  forks (2-of-5, seed 137).
+
+  **Residual (not closed): a straddled value.** With `|F|` below the
+  threshold a card whose voices are split between free and lock seats
+  can have m voices and still not seal: in 3-of-5, one free voice and
+  two lock voices give neither path three (`a_value_split_between_a_free_and_two_lock_voices_waits`).
+  B6 alone seals it. The height decides once a third lock seat approves,
+  another free seat appears, or another card is ready (the straddled one
+  then gets its own height, where every seat runs the lock). It needs an
+  activation race at that very height and n >= 4 with m >= 2; it is why
+  the capability stays off by default until decided.
 - **Amnesia needs a marker (§6).** "No lock file = amnesia" would make
   every seat of an upgraded republic amnesiac at head+1 at once, and the
   height never decides. `prefs.chain_lock` is set after the first
   successful lock write and travels with an export: file missing with the
-  marker set = amnesia; neither = a seat that never ran the lock (it only
-  signed freely; its replayed own signatures are marked free at their
-  heights before anything else). Residual: an export made by a pre-lock
-  build and imported after the lock ran is not seen as amnesiac.
+  marker set = amnesia; neither = a seat that never ran the lock. On
+  every open with the lock on, the replayed own signatures (always free
+  ones) are marked free at their heights before anything else, so a
+  build without the lock that ran in between leaves no gap. With the lock
+  off nothing is written and nothing is passive. An export made before
+  the lock ran carries no marker and looks like a fresh upgrade - but an
+  imported workspace opens detached and comes back only through the
+  recovery ritual, whose restored seat is §4.2's Z with a fresh acceptor,
+  so no forgotten promise of the old device is ever asked for. Residual: two live
+  copies of one workspace (a copied directory run twice) - B2/B3's
+  territory, like a live old device.
 - **The amnesia floor** is fixed by the first peer height this seat hears
   after the open (a block, catch-up samples, a cut proposal, a `Nack`'s
   head), not only a catch-up answer; past the floor the file is written

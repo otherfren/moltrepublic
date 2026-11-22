@@ -1059,6 +1059,10 @@ impl State {
             .get(&id)
             .map(|p| p.verified.iter().cloned().collect())
             .unwrap_or_default();
+        // B7: under the lock a survivor's voice is its intent until the seal
+        if let Some(intents) = self.chain.lock.intents.get(&id) {
+            approved.extend(intents.iter().filter(|m| roster.contains(m) && *m != member).cloned());
+        }
         if consent.is_some() {
             approved.insert(member.clone());
         }
