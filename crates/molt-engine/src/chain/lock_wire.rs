@@ -1393,6 +1393,22 @@ impl State {
             return;
         }
         let Some(next) = self.chain.head.as_ref().map(|h| h.height + 1) else { return };
+        // a backoff after yielding to a seat that is now being restored
+        // waits on a ballot nobody will finish (§4.2: its old device is gone)
+        let subjects = self.lock_restore_subjects();
+        let yielded_to_gone = self
+            .chain
+            .lock
+            .seen
+            .iter()
+            .filter(|(s, _)| s.height == next)
+            .map(|(_, b)| b)
+            .max()
+            .is_some_and(|b| subjects.contains(&b.leader));
+        if yielded_to_gone && self.chain.lock.wait.as_ref().is_some_and(|w| w.attempt > 0) {
+            tracing::info!(height = next, "lock=backoff_dropped reason=restore_subject");
+            self.chain.lock.wait = None;
+        }
         let backing_off = self.chain.lock.wait.as_ref().is_some_and(|w| w.height == next && w.attempt > 0);
         if !backing_off && self.lock_line(next).first() == Some(&self.member()) {
             self.lock_start(0);

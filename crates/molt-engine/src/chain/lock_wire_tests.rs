@@ -1034,3 +1034,31 @@ fn an_idle_leader_is_silent() {
     }
     assert!(sent_kinds(&dora).is_empty(), "an idle leader sent {:?}", sent_kinds(&dora));
 }
+
+/// A seat yielded to the ballot of a seat that is then lost and restored:
+/// its backoff waits on a ballot nobody will finish. Once the restore is
+/// registered the backoff is dropped and the next seat in line leads.
+#[test]
+fn a_backoff_after_yielding_to_a_restored_seat_is_dropped() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    hear(&mut dora, T, &["dora", "mara"]);
+    dora.lock_start(0);
+    let base = dora.lock_slot().expect("slot").base;
+    // walter, about to be lost, took the height over at a higher ballot
+    wire(&mut dora, "walter", 1, WorkspaceEvent::LockPrepare { height: 1, base, round: 9 });
+    assert!(dora.chain.lock.run.is_none(), "dora yielded");
+    assert!(dora.chain.lock.wait.as_ref().is_some_and(|w| w.attempt > 0), "and backs off");
+    // walter's device is gone: the restore gate does not wait for it
+    dora.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
+    let rid = b.republic_id.clone();
+    let ticket = "ticket";
+    let kp_hex = kp_hex_for(&b, "walter");
+    let proof = crate::make_seat_proof(b.key("walter"), ticket, &kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(&b, "walter", "", &[], 0, &"cc".repeat(32));
+    dora.verify_and_propose_restore("walter", &b.pk("walter"), &kp_hex, ticket, &proof, "", &[], &consent, "")
+        .expect("proposed");
+    dora.lock_tick();
+    let run = dora.chain.lock.run.as_ref().expect("dora leads again at once");
+    assert!(run.leader.ballot.round > 9, "above walter's ballot");
+}
