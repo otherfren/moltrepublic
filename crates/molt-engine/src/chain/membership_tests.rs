@@ -1998,3 +1998,180 @@ fn a_withdrawn_restore_sealed_elsewhere_is_reported_not_rekeyed() {
         .verify_and_propose_restore("dora", &b.pk("dora"), &kp2, &fresh, &proof2, &npk2, &[], &consent2, "")
         .expect("a new link restores the seat");
 }
+
+/// A Nostr transport on `st` (the seal pacing and the restore settle are
+/// off without one), its presence clock at `now`.
+fn on_nostr(st: &mut crate::State, now: u64) {
+    st.nostr = Some(crate::NostrTransport {
+        sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+        relays: vec!["ws://relay.example".to_string()],
+        rotation_seed: [0u8; 32],
+    });
+    st.presence.clock_override = Some(now);
+    // the head moved long ago: no seal pacing round in the way
+    st.chain.head_moved_at = 0;
+}
+
+/// **F1 (v0.1.1):** a bystander does not sign or seal a consented restore
+/// the instant it sees the card. A withdrawal right behind the card - in
+/// the same burst, or seconds later - wins; without one the card signs
+/// and seals once the settle has passed.
+#[test]
+fn a_consented_restore_settles_before_a_bystander_signs_or_seals() {
+    use molt_core::{ProposalId, WorkspaceEvent};
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let id = 8;
+    let (frame, change) = dora_card_frame(&b, id);
+    let petra_sig =
+        molt_storage::identity_sign(b.key("petra"), &molt_core::chain::approval_bytes(&b.republic_id, 1, &change));
+    let approval = WorkspaceEvent::Approved { id: ProposalId(id), by: "petra".to_string(), height: 1, sig: petra_sig };
+    let withdrawn = WorkspaceEvent::Withdrawn { id: ProposalId(id), by: "petra".to_string() };
+    let own_sig =
+        |w: &crate::State| w.chain.pending_sigs.get(&id).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
+    let height = |w: &crate::State| w.chain.head.as_ref().expect("head").height;
+    let settle = super::membership::RESTORE_SETTLE_SECS;
+
+    // the withdrawal in the same burst as the card
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    on_nostr(&mut walter, 10_000);
+    wire(&mut walter, "petra", 1, frame.clone());
+    wire(&mut walter, "petra", 2, approval.clone());
+    assert!(!own_sig(&walter), "not signed on sight");
+    assert_eq!(height(&walter), 0, "not sealed on sight");
+    wire(&mut walter, "petra", 3, withdrawn.clone());
+    walter.presence.clock_override = Some(10_000 + settle + 1);
+    walter.cmd_net_delivery_tick().expect("tick");
+    assert!(!own_sig(&walter) && height(&walter) == 0, "the withdrawal won");
+
+    // the withdrawal seconds behind the card
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    on_nostr(&mut walter, 10_000);
+    wire(&mut walter, "petra", 1, frame.clone());
+    wire(&mut walter, "petra", 2, approval.clone());
+    walter.presence.clock_override = Some(10_000 + settle - 1);
+    walter.cmd_net_delivery_tick().expect("tick");
+    assert!(!own_sig(&walter) && height(&walter) == 0, "still settling");
+    wire(&mut walter, "petra", 3, withdrawn);
+    walter.presence.clock_override = Some(10_000 + settle + 1);
+    walter.cmd_net_delivery_tick().expect("tick");
+    assert!(!own_sig(&walter) && height(&walter) == 0, "the withdrawal won");
+
+    // no withdrawal: the settle ends on a delivery tick
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    on_nostr(&mut walter, 10_000);
+    wire(&mut walter, "petra", 1, frame);
+    wire(&mut walter, "petra", 2, approval);
+    walter.presence.clock_override = Some(10_000 + settle);
+    walter.cmd_net_delivery_tick().expect("tick");
+    assert_eq!(height(&walter), 1, "sealed after the settle");
+    let sealed = walter.chain.blocks.last().expect("block");
+    assert!(sealed.sigs.iter().any(|a| a.member == "walter"), "signed after the settle");
+    verify_chain(&walter.chain.blocks).expect("verifies");
+}
+
+/// The coordinator side of a dora restore: a minted ticket, a proposed v2
+/// card; returns `(id, ticket, anchor, key package)`.
+fn propose_dora(coord: &mut crate::State, b: &Builder) -> (u64, String, String, String) {
+    let ticket = "11".repeat(16);
+    mint_link_for_dora(coord, b, &ticket);
+    let npk = "dd".repeat(32);
+    let kp_hex = kp_hex_for(b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), &ticket, &kp_hex, &b.republic_id, &npk, &[]);
+    let consent = consent_v2_for(b, "dora", &npk, &[], 0, &"cc".repeat(32));
+    let id = coord
+        .verify_and_propose_restore("dora", &b.pk("dora"), &kp_hex, &ticket, &proof, &npk, &[], &consent, "")
+        .expect("proposed");
+    // what the Ready did
+    coord.recovery.tickets.remove(&ticket);
+    coord.recovery.spent_tickets.insert(ticket.clone());
+    (id, ticket, npk, kp_hex)
+}
+
+/// **F1 on the coordinator:** its own co-signature plus the consent can
+/// seal at once in 2-of-3; the settle holds that seal too, so a cancel
+/// right after Ready withdraws the card instead.
+#[test]
+fn a_cancel_right_after_ready_withdraws_before_the_coordinator_seals() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    coord.config.self_cosign = true;
+    on_nostr(&mut coord, 10_000);
+    let (id, ticket, npk, kp_hex) = propose_dora(&mut coord, &b);
+    assert_eq!(coord.chain.head.as_ref().expect("head").height, 0, "settling, not sealed");
+
+    coord.presence.clock_override = Some(10_001);
+    let attempt = molt_net::invite::recover_attempt_id(&kp_hex);
+    coord.cmd_net_recover_peer_failed("dora", "cancelled", "0.0.21", &attempt, &npk).expect("ack");
+    assert!(coord.proposals.get(&id).is_some_and(|p| p.withdrawn), "withdrawn");
+    coord.presence.clock_override = Some(10_000 + super::membership::RESTORE_SETTLE_SECS + 1);
+    coord.cmd_net_delivery_tick().expect("tick");
+    assert_eq!(coord.chain.head.as_ref().expect("head").height, 0, "nothing sealed");
+    assert!(coord.recovery.tickets.contains_key(&ticket), "the ticket is live again");
+}
+
+/// **F2 (v0.1.1):** a run cancelled after its block sealed and the group
+/// re-keyed for it is reported on the coordinator, not only logged; the
+/// seat is not "heard", so a new link mints and restores it. Another
+/// run's frame, or one after the seat was heard again, reports nothing.
+#[test]
+fn a_run_abandoned_after_its_rekey_is_reported_and_a_new_link_restores_it() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    coord.config.self_cosign = false;
+    let (id, _ticket, npk, kp_hex) = propose_dora(&mut coord, &b);
+    let card = coord.chain.proposal_changes.get(&id).cloned().expect("card");
+    coord.receive_block(b.seal(1, card, &["walter"]));
+    assert_eq!(coord.chain.head.as_ref().expect("head").height, 1, "sealed");
+    assert!(coord.recovery.pending.is_empty(), "the re-key consumed the run");
+    coord.session.notice.clear();
+
+    let other = molt_net::invite::recover_attempt_id(&kp_hex_for(&b, "dora"));
+    coord.cmd_net_recover_peer_failed("dora", "cancelled", "0.0.21", &other, &npk).expect("ack");
+    assert_eq!(coord.session.notice, "", "another run reports nothing");
+
+    let attempt = molt_net::invite::recover_attempt_id(&kp_hex);
+    coord.cmd_net_recover_peer_failed("dora", "cancelled", "0.0.21", &attempt, &npk).expect("ack");
+    assert_eq!(coord.session.notice, "restore-abandoned:dora");
+    coord.session.notice.clear();
+    coord.cmd_net_recover_peer_failed("dora", "cancelled", "0.0.21", &attempt, &npk).expect("ack");
+    assert_eq!(coord.session.notice, "", "reported once");
+
+    // the seat is not heard: a new link mints and restores it
+    assert_eq!(coord.restore_gate("dora"), None, "no `seat still active`");
+    let fresh = "22".repeat(16);
+    coord.recovery.tickets.insert(fresh.clone(), "dora".to_string());
+    let npk2 = "ee".repeat(32);
+    let kp2 = kp_hex_for(&b, "dora");
+    let proof2 = crate::make_seat_proof(b.key("dora"), &fresh, &kp2, &b.republic_id, &npk2, &[]);
+    let consent2 = consent_v2_for(&b, "dora", &npk2, &[], 1, &npk);
+    coord
+        .verify_and_propose_restore("dora", &b.pk("dora"), &kp2, &fresh, &proof2, &npk2, &[], &consent2, "")
+        .expect("a new link restores the seat");
+}
+
+/// F2: a withdrawal that arrives after the restored seat was heard from
+/// its new leaf is a stale run's - nothing to report.
+#[test]
+fn a_late_withdrawal_after_the_seat_came_back_reports_nothing() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    coord.config.self_cosign = false;
+    coord.presence.clock_override = Some(10_000);
+    let (id, _ticket, npk, kp_hex) = propose_dora(&mut coord, &b);
+    let card = coord.chain.proposal_changes.get(&id).cloned().expect("card");
+    coord.receive_block(b.seal(1, card, &["walter"]));
+    coord.session.notice.clear();
+    coord.presence.clock_override = Some(10_010);
+    coord.note_frame_heard("dora", 10_005);
+    let attempt = molt_net::invite::recover_attempt_id(&kp_hex);
+    coord.cmd_net_recover_peer_failed("dora", "cancelled", "0.0.21", &attempt, &npk).expect("ack");
+    assert_eq!(coord.session.notice, "", "the seat is back");
+}

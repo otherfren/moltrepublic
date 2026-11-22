@@ -1,7 +1,7 @@
 # Detached reattach: a restored seat reconnects without a fresh ritual
 
 **Status: SUPERSEDED 2026-11-21 by B3 of
-`docs/chain/rejoin_divergence_build_plan.md`.** A node never asks for its
+`docs_archive/chain/rejoin_divergence_build_plan.md`.** A node never asks for its
 own restore any more: the detached open (§2.3) and the self-heal (§2.4)
 only report (`detached` / `seat-locked-out` + a `seat_locked_out` WARN),
 and a coordinator refuses a link-less request with `rejoin needs a link`

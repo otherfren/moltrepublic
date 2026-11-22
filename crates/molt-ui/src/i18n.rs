@@ -546,6 +546,14 @@ pub(crate) fn localize_recover_failed(lang: i32, e: &str) -> String {
             "Already re-admitted - ask for a new link.".to_string()
         };
     }
+    // a cancel after Ready, the seal unseen (F2)
+    if e.starts_with("cancelled - the seat may already be re-admitted") {
+        return if lang == 1 {
+            "Abgebrochen - der Sitz ist vielleicht schon wieder aufgenommen.".to_string()
+        } else {
+            "Cancelled - the seat may already be re-admitted.".to_string()
+        };
+    }
     if lang != 1 {
         return e.to_string();
     }

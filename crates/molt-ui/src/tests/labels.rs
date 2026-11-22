@@ -157,6 +157,18 @@ fn the_vault_and_the_board_have_no_generic_proposal_op() {
 }
 
 #[test]
+fn a_restore_abandoned_after_its_rekey_asks_for_a_new_link() {
+    assert_eq!(
+        restore_abandoned_copy(0, "petra"),
+        "Seat petra re-admitted, but its device gave up - send a new link."
+    );
+    assert_eq!(
+        restore_abandoned_copy(1, "petra"),
+        "Sitz petra wieder aufgenommen, aber sein Gerät hat aufgegeben - neuen Link senden."
+    );
+}
+
+#[test]
 fn a_restore_sealed_after_its_withdrawal_asks_for_a_new_link() {
     assert_eq!(
         restore_sealed_after_withdrawal_copy(0, "petra"),

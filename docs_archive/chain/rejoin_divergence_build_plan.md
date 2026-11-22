@@ -1,12 +1,13 @@
 # Rejoin and divergence fixes: build plan
 
-**Status: BUILT (2026-11-22), released as v0.1.0.** B1-B6, their
+**Status: BUILT (2026-11-22), released as v0.1.0; archived. The
+rescue ("later" below) is open in `docs/chain/chain_rescue_plan.md`.** B1-B6, their
 follow-ups, the fixes of two code reviews and of the acceptance runs are
 on master; B8 passed on the field copies (table below). B7, the
 fork-free lock, is NOT in v0.1.0: design and proven state machine are on
 master unused, the wiring is planned for v0.1.1
 (`docs/chain/chain_lock_wiring_plan.md`). Evidence:
-`docs/chain/rejoin_divergence_findings.md`.
+`docs_archive/chain/rejoin_divergence_findings.md`.
 
 ## In short
 

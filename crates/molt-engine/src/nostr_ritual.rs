@@ -934,6 +934,8 @@ pub(crate) struct RecoverCtx {
     pub generation: u64,
     /// Set once the run saw its re-admission seal (a cancel cannot undo it).
     pub readmitted: Arc<std::sync::atomic::AtomicBool>,
+    /// Set once the run asked for its card (Ready, or a vote report came).
+    pub asked: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// What a quitting rejoiner sends: its run's withdrawal, to the
@@ -1163,6 +1165,7 @@ impl AnchorCollect {
 pub(crate) struct Run<'a> {
     pub attempt: &'a str,
     pub readmitted: &'a std::sync::atomic::AtomicBool,
+    pub asked: &'a std::sync::atomic::AtomicBool,
 }
 
 impl Run<'_> {
@@ -1251,6 +1254,7 @@ pub(crate) async fn await_admission(
             want_at = Some(now + want_wait);
         }
         if verified.is_some() && ready_at.is_some_and(|at| now >= at) {
+            run.asked.store(true, SeqCst);
             match io.send(&ready).await {
                 Ok(()) => {
                     ready_at = Some(now + ready_repeat);
@@ -1295,6 +1299,7 @@ pub(crate) async fn await_admission(
                 sender,
             ) if sender == h.npub && run.ours(&attempt) =>
             {
+                run.asked.store(true, SeqCst);
                 if sealed {
                     run.readmitted.store(true, SeqCst);
                 }
@@ -1452,7 +1457,7 @@ async fn recovery_rejoin(
     let _ = note("request sent - waiting for the coordinator".to_string()).await;
 
     let mut io = RelayIo { net, inbox, to: h.npub.clone() };
-    let run = Run { attempt: &attempt, readmitted: &ctx.readmitted };
+    let run = Run { attempt: &attempt, readmitted: &ctx.readmitted, asked: &ctx.asked };
     let admission = await_admission(&mut io, h, &ctx.member, &request, &run, tx, generation).await?;
     let (payload, blob, blocks) = match admission {
         Admission::AnchorFirst { welcome, blob, blocks } => {
@@ -2558,7 +2563,8 @@ mod admission_tests {
     async fn admit(io: &mut Fake, rid: &str, weak: &mpsc::WeakSender<Envelope>) -> Result<Admission, String> {
         let attempt = run_id();
         let readmitted = std::sync::atomic::AtomicBool::new(false);
-        let run = Run { attempt: &attempt, readmitted: &readmitted };
+        let asked = std::sync::atomic::AtomicBool::new(false);
+        let run = Run { attempt: &attempt, readmitted: &readmitted, asked: &asked };
         await_admission(io, &handover(rid), "petra", &request(), &run, weak, Some(1)).await
     }
 
@@ -2726,7 +2732,8 @@ mod admission_tests {
         io.queue.push_back(progress(false));
         let attempt = run_id();
         let readmitted = std::sync::atomic::AtomicBool::new(false);
-        let run = Run { attempt: &attempt, readmitted: &readmitted };
+        let asked = std::sync::atomic::AtomicBool::new(false);
+        let run = Run { attempt: &attempt, readmitted: &readmitted, asked: &asked };
         let _ = tokio::time::timeout(
             Duration::from_secs(60),
             await_admission(&mut io, &handover(&rid), "petra", &request(), &run, &weak, Some(1)),

@@ -107,6 +107,8 @@ pub use wiki_export::read_wiki_export;
 #[doc(hidden)]
 pub use recovery::RecoveryInvite;
 #[doc(hidden)]
+pub use recovery::RECOVER_CANCELLED_MAYBE_READMITTED;
+#[doc(hidden)]
 pub use recovery::{run_rejoin, RejoinOutcome};
 #[doc(hidden)]
 pub use founding::{
@@ -1135,6 +1137,9 @@ pub(crate) struct RecoveryState {
     /// B3: consented restores this node held back from auto-approving while
     /// a gate held; retried on the presence tick.
     pub(crate) held_approvals: std::collections::BTreeSet<u64>,
+    /// F1: when this node first judged each open `Restored` card (presence
+    /// clock); it signs and seals only after the settle. Memory only.
+    pub(crate) settle: HashMap<u64, u64>,
     /// B3: `Restored` cards whose seal a gate holds, already reported.
     pub(crate) held_seals: std::collections::BTreeSet<u64>,
     /// Recoveries this node is coordinating, keyed by the returning **member**
@@ -1157,6 +1162,9 @@ pub(crate) struct RecoveryState {
     /// D1: cards this node withdrew for a cancelled run, newest last
     /// (bounded). One that seals anyway is reported, never re-keyed.
     pub(crate) withdrawn: std::collections::VecDeque<(Vec<u64>, chain::PendingRecovery)>,
+    /// F2: `(seat, attempt, anchor, re-keyed at)` of the runs this node
+    /// re-keyed for, newest last (bounded); memory only.
+    pub(crate) rekeyed: std::collections::VecDeque<(String, String, String, u64)>,
     /// D2: `(ticket, link)` of the links minted this session, newest last
     /// (bounded), so a link live again shows again. Never logged.
     pub(crate) links: std::collections::VecDeque<(String, String)>,
@@ -1166,6 +1174,8 @@ pub(crate) struct RecoveryState {
     pub(crate) quit: Option<tokio::sync::oneshot::Sender<()>>,
     /// The running rejoiner saw its re-admission seal.
     pub(crate) readmitted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The running rejoiner asked for its card: a cancel may come too late.
+    pub(crate) asked: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Review R5: `(seat, anchor)` this node restored seal-first, and each
     /// unfinished restore's anchor re-pushes `(count, last)`; persisted.
     pub(crate) seal_first_seats: std::collections::HashSet<(String, String)>,
@@ -1770,10 +1780,13 @@ impl State {
                 anchor_first_seats: std::collections::HashSet::new(),
                 swept: HashMap::new(),
                 withdrawn: std::collections::VecDeque::new(),
+                rekeyed: std::collections::VecDeque::new(),
                 links: std::collections::VecDeque::new(),
                 attempts: chain::AttemptBook::default(),
                 quit: None,
+                settle: HashMap::new(),
                 readmitted: std::sync::Arc::default(),
+                asked: std::sync::Arc::default(),
                 seal_first_seats: std::collections::HashSet::new(),
                 repushes: BTreeMap::new(),
                 opened_at: 0,
