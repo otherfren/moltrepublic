@@ -591,9 +591,12 @@ Where the wiring differs from §1-§13, and why.
   waiting for the leader's 15 s resend made every settled restore late.
 - **A restore settles before the lock accepts it** (`RESTORE_SETTLE_SECS`,
   as the B6 approval and seal do): a withdrawal right behind the card wins.
-- **Gap hold** (inbound): an intent is a stance and waits behind a gap
-  like any `Approved`; the five lock frames carry their ballot and never
-  wait.
+- **Inbound frontier** (delivery rework, master 2026-11-22): an intent is
+  a stance and waits behind a missing seq like any `Approved`; the five
+  lock frames are not order-sensitive and pass a gap at once. They do
+  carry log seqs, so like every envelope a lock frame more than the
+  accept window (1 024) above the frontier is buffered and applied bottom-up
+  - stale and ignored by then, never a decision out of order.
 - **The line leaves a restore's subject out** (§5 as designed; the
   first wiring used B6's line unchanged, so the lost seat, still "heard"
   seconds ago, led the height and the survivor waited a full grace:
