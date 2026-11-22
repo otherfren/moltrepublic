@@ -250,6 +250,9 @@ impl State {
         if CutKind::of(&change).is_some() && (self.vault_base_pending() || self.wiki_base_pending()) {
             return Some("base still loading".to_string());
         }
+        if let Some(why) = self.lock_enable_blocker(&change) {
+            return Some(why.to_string());
+        }
         if self.chain_unsettled() {
             if CutKind::of(&change).is_some() {
                 return Some(CUT_WAIT.to_string());

@@ -172,6 +172,9 @@ impl Surface {
     /// diagnosis (it is not "unknown", it is not optional), anything the
     /// vocabulary does not name is refused.
     fn check_feature_key(key: &str) -> Result<(), String> {
+        if key == crate::chain::CHAIN_LOCK_FEATURE {
+            return Ok(());
+        }
         match Surface::parse(key) {
             Some(sf) if sf.is_charter_feature() => Ok(()),
             Some(_) => Err(format!("{key} is always on")),
@@ -8572,6 +8575,10 @@ pub struct ChainSync {
     /// B7: why head+1 waits under the lock ("" = it does not).
     #[serde(default)]
     pub lock_wait: String,
+    /// B7: the first locked height this holder can see (1 = since the
+    /// founding; 0 = the chain has not enabled the lock).
+    #[serde(default)]
+    pub lock_since: u64,
 }
 
 /// One fork decision ([`ChainSync::last_fork`]).
@@ -9775,6 +9782,27 @@ mod tests {
     /// which field moved. The conditional rule is load-bearing: `None`
     /// must stay byte-identical to v4 (the v4 pin above proves that), and
     /// `Some([])` must be a DIFFERENT table than `None`.
+    /// B7: the lock is one more feature key - accepted, sorted like any
+    /// other, carried in the roster-v5 feature run (layout and tag
+    /// unchanged; a table without it keeps its bytes).
+    #[test]
+    fn the_lock_is_a_feature_key_in_the_unchanged_v5_layout() {
+        let lock = crate::chain::CHAIN_LOCK_FEATURE.to_string();
+        let keys = canonical_features(&["memory".to_string(), lock.clone()]).expect("known keys");
+        assert_eq!(keys, vec![lock.clone(), "memory".to_string()]);
+        verify_canonical_features(&keys).expect("canonical");
+        let table = [MemberIdentity {
+            member: "alice".to_string(),
+            identity_pk: "aa".repeat(32),
+            nostr_pk: "cc".repeat(32),
+            vault_pk: String::new(),
+        }];
+        let plain = roster_canonical_bytes("f00", 1, 1, &table, "charter", &[], Some(&["memory".to_string()]));
+        let locked = roster_canonical_bytes("f00", 1, 1, &table, "charter", &[], Some(&keys));
+        assert!(locked.starts_with(b"molt-roster-v5\0") && plain.starts_with(b"molt-roster-v5\0"));
+        assert_eq!(locked.len(), plain.len() + 4 + lock.len(), "one more length-prefixed key, nothing else");
+    }
+
     #[test]
     fn roster_canonical_bytes_v5_binds_the_feature_set() {
         let table = vec![MemberIdentity {

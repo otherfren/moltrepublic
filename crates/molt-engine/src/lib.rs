@@ -361,6 +361,14 @@ impl WalletHandle {
         self.lock_seams.cap.store(if off { 2 } else { 1 }, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam (B7): this seat's next founding leaves the lock out of the
+    /// charter - a republic as founded before the lock existed (B6 until a
+    /// `set_features` vote enables it).
+    #[doc(hidden)]
+    pub fn __found_pre_lock(&self, on: bool) {
+        self.lock_seams.found_pre_lock.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam (B7): the takeover grace and the retransmit interval in
     /// seconds; 0 restores a default.
     #[doc(hidden)]

@@ -87,13 +87,13 @@ async fn status(w: &WalletHandle) -> StatusView {
 /// The sealing line by name: dora, mara, walter. Returns the seats and
 /// dora's phrase.
 async fn found_trio(root: &std::path::Path, url: &str) -> ([WalletHandle; 3], String) {
-    found_trio_with(root, url, &[]).await
+    found_trio_as(root, url, false).await
 }
 
-/// [`found_trio`] where the seats named in `old` run an older build.
-async fn found_trio_with(root: &std::path::Path, url: &str, old: &[&str]) -> ([WalletHandle; 3], String) {
+/// [`found_trio`]; `pre_lock` founds a republic as before the lock existed.
+async fn found_trio_as(root: &std::path::Path, url: &str, pre_lock: bool) -> ([WalletHandle; 3], String) {
     let a = engine(&root.join("mara"));
-    a.__lock_cap_off(old.contains(&"mara"));
+    a.__found_pre_lock(pre_lock);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
         name: "Drei".to_string(),
@@ -113,7 +113,6 @@ async fn found_trio_with(root: &std::path::Path, url: &str, old: &[&str]) -> ([W
     let mut joiners = Vec::new();
     for (name, link) in ["walter", "dora"].iter().zip(links) {
         let w = engine(&root.join(name));
-        w.__lock_cap_off(old.contains(name));
         adopt_relay(&w, url).await;
         w.execute(Command::JoinStart { invite: link, member: (*name).to_string(), relays: Vec::new() })
             .await
@@ -319,15 +318,19 @@ async fn a_cut_seals_under_the_lock() {
     assert_eq!(forks, 0);
 }
 
-/// One seat on an older build (no capability, lock frames dropped): the
-/// others see it and run B6 - every seat still ends on one head.
+/// After activation one seat runs a build without the lock (restored
+/// onto an older one: it signs freely, drops lock frames). The others keep
+/// the lock where it can decide and go free where it cannot (§14) - every
+/// height decides, every seat ends on one head.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn one_older_seat_means_b6_and_still_one_head() {
+async fn one_older_seat_after_activation_still_ends_on_one_head() {
     trace();
     let (_relay, url) = relay().await;
     let tmp = tempfile::tempdir().expect("tmp");
-    let ([mara, walter, dora], _) = found_trio_with(tmp.path(), &url, &["walter"]).await;
-    lock_on(&[&mara, &walter, &dora], false).await;
+    let ([mara, walter, dora], _) = found_trio(tmp.path(), &url).await;
+    lock_on(&[&mara, &walter, &dora], true).await;
+    walter.__lock_cap_off(true);
+    lock_on(&[&walter], false).await;
     let names = ["mara", "walter", "dora"];
     let forks = burst(&[&mara, &walter, &dora], &names, "m", 2, 6, 300).await;
     eprintln!("mixed fork_decisions={forks}");
@@ -423,4 +426,48 @@ async fn a_consented_restore_under_the_lock_needs_both_survivors() {
     .await;
     assert!(!s.notice.starts_with("recover-failed:"), "{:?}", s.notice);
     assert_eq!(status(&mara).await.chain_sync.fork_decisions, 0);
+}
+
+/// An older republic turns the lock on by a vote (§8): B6 before it; the
+/// sealed vote's next height is locked on every seat, also on one that
+/// was away during the vote and caught up after; the bursts after it end
+/// on one head without a fork decision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_vote_enables_the_lock_in_an_older_republic() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let ([mara, walter, dora], _) = found_trio_as(tmp.path(), &url, true).await;
+    lock_on(&[&mara, &walter, &dora], false).await;
+    let names = ["mara", "walter", "dora"];
+    burst(&[&mara, &walter, &dora], &names, "pre", 1, 3, 180).await;
+    // every seat announced the capability before dora goes away
+    let enable = serde_json::json!({ "op": "set_features", "value": "chain-lock memory" });
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        match mara.execute(Command::Propose { surface: molt_core::Surface::Organization, payload: enable.clone() }).await {
+            Ok(_) => break,
+            Err(e) => assert!(tokio::time::Instant::now() < deadline, "the vote was never put up: {e}"),
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let ws = read_session(&dora).await.active_workspace.clone();
+    let _dir = hard_kill(dora, &tmp.path().join("dora"), &ws).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    while !status(&mara).await.chain_sync.lock_active {
+        approve_open(&walter).await;
+        assert!(tokio::time::Instant::now() < deadline, "the enabling vote never sealed");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let since = status(&mara).await.chain_sync.lock_since;
+    assert!(since > 1, "locked from the height after the vote: {since}");
+    lock_on(&[&walter], true).await;
+    assert_eq!(status(&walter).await.chain_sync.lock_since, since);
+    let dora = engine(&tmp.path().join("dora"));
+    adopt_relay(&dora, &url).await;
+    dora.execute(Command::OpenWorkspace { id: ws }).await.expect("dora reopens");
+    lock_on(&[&dora], true).await;
+    assert_eq!(status(&dora).await.chain_sync.lock_since, since, "the seat that was away agrees");
+    let forks = burst(&[&mara, &walter, &dora], &names, "post", 1, 7, 300).await;
+    assert_eq!(forks, 0, "no fork under the lock");
 }

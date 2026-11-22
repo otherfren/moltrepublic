@@ -2682,6 +2682,12 @@ mod ritual_ops {
             // the feature selection: the ONE shared rule — known optional
             // keys, sorted + deduped, so every member verifies and signs the
             // identical v5 table
+            // B7: every founding of this build ratifies the lock - part of
+            // the charter, not a choice
+            let mut features = features;
+            if !self.lock_seams.found_pre_lock.load(std::sync::atomic::Ordering::SeqCst) {
+                features.push(molt_core::chain::CHAIN_LOCK_FEATURE.to_string());
+            }
             let features =
                 molt_core::canonical_features(&features).map_err(molt_core::MoltError::Create)?;
             let Some(ritual) = &mut self.net_ritual else {

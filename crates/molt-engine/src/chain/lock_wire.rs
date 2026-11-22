@@ -19,22 +19,23 @@ use super::governance::{FALLBACK_ASK_SECS, SEALER_GRACE_SECS};
 use super::lock::{Acceptor, Ballot, Leader, Quorum, Reply, Sealable, Slot, Step, Tally, Value};
 use super::*;
 
+/// The enabling vote waits: a seat runs a build without the lock.
+pub(crate) const LOCK_NOT_EVERYWHERE: &str = "a seat runs a build without the lock";
+
 /// A leader re-sends its open phase this often (§7).
 pub(crate) const LOCK_RETRANSMIT_SECS: u64 = 15;
 /// The cap of a leader's retry backoff (§5).
 const LOCK_BACKOFF_MAX_SECS: u64 = 600;
 
-/// Whether this build runs the lock and advertises
-/// [`molt_core::chain::CHAIN_LOCK_CAP`]. Off until the release rule's
-/// residuals are decided (`docs/chain/chain_lock_wiring_plan.md` §5).
-pub(crate) const CHAIN_LOCK_DEFAULT_ON: bool = false;
-
 /// Test seams of the lock (never a `Command`).
 #[derive(Default)]
 pub(crate) struct LockSeams {
-    /// 0 = [`CHAIN_LOCK_DEFAULT_ON`], 1 = on, 2 = off (an older build: no
-    /// capability, every lock frame ignored).
+    /// 0/1 = this build, 2 = an older build (no capability, every lock
+    /// frame ignored, free signatures only).
     pub(crate) cap: std::sync::atomic::AtomicU8,
+    /// The next founding leaves the lock out of the charter (a republic
+    /// founded before the lock existed).
+    pub(crate) found_pre_lock: AtomicBool,
     /// Takeover grace in seconds, 0 = [`SEALER_GRACE_SECS`].
     pub(crate) grace_secs: AtomicU64,
     /// Retransmit interval in seconds, 0 = [`LOCK_RETRANSMIT_SECS`].
@@ -126,9 +127,12 @@ pub(crate) struct LockRuntime {
     /// Seats known to have signed freely at a height (a verified free
     /// signature or a free `Nack`).
     free_seen: BTreeMap<u64, BTreeSet<String>>,
+    /// Test override of "the chain enabled the lock".
+    #[cfg(test)]
+    pub(crate) enabled_override: Option<bool>,
     /// Test override of "every seat announced the capability".
     #[cfg(test)]
-    pub(crate) all_capable: Option<bool>,
+    pub(crate) caps_override: Option<bool>,
     /// Test: every own envelope this seat put on the wire.
     #[cfg(test)]
     pub(crate) outbox: Vec<molt_core::EventEnvelope>,
@@ -195,9 +199,8 @@ impl State {
     /// This build runs the lock (an older-build seam turns it off).
     pub(crate) fn lock_cap_on(&self) -> bool {
         match self.lock_seams.cap.load(SeqCst) {
-            1 => true,
             2 => false,
-            _ => CHAIN_LOCK_DEFAULT_ON,
+            _ => true,
         }
     }
 
@@ -299,13 +302,47 @@ impl State {
             .collect()
     }
 
-    /// Every roster seat announced [`molt_core::chain::CHAIN_LOCK_CAP`].
-    fn lock_all_capable(&self) -> bool {
-        if !self.lock_cap_on() {
-            return false;
-        }
+    /// The chain enabled the lock at head+1 (§8 as built): the effective
+    /// features at the head carry [`molt_core::chain::CHAIN_LOCK_FEATURE`] -
+    /// ratified at the founding, or added by a sealed `set_features` vote.
+    /// Chain state, so every holder (full or pruned) agrees.
+    pub(crate) fn lock_enabled(&self) -> bool {
         #[cfg(test)]
-        if let Some(all) = self.chain.lock.all_capable {
+        if let Some(on) = self.chain.lock.enabled_override {
+            return on;
+        }
+        self.effective_features().iter().any(|f| f == molt_core::chain::CHAIN_LOCK_FEATURE)
+    }
+
+    /// The first locked height this holder can see: 1 for a lock the
+    /// founding ratified, the height after the enabling block, or - when
+    /// that block lies below a pruned holder's anchor - the anchor's next.
+    pub(crate) fn lock_since(&self) -> u64 {
+        let key = molt_core::chain::CHAIN_LOCK_FEATURE;
+        if !self.lock_enabled() {
+            return 0;
+        }
+        if self.replica.as_ref().and_then(|r| r.features.as_ref()).is_some_and(|f| f.iter().any(|k| k == key)) {
+            return 1;
+        }
+        let enabling = self.chain.blocks.iter().find(|b| match &b.change {
+            ChainChange::Applied { surface: Surface::Organization, payload, .. } => {
+                payload.get("op").and_then(serde_json::Value::as_str) == Some("set_features")
+                    && payload
+                        .get("value")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|v| v.split_whitespace().any(|k| k == key))
+            }
+            _ => false,
+        });
+        enabling.or_else(|| self.chain.blocks.first()).map_or(0, |b| b.height + 1)
+    }
+
+    /// Every other roster seat announced [`molt_core::chain::CHAIN_LOCK_CAP`]
+    /// (information only: it gates the enabling vote, never the mode).
+    pub(crate) fn lock_all_capable(&self) -> bool {
+        #[cfg(test)]
+        if let Some(all) = self.chain.lock.caps_override {
             return all;
         }
         let me = self.member();
@@ -319,8 +356,22 @@ impl State {
         })
     }
 
-    /// §8: lock state here -> lock; a free mark -> free; else lock iff
-    /// every seat runs it.
+    /// Why this seat neither proposes nor approves enabling the lock now:
+    /// a seat it knows of runs a build without it.
+    pub(crate) fn lock_enable_blocker(&self, change: &ChainChange) -> Option<&'static str> {
+        let ChainChange::Applied { surface: Surface::Organization, payload, .. } = change else {
+            return None;
+        };
+        let enables = payload.get("op").and_then(serde_json::Value::as_str) == Some("set_features")
+            && payload
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|v| v.split_whitespace().any(|k| k == molt_core::chain::CHAIN_LOCK_FEATURE));
+        (enables && !(self.lock_cap_on() && self.lock_all_capable())).then_some(LOCK_NOT_EVERYWHERE)
+    }
+
+    /// §8: lock state here -> lock; a free mark (or a dead lock, §14) ->
+    /// free; else lock iff the chain enabled it.
     pub(crate) fn lock_mode(&self, height: u64) -> LockMode {
         if !self.lock_cap_on() {
             return LockMode::Free;
@@ -332,7 +383,7 @@ impl State {
         if a.signed_freely(height) || self.lock_dead_at(height) {
             return LockMode::Free;
         }
-        if self.lock_all_capable() {
+        if self.lock_enabled() {
             LockMode::Lock
         } else {
             LockMode::Free

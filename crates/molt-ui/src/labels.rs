@@ -450,6 +450,14 @@ pub(crate) fn surface_name(lang: i32, sf: Surface) -> &'static str {
     }
 }
 
+/// A feature key's label: a surface's name, or the sealing lock.
+pub(crate) fn feature_name(lang: i32, key: &str) -> String {
+    if key == molt_core::chain::CHAIN_LOCK_FEATURE {
+        return if lang == 1 { "Kettensperre" } else { "Chain lock" }.to_string();
+    }
+    Surface::parse(key).map_or_else(|| key.to_string(), |sf| surface_name(lang, sf).to_string())
+}
+
 /// Localized sub-view label for a nav row. The English display label comes
 /// from the shared `molt-core` vocabulary ([`Surface::views`]); German maps
 /// by the machine key here — keys repeating across surfaces (archive,

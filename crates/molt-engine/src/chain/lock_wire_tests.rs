@@ -50,7 +50,7 @@ fn hear(st: &mut crate::State, now: u64, seats: &[&str]) {
 /// A capable 2-of-3 seat that heard every seat at `T`.
 fn seat(member: &str, b: &Builder) -> crate::State {
     let mut st = genesis_seat(member, b, b.blocks.clone());
-    st.chain.lock.all_capable = Some(true);
+    st.chain.lock.enabled_override = Some(true);
     st.lock_force(true);
     hear(&mut st, T, &SEATS);
     st
@@ -162,7 +162,7 @@ fn sent_kinds(st: &crate::State) -> Vec<&'static str> {
 fn the_gate_keeps_free_signing_and_the_lock_apart_per_height() {
     let b = Builder::new(&SEATS, 2);
     let mut walter = seat("walter", &b);
-    walter.chain.lock.all_capable = Some(false);
+    walter.chain.lock.enabled_override = Some(false);
     let id = note(&mut walter, "free");
     assert_eq!(own_sigs(&walter), 1, "a free seat signs (B6)");
     assert!(walter.chain.lock.acceptor.signed_freely(1), "the free mark");
@@ -177,7 +177,7 @@ fn the_gate_keeps_free_signing_and_the_lock_apart_per_height() {
     let base = mara.lock_slot().expect("slot").base;
     wire(&mut mara, "dora", 1, WorkspaceEvent::LockPrepare { height: 1, base, round: 1 });
     assert_eq!(sent_kinds(&mara), vec!["promise"]);
-    mara.chain.lock.all_capable = Some(false);
+    mara.chain.lock.enabled_override = Some(false);
     assert!(!mara.lock_sign_freely(1), "the gate refuses a free signature over a promise");
     mara.chain.lock.outbox.clear();
     note(&mut mara, "after the promise");
@@ -242,16 +242,16 @@ fn a_failed_lock_write_sends_nothing() {
     assert_eq!(mara.chain.lock.acceptor.promised(&slot), None, "rolled back");
     assert_eq!(mara.chain.lock.disk, None, "nothing written");
     // the same for a free signature
-    mara.chain.lock.all_capable = Some(false);
+    mara.chain.lock.enabled_override = Some(false);
     note(&mut mara, "free");
     assert_eq!(own_sigs(&mara), 0, "no signature without its durable mark");
     assert!(!mara.chain.lock.acceptor.signed_freely(1));
     // a crash after the change, before the write: the reload is the old state
     mara.chain.lock.fail_writes = false;
-    mara.chain.lock.all_capable = Some(true);
+    mara.chain.lock.enabled_override = Some(true);
     let disk = mara.chain.lock.disk.clone();
     mara.load_chain_lock(Ok(disk), true);
-    mara.chain.lock.all_capable = Some(true);
+    mara.chain.lock.enabled_override = Some(true);
     assert_eq!(mara.chain.lock.acceptor.promised(&slot), None);
 }
 
@@ -267,7 +267,7 @@ fn a_restarted_seat_keeps_its_promise() {
 
     let mut again = seat("mara", &b);
     again.load_chain_lock(Ok(Some(disk)), true);
-    again.chain.lock.all_capable = Some(true);
+    again.chain.lock.enabled_override = Some(true);
     assert_eq!(
         again.chain.lock.acceptor.promised(&slot),
         Some(&Ballot { round: 5, leader: "walter".into() })
@@ -293,10 +293,10 @@ fn amnesia_answers_nothing_up_to_the_floor() {
     let mut b = Builder::new(&SEATS, 2);
     let mut mara = seat("mara", &b);
     mara.load_chain_lock(Ok(None), true);
-    mara.chain.lock.all_capable = Some(true);
+    mara.chain.lock.enabled_override = Some(true);
     let slot = mara.lock_slot().expect("slot");
     wire(&mut mara, "dora", 1, WorkspaceEvent::LockPrepare { height: 1, base: slot.base, round: 1 });
-    mara.chain.lock.all_capable = Some(false);
+    mara.chain.lock.enabled_override = Some(false);
     note(&mut mara, "free");
     assert!(sent_kinds(&mara).is_empty(), "nothing answered: {:?}", sent_kinds(&mara));
     assert_eq!(own_sigs(&mara), 0);
@@ -368,7 +368,7 @@ fn a_seat_caught_up_through_a_served_checkpoint_names_the_same_slot() {
     b.commit_applied(4, &["mara", "walter"]);
     let mut full = seat("mara", &b);
     let mut late = genesis_seat("walter", &b, b.blocks[..1].to_vec());
-    late.chain.lock.all_capable = Some(true);
+    late.chain.lock.enabled_override = Some(true);
     late.lock_force(true);
     for block in &b.blocks[3..] {
         late.chain.pending_blocks.insert(block.height, block.clone());
@@ -568,7 +568,7 @@ fn a_height_split_by_activation_still_decides() {
     let b = Builder::new(&["dora", "mara"], 2);
     let dora = seat("dora", &b);
     let mut mara = seat("mara", &b);
-    mara.chain.lock.all_capable = Some(false);
+    mara.chain.lock.enabled_override = Some(false);
     let id = note(&mut mara, "split");
     assert_eq!(own_sigs(&mara), 1, "mara signed freely");
     let mut seats = [dora, mara];
@@ -601,7 +601,7 @@ fn an_acceptance_is_released_once_no_quorum_can_complete_it() {
     assert!(seats[0].chain.lock.acceptor.accepted(&slot).is_some(), "dora proposed and accepted");
     // mara has not heard dora yet and now believes the height free
     seats[0].chain.lock.outbox.clear();
-    seats[1].chain.lock.all_capable = Some(false);
+    seats[1].chain.lock.enabled_override = Some(false);
     seats[1].chain.lock.intent_sent.clear();
     seats[1].chain_sign_and_gossip_approval(id);
     assert_eq!(own_sigs(&seats[1]), 1, "mara signed freely");
@@ -627,7 +627,7 @@ fn a_value_split_between_a_free_and_two_lock_voices_waits() {
             .iter()
             .map(|m| {
                 let mut st = genesis_seat(m, &b, b.blocks.clone());
-                st.chain.lock.all_capable = Some(lock && *m != "walter");
+                st.chain.lock.enabled_override = Some(lock && *m != "walter");
                 st.lock_force(lock);
                 hear(&mut st, T, &names);
                 st
@@ -667,7 +667,7 @@ fn an_intent_is_signed_freely_once_the_height_goes_free() {
     let mut walter = seat("walter", &b);
     let id = note(&mut walter, "one");
     assert_eq!(own_sigs(&walter), 0, "an intent first");
-    walter.chain.lock.all_capable = Some(false);
+    walter.chain.lock.enabled_override = Some(false);
     walter.lock_tick();
     assert_eq!(own_sigs(&walter), 1, "signed freely once the height is free");
     walter.lock_tick();
@@ -679,6 +679,99 @@ fn an_intent_is_signed_freely_once_the_height_goes_free() {
     mara.lock_tick();
     assert_eq!(own_sigs(&mara), 1);
     let _ = (id, id2);
+}
+
+/// The chain decides where the lock runs (§8 as built): a charter that
+/// carries it locks height 1, no capability heard; an older republic is
+/// B6 until a sealed `set_features` vote, then locked from the next
+/// height - on a full holder and on one anchored on a later cut.
+#[test]
+fn the_chain_decides_where_the_lock_runs() {
+    use molt_core::chain::CHAIN_LOCK_FEATURE;
+    let founded = Builder::new_with_features(&SEATS, 2, &[CHAIN_LOCK_FEATURE, "memory"], false);
+    let st = genesis_seat("mara", &founded, founded.blocks.clone());
+    assert_eq!((st.lock_mode(1), st.lock_since()), (LockMode::Lock, 1), "locked from the founding");
+
+    let mut old = Builder::new(&SEATS, 2);
+    old.commit_applied(1, &["dora", "mara"]);
+    let mut full = genesis_seat("mara", &old, old.blocks.clone());
+    assert_eq!((full.lock_mode(2), full.lock_since()), (LockMode::Free, 0), "B6 before the vote");
+    old.commit_org(5, "set_features", CHAIN_LOCK_FEATURE, &["dora", "mara"]);
+    full.receive_block_from("dora", old.blocks[2].clone());
+    assert_eq!(full.chain.head.as_ref().expect("head").height, 2);
+    assert_eq!((full.lock_mode(3), full.lock_since()), (LockMode::Lock, 3), "locked after the enabling block");
+
+    let state = checkpoint_state(&old.blocks, 2).expect("state at the cut");
+    old.commit(ChainChange::Checkpoint { upto: 2, state_hash: checkpoint_state_hash(&state) }, &SEATS);
+    let mut late = genesis_seat("walter", &old, old.blocks[..1].to_vec());
+    late.chain.pending_blocks.insert(3, old.blocks[3].clone());
+    late.receive_checkpoint_blob(state);
+    assert_eq!(late.chain.head.as_ref().expect("head").height, 3, "anchored on the cut");
+    assert_eq!(late.lock_mode(4), LockMode::Lock, "a pruned holder reads the same chain state");
+    full.receive_block_from("dora", old.blocks[3].clone());
+    assert_eq!(full.lock_mode(4), late.lock_mode(4));
+}
+
+/// The enabling vote waits while a seat runs a build without the lock:
+/// the proposer refuses to put it up, an approver refuses to sign it.
+#[test]
+fn enabling_the_lock_waits_until_every_seat_runs_it() {
+    use molt_core::chain::CHAIN_LOCK_FEATURE;
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = genesis_seat("mara", &b, b.blocks.clone());
+    mara.chain.lock.caps_override = Some(false);
+    let enable = json!({ "op": "set_features", "value": format!("{CHAIN_LOCK_FEATURE} memory") });
+    let err = mara.cmd_propose(Surface::Organization, enable.clone()).expect_err("refused");
+    assert!(err.to_string().contains(LOCK_NOT_EVERYWHERE), "{err}");
+    mara.chain.lock.caps_override = Some(true);
+    let id = propose(&mut mara, Surface::Organization, enable);
+    let mut walter = genesis_seat("walter", &b, b.blocks.clone());
+    walter.chain.lock.caps_override = Some(false);
+    let change = mara.proposal_change(id).expect("change");
+    let ChainChange::Applied { payload, .. } = change else { panic!("an org change") };
+    assert!(walter.receive_proposed(id, Surface::Organization, payload, "mara"));
+    assert_eq!(walter.sign_blocker(id).as_deref(), Some(LOCK_NOT_EVERYWHERE));
+    walter.chain.lock.caps_override = Some(true);
+    assert_eq!(walter.sign_blocker(id), None);
+}
+
+/// After activation a seat on a build without the lock signs freely and
+/// answers no lock frame; the capable seats still decide every height
+/// (exclusivity keeps the two apart), on one head.
+#[test]
+fn a_seat_without_the_lock_after_activation_neither_stalls_nor_forks() {
+    let with_lock = old_seat_run(true);
+    let b6 = old_seat_run(false);
+    eprintln!("fork decisions: lock {with_lock}, B6 {b6}");
+    assert!(with_lock <= b6, "no more forks than B6: {with_lock} > {b6}");
+}
+
+/// Three cards through seats dora and mara on the lock (or all on B6),
+/// walter on a build without it; the summed fork decisions.
+fn old_seat_run(lock: bool) -> u64 {
+    let b = Builder::new(&SEATS, 2);
+    let mut net = Net::new(&b);
+    for s in &mut net.seats {
+        s.chain.lock.enabled_override = Some(lock);
+    }
+    net.seats[2].lock_force(false);
+    let mut now = T;
+    for title in ["one", "two", "three"] {
+        let id = note(&mut net.seats[2], title);
+        net.pump();
+        net.seats[0].chain_sign_and_gossip_approval(id);
+        net.seats[1].chain_sign_and_gossip_approval(id);
+        net.pump();
+        for _ in 0..20 {
+            now += 5;
+            net.tick(now);
+        }
+    }
+    assert_eq!(net.heights(), vec![3, 3, 3], "every height decided");
+    let heads = net.heads();
+    assert!(heads.iter().all(|h| *h == heads[0]), "one head");
+    verify_chain(&net.seats[0].chain.blocks).expect("an ordinary chain");
+    net.seats.iter().map(|s| s.chain.fork_decisions).sum()
 }
 
 /// Deliver each seat's recorded frames to the other.
@@ -699,7 +792,7 @@ fn one_free_signer_in_three_of_five_releases_nothing() {
     let names = ["dora", "erik", "mara", "nils", "walter"];
     let b = Builder::new(&names, 3);
     let mut dora = genesis_seat("dora", &b, b.blocks.clone());
-    dora.chain.lock.all_capable = Some(true);
+    dora.chain.lock.enabled_override = Some(true);
     dora.lock_force(true);
     hear(&mut dora, T, &names);
     let id = note(&mut dora, "x");

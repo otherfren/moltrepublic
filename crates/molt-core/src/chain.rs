@@ -373,6 +373,12 @@ pub const RESTORE_CONSENT_V2_CAP: &str = "molt-restore-consent-v2";
 /// (`docs/chain/chain_lock_design.md` §8).
 pub const CHAIN_LOCK_CAP: &str = "molt-chain-lock-v1";
 
+/// The feature key that turns the sealing lock on: ratified at every
+/// founding of a build that knows it, added to an older republic by a
+/// `set_features` vote. Not a surface key (the one exception to
+/// `charter_features.md` D1).
+pub const CHAIN_LOCK_FEATURE: &str = "chain-lock";
+
 /// A lock ballot on the wire: ordered by round, then leader name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockBallot {

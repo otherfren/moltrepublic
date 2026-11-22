@@ -129,7 +129,8 @@ async fn wait_long(
 /// A real 2-of-3 republic over `url`: mara founds, walter and dora join.
 async fn found_trio(root: &std::path::Path, url: &str, lock: bool) -> [WalletHandle; 3] {
     let a = engine(&root.join("mara"));
-    a.__lock_cap_off(!lock);
+    // B6 alone: a republic founded before the lock existed
+    a.__found_pre_lock(!lock);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
         name: "Drei".to_string(),
@@ -149,7 +150,6 @@ async fn found_trio(root: &std::path::Path, url: &str, lock: bool) -> [WalletHan
     let mut joiners = Vec::new();
     for (name, link) in ["walter", "dora"].iter().zip(links) {
         let w = engine(&root.join(name));
-        w.__lock_cap_off(!lock);
         adopt_relay(&w, url).await;
         w.execute(Command::JoinStart { invite: link, member: (*name).to_string(), relays: Vec::new() })
             .await

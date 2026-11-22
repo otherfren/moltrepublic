@@ -386,7 +386,8 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
     let (name, agenda, features) = prop_rx.recv().await.expect("charter surfaced to the joiner");
     assert_eq!(name, "Pact");
     assert_eq!(agenda, "the pact: tend the commons, share the harvest");
-    assert_eq!(features.as_deref(), Some(["memory".to_string()].as_slice()));
+    // every founding of this build ratifies the lock (B7)
+    assert_eq!(features.as_deref(), Some(["chain-lock".to_string(), "memory".to_string()].as_slice()));
 
     // the gate holds: with B not yet confirmed, the founding has not sealed
     tokio::time::sleep(Duration::from_millis(200)).await;

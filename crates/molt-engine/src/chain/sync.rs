@@ -1035,6 +1035,7 @@ impl State {
             lock_active,
             lock_ballot,
             lock_wait,
+            lock_since: self.lock_since(),
             head_hash: self.chain.head.as_ref().map(|h| h.hash.clone()).unwrap_or_default(),
             catchup_from: self.chain.catchup_from.unwrap_or(0),
             catchup_since: if self.chain.catchup_from.is_some() { self.chain.catchup_since } else { 0 },
