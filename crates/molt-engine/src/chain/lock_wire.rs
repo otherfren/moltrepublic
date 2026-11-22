@@ -1441,11 +1441,14 @@ impl State {
             }
         }
         if let Some(run) = &self.chain.lock.run {
-            // S4/W4: every run goes stale after its backoff, proposed or not;
-            // the open phase is re-sent at a doubling interval up to the cap
-            let stale = now >= run.started + self.lock_backoff(slot.height, run.attempt);
+            // S4/W4: a run that is not idle - promises missing, a forced
+            // value waiting, or a value out - is re-sent at a doubling
+            // interval up to the cap and goes stale after its backoff. An
+            // idle leader (promises in hand, nothing to propose) is silent.
+            let busy = !run.leader.ready() || run.leader.forced().is_some() || run.leader.proposed().is_some();
+            let stale = busy && now >= run.started + self.lock_backoff(slot.height, run.attempt);
             let interval = self.lock_retransmit().saturating_mul(1 << run.resends.min(10)).min(LOCK_BACKOFF_MAX_SECS);
-            let resend = now >= run.sent_at + interval;
+            let resend = busy && now >= run.sent_at + interval;
             let attempt = run.attempt;
             // S3: a forced value that waited for a fuller hearing goes out
             // once its interval has passed
@@ -1546,8 +1549,8 @@ impl State {
                 id: ProposalId(id),
                 change,
             },
-            // phase 1, ready or not: a missing promise may still free a
-            // forced value or complete a cut's hearing (S3, S4)
+            // phase 1 (only while busy, see the tick): a missing promise may
+            // still free a forced value or complete a cut's hearing (S3, S4)
             _ => WorkspaceEvent::LockPrepare { height: slot.height, base: slot.base.clone(), round: ballot.round },
         };
         tracing::debug!(height = slot.height, ballot = %fmt_ballot(&ballot), "lock=resend");

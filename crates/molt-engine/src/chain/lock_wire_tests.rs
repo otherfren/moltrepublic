@@ -1010,3 +1010,27 @@ fn a_failed_write_at_open_means_amnesia() {
     mara.load_chain_lock(Ok(None), false);
     assert_eq!(mara.chain.lock.amnesia, Some(None));
 }
+
+/// An idle leader - its promises in hand, nothing to propose - sends
+/// nothing: no re-sent `Prepare`, no new ballot, for an hour.
+#[test]
+fn an_idle_leader_is_silent() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let mut now = T;
+    dora.presence.clock_override = Some(now);
+    dora.lock_start(0);
+    let (base, round) = {
+        let run = dora.chain.lock.run.as_ref().expect("dora leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    wire(&mut dora, "mara", 1, WorkspaceEvent::LockPromise { height: 1, base, round, leader: "dora".into(), accepted: None });
+    assert!(dora.chain.lock.run.as_ref().is_some_and(|r| r.leader.ready()), "phase 1 complete");
+    dora.chain.lock.outbox.clear();
+    for _ in 0..360 {
+        now += 10;
+        hear(&mut dora, now, &SEATS);
+        dora.lock_tick();
+    }
+    assert!(sent_kinds(&dora).is_empty(), "an idle leader sent {:?}", sent_kinds(&dora));
+}
