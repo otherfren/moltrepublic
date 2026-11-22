@@ -552,12 +552,9 @@ verschickt wurde."* Umsetzung (Branch delivery-followups):
   Vorgänger; ein Crash des Empfängers kostet nur den RAM-Park, den die
   Resend-Maschine von selbst wieder füllt. Landet der Vorgänger, drainiert
   der Park in Seq-Reihenfolge durch denselben `deliver_gated`-Pfad.
-  Bounded (512/Sender, Überlauf shedded aufs Resend), Dup-tolerant, vom
-  Recovery-Fenster-Reset mitgeräumt.
-- **Pathologie-Ventil:** Ein Park-Eintrag, dessen Vorgänger nie kommt
-  (verlogene/kaputte Kette), wird nach 900 s LAUT ungeordnet freigegeben —
-  ehrliche Ketten erreichen das nie (Resend-Backoff-Cap 600 s), aber ein
-  Fehler darf einen Sender nicht für immer wedgen.
+  Dup-tolerant, vom Recovery-Fenster-Reset mitgeräumt. **Superseded by §10
+  (v0.1.1):** only order-sensitive kinds wait, the gap is asked for, the
+  900 s valve and the shed-newest cap are gone.
 - **Latenz-Flanken:** `out_of_order_tolerance` 5 → 5000 — die im Server
   gespeicherten ORIGINALE des tauben Fensters kommen nach dem Heal mit
   längst überholten Generationen an und wurden alle
@@ -608,3 +605,73 @@ verschickt wurde."* Umsetzung (Branch delivery-followups):
   `a_heard_slow_peer_keeps_its_resends_beside_a_silent_one`,
   `a_locked_out_seat_re_offers_nothing`,
   `crates/molt-engine/tests/nostr_outbox_quiet.rs`.
+
+## 10. G7 by need: hold what needs order, ask for the gap (v0.1.1)
+
+Field 2026-11: after a restart one missing predecessor per sender held a
+node deaf for the full 900 s valve - every later envelope of that sender
+parked behind it, the park filled (512) and shed the newest, which opened
+the next gap. The original of a missing envelope often can never arrive
+(MLS: a generation spent before the restart or behind the 5 000
+out-of-order window of a newest-first replay; relay: paged out, expired,
+pruned), and the sender's stall round is on a 10..600 s ladder plus an
+hourly budget, unmoved by a hold that changes no window. Worse, the acked
+floor only moves forward (`apply_group_ack`, and the mesh's twin): an
+accept window that regressed across a hard stop (saved every 5 s, the
+ratchet every 10 s) leaves a seq the sender already counts as acked - no
+stall round ever re-offers it, §4.7's "resends absorb a lost save" does
+not hold for it. The gap want below is what reaches it.
+
+- **Hold by need.** Only kinds whose effect depends on the same sender's
+  earlier envelopes wait: the chat stream (`Chat`, `ChatReacted`,
+  `ChatDeleted`, `ChatRead`, `FileRemoved` - arrival is display order, a
+  reaction toggles) and stances (`Approved`, `Declined`, `Withdrawn` -
+  newest wins). Everything else is accepted at once: `Proposed` (votes that
+  outrun it park on its id), `Committed` (height/prev checks, buffers),
+  `ChainRequest`, `Checkpoint*` (by index/hash), `MembershipProposed`
+  (gated card), `VoteRefused`, `MeshAnnounced`, `File*`. An order-sensitive
+  envelope waits while ANY seq of its sender below it is missing or held;
+  a missing seq is a `prev_seq` that is neither accepted nor held.
+- **Ask.** A seq missing for 2 s is named in a `GapWant` control frame
+  (`\x00molt-gapwant-v1`, ≤ 64 seqs, re-asked every 10 s). The named
+  sender re-publishes exactly those own envelopes as fresh frames (per
+  asker each seq at most once and 64 frames in all per 10 s, never past its
+  publish cursor, outside the hourly budget) and then sends a `GapAnswer`
+  (`\x00molt-gapans-v1`):
+  `resent` and `gone` (not an own ackable envelope of its log).
+- **Release** (whichever first): the seq arrives; the sender answers it
+  `gone` (at once); it was `resent` yet is absent 5 s later; a resend round
+  passed over it (a duplicate above it arrived, counted only for a sender
+  that never answered a want - an answering sender's duplicates are
+  targeted resends for others) and it is absent 5 s later;
+  the window aged it out; 60 s after it went missing - the bound for a
+  sender that answers nothing, six times the first rung of its ladder. A
+  settled seq is remembered and never held for again; arriving later it is
+  applied once.
+- **Start.** The persisted window is the baseline; the replay fills gaps
+  by itself (newest-first pages move the gap down, not wide), and a gap the
+  relays no longer hold is asked for like any other: the author still has
+  its log. Only order-sensitive kinds can wait at all, and at most 60 s.
+- **Cap.** 512 held per sender; past it the OLDEST held envelope is
+  delivered out of order - nothing is shed, the window is honest. So is a
+  held one about to age below the accept window (it would read as
+  accepted and never apply). A delivery left unaccepted (the D7 decline
+  park) stays missing, so the stances behind it keep waiting.
+- **Visibility.** `inbound_held member= missing_seq= held= since_s=` once
+  per episode (after 2 s), `inbound_held_cleared member= since_s= via=
+  unordered=` when it ends, `inbound_gap_skipped member= missing_seq= via=`
+  per settled seq (WARN for the fallback), `inbound_released_unordered why=full|aged` once;
+  `StatusView.inbound_held` lists the held streams.
+- **Mixed versions.** An older build drops both tags as unknown control
+  frames: as a receiver it keeps its old park, as a sender it never answers
+  and its gaps settle on its resend rounds or the 60 s bound.
+
+Pins: `net::delivery_tests` (`a_gap_holds_only_order_sensitive_kinds`,
+`a_gap_the_sender_disowns_releases_at_once`,
+`an_unanswered_gap_falls_back_far_below_the_old_valve`,
+`a_resend_round_passing_the_gap_settles_it`,
+`a_flood_behind_a_gap_loses_nothing`,
+`a_held_envelope_is_applied_before_it_ages_out_of_the_window`,
+`an_answering_senders_duplicates_are_no_evidence`),
+`group_runtime::tests::a_gap_want_is_answered_with_exactly_the_missing_frames`,
+`crates/molt-engine/tests/nostr_inbound_gap.rs`.

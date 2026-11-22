@@ -3380,7 +3380,7 @@ pub(crate) mod tests {
         // hook; the value itself rides the settings surface as
         // `poke_wake_command` (ADR-0007), so this stays internal only
         // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 94] = [
+        const INTERNAL: [&str; 96] = [
             // not a door of its own: chat_send/approve/decline/withdraw
             // build it from their `operator`/`agent` arguments
             "as_operator",
@@ -3447,6 +3447,10 @@ pub(crate) mod tests {
             // the running fetch asking the actor to send one (mirroring §3.2)
             "net_piece_wanted",
             "net_piece_want_send",
+            // a gap want / answer landing (delivery guarantee §10): the
+            // transport speaks; an agent must not forge a peer's answer
+            "net_gap_wanted",
+            "net_gap_answered",
             // the mirror gossip landing (the transport speaks; an agent must
             // not forge another seat's declaration or holdings)
             "net_mirror_decl",

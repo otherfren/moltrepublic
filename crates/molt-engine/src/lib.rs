@@ -345,6 +345,13 @@ impl WalletHandle {
         self.drop_seam.every.store(n, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: lose the next inbound wire chat carrying `body` once, as
+    /// a relay that never delivers it would. No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __drop_inbound_chat(&self, body: &str) {
+        self.drop_seam.arm_chat(body);
+    }
+
     /// Test seam: how many inbound envelopes the drop seam swallowed. A
     /// read only; no `Command` reaches it.
     #[doc(hidden)]
@@ -748,17 +755,10 @@ pub(crate) struct DeliveryState {
     /// `prev_seq`. Derived in `apply` (live records and the open replay),
     /// runtime-only, workspace scope.
     pub(crate) last_own_ackable: u64,
-    /// G7 in-order hold: per SENDER, wire envelopes whose `prev_seq` is not
-    /// yet in the accept window (`seq → (envelope, parked_at)`). Deliberately
-    /// NOT accept-marked while parked: the sender keeps them unacked and a
-    /// crash simply re-earns them via the resend machinery. Drained in seq
-    /// order as predecessors land; a stale entry (pathological chain) is
-    /// released loudly by the delivery tick after
-    /// `ORDERED_PARK_GIVEUP_SECS` (net/delivery.rs). Runtime-only, workspace
-    /// scope.
-    #[allow(clippy::type_complexity)]
-    pub(crate) ordered_park:
-        std::collections::HashMap<MemberId, std::collections::BTreeMap<u64, (molt_core::EventEnvelope, u64)>>,
+    /// G7 in-order hold per SENDER: its missing seqs and the order-sensitive
+    /// envelopes waiting behind them (`net/delivery.rs`). Runtime-only,
+    /// workspace scope.
+    pub(crate) inbound: std::collections::HashMap<MemberId, net::SenderHold>,
     /// `presence_now` of the last persisted accept-window save (debounce).
     pub(crate) accepted_saved_at: u64,
     /// `presence_now` of the last debounced live MLS-ratchet merge into
@@ -1987,6 +1987,20 @@ impl State {
                     return Ok(Reply::Ack);
                 }
                 self.cmd_net_wiki_base_failed(&reason)
+            }
+            Command::NetGapWanted { from, of, seqs, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_gap_wanted(&from, &of, seqs);
+                Ok(Reply::Ack)
+            }
+            Command::NetGapAnswered { from, to, resent, gone, generation } => {
+                if !self.net_generation_current(generation) {
+                    return Ok(Reply::Ack);
+                }
+                self.cmd_net_gap_answered(from, to, resent, gone);
+                Ok(Reply::Ack)
             }
             Command::NetPieceWanted { from, id, ranges, generation } => {
                 if !self.net_generation_current(generation) {
