@@ -389,3 +389,28 @@ fn an_init_at_the_open_cap_is_refused() {
     assert!(matches!(r, Err(MoltError::OpenProposalsCap(64))), "{r:?}");
     assert_eq!(st.next_seq, seq, "nothing recorded");
 }
+
+/// Two founding seats auto-propose an init (the second after one step
+/// without seeing the first). A seat consents to every init card it sees
+/// before one applies: the lock's leader takes whichever is ready first,
+/// and a consent kept to the first card only left the n-of-n run "not
+/// ready" when the other one sealed. Only one can apply (the projection
+/// takes the first, the rest are superseded), and a card carries no key
+/// material - so the wider consent founds no second wallet.
+#[test]
+fn a_founding_seat_consents_to_every_init_card_before_one_applies() {
+    let mut b = Builder::new_with_features(&ABC, 2, &["memory", "wallet"], false);
+    let mut c = genesis_seat("c", &b, b.blocks.clone());
+    with_daemon(&mut c, 3000);
+    c.session.settings.wallet_network = "mainnet".to_string();
+    c.wallet_arm_founding(Some(&["memory".to_string(), "wallet".to_string()]));
+    card_from(&mut c, "a", 1, init(2990, "mainnet"));
+    assert!(c.wallet_founding_consents(1), "the first card");
+    card_from(&mut c, "b", 2, init(2990, "mainnet"));
+    assert!(c.wallet_founding_consents(2), "the second founding card too");
+    commit_wallet(&mut b, 2, init(2990, "mainnet"));
+    c.receive_block_from("a", b.blocks[1].clone());
+    assert_eq!(c.wallet_init_applied().map(|i| i.id), Some(Some(2)), "the second one applied");
+    card_from(&mut c, "a", 3, init(2990, "mainnet"));
+    assert!(!c.wallet_founding_consents(3), "nothing after one applied");
+}

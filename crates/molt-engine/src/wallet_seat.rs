@@ -30,7 +30,8 @@ pub(crate) struct SeatRt {
     pub(crate) founding: bool,
     /// The auto-init is armed since then, until an init is visible.
     armed_at: Option<u64>,
-    /// The inits visible when arming ended: the founding consented to these only.
+    /// The inits of this founding: those visible when arming ended, and every
+    /// later card until one applies.
     founding_inits: BTreeSet<u64>,
     pub(crate) tried_at: u64,
     /// The others' key part status, last frame wins.
@@ -66,9 +67,17 @@ impl State {
         }
     }
 
-    /// The first inits seen after arming are the founding's; arming ends.
+    /// The inits seen after arming are the founding's; arming ends at the
+    /// first. Until one applies every later init card is the founding's
+    /// too: two seats may both auto-propose, and the one that seals need
+    /// not be the one this seat saw first. Only the first applied init
+    /// counts and the rest are superseded, so the consent founds one purse.
     pub(crate) fn wallet_founding_claim(&mut self) {
         if self.purse.seat.armed_at.is_none() {
+            if !self.purse.seat.founding_inits.is_empty() && self.wallet_init_applied().is_none() {
+                let cards = self.wallet_init_card_ids();
+                self.purse.seat.founding_inits.extend(cards);
+            }
             return;
         }
         let applied = self.wallet_init_applied();

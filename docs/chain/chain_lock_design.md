@@ -544,11 +544,10 @@ Where the wiring differs from §1-§13, and why.
   every open with the lock on, the replayed own signatures (always free
   ones) are marked free at their heights before anything else, so a
   build without the lock that ran in between leaves no gap. With the lock
-  off nothing is written and nothing is passive. An export made before
-  the lock ran carries no marker and looks like a fresh upgrade - but an
-  imported workspace opens detached and comes back only through the
-  recovery ritual, whose restored seat is §4.2's Z with a fresh acceptor,
-  so no forgotten promise of the old device is ever asked for. Residual: two live
+  off nothing is written and nothing is passive. An import sets the
+  marker whatever the export carried, so a restored workspace opens
+  amnesiac where its chain runs the lock (S6 below); it also opens
+  detached and comes back only through the recovery ritual. Residual: two live
   copies of one workspace (a copied directory run twice) - B2/B3's
   territory, like a live old device.
 - **The amnesia floor** is fixed by the first peer height this seat hears
@@ -678,9 +677,15 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   acceptance or a choice): every shape decides; without S1, or waiting for
   every seat forever, it stalls. Not modelled: the downgrade (the storage
   gate closes it), head moves and pruning (pinned in the engine tests).
-- **Not closed (S6):** a filesystem backup that restores the chain AND
-  an older but readable lock file is not detected as amnesia (binding
-  the file to its head does not catch it either: both are equally old).
-  The floor stays the FIRST peer report on purpose: peers report with
-  every block, so a highest-report floor would move with the live chain
-  and never be passed.
+- **S6, a residual outside the crash model.** A filesystem backup that
+  restores the chain AND an older but readable `chain_lock.state` is not
+  detected: the seat may re-promise a slot whose acceptance it lost. An
+  operator who restores such a backup must DELETE `chain_lock.state`
+  (never restore it): with the marker set and the file gone the seat is
+  amnesiac - passive up to the first peer height it hears - which is the
+  safe state. The product's own paths cannot produce the case: an export
+  (file or S3 backup) never carries the lock file, and an import sets the
+  marker, so every restored workspace opens amnesiac where its chain runs
+  the lock (`a_restored_workspace_is_amnesiac_for_the_lock`). The floor
+  stays the FIRST peer report: peers report with every block, so a
+  highest-report floor would move with the live chain and never be passed.

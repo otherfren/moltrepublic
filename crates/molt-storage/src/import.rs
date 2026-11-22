@@ -516,6 +516,13 @@ impl ImportStaging {
             prefs.shared_file_mtimes.clear();
             changed = true;
         }
+        // the lock file never travels: a restored seat may have promised
+        // after the export was made, so it opens amnesiac (the marker
+        // without the file) wherever its chain runs the lock
+        if !prefs.chain_lock {
+            prefs.chain_lock = true;
+            changed = true;
+        }
         if changed {
             crate::write_prefs(&self.dir, &prefs)?;
         }
@@ -760,6 +767,26 @@ mod tests {
         let dir = staging.commit(&dest_root, false, None).expect("commit");
         assert_eq!(scan_names(&dest_root), vec![id]);
         assert!(crate::read_prefs(&dir).shared_files.is_empty(), "paths dropped");
+    }
+
+    /// S6 at the product's own restore: the lock file never travels, and a
+    /// restored workspace carries the lock marker even when its export was
+    /// made before the lock first wrote - the marker without the file is
+    /// amnesia, so the restored seat answers no lock frame and signs
+    /// nothing freely up to the floor (where its chain runs the lock).
+    #[test]
+    fn a_restored_workspace_is_amnesiac_for_the_lock() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (src_root, src_dir, _seed, _id) = make_ws(tmp.path());
+        assert!(!crate::read_prefs(&src_dir).chain_lock, "an export made before the lock wrote");
+        std::fs::write(src_dir.join(crate::CHAIN_LOCK_FILE), b"held promises").expect("plant");
+        let blob = blob_of(&src_root, &src_dir, &ExportKey::passphrase(PASS));
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = import_stage(&dest_root, &blob, PASS).expect("stage");
+        let dir = staging.commit(&dest_root, false, None).expect("commit");
+        assert!(!dir.join(crate::CHAIN_LOCK_FILE).exists(), "the lock file never travels");
+        assert!(crate::read_prefs(&dir).chain_lock, "the marker is set: amnesia at the first open");
     }
 
     /// `make_ws` plus a folded wiki base written under the workspace's own

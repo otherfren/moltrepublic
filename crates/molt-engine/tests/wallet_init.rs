@@ -92,6 +92,9 @@ async fn wallet_init_turns_the_feature_on() {
     let id = init(&all[0]).await;
     wait_wallet(&all[1], "the init card", |_, p| p.iter().any(|c| c.id == id)).await;
     assert!(features(&all[1]).await.iter().any(|f| f == "wallet"), "the nav shows the open card");
+    // the approve checks the birthday against this seat's daemon: wait for
+    // its answer, or the approve is held (`checking`)
+    wait_wallet(&all[1], "the daemon answered", |v, _| v.daemon_height > 0).await;
     all[1].execute(Command::Approve { proposal: id, note: None }).await.expect("approved while off");
     for w in &all {
         wait_wallet(w, "the init to apply", |v, _| v.phase == WalletPhase::Init).await;
