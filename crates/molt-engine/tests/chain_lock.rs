@@ -435,7 +435,9 @@ async fn a_consented_restore_under_the_lock_needs_both_survivors() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(240);
     loop {
         let c = chain(&mara).await;
-        if c.iter().any(|(h, _, signers)| *h >= 1 && signers.len() == 1) {
+        // the restore (proposal id 0): one survivor beside the consent, or
+        // both when both accepted before the seal
+        if c.iter().any(|(h, pid, signers)| *h >= 1 && *pid == 0 && (1..=2).contains(&signers.len())) {
             break;
         }
         assert!(tokio::time::Instant::now() < deadline, "the restore never sealed: {c:?}");
@@ -447,6 +449,9 @@ async fn a_consented_restore_under_the_lock_needs_both_survivors() {
     .await;
     assert!(!s.notice.starts_with("recover-failed:"), "{:?}", s.notice);
     assert_eq!(status(&mara).await.chain_sync.fork_decisions, 0);
+    // W10: the restored seat reads the same activation from its chain
+    lock_on(&[&rejoiner], true).await;
+    assert_eq!(status(&rejoiner).await.chain_sync.lock_since, status(&mara).await.chain_sync.lock_since);
 }
 
 /// An older republic turns the lock on by a vote (§8): B6 before it; the

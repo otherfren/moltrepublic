@@ -946,7 +946,7 @@ impl State {
                     // that never answers must not keep the holders of a chosen
                     // value from completing it (S1)
                     let (heard, started) =
-                        self.chain.lock.run.as_ref().map_or((0, 0), |r| (r.promised.len() + r.leader.free_count(), r.started));
+                        self.chain.lock.run.as_ref().map_or((0, 0), |r| (r.leader.heard(), r.started));
                     let waiting = self.presence_now() < started + self.lock_retransmit();
                     if heard < n && waiting {
                         tracing::debug!(height = slot.height, id, heard, "lock=forced_waits_for_hearing");

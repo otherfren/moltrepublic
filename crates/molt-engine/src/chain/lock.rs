@@ -307,11 +307,6 @@ impl Leader {
         self.promises.len() + self.free.len()
     }
 
-    /// Seats heard as free (never also promisers).
-    pub(crate) fn free_count(&self) -> usize {
-        self.free.len()
-    }
-
     /// Phase 1 is complete.
     pub(crate) fn ready(&self) -> bool {
         self.promises.len() >= self.quorum.promises()

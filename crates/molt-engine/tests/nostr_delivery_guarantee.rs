@@ -237,3 +237,38 @@ async fn a_message_missed_while_away_is_resent_until_it_lands() {
     a.execute(Command::CloseWorkspace).await.expect("close a");
     b.execute(Command::CloseWorkspace).await.expect("close b");
 }
+
+/// The same gap under the sealing lock (every founding of this build): the
+/// message missed while away LANDS, exactly once - by the gap fetch (a lock
+/// frame from walter right after petra's return exposes the hole) or by
+/// the resend, whichever comes first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn under_the_lock_a_message_missed_while_away_lands_exactly_once() {
+    let (relay, db) = prunable_relay().await;
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b) = found_two_of_two_as(tmp.path(), &url, false).await;
+    let ws_b = read_session(&b).await.active_workspace.clone();
+    a.execute(Command::Chat { body: "before the gap".to_string(), quote: None, channel: molt_core::ChannelRef::Group })
+        .await
+        .expect("walter speaks");
+    assert!(wait_for_chat(&b, "before the gap", 30).await, "the live path works");
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+    a.execute(Command::Chat { body: "into the void".to_string(), quote: None, channel: molt_core::ChannelRef::Group })
+        .await
+        .expect("walter speaks again");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let group_frames = Filter::new().kind(Kind::Custom(molt_net::kinds::KIND_GROUP));
+    assert!(!db.query(group_frames.clone()).await.expect("query").is_empty(), "the relay stored the traffic");
+    db.wipe().await.expect("prune the relay");
+    assert!(db.query(group_frames).await.expect("query").is_empty(), "nothing left to serve");
+    b.execute(Command::OpenWorkspace { id: ws_b }).await.expect("reopen b");
+    assert!(wait_for_chat(&b, "into the void", 90).await, "the missed message lands");
+    // a few more seconds for a late duplicate to show up
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let landed = read_chat(&b).await.iter().filter(|r| r.get("body").and_then(|v| v.as_str()) == Some("into the void")).count();
+    assert_eq!(landed, 1, "exactly once");
+    a.execute(Command::CloseWorkspace).await.expect("close a");
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+}
