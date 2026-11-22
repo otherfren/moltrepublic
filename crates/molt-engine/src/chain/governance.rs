@@ -1270,10 +1270,13 @@ impl State {
     /// that still stands, only its position moved — so re-express it (the human
     /// is not asked again). Proposals this node did not approve are just cleared.
     pub(super) fn rebase_pending_approvals(&mut self) {
-        let Some(head) = self.chain.head.as_ref() else {
+        let Some(at) = self.chain.head.as_ref().map(|h| h.height) else {
             return;
         };
-        let target = head.height + 1;
+        let target = at + 1;
+        // T5: an own free signature at head+1 is marked before the re-sign
+        // below can start a ballot (and a durable promise) there
+        self.lock_mark_after_move(at);
         let stale: Vec<u64> = self
             .chain.pending_sigs
             .iter()
@@ -1284,7 +1287,7 @@ impl State {
         // (a proposer without self-cosign, a bailed sign): a cut below the
         // new head can never seal (upto == height-1 is enforced) and must
         // not linger as bookkeeping a late Approved could resurrect
-        let head_height = head.height;
+        let head_height = at;
         let swept: Vec<u64> = self
             .chain.proposal_changes
             .iter()

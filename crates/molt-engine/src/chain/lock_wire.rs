@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::governance::{FALLBACK_ASK_SECS, SEALER_GRACE_SECS};
-use super::lock::{Acceptor, Ballot, Leader, Quorum, Reply, Sealable, Slot, Step, Tally, Value, SLOT_KEEP};
+use super::lock::{Acceptor, Ballot, Leader, Quorum, Reply, Sealable, Slot, Step, Subjects, Tally, Value, SLOT_KEEP};
 use super::*;
 
 /// The enabling vote waits: a seat runs a build without the lock.
@@ -30,6 +30,9 @@ pub(crate) const CHAIN_LOCK_AVAILABLE: bool = false;
 
 /// The refusal while the lock is dark.
 pub(crate) const LOCK_NOT_AVAILABLE: &str = "Strict Order Mode is not available in this build";
+
+/// Strict Order Mode needs at least two approvals per decision (A-F4).
+pub(crate) const LOCK_NEEDS_TWO: &str = "Strict Order Mode needs at least 2 approvals per decision";
 
 /// Why this build signs nothing on a chain that runs the lock.
 pub(crate) const LOCK_CHAIN_UNSUPPORTED: &str = "this republic uses Strict Order Mode - needs a newer build";
@@ -55,6 +58,8 @@ pub(crate) struct LockSeams {
     pub(crate) retransmit_secs: AtomicU64,
     /// The next leader to send a `LockAccept` stops right after it.
     pub(crate) stop_after_accept: AtomicBool,
+    /// The same, after its own acceptance went out too.
+    pub(crate) stop_after_own_accept: AtomicBool,
     /// Lock activity of this seat has stopped (a killed leader).
     pub(crate) stopped: AtomicBool,
 }
@@ -336,26 +341,45 @@ impl State {
             c if CutKind::of(c).is_some() => q.n,
             ChainChange::Membership { op: MembershipOp::Restored, consent: Some(_), .. } => {
                 self.restore_consent_at(change, height).ok()?;
-                q.m.saturating_sub(1).max(1)
+                q.restore_need()
             }
             _ => q.m,
         };
         Some(Value { digest: change_digest(&self.republic_id(), height, change), need })
     }
 
-    /// Seats whose consented restore is registered, or held by the lock at
-    /// head+1 (R2: a withdrawn card the lock may still choose): never
-    /// counted as promisers (§4.2) nor as a restore's acceptors.
+    /// Seats that are the subject of some restore here (see
+    /// [`Self::lock_subjects`]).
     fn lock_restore_subjects(&self) -> BTreeSet<String> {
-        fn subject(c: &ChainChange) -> Option<&String> {
-            match c {
-                ChainChange::Membership { op: MembershipOp::Restored, member, consent: Some(_), .. } => Some(member),
-                _ => None,
-            }
-        }
-        let mut out: BTreeSet<String> = self.chain.proposal_changes.values().filter_map(subject).cloned().collect();
+        self.lock_subjects().seats()
+    }
+
+    /// The consented restores that may still be chosen at head+1, as this
+    /// seat sees them: an OPEN card (a declined or withdrawn one no
+    /// longer counts, C-HIGH-1; where m < n also not one the
+    /// seat-still-active gate holds - its subject is alive), and every
+    /// restore value the lock itself holds at head+1 (R2: chosen values
+    /// outlive their card).
+    pub(crate) fn lock_subjects(&self) -> Subjects {
+        let mut out = Subjects::default();
         let Some(next) = self.chain.head.as_ref().map(|h| h.height + 1) else { return out };
         let rid = self.republic_id();
+        let strict = self.lock_quorum().is_some_and(|q| q.m >= q.n);
+        let me = self.member();
+        for (id, change) in &self.chain.proposal_changes {
+            let ChainChange::Membership { op: MembershipOp::Restored, member, consent: Some(_), .. } = change else {
+                continue;
+            };
+            let open = self.proposals.get(id).map_or(true, |p| p.state == ProposalState::Proposed && !p.withdrawn);
+            // in its own view a seat is always "active": it stays a subject
+            let alive = !strict
+                && *member != me
+                && self.restore_gate(member) == Some(super::membership::SEAT_STILL_ACTIVE);
+            if !open || alive {
+                continue;
+            }
+            out.insert(change_digest(&rid, next, change), member.clone());
+        }
         let lock = &self.chain.lock;
         let held = lock
             .values
@@ -364,9 +388,9 @@ impl State {
             .chain(lock.run.iter().flat_map(|r| r.ids.iter().filter_map(|(d, (_, c))| Some((d, c.as_ref()?)))))
             .chain(lock.known.iter().filter(|((h, _), _)| *h == next).map(|((_, d), (_, c))| (d, c)));
         for (digest, change) in held {
-            if let Some(m) = subject(change) {
-                if !out.contains(m) && change_digest(&rid, next, change) == *digest {
-                    out.insert(m.clone());
+            if let ChainChange::Membership { op: MembershipOp::Restored, member, consent: Some(_), .. } = change {
+                if change_digest(&rid, next, change) == *digest {
+                    out.insert(digest.clone(), member.clone());
                 }
             }
         }
@@ -414,6 +438,10 @@ impl State {
     /// The first seat that keeps the lock off, and why (R9): this seat's
     /// own build, a seat announced without the lock, or one never heard.
     pub(crate) fn lock_not_capable(&self) -> Option<String> {
+        // A-F4: with m = 1 phase 1 would need every seat
+        if self.lock_quorum().is_some_and(|q| q.m < 2) {
+            return Some(LOCK_NEEDS_TWO.to_string());
+        }
         #[cfg(test)]
         if let Some(all) = self.chain.lock.caps_override {
             return (!all).then(|| LOCK_NOT_EVERYWHERE.to_string());
@@ -654,8 +682,18 @@ impl State {
     /// refused where this seat holds lock state or is amnesiac; the free
     /// mark is durable before `true`.
     pub(crate) fn lock_sign_freely(&mut self, height: u64) -> bool {
+        if !self.lock_cap_on() {
+            return true;
+        }
+        // A-F3: lock state at this height on any lineage forbids it - the
+        // signature is base-agnostic and would count free where it holds
+        let a = &self.chain.lock.acceptor;
+        if !a.may_sign_freely(height) && !a.signed_freely(height) {
+            tracing::warn!(height, "lock=refused_free reason=lock_state");
+            return false;
+        }
         // W7: no free mark, no amnesia where the chain never enabled the lock
-        if !self.lock_cap_on() || !self.lock_enabled() {
+        if !self.lock_enabled() {
             return true;
         }
         if self.chain.lock.passive.contains(&height) {
@@ -789,7 +827,6 @@ impl State {
         skip: Option<&BTreeSet<u64>>,
     ) -> Option<(u64, ChainChange, Value)> {
         let q = self.lock_quorum()?;
-        let subjects = self.lock_restore_subjects();
         // a seat that signed freely here never accepts: its intent cannot help
         let free = self.chain.lock.free_seen.get(&slot.height).cloned().unwrap_or_default();
         let mut ids: BTreeSet<u64> = self
@@ -810,7 +847,7 @@ impl State {
             let decliners: Vec<String> = self.proposals.get(&id).map(|p| p.decliners.clone()).unwrap_or_default();
             let voices = self.chain.lock.intents.get(&id).map_or(0, |s| {
                 s.iter()
-                    .filter(|m| !decliners.contains(m) && !subjects.contains(*m) && !free.contains(*m) && self.lock_rostered(m))
+                    .filter(|m| !decliners.contains(m) && !free.contains(*m) && self.lock_rostered(m))
                     .count()
             });
             if voices < q.m.saturating_sub(1).max(1) {
@@ -973,6 +1010,10 @@ impl State {
             return;
         }
         let me = self.member();
+        // H2: a seat that is a restore's subject in its own view never leads
+        if self.lock_restore_subjects().contains(&me) {
+            return;
+        }
         let now = self.presence_now();
         let seen = self.chain.lock.seen.get(&slot).map_or(0, |b| b.round);
         let round = self.chain.lock.acceptor.next_round(&slot).max(seen + 1);
@@ -1069,6 +1110,8 @@ impl State {
                         tracing::debug!(height = slot.height, id, heard, "lock=forced_waits_for_hearing");
                         return;
                     }
+                    // C-MED-5: the whole change rides a forced Accept
+                    let change = change.or_else(|| self.proposal_change(id));
                     (id, change, None)
                 }
                 None => {
@@ -1105,27 +1148,47 @@ impl State {
             return;
         }
         self.lock_acceptor_accept(&slot, &ballot, &value, id, change, is_forced);
+        if self.lock_seam(&self.lock_seams.stop_after_own_accept) {
+            self.lock_seams.stopped.store(true, SeqCst);
+            tracing::warn!(height = slot.height, "lock=stopped seam=stop_after_own_accept");
+        }
     }
 
-    /// The approver rule (T1): `id` was withdrawn or retired here, and this
-    /// seat's intent for it stood - a leader forced to it may complete it.
-    /// Never for a seat that declined (a decline drops the intent).
-    fn lock_forced_approver(&self, id: u64) -> bool {
-        let me = self.member();
-        let Some(p) = self.proposals.get(&id) else { return false };
-        (p.withdrawn || p.state != ProposalState::Proposed)
-            && !p.decliners.contains(&me)
-            && self.chain.lock.intents.get(&id).is_some_and(|i| i.contains(&me))
-    }
-
-    /// The gates a forced value still passes: the ones without which the
-    /// block would not verify or apply - a valid restore consent at the
-    /// height, a cut of this height with this seat's state hash. The
-    /// withdrawal, the settle, the seat-still-active gate and the local
-    /// checks do not hold here.
-    fn lock_forced_invalid(&self, change: &ChainChange, height: u64) -> Option<String> {
+    /// What a seat checks before signing a forced value it may never have
+    /// approved (M4): the change it signs is the one carried, bound to the
+    /// digest by the caller; here the checks without which the block would
+    /// not verify or apply, the same an incoming card meets
+    /// (`receive_proposed`): no reserved op, the vault and wallet wire
+    /// shapes, the feature-set refusals, no other change under the id; a
+    /// valid restore consent at the height; a cut of this height with this
+    /// seat's state hash; any other membership change only as registered
+    /// here. The withdrawal, the settle, the seat-still-active gate and
+    /// the local vault/wallet checks do not hold.
+    fn lock_forced_invalid(&self, id: u64, change: &ChainChange, height: u64) -> Option<String> {
         if self.identity_sk.is_none() {
             return Some("no signing key".into());
+        }
+        match change {
+            ChainChange::Applied { proposal_id, surface, payload } => {
+                if *proposal_id != id || super::is_base_entry_op(payload) {
+                    return Some("invalid change".into());
+                }
+                if self.proposals.get(&id).is_some_and(|p| p.surface != *surface || p.payload != *payload) {
+                    return Some("another change under the id".into());
+                }
+                if self.vault_enable_refusal(*surface, payload).is_some()
+                    || self.wallet_feature_refusal(*surface, payload).is_some()
+                    || (*surface == Surface::Vault && self.vault_wire_check(id, payload).is_err())
+                    || (*surface == Surface::Wallet && !crate::wallet::purse_op_ok(payload))
+                {
+                    return Some("invalid change".into());
+                }
+            }
+            ChainChange::Membership { op: MembershipOp::Restored, consent: Some(_), .. } => {}
+            ChainChange::Membership { .. } if self.chain.proposal_changes.get(&id) != Some(change) => {
+                return Some("unregistered membership change".into());
+            }
+            _ => {}
         }
         if matches!(change, ChainChange::Membership { op: MembershipOp::Restored, consent: Some(_), .. }) {
             if let Err(why) = self.restore_consent_at(change, height) {
@@ -1167,14 +1230,16 @@ impl State {
         // W1: a value this seat already accepted may be chosen; accepting it
         // again is a promise kept, not a new vote - no approval gate applies
         let kept = self.chain.lock.acceptor.holds(slot, value);
-        // T1: a forced value this seat approved before it was withdrawn
-        let approver = forced && !kept && self.lock_forced_approver(id);
+        // H1: a forced value may already be chosen - any promiser completes
+        // it, its approval or not; validity gates only
+        let forced_path = forced && !kept;
         let stored = || self.chain.lock.values.get(&value.digest).and_then(|(_, c)| c.clone());
-        let Some(change) = self
-            .proposal_change(id)
-            .or_else(|| if kept { stored() } else { None })
-            .or_else(|| if approver { wire.clone() } else { None })
-        else {
+        let resolved = if forced_path {
+            wire.clone().or_else(|| self.proposal_change(id))
+        } else {
+            self.proposal_change(id).or_else(|| if kept { stored() } else { None })
+        };
+        let Some(change) = resolved else {
             tracing::debug!(height = slot.height, id, "lock=withheld reason=unknown");
             // W9: the card may still be on its way
             self.chain.lock.retry_accept = Some((slot.clone(), ballot.clone(), value.clone(), id, wire, forced));
@@ -1189,8 +1254,8 @@ impl State {
         // right behind the card wins here too
         let withheld = if kept {
             None
-        } else if approver {
-            self.lock_forced_invalid(&change, slot.height)
+        } else if forced_path {
+            self.lock_forced_invalid(id, &change, slot.height)
         } else if matches!(change, ChainChange::Membership { op: MembershipOp::Restored, .. })
             && self.restore_settling(id)
         {
@@ -1251,7 +1316,8 @@ impl State {
     /// the same-ballot tally, and the seal once it holds `need`.
     fn lock_count_accepted(&mut self, from: &str, slot: &Slot, ballot: &Ballot, sig: &str, id: u64, change: ChainChange) {
         let Some(value) = self.lock_value(slot.height, &change) else { return };
-        if self.lock_restore_subjects().contains(from) && matches!(change, ChainChange::Membership { .. }) {
+        // a restore's subject never counts for its own restore
+        if self.lock_subjects().of(&value.digest) == Some(from) {
             return;
         }
         self.chain
@@ -1287,10 +1353,13 @@ impl State {
             return false;
         };
         let consented = matches!(change, ChainChange::Membership { op: MembershipOp::Restored, consent: Some(_), .. });
-        let subjects = self.lock_restore_subjects();
+        let subject = match &change {
+            ChainChange::Membership { op: MembershipOp::Restored, member, .. } => Some(member.clone()),
+            _ => None,
+        };
         let mut sigs: Vec<RosterAttestation> = by
             .iter()
-            .filter(|(m, _)| !(consented && subjects.contains(*m)))
+            .filter(|(m, _)| subject.as_ref() != Some(*m))
             .map(|(m, sig)| RosterAttestation { member: m.clone(), sig: sig.clone() })
             .collect();
         // a consented restore keeps up to m survivor voices beside the
@@ -1326,6 +1395,11 @@ impl State {
         if !self.lock_listens() || !self.lock_rostered(from) || from == self.member() {
             return;
         }
+        // A-F1: a restore's subject never leads, known to it or not
+        if self.lock_restore_subjects().contains(from) {
+            tracing::debug!(%from, height, "lock=refused reason=restore_subject");
+            return;
+        }
         let slot = Slot { height, base };
         let ballot = Ballot { round, leader: from.to_string() };
         self.lock_note_locked(height, from);
@@ -1344,8 +1418,9 @@ impl State {
                     tracing::info!(height, ballot = %fmt_ballot(&ballot), "lock=promised");
                 }
                 let accepted = accepted.map(|(b, v)| {
+                    // the whole change (C-MED-5): a leader forced to it can
+                    // carry it to seats that never saw the card
                     let (id, change) = self.chain.lock.values.get(&v.digest).cloned().unwrap_or((0, None));
-                    let change = change.as_ref().and_then(wire_change);
                     molt_core::chain::LockAcceptedValue {
                         round: b.round,
                         leader: b.leader,
@@ -1426,6 +1501,10 @@ impl State {
         forced: bool,
     ) {
         if !self.lock_listens() || !self.lock_rostered(from) || from == self.member() {
+            return;
+        }
+        if self.lock_restore_subjects().contains(from) {
+            tracing::debug!(%from, height, "lock=refused reason=restore_subject");
             return;
         }
         let slot = Slot { height, base };
@@ -1877,7 +1956,7 @@ impl State {
     /// R6: a free signature given where the lock was not enabled (the losing
     /// side of a fork at the enabling height) is marked before any lock
     /// reply once the head reaches a lineage that runs the lock.
-    fn lock_mark_after_move(&mut self, head: u64) {
+    pub(crate) fn lock_mark_after_move(&mut self, head: u64) {
         if !self.lock_cap_on() || !self.lock_enabled() || self.chain.lock.amnesia.is_some() || !self.is_chain_governed() {
             return;
         }

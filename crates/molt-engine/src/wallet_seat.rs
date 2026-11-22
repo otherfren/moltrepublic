@@ -74,9 +74,16 @@ impl State {
     /// counts and the rest are superseded, so the consent founds one purse.
     pub(crate) fn wallet_founding_claim(&mut self) {
         if self.purse.seat.armed_at.is_none() {
-            if !self.purse.seat.founding_inits.is_empty() && self.wallet_init_applied().is_none() {
-                let cards = self.wallet_init_card_ids();
-                self.purse.seat.founding_inits.extend(cards);
+            if !self.purse.seat.founding_inits.is_empty() {
+                match self.wallet_init_applied() {
+                    None => {
+                        let cards = self.wallet_init_card_ids();
+                        self.purse.seat.founding_inits.extend(cards);
+                    }
+                    // T6: an init first seen as its applied block (catch-up,
+                    // lost card gossip) is the founding's too
+                    Some(applied) => self.purse.seat.founding_inits.extend(applied.id),
+                }
             }
             return;
         }

@@ -120,6 +120,9 @@ pub(crate) fn localize_vault_refusal(lang: i32, r: &molt_core::vault::VaultRefus
 fn strict_order_de(t: &str) -> &str {
     match t {
         "Strict Order Mode is not available in this build" => "Strenge Reihenfolge ist in diesem Build nicht verfügbar",
+        "Strict Order Mode needs at least 2 approvals per decision" => {
+            "Strenge Reihenfolge braucht mindestens 2 Zustimmungen pro Entscheidung"
+        }
         "this republic uses Strict Order Mode - needs a newer build" => {
             "diese Republik nutzt die Strenge Reihenfolge - braucht einen neueren Build"
         }

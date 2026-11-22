@@ -409,6 +409,13 @@ impl WalletHandle {
         self.lock_seams.stop_after_accept.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam (B7): as [`Self::__lock_stop_after_accept`], after the
+    /// leader's own acceptance went out.
+    #[doc(hidden)]
+    pub fn __lock_stop_after_own_accept(&self) {
+        self.lock_seams.stop_after_own_accept.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam (B7): this seat's lock stopped (the seam above fired).
     #[doc(hidden)]
     pub fn __lock_stopped(&self) -> bool {

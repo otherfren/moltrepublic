@@ -21,8 +21,10 @@
 //! | a subject's acceptance of a membership value not counted  | `on_accepted` |
 //! | seal: `restore_seal_held` (seat still active)             | `seal`, retried on ticks |
 //! | a sealed restore evicts the old device at later heights   | not modelled: heights are independent here, the old device stays (worst case); the rejoiner is not modelled |
-//! | need(R) = m - 1 (H2 fix: m where m < n)                   | `restore_need` |
+//! | need(R) = m - 1 (H2 fix: `Quorum::restore_need`)         | `restore_need` |
 //! | a seat that is a subject in its own view leads (H2 fix: never) | `may_lead` |
+//! | acceptors refuse a subject's Prepare/Accept (A-F1)       | `refuses_frame` |
+//! | subjects: open cards only (C-HIGH-1), held values, per value intents | `subjects_of`, `ready_cards` |
 //! | persist before the frame; crash between loses both        | `step_acceptor` |
 //! | withdrawal by the proposer                                | `Msg::Withdraw`, lossy |
 //!
@@ -84,6 +86,12 @@ enum Msg {
     Accept { slot: Slot, ballot: Ballot, value: Value, forced: bool },
     Reply { from: usize, reply: Reply },
     Decided { height: u64, value: Value },
+    /// An amnesiac seat asks the others what it may have touched.
+    AmnesiaAsk { from: usize, nonce: u64 },
+    /// `touched`: the highest height the replier holds or saw lock state
+    /// at (or its head + 1); `round`: the highest round it saw from the
+    /// asker.
+    AmnesiaReply { from: usize, nonce: u64, touched: u64, round: u64 },
 }
 
 #[derive(Default)]
@@ -112,6 +120,20 @@ struct Seat {
     intents: BTreeMap<String, BTreeSet<usize>>,
     /// R5/T2: cards whose free ballot went stale, per height, oldest first.
     stale: BTreeMap<u64, Vec<String>>,
+    /// The highest height this seat touched (lock state held or seen).
+    touched: u64,
+    /// The highest round seen from each leader.
+    rounds_by: BTreeMap<usize, u64>,
+    /// Lost its lock state: the replies collected, and the floor and
+    /// round floor once enough are in.
+    amnesia: Option<Amnesia>,
+}
+
+#[derive(Default)]
+struct Amnesia {
+    nonce: u64,
+    replies: BTreeMap<usize, (u64, u64)>,
+    floor: Option<(u64, u64)>,
 }
 
 /// Which fixes run.
@@ -123,6 +145,11 @@ pub(super) struct Fixes {
     pub h1: bool,
     /// A chosen value seals; the seal never gates.
     pub m3: bool,
+    /// An amnesiac seat stays passive at heights up to the highest one
+    /// max(m, n - m + 1) OTHER seats report it may have touched, and
+    /// leads above the highest round they saw from it. Off: it carries on
+    /// with a fresh acceptor at once (the control).
+    pub amnesia_rule: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -144,6 +171,10 @@ pub(super) struct WConfig {
     pub approve: u64,
     /// Percent of frames lost (chaos phase).
     pub drop: u64,
+    /// Per mille of steps that wipe a seat's lock state (amnesia).
+    pub amnesia: u64,
+    /// An amnesia also loses the seat's newest decided heights.
+    pub tail_loss: bool,
 }
 
 #[derive(Debug, Default)]
@@ -215,11 +246,11 @@ impl Sim {
     }
 
     fn restore_need(&self) -> usize {
-        let (n, m) = (self.cfg.n, self.cfg.m);
-        if self.fix.h2 && m < n {
-            m
+        let q = self.quorum();
+        if self.fix.h2 {
+            q.restore_need()
         } else {
-            m.saturating_sub(1).max(1)
+            q.m.saturating_sub(1).max(1)
         }
     }
 
@@ -234,14 +265,74 @@ impl Sim {
                 Kind::Change => None,
             })
             .collect();
-        self.seats[i]
+        if !self.fix.h2 {
+            return self.seats[i]
+                .knows
+                .keys()
+                .filter_map(|d| match self.cards.get(d)?.kind {
+                    Kind::Restore(z) if !restored.contains(&z) => Some(z),
+                    _ => None,
+                })
+                .collect();
+        }
+        // the fix (C-HIGH-1): an OPEN restore card (where m < n not one
+        // whose subject is heard), and every restore value this seat's
+        // acceptor holds
+        let strict = self.cfg.m >= self.cfg.n;
+        let mut out: BTreeSet<usize> = self.seats[i]
             .knows
-            .keys()
-            .filter_map(|d| match self.cards.get(d)?.kind {
-                Kind::Restore(z) if !restored.contains(&z) => Some(z),
+            .iter()
+            .filter_map(|(d, view)| match self.cards.get(d)?.kind {
+                Kind::Restore(z) if !restored.contains(&z) && !view.withdrawn && (strict || !self.acting(z)) => Some(z),
                 _ => None,
             })
-            .collect()
+            .collect();
+        for h in 1..=self.cfg.heights {
+            if let Some((_, v)) = self.seats[i].acceptor.accepted(&Self::slot(h)) {
+                if let Some(Kind::Restore(z)) = self.cards.get(&v.digest).map(|c| c.kind) {
+                    out.insert(z);
+                }
+            }
+        }
+        out
+    }
+
+    /// The fix (A-F1): an acceptor takes no `Prepare`/`Accept` from a seat
+    /// that is a restore's subject in its own view.
+    fn refuses_frame(&self, i: usize, ballot: &Ballot) -> bool {
+        self.fix.h2 && self.subjects_of(i).contains(&ballot.leader[1..].parse::<usize>().expect("a seat"))
+    }
+
+    /// The amnesia rule: passive while the floor is unknown, and at every
+    /// height up to it.
+    fn passive_at(&self, i: usize, h: u64) -> bool {
+        self.fix.amnesia_rule
+            && self.seats[i].amnesia.as_ref().is_some_and(|a| a.floor.map_or(true, |(f, _)| h <= f))
+    }
+
+    /// A seat loses its lock state (a crash between writes, a restored
+    /// backup), and with `tail_loss` its newest decided heights.
+    fn amnesia(&mut self, i: usize) {
+        let seat = &mut self.seats[i];
+        seat.acceptor = Acceptor::default();
+        seat.disk = serde_json::to_string(&seat.acceptor).expect("serializes");
+        seat.runs.clear();
+        seat.tallies.clear();
+        seat.held.clear();
+        seat.seen_round.clear();
+        seat.rounds_by.clear();
+        seat.touched = 0;
+        if self.cfg.tail_loss {
+            if let Some(h) = seat.decided.keys().max().copied() {
+                seat.decided.remove(&h);
+            }
+        }
+        if self.fix.amnesia_rule {
+            self.serial += 1;
+            let nonce = self.serial;
+            self.seats[i].amnesia = Some(Amnesia { nonce, ..Amnesia::default() });
+            self.send_all(i, &Msg::AmnesiaAsk { from: i, nonce });
+        }
     }
 
     fn may_lead(&self, i: usize) -> bool {
@@ -295,6 +386,43 @@ impl Sim {
         if !self.acting(i) {
             return;
         }
+        match &msg {
+            Msg::Prepare { slot, ballot } | Msg::Accept { slot, ballot, .. } => {
+                let leader: usize = ballot.leader[1..].parse().expect("a seat");
+                let r = self.seats[i].rounds_by.entry(leader).or_default();
+                *r = (*r).max(ballot.round);
+                self.seats[i].touched = self.seats[i].touched.max(slot.height);
+                if self.passive_at(i, slot.height) {
+                    return;
+                }
+            }
+            Msg::Reply { reply: Reply::Promise { slot, .. } | Reply::Accepted { slot, .. }, .. } => {
+                self.seats[i].touched = self.seats[i].touched.max(slot.height);
+            }
+            Msg::AmnesiaAsk { from, nonce } => {
+                // a seat that lost its own state knows nothing to report
+                if self.seats[i].amnesia.is_some() {
+                    return;
+                }
+                let touched = self.seats[i].touched.max(self.seats[i].decided.keys().max().copied().unwrap_or(0) + 1);
+                let round = self.seats[i].rounds_by.get(from).copied().unwrap_or(0);
+                self.net.push((*from, Msg::AmnesiaReply { from: i, nonce: *nonce, touched, round }));
+                return;
+            }
+            Msg::AmnesiaReply { from, nonce, touched, round } => {
+                let need = self.cfg.m.max(self.cfg.n - self.cfg.m + 1);
+                if let Some(a) = self.seats[i].amnesia.as_mut().filter(|a| a.nonce == *nonce && *from != i) {
+                    a.replies.insert(*from, (*touched, *round));
+                    if a.floor.is_none() && a.replies.len() >= need {
+                        let floor = a.replies.values().map(|(t, _)| *t).max().unwrap_or(0);
+                        let rounds = a.replies.values().map(|(_, r)| *r).max().unwrap_or(0);
+                        a.floor = Some((floor, rounds));
+                    }
+                }
+                return;
+            }
+            _ => {}
+        }
         match msg {
             Msg::Card { digest } => {
                 let fresh = !self.seats[i].knows.contains_key(&digest);
@@ -312,6 +440,9 @@ impl Sim {
                     v.withdrawn = true;
                 }
             }
+            Msg::Prepare { slot, ballot } if self.refuses_frame(i, &ballot) => {
+                let _ = slot;
+            }
             Msg::Prepare { slot, ballot } => {
                 let seen = self.seats[i].seen_round.entry(slot.height).or_default();
                 *seen = (*seen).max(ballot.round);
@@ -324,6 +455,7 @@ impl Sim {
                     self.send_all(i, &Msg::Reply { from: i, reply });
                 }
             }
+            Msg::Accept { ballot, .. } if self.refuses_frame(i, &ballot) => {}
             Msg::Accept { slot, ballot, value, forced } => {
                 // a membership change rides the frame: the seat learns it
                 self.learn(i, &value.digest);
@@ -338,6 +470,7 @@ impl Sim {
             }
             Msg::Reply { from, reply } => self.on_reply(i, from, reply),
             Msg::Decided { height, value } => self.decide(i, height, &value, false),
+            Msg::AmnesiaAsk { .. } | Msg::AmnesiaReply { .. } => {}
         }
     }
 
@@ -392,7 +525,7 @@ impl Sim {
     }
 
     fn start_ballot(&mut self, i: usize, h: u64) {
-        if !self.may_lead(i) || self.seats[i].decided.contains_key(&h) {
+        if !self.may_lead(i) || self.seats[i].decided.contains_key(&h) || self.passive_at(i, h) {
             return;
         }
         // a free pick whose ballot did not decide goes to the back (R5/T2)
@@ -402,7 +535,13 @@ impl Sim {
             order.push(d);
         }
         let s = Self::slot(h);
-        let round = self.seats[i].acceptor.next_round(&s).max(self.seats[i].seen_round.get(&h).copied().unwrap_or(0) + 1);
+        let reported = self.seats[i].amnesia.as_ref().and_then(|a| a.floor).map_or(0, |(_, r)| r);
+        let round = self.seats[i]
+            .acceptor
+            .next_round(&s)
+            .max(self.seats[i].seen_round.get(&h).copied().unwrap_or(0) + 1)
+            .max(reported + 1);
+        self.seats[i].touched = self.seats[i].touched.max(h);
         let ballot = Ballot { round, leader: name(i) };
         let q = self.quorum();
         self.seats[i].runs.insert(h, Run { leader: Leader::new(s.clone(), q, ballot.clone()), forced: false, waiting: false });
@@ -499,7 +638,11 @@ impl Sim {
                     return None;
                 }
             }
-            let voices = self.seats[i].intents.get(d).map_or(0, |s| s.iter().filter(|v| !subjects.contains(v)).count());
+            // the fix counts a subject's intent for every other card
+            let voices = self.seats[i]
+                .intents
+                .get(d)
+                .map_or(0, |s| s.iter().filter(|v| self.fix.h2 || !subjects.contains(v)).count());
             (voices >= card.need).then(|| Value { digest: d.clone(), need: card.need })
         })
         .collect()
@@ -640,6 +783,12 @@ impl Sim {
         for _ in 0..steps {
             self.step += 1;
             self.lifecycle();
+            if self.cfg.amnesia > 0 && self.rng.next_u64() % 1000 < self.cfg.amnesia {
+                let i = self.rng.below(self.cfg.n);
+                if self.acting(i) {
+                    self.amnesia(i);
+                }
+            }
             self.act();
         }
     }
@@ -726,7 +875,21 @@ pub(super) fn run(cfg: WConfig, fix: Fixes, seed: u64) -> WOutcome {
 }
 
 pub(super) fn base(n: usize, m: usize) -> WConfig {
-    WConfig { n, m, heights: 3, lost: 0, dies: 0, die_at: 0, revive: 0, revive_at: 0, withdraw: 3, approve: 85, drop: 15 }
+    WConfig {
+        n,
+        m,
+        heights: 3,
+        lost: 0,
+        dies: 0,
+        die_at: 0,
+        revive: 0,
+        revive_at: 0,
+        withdraw: 3,
+        approve: 85,
+        drop: 15,
+        amnesia: 0,
+        tail_loss: false,
+    }
 }
 
 pub(super) fn configs() -> Vec<(&'static str, WConfig)> {
@@ -779,7 +942,7 @@ fn the_wire_rules_before_the_fourth_review_fork_and_halt() {
 /// two lost, n-of-n.
 #[test]
 fn with_the_fixes_no_fork_and_every_height_decides() {
-    let fix = Fixes { h2: true, h1: true, m3: true };
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false };
     for (name, cfg) in configs() {
         for drop in [15, 45] {
             for seed in 0..SIM_SEEDS {
@@ -790,4 +953,40 @@ fn with_the_fixes_no_fork_and_every_height_decides() {
             }
         }
     }
+}
+
+fn amnesia_configs() -> Vec<(&'static str, WConfig)> {
+    vec![
+        ("2-of-3", WConfig { amnesia: 8, ..base(3, 2) }),
+        ("3-of-5", WConfig { amnesia: 8, ..base(5, 3) }),
+        ("2-of-5", WConfig { amnesia: 8, ..base(5, 2) }),
+        ("3-of-4", WConfig { amnesia: 8, ..base(4, 3) }),
+        ("2-of-3, tail lost", WConfig { amnesia: 8, tail_loss: true, ..base(3, 2) }),
+        ("3-of-5, tail lost", WConfig { amnesia: 8, tail_loss: true, ..base(5, 3) }),
+    ]
+}
+
+/// Amnesia (B-F2, the corrected rule): a seat that lost its lock state
+/// (as acceptor, promiser or leader, with or without its newest chain
+/// heights) asks the others; with replies from max(m, n - m + 1) OTHER
+/// seats it is passive up to the highest height they report it may have
+/// touched, and leads above the highest round they saw from it. The
+/// control (carrying on at once) forks; the rule never does. m = n is
+/// left out on purpose: no reply set proves anything there, the
+/// recovery ritual is the only exit.
+#[test]
+fn an_amnesiac_seat_waits_for_the_others_and_never_forks() {
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: true };
+    let control = Fixes { amnesia_rule: false, ..fix };
+    let mut control_forks = 0;
+    for (name, cfg) in amnesia_configs() {
+        for seed in 0..SIM_SEEDS {
+            let out = run(cfg, fix, seed);
+            assert_eq!(out.forks, 0, "{name}: fork at seed {seed}");
+            assert_eq!(out.learned_twice, 0, "{name}: learned twice at seed {seed}");
+            control_forks += run(cfg, control, seed).forks;
+        }
+    }
+    assert!(control_forks > 0, "amnesia without the rule never forked");
+    eprintln!("amnesia without the rule: {control_forks} forks");
 }

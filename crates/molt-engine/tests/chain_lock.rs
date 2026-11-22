@@ -609,14 +609,14 @@ async fn a_chosen_restore_seals_after_its_withdrawal_and_is_reported() {
     let ([mara, walter, dora], dora_phrase) = found_trio(tmp.path(), &url).await;
     lock_on(&[&mara, &walter, &dora], true).await;
     every_seat_announced(&[&mara, &walter, &dora]).await;
-    // dora lost: mara (first in the line) leads and stops right after her
-    // Accept leaves, before accepting herself; walter coordinates
+    // dora lost: mara (first in the line) leads, accepts and stops;
+    // walter coordinates
     for w in [&mara, &walter] {
         w.__seat_active_secs(0);
         w.__lock_timing(15, 3);
     }
     drop(dora);
-    mara.__lock_stop_after_accept();
+    mara.__lock_stop_after_own_accept();
     let epoch = status(&walter).await.mls_epoch;
     walter.execute(Command::RecoverInviteStart { member: "dora".to_string() }).await.expect("mint");
     let s = wait_for(&walter, "the recovery link", |s| {
@@ -632,9 +632,9 @@ async fn a_chosen_restore_seals_after_its_withdrawal_and_is_reported() {
         assert!(tokio::time::Instant::now() < deadline, "mara never led the restore");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    // walter accepts once his settle passed: chosen (the restore's need
-    // is one survivor); his seal waits a grace (15 s) as a learner, and
-    // the withdrawal lands inside it
+    // walter accepts once his settle passed: chosen (both survivors, H2);
+    // his seal waits a grace (15 s) as a learner, and the withdrawal
+    // lands inside it
     tokio::time::sleep(Duration::from_secs(7)).await;
     rejoiner.execute(Command::RecoverCancel).await.expect("cancel");
     drop(rejoiner);

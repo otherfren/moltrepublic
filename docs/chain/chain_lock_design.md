@@ -161,37 +161,44 @@ one ballot. Rules:
 ### 4.2 Consented restore
 
 The consent is a pre-signed statement of the returning seat Z (bound to
-a height window and Z's previous anchor, v2), not a live acceptor. It
-counts as Z's acceptance of the restore R at every ballot, so `need(R) =
-m - 1` live survivors. Safe iff Z's lost device never acts as an
-acceptor (it is gone by definition of a restore, and B2/B3 gate the
-restore of a live seat): then the acceptor universe is N \ {Z}, size n -
-1, and Q1 + (m - 1) = n > n - 1 still intersects - also for any value
-Z's old device accepted before it died (its acceptances are at heights
-up to its last head + 1; a quorum minus Z still meets P).
+a height window and Z's previous anchor, v2), not a live acceptor. Z's
+old device may come back at any time (a found laptop) and promise,
+accept, even lead without knowing it is being restored - the design does
+not rely on it being gone (fourth review, H2/A-F1).
 
+- **need(R) = m where m < n** (`Quorum::restore_need`): R's acceptors
+  come from N \ {Z}, and Q1 = n - m + 1 meets any m of them even when Z
+  promises. Cost: a restore needs max(n - m + 1, m) live survivors (2-of-3
+  and 3-of-5: unchanged in phase 1; 3-of-4: 2 -> 3; 4-of-5: 3 -> 4).
+  Pinned: `a_restore_needs_m_where_m_is_below_n`.
+- **m = n: need(R) = n - 1**, and the consent stands in for Z. Q1 = 1, so
+  a promise from Z alone would be a phase 1: every acceptor refuses
+  `LockPrepare`/`LockAccept` from a seat that is a restore's subject in
+  its view (`an_acceptor_refuses_a_restore_subjects_prepare`); R's n - 1
+  acceptors all know R, so a Z ballot reaches none of them.
+- **Who is a subject, for which value** (`lock_subjects`, a pure
+  `Subjects` in `lock.rs`): an OPEN consented restore card (a declined or
+  withdrawn one takes no live seat out, C-HIGH-1:
+  `a_declined_restore_card_makes_no_subject`; where m < n not one whose
+  seat is heard - it is alive), and every restore value the lock holds at
+  head + 1. A subject is never a promiser and never a leader (also not
+  in its own view: `a_restore_subject_never_leads`); its acceptance of
+  its own restore never counts; its intents and acceptances of every
+  other value count as any seat's.
+- Per value (T1): the subject is no unheard voice for its OWN restore
+  (it never accepts it) and an ordinary unheard voice for every other
+  value (`a_lost_seat_heard_for_every_value_forks_when_it_comes_back`).
+  With need(R) = m the excusal is no longer needed for safety; it stays
+  for liveness: in 2-of-3 a restore one survivor holds is otherwise
+  forced while Z is silent.
 - The consent rules stay as they are (`restore_consent_at` at the slot's
   height, single use, window). A consent invalid at the height means the
   change is not a value there; acceptors never accept it.
-- The block carries m - 1 survivor signatures plus the consent, as
-  today; with m survivors accepting, the m lowest-named survivors sign
-  and the consent still rides (`try_commit`'s rule).
-- Guard: a leader does not count a promise from a seat it knows is the
-  subject of a consented restore - registered, or held by the lock at
-  the slot (fewer promisers is always safe).
-- Per value (T1): the subject is no unheard voice for its OWN restore
-  (it never accepts it) and an ordinary unheard voice for every other
-  value - its old device may have accepted one before it was lost, or be
-  back (a found laptop) and accept one now. Heard as free for every value
-  it let a second value in (`a_lost_seat_heard_for_every_value_forks_when_it_comes_back`).
-- **Changed liveness, on purpose:** phase 1 needs n - m + 1 seats, so in
-  2-of-3 BOTH survivors must be reachable to restore the third (2-of-2:
-  the one survivor suffices). On one lineage this removes N1's shape (a
-  survivor restoring a seat alone); two survivors on two diverged
-  branches have two slots, which stays B3's `chain diverged` gate.
-- Cannot guarantee: if Z's old device is in fact alive and promises (the
-  N1 shape), P may miss R's acceptor and a different value can seal at
-  that slot. B3 is the defence; the lock degrades to R1 healing there.
+- The block carries the survivor signatures (m where m < n) plus the
+  consent; `verify_chain` accepts m - 1 or more beside it.
+- Simulation: `lock_sim.rs` (wire-faithful) found the 2-of-3 fork on the
+  old rule (seed 42) and decides every slot without a fork with these
+  rules.
 
 ## 5. Ballots and leaders
 
@@ -381,7 +388,11 @@ free mark (exclusivity), so it can never join a lock quorum.
 restored onto one): they sign freely and answer no lock frame.
 - Safety: exclusivity, as before. A lock decision needs n - m + 1
   promises from seats that never sign freely there, so at most m - 1
-  free signatures exist at that height.
+  free signatures exist at that height - for an ordinary value. A
+  consented restore seals freely with m - 1 survivor signatures plus the
+  consent, so a free restore can stand beside a lock decision (A-F2):
+  open, see §14 (a seat without the capability in a republic running the
+  lock).
 - Liveness: the lock decides while n - m + 1 capable seats promise and
   `need` of them approve. Where the free seats leave it no quorum, the
   release rule (§14) turns the height free and B6 decides.
@@ -722,27 +733,42 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   `sealed-after-withdrawal:<id>`. Once the card is retired the leader
   cannot resolve a `LockAccepted` for it, so only a seat holding the
   value seals it - slower, not a stall.
-- **T1, the approver rule.** A lost seat counts as a voice that may hold
-  any ordinary value at the slot, so a value fewer than `need` survivors
-  hold can stay forced while the lost seat is silent. A seat whose intent
-  for a card stood accepts it when a leader is FORCED to it (`LockAccept
-  { forced: true }`), although the card was withdrawn since; a leader
-  only proposes a card with m intents, so the forced value can always
-  complete. A seat that never approved, or declined, does not. On the
-  forced path only the validity gates hold (a restore consent valid at
-  the height, a cut of this height with this seat's state hash, a
-  signing key); the withdrawal, the settle, the seat-still-active gate
-  and the local vault/wallet checks do not. **A withdrawal under the
-  lock means "do not choose this if it is not yet under way"**; once a
-  leader proposed it, it may still seal and is reported
-  (`sealed-after-withdrawal`, for a restore
+- **H1, a forced value is completed by any promiser.** A lost seat
+  counts as a voice that may hold any ordinary value at the slot, so a
+  value fewer than `need` survivors hold can stay forced while the lost
+  seat is silent. In Paxos an acceptor never refuses a value a leader
+  was forced to propose: a seat accepts a `LockAccept { forced: true }`
+  whether or not it approved the card, also when the card was withdrawn
+  (an approval gates what a leader may FREELY pick, not what a seat must
+  complete). The leader carries the whole change on a forced Accept, and
+  a promise reports the whole change of the value it holds (C-MED-5), so
+  a seat that never saw the card can complete it. What such a seat
+  checks before signing (M4, `lock_forced_invalid`): the carried change
+  hashes to the forced digest; the checks an incoming card meets
+  (`receive_proposed`: no reserved op, the vault and wallet wire shapes,
+  the feature-set refusals, no other change under the id); a restore's
+  consent valid at the height; a cut of this height with this seat's
+  state hash; any other membership change only as registered here. The
+  withdrawal, the settle, the seat-still-active gate and the local
+  vault/wallet checks do not hold. **A withdrawal under the lock means
+  "do not choose this if it is not yet under way"**; a value that seals
+  anyway is reported (`sealed-after-withdrawal`, for a restore
   `restore-sealed-after-withdrawal` with no re-key). Residual: a forced
-  value that fails a validity gate on every approver (a cut whose hash
-  no longer matches, a consent out of its window) stays forced - S1 has
-  no "cannot accept" answer that the hearing would count. Simulation:
-  12 configs x 1,500 seeds with lost seats coming back and withdrawals,
-  no fork, no undecided slot; without the rule 4-28 % of the runs with a
-  lost seat halt (`simulation_with_withdrawals_decides_every_slot`).
+  cut whose hash no longer matches on every seat stays forced (C-LOW-7,
+  A-F6) - a cut with a lost seat halts. The local wallet/vault refusal
+  is lost on the forced path (L5); no divergence follows, the change is
+  the chain's. Pinned: `a_forced_withdrawn_value_completes_with_any_promiser`,
+  `lock_sim` (H1 halt on the old rule at seed 32).
+- **A-F3.** Lock state at a height on any lineage forbids a free
+  signature there, also on a lineage without the enabling block - the
+  signature is base-agnostic and would count free where the lock holds
+  (`lock_state_on_another_lineage_forbids_a_free_signature`).
+- **Fault tolerance (A-F4).** The lock decides while max(n - m + 1, m)
+  seats answer; it halts beyond min(m - 1, n - m) lost seats (B6: n -
+  m + 1, since a consented restore there needs m - 1 survivors). 2-of-3:
+  1 (2); 2-of-5: 1 (4); 3-of-5: 2 (3); 3-of-7: 2 (5); 4-of-7: 3 (4). The enabling vote is refused where m < 2
+  (`Strict Order Mode needs at least 2 approvals per decision`,
+  `the_mode_needs_two_approvals_per_decision`).
 - **B-F1/D-F1, a seat never forgets what it promised or accepted at a
   slot that can still be contended.** A head move forgets slots only up
   to `min(durable_head, max(last cut, head - SLOT_KEEP))`: never above
@@ -768,7 +794,10 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   while another card is ready; when all went stale they take turns, the
   one stale longest first (T2: a card blocked for good never takes every
   ballot from one that went stale once). A
-  forced value is never skipped.
+  forced value is never skipped. Residual (L6): a free pick that a late
+  promise turned into a forced value is not marked stale when its
+  ballot lapses; it is the forced value then, and forced values are not
+  rotated.
 - **W5** voices before digests; **W6** marks unwritten at open mean
   amnesia; **W7** no amnesia where the lock is not enabled; **W8** the
   restore label counts intents; **W9** an `Accept` before its card is

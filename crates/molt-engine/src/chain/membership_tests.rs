@@ -2344,9 +2344,14 @@ fn a_chosen_restore_seals_after_its_withdrawal() {
     );
     assert!(
         walter.chain.lock.outbox.iter().any(|e| matches!(e.body, WorkspaceEvent::LockAccepted { .. })),
-        "walter accepted: the value is chosen"
+        "walter accepted"
     );
-    wire(&mut walter, "petra", 3, WorkspaceEvent::Withdrawn { id: ProposalId(id), by: "petra".to_string() });
+    // the leader's own acceptance: both survivors, the value is chosen
+    let base = walter.lock_slot().expect("slot").base;
+    let sig = molt_storage::identity_sign(b.key("petra"), &molt_core::chain::approval_bytes(&b.republic_id, 1, &change));
+    let digest = walter.lock_value(1, &change).expect("value").digest;
+    wire(&mut walter, "petra", 3, WorkspaceEvent::LockAccepted { height: 1, base, round: 20, leader: "petra".into(), digest, sig });
+    wire(&mut walter, "petra", 4, WorkspaceEvent::Withdrawn { id: ProposalId(id), by: "petra".to_string() });
     let grace = walter.lock_grace();
     for t in [grace + 1, grace + settle + 2, 2 * grace + 2 * settle + 3] {
         walter.presence.clock_override = Some(10_000 + settle + 1 + t);

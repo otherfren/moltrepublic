@@ -59,6 +59,19 @@ impl Quorum {
     /// the non-free seats cannot answer phase 1 (`free >= m`), or they are
     /// too few to accept m (`free >= n - m`, plus one when this seat's own
     /// acceptance still counts among them).
+    /// A consented restore's need (H2): m where m < n, so Q1 = n - m + 1
+    /// meets its acceptors even when the subject's old device promises;
+    /// m - 1 only for m = n, where the consent stands in for the one seat
+    /// every other value needs (there the acceptors refuse the subject's
+    /// frames instead).
+    pub(crate) fn restore_need(self) -> usize {
+        if self.m < self.n {
+            self.m
+        } else {
+            self.m.saturating_sub(1).max(1)
+        }
+    }
+
     pub(crate) fn lock_dead(self, free: usize, holds_acceptance: bool) -> bool {
         free > 0 && free >= self.m.min(self.n.saturating_sub(self.m) + usize::from(holds_acceptance))
     }
@@ -362,6 +375,31 @@ impl Leader {
 
     pub(crate) fn proposed(&self) -> Option<&Value> {
         self.proposed.as_ref()
+    }
+}
+
+/// Who is the subject of which consented restore, as one seat sees it
+/// (H2, C-HIGH-1): value digest -> seat.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Subjects(BTreeMap<String, String>);
+
+impl Subjects {
+    pub(crate) fn insert(&mut self, digest: String, seat: String) {
+        self.0.insert(digest, seat);
+    }
+
+    /// Seats that are the subject of some restore here: never a promiser
+    /// and never a leader - acceptors refuse their `Prepare` and `Accept`
+    /// (A-F1: an old device back without knowing would lead with its own
+    /// promise alone where m = n).
+    pub(crate) fn seats(&self) -> BTreeSet<String> {
+        self.0.values().cloned().collect()
+    }
+
+    /// The subject of the restore `digest`, if it is one: its acceptance
+    /// of that value never counts.
+    pub(crate) fn of(&self, digest: &str) -> Option<&str> {
+        self.0.get(digest).map(String::as_str)
     }
 }
 
