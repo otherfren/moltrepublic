@@ -1816,3 +1816,185 @@ fn a_node_that_is_behind_holds_its_restore_approval() {
     walter.retry_held_restore_approvals();
     assert!(signed(&walter), "level: signed");
 }
+
+/// The `MembershipProposed` frame of a v2 card for dora, as petra (the
+/// coordinator) sends it, and the change it registers.
+fn dora_card_frame(b: &Builder, id: u64) -> (molt_core::WorkspaceEvent, ChainChange) {
+    let npk = "dd".repeat(32);
+    let consent = consent_v2_for(b, "dora", &npk, &[], 0, &"cc".repeat(32));
+    let frame = molt_core::WorkspaceEvent::MembershipProposed {
+        id: molt_core::ProposalId(id),
+        op: MembershipOp::Restored,
+        member: "dora".to_string(),
+        identity_pk: b.pk("dora"),
+        nostr_pk: Some(npk.clone()),
+        relays: Vec::new(),
+        consent: Some(consent.clone()),
+    };
+    let change = ChainChange::Membership {
+        op: MembershipOp::Restored,
+        member: "dora".to_string(),
+        identity_pk: b.pk("dora"),
+        nostr_pk: Some(npk),
+        relays: Vec::new(),
+        consent: Some(consent),
+    };
+    (frame, change)
+}
+
+/// D1 (v0.1.0 acceptance): a bystander that saw the proposer's withdrawal
+/// never opens, signs, holds or seals that restore card again - whatever
+/// arrives later (a re-served card, a peer's signature, the gate opening,
+/// the card aging out).
+#[test]
+fn a_withdrawn_restore_stays_withdrawn_on_a_bystander() {
+    use molt_core::{ProposalId, ProposalState, WorkspaceEvent};
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    // sorted [dora, petra, walter]: petra mints ids = 2 mod 3
+    let id = 8;
+    let (frame, change) = dora_card_frame(&b, id);
+    let petra_sig = molt_storage::identity_sign(
+        b.key("petra"),
+        &molt_core::chain::approval_bytes(&b.republic_id, 1, &change),
+    );
+    let approval = WorkspaceEvent::Approved { id: ProposalId(id), by: "petra".to_string(), height: 1, sig: petra_sig };
+    let withdrawn = WorkspaceEvent::Withdrawn { id: ProposalId(id), by: "petra".to_string() };
+    let own_sig =
+        |w: &crate::State| w.chain.pending_sigs.get(&id).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
+
+    // the card first (held: dora was heard), then the withdrawal
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    heard(&mut walter, "dora", 10_000 - 10, 10_000);
+    wire(&mut walter, "petra", 1, frame.clone());
+    assert!(walter.recovery.held_approvals.contains(&id), "held while dora is heard");
+    wire(&mut walter, "petra", 2, withdrawn.clone());
+    // …then everything that used to be able to reopen it
+    wire(&mut walter, "petra", 3, frame.clone());
+    wire(&mut walter, "petra", 4, approval);
+    heard(&mut walter, "dora", 10_000 - 10, 10_000 + 120);
+    walter.retry_held_restore_approvals();
+    walter.drain_held_seals();
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 0, "never sealed");
+    assert!(!own_sig(&walter), "never signed");
+    assert_eq!(walter.proposals.get(&id).map(|p| (p.state, p.withdrawn)), Some((ProposalState::Rejected, true)));
+    assert!(!walter.chain.proposal_changes.contains_key(&id), "no longer registered");
+    assert!(walter.recovery.held_approvals.is_empty() && walter.chain.seal_held.is_empty(), "nothing held");
+}
+
+/// D1: [`a_withdrawn_restore_stays_withdrawn_on_a_bystander`] with the
+/// withdrawal ahead of the card, and with the card aged out.
+#[test]
+fn a_withdrawn_restore_stays_withdrawn_in_any_order() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let id = 8;
+    let (frame, _) = dora_card_frame(&b, id);
+    let withdrawn = molt_core::WorkspaceEvent::Withdrawn { id: molt_core::ProposalId(id), by: "petra".to_string() };
+    let own_sig =
+        |w: &crate::State| w.chain.pending_sigs.get(&id).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
+
+    // the withdrawal first, the card after it
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    wire(&mut walter, "petra", 1, withdrawn.clone());
+    wire(&mut walter, "petra", 2, frame.clone());
+    assert!(walter.proposals.get(&id).is_some_and(|p| p.withdrawn), "the parked withdrawal stands");
+    assert!(!own_sig(&walter), "never signed");
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 0);
+
+    // the withdrawn card aged out with its discussion: a late re-serve
+    // must not bring it back as a fresh vote
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    heard(&mut walter, "dora", 10_000 - 10, 10_000);
+    wire(&mut walter, "petra", 1, frame.clone());
+    wire(&mut walter, "petra", 2, withdrawn);
+    walter.retire_decided_cards(u64::MAX, 10_000);
+    heard(&mut walter, "dora", 10_000 - 10, 10_000 + 120);
+    wire(&mut walter, "petra", 3, frame);
+    walter.retry_held_restore_approvals();
+    walter.drain_held_seals();
+    assert!(!own_sig(&walter), "a retired card is never signed");
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 0, "…nor sealed");
+    assert!(!walter.proposals.contains_key(&id), "…nor reopened");
+}
+
+/// A link minted on `coord` for dora: the ticket registered and the link
+/// shown, as the inbox task reports it.
+fn mint_link_for_dora(coord: &mut crate::State, b: &Builder, ticket: &str) -> String {
+    coord.recovery.tickets.insert(ticket.to_string(), "dora".to_string());
+    let link = crate::recovery::RecoveryInvite {
+        republic: "Chess Club".to_string(),
+        member: "dora".to_string(),
+        ticket: ticket.to_string(),
+        server: "loopback".to_string(),
+        queue_id: "ab".repeat(16),
+        wrap: "cd".repeat(32),
+        republic_id: b.republic_id.clone(),
+        handover: None,
+        consent_anchor: None,
+    }
+    .render();
+    coord.cmd_net_recover_link_ready("dora".to_string(), link.clone(), None).expect("ack");
+    link
+}
+
+/// D1b + D2 on the coordinator: a cancelled run withdraws the card and
+/// shows its link again (the ticket is live); when the card seals
+/// elsewhere anyway, nothing is re-keyed, the operator is told and the
+/// old link is dead - a new link restores the seat.
+#[test]
+fn a_withdrawn_restore_sealed_elsewhere_is_reported_not_rekeyed() {
+    use molt_core::ProposalState;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    coord.config.self_cosign = false;
+    let ticket = "11".repeat(16);
+    let link = mint_link_for_dora(&mut coord, &b, &ticket);
+    let npk = "dd".repeat(32);
+    let kp_hex = kp_hex_for(&b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), &ticket, &kp_hex, &b.republic_id, &npk, &[]);
+    let consent = consent_v2_for(&b, "dora", &npk, &[], 0, &"cc".repeat(32));
+    let id = coord
+        .verify_and_propose_restore("dora", &b.pk("dora"), &kp_hex, &ticket, &proof, &npk, &[], &consent, "")
+        .expect("proposed");
+    // what the Ready did: the ticket spent, the link off the notice
+    coord.recovery.tickets.remove(&ticket);
+    coord.recovery.spent_tickets.insert(ticket.clone());
+    coord.clear_link_notice(&ticket);
+    assert_eq!(coord.session.notice, "", "a spent link is off the notice");
+    let card = coord.chain.proposal_changes.get(&id).cloned().expect("card");
+
+    let attempt = molt_net::invite::recover_attempt_id(&kp_hex);
+    coord.cmd_net_recover_peer_failed("dora", "cancelled", "0.0.21", &attempt, &npk).expect("ack");
+    assert!(coord.proposals.get(&id).is_some_and(|p| p.withdrawn), "withdrawn");
+    assert!(coord.recovery.tickets.contains_key(&ticket), "the ticket is live again");
+    assert_eq!(coord.session.notice, format!("recovery-link:{link}"), "D2: the live link shows again");
+
+    // walter had signed before the withdrawal reached him: his block lands
+    let seq = coord.next_seq;
+    coord.receive_block(b.seal(1, card, &["walter"]));
+    assert_eq!(coord.chain.head.as_ref().expect("head").height, 1, "a sealed block stands");
+    assert_eq!(coord.session.notice, "restore-sealed-after-withdrawal:dora");
+    assert!(coord.recovery.pending.is_empty() && coord.recovery.mesh_window.is_empty(), "no re-key");
+    assert_eq!(coord.next_seq, seq, "nothing recorded: no MlsCommit");
+    assert!(!coord.recovery.tickets.contains_key(&ticket), "the old link is dead");
+    assert_eq!(
+        coord.proposals.get(&id).map(|p| (p.state, p.withdrawn)),
+        Some((ProposalState::Applied, false)),
+        "the card reads as what the chain says"
+    );
+    // the seat restores again with a new link
+    let fresh = "22".repeat(16);
+    coord.recovery.tickets.insert(fresh.clone(), "dora".to_string());
+    let npk2 = "ee".repeat(32);
+    let kp2 = kp_hex_for(&b, "dora");
+    let proof2 = crate::make_seat_proof(b.key("dora"), &fresh, &kp2, &b.republic_id, &npk2, &[]);
+    let consent2 = consent_v2_for(&b, "dora", &npk2, &[], 1, &npk);
+    coord
+        .verify_and_propose_restore("dora", &b.pk("dora"), &kp2, &fresh, &proof2, &npk2, &[], &consent2, "")
+        .expect("a new link restores the seat");
+}

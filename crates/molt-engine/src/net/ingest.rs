@@ -599,16 +599,18 @@ impl State {
                     tracing::warn!(%from, claimed = %by, "dropping a withdraw claiming another member");
                     return Ok(Reply::Ack);
                 }
-                if matches!(
-                    self.register_withdraw(id.0, &from, envelope.ts),
-                    crate::proposals::WithdrawOutcome::Withdrawn
-                ) {
-                    // R12: durable like the decline above, at the wire stamp
+                let outcome = self.register_withdraw(id.0, &from, envelope.ts);
+                tracing::info!(id = id.0, %from, ?outcome, "withdraw_received");
+                // R12: durable like the decline above, at the wire stamp -
+                // a parked one too (D1), or a reopen reopens its card
+                if outcome != crate::proposals::WithdrawOutcome::Ignored {
                     self.keep_peer_event(
                         from.clone(),
                         envelope.ts,
                         WorkspaceEvent::Withdrawn { id, by: by.clone() },
                     );
+                }
+                if outcome == crate::proposals::WithdrawOutcome::Withdrawn {
                     self.emit(molt_core::Event::Withdrawn { id });
                 }
             }

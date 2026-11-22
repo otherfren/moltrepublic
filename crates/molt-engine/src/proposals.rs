@@ -27,7 +27,7 @@ use crate::State;
 /// Parked declines: at most this many proposal ids wait for their proposal
 /// (each id holds at most one voice per member) — a roster member can spam
 /// declines for invented ids, and the park must not grow with them.
-const PARKED_DECLINE_IDS_MAX: usize = 1024;
+pub(crate) const PARKED_DECLINE_IDS_MAX: usize = 1024;
 
 /// Per-member ceiling on parked decline ids: a single member wedging the
 /// park with invented ids must not evict or block the other members'
@@ -1325,6 +1325,11 @@ impl State {
         self.chain.pending_sigs.remove(&id);
         self.chain.own_approvals.remove(&id);
         self.chain.pending_declines.remove(&id);
+        // D1: nothing left that a retry or a re-served card could sign
+        self.chain.proposal_changes.remove(&id);
+        self.chain.seal_held.remove(&id);
+        self.recovery.held_approvals.remove(&id);
+        self.recovery.held_seals.remove(&id);
         WithdrawOutcome::Withdrawn
     }
 

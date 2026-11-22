@@ -530,3 +530,29 @@ fn a_held_relay_approval_survives_a_restart() {
     back.cmd_net_delivery_tick().expect("tick");
     assert!(back.own_signature_stands(id), "signed on the settled chain");
 }
+
+/// D1: a withdrawal that outran its card is parked - and the park
+/// survives a reopen, so the card arriving afterwards is still withdrawn,
+/// never a fresh vote.
+#[test]
+fn a_withdrawal_ahead_of_its_card_survives_a_reopen() {
+    for with_snapshot in [false, true] {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let (mut walter, _tmp, dir) = stored_chain_signer(&b, "walter", &["petra", "walter", "dora"]);
+        // sorted [dora, petra, walter]: petra mints ids = 2 mod 3
+        wire(&mut walter, "petra", 1, WorkspaceEvent::Withdrawn { id: ProposalId(8), by: "petra".to_string() });
+        let mut back = reopen_chain_signer(walter, &dir, &b, "walter", with_snapshot);
+        wire(
+            &mut back,
+            "petra",
+            2,
+            WorkspaceEvent::Proposed {
+                id: ProposalId(8),
+                surface: Surface::Organization,
+                payload: json!({ "op": "set_name", "value": "Gone" }),
+            },
+        );
+        let p = back.proposals.get(&8).expect("card");
+        assert_eq!((p.state, p.withdrawn), (ProposalState::Rejected, true), "snapshot={with_snapshot}");
+    }
+}

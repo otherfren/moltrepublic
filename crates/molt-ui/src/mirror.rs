@@ -843,6 +843,8 @@ pub(crate) fn apply_session(
         } else if let Some(rest) = sv.notice.strip_prefix("vote-refused:") {
             // A6: the vote this seat cast was dropped by a peer that is ahead
             ui.invoke_show_toast_error(vote_refused_copy(lang, rest).into());
+        } else if let Some(member) = sv.notice.strip_prefix("restore-sealed-after-withdrawal:") {
+            ui.invoke_show_toast_error(crate::labels::restore_sealed_after_withdrawal_copy(lang, member).into());
         } else if let Some(rest) = sv.notice.strip_prefix("chain-diverged:") {
             // A2.1: Rust-side copy like genesis-undelivered - no window rebuild
             ui.invoke_show_toast_error(chain_diverged_copy(lang, rest).into());

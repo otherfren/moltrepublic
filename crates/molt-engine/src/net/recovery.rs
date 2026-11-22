@@ -25,6 +25,9 @@ pub(crate) const MAX_ANCHOR_ATTEMPTS: usize = 4;
 /// The coordinator's wait line while an attempt waits for Ready.
 const WAIT_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Links kept in memory to show again (D2).
+const LINKS_KEPT: usize = 16;
+
 /// B4: the answer to a Want/Ready for an attempt this coordinator does
 /// not hold (it restarted, or the link was re-minted).
 pub(crate) const LINK_OUTDATED: &str = "link outdated";
@@ -369,6 +372,21 @@ impl State {
             .is_some_and(|inv| inv.ticket == ticket);
         if shows {
             self.session.notice.clear();
+            self.emit_session(SessionScope::Full);
+        }
+    }
+
+    /// D2: a ticket live again (its run withdrawn) shows its link again.
+    pub(crate) fn show_link_notice(&mut self, ticket: &str) {
+        if !self.recovery.tickets.contains_key(ticket) {
+            return;
+        }
+        let Some(link) = self.recovery.links.iter().find(|(t, _)| t == ticket).map(|(_, l)| l.clone()) else {
+            return;
+        };
+        let notice = format!("recovery-link:{link}");
+        if self.session.notice != notice {
+            self.session.notice = notice;
             self.emit_session(SessionScope::Full);
         }
     }
@@ -734,7 +752,7 @@ impl State {
                 if let Some(a) = self.recovery.anchor_first.remove(&ticket) {
                     a.abort();
                 }
-                self.clear_link_notice(&ticket);
+                self.show_link_notice(&ticket);
                 tracing::info!(%member, stage = "anchor", "recover_withdrawn");
                 return Ok(Reply::Ack);
             }
@@ -1105,6 +1123,13 @@ impl State {
         // the link itself is single-use secret material — it goes to the
         // operator surface only, never into the log
         tracing::info!(%member, "recovery link ready");
+        if let Some(inv) = crate::recovery::RecoveryInvite::parse(&link) {
+            self.recovery.links.retain(|(t, _)| *t != inv.ticket);
+            self.recovery.links.push_back((inv.ticket, link.clone()));
+            while self.recovery.links.len() > LINKS_KEPT {
+                self.recovery.links.pop_front();
+            }
+        }
         self.session.notice = format!("recovery-link:{link}");
         self.emit_session(molt_core::SessionScope::Full);
         Ok(Reply::Ack)
@@ -1151,6 +1176,7 @@ impl State {
         }
         if !ticket.is_empty() {
             self.recovery.tickets.remove(&ticket);
+            self.recovery.links.retain(|(t, _)| *t != ticket);
         }
         tracing::warn!(%member, %reason, "recovery link mint failed");
         self.session.notice = format!("recovery-link-failed:{reason}");

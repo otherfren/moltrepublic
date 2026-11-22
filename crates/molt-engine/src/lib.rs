@@ -1154,6 +1154,12 @@ pub(crate) struct RecoveryState {
     /// Recoveries whose card the sweep dropped as dead, one per seat: not
     /// in flight (R3), but a reorg can still seal the card.
     pub(crate) swept: HashMap<String, chain::PendingRecovery>,
+    /// D1: cards this node withdrew for a cancelled run, newest last
+    /// (bounded). One that seals anyway is reported, never re-keyed.
+    pub(crate) withdrawn: std::collections::VecDeque<(Vec<u64>, chain::PendingRecovery)>,
+    /// D2: `(ticket, link)` of the links minted this session, newest last
+    /// (bounded), so a link live again shows again. Never logged.
+    pub(crate) links: std::collections::VecDeque<(String, String)>,
     /// Review R1-R4: runs seen per ticket, spent runs, minted tickets.
     pub(crate) attempts: chain::AttemptBook,
     /// The running rejoiner's quit: it withdraws its run, then ends.
@@ -1763,6 +1769,8 @@ impl State {
                 spent_tickets: std::collections::HashSet::new(),
                 anchor_first_seats: std::collections::HashSet::new(),
                 swept: HashMap::new(),
+                withdrawn: std::collections::VecDeque::new(),
+                links: std::collections::VecDeque::new(),
                 attempts: chain::AttemptBook::default(),
                 quit: None,
                 readmitted: std::sync::Arc::default(),
