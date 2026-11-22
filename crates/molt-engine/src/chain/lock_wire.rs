@@ -137,9 +137,10 @@ pub(crate) struct LockRuntime {
     /// a leader's frame): never counted free there - a seat that later
     /// signs freely at that height was downgraded, not free (S2).
     locked_seen: BTreeMap<u64, BTreeSet<String>>,
-    /// Cards proposed freely at a height whose ballot went stale there:
-    /// skipped while another card is ready (R5).
-    stale_ids: BTreeMap<u64, BTreeSet<u64>>,
+    /// Cards proposed freely at a height whose ballot went stale there,
+    /// longest stale first: skipped while another card is ready, then
+    /// taken in turn (R5, T2).
+    stale_ids: BTreeMap<u64, Vec<u64>>,
     /// The seats among them seen holding an acceptance there.
     accepted_seen: BTreeMap<u64, BTreeSet<String>>,
     /// Heights where this seat holds its own free signature beside lock
@@ -729,11 +730,15 @@ impl State {
     /// The B6 choice (§5): the smallest open id whose intents reach its
     /// `need`; a cut only with every seat's promise in hand (§4.1).
     fn lock_choose(&self, slot: &Slot, promised: Option<&BTreeSet<String>>) -> Option<(u64, ChainChange, Value)> {
-        let stale = self.chain.lock.stale_ids.get(&slot.height);
+        let order = self.chain.lock.stale_ids.get(&slot.height).cloned().unwrap_or_default();
+        let stale: BTreeSet<u64> = order.iter().copied().collect();
         // R5: a card whose ballot went stale waits while another is ready;
-        // once every ready card went stale they all come round again
-        self.lock_choose_skipping(slot, promised, stale).or_else(|| {
-            stale.filter(|s| !s.is_empty()).and_then(|_| self.lock_choose_skipping(slot, promised, None))
+        // once every ready card went stale they take turns (T2)
+        self.lock_choose_skipping(slot, promised, Some(&stale)).or_else(|| {
+            order.iter().find_map(|id| {
+                let others: BTreeSet<u64> = stale.iter().copied().filter(|x| x != id).collect();
+                self.lock_choose_skipping(slot, promised, Some(&others))
+            })
         })
     }
 
@@ -1564,7 +1569,9 @@ impl State {
             }
             if stale {
                 if let Some(id) = free_pick {
-                    self.chain.lock.stale_ids.entry(slot.height).or_default().insert(id);
+                    let order = self.chain.lock.stale_ids.entry(slot.height).or_default();
+                    order.retain(|x| *x != id);
+                    order.push(id);
                 }
                 tracing::info!(height = slot.height, attempt = attempt + 1, "lock=retry");
                 self.chain.lock.run = None;

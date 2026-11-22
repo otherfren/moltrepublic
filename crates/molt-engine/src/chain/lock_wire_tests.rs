@@ -1340,3 +1340,37 @@ fn a_restore_subject_is_excused_only_for_its_own_restore() {
     assert!(run.leader.ready(), "c, b and a promised");
     assert_eq!(run.leader.forced(), Some(w_value), "z may hold w: w is forced");
 }
+
+/// Review T2: once every ready card went stale they take turns - the one
+/// stale longest first - so a card blocked for good does not take every
+/// later ballot from one that went stale only once.
+#[test]
+fn stale_cards_take_turns() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let first = note(&mut dora, "first");
+    let second = note(&mut dora, "second");
+    dora.lock_note_intent(first, "mara");
+    dora.lock_note_intent(second, "mara");
+    dora.chain.own_approvals.clear();
+    let mut now = T;
+    let mut seq = 0;
+    let mut proposed = Vec::new();
+    dora.lock_start(0);
+    for _ in 0..4 {
+        let (base, round) = {
+            let run = dora.chain.lock.run.as_ref().expect("dora leads");
+            (run.leader.slot.base.clone(), run.leader.ballot.round)
+        };
+        seq += 1;
+        wire(&mut dora, "mara", seq, WorkspaceEvent::LockPromise { height: 1, base, round, leader: "dora".into(), accepted: None });
+        proposed.push(dora.chain.lock.run.as_ref().and_then(|r| r.value.as_ref()).map(|(id, _)| *id));
+        let started = dora.chain.lock.run.as_ref().map(|r| r.leader.ballot.round);
+        while dora.chain.lock.run.as_ref().map(|r| r.leader.ballot.round) == started {
+            now += 10;
+            hear(&mut dora, now, &SEATS);
+            dora.lock_tick();
+        }
+    }
+    assert_eq!(proposed, vec![Some(first), Some(second), Some(first), Some(second)]);
+}

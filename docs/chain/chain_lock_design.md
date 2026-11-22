@@ -708,7 +708,9 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   vault/wallet checks only stop its acceptance, since another seat may
   pass them. A card whose ballot went stale without reaching need (every
   acceptor withholding, e.g. a wallet daemon down) waits at that height
-  while another card is ready; when all went stale they rotate again. A
+  while another card is ready; when all went stale they take turns, the
+  one stale longest first (T2: a card blocked for good never takes every
+  ballot from one that went stale once). A
   forced value is never skipped.
 - **W5** voices before digests; **W6** marks unwritten at open mean
   amnesia; **W7** no amnesia where the lock is not enabled; **W8** the
