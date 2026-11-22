@@ -5195,7 +5195,7 @@ export component AppWindow inherits Window {
                                 label: seat.member;
                                 label-color: seat.approved ? Theme.text : Theme.dim;
                             }
-                            if root.rv-log.length > 0: Rectangle {
+                            if root.rv-log.length > 0: rv-log-box := Rectangle {
                                 background: Theme.panel;
                                 border-radius: Theme.win95 ? 0px : 6px;
                                 border-width: Theme.border-w;
@@ -5569,40 +5569,68 @@ export component AppWindow inherits Window {
                     height: 1px;
                     background: Theme.line;
                 }
-                // R2: catching up, with progress and what the node is doing
-                if root.catchup-show: Rectangle {
+                // R2: catching up - one slim row; a cut detail reads in full on hover.
+                // A Rectangle's implicit stretch is 1: unpinned, it split the
+                // leftover height with the surface below (half the pane, 2026-11-22)
+                if root.catchup-show: cu-bar := Rectangle {
+                    vertical-stretch: 0;
                     background: Theme.warn.transparentize(0.9);
-                    VerticalLayout {
-                        padding-top: 8px;
-                        padding-bottom: 8px;
+                    HorizontalLayout {
+                        padding-top: 4px * Theme.ui-scale;
+                        padding-bottom: 4px * Theme.ui-scale;
                         padding-left: 16px;
                         padding-right: 12px;
-                        spacing: 4px;
+                        spacing: 10px * Theme.ui-scale;
                         Text {
                             text: root.catchup-title;
                             color: Theme.text;
-                            font-size: Theme.fs-body;
+                            font-size: Theme.fs-cap;
                             font-weight: 600;
+                            vertical-alignment: center;
                         }
-                        Rectangle {
-                            height: 4px;
-                            border-radius: 2px;
-                            background: Theme.line;
+                        VerticalLayout {
+                            alignment: center;
                             Rectangle {
-                                x: 0;
-                                width: parent.width * clamp(root.catchup-progress, 0, 1);
-                                height: parent.height;
-                                border-radius: 2px;
-                                background: Theme.warn;
+                                width: 160px * Theme.ui-scale;
+                                height: 4px * Theme.ui-scale;
+                                border-radius: self.height / 2;
+                                background: Theme.line;
+                                Rectangle {
+                                    x: 0;
+                                    width: parent.width * clamp(root.catchup-progress, 0, 1);
+                                    height: parent.height;
+                                    border-radius: parent.border-radius;
+                                    background: Theme.warn;
+                                }
                             }
                         }
-                        Text {
+                        cu-detail := Text {
                             text: root.catchup-detail;
                             color: Theme.dim;
                             font-size: Theme.fs-cap;
-                            wrap: word-wrap;
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                            property <bool> tip-on: cu-ta.has-hover && self.width < self.preferred-width;
+                            property <int> tip-gen;
+                            property <string> tip-text: root.catchup-detail;
+                            changed tip-text => {
+                                if (self.tip-on) {
+                                    self.tip-gen = HintTip.show(self.tip-text, self.absolute-position.x,
+                                        cu-bar.absolute-position.y + cu-bar.height + 4px);
+                                }
+                            }
+                            changed tip-on => {
+                                if (self.tip-on) {
+                                    self.tip-gen = HintTip.show(self.tip-text, self.absolute-position.x,
+                                        cu-bar.absolute-position.y + cu-bar.height + 4px);
+                                } else {
+                                    HintTip.hide(self.tip-gen);
+                                }
+                            }
                         }
                     }
+                    cu-ta := TouchArea { }
                 }
                 // mesh self-heal Phase 4 — honest connection-health banner.
                 // `net-health-tone` is set from SessionView.net_health (0 ok /
@@ -5611,36 +5639,40 @@ export component AppWindow inherits Window {
                 // (the Stage 3 auto-heal runs and clears it on its own); red is
                 // honest that nothing flows, notes the ephemeral gap, and offers
                 // a repair route into the existing recovery rejoin.
-                if root.net-health-tone > 0: Rectangle {
+                // The reason rides the title row (in full on hover when cut):
+                // the banner is as tall as its content, never more.
+                if root.net-health-tone > 0: nh-bar := Rectangle {
+                    vertical-stretch: 0;
                     background: root.net-health-tone == 1
                         ? Theme.warn.transparentize(0.9)
                         : Theme.bad.transparentize(0.9);
+                    // under the layout, so the repair button keeps its clicks
+                    nh-hover := TouchArea { }
                     HorizontalLayout {
-                        padding-top: 10px;
-                        padding-bottom: 10px;
+                        padding-top: 5px * Theme.ui-scale;
+                        padding-bottom: 5px * Theme.ui-scale;
                         padding-left: 16px;
                         padding-right: 12px;
-                        spacing: 10px;
+                        spacing: 10px * Theme.ui-scale;
                         VerticalLayout {
                             alignment: center;
                             Rectangle {
-                                width: 10px;
-                                height: 10px;
-                                border-radius: 5px;
+                                width: 10px * Theme.ui-scale;
+                                height: self.width;
+                                border-radius: self.width / 2;
                                 background: root.net-health-tone == 1 ? Theme.warn : Theme.bad;
                             }
                         }
                         VerticalLayout {
                             alignment: center;
                             horizontal-stretch: 1;
-                            spacing: 3px;
+                            spacing: 2px;
                             HorizontalLayout {
-                                spacing: 8px;
-                                alignment: start;
+                                spacing: 8px * Theme.ui-scale;
                                 if root.net-health-tone == 1: VerticalLayout {
                                     alignment: center;
                                     Spinner {
-                                        size: 13px;
+                                        size: 13px * Theme.ui-scale;
                                         tone: Theme.warn;
                                     }
                                 }
@@ -5653,12 +5685,24 @@ export component AppWindow inherits Window {
                                     font-weight: 600;
                                     vertical-alignment: center;
                                 }
-                            }
-                            if root.net-health-reason != "": Text {
-                                text: root.net-health-reason;
-                                color: Theme.dim;
-                                font-size: Theme.fs-cap;
-                                overflow: elide;
+                                nh-reason := Text {
+                                    text: root.net-health-reason;
+                                    color: Theme.dim;
+                                    font-size: Theme.fs-cap;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                    property <bool> tip-on: nh-hover.has-hover && self.width < self.preferred-width;
+                                    property <int> tip-gen;
+                                    changed tip-on => {
+                                        if (self.tip-on) {
+                                            self.tip-gen = HintTip.show(self.text, self.absolute-position.x,
+                                                nh-bar.absolute-position.y + nh-bar.height + 4px);
+                                        } else {
+                                            HintTip.hide(self.tip-gen);
+                                        }
+                                    }
+                                }
                             }
                             if root.net-health-tone == 2: Text {
                                 text: Strings.banner-gap-note;
@@ -5681,7 +5725,7 @@ export component AppWindow inherits Window {
                         }
                     }
                 }
-                Rectangle {
+                surf-area := Rectangle {
                     vertical-stretch: 1;
                     for s in root.surfaces: surf-rect := Rectangle {
                     width: 100%;

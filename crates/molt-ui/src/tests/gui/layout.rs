@@ -1663,3 +1663,114 @@ fn a_nav_taller_than_the_window_scrolls_to_its_last_row() {
         "the last view sits above the footer: {lb}"
     );
 }
+
+/// The main screen over an empty chat, the state the banners sit above.
+#[cfg(feature = "live-preview")]
+fn banner_window() -> (AppWindow, Shown) {
+    let ui = AppWindow::new().expect("headless window");
+    ui.set_screen(AppScreen::Main);
+    ui.set_active_workspace("a".into());
+    ui.set_selected_surface("chat".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "chat".into(),
+        ..SurfaceTab::default()
+    }])));
+    apply_strings(&ui, 0);
+    let shown = show_headless(&ui);
+    (ui, shown)
+}
+
+/// `id`'s height at scales 1.0 and 1.5, windows 600 and 1200 high; a
+/// finding for every growth with the window, every height over `cap`
+/// body lines, and every content area under 85 % beside it.
+#[cfg(feature = "live-preview")]
+fn banner_sweep(ui: &AppWindow, id: &str, cap: f32, content_id: Option<&str>) -> Vec<String> {
+    let size = |id: &str| {
+        i_slint_backend_testing::ElementHandle::find_by_element_id(ui, id)
+            .find(|e| e.size().height > 0.0)
+            .map(|e| e.size().height)
+            .unwrap_or_else(|| panic!("{id} renders"))
+    };
+    let mut bad = Vec::new();
+    for font in [14.0_f32, 21.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        // a generous body line height at this font
+        let line = font * 1.4;
+        let mut seen = Vec::new();
+        for h in [600_u32, 1200] {
+            ui.window().set_size(slint::PhysicalSize::new(1200, h));
+            rail_settled();
+            let bar = size(id);
+            let content = content_id.map(size);
+            eprintln!("{id} font={font} h={h} height={bar} content={content:?}");
+            if bar > cap * line {
+                bad.push(format!("{id} font={font} h={h}: {bar} over {cap} lines of {line}"));
+            }
+            if let Some(c) = content.filter(|c| *c < 0.85 * (c + bar)) {
+                bad.push(format!("{id} font={font} h={h}: content {c} beside {bar}"));
+            }
+            seen.push(bar);
+        }
+        if (seen[0] - seen[1]).abs() > 0.5 {
+            bad.push(format!("{id} font={font}: grows with the window {seen:?}"));
+        }
+    }
+    bad
+}
+
+/// **The catch-up bar is one slim row, at any window height and scale.**
+/// It took about half the content area (reported 2026-11-22).
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_catch_up_bar_is_one_slim_row() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = banner_window();
+    ui.set_catchup_show(true);
+    ui.set_catchup_title("Catching up: block 412 of 936".into());
+    ui.set_catchup_detail("524 to go · 120 blocks/min · asking peers".into());
+    ui.set_catchup_progress(0.44);
+    let bad = banner_sweep(&ui, "AppWindow::cu-bar", 2.5, Some("AppWindow::surf-area"));
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// **The connection-health banner is as tall as its content**, amber and
+/// red, and never grows with the window.
+#[cfg(feature = "live-preview")]
+#[test]
+fn the_health_banner_keeps_its_content_height() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = banner_window();
+    ui.set_net_health_reason("b unreachable".into());
+    let mut bad = Vec::new();
+    for tone in [1, 2] {
+        ui.set_net_health_tone(tone);
+        bad.extend(banner_sweep(&ui, "AppWindow::nh-bar", 5.0, Some("AppWindow::surf-area")));
+    }
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// **A two-line rejoin log stays two lines tall.** It may grow with its
+/// lines, never with the window.
+#[cfg(feature = "live-preview")]
+#[test]
+fn a_two_line_rejoin_log_keeps_its_content_height() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.set_screen(AppScreen::Restore);
+    ui.set_rv_running(true);
+    ui.set_rv_member("b".into());
+    ui.set_rv_log(ModelRc::new(VecModel::from(vec![
+        slint::SharedString::from("version 1"),
+        slint::SharedString::from("block 3 received"),
+    ])));
+    apply_strings(&ui, 0);
+    ui.window().set_size(slint::PhysicalSize::new(1200, 800));
+    let _shown = show_headless(&ui);
+    let goto = ui.global::<Strings>().get_rw_join_goto();
+    let button = i_slint_backend_testing::ElementHandle::find_by_element_id(&ui, "AppButton::abtn-label")
+        .find(|e| e.accessible_label().is_some_and(|l| l == goto))
+        .expect("the run's goto button");
+    click(&ui, &button);
+    let bad = banner_sweep(&ui, "AppWindow::rv-log-box", 3.5, None);
+    assert!(bad.is_empty(), "{bad:#?}");
+}
