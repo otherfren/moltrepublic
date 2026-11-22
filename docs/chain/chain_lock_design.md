@@ -158,8 +158,13 @@ up to its last head + 1; a quorum minus Z still meets P).
   today; with m survivors accepting, the m lowest-named survivors sign
   and the consent still rides (`try_commit`'s rule).
 - Guard: a leader does not count a promise from a seat it knows is the
-  subject of a registered consented restore (fewer promisers is always
-  safe).
+  subject of a consented restore - registered, or held by the lock at
+  the slot (fewer promisers is always safe).
+- Per value (T1): the subject is no unheard voice for its OWN restore
+  (it never accepts it) and an ordinary unheard voice for every other
+  value - its old device may have accepted one before it was lost, or be
+  back (a found laptop) and accept one now. Heard as free for every value
+  it let a second value in (`a_lost_seat_heard_for_every_value_forks_when_it_comes_back`).
 - **Changed liveness, on purpose:** phase 1 needs n - m + 1 seats, so in
   2-of-3 BOTH survivors must be reachable to restore the third (2-of-2:
   the one survivor suffices). On one lineage this removes N1's shape (a
@@ -671,8 +676,7 @@ liveness and the downgrade boundary. Each fix has a red-first test.
 - **S3, a forced value waits for a fuller hearing for one retransmit
   interval** while seats are unheard (its holders keep a value nobody
   chose alive), then goes out anyway so the holders of a chosen value
-  complete it. A registered restore's subject counts as heard holding
-  nothing (§4.2).
+  complete it.
 - **S4/W4, one rule for phase 1.** A busy run (promises missing, a forced
   value waiting, a value out) re-sends at a doubling interval to 600 s
   (reset by a new promise) and goes stale after its backoff. An idle
@@ -688,6 +692,15 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   `sealed-after-withdrawal:<id>`. Once the card is retired the leader
   cannot resolve a `LockAccepted` for it, so only a seat holding the
   value seals it - slower, not a stall.
+- **T1, the price of the per-value excusal.** A lost seat counts as a
+  voice that may hold any ordinary value at the slot. A value fewer than
+  `need` survivors hold, that the others then refuse (withdrawn), stays
+  forced while the lost seat is silent: the height halts. Nothing
+  unsticks it automatically - not the restore, which needs that height.
+  The simulation measures it (with a withdrawal every ~30 steps: 4-28 %
+  of runs with a lost seat; none without one). Before T1 the lost seat
+  counted as free and the same schedule could fork once its device came
+  back; safety wins. Open for a decision.
 - **R8.** Intents that outrun their card survive a head move (up to
   1,024 unknown ids, oldest first out); a retired card's go.
 - **W2/R5.** The leader skips a card the chain-wide gates refuse now

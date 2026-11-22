@@ -1283,3 +1283,60 @@ fn the_enabling_refusal_names_the_seat_and_the_lock_stays_on() {
     assert!(dora.proposals.contains_key(&id));
     assert!(dora.lock_enabled(), "still on");
 }
+
+/// Review T1: a withdrawn restore of z still held by the lock excuses z
+/// for THAT restore only. z's old device is back and accepted w (an
+/// ordinary change) with d and a; a leader hearing c, b (holding the
+/// restore) and a (holding w) must count z as a voice that may hold w:
+/// w is forced. Heard as free for every value, z let a second value in.
+#[test]
+fn a_restore_subject_is_excused_only_for_its_own_restore() {
+    const FIVE: [&str; 5] = ["a", "b", "c", "d", "z"];
+    let b = Builder::new(&FIVE, 3);
+    let mut x = genesis_seat("a", &b, b.blocks.clone());
+    x.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
+    let rid = b.republic_id.clone();
+    let kp_hex = kp_hex_for(&b, "z");
+    let proof = crate::make_seat_proof(b.key("z"), "ticket", &kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(&b, "z", "", &[], 0, &"cc".repeat(32));
+    let rid_restore = x
+        .verify_and_propose_restore("z", &b.pk("z"), &kp_hex, "ticket", &proof, "", &[], &consent, "")
+        .expect("proposed");
+    let restore = x.chain.proposal_changes.get(&rid_restore).cloned().expect("the restore");
+    let w_id = note(&mut x, "w");
+    let w = x.proposal_change(w_id).expect("w");
+
+    let mut c = genesis_seat("c", &b, b.blocks.clone());
+    c.chain.lock.enabled_override = Some(true);
+    c.lock_force(true);
+    hear(&mut c, T, &FIVE);
+    let r_value = c.lock_value(1, &restore).expect("restore value");
+    let w_value = c.lock_value(1, &w).expect("w value");
+    // the withdrawn restore is still known here (its LockAccept came by)
+    c.chain.lock.known.insert((1, r_value.digest.clone()), (rid_restore, restore.clone()));
+    assert!(c.lock_restore_subjects().contains("z"));
+    c.lock_start(0);
+    let (base, round) = {
+        let run = c.chain.lock.run.as_ref().expect("c leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    let held = |value: &Value, ballot: u64, leader: &str, id: u64, change: Option<ChainChange>| molt_core::chain::LockAcceptedValue {
+        round: ballot,
+        leader: leader.into(),
+        digest: value.digest.clone(),
+        need: u64::try_from(value.need).expect("small"),
+        id,
+        change,
+    };
+    let promises = [
+        ("b", held(&r_value, 1, "a", rid_restore, Some(restore.clone()))),
+        ("a", held(&w_value, 2, "d", w_id, None)),
+    ];
+    for (seq, (from, accepted)) in promises.into_iter().enumerate() {
+        let promise = WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round, leader: "c".into(), accepted: Some(accepted) };
+        wire(&mut c, from, u64::try_from(seq).expect("small") + 1, promise);
+    }
+    let run = c.chain.lock.run.as_ref().expect("still leading");
+    assert!(run.leader.ready(), "c, b and a promised");
+    assert_eq!(run.leader.forced(), Some(w_value), "z may hold w: w is forced");
+}

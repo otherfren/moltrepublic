@@ -951,17 +951,39 @@ impl State {
             }
         }
         run.leader.promise(&me, &ballot, accepted);
-        // S5: seats known free here hold nothing that can be chosen; nor
-        // does a registered restore's subject - its old device is gone (§4.2)
-        for m in self.lock_known_free(slot.height).into_iter().chain(self.lock_restore_subjects()) {
+        // S5: seats known free here hold nothing that can be chosen
+        for m in self.lock_known_free(slot.height) {
             run.leader.heard_free(&m);
         }
         self.chain.lock.seen.insert(slot.clone(), ballot.clone());
         self.chain.lock.run = Some(run);
+        self.lock_excuse_subjects();
         self.chain.lock.wait = None;
         tracing::info!(height = slot.height, ballot = %fmt_ballot(&ballot), attempt, "lock=prepare");
         self.lock_send(WorkspaceEvent::LockPrepare { height: slot.height, base: slot.base.clone(), round });
         self.lock_try_propose();
+    }
+
+    /// §4.2 per value (R2, T1): a consented restore's subject can never
+    /// hold that restore, so it is no unheard voice for it - and for that
+    /// value only: its old device may be back and accept any other.
+    fn lock_excuse_subjects(&mut self) {
+        let rid = self.republic_id();
+        let Some(run) = self.chain.lock.run.as_mut() else { return };
+        let height = run.leader.slot.height;
+        let restores: Vec<(String, String)> = run
+            .ids
+            .iter()
+            .filter_map(|(digest, (_, change))| match change.as_ref()? {
+                c @ ChainChange::Membership { op: MembershipOp::Restored, member, consent: Some(_), .. } => {
+                    (change_digest(&rid, height, c) == *digest).then(|| (digest.clone(), member.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        for (digest, member) in restores {
+            run.leader.excuse(&digest, &member);
+        }
     }
 
     /// Phase 2a once the promises are in: the forced value, else the B6
@@ -1286,13 +1308,7 @@ impl State {
             run.resends = 0;
         }
         run.leader.promise(from, &ballot, acc);
-        // R2: a restore a promise names makes its subject no unheard voice
-        let subjects = self.lock_restore_subjects();
-        if let Some(run) = self.chain.lock.run.as_mut() {
-            for m in &subjects {
-                run.leader.heard_free(m);
-            }
-        }
+        self.lock_excuse_subjects();
         self.lock_try_propose();
     }
 

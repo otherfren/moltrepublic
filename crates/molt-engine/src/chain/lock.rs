@@ -278,12 +278,30 @@ pub(crate) struct Leader {
     /// Seats that answered "signed freely here": they hold no acceptance
     /// that can be part of a chosen value.
     free: BTreeSet<String>,
+    /// Per value digest, seats that can never be among its acceptors (a
+    /// restore's subject for that restore, §4.2) - excused from the
+    /// unheard count for that value only.
+    excused: BTreeMap<String, BTreeSet<String>>,
     proposed: Option<Value>,
 }
 
 impl Leader {
     pub(crate) fn new(slot: Slot, quorum: Quorum, ballot: Ballot) -> Self {
-        Self { slot, ballot, quorum, promises: BTreeMap::new(), free: BTreeSet::new(), proposed: None }
+        Self {
+            slot,
+            ballot,
+            quorum,
+            promises: BTreeMap::new(),
+            free: BTreeSet::new(),
+            excused: BTreeMap::new(),
+            proposed: None,
+        }
+    }
+
+    /// `seat` can never accept the value `digest` (T1: never a global
+    /// "heard" - the seat may be alive and accept other values).
+    pub(crate) fn excuse(&mut self, digest: &str, seat: &str) {
+        self.excused.entry(digest.to_string()).or_default().insert(seat.to_string());
     }
 
     /// A free `Nack` from `from`: heard, holding nothing that counts.
@@ -318,7 +336,10 @@ impl Leader {
     pub(crate) fn forced(&self) -> Option<Value> {
         let (_, top) = self.promises.values().flatten().max()?;
         let holding = self.promises.values().flatten().filter(|(_, v)| v == top).count();
-        let unheard = self.quorum.n.saturating_sub(self.promises.len() + self.free.len());
+        let excused = self.excused.get(&top.digest).map_or(0, |e| {
+            e.iter().filter(|s| !self.promises.contains_key(*s) && !self.free.contains(*s)).count()
+        });
+        let unheard = self.quorum.n.saturating_sub(self.promises.len() + self.free.len() + excused);
         (holding + unheard >= top.need).then(|| top.clone())
     }
 

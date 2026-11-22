@@ -337,6 +337,9 @@ struct Config {
     old: usize,
     /// The step the old seats appear at.
     old_from: usize,
+    /// The step the lost (dead) seats come back at and accept every value
+    /// but their own restore - a found laptop (T1); 0 = never.
+    revive: usize,
 }
 
 struct Seat {
@@ -389,6 +392,9 @@ struct Sim {
     withdraw: u64,
     /// S1: a seat re-accepts a value it already holds, withdrawn or not.
     keep_held: bool,
+    /// The control for T1: a lost seat counts as heard (free) for every
+    /// value, not only for its own restore.
+    global_subjects: bool,
     /// S3: a leader whose forced value is withdrawn and not its own waits
     /// for a fuller hearing; `Some(false)` = until every seat answered
     /// (the control), `Some(true)` = until its interval passes (settle).
@@ -431,6 +437,7 @@ impl Sim {
             withdrawn: BTreeSet::new(),
             withdraw: 0,
             keep_held: true,
+            global_subjects: false,
             hearing: Some(true),
             step: 0,
             drop: 15,
@@ -445,11 +452,20 @@ impl Sim {
 
     /// Runs this build: answers lock frames, may lead.
     fn runs_lock(&self, i: usize) -> bool {
-        i < self.cfg.n - self.cfg.dead - self.cfg.old
+        i < self.cfg.n - self.cfg.dead - self.cfg.old || self.revived(i)
+    }
+
+    fn is_dead(&self, i: usize) -> bool {
+        i >= self.cfg.n - self.cfg.dead
+    }
+
+    /// A lost seat back online (its old device): it runs the lock.
+    fn revived(&self, i: usize) -> bool {
+        self.is_dead(i) && self.cfg.revive > 0 && self.step >= self.cfg.revive
     }
 
     fn is_old(&self, i: usize) -> bool {
-        !self.runs_lock(i) && i < self.cfg.n - self.cfg.dead
+        !self.runs_lock(i) && !self.is_dead(i)
     }
 
     fn live(&self, i: usize) -> bool {
@@ -489,6 +505,10 @@ impl Sim {
     /// Seat `i` refuses `value` at `slot`: it is withdrawn and (S1) not a
     /// value this seat already accepted there.
     fn refuses(&self, i: usize, slot: &Slot, value: &Value) -> bool {
+        // a restore's subject never counts for its own restore
+        if self.is_dead(i) && value.digest.starts_with("restore") {
+            return true;
+        }
         self.withdrawn.contains(&value.digest) && !(self.keep_held && self.seats[i].acceptor.holds(slot, value))
     }
 
@@ -536,9 +556,10 @@ impl Sim {
         let round = seat.acceptor.next_round(&s).max(seat.seen_round.get(&h).copied().unwrap_or(0) + 1);
         let ballot = Ballot { round, leader: seat.name.clone() };
         let mut leader = Leader::new(s.clone(), self.quorum(), ballot.clone());
-        // a lost seat (a restore's subject) never acted: it holds nothing (§4.2)
-        for d in self.cfg.n - self.cfg.dead..self.cfg.n {
-            leader.heard_free(&self.seats[d].name);
+        if self.global_subjects {
+            for d in self.cfg.n - self.cfg.dead..self.cfg.n {
+                leader.heard_free(&self.seats[d].name);
+            }
         }
         self.seats[i].leaders.insert(h, leader);
         self.seats[i].seen_round.insert(h, round);
@@ -659,7 +680,19 @@ impl Sim {
         match reply {
             Reply::Promise { slot, ballot, accepted } => {
                 let h = slot.height;
+                // §4.2: a restore's subject never counts as a promiser (its
+                // old device may be back), and per value: it can never hold
+                // its own restore
+                if self.is_dead(from) {
+                    return;
+                }
+                let subjects: Vec<String> = (self.cfg.n - self.cfg.dead..self.cfg.n).map(|d| self.seats[d].name.clone()).collect();
                 let Some(leader) = self.seats[i].leaders.get_mut(&h) else { return };
+                if let Some((_, v)) = accepted.as_ref().filter(|(_, v)| v.digest.starts_with("restore")) {
+                    for z in &subjects {
+                        leader.excuse(&v.digest, z);
+                    }
+                }
                 leader.promise(&from_name, &ballot, accepted);
                 if leader.ready() && leader.proposed().is_none() {
                     if self.waits_for_hearing(i, &slot) {
@@ -916,7 +949,7 @@ fn run(cfg: Config, seed: u64, skip_promise_check: bool, liveness: bool) -> Outc
 const SEEDS: u64 = 1500;
 
 fn plain(n: usize, m: usize) -> Config {
-    Config { n, m, heights: 3, dead: 0, cuts: 0, restores: 0, old: 0, old_from: 0 }
+    Config { n, m, heights: 3, dead: 0, cuts: 0, restores: 0, old: 0, old_from: 0, revive: 0 }
 }
 
 fn configs() -> Vec<(&'static str, Config)> {
@@ -930,6 +963,9 @@ fn configs() -> Vec<(&'static str, Config)> {
         ("3-of-5 with cuts", Config { cuts: 40, ..plain(5, 3) }),
         ("2-of-3 restoring a lost seat", Config { dead: 1, restores: 50, ..plain(3, 2) }),
         ("3-of-5 restoring a lost seat", Config { dead: 1, restores: 50, ..plain(5, 3) }),
+        ("2-of-3, the lost seat comes back", Config { dead: 1, restores: 50, revive: 120, ..plain(3, 2) }),
+        ("3-of-5, the lost seat comes back", Config { dead: 1, restores: 50, revive: 120, ..plain(5, 3) }),
+        ("4-of-7, the lost seat comes back", Config { dead: 1, restores: 50, revive: 120, ..plain(7, 4) }),
     ]
 }
 
@@ -1081,15 +1117,20 @@ fn run_withdrawing(cfg: Config, seed: u64, keep_held: bool, hearing: Option<bool
 #[test]
 fn simulation_with_withdrawals_decides_every_slot() {
     for (name, cfg) in configs() {
-        let mut withdrawn_runs = 0;
+        let mut stalled = 0;
         for seed in 0..MIXED_SEEDS {
             let out = run_withdrawing(cfg, seed, true, Some(true));
             assert_eq!(out.forks, 0, "{name}: fork at seed {seed}");
             assert_eq!(out.learned_twice, 0, "{name}: learned twice at seed {seed}");
-            assert_eq!(out.undecided, 0, "{name}: undecided at seed {seed}");
-            withdrawn_runs += 1;
+            // T1's price: a lost seat may hold any value it saw before it
+            // was lost, so a value one survivor holds and the others refuse
+            // (withdrawn) stays forced - the documented residual
+            if cfg.dead == 0 {
+                assert_eq!(out.undecided, 0, "{name}: undecided at seed {seed}");
+            }
+            stalled += usize::from(out.undecided > 0);
         }
-        eprintln!("{name}: {withdrawn_runs} runs with withdrawals decided");
+        eprintln!("{name}: {stalled} of {MIXED_SEEDS} runs with withdrawals stalled");
     }
     let stall = |keep_held: bool, hearing: Option<bool>, cfg: Config| {
         (0..MIXED_SEEDS).find(|seed| run_withdrawing(cfg, *seed, keep_held, hearing).undecided > 0)
@@ -1104,3 +1145,21 @@ fn simulation_with_withdrawals_decides_every_slot() {
 }
 
 
+
+/// T1 (review 2026-11-22): a lost seat counted as heard for EVERY value
+/// forks once its old device comes back and accepts an ordinary value;
+/// excused only for its own restore, it never does (the configs above,
+/// with and without withdrawals, cover the excusal).
+#[test]
+fn a_lost_seat_heard_for_every_value_forks_when_it_comes_back() {
+    let cfg = Config { dead: 1, restores: 50, revive: 120, ..plain(5, 3) };
+    let found = (0..MIXED_SEEDS * 4).find(|seed| {
+        let mut sim = Sim::new(cfg, *seed, false);
+        sim.global_subjects = true;
+        sim.withdraw = 3;
+        sim.chaos(400);
+        sim.outcome().forks > 0
+    });
+    assert!(found.is_some(), "the global rule forked nowhere");
+    eprintln!("global subject rule: fork at seed {found:?}");
+}
