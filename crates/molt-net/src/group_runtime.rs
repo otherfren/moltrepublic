@@ -62,14 +62,45 @@ const CONTROL_QUEUE: usize = 64;
 /// and a quiet live listener only proves itself by acking a round.
 const OPEN_ROUNDS: u32 = 2;
 
-/// Gap wants queued for the resend task before further ones are dropped
-/// (the asker re-asks).
-const GAP_QUEUE: usize = 16;
-
-/// A gap answer's budget window per asker: each seq at most once and
-/// `GAP_MAX_SEQS` frames in all - the bound that keeps a gap want from
-/// becoming a resend amplifier outside the hourly budget.
+/// Per asker: at most `GAP_MAX_SEQS` re-published frames per window, and a
+/// seq re-published once is refused for [`GAP_RESEND_REFUSE`].
 const GAP_ANSWER_EVERY: Duration = Duration::from_secs(10);
+
+/// How long a seq re-published to one asker is not re-published to it again.
+const GAP_RESEND_REFUSE: Duration = Duration::from_secs(60);
+
+/// Per asker: one range listing per this long.
+const GAP_LIST_EVERY: Duration = Duration::from_secs(5);
+
+/// Re-published frames per turn before the next asker is served.
+const GAP_TURN_FRAMES: usize = 16;
+
+/// Re-published gap frames per minute, all askers together.
+const GAP_FRAMES_PER_MIN: usize = 384;
+
+/// Test seam: envelopes re-published by gap answers in this process.
+static GAP_REPUBLISHED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test seam: how many envelopes gap answers re-published in this process.
+#[doc(hidden)]
+pub fn __gap_republished() -> u64 {
+    GAP_REPUBLISHED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// What one asker wants answered, coalesced: a flood overwrites only its
+/// own entry.
+#[derive(Debug, Default)]
+struct GapAsk {
+    seqs: std::collections::BTreeSet<u64>,
+    range: Option<(u64, u64)>,
+}
+
+/// The pending gap asks, one entry per asker, served round-robin.
+#[derive(Debug, Default)]
+struct GapAsks {
+    pending: std::sync::Mutex<std::collections::BTreeMap<MemberId, GapAsk>>,
+    wake: tokio::sync::Notify,
+}
 
 /// Test seam for the stall backoff, packed ms `first << 32 | cap` (`0` =
 /// production).
@@ -196,8 +227,8 @@ pub struct GroupHandle {
     /// Bounded and dropped-when-full, because each is worth exactly one
     /// best-effort attempt.
     controls: mpsc::Sender<Vec<u8>>,
-    /// Gap wants addressed at this node, awaiting their targeted resend.
-    gaps: mpsc::Sender<(MemberId, Vec<u64>)>,
+    /// Gap wants addressed at this node, awaiting their answer.
+    gaps: std::sync::Arc<GapAsks>,
     /// The engine's latest verdict on who can be reached: state, so a watch.
     reach: watch::Sender<OutboxReach>,
     /// Whether the outbox is mid-pass with own frames to publish - what
@@ -238,8 +269,19 @@ impl GroupHandle {
 
     /// Queue a targeted resend of `seqs` for `to` (delivery guarantee
     /// §10); `false` = dropped, the queue is full - the asker asks again.
-    pub fn answer_gap(&self, to: MemberId, seqs: Vec<u64>) -> bool {
-        self.gaps.try_send((to, seqs)).is_ok()
+    pub fn answer_gap(&self, to: MemberId, seqs: Vec<u64>, range: Option<(u64, u64)>) -> bool {
+        let Ok(mut pending) = self.gaps.pending.lock() else { return false };
+        let ask = pending.entry(to).or_default();
+        ask.seqs.extend(seqs);
+        while ask.seqs.len() > crate::gap::GAP_MAX_SEQS {
+            ask.seqs.pop_last();
+        }
+        if range.is_some() {
+            ask.range = range;
+        }
+        drop(pending);
+        self.gaps.wake.notify_one();
+        true
     }
 
     /// Queue the latest claim sheet for publication.
@@ -433,14 +475,14 @@ where
     ));
     // a FIFTH: a targeted resend answers in seconds, never behind the
     // outbox's pass or its hourly budget (delivery guarantee §10)
-    let (gaps, gaps_rx) = mpsc::channel(GAP_QUEUE);
+    let gaps = std::sync::Arc::new(GapAsks::default());
     let gap = tokio::spawn(gap_loop(
         channel.clone(),
         mls.clone(),
         cfg.member.clone(),
         log.clone(),
         store.clone(),
-        gaps_rx,
+        gaps.clone(),
         stop_rx.clone(),
     ));
     let (busy_tx, busy) = watch::channel(false);
@@ -484,51 +526,96 @@ where
     }
 }
 
-/// Answer gap wants: re-publish exactly the named own envelopes as fresh
-/// frames, then one [`crate::gap::GapAnswer`] naming what went out and
-/// what is not owed. Seqs past the publish cursor are the outbox's and
-/// left out. Per asker, a seq is re-published at most once per
-/// [`GAP_ANSWER_EVERY`], and at most [`crate::gap::GAP_MAX_SEQS`] frames go
-/// out per such window.
+/// Answer gap wants, one asker per turn: a range want gets the listing of
+/// this node's own seqs in the span (nothing re-published); named seqs are
+/// re-published as fresh frames and answered `resent`/`gone`. Seqs past the
+/// publish cursor are the outbox's and left out. Bounded per asker (frames
+/// per window, per-seq refusal, listings) and in all (frames per minute).
 async fn gap_loop<L: OutboxLog, S: StateStore>(
     channel: GroupChannel,
     mls: MlsChannel,
     me: MemberId,
     log: L,
     store: S,
-    mut rx: mpsc::Receiver<(MemberId, Vec<u64>)>,
+    asks: std::sync::Arc<GapAsks>,
     mut stop: watch::Receiver<bool>,
 ) {
-    // per asker: the window's start, frames spent in it, seqs resent in it
-    let mut budget: std::collections::HashMap<MemberId, (tokio::time::Instant, usize, Vec<u64>)> =
-        std::collections::HashMap::new();
+    type Instant = tokio::time::Instant;
+    // per asker: window start + frames in it, per-seq refusals, last listing
+    let mut window: std::collections::HashMap<MemberId, (Instant, usize)> = std::collections::HashMap::new();
+    let mut refused: std::collections::HashMap<(MemberId, u64), Instant> = std::collections::HashMap::new();
+    let mut listed: std::collections::HashMap<MemberId, Instant> = std::collections::HashMap::new();
+    let mut minute: (Instant, usize) = (Instant::now(), 0);
+    let mut last: Option<MemberId> = None;
     loop {
-        let (to, mut seqs) = tokio::select! {
-            got = rx.recv() => match got {
-                Some(g) => g,
-                None => return,
-            },
-            _ = stop.changed() => return,
+        let next = asks.pending.lock().ok().and_then(|mut p| {
+            let key = last
+                .as_ref()
+                .and_then(|l| p.range::<MemberId, _>((std::ops::Bound::Excluded(l), std::ops::Bound::Unbounded)).next())
+                .or_else(|| p.iter().next())
+                .map(|(k, _)| k.clone())?;
+            p.remove(&key).map(|a| (key, a))
+        });
+        let Some((to, mut ask)) = next else {
+            tokio::select! {
+                () = asks.wake.notified() => continue,
+                _ = stop.changed() => return,
+            }
         };
-        let now = tokio::time::Instant::now();
-        let window = budget.entry(to.clone()).or_insert((now, 0, Vec::new()));
-        if now.duration_since(window.0) >= GAP_ANSWER_EVERY {
-            *window = (now, 0, Vec::new());
-        }
-        seqs.sort_unstable();
-        seqs.dedup();
-        seqs.retain(|s| !window.2.contains(s));
-        seqs.truncate(crate::gap::GAP_MAX_SEQS.saturating_sub(window.1));
-        let Some(&lo) = seqs.first() else {
-            tracing::debug!(%to, "gap_want=debounced");
-            continue;
-        };
-        window.1 += seqs.len();
-        window.2.extend_from_slice(&seqs);
+        last = Some(to.clone());
+        let now = Instant::now();
+        refused.retain(|_, t| now.duration_since(*t) < GAP_RESEND_REFUSE);
         let cursor = store.load().await.group.unwrap_or_default().log_seq;
-        let envs = log.read_from(lo).await;
+        if let Some((after, upto)) = ask.range.take() {
+            if listed.get(&to).is_none_or(|t| now.duration_since(*t) >= GAP_LIST_EVERY) {
+                listed.insert(to.clone(), now);
+                let upto = upto.min(cursor).min(after.saturating_add(crate::gap::GAP_RANGE_MAX));
+                if upto > after {
+                    let envs = log.read_range(after + 1, upto).await;
+                    let mut own: Vec<u64> =
+                        envs.iter().filter(|e| crate::supervisor::own_ackable(&me, e)).map(|e| e.seq).collect();
+                    let through = if own.len() > crate::gap::GAP_LIST_MAX {
+                        own.truncate(crate::gap::GAP_LIST_MAX);
+                        own.last().copied().unwrap_or(upto)
+                    } else {
+                        upto
+                    };
+                    tracing::debug!(%to, after, through, own = own.len(), "gap_listed");
+                    let listing = crate::gap::GapListing { after, through, own };
+                    publish_gap_answer(&channel, &mls, crate::gap::GapAnswer::listing(me.clone(), to.clone(), listing)).await;
+                }
+            }
+        }
+        let w = window.entry(to.clone()).or_insert((now, 0));
+        if now.duration_since(w.0) >= GAP_ANSWER_EVERY {
+            *w = (now, 0);
+        }
+        if now.duration_since(minute.0) >= Duration::from_secs(60) {
+            minute = (now, 0);
+        }
+        let room = crate::gap::GAP_MAX_SEQS
+            .saturating_sub(w.1)
+            .min(GAP_TURN_FRAMES)
+            .min(GAP_FRAMES_PER_MIN.saturating_sub(minute.1));
+        let mut now_seqs: Vec<u64> = ask
+            .seqs
+            .iter()
+            .copied()
+            .filter(|s| *s <= cursor && !refused.contains_key(&(to.clone(), *s)))
+            .collect();
+        let later = now_seqs.split_off(room.min(now_seqs.len()));
+        // cut by the turn: back into the queue behind the other askers; cut
+        // by a budget: dropped, the asker asks again
+        if !later.is_empty() && room == GAP_TURN_FRAMES {
+            if let Ok(mut p) = asks.pending.lock() {
+                p.entry(to.clone()).or_default().seqs.extend(later);
+            }
+            asks.wake.notify_one();
+        }
+        let (Some(&lo), Some(&hi)) = (now_seqs.first(), now_seqs.last()) else { continue };
+        let envs = log.read_range(lo.max(hi.saturating_sub(crate::gap::GAP_RANGE_MAX)), hi).await;
         let (mut resent, mut gone) = (Vec::new(), Vec::new());
-        for seq in seqs.into_iter().filter(|s| *s <= cursor) {
+        for seq in now_seqs {
             let env = envs
                 .binary_search_by_key(&seq, |e| e.seq)
                 .ok()
@@ -544,6 +631,10 @@ async fn gap_loop<L: OutboxLog, S: StateStore>(
                 }
                 continue;
             };
+            refused.insert((to.clone(), seq), now);
+            GAP_REPUBLISHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            w.1 += 1;
+            minute.1 += 1;
             match channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
                 Ok((_, report)) if !report.accepted.is_empty() => resent.push(seq),
                 Ok(_) => tracing::debug!(%to, seq, "gap resend accepted by no relay"),
@@ -554,11 +645,14 @@ async fn gap_loop<L: OutboxLog, S: StateStore>(
             continue;
         }
         tracing::info!(%to, resent = resent.len(), gone = gone.len(), "gap_answered");
-        let ans = crate::gap::GapAnswer::new(me.clone(), to, resent, gone);
-        let Some(frame) = mls.group_control_frame(&ans.to_frame()) else { continue };
-        if let Err(e) = channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
-            tracing::debug!(error = %e, "publishing a gap answer failed");
-        }
+        publish_gap_answer(&channel, &mls, crate::gap::GapAnswer::new(me.clone(), to, resent, gone)).await;
+    }
+}
+
+async fn publish_gap_answer(channel: &GroupChannel, mls: &MlsChannel, ans: crate::gap::GapAnswer) {
+    let Some(frame) = mls.group_control_frame(&ans.to_frame()) else { return };
+    if let Err(e) = channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
+        tracing::debug!(error = %e, "publishing a gap answer failed");
     }
 }
 
@@ -3673,14 +3767,20 @@ mod tests {
         let welcome = walter.add_members(&[petra.key_package().expect("kp")]).expect("add").expect("welcome");
         let mut petra = petra;
         petra.join_from_welcome(&welcome).expect("petra joins");
-        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        // without the 60-notes-per-minute default: a hundred frames here
+        let relay = nostr_relay_builder::LocalRelay::new(nostr_relay_builder::RelayBuilder::default().rate_limit(
+            nostr_relay_builder::builder::RateLimit { max_reqs: 500, notes_per_minute: 1_000_000 },
+        ));
+        relay.run().await.expect("relay");
         let url = relay.url().await.to_string();
         let chan = || crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url.clone()], [7u8; 32]);
 
         let log = crate::MemLog::default();
         log.push(walter_event(1));
         log.push(molt_core::EventEnvelope { by: "zoe".into(), prev_seq: 0, ..walter_event(2) });
-        log.push(walter_event(3));
+        for seq in 3..=100 {
+            log.push(walter_event(seq));
+        }
         let (_ww, wake_w) = watch::channel(0u64);
         let (hw, _hw) = watch::channel(GroupHealth::default());
         let walter = spawn_group(
@@ -3721,17 +3821,43 @@ mod tests {
                 }
             }
         };
-        let (seqs, _) = wait(2, 0).await;
-        assert_eq!(seqs, vec![1, 3], "the first pass");
+        let first: Vec<u64> = std::iter::once(1).chain(3..=100).collect();
+        let (seqs, _) = wait(99, 0).await;
+        assert_eq!(seqs, first, "the first pass");
 
-        assert!(walter.answer_gap("petra".into(), vec![1, 2, 9]));
-        let (seqs, answers) = wait(3, 1).await;
-        assert_eq!(seqs, vec![1, 3, 1], "exactly seq 1 again");
-        assert_eq!(answers, vec![GapAnswer::new("walter".into(), "petra".into(), vec![1], vec![2])]);
+        // seq 1 again, 2 is not walter's, 999 is past the cursor
+        assert!(walter.answer_gap("petra".into(), vec![1, 2, 999], None));
+        let (seqs, answers) = wait(100, 1).await;
+        assert_eq!(seqs[99..], [1], "exactly seq 1 again");
+        assert_eq!(answers[0], GapAnswer::new("walter".into(), "petra".into(), vec![1], vec![2]));
 
-        assert!(walter.answer_gap("petra".into(), vec![1]));
-        tokio::time::sleep(Duration::from_secs(1)).await;
-        assert_eq!(cap.0.lock().expect("cap").0.len(), 3, "debounced");
+        // seq 1 is refused for a while; 3 is not. The answer follows the
+        // re-publications, so a re-published 1 would be here by then.
+        assert!(walter.answer_gap("petra".into(), vec![1, 3], None));
+        let (seqs, answers) = wait(101, 2).await;
+        assert_eq!(seqs[100..], [3], "seq 1 is not re-published twice: {seqs:?}");
+        assert_eq!(answers[1].resent, vec![3]);
+
+        // a range want is listed, nothing re-published
+        assert!(walter.answer_gap("petra".into(), Vec::new(), Some((0, 10))));
+        let (seqs, answers) = wait(101, 3).await;
+        let listing = answers[2].listing.clone().expect("a listing");
+        assert_eq!((listing.after, listing.through, listing.own), (0, 10, vec![1, 3, 4, 5, 6, 7, 8, 9, 10]));
+        assert_eq!(seqs.len(), 101, "a listing re-publishes nothing");
+
+        // the per-asker budget: 64 frames per window, two spent already
+        assert!(walter.answer_gap("petra".into(), (4..=70).collect(), None));
+        let resent = |a: &[GapAnswer]| a.iter().map(|x| x.resent.len()).sum::<usize>();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        while resent(&cap.0.lock().expect("cap").1) < 64 {
+            assert!(tokio::time::Instant::now() < deadline, "the budget's frames never all came");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(walter.answer_gap("petra".into(), vec![80], None));
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let (seqs, answers) = cap.0.lock().expect("cap").clone();
+        assert_eq!(resent(&answers), 64, "the window's budget holds: {answers:?}");
+        assert_eq!(seqs.iter().filter(|s| **s == 80).count(), 1, "past the budget nothing goes out");
         walter.shutdown().await;
         petra.shutdown().await;
         drop(relay);

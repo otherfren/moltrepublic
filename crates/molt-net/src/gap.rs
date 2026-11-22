@@ -21,6 +21,12 @@ pub const GAP_V: u32 = 1;
 /// Seqs one frame names; a longer gap asks again.
 pub const GAP_MAX_SEQS: usize = 64;
 
+/// Own seqs one listing names; a longer range is listed in pages.
+pub const GAP_LIST_MAX: usize = 256;
+
+/// Widest range one want may name: the receiver's accept window.
+pub const GAP_RANGE_MAX: u64 = molt_core::ACCEPT_WINDOW_BITS;
+
 /// Refused UNPARSED above this.
 pub const GAP_MAX_BYTES: usize = 8 * 1024;
 
@@ -35,6 +41,20 @@ pub struct GapWant {
     pub of: MemberId,
     /// The missing seqs, in `of`'s log seq space.
     pub seqs: Vec<u64>,
+    /// `(after, upto]`: list `of`'s own envelopes in this span, resend none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<(u64, u64)>,
+}
+
+/// The sender's own ackable seqs in `(after, through]`, complete.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GapListing {
+    /// Exclusive lower bound, as asked.
+    pub after: u64,
+    /// Inclusive upper bound this listing covers.
+    pub through: u64,
+    /// Every own ackable seq in the span.
+    pub own: Vec<u64>,
 }
 
 /// `by`'s answer to `to`'s want: `resent` went out again just before this
@@ -51,6 +71,9 @@ pub struct GapAnswer {
     pub resent: Vec<u64>,
     /// Not an envelope the asker is owed.
     pub gone: Vec<u64>,
+    /// The answer to a range want.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listing: Option<GapListing>,
 }
 
 /// One gap frame, either direction.
@@ -86,6 +109,8 @@ pub enum GapError {
     UnknownVersion(u32),
     /// Empty, or more than [`GAP_MAX_SEQS`] seqs.
     BadSeqs,
+    /// A range or listing out of shape.
+    BadRange,
 }
 
 impl std::fmt::Display for GapError {
@@ -96,6 +121,7 @@ impl std::fmt::Display for GapError {
             GapError::Malformed => write!(f, "malformed gap frame"),
             GapError::UnknownVersion(v) => write!(f, "gap frame version {v}"),
             GapError::BadSeqs => write!(f, "gap frame seqs"),
+            GapError::BadRange => write!(f, "gap frame range"),
         }
     }
 }
@@ -107,7 +133,14 @@ impl GapWant {
         seqs.sort_unstable();
         seqs.dedup();
         seqs.truncate(GAP_MAX_SEQS);
-        GapWant { v: GAP_V, by, of, seqs }
+        GapWant { v: GAP_V, by, of, seqs, range: None }
+    }
+
+    /// A want by `by` for the listing of `of`'s own seqs in `(after, upto]`.
+    #[must_use]
+    pub fn range(by: MemberId, of: MemberId, after: u64, upto: u64) -> GapWant {
+        let upto = upto.min(after.saturating_add(GAP_RANGE_MAX));
+        GapWant { v: GAP_V, by, of, seqs: Vec::new(), range: Some((after, upto)) }
     }
 
     /// TAG ‖ JSON.
@@ -121,7 +154,13 @@ impl GapAnswer {
     /// An answer by `by` to `to`.
     #[must_use]
     pub fn new(by: MemberId, to: MemberId, resent: Vec<u64>, gone: Vec<u64>) -> GapAnswer {
-        GapAnswer { v: GAP_V, by, to, resent, gone }
+        GapAnswer { v: GAP_V, by, to, resent, gone, listing: None }
+    }
+
+    /// A range answer by `by` to `to`.
+    #[must_use]
+    pub fn listing(by: MemberId, to: MemberId, listing: GapListing) -> GapAnswer {
+        GapAnswer { v: GAP_V, by, to, resent: Vec::new(), gone: Vec::new(), listing: Some(listing) }
     }
 
     /// TAG ‖ JSON.
@@ -152,8 +191,11 @@ impl GapFrame {
             if w.v != GAP_V {
                 return Err(GapError::UnknownVersion(w.v));
             }
-            if w.seqs.is_empty() || !seqs_ok(&w.seqs) {
+            if (w.seqs.is_empty() && w.range.is_none()) || !seqs_ok(&w.seqs) {
                 return Err(GapError::BadSeqs);
+            }
+            if w.range.is_some_and(|(a, u)| a >= u || u - a > GAP_RANGE_MAX) {
+                return Err(GapError::BadRange);
             }
             return Ok(GapFrame::Want(w));
         }
@@ -164,6 +206,13 @@ impl GapFrame {
         }
         if !seqs_ok(&a.resent) || !seqs_ok(&a.gone) {
             return Err(GapError::BadSeqs);
+        }
+        if a.listing.as_ref().is_some_and(|l| {
+            l.after >= l.through
+                || l.own.len() > GAP_LIST_MAX
+                || l.own.iter().any(|s| *s <= l.after || *s > l.through)
+        }) {
+            return Err(GapError::BadRange);
         }
         Ok(GapFrame::Answer(a))
     }
@@ -189,10 +238,18 @@ mod tests {
     fn a_gap_want_is_bounded_and_never_names_seq_zero() {
         let many: Vec<u64> = (1..=200).collect();
         assert_eq!(GapWant::new("a".into(), "b".into(), many).seqs.len(), GAP_MAX_SEQS);
-        let zero = crate::framed(GAP_WANT_TAG, &GapWant { v: GAP_V, by: "a".into(), of: "b".into(), seqs: vec![0] });
+        let want = |seqs: Vec<u64>, range| GapWant { v: GAP_V, by: "a".into(), of: "b".into(), seqs, range };
+        let zero = crate::framed(GAP_WANT_TAG, &want(vec![0], None));
         assert_eq!(GapFrame::from_frame(&zero), Err(GapError::BadSeqs));
-        let empty = crate::framed(GAP_WANT_TAG, &GapWant { v: GAP_V, by: "a".into(), of: "b".into(), seqs: vec![] });
+        let empty = crate::framed(GAP_WANT_TAG, &want(vec![], None));
         assert_eq!(GapFrame::from_frame(&empty), Err(GapError::BadSeqs));
+        let wide = crate::framed(GAP_WANT_TAG, &want(vec![], Some((10, 11 + GAP_RANGE_MAX))));
+        assert_eq!(GapFrame::from_frame(&wide), Err(GapError::BadRange));
+        let r = GapWant::range("a".into(), "b".into(), 10, 99_999);
+        assert_eq!(r.range, Some((10, 10 + GAP_RANGE_MAX)), "clamped to one window");
+        assert_eq!(GapFrame::from_frame(&r.to_frame()), Ok(GapFrame::Want(r)));
+        let stray = GapAnswer::listing("b".into(), "a".into(), GapListing { after: 10, through: 20, own: vec![21] });
+        assert_eq!(GapFrame::from_frame(&stray.to_frame()), Err(GapError::BadRange));
         let mut big = GAP_WANT_TAG.to_vec();
         big.extend(std::iter::repeat_n(b' ', GAP_MAX_BYTES + 1));
         assert!(matches!(GapFrame::from_frame(&big), Err(GapError::TooBig(_))));
