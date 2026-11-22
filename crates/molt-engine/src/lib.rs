@@ -929,6 +929,9 @@ pub(crate) struct FilePlane {
     /// R10: a declaration owed (a peer asked, the audience changed), and
     /// the next ask for capabilities this seat lacks, with its backoff.
     pub(crate) mirror_decl_due: bool,
+    /// T4: per seat, the sender clock of the capabilities taken last and
+    /// this node's clock then (runtime only).
+    pub(crate) caps_at: HashMap<MemberId, (u64, u64)>,
     pub(crate) mirror_caps_ask_at: u64,
     pub(crate) mirror_caps_backoff: u64,
     /// The mirror worker (§3.3): the running fetch per series, the series
@@ -1789,6 +1792,7 @@ impl State {
                 mirror_who_answered: 0,
                 mirror_who_asked: false,
                 mirror_decl_due: false,
+                caps_at: HashMap::new(),
                 mirror_caps_ask_at: 0,
                 mirror_caps_backoff: 0,
                 mirror_fetches: HashMap::new(),
@@ -2099,11 +2103,11 @@ impl State {
             Command::ReadMirror => Ok(Reply::Mirror(Box::new(self.mirror_view()))),
             Command::SetMirror { on, quota_bytes } => self.cmd_set_mirror(on, quota_bytes),
             Command::SetMirrorDir { path } => self.cmd_set_mirror_dir(path),
-            Command::NetMirrorDecl { from, on, quota, rev, caps, generation } => {
+            Command::NetMirrorDecl { from, on, quota, rev, caps, at, generation } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
-                self.cmd_net_mirror_decl(&from, on, quota, rev, caps)
+                self.cmd_net_mirror_decl(&from, on, quota, rev, caps, at)
             }
             Command::NetMirrorStatus { from, holds, serving, gen, page, pages, generation } => {
                 if !self.net_generation_current(generation) {

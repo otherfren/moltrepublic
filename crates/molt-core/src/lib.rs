@@ -6615,6 +6615,9 @@ pub enum Command {
         /// The capabilities the declarer's build announces.
         #[serde(default)]
         caps: Vec<String>,
+        /// The declarer's clock at sending; 0 from an older build.
+        #[serde(default)]
+        at: u64,
         /// Transport incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,

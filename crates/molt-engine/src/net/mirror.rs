@@ -163,6 +163,7 @@ impl State {
             quota: decl.quota,
             rev: decl.rev,
             caps: own_caps(self.lock_cap_on()),
+            at: now,
         };
         if self.publish_mirror_frame(frame.to_frame()) {
             self.files.mirror_decl_due = false;
@@ -672,6 +673,7 @@ impl State {
         quota: u64,
         rev: u64,
         caps: Vec<String>,
+        at: u64,
     ) -> Result<Reply, MoltError> {
         if *from == self.member() || !self.roster().contains(from) {
             return Ok(Reply::Ack);
@@ -681,8 +683,28 @@ impl State {
             self.files.mirror.decls.insert(from.clone(), MirrorDecl { on, quota, rev });
             self.persist_mirror();
         }
-        self.remember_caps(from, caps);
+        if self.caps_fresh(from, at) {
+            self.remember_caps(from, caps);
+        }
         Ok(Reply::Ack)
+    }
+
+    /// T4: a declaration's capabilities are newer than the ones taken: by
+    /// the sender's clock; an unstamped one (an older build) after a
+    /// stamped one only once a repeat period passed (a real downgrade
+    /// repeats; a reordered stale frame does not).
+    fn caps_fresh(&mut self, from: &MemberId, at: u64) -> bool {
+        let now = self.presence_now();
+        let fresh = match self.files.caps_at.get(from) {
+            None => true,
+            Some(&(seen, _)) if at > 0 => at >= seen,
+            Some(&(0, _)) => true,
+            Some(&(_, taken)) => now.saturating_sub(taken) >= DECL_REPEAT_SECS,
+        };
+        if fresh {
+            self.files.caps_at.insert(from.clone(), (at, now));
+        }
+        fresh
     }
 
     /// The member's last announced capabilities, kept in the prefs (they

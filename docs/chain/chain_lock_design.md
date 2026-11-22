@@ -337,7 +337,11 @@ surfaces, the GUI among them).
 change, and again whenever a peer asks (`MirrorWho`) or a seat is
 restored or joins; a seat lacking a roster peer's declaration asks,
 backing off from 10 s to an hour. A declaration without a capability is
-kept as such (`declared without` differs from `unheard`). Without this
+kept as such (`declared without` differs from `unheard`). A
+declaration carries the sender's clock (`at`, additive): a reordered
+older one never overwrites newer capabilities; an unstamped one (an
+older build) after a stamped one counts only once a repeat period
+passed (T4). Without this
 a restored seat learned the others' capabilities only at their 6 h
 repeat and could not approve the enabling vote.
 
