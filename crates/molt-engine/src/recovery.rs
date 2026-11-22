@@ -20,6 +20,10 @@ use tokio::sync::mpsc;
 /// A cancel after the re-admission sealed: nothing to withdraw.
 pub(crate) const READMITTED_NEW_LINK: &str = "already re-admitted - a new link is needed";
 
+/// A cancel after the run asked for its card, before it saw the seal: the
+/// coordinator may have sealed it (F2, v0.1.1).
+pub const RECOVER_CANCELLED_MAYBE_READMITTED: &str = "cancelled - the seat may already be re-admitted";
+
 /// A recovery link — `molt://recover/<segment>` — mirroring
 /// [`crate::FoundingInvite`], but for an *existing* seat. It carries a
 /// transport handover (the coordinator's recovery queue) and a single-use

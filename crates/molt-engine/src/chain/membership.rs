@@ -1286,6 +1286,7 @@ impl State {
         let Some(pending) = self.recovery.pending.remove(member) else {
             return;
         };
+        self.note_rekeyed_run(member, &pending);
         let Ok(kp) = hex::decode(&pending.key_package) else {
             tracing::warn!(%member, "recovery KeyPackage is not valid hex");
             return;

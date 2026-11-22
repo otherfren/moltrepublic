@@ -2112,3 +2112,66 @@ fn a_cancel_right_after_ready_withdraws_before_the_coordinator_seals() {
     assert_eq!(coord.chain.head.as_ref().expect("head").height, 0, "nothing sealed");
     assert!(coord.recovery.tickets.contains_key(&ticket), "the ticket is live again");
 }
+
+/// **F2 (v0.1.1):** a run cancelled after its block sealed and the group
+/// re-keyed for it is reported on the coordinator, not only logged; the
+/// seat is not "heard", so a new link mints and restores it. Another
+/// run's frame, or one after the seat was heard again, reports nothing.
+#[test]
+fn a_run_abandoned_after_its_rekey_is_reported_and_a_new_link_restores_it() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    coord.config.self_cosign = false;
+    let (id, _ticket, npk, kp_hex) = propose_dora(&mut coord, &b);
+    let card = coord.chain.proposal_changes.get(&id).cloned().expect("card");
+    coord.receive_block(b.seal(1, card, &["walter"]));
+    assert_eq!(coord.chain.head.as_ref().expect("head").height, 1, "sealed");
+    assert!(coord.recovery.pending.is_empty(), "the re-key consumed the run");
+    coord.session.notice.clear();
+
+    let other = molt_net::invite::recover_attempt_id(&kp_hex_for(&b, "dora"));
+    coord.cmd_net_recover_peer_failed("dora", "cancelled", "0.0.21", &other, &npk).expect("ack");
+    assert_eq!(coord.session.notice, "", "another run reports nothing");
+
+    let attempt = molt_net::invite::recover_attempt_id(&kp_hex);
+    coord.cmd_net_recover_peer_failed("dora", "cancelled", "0.0.21", &attempt, &npk).expect("ack");
+    assert_eq!(coord.session.notice, "restore-abandoned:dora");
+    coord.session.notice.clear();
+    coord.cmd_net_recover_peer_failed("dora", "cancelled", "0.0.21", &attempt, &npk).expect("ack");
+    assert_eq!(coord.session.notice, "", "reported once");
+
+    // the seat is not heard: a new link mints and restores it
+    assert_eq!(coord.restore_gate("dora"), None, "no `seat still active`");
+    let fresh = "22".repeat(16);
+    coord.recovery.tickets.insert(fresh.clone(), "dora".to_string());
+    let npk2 = "ee".repeat(32);
+    let kp2 = kp_hex_for(&b, "dora");
+    let proof2 = crate::make_seat_proof(b.key("dora"), &fresh, &kp2, &b.republic_id, &npk2, &[]);
+    let consent2 = consent_v2_for(&b, "dora", &npk2, &[], 1, &npk);
+    coord
+        .verify_and_propose_restore("dora", &b.pk("dora"), &kp2, &fresh, &proof2, &npk2, &[], &consent2, "")
+        .expect("a new link restores the seat");
+}
+
+/// F2: a withdrawal that arrives after the restored seat was heard from
+/// its new leaf is a stale run's - nothing to report.
+#[test]
+fn a_late_withdrawal_after_the_seat_came_back_reports_nothing() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    coord.config.self_cosign = false;
+    coord.presence.clock_override = Some(10_000);
+    let (id, _ticket, npk, kp_hex) = propose_dora(&mut coord, &b);
+    let card = coord.chain.proposal_changes.get(&id).cloned().expect("card");
+    coord.receive_block(b.seal(1, card, &["walter"]));
+    coord.session.notice.clear();
+    coord.presence.clock_override = Some(10_010);
+    coord.note_frame_heard("dora", 10_005);
+    let attempt = molt_net::invite::recover_attempt_id(&kp_hex);
+    coord.cmd_net_recover_peer_failed("dora", "cancelled", "0.0.21", &attempt, &npk).expect("ack");
+    assert_eq!(coord.session.notice, "", "the seat is back");
+}

@@ -760,6 +760,9 @@ impl State {
                 tracing::info!(%member, stage = "card", "recover_withdrawn");
                 return Ok(Reply::Ack);
             }
+            if self.restore_abandoned(member, attempt, &canonical) {
+                return Ok(Reply::Ack);
+            }
         }
         let anchor = self.chain.blocks.iter().rev().find_map(|b| match &b.change {
             molt_core::ChainChange::Membership {
@@ -777,6 +780,52 @@ impl State {
         let version = if version.is_empty() { "unknown" } else { version };
         tracing::warn!(%member, version, reason, "recovery_failed");
         Ok(Reply::Ack)
+    }
+
+    /// F2: remember the run a sealed restore re-keyed for.
+    pub(crate) fn note_rekeyed_run(&mut self, member: &str, p: &crate::chain::PendingRecovery) {
+        const REKEYED_KEPT: usize = 16;
+        let molt_core::ChainChange::Membership { nostr_pk: Some(anchor), .. } = &p.card else {
+            return;
+        };
+        let attempt = molt_net::invite::recover_attempt_id(&p.key_package);
+        let at = self.presence_now();
+        self.recovery.rekeyed.push_back((member.to_string(), attempt, anchor.clone(), at));
+        while self.recovery.rekeyed.len() > REKEYED_KEPT {
+            self.recovery.rekeyed.pop_front();
+        }
+    }
+
+    /// F2: the run this node re-keyed for gave up before its device was
+    /// heard - the seat is re-admitted with no device holding its leaf.
+    /// Reported once; a new link restores it.
+    fn restore_abandoned(&mut self, member: &str, attempt: &str, sender: &str) -> bool {
+        let Some(at) = self
+            .recovery
+            .rekeyed
+            .iter()
+            .position(|(m, a, k, _)| m == member && a == attempt && k == sender)
+        else {
+            return false;
+        };
+        let Some((_, _, _, rekeyed_at)) = self.recovery.rekeyed.remove(at) else {
+            return false;
+        };
+        if self.restore_heard_at(member) > rekeyed_at {
+            return false;
+        }
+        let height = self.chain.blocks.iter().rev().find_map(|b| match &b.change {
+            molt_core::ChainChange::Membership { op: molt_core::MembershipOp::Restored, member: m, .. }
+                if m == member =>
+            {
+                Some(b.height)
+            }
+            _ => None,
+        });
+        tracing::warn!(%member, height = height.unwrap_or(0), "restore_abandoned");
+        self.session.notice = format!("restore-abandoned:{member}");
+        self.emit_session(SessionScope::Full);
+        true
     }
 
     /// Report a coordinated recovery's vote state to its waiting rejoiner

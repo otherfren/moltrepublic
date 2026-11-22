@@ -226,7 +226,19 @@ frame (every survivor stops signing it) and gives the ticket back; only
 the run's own key with its own attempt id withdraws. After the seal
 nothing is undone: `R` says `already re-admitted - a new link is needed`
 when it saw the sealed report (`RecoverProgress.sealed`), and a retry on
-the link hears `link outdated`. The live link shows on `S` again.
+the link hears `link outdated`. The live link shows on `S` again. A
+cancel after the run asked for its card (Ready sent, or a vote report
+seen) but before it saw the seal says `cancelled - the seat may already
+be re-admitted` (v0.1.1): `R` cannot tell a won withdrawal from a lost
+one.
+
+**Abandoned after the re-key (F2, v0.1.1).** A `RecoverFailed` naming the
+run `S` re-keyed for (seat, attempt and anchor match), before the seat
+was heard again, means the chain holds the restore and no device holds
+the leaf. `S` logs `restore_abandoned member= height=` and raises
+`restore-abandoned:<member>` once. The seat is not heard, so a new link
+mints at once and restores it. Memory only: after a restart of `S` the
+frame is logged as `recovery_failed`, as before.
 
 **The settle (F1, v0.1.1).** The withdrawal leaves right behind its card
 (the outbox publishes in order, often in one burst), so a seat that
@@ -529,8 +541,10 @@ The product never uses the seam.
   `a_retry_on_the_same_link_is_not_ended_by_an_earlier_runs_refusal`,
   `a_replayed_earlier_run_never_replaces_the_running_one`,
   `a_cancel_after_ready_withdraws_the_unsealed_card` and
-  `a_new_run_on_a_spent_link_hears_link_outdated`; the settle (v0.1.1)
-  in `a_cancel_right_after_ready_beats_an_auto_approving_bystander`.
+  `a_new_run_on_a_spent_link_hears_link_outdated`; the settle and the
+  abandoned report (v0.1.1) in
+  `a_cancel_right_after_ready_beats_an_auto_approving_bystander` and
+  `a_cancel_after_the_rekey_is_reported_and_a_new_link_heals_it`.
 
 - **Recovery UI** — ✅ (2026-07-11, mint states 2026-07-16) both surfaces in
   `molt-ui`, driving the same co-equal commands. Coordinator: a per-member

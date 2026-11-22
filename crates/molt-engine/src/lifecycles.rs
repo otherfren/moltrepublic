@@ -1829,6 +1829,7 @@ impl State {
         let (quit, quit_rx) = tokio::sync::oneshot::channel();
         self.recovery.quit = Some(quit);
         self.recovery.readmitted = std::sync::Arc::default();
+        self.recovery.asked = std::sync::Arc::default();
         self.recovery.task = Some(crate::nostr_ritual::spawn_recovery_rejoiner(
             dialer,
             crate::nostr_ritual::RecoverCtx {
@@ -1838,6 +1839,7 @@ impl State {
                 phrase: task_phrase.into(),
                 generation,
                 readmitted: self.recovery.readmitted.clone(),
+                asked: self.recovery.asked.clone(),
             },
             quit_rx,
             cmd_tx.downgrade(),
@@ -2399,11 +2401,14 @@ impl State {
         }
         // review R2: a sealed re-admission cannot be withdrawn
         let readmitted = self.recovery.readmitted.load(std::sync::atomic::Ordering::SeqCst);
+        let asked = self.recovery.asked.load(std::sync::atomic::Ordering::SeqCst);
         self.invalidate_recovery();
         self.session.recover = molt_core::RecoverState::default();
-        tracing::info!(readmitted, "recover=cancelled");
+        tracing::info!(readmitted, asked, "recover=cancelled");
         self.session.notice = if readmitted {
             format!("recover-failed:{}", crate::recovery::READMITTED_NEW_LINK)
+        } else if asked {
+            format!("recover-failed:{}", crate::recovery::RECOVER_CANCELLED_MAYBE_READMITTED)
         } else {
             "recover-cancelled".to_string()
         };
