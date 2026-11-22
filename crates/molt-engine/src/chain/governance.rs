@@ -17,6 +17,9 @@ const VOTE_REFUSAL_DEBOUNCE_SECS: u64 = 30;
 
 /// L3: open cards one proposer may hold at once — a flooding member can
 /// only crowd itself (the shed card is re-earned by the WP2 re-serve).
+/// A pre-v0.1.1 receiver charges a re-server for every card it relays:
+/// a sender's cards beyond that miscount are dropped there, unseen by
+/// the sender, until a later re-serve re-earns them.
 pub(super) const OPEN_CARDS_PER_PROPOSER_MAX: usize = 64;
 
 /// A2.2 seal pacing (mcp_agent_friction_fixes.md): over a real transport a
@@ -1499,19 +1502,58 @@ impl State {
             .saturating_add(crate::proposals::PARKED_DECLINE_ID_WINDOW)
     }
 
-    /// `by`'s open cards, membership records included: what both sides of
-    /// the L3 cap count.
+    /// `by`'s open cards that `by` delivered itself, membership records
+    /// included: what a receiver charges to `by`'s cap.
     pub(crate) fn open_cards_by(&self, by: &str) -> usize {
         self.proposals
             .values()
-            .filter(|p| p.state == ProposalState::Proposed && p.by == by)
+            .filter(|p| p.state == ProposalState::Proposed && p.by == by && p.relayed_by.is_empty())
+            .count()
+    }
+
+    /// Open cards `via` relayed for a seat that has not delivered them.
+    fn open_relayed_by(&self, via: &str) -> usize {
+        self.proposals
+            .values()
+            .filter(|p| p.state == ProposalState::Proposed && p.relayed_by == via)
+            .count()
+    }
+
+    /// A relayer honestly carries at most every other seat's full cap.
+    fn relay_budget(&self) -> usize {
+        OPEN_CARDS_PER_PROPOSER_MAX * self.roster().len().saturating_sub(1).max(1)
+    }
+
+    /// A card belongs to its id's minting seat, on every node however it
+    /// arrived. Until that seat delivers it itself, the wire sender `via`
+    /// is kept as its relayer. Without a roster `via` is the proposer.
+    pub(crate) fn attribute_card(&mut self, id: u64, via: &str) {
+        let minter = self.minting_seat(id).unwrap_or_else(|| via.to_string());
+        let Some(p) = self.proposals.get_mut(&id) else {
+            return;
+        };
+        if via == minter {
+            p.relayed_by.clear();
+        } else if p.by != minter && p.relayed_by.is_empty() {
+            p.relayed_by = std::mem::take(&mut p.by);
+        }
+        p.by = minter;
+    }
+
+    /// Own open cards, however they came back here: the sender counts at
+    /// least what any receiver charges it.
+    fn own_open(&self) -> usize {
+        let me = self.member();
+        self.proposals
+            .values()
+            .filter(|p| p.state == ProposalState::Proposed && p.by == me)
             .count()
     }
 
     /// The sender twin of the L3 cap: a card every peer would drop is
     /// never put up. Membership cards and cuts do not pass through it.
     pub(crate) fn open_cap_gate(&self) -> Result<(), molt_core::MoltError> {
-        if self.open_cards_by(&self.member()) >= OPEN_CARDS_PER_PROPOSER_MAX {
+        if self.own_open() >= OPEN_CARDS_PER_PROPOSER_MAX {
             return Err(molt_core::MoltError::OpenProposalsCap(OPEN_CARDS_PER_PROPOSER_MAX));
         }
         Ok(())
@@ -1519,7 +1561,7 @@ impl State {
 
     /// `(own open cards, the cap)` for `status`.
     pub(crate) fn own_open_cards(&self) -> (usize, usize) {
-        (self.open_cards_by(&self.member()), OPEN_CARDS_PER_PROPOSER_MAX)
+        (self.own_open(), OPEN_CARDS_PER_PROPOSER_MAX)
     }
 
     /// Inbound: a peer proposed something (gossip). Record it as pending so it
@@ -1571,9 +1613,20 @@ impl State {
         // L3: a flooding proposer may only crowd ITSELF — the newest card
         // is refused (the WP2 re-serve re-earns an honest one later), and
         // another member's cards are never evicted
-        if !self.proposals.contains_key(&id) && self.open_cards_by(by) >= OPEN_CARDS_PER_PROPOSER_MAX {
-            tracing::warn!(%id, %by, "refusing a proposal beyond the per-proposer open cap");
-            return false;
+        // A relayed card (a re-serve, or a forgery in a third seat's id
+        // stripe) is charged to the relayer's own relay budget, never to
+        // the seat the id names
+        if !self.proposals.contains_key(&id) {
+            let minter = self.minting_seat(id);
+            let full = if minter.as_deref().map_or(true, |m| m == by) {
+                self.open_cards_by(by) >= OPEN_CARDS_PER_PROPOSER_MAX
+            } else {
+                self.open_relayed_by(by) >= self.relay_budget()
+            };
+            if full {
+                tracing::warn!(%id, %by, "refusing a proposal beyond the per-proposer open cap");
+                return false;
+            }
         }
         self.next_id = self.next_id.max(id.saturating_add(1));
         // SECURITY (symmetric to receive_membership_proposal): an id already
@@ -1613,6 +1666,7 @@ impl State {
             inserted = true;
             molt_core::ProposalRecord::new(surface, payload, by.to_string())
         });
+        self.attribute_card(id, by);
         if inserted && surface == Surface::Vault {
             self.after_vault_proposed(id);
         }

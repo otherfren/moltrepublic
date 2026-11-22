@@ -71,13 +71,14 @@ fn reopen_keeps_the_proposer_and_every_vote(with_snapshot: bool) {
     let b = Builder::new(&["petra", "walter", "dora"], 2);
     let (mut walter, _tmp, dir) = stored_chain_signer(&b, "walter", &["petra", "walter", "dora"]);
 
-    // a FOREIGN card, plus the proposer's own signature for it
+    // a FOREIGN card (8 is in petra's id stripe), plus the proposer's own
+    // signature for it
     wire(
         &mut walter,
         "petra",
         1,
         WorkspaceEvent::Proposed {
-            id: ProposalId(7),
+            id: ProposalId(8),
             surface: Surface::Organization,
             payload: json!({ "op": "set_name", "value": "Petra's" }),
         },
@@ -85,7 +86,7 @@ fn reopen_keeps_the_proposer_and_every_vote(with_snapshot: bool) {
     let sig = peer_sig(
         &b,
         "petra",
-        7,
+        8,
         Surface::Organization,
         json!({ "op": "set_name", "value": "Petra's" }),
         1,
@@ -95,7 +96,7 @@ fn reopen_keeps_the_proposer_and_every_vote(with_snapshot: bool) {
         "petra",
         2,
         WorkspaceEvent::Approved {
-            id: ProposalId(7),
+            id: ProposalId(8),
             by: "petra".to_string(),
             height: 1,
             sig,
@@ -112,12 +113,12 @@ fn reopen_keeps_the_proposer_and_every_vote(with_snapshot: bool) {
     // the catch-up re-serve: it re-authors BOTH cards under this node
     walter.serve_open_governance();
 
-    let live_foreign = card(&walter, 7);
+    let live_foreign = card(&walter, 8);
     assert_eq!(live_foreign.approvals, 1, "the live card counts petra's signature");
 
     let back = reopen_chain_signer(walter, &dir, &b, "walter", with_snapshot);
 
-    let foreign = card(&back, 7);
+    let foreign = card(&back, 8);
     assert_eq!(foreign.by, "petra", "the foreign card keeps its proposer");
     assert!(!foreign.mine, "…and is not read as our own");
     assert_eq!(foreign.state, ProposalState::Proposed, "still open");

@@ -2070,7 +2070,7 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
         ts: 1_751_000_300,
         by: "member-b".to_string(),
         body: WorkspaceEvent::Proposed {
-            id: ProposalId(7),
+            id: ProposalId(6),
             surface: Surface::Organization,
             payload: serde_json::json!({
                 "op": "set_image",
@@ -2081,12 +2081,12 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
         },
     });
     let _ = member_wake.send(2);
-    // the streaming event names the WIRE proposer — the GUI's alert-sound
+    // the streaming event names the proposer (6 is in member-b's id stripe) — the GUI's alert-sound
     // gate (only somebody else's vote rings)
     let ev_by = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             if let Ok(Event::Proposed { id, by, .. }) = a_ev.recv().await {
-                if id == ProposalId(7) {
+                if id == ProposalId(6) {
                     return by;
                 }
             }
@@ -2109,7 +2109,7 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
             Reply::State(s) => s.pending,
             other => panic!("unexpected: {other:?}"),
         };
-        if let Some(p) = pending.iter().find(|p| p.id == ProposalId(7)) {
+        if let Some(p) = pending.iter().find(|p| p.id == ProposalId(6)) {
             let got = p.payload["bytes_b64"].as_str().expect("bytes_b64 is a string");
             assert_eq!(
                 got, member_b64,
@@ -2133,13 +2133,13 @@ async fn a_set_image_proposal_carries_its_bytes_across_the_mesh() {
     // open proposals under the SERVING peer's name, so a second Proposed
     // for a known id would re-ring every GUI's vote alert after each
     // rejoin. Only a genuinely new insert may emit; the next streamed
-    // Proposed must therefore be the fresh id 8, never id 7 again. ---
+    // Proposed must therefore be the fresh id 8, never id 6 again. ---
     member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 3,
         ts: 1_751_000_400,
         by: "member-b".to_string(),
         body: WorkspaceEvent::Proposed {
-            id: ProposalId(7),
+            id: ProposalId(6),
             surface: Surface::Organization,
             payload: serde_json::json!({
                 "op": "set_image",

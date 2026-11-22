@@ -3448,13 +3448,12 @@ pub struct ProposalRecord {
     /// Additive, skipped when empty so pre-field dumps stay byte-identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub voted: Vec<MemberId>,
-    /// Who proposed it ("" = unknown: a pre-field record, or a WP2
-    /// catch-up re-serve — those arrive re-wrapped under the SERVING
-    /// peer's name, so this field is an ownership DISPLAY hint (the
-    /// "pull back" button's visibility), never an authorization input:
-    /// a future withdraw must gate on the authenticated wire sender at
-    /// execution time. Additive, and skipped when empty so pre-field
-    /// dumps stay byte-identical.
+    /// Who proposed it: the seat whose stripe the id falls on, however
+    /// the card arrived ("" = unknown, a pre-field record; a record from
+    /// before v0.1.1 may name the re-server that delivered it). A DISPLAY
+    /// hint, never an authorization input: a withdraw gates on the
+    /// authenticated wire sender against the id's minting seat. Additive,
+    /// and skipped when empty so pre-field dumps stay byte-identical.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub by: MemberId,
     /// The supersede walk's terminal verdict
@@ -3485,6 +3484,11 @@ pub struct ProposalRecord {
     /// stamp below it. `None` = never folded here, or void. Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wiki_rev: Option<u64>,
+    /// The seat that delivered this card while `by`, the id's minting
+    /// seat, has not delivered it itself ("" = from the minter). Such a
+    /// card counts against this relayer's relay budget, not `by`'s cap.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub relayed_by: MemberId,
 }
 
 impl ProposalRecord {
@@ -3506,6 +3510,7 @@ impl ProposalRecord {
             superseded_kind: None,
             withdrawn: false,
             wiki_rev: None,
+            relayed_by: MemberId::new(),
         }
     }
 
