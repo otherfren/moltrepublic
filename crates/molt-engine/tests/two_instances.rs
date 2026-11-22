@@ -3916,7 +3916,9 @@ async fn wait_for(
     pred: impl Fn(&(MemberId, EventEnvelope)) -> bool,
     what: &str,
 ) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    // a production-tuned mesh jitters every send up to 2 s and drains its
+    // backlog to a new link first: a bound for a hung test, not a latency
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
     loop {
         if sink.messages().iter().any(&pred) {
             return;
