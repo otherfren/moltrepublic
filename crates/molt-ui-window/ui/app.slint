@@ -5195,7 +5195,7 @@ export component AppWindow inherits Window {
                                 label: seat.member;
                                 label-color: seat.approved ? Theme.text : Theme.dim;
                             }
-                            if root.rv-log.length > 0: Rectangle {
+                            if root.rv-log.length > 0: rv-log-box := Rectangle {
                                 background: Theme.panel;
                                 border-radius: Theme.win95 ? 0px : 6px;
                                 border-width: Theme.border-w;
@@ -5639,36 +5639,40 @@ export component AppWindow inherits Window {
                 // (the Stage 3 auto-heal runs and clears it on its own); red is
                 // honest that nothing flows, notes the ephemeral gap, and offers
                 // a repair route into the existing recovery rejoin.
-                if root.net-health-tone > 0: Rectangle {
+                // The reason rides the title row (in full on hover when cut):
+                // the banner is as tall as its content, never more.
+                if root.net-health-tone > 0: nh-bar := Rectangle {
+                    vertical-stretch: 0;
                     background: root.net-health-tone == 1
                         ? Theme.warn.transparentize(0.9)
                         : Theme.bad.transparentize(0.9);
+                    // under the layout, so the repair button keeps its clicks
+                    nh-hover := TouchArea { }
                     HorizontalLayout {
-                        padding-top: 10px;
-                        padding-bottom: 10px;
+                        padding-top: 5px * Theme.ui-scale;
+                        padding-bottom: 5px * Theme.ui-scale;
                         padding-left: 16px;
                         padding-right: 12px;
-                        spacing: 10px;
+                        spacing: 10px * Theme.ui-scale;
                         VerticalLayout {
                             alignment: center;
                             Rectangle {
-                                width: 10px;
-                                height: 10px;
-                                border-radius: 5px;
+                                width: 10px * Theme.ui-scale;
+                                height: self.width;
+                                border-radius: self.width / 2;
                                 background: root.net-health-tone == 1 ? Theme.warn : Theme.bad;
                             }
                         }
                         VerticalLayout {
                             alignment: center;
                             horizontal-stretch: 1;
-                            spacing: 3px;
+                            spacing: 2px;
                             HorizontalLayout {
-                                spacing: 8px;
-                                alignment: start;
+                                spacing: 8px * Theme.ui-scale;
                                 if root.net-health-tone == 1: VerticalLayout {
                                     alignment: center;
                                     Spinner {
-                                        size: 13px;
+                                        size: 13px * Theme.ui-scale;
                                         tone: Theme.warn;
                                     }
                                 }
@@ -5681,12 +5685,24 @@ export component AppWindow inherits Window {
                                     font-weight: 600;
                                     vertical-alignment: center;
                                 }
-                            }
-                            if root.net-health-reason != "": Text {
-                                text: root.net-health-reason;
-                                color: Theme.dim;
-                                font-size: Theme.fs-cap;
-                                overflow: elide;
+                                nh-reason := Text {
+                                    text: root.net-health-reason;
+                                    color: Theme.dim;
+                                    font-size: Theme.fs-cap;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                    property <bool> tip-on: nh-hover.has-hover && self.width < self.preferred-width;
+                                    property <int> tip-gen;
+                                    changed tip-on => {
+                                        if (self.tip-on) {
+                                            self.tip-gen = HintTip.show(self.text, self.absolute-position.x,
+                                                nh-bar.absolute-position.y + nh-bar.height + 4px);
+                                        } else {
+                                            HintTip.hide(self.tip-gen);
+                                        }
+                                    }
+                                }
                             }
                             if root.net-health-tone == 2: Text {
                                 text: Strings.banner-gap-note;
