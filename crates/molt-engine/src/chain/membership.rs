@@ -615,11 +615,13 @@ impl State {
         let open = &self.chain.proposal_changes;
         self.recovery.settle.retain(|i, _| open.contains_key(i));
         let since = *self.recovery.settle.entry(id).or_insert(now);
-        let settle = match self.lock_seams.settle_secs.load(std::sync::atomic::Ordering::SeqCst) {
+        // the coordinator's withdrawal may wait behind a gap in its stream
+        let settle = match self.drop_seam.restore_settle.load(std::sync::atomic::Ordering::SeqCst) {
             0 => RESTORE_SETTLE_SECS,
-            s => s,
+            v => v - 1,
         };
         now.saturating_sub(since) < settle
+            || self.proposals.get(&id).is_some_and(|p| self.inbound_held_from(&p.by))
     }
 
     /// F1, read-only: `change` is no restore, or no settle runs for it here.
@@ -627,9 +629,9 @@ impl State {
         if !matches!(change, ChainChange::Membership { op: MembershipOp::Restored, .. }) || self.nostr.is_none() {
             return true;
         }
-        let settle = match self.lock_seams.settle_secs.load(std::sync::atomic::Ordering::SeqCst) {
+        let settle = match self.drop_seam.restore_settle.load(std::sync::atomic::Ordering::SeqCst) {
             0 => RESTORE_SETTLE_SECS,
-            s => s,
+            v => v - 1,
         };
         self.recovery.settle.get(&id).map_or(true, |since| self.presence_now().saturating_sub(*since) >= settle)
     }
@@ -1306,17 +1308,20 @@ impl State {
         let Some(pending) = self.recovery.pending.remove(member) else {
             return;
         };
-        self.note_rekeyed_run(member, &pending);
         let Ok(kp) = hex::decode(&pending.key_package) else {
             tracing::warn!(%member, "recovery KeyPackage is not valid hex");
             return;
         };
+        // F2 remembers a run only once its re-key really happened
         if self.group_net.is_some() {
-            self.coordinator_rekey_nostr(member, &kp);
+            if self.coordinator_rekey_nostr(member, &kp) {
+                self.note_rekeyed_run(member, &pending);
+            }
             return;
         }
         match self.net.as_ref().and_then(|n| n.restore_member_on_group(member, &kp)) {
             Some(Ok((commit, welcome))) => {
+                self.note_rekeyed_run(member, &pending);
                 let me = self.member();
                 // 1) broadcast the raw re-key commit to the survivors: recorded as
                 // an `MlsCommit`, the outbox fans it out; every survivor merges it
@@ -1401,7 +1406,7 @@ impl State {
     /// Steps 2 and 3 are off the actor; 1 and 4 are on it. Every failure is
     /// named — a recovery that quietly does nothing leaves a member locked out
     /// with no way to find out why.
-    fn coordinator_rekey_nostr(&mut self, member: &str, key_package: &[u8]) {
+    fn coordinator_rekey_nostr(&mut self, member: &str, key_package: &[u8]) -> bool {
         // **Everything that can fail is resolved BEFORE the group is touched.**
         //
         // `nostr_rekey` advances the epoch and evicts the old leaf, and there
@@ -1413,15 +1418,15 @@ impl State {
         let relays = self.dialable_group_relays();
         if relays.is_empty() {
             tracing::error!(%member, "no dialable relay for this republic - the re-key cannot be delivered");
-            return;
+            return false;
         }
         let Ok(dialer) = self.dialer_for() else {
             tracing::error!(%member, "no usable dial route - the re-key cannot be delivered");
-            return;
+            return false;
         };
         // the transport material, copied out so the group borrow below is free
         let Some(nostr) = self.nostr.as_ref() else {
-            return;
+            return false;
         };
         let rotation_seed = nostr.rotation_seed;
         // the payload carries what the GROUP ratified, not this node's own
@@ -1441,7 +1446,7 @@ impl State {
             Ok(n) => n,
             Err(e) => {
                 tracing::error!(%member, error = %e, "recovery transport keys - the re-key cannot be delivered");
-                return;
+                return false;
             }
         };
         // a running group's re-key: its 445 frames carry the same relay
@@ -1453,7 +1458,7 @@ impl State {
         let to = self.working_nostr_pk(member);
         if to.is_empty() {
             tracing::error!(%member, "the restored seat carries no transport anchor - nothing to address the welcome to");
-            return;
+            return false;
         }
 
         // --- past here the group really changes -------------------------------
@@ -1461,13 +1466,13 @@ impl State {
         // unchanged into both `restore_member` and `publish_frame_at`
         let stamp = molt_storage::now_secs();
         let Some(group) = self.group_net.as_ref() else {
-            return;
+            return false;
         };
         let rekey = match nostr_rekey(&group.mls, member, key_package, stamp) {
             Ok(r) => r,
             Err(e) => {
                 tracing::error!(%member, error = %e, "the Nostr re-key failed - the returning seat gets no welcome");
-                return;
+                return false;
             }
         };
         let payload = molt_net::welcome::WelcomePayload {
@@ -1530,5 +1535,6 @@ impl State {
             tracing::warn!(error = %e, "could not post the rejoin notice");
         }
         tracing::info!(%member, stamp, "re-keyed the group on Nostr and offered the chain anchor");
+        true
     }
 }

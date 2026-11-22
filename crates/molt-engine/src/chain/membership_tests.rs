@@ -2071,6 +2071,50 @@ fn a_consented_restore_settles_before_a_bystander_signs_or_seals() {
     verify_chain(&walter.chain.blocks).expect("verifies");
 }
 
+/// **G2:** the coordinator's withdrawal may sit in a gap of its stream (a
+/// later frame of the coordinator arrived, the withdrawal did not yet): the
+/// settle keeps waiting while that stream is held, so the withdrawal still
+/// wins after the 5 s.
+#[test]
+fn a_restore_keeps_settling_while_the_coordinators_stream_has_a_gap() {
+    use molt_core::{EventEnvelope, ProposalId, WorkspaceEvent};
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let id = 8;
+    let (frame, change) = dora_card_frame(&b, id);
+    let petra_sig =
+        molt_storage::identity_sign(b.key("petra"), &molt_core::chain::approval_bytes(&b.republic_id, 1, &change));
+    let approval = WorkspaceEvent::Approved { id: ProposalId(id), by: "petra".to_string(), height: 1, sig: petra_sig };
+    let env = |seq: u64, prev: u64, body: WorkspaceEvent| EventEnvelope {
+        seq,
+        ts: 1_751_000_000 + seq,
+        by: "petra".to_string(),
+        body,
+        prev_seq: prev,
+    };
+    let own_sig =
+        |w: &crate::State| w.chain.pending_sigs.get(&id).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
+    let settle = super::membership::RESTORE_SETTLE_SECS;
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    on_nostr(&mut walter, 10_000);
+    let deliver = |w: &mut crate::State, e: EventEnvelope| {
+        w.cmd_net_delivered("petra".to_string(), e, None).expect("delivered");
+    };
+    deliver(&mut walter, env(1, 0, frame));
+    deliver(&mut walter, env(2, 1, approval));
+    // seq 3 (the withdrawal) is in flight; seq 4 already here
+    deliver(&mut walter, env(4, 3, WorkspaceEvent::ChainRequest { from_height: 1, known: Vec::new() }));
+    walter.presence.clock_override = Some(10_000 + settle + 1);
+    walter.cmd_net_delivery_tick().expect("tick");
+    assert!(!own_sig(&walter), "no signature while the coordinator's stream has a gap");
+    deliver(&mut walter, env(3, 2, WorkspaceEvent::Withdrawn { id: ProposalId(id), by: "petra".to_string() }));
+    walter.presence.clock_override = Some(10_000 + settle + 2);
+    walter.cmd_net_delivery_tick().expect("tick");
+    assert!(!own_sig(&walter), "the withdrawal won");
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 0);
+}
+
 /// The coordinator side of a dora restore: a minted ticket, a proposed v2
 /// card; returns `(id, ticket, anchor, key package)`.
 fn propose_dora(coord: &mut crate::State, b: &Builder) -> (u64, String, String, String) {
@@ -2087,6 +2131,24 @@ fn propose_dora(coord: &mut crate::State, b: &Builder) -> (u64, String, String, 
     coord.recovery.tickets.remove(&ticket);
     coord.recovery.spent_tickets.insert(ticket.clone());
     (id, ticket, npk, kp_hex)
+}
+
+/// **G6:** a re-key that never happened is not remembered as one - a bad
+/// KeyPackage, or no group to re-key - so a later failure of that run is
+/// not reported as `restore-abandoned`.
+#[test]
+fn a_failed_rekey_is_not_remembered_as_a_rekeyed_run() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    for kp in ["zz", "beef"] {
+        let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+        on_nostr(&mut coord, 10_000);
+        let _ = propose_dora(&mut coord, &b);
+        coord.recovery.pending.get_mut("dora").expect("pending").key_package = kp.to_string();
+        coord.coordinator_rekey("dora");
+        assert!(coord.recovery.rekeyed.is_empty(), "kp {kp}: no re-key, no record");
+    }
 }
 
 /// **F1 on the coordinator:** its own co-signature plus the consent can
@@ -2126,9 +2188,12 @@ fn a_run_abandoned_after_its_rekey_is_reported_and_a_new_link_restores_it() {
     coord.config.self_cosign = false;
     let (id, _ticket, npk, kp_hex) = propose_dora(&mut coord, &b);
     let card = coord.chain.proposal_changes.get(&id).cloned().expect("card");
+    let run = coord.recovery.pending.get("dora").cloned().expect("pending");
     coord.receive_block(b.seal(1, card, &["walter"]));
     assert_eq!(coord.chain.head.as_ref().expect("head").height, 1, "sealed");
     assert!(coord.recovery.pending.is_empty(), "the re-key consumed the run");
+    // this harness has no group to re-key: record what a real re-key does
+    coord.note_rekeyed_run("dora", &run);
     coord.session.notice.clear();
 
     let other = molt_net::invite::recover_attempt_id(&kp_hex_for(&b, "dora"));

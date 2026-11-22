@@ -40,8 +40,6 @@ pub(crate) struct LockSeams {
     pub(crate) grace_secs: AtomicU64,
     /// Retransmit interval in seconds, 0 = [`LOCK_RETRANSMIT_SECS`].
     pub(crate) retransmit_secs: AtomicU64,
-    /// The restore settle step in seconds, 0 = `RESTORE_SETTLE_SECS`.
-    pub(crate) settle_secs: AtomicU64,
     /// The next leader to send a `LockAccept` stops right after it.
     pub(crate) stop_after_accept: AtomicBool,
     /// Lock activity of this seat has stopped (a killed leader).

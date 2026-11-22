@@ -549,6 +549,18 @@ pub trait OutboxLog: Send + Sync + Clone + 'static {
         &self,
         from_seq: u64,
     ) -> impl std::future::Future<Output = Vec<EventEnvelope>> + Send;
+    /// Every envelope with `from_seq <= seq <= to_seq`, in seq order.
+    fn read_range(
+        &self,
+        from_seq: u64,
+        to_seq: u64,
+    ) -> impl std::future::Future<Output = Vec<EventEnvelope>> + Send {
+        async move {
+            let mut envs = self.read_from(from_seq).await;
+            envs.retain(|e| e.seq <= to_seq);
+            envs
+        }
+    }
 }
 
 /// Where delivery cursors persist (`transport.state`, or memory for the

@@ -2036,6 +2036,23 @@ pub struct AcceptedWindow {
     /// or short vectors read as all-zero (serde-additive).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bits: Vec<u64>,
+    /// Receiver-local: every envelope this sender owes at or below it is
+    /// accepted or proven unfillable; nothing is accepted above
+    /// `frontier + ACCEPT_WINDOW_BITS`. 0 = not tracked (reads as `high`).
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub frontier: u64,
+    /// Receiver-local: accepted seqs above `frontier` as `(prev_seq, seq)`,
+    /// so the frontier can climb through them after a restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<(u64, u64)>,
+}
+
+impl AcceptedWindow {
+    /// The window as a peer may see it: the receiver-local fields stripped.
+    #[must_use]
+    pub fn for_sheet(&self) -> AcceptedWindow {
+        AcceptedWindow { high: self.high, bits: self.bits.clone(), ..AcceptedWindow::default() }
+    }
 }
 
 /// Width of [`AcceptedWindow`]: how many seqs below `high` keep explicit
@@ -6532,6 +6549,9 @@ pub enum Command {
         of: MemberId,
         /// The missing seqs.
         seqs: Vec<u64>,
+        /// `(after, upto]`: list `of`'s own seqs in this span.
+        #[serde(default)]
+        range: Option<(u64, u64)>,
         /// Transport incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -6548,6 +6568,9 @@ pub enum Command {
         resent: Vec<u64>,
         /// Never coming.
         gone: Vec<u64>,
+        /// A range answer: `(after, through, own seqs)`, complete.
+        #[serde(default)]
+        listing: Option<(u64, u64, Vec<u64>)>,
         /// Transport incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -8594,6 +8617,15 @@ pub struct InboundHeld {
     /// When the hold began (unix seconds).
     #[serde(default)]
     pub since: u64,
+    /// Everything owed up to here is in (the catch-up's progress).
+    #[serde(default)]
+    pub frontier: u64,
+    /// Bytes the held envelopes take.
+    #[serde(default)]
+    pub bytes: u64,
+    /// Seqs known missing.
+    #[serde(default)]
+    pub missing: u32,
 }
 
 /// This node's chain sync state ([`StatusView::chain_sync`]).

@@ -762,8 +762,27 @@ impl GroupChannel {
             runtime = runtime
                 .without_history_bound()
                 .with_channel_capacity(crate::relay_runtime::FILE_SUB_CAPACITY);
+        } else if let Some(bound) = group_history_bound() {
+            runtime = runtime.with_history_bound(bound);
         }
         runtime.subscribe(filter).await
+    }
+}
+
+/// Test seam: the stored-event bound of a 445 subscription's replay page
+/// (`0` = production).
+static GROUP_HISTORY_BOUND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Test seam: page every 445 replay in this process at `bound` stored events.
+#[doc(hidden)]
+pub fn __set_group_history_bound(bound: usize) {
+    GROUP_HISTORY_BOUND.store(bound, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn group_history_bound() -> Option<usize> {
+    match GROUP_HISTORY_BOUND.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        b => Some(b),
     }
 }
 

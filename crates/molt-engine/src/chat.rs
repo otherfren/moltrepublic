@@ -1803,7 +1803,7 @@ mod tests {
         assert_eq!(st.chat.len(), 2, "inside the bound it stays held");
         st.inbound_gap_tick(1_750_000_000 + crate::net::GAP_FALLBACK_SECS + 1);
         assert_eq!(st.chat.len(), 3, "the bound releases rather than wedges");
-        assert!(st.inbound_held_view().is_empty());
+        assert!(st.inbound_held_view().iter().all(|h| h.held == 0), "nothing held");
     }
 
     // ---- read receipts (Lesebestätigung) ---------------------------------

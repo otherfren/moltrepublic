@@ -36,7 +36,9 @@ async fn store_relay() -> (LocalRelay, String) {
         events: true,
         max_events: None,
     }));
-    let relay = LocalRelay::new(RelayBuilder::default().database(db));
+    let relay = LocalRelay::new(RelayBuilder::default().database(db).rate_limit(
+        nostr_relay_builder::builder::RateLimit { max_reqs: 500, notes_per_minute: 1_000_000 },
+    ));
     relay.run().await.expect("relay runs");
     let url = relay.url().await.to_string();
     (relay, url)

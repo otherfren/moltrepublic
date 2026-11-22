@@ -606,7 +606,7 @@ verschickt wurde."* Umsetzung (Branch delivery-followups):
   `a_locked_out_seat_re_offers_nothing`,
   `crates/molt-engine/tests/nostr_outbox_quiet.rs`.
 
-## 10. G7 by need: hold what needs order, ask for the gap (v0.1.1)
+## 10. G7 by need: a frontier per sender, a buffer, the gap asked for (v0.1.1)
 
 Field 2026-11: after a restart one missing predecessor per sender held a
 node deaf for the full 900 s valve - every later envelope of that sender
@@ -620,58 +620,92 @@ floor only moves forward (`apply_group_ack`, and the mesh's twin): an
 accept window that regressed across a hard stop (saved every 5 s, the
 ratchet every 10 s) leaves a seq the sender already counts as acked - no
 stall round ever re-offers it, §4.7's "resends absorb a lost save" does
-not hold for it. The gap want below is what reaches it.
+not hold for it.
 
-- **Hold by need.** Only kinds whose effect depends on the same sender's
-  earlier envelopes wait: the chat stream (`Chat`, `ChatReacted`,
-  `ChatDeleted`, `ChatRead`, `FileRemoved` - arrival is display order, a
-  reaction toggles) and stances (`Approved`, `Declined`, `Withdrawn` -
-  newest wins). Everything else is accepted at once: `Proposed` (votes that
-  outrun it park on its id), `Committed` (height/prev checks, buffers),
-  `ChainRequest`, `Checkpoint*` (by index/hash), `MembershipProposed`
-  (gated card), `VoteRefused`, `MeshAnnounced`, `File*`. An order-sensitive
-  envelope waits while ANY seq of its sender below it is missing or held;
-  a missing seq is a `prev_seq` that is neither accepted nor held.
-- **Ask.** A seq missing for 2 s is named in a `GapWant` control frame
-  (`\x00molt-gapwant-v1`, ≤ 64 seqs, re-asked every 10 s). The named
-  sender re-publishes exactly those own envelopes as fresh frames (per
-  asker each seq at most once and 64 frames in all per 10 s, never past its
-  publish cursor, outside the hourly budget) and then sends a `GapAnswer`
-  (`\x00molt-gapans-v1`):
-  `resent` and `gone` (not an own ackable envelope of its log).
-- **Release** (whichever first): the seq arrives; the sender answers it
-  `gone` (at once); it was `resent` yet is absent 5 s later; a resend round
-  passed over it (a duplicate above it arrived, counted only for a sender
-  that never answered a want - an answering sender's duplicates are
-  targeted resends for others) and it is absent 5 s later;
-  the window aged it out; 60 s after it went missing - the bound for a
-  sender that answers nothing, six times the first rung of its ladder. A
-  settled seq is remembered and never held for again; arriving later it is
-  applied once.
-- **Start.** The persisted window is the baseline; the replay fills gaps
-  by itself (newest-first pages move the gap down, not wide), and a gap the
-  relays no longer hold is asked for like any other: the author still has
-  its log. Only order-sensitive kinds can wait at all, and at most 60 s.
-- **Cap.** 512 held per sender; past it the OLDEST held envelope is
-  delivered out of order - nothing is shed, the window is honest. So is a
-  held one about to age below the accept window (it would read as
-  accepted and never apply). A delivery left unaccepted (the D7 decline
-  park) stays missing, so the stances behind it keep waiting.
-- **Visibility.** `inbound_held member= missing_seq= held= since_s=` once
-  per episode (after 2 s), `inbound_held_cleared member= since_s= via=
-  unordered=` when it ends, `inbound_gap_skipped member= missing_seq= via=`
-  per settled seq (WARN for the fallback), `inbound_released_unordered why=full|aged` once;
-  `StatusView.inbound_held` lists the held streams.
+The accept window itself is the second trap: a seq more than 1024 below
+`high` reads as accepted (aged out), the sheet reports it so, and the
+sender's floor passes it for good. Whatever lets `high` jump past an
+unseen owed seq loses it silently.
+
+- **Frontier.** Per sender, `frontier` C: every envelope the sender owes
+  at or below C is accepted or proven unfillable. It is persisted with the
+  window (`AcceptedWindow.frontier`, and `links` - the `(prev_seq, seq)`
+  pairs accepted above it - both receiver-local, stripped from every ack
+  sheet; `0` = legacy, read as `high`). **Nothing is accepted above C +
+  1024**, so no owed seq ever ages out unseen and the sender's floor never
+  passes one. C rises only on proof: (a) an accepted envelope whose
+  `prev_seq` is at or below C (then on through the stored links); (b) the
+  sender's listing of its own seqs above C, up to the first listed seq
+  that is neither accepted nor held; (c) for a sender that never answers a
+  want: its resend round passed - a second arrival, in this session, of a
+  seq above C (MLS opens a consumed frame only once, so a relay re-delivery
+  cannot fake it; a frame re-read after a restart is from an earlier
+  session and does not count) - then 5 s later C jumps to just below the
+  lowest seq that round re-offered (the round starts at the sender's floor
+  and goes up; a hole below it is outside it), never past a held or a D7
+  refused seq. Seqs passed over by (c), and listed seqs re-published 3
+  times that never landed, are the only losses: `inbound_gap_lost
+  member= count= first= via=` (WARN).
+- **Buffer.** Decrypted envelopes that may not be applied yet are kept,
+  unaccepted: anything above C + 1024, and an order-sensitive one behind a
+  missing seq. They are applied bottom-up as C rises, so a newest-first
+  replay catches up entirely from what the relay sent, without a resend.
+  Bounded by 64 MiB across all senders (a card nears the 70 KiB payload
+  budget: ~900 of the largest, tens of thousands of chat and votes); past
+  it the highest seq of the largest buffer is shed, becomes missing again
+  and stays owed. A restart loses the buffer; its frames are spent, the
+  window never claimed them, C and the links come back with it, and what
+  is still owed is listed or re-offered.
+- **Order.** Order-free kinds at or below the cap are applied at once:
+  `Proposed`, `Withdrawn` (terminal, parks on its card's id), `Committed`,
+  `ChainRequest`, `Checkpoint*`, `MembershipProposed`, `VoteRefused`,
+  `MeshAnnounced`, `File*`. Chat (`Chat`, `ChatReacted`, `ChatDeleted`,
+  `ChatRead`, `FileRemoved`) and stances (`Approved`, `Declined`) wait while
+  a seq of their sender below them is missing or held. For ORDER only that
+  wait ends when the seq arrives, is answered `gone` or not listed, was
+  `resent` and is absent 5 s later, a round passed it, or after 60 s;
+  none of these moves C. A seq left unaccepted by the D7 decline park is
+  not re-asked and is settled by nothing but the 60 s: re-publishing it
+  changes nothing, and longer would hold that member's chat behind a local
+  park.
+- **Ask.** `GapWant` (`\x00molt-gapwant-v1`): named seqs (≤ 64, a seq
+  missing for 2 s, re-asked every 10 s), or `range (after, upto]` (≤ 1024)
+  whenever something is known above C. The sender re-publishes named own
+  envelopes as fresh frames and answers `GapAnswer` (`\x00molt-gapans-v1`)
+  `resent`/`gone`; a range is answered with `listing {after, through,
+  own}` (≤ 256 seqs, never past its publish cursor), nothing re-published.
+  Bounds per asker: each seq re-published at most once per 60 s, 64 frames
+  per 10 s, one listing per 5 s; 384 re-published frames per minute in
+  all; askers served round-robin, each read bounded to the asked span.
+- **Visibility.** `inbound_held member= missing_seq= held= frontier=
+  since_s=` once per episode (after 2 s); `inbound_held_cleared member=
+  since_s= via= unordered= shed= lost=`; `inbound_gap_skipped` per seq
+  settled for order (WARN for the 60 s); `inbound_hold_shed` once per
+  episode. `StatusView.inbound_held`: per sender `frontier`, `missing_seq`,
+  `missing`, `held`, `bytes`, `since` - a rising frontier is a catch-up,
+  a frontier that stands still with `held` growing is stuck. The restore
+  settle (`recovery_auto_approval.md`) keeps waiting while the
+  coordinator's stream has a missing or held seq here.
 - **Mixed versions.** An older build drops both tags as unknown control
-  frames: as a receiver it keeps its old park, as a sender it never answers
-  and its gaps settle on its resend rounds or the 60 s bound.
+  frames: as a receiver it keeps its old park and ignores `frontier` and
+  `links` (it reads `high` as before; what this build buffered is memory
+  and gone, still owed); as a sender it never answers, so its holes close
+  by its resend rounds (≤ 600 s, its hourly budget) via (c).
 
-Pins: `net::delivery_tests` (`a_gap_holds_only_order_sensitive_kinds`,
+Pins: `net::delivery_tests` (`a_newest_first_replay_past_the_window_loses_nothing`,
+`an_older_senders_hole_is_never_acked_and_closes_on_its_round`,
+`a_listed_hole_is_resent_and_the_frontier_walks_up`,
+`a_shed_envelope_stays_owed_and_is_recovered`,
+`a_restart_mid_catch_up_loses_nothing_owed`,
+`a_frame_re_read_after_a_restart_is_no_round`,
+`a_cut_round_passes_only_what_lies_below_it`,
+`a_gap_holds_only_order_sensitive_kinds`,
 `a_gap_the_sender_disowns_releases_at_once`,
 `an_unanswered_gap_falls_back_far_below_the_old_valve`,
 `a_resend_round_passing_the_gap_settles_it`,
 `a_flood_behind_a_gap_loses_nothing`,
-`a_held_envelope_is_applied_before_it_ages_out_of_the_window`,
-`an_answering_senders_duplicates_are_no_evidence`),
+`an_answering_senders_duplicates_are_no_evidence`,
+`a_gap_want_is_ours_only_from_the_roster_for_our_stream`),
 `group_runtime::tests::a_gap_want_is_answered_with_exactly_the_missing_frames`,
+`chain::membership_tests::a_restore_keeps_settling_while_the_coordinators_stream_has_a_gap`,
 `crates/molt-engine/tests/nostr_inbound_gap.rs`.

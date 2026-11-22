@@ -355,6 +355,14 @@ impl WalletHandle {
         self.drop_seam.arm_chat(body);
     }
 
+    /// Test seam: this node's restore settle in seconds (`None` = the
+    /// constant). No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __restore_settle_secs(&self, secs: Option<u64>) {
+        let v = secs.map_or(0, |s| s.saturating_add(1));
+        self.drop_seam.restore_settle.store(v, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam: how many inbound envelopes the drop seam swallowed. A
     /// read only; no `Command` reaches it.
     #[doc(hidden)]
@@ -368,13 +376,6 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __lock_cap_off(&self, off: bool) {
         self.lock_seams.cap.store(if off { 2 } else { 1 }, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Test seam: the restore settle step in seconds (F1); 0 restores the
-    /// default.
-    #[doc(hidden)]
-    pub fn __restore_settle_secs(&self, secs: u64) {
-        self.lock_seams.settle_secs.store(secs, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (B7): this seat's next founding leaves the lock out of the
@@ -809,6 +810,8 @@ pub(crate) struct DeliveryState {
     /// envelopes waiting behind them (`net/delivery.rs`). Runtime-only,
     /// workspace scope.
     pub(crate) inbound: std::collections::HashMap<MemberId, net::SenderHold>,
+    /// Test override of `HOLD_BYTES_MAX` (`None` = the constant).
+    pub(crate) hold_bytes_cap: Option<usize>,
     /// `presence_now` of the last persisted accept-window save (debounce).
     pub(crate) accepted_saved_at: u64,
     /// `presence_now` of the last debounced live MLS-ratchet merge into
@@ -2054,16 +2057,19 @@ impl State {
                 }
                 self.cmd_net_wiki_base_failed(&reason)
             }
-            Command::NetGapWanted { from, of, seqs, generation } => {
+            Command::NetGapWanted { from, of, seqs, range, generation } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
-                self.cmd_net_gap_wanted(&from, &of, seqs);
+                self.cmd_net_gap_wanted(&from, &of, seqs, range);
                 Ok(Reply::Ack)
             }
-            Command::NetGapAnswered { from, to, resent, gone, generation } => {
+            Command::NetGapAnswered { from, to, resent, gone, listing, generation } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
+                }
+                if let Some((after, through, own)) = listing {
+                    self.cmd_net_gap_listed(&from, &to, after, through, own);
                 }
                 self.cmd_net_gap_answered(from, to, resent, gone);
                 Ok(Reply::Ack)

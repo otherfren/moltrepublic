@@ -2175,10 +2175,16 @@ impl OpenedWorkspace {
     /// consistently ordered with its own appends (same handle, page cache
     /// — no fsync needed to see them).
     pub fn read_log_from(&self, from_seq: u64) -> Result<Vec<EventEnvelope>, StorageError> {
+        self.read_log_range(from_seq, u64::MAX)
+    }
+
+    /// [`Self::read_log_from`] up to `to_seq` inclusive: frames past it are
+    /// neither decrypted nor read.
+    pub fn read_log_range(&self, from_seq: u64, to_seq: u64) -> Result<Vec<EventEnvelope>, StorageError> {
         // the common wakeup finds the cursor at the tip — answer without
         // touching a single segment (the full scan below is O(log bytes);
         // a per-segment seq index for long logs is T3 work)
-        if from_seq >= self.next_seq {
+        if from_seq >= self.next_seq || from_seq > to_seq {
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
@@ -2200,6 +2206,9 @@ impl OpenedWorkspace {
                 seq += 1;
                 if seq < from_seq {
                     continue;
+                }
+                if seq > to_seq {
+                    return Ok(out);
                 }
                 let plaintext =
                     self.decrypt_log_frame(seg_no, seq, frame.nonce, frame.ciphertext)?;
@@ -3495,10 +3504,10 @@ enum WriterMsg {
     /// `avatar-<stem>.<ext>` with its applied profile picture. Idempotent.
     Avatar(String, Option<(String, Vec<u8>)>),
     Snapshot(WorkspaceSnapshot),
-    /// Outbox read: every envelope with `seq >= from`. Served by the
+    /// Outbox read: every envelope with `from <= seq <= to`. Served by the
     /// writer thread so reads are consistently ordered with queued appends
     /// (same channel, FIFO — a read enqueued after an append sees it).
-    ReadFrom(u64, tokio::sync::oneshot::Sender<Vec<EventEnvelope>>),
+    ReadFrom(u64, u64, tokio::sync::oneshot::Sender<Vec<EventEnvelope>>),
     /// Persist `transport.state` (atomic rewrite).
     SaveTransport(Box<TransportState>),
     /// Merge the engine's receive-side accept windows (delivery guarantee
@@ -3790,8 +3799,13 @@ impl StorageHandle {
     /// Read every envelope with `seq >= from_seq` — the log-backed outbox
     /// source. Empty when the writer is gone.
     pub async fn read_log_from(&self, from_seq: u64) -> Vec<EventEnvelope> {
+        self.read_log_range(from_seq, u64::MAX).await
+    }
+
+    /// [`Self::read_log_from`] up to `to_seq` inclusive.
+    pub async fn read_log_range(&self, from_seq: u64, to_seq: u64) -> Vec<EventEnvelope> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if !self.send_from_async(WriterMsg::ReadFrom(from_seq, tx)).await {
+        if !self.send_from_async(WriterMsg::ReadFrom(from_seq, to_seq, tx)).await {
             return Vec::new();
         }
         rx.await.unwrap_or_default()
@@ -4278,8 +4292,8 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             fail(&failed_flag, "avatar write", &e);
                         }
                     }
-                    Ok(WriterMsg::ReadFrom(from_seq, reply)) => {
-                        match ws.read_log_from(from_seq) {
+                    Ok(WriterMsg::ReadFrom(from_seq, to_seq, reply)) => {
+                        match ws.read_log_range(from_seq, to_seq) {
                             Ok(events) => {
                                 let _ = reply.send(events);
                             }

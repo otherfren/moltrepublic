@@ -98,7 +98,7 @@ fn a_gap_the_sender_disowns_releases_at_once() {
     assert_eq!(bodies(&st), ["base"], "an answer to another asker is not ours");
     st.cmd_net_gap_answered("bob".to_string(), "ada".to_string(), Vec::new(), vec![2]);
     assert_eq!(bodies(&st), ["base", "held"]);
-    assert!(st.inbound_held_view().is_empty(), "nothing is held any more");
+    assert!(st.inbound_held_view().iter().all(|h| h.held == 0), "nothing is held any more");
 
     land(&mut st, chat_env(5, 4, "held two"));
     at(&mut st, 3);
@@ -154,19 +154,146 @@ fn a_resend_round_passing_the_gap_settles_it() {
     assert_eq!(bodies(&st), ["base", "held"]);
 }
 
-/// A held envelope the window is about to age out is applied first: once
-/// below the window it would read as accepted and be dropped as a
-/// duplicate, and the sender would never offer it again.
+/// Envelope `seq` of the G1 replay: every third one chat, the rest
+/// order-free; the newest (`top`) order-free.
+fn replay_env(seq: u64) -> molt_core::EventEnvelope {
+    if seq % 3 == 1 {
+        chat_env(seq, seq - 1, &format!("m{seq}"))
+    } else {
+        request_env(seq, seq - 1)
+    }
+}
+
+fn replay_chats(upto: u64, without: &[u64]) -> Vec<String> {
+    std::iter::once("base".to_string())
+        .chain((2..=upto).filter(|s| s % 3 == 1 && !without.contains(s)).map(|s| format!("m{s}")))
+        .collect()
+}
+
+fn accepted(st: &crate::State, seq: u64) -> bool {
+    st.delivery.accepted["bob"].is_accepted(seq)
+}
+
+/// G1: a newest-first replay over far more than the accept window, with an
+/// order-free head. Nothing may be accepted beyond the window above the
+/// last gap-free point, so no older seq ever ages out unseen: everything
+/// lands exactly once, in the sender's order, with no resend at all.
 #[test]
-fn a_held_envelope_is_applied_before_it_ages_out_of_the_window() {
+fn a_newest_first_replay_past_the_window_loses_nothing() {
     let mut st = presence_fixture();
     land(&mut st, chat_env(1, 0, "base"));
-    land(&mut st, chat_env(3, 2, "held"));
-    for seq in 4..=1100 {
-        land(&mut st, request_env(seq, seq - 1));
+    let top = 3000;
+    for seq in (2..=top).rev() {
+        land(&mut st, replay_env(seq));
+        let high = st.delivery.accepted["bob"].high;
+        assert!(seq == 2 || high <= 1 + molt_core::ACCEPT_WINDOW_BITS, "seq {seq}: high {high}");
     }
+    assert_eq!(bodies(&st), replay_chats(top, &[]), "every chat once, in order");
+    assert!((1..=top).all(|s| accepted(&st, s)), "every seq accepted");
+    assert!(st.inbound_held_view().is_empty());
+}
+
+/// G1 with a real hole and a sender that never answers a gap want (an
+/// older build): the window keeps reporting the hole unseen - so the
+/// sender's ack floor stays below it and its resend rounds reach back to
+/// it - and nothing above the window over the hole is accepted. Its next
+/// round passing over the hole proves it unfillable; then everything held
+/// lands in order.
+#[test]
+fn an_older_senders_hole_is_never_acked_and_closes_on_its_round() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    let top = 3000;
+    for seq in (2..=top).rev().filter(|s| *s != 5) {
+        land(&mut st, replay_env(seq));
+    }
+    let w = st.delivery.accepted["bob"].clone();
+    assert!(!w.is_accepted(5), "the hole reads unseen: the sender's floor stops below it");
+    assert!(w.is_accepted(4));
+    assert!(w.high <= 4 + molt_core::ACCEPT_WINDOW_BITS, "nothing far above the hole: high {}", w.high);
+    assert!(!accepted(&st, top), "the head waits, unaccepted");
+    // the sender's round re-offers from its floor, which the hole pinned
+    at(&mut st, 30);
+    for seq in 6..=20 {
+        land(&mut st, replay_env(seq));
+    }
+    at(&mut st, 30 + crate::net::GAP_PASS_GRACE_SECS);
     st.cmd_net_delivery_tick().expect("tick");
-    assert_eq!(bodies(&st), ["base", "held"], "applied, not swallowed");
+    assert_eq!(bodies(&st), replay_chats(top, &[]), "everything held lands, once, in order");
+    assert!((6..=top).all(|s| accepted(&st, s)));
+}
+
+/// G1 with a sender that answers: the hole is listed, asked for and resent;
+/// the frontier then walks up page by page.
+#[test]
+fn a_listed_hole_is_resent_and_the_frontier_walks_up() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    let top = 3000;
+    for seq in (2..=top).rev().filter(|s| *s != 5) {
+        land(&mut st, replay_env(seq));
+    }
+    let own: Vec<u64> = (2..=1 + molt_core::ACCEPT_WINDOW_BITS).collect();
+    st.cmd_net_gap_listed(&"bob".to_string(), &"ada".to_string(), 1, 1 + molt_core::ACCEPT_WINDOW_BITS, own);
+    assert!(!accepted(&st, top));
+    land(&mut st, replay_env(5)); // the targeted resend
+    assert_eq!(bodies(&st), replay_chats(top, &[]));
+    assert!((1..=top).all(|s| accepted(&st, s)));
+}
+
+/// The byte bound: what it sheds stays owed (never accepted), is listed
+/// and resent, and lands in order.
+#[test]
+fn a_shed_envelope_stays_owed_and_is_recovered() {
+    let mut st = presence_fixture();
+    st.delivery.hold_bytes_cap = Some(20_000);
+    land(&mut st, chat_env(1, 0, "base"));
+    let top = 400;
+    for seq in (3..=top).rev() {
+        land(&mut st, replay_env(seq));
+    }
+    let shed: Vec<u64> = (3..=top).filter(|s| !accepted(&st, *s) && !st.inbound_held_has("bob", *s)).collect();
+    assert!(!shed.is_empty(), "the bound shed something");
+    assert!(shed.iter().all(|s| !accepted(&st, *s)), "shed is never accepted");
+    land(&mut st, replay_env(2));
+    for seq in shed {
+        land(&mut st, replay_env(seq)); // the sender's resend
+    }
+    assert_eq!(bodies(&st), replay_chats(top, &[]));
+    assert!((1..=top).all(|s| accepted(&st, s)));
+}
+
+/// A restart in the middle of the catch-up: the held envelopes are gone
+/// (their frames are spent), the frontier comes back with the window, the
+/// listing names what is still owed, and the resends close it.
+#[test]
+fn a_restart_mid_catch_up_loses_nothing_owed() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    let top = 2000;
+    for seq in (1500..=top).rev() {
+        land(&mut st, replay_env(seq));
+    }
+    for seq in (2..=10).rev() {
+        land(&mut st, replay_env(seq));
+    }
+    let saved = st.delivery.accepted.clone();
+    let mut st = presence_fixture();
+    st.delivery.accepted = saved;
+    let owed: Vec<u64> = (2..=top).filter(|s| !st.delivery.accepted["bob"].is_accepted(*s)).collect();
+    assert!(owed.contains(&top), "the spent head stays owed");
+    let f = st.delivery.accepted["bob"].frontier;
+    assert!(f >= 10, "the frontier came back: {f}");
+    // the sender's listings and resends, bottom up
+    for seq in owed {
+        land(&mut st, replay_env(seq));
+    }
+    assert!((1..=top).all(|s| accepted(&st, s)));
+    let chats: Vec<String> = bodies(&st);
+    let want: Vec<String> = replay_chats(top, &[]).into_iter().filter(|b| {
+        b.strip_prefix('m').and_then(|n| n.parse::<u64>().ok()).map_or(true, |n| n > 10)
+    }).filter(|b| b != "base").collect();
+    assert_eq!(chats, want, "after the restart: the rest, once, in order");
 }
 
 /// A sender that answers gap wants re-publishes for other askers too: its
@@ -199,6 +326,61 @@ fn a_flood_behind_a_gap_loses_nothing() {
     for seq in 2..=702 {
         assert!(st.delivery.accepted["bob"].is_accepted(seq), "seq {seq} accepted");
     }
+}
+
+/// G5: a want is answered only for this node's own stream and only from a
+/// roster member.
+#[test]
+fn a_gap_want_is_ours_only_from_the_roster_for_our_stream() {
+    let st = presence_fixture();
+    let s = |x: &str| x.to_string();
+    assert!(st.gap_want_is_ours(&s("bob"), &s("ada")));
+    assert!(!st.gap_want_is_ours(&s("mallory"), &s("ada")), "not on the roster");
+    assert!(!st.gap_want_is_ours(&s("bob"), &s("cid")), "a third member's stream");
+    assert!(!st.gap_want_is_ours(&s("ada"), &s("ada")), "our own want echoed");
+}
+
+/// G1 evidence: a seq accepted in an earlier session arriving again (a
+/// stored frame re-read after a restart from a ratchet persisted late) is
+/// no resend round - the frontier stays below the hole.
+#[test]
+fn a_frame_re_read_after_a_restart_is_no_round() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    for seq in 2..=4 {
+        land(&mut st, request_env(seq, seq - 1));
+    }
+    land(&mut st, request_env(6, 5));
+    let saved = st.delivery.accepted.clone();
+    assert_eq!(saved["bob"].frontier, 4);
+    let mut st = presence_fixture();
+    st.delivery.accepted = saved;
+    land(&mut st, request_env(6, 5)); // re-read after the restart, not re-sent
+    at(&mut st, 60);
+    st.cmd_net_delivery_tick().expect("tick");
+    assert!(!accepted(&st, 5));
+    assert_eq!(st.delivery.accepted["bob"].frontier, 4, "the frontier stays below the hole");
+    land(&mut st, request_env(5, 4));
+    assert_eq!(st.delivery.accepted["bob"].frontier, 6, "the real 5 closes it");
+}
+
+/// G1 evidence: a round seen only from its middle (cut short) proves
+/// nothing above its lowest re-offer - only the hole below it is given up.
+#[test]
+fn a_cut_round_passes_only_what_lies_below_it() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, request_env(3, 2));
+    land(&mut st, request_env(4, 3));
+    land(&mut st, request_env(6, 5));
+    at(&mut st, 10);
+    land(&mut st, request_env(4, 3)); // the round re-offers 4, then stops
+    at(&mut st, 10 + crate::net::GAP_PASS_GRACE_SECS);
+    st.cmd_net_delivery_tick().expect("tick");
+    assert_eq!(st.delivery.accepted["bob"].frontier, 4, "2 given up, 5 still owed");
+    assert!(!accepted(&st, 5));
+    land(&mut st, request_env(5, 4));
+    assert_eq!(st.delivery.accepted["bob"].frontier, 6);
 }
 
 /// B7 behind an inbound gap: an intent is a stance (an `Approved` without
@@ -234,4 +416,31 @@ fn intents_wait_behind_a_gap_and_lock_frames_never_do() {
         WorkspaceEvent::LockNack { height: 1, base, round: 1, leader: "a".into(), promised: None, head: 0 },
     ];
     assert!(lock.iter().all(|f| !order_sensitive(f)));
+}
+
+fn bob_env(seq: u64, prev: u64, body: molt_core::WorkspaceEvent) -> molt_core::EventEnvelope {
+    molt_core::EventEnvelope { seq, ts: T, by: "bob".to_string(), body, prev_seq: prev }
+}
+
+/// B7 behind a real gap (the frontier, 2026-11-22): a lock frame behind a
+/// missing seq is accepted at once; an intent (an unsigned `Approved`)
+/// waits like any stance until the hole closes. Far ahead of the frontier
+/// (more than the accept window) a lock frame is buffered like every
+/// envelope and applied bottom-up - stale by then and ignored, never
+/// reordered into a decision.
+#[test]
+fn behind_a_gap_a_lock_frame_passes_and_an_intent_waits() {
+    use molt_core::{ProposalId, WorkspaceEvent};
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, bob_env(3, 2, WorkspaceEvent::LockPrepare { height: 1, base: "ab".into(), round: 1 }));
+    assert!(accepted(&st, 3), "a lock frame does not wait for seq 2");
+    let intent = WorkspaceEvent::Approved { id: ProposalId(1), by: "bob".into(), height: 1, sig: String::new() };
+    land(&mut st, bob_env(4, 3, intent));
+    assert!(!accepted(&st, 4), "the intent waits behind the hole");
+    land(&mut st, chat_env(2, 1, "the hole"));
+    assert!(accepted(&st, 4), "the hole closed, the intent applied");
+    let far = 3 + 2000;
+    land(&mut st, bob_env(far, far - 1, WorkspaceEvent::LockPrepare { height: 9, base: "ab".into(), round: 1 }));
+    assert!(!accepted(&st, far), "far ahead of the frontier even a lock frame is buffered");
 }
