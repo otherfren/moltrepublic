@@ -1163,3 +1163,42 @@ fn seats_seen_promising_that_released_soundly_count_free() {
     free(&mut a, "b", 6, v, &change_v);
     assert!(a.chain.lock.acceptor.signed_freely(1), "o and b free leave two lock seats: a releases");
 }
+
+/// Review R5: a card every acceptor withholds (a wallet init while the
+/// daemon is down) goes stale; the next ballot proposes the next ready
+/// card instead of the same one again. Once every ready card went stale
+/// the first comes round again.
+#[test]
+fn a_stale_proposal_rotates_to_the_next_card() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let first = note(&mut dora, "first");
+    let second = note(&mut dora, "second");
+    dora.lock_note_intent(first, "mara");
+    dora.lock_note_intent(second, "mara");
+    // dora's own local check withholds too (no acceptance anywhere)
+    dora.chain.own_approvals.clear();
+    let mut now = T;
+    let mut seq = 0;
+    let mut proposed = Vec::new();
+    for attempt in 0..3 {
+        if attempt == 0 {
+            dora.lock_start(0);
+        }
+        let (base, round) = {
+            let run = dora.chain.lock.run.as_ref().expect("dora leads");
+            (run.leader.slot.base.clone(), run.leader.ballot.round)
+        };
+        seq += 1;
+        wire(&mut dora, "mara", seq, WorkspaceEvent::LockPromise { height: 1, base, round, leader: "dora".into(), accepted: None });
+        proposed.push(dora.chain.lock.run.as_ref().and_then(|r| r.value.as_ref()).map(|(id, _)| *id));
+        // mara withholds: the run goes stale and the next ballot starts
+        let started = dora.chain.lock.run.as_ref().map(|r| r.leader.ballot.round);
+        while dora.chain.lock.run.as_ref().map(|r| r.leader.ballot.round) == started {
+            now += 10;
+            hear(&mut dora, now, &SEATS);
+            dora.lock_tick();
+        }
+    }
+    assert_eq!(proposed, vec![Some(first), Some(second), Some(first)]);
+}

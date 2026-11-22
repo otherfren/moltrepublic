@@ -134,6 +134,9 @@ pub(crate) struct LockRuntime {
     /// a leader's frame): never counted free there - a seat that later
     /// signs freely at that height was downgraded, not free (S2).
     locked_seen: BTreeMap<u64, BTreeSet<String>>,
+    /// Cards proposed freely at a height whose ballot went stale there:
+    /// skipped while another card is ready (R5).
+    stale_ids: BTreeMap<u64, BTreeSet<u64>>,
     /// The seats among them seen holding an acceptance there.
     accepted_seen: BTreeMap<u64, BTreeSet<String>>,
     /// Heights where this seat holds its own free signature beside lock
@@ -713,6 +716,20 @@ impl State {
     /// The B6 choice (§5): the smallest open id whose intents reach its
     /// `need`; a cut only with every seat's promise in hand (§4.1).
     fn lock_choose(&self, slot: &Slot, promised: Option<&BTreeSet<String>>) -> Option<(u64, ChainChange, Value)> {
+        let stale = self.chain.lock.stale_ids.get(&slot.height);
+        // R5: a card whose ballot went stale waits while another is ready;
+        // once every ready card went stale they all come round again
+        self.lock_choose_skipping(slot, promised, stale).or_else(|| {
+            stale.filter(|s| !s.is_empty()).and_then(|_| self.lock_choose_skipping(slot, promised, None))
+        })
+    }
+
+    fn lock_choose_skipping(
+        &self,
+        slot: &Slot,
+        promised: Option<&BTreeSet<String>>,
+        skip: Option<&BTreeSet<u64>>,
+    ) -> Option<(u64, ChainChange, Value)> {
         let q = self.lock_quorum()?;
         let subjects = self.lock_restore_subjects();
         // a seat that signed freely here never accepts: its intent cannot help
@@ -725,7 +742,9 @@ impl State {
             .collect();
         ids.extend(self.chain.proposal_changes.keys().copied());
         for id in ids {
-            if self.proposals.get(&id).is_some_and(|p| p.state != ProposalState::Proposed) {
+            if skip.is_some_and(|s| s.contains(&id))
+                || self.proposals.get(&id).is_some_and(|p| p.state != ProposalState::Proposed)
+            {
                 continue;
             }
             // W5: the cheap count first; the change and its digest only for
@@ -1376,6 +1395,7 @@ impl State {
         lock.free_seen.retain(|h, _| *h > head);
         lock.locked_seen.retain(|h, _| *h > head);
         lock.accepted_seen.retain(|h, _| *h > head);
+        lock.stale_ids.retain(|h, _| *h > head);
         lock.passive.retain(|h| *h > head);
         if lock.learned.as_ref().is_some_and(|l| l.slot.height <= head) {
             lock.learned = None;
@@ -1496,6 +1516,7 @@ impl State {
             let interval = self.lock_retransmit().saturating_mul(1 << run.resends.min(10)).min(LOCK_BACKOFF_MAX_SECS);
             let resend = busy && now >= run.sent_at + interval;
             let attempt = run.attempt;
+            let free_pick = run.value.as_ref().filter(|_| run.leader.forced().is_none()).map(|(id, _)| *id);
             // S3: a forced value that waited for a fuller hearing goes out
             // once its interval has passed
             if run.leader.ready() && run.leader.proposed().is_none() && !stale {
@@ -1505,6 +1526,9 @@ impl State {
                 return;
             }
             if stale {
+                if let Some(id) = free_pick {
+                    self.chain.lock.stale_ids.entry(slot.height).or_default().insert(id);
+                }
                 tracing::info!(height = slot.height, attempt = attempt + 1, "lock=retry");
                 self.chain.lock.run = None;
                 self.lock_start(attempt + 1);

@@ -667,9 +667,13 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   first version of this rule did, and `nostr_outbox_quiet` caught it).
 - **S5.** Seats known free are heard as free; promisers and free seats
   stay disjoint.
-- **W2.** The leader skips a card the gates refuse now (relay wait, a
-  restore gate, vault/wallet checks); one unsealable card no longer
-  starves a height.
+- **W2/R5.** The leader skips a card the chain-wide gates refuse now
+  (relay wait, a restore gate and consent, a cut's hash); a seat's own
+  vault/wallet checks only stop its acceptance, since another seat may
+  pass them. A card whose ballot went stale without reaching need (every
+  acceptor withholding, e.g. a wallet daemon down) waits at that height
+  while another card is ready; when all went stale they rotate again. A
+  forced value is never skipped.
 - **W5** voices before digests; **W6** marks unwritten at open mean
   amnesia; **W7** no amnesia where the lock is not enabled; **W8** the
   restore label counts intents; **W9** an `Accept` before its card is
