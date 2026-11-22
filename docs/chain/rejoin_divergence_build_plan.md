@@ -1,12 +1,12 @@
 # Rejoin and divergence fixes: build plan
 
-**Status: IN PROGRESS (2026-11-21, night).** B1-B6 are on master; their
-residual risks are being closed; B8 (acceptance on the field copies)
-and the release follow: **v0.1.0**; the lock ships as v0.1.1. B7, the fork-free lock, is NOT part of this
-release (user, 2026-11-21): its design and proven state machine are on
-master unused, the wiring is a plan
-(`docs/chain/chain_lock_wiring_plan.md`).
-Evidence: `docs/chain/rejoin_divergence_findings.md`.
+**Status: BUILT (2026-11-22), released as v0.1.0.** B1-B6, their
+follow-ups, the fixes of two code reviews and of the acceptance runs are
+on master; B8 passed on the field copies (table below). B7, the
+fork-free lock, is NOT in v0.1.0: design and proven state machine are on
+master unused, the wiring is planned for v0.1.1
+(`docs/chain/chain_lock_wiring_plan.md`). Evidence:
+`docs/chain/rejoin_divergence_findings.md`.
 
 ## In short
 
@@ -33,8 +33,20 @@ from the three seats' copies and reproduced in isolation:
 | B5 | a relay-list change waits until a fork has healed | on master |
 | B6 | one sealer per height (measured: fork decisions 11-19 -> 0 in a lossy three-seat test) | on master |
 | B7 | fork-free sealing (a Flexible-Paxos lock): design and proven state machine on master, not wired, not active | planned, after this release |
-| B8 | acceptance: the three field copies with the fixed build, then the release | in progress |
+| B8 | acceptance: the three field copies with the fixed build | passed |
 | later | rescue: a rejoin that cuts back to the last common block and restarts a split republic | own design, after B8 |
+
+Acceptance on the field copies (isolated, 2026-11-22): a rejoin with
+35 506 stored group frames completes (anchor first; coordinator head
+unchanged until "ready"); both mixed-version pairings complete; no
+automatic restore in 45 min; published frames flat after 1.5 min (13 640
+in 45 min against 40 917 before the fix); one unreadable warning per
+seat; `seat still active` refused and returned as an error; a double
+recovery works; an evicted device reports it, publishes nothing and
+refuses actions; a new block seals with three seats. Known limit: a
+cancel right after "ready" can lose against another seat's automatic
+approval; the coordinator then reports it and a new link restores the
+seat.
 
 No signed format changes; old and new builds run mixed. The fixes
 protect a seat once it runs the new build; B1 in particular acts on the
