@@ -1454,6 +1454,7 @@ impl State {
                 member: self.session.join.member.clone(),
                 phrase: self.session.join.seed.clone().into(),
                 generation,
+                lock: self.lock_cap_on(),
             },
             confirm_rx,
             backup_rx,

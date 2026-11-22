@@ -2277,6 +2277,7 @@ fn under_the_lock_a_restore_is_accepted_only_after_its_settle() {
     let fresh = || {
         let mut walter = chain_signer("walter", &b, b.blocks.clone());
         walter.chain.lock.enabled_override = Some(true);
+        walter.lock_force(true);
         on_nostr(&mut walter, 10_000);
         walter
     };
@@ -2317,6 +2318,7 @@ fn a_chosen_restore_seals_after_its_withdrawal() {
     let settle = super::membership::RESTORE_SETTLE_SECS;
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
     walter.chain.lock.enabled_override = Some(true);
+    walter.lock_force(true);
     on_nostr(&mut walter, 10_000);
     wire(&mut walter, "petra", 1, frame);
     walter.presence.clock_override = Some(10_000 + settle + 1);

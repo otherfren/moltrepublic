@@ -370,6 +370,13 @@ impl WalletHandle {
         self.drop_seam.dropped.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Test seam (G): the chain lock on for this engine although the build
+    /// ships it dark (`true`), or the build default (`false`).
+    #[doc(hidden)]
+    pub fn __lock_available(&self, on: bool) {
+        self.lock_seams.cap.store(u8::from(on), std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam (B7): `true` = this seat behaves like an older build (no
     /// lock capability, every lock frame ignored); `false` = it runs the
     /// lock whatever the build default.

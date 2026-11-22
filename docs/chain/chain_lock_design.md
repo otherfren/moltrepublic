@@ -1,12 +1,28 @@
 # The chain lock: fork-free sealing (B7)
 
-**Status: BUILT on master, UNDER REVIEW, not released (2026-11-22).
-Review rounds three and four found a halt and a fork in 2-of-3 that are
-not fixed here: do not found or enable a republic with a build of this
-tree. An existing republic without the lock is unaffected (field-checked).
-B7a pure state machine, B7b wiring: the lock runs where the chain enabled it - every founding of
-this build, or an older republic after a `set_features` vote (§8);
-deviations in §14; plan `docs/chain/chain_lock_wiring_plan.md`.** Modules:
+**Status: BUILT, dark: not available in release builds, under review
+(B7a pure state machine, B7b wiring, 2026-11-22). Review rounds three
+and four found a halt and a fork in 2-of-3 that are not fixed in the
+release tree. With the switch on the lock runs where the chain enabled
+it - every founding, or an older republic after a `set_features` vote
+(§8); deviations in §14; plan `docs/chain/chain_lock_wiring_plan.md`.**
+
+**The switch.** `CHAIN_LOCK_AVAILABLE = false` in `chain/lock_wire.rs`; a
+hidden engine seam (`__lock_available`) turns it on per engine, so the
+lock suites run against the real code. Off: a founding ratifies no
+`chain-lock` (the v0.1.0 charter, roster and genesis bytes), the
+founding-join refusal does not fire, the capability is not announced
+(mirror declaration, JoinRequest), a `set_features` naming the key is
+refused at propose and approve (`Strict Order Mode is not available in
+this build`), no lock frame is sent or answered, and nothing lock-related is
+written - no file, no version 4, no marker
+(`the_lock_is_dark_in_this_build`). A chain that nevertheless carries the
+key (founded or switched with a dev build): this build signs nothing
+there - neither the lock nor a free signature beside it - and says
+`this republic uses Strict Order Mode - needs a newer build`; reading and
+catching up stay possible (`sign_blocker`).
+
+Modules:
 `crates/molt-engine/src/chain/lock.rs` (simulation in `lock_tests.rs`),
 the wiring `chain/lock_wire.rs` (`lock_wire_tests.rs`), over a relay
 `crates/molt-engine/tests/chain_lock.rs`. Plan: `docs_archive/chain/rejoin_divergence_build_plan.md`
@@ -276,6 +292,10 @@ What an old (v0.0.20) node sees: unsigned `Approved` (ignored), lock
 frames (dropped), `Committed` blocks (verified and adopted as today).
 
 ## 8. Activation per height (user decision 2026-11-22, as built)
+
+How the members switch it on once it is available (explicitly, in the UI
+under Organization, never by a founding default) is decided but not
+built: `docs/chain/chain_lock_wiring_plan.md` §11.
 
 The chain decides, not a belief: the lock runs at height h iff the
 effective feature set at h - 1 holds the key `chain-lock`

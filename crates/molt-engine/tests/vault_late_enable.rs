@@ -65,8 +65,8 @@ async fn a_founding_without_the_vault_is_prepared_but_hidden() {
             features.as_deref(),
         );
         assert!(bytes.starts_with(b"molt-roster-v6\0"), "{name}: prepared means roster-v6");
-        // every founding of this build ratifies the lock (B7)
-        assert_eq!(features.as_deref(), Some(&["chain-lock".to_string(), "memory".to_string()][..]));
+        // the lock ships dark (G): the v0.1.0 charter
+        assert_eq!(features.as_deref(), Some(&["memory".to_string()][..]));
         let (_, chain) = ws.read_chain().expect("chain");
         molt_engine::verify_chain(&chain).expect("the prepared genesis verifies");
         let seat = identities.iter().find(|i| i.member == name).expect("own seat");
