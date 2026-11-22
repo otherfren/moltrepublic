@@ -59,17 +59,18 @@ turn one into an `Approved`.
 
 ## 4. Steps
 
-1. Merge the WIP onto master, then master 0.1.0: done (all conflicts
-   additive).
+1. Merge the WIP onto master, then master 0.1.0 and its acceptance
+   stages (settle, open-card cap, gap hold): done; all conflicts additive.
 2. Re-derive the signing paths: done, re-checked after each merge (§3).
 3. Review the release rule: counterexample found and corrected (§5).
 4. Activation as chain state (user decision 2026-11-22): done (§8).
-5. Suites: see the report of the build (§6 holds the earlier lock-on
-   triage).
-6. Lossy trio and lock integration tests, five runs each: §7.
-7. Traffic measurement over Tor against a real relay: open.
-8. Acceptance on field copies (a v0.1.0 republic enabling it by vote,
-   a fresh founding): open.
+5. Suites with the lock on by default for new foundings: §9.
+6. Lossy trio and lock integration tests, five runs each: §10.
+7. Two code reviews (S1-S6, W1-W10): fixed except S6, design §14.
+8. Re-check the gap-hold pins when the frontier rework lands on master.
+9. Traffic measurement over Tor against a real relay: open.
+10. Acceptance on field copies (a v0.1.0 republic enabling it by vote, a
+    fresh founding): open.
 
 ## 5. The release rule (review result)
 
