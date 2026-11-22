@@ -1,7 +1,10 @@
 # The chain lock: fork-free sealing (B7)
 
-**Status: BUILT on a branch (B7a pure state machine, B7b wiring,
-2026-11-22): the lock runs where the chain enabled it - every founding of
+**Status: BUILT on master, UNDER REVIEW, not released (2026-11-22).
+Review rounds three and four found a halt and a fork in 2-of-3 that are
+not fixed here: do not found or enable a republic with a build of this
+tree. An existing republic without the lock is unaffected (field-checked).
+B7a pure state machine, B7b wiring: the lock runs where the chain enabled it - every founding of
 this build, or an older republic after a `set_features` vote (§8);
 deviations in §14; plan `docs/chain/chain_lock_wiring_plan.md`.** Modules:
 `crates/molt-engine/src/chain/lock.rs` (simulation in `lock_tests.rs`),
