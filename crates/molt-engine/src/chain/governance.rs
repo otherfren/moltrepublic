@@ -1624,6 +1624,10 @@ impl State {
         if voter == me || !self.roster().iter().any(|m| m == voter) {
             return;
         }
+        // D4: catching up, this seat is the one behind - not the voter
+        if self.chain.catchup_from.is_some() || self.chain_lag().peers_ahead > 0 {
+            return;
+        }
         let now = self.presence_now();
         if self
             .chain
@@ -1661,6 +1665,24 @@ impl State {
         self.session.notice = format!("vote-refused:{}:{by}:{head}", proposal.0);
         self.emit_session(crate::SessionScope::Full);
         Ok(molt_core::Reply::Ack)
+    }
+
+    /// D4: `peer`'s own vote counts here at the current height - it is
+    /// level again, so its `vote-refused` notice goes.
+    pub(crate) fn clear_vote_refused_by(&mut self, peer: &str, height: u64) {
+        if self.chain.head.as_ref().map(|h| h.height + 1) != Some(height) {
+            return;
+        }
+        let shows = self
+            .session
+            .notice
+            .strip_prefix("vote-refused:")
+            .and_then(|rest| rest.split(':').nth(1))
+            .is_some_and(|p| p == peer);
+        if shows {
+            self.session.notice.clear();
+            self.emit_session(crate::SessionScope::Full);
+        }
     }
 
     /// The event bodies a catch-up answer re-gossips (WP2): per OPEN surface

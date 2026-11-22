@@ -519,6 +519,9 @@ impl State {
                     .pending_sigs
                     .get(&id.0)
                     .is_some_and(|p| p.sigs.iter().any(|a| a.member == by && a.sig == sig));
+                if landed && by == from {
+                    self.clear_vote_refused_by(&from, height);
+                }
                 if landed {
                     self.keep_peer_event(
                         from.clone(),
