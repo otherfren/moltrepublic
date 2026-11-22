@@ -740,7 +740,7 @@ impl State {
             }
             // W2: a card every seat would refuse now must not starve the
             // height while another one is ready
-            if self.lock_gate(id, &change, slot.height).is_some() || !self.restore_settled(id, &change) {
+            if self.lock_gate(id, &change, slot.height, false).is_some() || !self.restore_settled(id, &change) {
                 continue;
             }
             return Some((id, change, value));
@@ -761,23 +761,24 @@ impl State {
         if self.proposals.get(&id).is_some_and(|p| p.state != ProposalState::Proposed || p.decliners.contains(&me)) {
             return Some("not open".into());
         }
-        self.lock_gate(id, change, height)
+        self.lock_gate(id, change, height, true)
     }
 
-    /// The gates every seat applies to `change` alike (relay wait, restore
-    /// gate and consent, vault/wallet checks, the cut's hash): a leader
-    /// never proposes past one (W2), an acceptor never accepts past one.
-    fn lock_gate(&self, id: u64, change: &ChainChange, height: u64) -> Option<String> {
+    /// The gates on `change`: the chain-wide ones (relay wait, restore gate
+    /// and consent, the cut's hash) a leader never proposes past (W2); with
+    /// `local` also this seat's own vault/wallet checks, which only stop
+    /// its acceptance - another seat may still accept the card.
+    fn lock_gate(&self, id: u64, change: &ChainChange, height: u64, local: bool) -> Option<String> {
         if let Some(why) = self.sign_blocker(id) {
             return Some(why);
         }
         match change {
-            ChainChange::Applied { surface: Surface::Vault, payload, .. } => {
+            ChainChange::Applied { surface: Surface::Vault, payload, .. } if local => {
                 if let Err(e) = self.vault_approve_check(payload) {
                     return Some(e.to_string());
                 }
             }
-            ChainChange::Applied { surface: Surface::Wallet, payload, .. } => {
+            ChainChange::Applied { surface: Surface::Wallet, payload, .. } if local => {
                 if let Err(e) = self.wallet_approve_check(payload) {
                     return Some(format!("{e:?}"));
                 }
