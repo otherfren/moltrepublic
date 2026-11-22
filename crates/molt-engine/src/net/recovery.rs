@@ -906,8 +906,10 @@ impl State {
         let republic = replica.name.clone();
         let republic_id = replica.republic_id.clone();
         // B3: no link for a seat that is running, nor from a fork
+        // D3: a verdict known now answers the command too, not only the notice
         if let Some(why) = self.restore_gate(&member) {
-            return self.cmd_net_recover_link_failed(member, why.to_string(), String::new(), None);
+            self.cmd_net_recover_link_failed(member, why.to_string(), String::new(), None)?;
+            return Err(MoltError::Recover(why.to_string()));
         }
         // announce the attempt on the recovery notice channel: the frontends
         // render a calm pending state until the real outcome (`recovery-link:`

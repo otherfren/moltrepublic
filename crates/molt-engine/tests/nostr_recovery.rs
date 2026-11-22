@@ -1682,12 +1682,13 @@ async fn a_link_for_a_seat_heard_seconds_ago_is_refused() {
         s.workspaces.iter().any(|w| w.members.iter().any(|m| m.name == "petra" && m.last_seen > 0))
     })
     .await;
-    a.execute(Command::RecoverInviteStart { member: "petra".to_string() }).await.expect("mint");
-    let s = wait_for(&a, "the mint's answer", |s| {
-        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
-    })
-    .await;
-    assert_eq!(s.notice, "recovery-link-failed:seat still active");
+    // D3: the command itself answers the refusal; the notice stays
+    let refused = a.execute(Command::RecoverInviteStart { member: "petra".to_string() }).await;
+    assert!(
+        matches!(&refused, Err(molt_core::MoltError::Recover(why)) if why == "seat still active"),
+        "{refused:?}"
+    );
+    assert_eq!(read_session(&a).await.notice, "recovery-link-failed:seat still active");
 }
 
 /// **Field failure 2026-09-12:** the rejoiner gave a relay a flat 10 s to

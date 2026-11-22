@@ -1713,7 +1713,12 @@ fn a_link_is_not_minted_for_a_live_seat_or_on_a_fork() {
     let b = Builder::new(&["petra", "walter", "dora"], 2);
     let mut coord = genesis_seat("petra", &b, b.blocks.clone());
     heard(&mut coord, "dora", 10_000 - 10, 10_000);
-    coord.cmd_recover_invite_start("dora".to_string()).expect("acked");
+    // D3: a verdict known at mint time answers the command itself
+    let refused = coord.cmd_recover_invite_start("dora".to_string());
+    assert!(
+        matches!(&refused, Err(molt_core::MoltError::Recover(why)) if why == "seat still active"),
+        "{refused:?}"
+    );
     assert_eq!(coord.session.notice, "recovery-link-failed:seat still active");
     assert!(coord.recovery.tickets.is_empty(), "no ticket minted");
     heard(&mut coord, "dora", 10_000 - 10, 10_000 + 120);
@@ -1722,7 +1727,11 @@ fn a_link_is_not_minted_for_a_live_seat_or_on_a_fork() {
         "walter".to_string(),
         molt_core::ChainDivergence { peer: "walter".to_string(), since_height: 0, seen_ts: 1 },
     );
-    coord.cmd_recover_invite_start("dora".to_string()).expect("acked");
+    let refused = coord.cmd_recover_invite_start("dora".to_string());
+    assert!(
+        matches!(&refused, Err(molt_core::MoltError::Recover(why)) if why == "chain diverged"),
+        "{refused:?}"
+    );
     assert_eq!(coord.session.notice, "recovery-link-failed:chain diverged");
 }
 
