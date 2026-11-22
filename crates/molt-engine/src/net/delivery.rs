@@ -345,6 +345,7 @@ impl State {
         self.wiki_base_tick();
         self.vault_payload_tick();
         self.vault_base_tick();
+        self.retry_settled_restore_approvals();
         // A2.2: held seals land once their round has passed
         self.drain_held_seals();
         self.chain_heal_tick();

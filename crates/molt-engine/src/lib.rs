@@ -1135,6 +1135,9 @@ pub(crate) struct RecoveryState {
     /// B3: consented restores this node held back from auto-approving while
     /// a gate held; retried on the presence tick.
     pub(crate) held_approvals: std::collections::BTreeSet<u64>,
+    /// F1: when this node first judged each open `Restored` card (presence
+    /// clock); it signs and seals only after the settle. Memory only.
+    pub(crate) settle: HashMap<u64, u64>,
     /// B3: `Restored` cards whose seal a gate holds, already reported.
     pub(crate) held_seals: std::collections::BTreeSet<u64>,
     /// Recoveries this node is coordinating, keyed by the returning **member**
@@ -1773,6 +1776,7 @@ impl State {
                 links: std::collections::VecDeque::new(),
                 attempts: chain::AttemptBook::default(),
                 quit: None,
+                settle: HashMap::new(),
                 readmitted: std::sync::Arc::default(),
                 seal_first_seats: std::collections::HashSet::new(),
                 repushes: BTreeMap::new(),

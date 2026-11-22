@@ -34,6 +34,10 @@ pub(crate) struct RecoverProgressReport {
     pub sealed: bool,
 }
 
+/// F1 (v0.1.1): a node signs or seals a `Restored` card only this long
+/// after it first saw it, so a withdrawal right behind the card wins.
+pub(crate) const RESTORE_SETTLE_SECS: u64 = 5;
+
 /// The group's rejoin notification - the one thing members see. Since B3
 /// every rejoin comes through a survivor-minted link.
 fn rejoin_note(member: &str) -> String {
@@ -588,6 +592,10 @@ impl State {
         };
         let Some(why) = self.restore_gate(member) else {
             self.recovery.held_seals.remove(&id);
+            if self.restore_settling(id) {
+                self.chain.seal_held.insert(id);
+                return true;
+            }
             return false;
         };
         if self.recovery.held_seals.insert(id) {
@@ -595,6 +603,30 @@ impl State {
         }
         self.chain.seal_held.insert(id);
         true
+    }
+
+    /// F1: whether `id` is still inside its settle here, counted from the
+    /// first time this node judged it. Off without a real transport.
+    fn restore_settling(&mut self, id: u64) -> bool {
+        if self.nostr.is_none() {
+            return false;
+        }
+        let now = self.presence_now();
+        let open = &self.chain.proposal_changes;
+        self.recovery.settle.retain(|i, _| open.contains_key(i));
+        let since = *self.recovery.settle.entry(id).or_insert(now);
+        now.saturating_sub(since) < RESTORE_SETTLE_SECS
+    }
+
+    /// F1: retry the auto-approvals the settle held back (delivery tick).
+    pub(crate) fn retry_settled_restore_approvals(&mut self) {
+        let ids: Vec<u64> =
+            self.recovery.settle.keys().filter(|id| self.recovery.held_approvals.contains(id)).copied().collect();
+        for id in ids {
+            if self.chain.proposal_changes.contains_key(&id) {
+                self.auto_approve_restore(id);
+            }
+        }
     }
 
     /// B3: retry the auto-approvals a gate held back (presence tick).
@@ -809,6 +841,10 @@ impl State {
             if self.recovery.held_approvals.insert(id) {
                 tracing::info!(%id, %member, peers_ahead = behind, "restore_held reason=catching_up");
             }
+            return;
+        }
+        if self.restore_settling(id) {
+            self.recovery.held_approvals.insert(id);
             return;
         }
         self.recovery.held_approvals.remove(&id);
