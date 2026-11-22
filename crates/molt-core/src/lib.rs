@@ -8385,6 +8385,13 @@ pub struct StatusView {
     /// The group's MLS epoch (0 = no group on this node).
     #[serde(default)]
     pub mls_epoch: u64,
+    /// This seat's own open proposals.
+    #[serde(default)]
+    pub open_proposals: usize,
+    /// The most open proposals a peer takes from one seat; at it, propose
+    /// is refused until one of them leaves the vote.
+    #[serde(default)]
+    pub open_proposals_max: usize,
 }
 
 /// One seat's standing as this node sees it (the Organization overview).
@@ -8950,6 +8957,10 @@ pub enum MoltError {
         /// How far ahead the peers are.
         peers_ahead: u64,
     },
+    /// This seat holds as many open proposals as a peer takes from one
+    /// proposer: a further one would be dropped by every receiver.
+    #[error("{0} open proposals - wait for a seal")]
+    OpenProposalsCap(usize),
     /// The engine task is gone or did not answer.
     #[error("engine: {0}")]
     Engine(String),

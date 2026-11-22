@@ -585,3 +585,14 @@ async fn a_displaced_line_reaches_the_disk_and_survives_a_reopen() {
     let (ws, _) = molt_storage::open_workspace(&dir).expect("reopen");
     assert_eq!(ws.read_transport_state().vault_displaced, c.vault_grants.displaced);
 }
+
+#[test]
+fn a_grant_at_the_open_cap_is_refused() {
+    let (b, _, _, sid) = deposited();
+    let mut c = seat("c", &b, b.blocks.clone());
+    crate::chain::test_support::fill_to_open_cap(&mut c);
+    let (seq, next_id) = (c.next_seq, c.next_id);
+    let r = c.cmd_vault_grant(sid, "d".into());
+    assert!(matches!(r, Err(MoltError::OpenProposalsCap(64))), "{r:?}");
+    assert_eq!((c.next_seq, c.next_id), (seq, next_id), "nothing recorded or minted");
+}
