@@ -302,6 +302,11 @@ impl Leader {
         }
     }
 
+    /// Seats heard: promisers and seats heard as free.
+    pub(crate) fn heard(&self) -> usize {
+        self.promises.len() + self.free.len()
+    }
+
     /// Seats heard as free (never also promisers).
     pub(crate) fn free_count(&self) -> usize {
         self.free.len()

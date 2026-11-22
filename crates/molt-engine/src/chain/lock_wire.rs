@@ -902,8 +902,9 @@ impl State {
             }
         }
         run.leader.promise(&me, &ballot, accepted);
-        // S5: seats known free here hold nothing that can be chosen
-        for m in self.lock_known_free(slot.height) {
+        // S5: seats known free here hold nothing that can be chosen; nor
+        // does a registered restore's subject - its old device is gone (§4.2)
+        for m in self.lock_known_free(slot.height).into_iter().chain(self.lock_restore_subjects()) {
             run.leader.heard_free(&m);
         }
         self.chain.lock.seen.insert(slot.clone(), ballot.clone());
@@ -937,18 +938,17 @@ impl State {
             return;
         }
         let (id, change, own) = match &forced {
-            Some(v) => match forced_id {
+            Some(_) => match forced_id {
                 Some((id, change)) => {
-                    // S3: a forced value this seat would withhold may not be
-                    // chosen at all - a fuller hearing can free the slot
-                    let held = self.chain.lock.acceptor.holds(&slot, v);
-                    let refused = !held
-                        && self
-                            .proposal_change(id)
-                            .or_else(|| change.clone())
-                            .map_or(true, |c| self.lock_withheld(id, &c, slot.height).is_some());
-                    let heard = self.chain.lock.run.as_ref().map_or(0, |r| r.promised.len() + r.leader.free_count());
-                    if refused && heard < n {
+                    // S3: a forced value may not be chosen at all - its holders
+                    // keep it alive while the others refuse it; a fuller hearing
+                    // frees the slot. Only for one retransmit interval: a seat
+                    // that never answers must not keep the holders of a chosen
+                    // value from completing it (S1)
+                    let (heard, started) =
+                        self.chain.lock.run.as_ref().map_or((0, 0), |r| (r.promised.len() + r.leader.free_count(), r.started));
+                    let waiting = self.presence_now() < started + self.lock_retransmit();
+                    if heard < n && waiting {
                         tracing::debug!(height = slot.height, id, heard, "lock=forced_waits_for_hearing");
                         return;
                     }
@@ -1448,6 +1448,14 @@ impl State {
             let interval = self.lock_retransmit().saturating_mul(1 << run.resends.min(10)).min(LOCK_BACKOFF_MAX_SECS);
             let resend = now >= run.sent_at + interval;
             let attempt = run.attempt;
+            // S3: a forced value that waited for a fuller hearing goes out
+            // once its interval has passed
+            if run.leader.ready() && run.leader.proposed().is_none() && !stale {
+                self.lock_try_propose();
+            }
+            if self.chain.lock.run.is_none() {
+                return;
+            }
             if stale {
                 tracing::info!(height = slot.height, attempt = attempt + 1, "lock=retry");
                 self.chain.lock.run = None;

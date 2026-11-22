@@ -382,6 +382,17 @@ struct Sim {
     free_ghost: BTreeMap<u64, BTreeMap<Value, BTreeSet<usize>>>,
     release: Release,
     releases: usize,
+    /// Values withdrawn: no seat approves them any more (withholding
+    /// acceptors, S1/S3).
+    withdrawn: BTreeSet<String>,
+    /// Percent of steps that withdraw a value some seat accepted.
+    withdraw: u64,
+    /// S1: a seat re-accepts a value it already holds, withdrawn or not.
+    keep_held: bool,
+    /// S3: a leader whose forced value is withdrawn and not its own waits
+    /// for a fuller hearing; `Some(false)` = until every seat answered
+    /// (the control), `Some(true)` = until its interval passes (settle).
+    hearing: Option<bool>,
     step: usize,
     drop: u64,
     dup: u64,
@@ -417,6 +428,10 @@ impl Sim {
             free_ghost: BTreeMap::new(),
             release: Release::Off,
             releases: 0,
+            withdrawn: BTreeSet::new(),
+            withdraw: 0,
+            keep_held: true,
+            hearing: Some(true),
             step: 0,
             drop: 15,
             dup: 10,
@@ -463,7 +478,18 @@ impl Sim {
 
     fn wish(&mut self, seat: usize, h: u64) -> Value {
         let (kind, need) = self.kind();
-        Value { digest: format!("{kind}-{h}-{seat}-{}", self.rng.below(3)), need }
+        let mut digest = format!("{kind}-{h}-{seat}-{}", self.rng.below(3));
+        // a fresh card: nobody proposes a withdrawn one
+        while self.withdrawn.contains(&digest) {
+            digest.push('+');
+        }
+        Value { digest, need }
+    }
+
+    /// Seat `i` refuses `value` at `slot`: it is withdrawn and (S1) not a
+    /// value this seat already accepted there.
+    fn refuses(&self, i: usize, slot: &Slot, value: &Value) -> bool {
+        self.withdrawn.contains(&value.digest) && !(self.keep_held && self.seats[i].acceptor.holds(slot, value))
     }
 
     fn send_all(&mut self, from: usize, msg: &Msg) {
@@ -509,7 +535,11 @@ impl Sim {
         let seat = &self.seats[i];
         let round = seat.acceptor.next_round(&s).max(seat.seen_round.get(&h).copied().unwrap_or(0) + 1);
         let ballot = Ballot { round, leader: seat.name.clone() };
-        let leader = Leader::new(s.clone(), self.quorum(), ballot.clone());
+        let mut leader = Leader::new(s.clone(), self.quorum(), ballot.clone());
+        // a lost seat (a restore's subject) never acted: it holds nothing (§4.2)
+        for d in self.cfg.n - self.cfg.dead..self.cfg.n {
+            leader.heard_free(&self.seats[d].name);
+        }
         self.seats[i].leaders.insert(h, leader);
         self.seats[i].seen_round.insert(h, round);
         let msg = Msg::Prepare { slot: s, ballot };
@@ -556,6 +586,9 @@ impl Sim {
                 }
             }
             Msg::Accept { slot, ballot, value } => {
+                if self.refuses(i, &slot, &value) {
+                    return;
+                }
                 let step = self.seats[i].acceptor.accept(&slot, &ballot, &value);
                 if let Some(reply) = self.acceptor_step(i, step) {
                     self.on_reply(i, i, reply.clone());
@@ -629,6 +662,9 @@ impl Sim {
                 let Some(leader) = self.seats[i].leaders.get_mut(&h) else { return };
                 leader.promise(&from_name, &ballot, accepted);
                 if leader.ready() && leader.proposed().is_none() {
+                    if self.waits_for_hearing(i, &slot) {
+                        return;
+                    }
                     let own = self.wish(i, h);
                     let Some(leader) = self.seats[i].leaders.get_mut(&h) else { return };
                     if let Some(value) = leader.propose(Some(own)) {
@@ -663,9 +699,45 @@ impl Sim {
         }
     }
 
+    /// S3 at seat `i`'s ballot for `slot`.
+    fn waits_for_hearing(&self, i: usize, slot: &Slot) -> bool {
+        let Some(leader) = self.seats[i].leaders.get(&slot.height) else { return false };
+        let Some(v) = leader.forced() else { return false };
+        match self.hearing {
+            Some(_) => leader.heard() < self.cfg.n && self.withdrawn.contains(&v.digest),
+            None => false,
+        }
+    }
+
+    /// A ballot whose leader waited: propose now (its interval passed).
+    fn propose_waiting(&mut self, i: usize, h: u64) {
+        let Some(leader) = self.seats[i].leaders.get(&h) else { return };
+        if !leader.ready() || leader.proposed().is_some() {
+            return;
+        }
+        let (slot, ballot) = (leader.slot.clone(), leader.ballot.clone());
+        let own = self.wish(i, h);
+        let Some(leader) = self.seats[i].leaders.get_mut(&h) else { return };
+        if let Some(value) = leader.propose(Some(own)) {
+            let msg = Msg::Accept { slot, ballot, value };
+            self.deliver(i, msg.clone());
+            self.send_all(i, &msg);
+        }
+    }
+
     fn chaos(&mut self, steps: usize) {
         for _ in 0..steps {
             self.step += 1;
+            if self.withdraw > 0 && self.rng.chance(self.withdraw) {
+                // a proposer withdraws a card some seat already accepted
+                let accepted: Vec<String> =
+                    self.ghost.values().flat_map(|by| by.keys().map(|(_, v)| v.digest.clone())).collect();
+                if !accepted.is_empty() {
+                    let k = self.rng.below(accepted.len());
+                    self.withdrawn.insert(accepted[k].clone());
+                }
+                continue;
+            }
             let roll = self.rng.next_u64() % 100;
             if roll < 8 || self.net.is_empty() {
                 // a seat times out and takes over a height it has not decided
@@ -736,7 +808,16 @@ impl Sim {
                 match self.seats[0].decided.get(&h).cloned() {
                     // the block gossip a catch-up re-serves
                     Some(value) => self.send_all(0, &Msg::Decided { slot: Self::slot(h), value }),
-                    None => self.start_ballot(0, h),
+                    None => {
+                        // the hearing interval of the last ballot passed
+                        if self.hearing == Some(true) {
+                            self.propose_waiting(0, h);
+                            self.drain();
+                        }
+                        if !self.seats[0].decided.contains_key(&h) {
+                            self.start_ballot(0, h);
+                        }
+                    }
                 }
             }
         }
@@ -974,3 +1055,52 @@ fn releasing_on_the_first_free_signer_forks() {
     assert!(found.is_some(), "the eager control found no fork");
     eprintln!("eager release fork at seed {found:?}");
 }
+
+fn run_withdrawing(cfg: Config, seed: u64, keep_held: bool, hearing: Option<bool>) -> Outcome {
+    let mut sim = Sim::new(cfg, seed, false);
+    sim.withdraw = 3;
+    sim.keep_held = keep_held;
+    sim.hearing = hearing;
+    sim.chaos(400);
+    let mut out = sim.outcome();
+    out.undecided = sim.settle();
+    let after = sim.outcome();
+    out.forks = out.forks.max(after.forks);
+    out.learned_twice = after.learned_twice;
+    out
+}
+
+/// S1/S3 (review 2026-11-22): acceptors that WITHHOLD. Cards are withdrawn
+/// mid-run - some after a seat accepted them, some after they were chosen.
+/// A seat re-accepts a value it already holds (S1); a leader whose forced
+/// value it would refuse waits for a fuller hearing for one interval, then
+/// proposes it anyway (S3). Every slot decides once delivery is reliable,
+/// never two values. The controls stall: without S1 a chosen withdrawn
+/// value can never be sealed again; waiting for every seat stalls where a
+/// seat never answers.
+#[test]
+fn simulation_with_withdrawals_decides_every_slot() {
+    for (name, cfg) in configs() {
+        let mut withdrawn_runs = 0;
+        for seed in 0..MIXED_SEEDS {
+            let out = run_withdrawing(cfg, seed, true, Some(true));
+            assert_eq!(out.forks, 0, "{name}: fork at seed {seed}");
+            assert_eq!(out.learned_twice, 0, "{name}: learned twice at seed {seed}");
+            assert_eq!(out.undecided, 0, "{name}: undecided at seed {seed}");
+            withdrawn_runs += 1;
+        }
+        eprintln!("{name}: {withdrawn_runs} runs with withdrawals decided");
+    }
+    let stall = |keep_held: bool, hearing: Option<bool>, cfg: Config| {
+        (0..MIXED_SEEDS).find(|seed| run_withdrawing(cfg, *seed, keep_held, hearing).undecided > 0)
+    };
+    let s1 = stall(false, Some(true), plain(3, 2));
+    assert!(s1.is_some(), "without S1 a chosen withdrawn value must stall somewhere");
+    eprintln!("without S1: stall at seed {s1:?}");
+    // a seat on an older build never answers a lock frame
+    let s3 = stall(true, Some(false), Config { old: 1, ..plain(5, 3) });
+    assert!(s3.is_some(), "waiting for every seat must stall with one seat that never answers");
+    eprintln!("waiting for all n: stall at seed {s3:?}");
+}
+
+
