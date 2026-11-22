@@ -146,7 +146,8 @@ fn seqs_ok(seqs: &[u64]) -> bool {
 impl GapFrame {
     /// The ONLY consumer of both tags. Bounds the input before serde.
     pub fn from_frame(plaintext: &[u8]) -> Result<GapFrame, GapError> {
-        if let Ok(b) = body(plaintext, GAP_WANT_TAG) {
+        if plaintext.starts_with(GAP_WANT_TAG) {
+            let b = body(plaintext, GAP_WANT_TAG)?;
             let w: GapWant = serde_json::from_slice(b).map_err(|_| GapError::Malformed)?;
             if w.v != GAP_V {
                 return Err(GapError::UnknownVersion(w.v));

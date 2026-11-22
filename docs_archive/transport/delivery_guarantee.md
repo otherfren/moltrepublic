@@ -615,7 +615,12 @@ the next gap. The original of a missing envelope often can never arrive
 (MLS: a generation spent before the restart or behind the 5 000
 out-of-order window of a newest-first replay; relay: paged out, expired,
 pruned), and the sender's stall round is on a 10..600 s ladder plus an
-hourly budget, unmoved by a hold that changes no window.
+hourly budget, unmoved by a hold that changes no window. Worse, the acked
+floor only moves forward (`apply_group_ack`, and the mesh's twin): an
+accept window that regressed across a hard stop (saved every 5 s, the
+ratchet every 10 s) leaves a seq the sender already counts as acked - no
+stall round ever re-offers it, §4.7's "resends absorb a lost save" does
+not hold for it. The gap want below is what reaches it.
 
 - **Hold by need.** Only kinds whose effect depends on the same sender's
   earlier envelopes wait: the chat stream (`Chat`, `ChatReacted`,
@@ -630,7 +635,7 @@ hourly budget, unmoved by a hold that changes no window.
 - **Ask.** A seq missing for 2 s is named in a `GapWant` control frame
   (`\x00molt-gapwant-v1`, ≤ 64 seqs, re-asked every 10 s). The named
   sender re-publishes exactly those own envelopes as fresh frames (at most
-  one answer per asker per 5 s, never past its publish cursor, outside the
+  one answer per asker per 10 s, never past its publish cursor, outside the
   hourly budget) and then sends a `GapAnswer` (`\x00molt-gapans-v1`):
   `resent` and `gone` (not an own ackable envelope of its log).
 - **Release** (whichever first): the seq arrives; the sender answers it

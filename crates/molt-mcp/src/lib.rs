@@ -3380,7 +3380,7 @@ pub(crate) mod tests {
         // hook; the value itself rides the settings surface as
         // `poke_wake_command` (ADR-0007), so this stays internal only
         // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 94] = [
+        const INTERNAL: [&str; 96] = [
             // not a door of its own: chat_send/approve/decline/withdraw
             // build it from their `operator`/`agent` arguments
             "as_operator",

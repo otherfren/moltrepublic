@@ -68,7 +68,7 @@ const GAP_QUEUE: usize = 16;
 
 /// One targeted resend per asker per this long: the bound that keeps a gap
 /// want from becoming a resend amplifier outside the hourly budget.
-const GAP_ANSWER_EVERY: Duration = Duration::from_secs(5);
+const GAP_ANSWER_EVERY: Duration = Duration::from_secs(10);
 
 /// Test seam for the stall backoff, packed ms `first << 32 | cap` (`0` =
 /// production).
@@ -3629,6 +3629,103 @@ mod tests {
         assert!(count(&sink) >= opening() + 8, "the heard peer's resends stopped: {}", count(&sink));
         walter.shutdown().await;
         petra.shutdown().await;
+    }
+
+    /// A gap want is answered with exactly the missing own frames, fresh,
+    /// past any budget; a seq that is not an own envelope is answered
+    /// `gone`, one past the publish cursor is left to the outbox, and a
+    /// second want inside the debounce gets nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_gap_want_is_answered_with_exactly_the_missing_frames() {
+        use crate::gap::{GapAnswer, GapFrame};
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+
+        #[derive(Clone, Default)]
+        struct Cap(std::sync::Arc<std::sync::Mutex<(Vec<u64>, Vec<GapAnswer>)>>);
+        impl EngineSink for Cap {
+            async fn deliver(&self, _f: &MemberId, env: molt_core::EventEnvelope) -> Result<(), crate::NetError> {
+                self.0.lock().expect("cap").0.push(env.seq);
+                Ok(())
+            }
+            async fn peer_seen(&self, _m: &MemberId) {}
+            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+            async fn gap_frame(&self, _m: &MemberId, frame: &GapFrame) {
+                if let GapFrame::Answer(a) = frame {
+                    self.0.lock().expect("cap").1.push(a.clone());
+                }
+            }
+        }
+
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut walter = MlsMember::new(&key(1), "walter").expect("walter");
+        let petra = MlsMember::new(&key(2), "petra").expect("petra");
+        walter.create_group().expect("group");
+        let welcome = walter.add_members(&[petra.key_package().expect("kp")]).expect("add").expect("welcome");
+        let mut petra = petra;
+        petra.join_from_welcome(&welcome).expect("petra joins");
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let chan = || crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url.clone()], [7u8; 32]);
+
+        let log = crate::MemLog::default();
+        log.push(walter_event(1));
+        log.push(molt_core::EventEnvelope { by: "zoe".into(), prev_seq: 0, ..walter_event(2) });
+        log.push(walter_event(3));
+        let (_ww, wake_w) = watch::channel(0u64);
+        let (hw, _hw) = watch::channel(GroupHealth::default());
+        let walter = spawn_group(
+            chan(),
+            MlsChannel::new(walter),
+            GroupNetConfig::fast("walter".into(), vec!["petra".into()])
+                .with_resend(Duration::from_secs(600), Duration::from_secs(600)),
+            log,
+            crate::MemStateStore::default(),
+            NullSink,
+            wake_w,
+            hw,
+        );
+        let cap = Cap::default();
+        let (_wp, wake_p) = watch::channel(0u64);
+        let (hp, _hp) = watch::channel(GroupHealth::default());
+        let petra = spawn_group(
+            chan(),
+            MlsChannel::new(petra),
+            GroupNetConfig::fast("petra".into(), vec!["walter".into()]),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            cap.clone(),
+            wake_p,
+            hp,
+        );
+        let wait = |n_seqs: usize, n_answers: usize| {
+            let cap = cap.clone();
+            async move {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                loop {
+                    let (s, a) = cap.0.lock().expect("cap").clone();
+                    if s.len() >= n_seqs && a.len() >= n_answers {
+                        return (s, a);
+                    }
+                    assert!(tokio::time::Instant::now() < deadline, "got {s:?} {a:?}");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+        let (seqs, _) = wait(2, 0).await;
+        assert_eq!(seqs, vec![1, 3], "the first pass");
+
+        assert!(walter.answer_gap("petra".into(), vec![1, 2, 9]));
+        let (seqs, answers) = wait(3, 1).await;
+        assert_eq!(seqs, vec![1, 3, 1], "exactly seq 1 again");
+        assert_eq!(answers, vec![GapAnswer::new("walter".into(), "petra".into(), vec![1], vec![2])]);
+
+        assert!(walter.answer_gap("petra".into(), vec![1]));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(cap.0.lock().expect("cap").0.len(), 3, "debounced");
+        walter.shutdown().await;
+        petra.shutdown().await;
+        drop(relay);
     }
 
     /// A seat that concluded it is locked out re-offers nothing, not even

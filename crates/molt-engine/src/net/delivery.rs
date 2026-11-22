@@ -43,7 +43,8 @@ pub(crate) const GAP_PASS_GRACE_SECS: u64 = 5;
 /// the first rung of its resend ladder, so its first rounds land inside it.
 pub(crate) const GAP_FALLBACK_SECS: u64 = 60;
 
-/// Settled gaps remembered per sender, so a late duplicate never reopens one.
+/// Missing and settled seqs tracked per sender (each); past it the lowest
+/// missing one is settled.
 const SETTLED_MAX: usize = 1024;
 
 /// One missing seq of a sender's stream.
@@ -276,6 +277,11 @@ impl State {
         let prev = envelope.prev_seq;
         if prev_missing && !hold.held.contains_key(&prev) && !hold.settled.contains(&prev) {
             hold.missing.entry(prev).or_insert(Gap { since: now, asked_at: None, settle_at: None });
+            if hold.missing.len() > SETTLED_MAX {
+                if let Some((&lowest, _)) = hold.missing.first_key_value() {
+                    hold.settle(lowest);
+                }
+            }
         }
         if order_sensitive(&envelope.body) && hold.blocks(envelope.seq) {
             hold.since.get_or_insert(now);
@@ -372,7 +378,7 @@ impl State {
                 } else if now.saturating_sub(gap.since) >= GAP_FALLBACK_SECS {
                     settle.push((seq, "fallback"));
                 } else if now.saturating_sub(gap.since) >= GAP_ASK_AFTER_SECS
-                    && gap.asked_at.is_none_or(|t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
+                    && gap.asked_at.map_or(true, |t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
                 {
                     ask.push(seq);
                 }

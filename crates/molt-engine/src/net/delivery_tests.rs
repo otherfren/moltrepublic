@@ -130,7 +130,7 @@ fn an_unanswered_gap_falls_back_far_below_the_old_valve() {
     at(&mut st, crate::net::GAP_FALLBACK_SECS + 1);
     st.cmd_net_delivery_tick().expect("tick");
     assert_eq!(bodies(&st), ["base", "held"], "released at the fallback bound");
-    assert!(crate::net::GAP_FALLBACK_SECS * 10 < 900, "far below the old valve");
+    const { assert!(crate::net::GAP_FALLBACK_SECS * 10 < 900, "far below the old valve") };
     land(&mut st, chat_env(2, 1, "late"));
     assert_eq!(bodies(&st), ["base", "held", "late"], "the late one lands once");
     land(&mut st, chat_env(2, 1, "late"));
