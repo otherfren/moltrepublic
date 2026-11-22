@@ -236,7 +236,7 @@ pub(crate) fn tools() -> Vec<ToolDef> {
             name: "quests_propose",
             command: "propose",
             scope: Scope::Seat,
-            description: "Propose ONE kanban changeset: ordered acts add / set / state, voted m-of-n as one decision and applied all-or-nothing. One changeset per wake: bundle everything one wake produced (transitions, new tasks, date changes). Refused at the call with the first reason when its shape is wrong or it would void on the board now (unknown task, blocked start, cycle, illegal transition). The reply: proposal `id`, `minted` (ids for adds without one, in act order) and `warnings` (impact on the derived dates, missing description or acceptance, evidence gaps). creator is your seat. Nothing is estimated in time; size is orientation only. Vote with approve / decline; review with quests_view {proposal}.",
+            description: "Propose ONE kanban changeset: ordered acts add / set / state, voted m-of-n as one decision and applied all-or-nothing. One changeset per wake: bundle everything one wake produced (transitions, new tasks, date changes). Refused at the call with the first reason when its shape is wrong or it would void on the board now (unknown task, blocked start, cycle, illegal transition). The reply: proposal `id`, `minted` (ids for adds without one, in act order) and `warnings` (impact on the derived dates, missing description or acceptance, evidence gaps). creator is your seat. Nothing is estimated in time; size is orientation only. Vote with approve / decline; review with quests_view {proposal}. Refused while this seat holds status.open_proposals_max open proposals.",
             schema: quests_propose_schema,
             build: |args| {
                 let summary = args
