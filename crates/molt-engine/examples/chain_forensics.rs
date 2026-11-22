@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 //! **Dump a workspace for offline chain forensics**
-//! (`docs/chain/rejoin_divergence_analysis_plan.md`, Phase O):
+//! (`docs_archive/chain/rejoin_divergence_analysis_plan.md`, Phase O):
 //!
 //! ```text
 //! cargo run -p molt-engine --example chain_forensics -- <workspace dir> <out dir>

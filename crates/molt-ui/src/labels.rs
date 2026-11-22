@@ -200,6 +200,15 @@ pub(crate) fn restore_sealed_after_withdrawal_copy(lang: i32, member: &str) -> S
     }
 }
 
+/// F2: `member`'s restore sealed and re-keyed, then its rejoiner gave up.
+pub(crate) fn restore_abandoned_copy(lang: i32, member: &str) -> String {
+    if lang == 1 {
+        format!("Sitz {member} wieder aufgenommen, aber sein Gerät hat aufgegeben - neuen Link senden.")
+    } else {
+        format!("Seat {member} re-admitted, but its device gave up - send a new link.")
+    }
+}
+
 /// A peer's proposal was dropped at ingest. `rest` is `<peer>:<reason>`.
 pub(crate) fn proposal_dropped_copy(lang: i32, rest: &str) -> String {
     let (peer, reason) = rest.rsplit_once(':').unwrap_or((rest, ""));

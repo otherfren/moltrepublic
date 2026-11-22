@@ -6,7 +6,7 @@ this build, or an older republic after a `set_features` vote (§8);
 deviations in §14; plan `docs/chain/chain_lock_wiring_plan.md`.** Modules:
 `crates/molt-engine/src/chain/lock.rs` (simulation in `lock_tests.rs`),
 the wiring `chain/lock_wire.rs` (`lock_wire_tests.rs`), over a relay
-`crates/molt-engine/tests/chain_lock.rs`. Plan: `docs/chain/rejoin_divergence_build_plan.md`
+`crates/molt-engine/tests/chain_lock.rs`. Plan: `docs_archive/chain/rejoin_divergence_build_plan.md`
 B7; research: `docs/chain/chain_divergence_plan.md` S6. Threat model:
 honest seats, faulty network (loss, delay, duplication, reordering,
 restarts). No signed layout changes.

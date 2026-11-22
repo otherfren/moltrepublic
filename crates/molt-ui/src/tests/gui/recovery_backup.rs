@@ -324,6 +324,28 @@ fn a_cancel_after_the_seal_reads_as_new_link_needed() {
     }
 }
 
+/// F2 (v0.1.1): a cancel after Ready, before the seal was seen, does not
+/// read as a clean cancel.
+#[test]
+fn a_cancel_after_ready_reads_as_maybe_readmitted() {
+    i_slint_backend_testing::init_no_event_loop();
+    for (lang, want) in [
+        ("en", "Cancelled - the seat may already be re-admitted."),
+        ("de", "Abgebrochen - der Sitz ist vielleicht schon wieder aufgenommen."),
+    ] {
+        let ui = AppWindow::new().expect("headless window");
+        apply_strings(&ui, i32::from(lang == "de"));
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let sv = SessionView {
+            language: lang.to_string(),
+            notice: "recover-failed:cancelled - the seat may already be re-admitted".to_string(),
+            ..SessionView::default()
+        };
+        apply_session(&ui, &sv, true, &chat_ui);
+        assert_eq!(ui.get_rv_error().as_str(), want);
+    }
+}
+
 /// B2/B3 notices reach the GUI as one compact fact each, in both languages.
 #[test]
 fn an_evicted_or_locked_out_seat_says_so() {

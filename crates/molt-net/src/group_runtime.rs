@@ -62,6 +62,15 @@ const CONTROL_QUEUE: usize = 64;
 /// and a quiet live listener only proves itself by acking a round.
 const OPEN_ROUNDS: u32 = 2;
 
+/// Gap wants queued for the resend task before further ones are dropped
+/// (the asker re-asks).
+const GAP_QUEUE: usize = 16;
+
+/// A gap answer's budget window per asker: each seq at most once and
+/// `GAP_MAX_SEQS` frames in all - the bound that keeps a gap want from
+/// becoming a resend amplifier outside the hourly budget.
+const GAP_ANSWER_EVERY: Duration = Duration::from_secs(10);
+
 /// Test seam for the stall backoff, packed ms `first << 32 | cap` (`0` =
 /// production).
 static RESEND_BACKOFF_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -187,6 +196,8 @@ pub struct GroupHandle {
     /// Bounded and dropped-when-full, because each is worth exactly one
     /// best-effort attempt.
     controls: mpsc::Sender<Vec<u8>>,
+    /// Gap wants addressed at this node, awaiting their targeted resend.
+    gaps: mpsc::Sender<(MemberId, Vec<u64>)>,
     /// The engine's latest verdict on who can be reached: state, so a watch.
     reach: watch::Sender<OutboxReach>,
     /// Whether the outbox is mid-pass with own frames to publish - what
@@ -196,6 +207,7 @@ pub struct GroupHandle {
     inbox: Option<tokio::task::JoinHandle<()>>,
     ack: Option<tokio::task::JoinHandle<()>>,
     poke: Option<tokio::task::JoinHandle<()>>,
+    gap: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl GroupHandle {
@@ -219,6 +231,15 @@ impl GroupHandle {
         if let Some(poke) = self.poke.take() {
             let _ = poke.await;
         }
+        if let Some(gap) = self.gap.take() {
+            let _ = gap.await;
+        }
+    }
+
+    /// Queue a targeted resend of `seqs` for `to` (delivery guarantee
+    /// §10); `false` = dropped, the queue is full - the asker asks again.
+    pub fn answer_gap(&self, to: MemberId, seqs: Vec<u64>) -> bool {
+        self.gaps.try_send((to, seqs)).is_ok()
     }
 
     /// Queue the latest claim sheet for publication.
@@ -410,6 +431,18 @@ where
         controls_rx,
         stop_rx.clone(),
     ));
+    // a FIFTH: a targeted resend answers in seconds, never behind the
+    // outbox's pass or its hourly budget (delivery guarantee §10)
+    let (gaps, gaps_rx) = mpsc::channel(GAP_QUEUE);
+    let gap = tokio::spawn(gap_loop(
+        channel.clone(),
+        mls.clone(),
+        cfg.member.clone(),
+        log.clone(),
+        store.clone(),
+        gaps_rx,
+        stop_rx.clone(),
+    ));
     let (busy_tx, busy) = watch::channel(false);
     let (reach, reach_rx) = watch::channel(OutboxReach::default());
     let outbox = tokio::spawn(outbox_loop(
@@ -440,12 +473,92 @@ where
         stop,
         acks,
         controls,
+        gaps,
         reach,
         busy,
         outbox: Some(outbox),
         inbox: Some(inbox),
         ack: Some(ack),
         poke: Some(poke),
+        gap: Some(gap),
+    }
+}
+
+/// Answer gap wants: re-publish exactly the named own envelopes as fresh
+/// frames, then one [`crate::gap::GapAnswer`] naming what went out and
+/// what is not owed. Seqs past the publish cursor are the outbox's and
+/// left out. Per asker, a seq is re-published at most once per
+/// [`GAP_ANSWER_EVERY`], and at most [`crate::gap::GAP_MAX_SEQS`] frames go
+/// out per such window.
+async fn gap_loop<L: OutboxLog, S: StateStore>(
+    channel: GroupChannel,
+    mls: MlsChannel,
+    me: MemberId,
+    log: L,
+    store: S,
+    mut rx: mpsc::Receiver<(MemberId, Vec<u64>)>,
+    mut stop: watch::Receiver<bool>,
+) {
+    // per asker: the window's start, frames spent in it, seqs resent in it
+    let mut budget: std::collections::HashMap<MemberId, (tokio::time::Instant, usize, Vec<u64>)> =
+        std::collections::HashMap::new();
+    loop {
+        let (to, mut seqs) = tokio::select! {
+            got = rx.recv() => match got {
+                Some(g) => g,
+                None => return,
+            },
+            _ = stop.changed() => return,
+        };
+        let now = tokio::time::Instant::now();
+        let window = budget.entry(to.clone()).or_insert((now, 0, Vec::new()));
+        if now.duration_since(window.0) >= GAP_ANSWER_EVERY {
+            *window = (now, 0, Vec::new());
+        }
+        seqs.sort_unstable();
+        seqs.dedup();
+        seqs.retain(|s| !window.2.contains(s));
+        seqs.truncate(crate::gap::GAP_MAX_SEQS.saturating_sub(window.1));
+        let Some(&lo) = seqs.first() else {
+            tracing::debug!(%to, "gap_want=debounced");
+            continue;
+        };
+        window.1 += seqs.len();
+        window.2.extend_from_slice(&seqs);
+        let cursor = store.load().await.group.unwrap_or_default().log_seq;
+        let envs = log.read_from(lo).await;
+        let (mut resent, mut gone) = (Vec::new(), Vec::new());
+        for seq in seqs.into_iter().filter(|s| *s <= cursor) {
+            let env = envs
+                .binary_search_by_key(&seq, |e| e.seq)
+                .ok()
+                .and_then(|i| envs.get(i))
+                .filter(|e| crate::supervisor::own_ackable(&me, e));
+            let Some(env) = env else {
+                gone.push(seq);
+                continue;
+            };
+            let Some(frame) = mls.group_frame(env) else {
+                if mls.evicted() {
+                    return;
+                }
+                continue;
+            };
+            match channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
+                Ok((_, report)) if !report.accepted.is_empty() => resent.push(seq),
+                Ok(_) => tracing::debug!(%to, seq, "gap resend accepted by no relay"),
+                Err(e) => tracing::debug!(%to, seq, error = %e, "gap resend failed"),
+            }
+        }
+        if resent.is_empty() && gone.is_empty() {
+            continue;
+        }
+        tracing::info!(%to, resent = resent.len(), gone = gone.len(), "gap_answered");
+        let ans = crate::gap::GapAnswer::new(me.clone(), to, resent, gone);
+        let Some(frame) = mls.group_control_frame(&ans.to_frame()) else { continue };
+        if let Err(e) = channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
+            tracing::debug!(error = %e, "publishing a gap answer failed");
+        }
     }
 }
 
@@ -1492,6 +1605,7 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
             | MlsDecode::GroupAck(..)
             | MlsDecode::Poke(..)
             | MlsDecode::PieceWanted(..)
+            | MlsDecode::Gap(..)
             | MlsDecode::MirrorDecl(..)
             | MlsDecode::MirrorStatus(..)
             | MlsDecode::MirrorWho(..)
@@ -1550,6 +1664,15 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
                 return Ingest::Nothing;
             }
             sink.piece_wanted(&from, &want).await;
+            Ingest::Nothing
+        }
+        MlsDecode::Gap(from, frame) => {
+            sink.peer_seen(&from).await;
+            if *frame.by() != from {
+                tracing::warn!(%from, claimed = %frame.by(), "a gap frame disowns its sender - dropped");
+                return Ingest::Nothing;
+            }
+            sink.gap_frame(&from, &frame).await;
             Ingest::Nothing
         }
         MlsDecode::MirrorDecl(from, decl) => {
@@ -3515,6 +3638,103 @@ mod tests {
         assert!(count(&sink) >= opening() + 8, "the heard peer's resends stopped: {}", count(&sink));
         walter.shutdown().await;
         petra.shutdown().await;
+    }
+
+    /// A gap want is answered with exactly the missing own frames, fresh,
+    /// past any budget; a seq that is not an own envelope is answered
+    /// `gone`, one past the publish cursor is left to the outbox, and a
+    /// second want inside the debounce gets nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_gap_want_is_answered_with_exactly_the_missing_frames() {
+        use crate::gap::{GapAnswer, GapFrame};
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+
+        #[derive(Clone, Default)]
+        struct Cap(std::sync::Arc<std::sync::Mutex<(Vec<u64>, Vec<GapAnswer>)>>);
+        impl EngineSink for Cap {
+            async fn deliver(&self, _f: &MemberId, env: molt_core::EventEnvelope) -> Result<(), crate::NetError> {
+                self.0.lock().expect("cap").0.push(env.seq);
+                Ok(())
+            }
+            async fn peer_seen(&self, _m: &MemberId) {}
+            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+            async fn gap_frame(&self, _m: &MemberId, frame: &GapFrame) {
+                if let GapFrame::Answer(a) = frame {
+                    self.0.lock().expect("cap").1.push(a.clone());
+                }
+            }
+        }
+
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut walter = MlsMember::new(&key(1), "walter").expect("walter");
+        let petra = MlsMember::new(&key(2), "petra").expect("petra");
+        walter.create_group().expect("group");
+        let welcome = walter.add_members(&[petra.key_package().expect("kp")]).expect("add").expect("welcome");
+        let mut petra = petra;
+        petra.join_from_welcome(&welcome).expect("petra joins");
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let chan = || crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url.clone()], [7u8; 32]);
+
+        let log = crate::MemLog::default();
+        log.push(walter_event(1));
+        log.push(molt_core::EventEnvelope { by: "zoe".into(), prev_seq: 0, ..walter_event(2) });
+        log.push(walter_event(3));
+        let (_ww, wake_w) = watch::channel(0u64);
+        let (hw, _hw) = watch::channel(GroupHealth::default());
+        let walter = spawn_group(
+            chan(),
+            MlsChannel::new(walter),
+            GroupNetConfig::fast("walter".into(), vec!["petra".into()])
+                .with_resend(Duration::from_secs(600), Duration::from_secs(600)),
+            log,
+            crate::MemStateStore::default(),
+            NullSink,
+            wake_w,
+            hw,
+        );
+        let cap = Cap::default();
+        let (_wp, wake_p) = watch::channel(0u64);
+        let (hp, _hp) = watch::channel(GroupHealth::default());
+        let petra = spawn_group(
+            chan(),
+            MlsChannel::new(petra),
+            GroupNetConfig::fast("petra".into(), vec!["walter".into()]),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            cap.clone(),
+            wake_p,
+            hp,
+        );
+        let wait = |n_seqs: usize, n_answers: usize| {
+            let cap = cap.clone();
+            async move {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                loop {
+                    let (s, a) = cap.0.lock().expect("cap").clone();
+                    if s.len() >= n_seqs && a.len() >= n_answers {
+                        return (s, a);
+                    }
+                    assert!(tokio::time::Instant::now() < deadline, "got {s:?} {a:?}");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+        let (seqs, _) = wait(2, 0).await;
+        assert_eq!(seqs, vec![1, 3], "the first pass");
+
+        assert!(walter.answer_gap("petra".into(), vec![1, 2, 9]));
+        let (seqs, answers) = wait(3, 1).await;
+        assert_eq!(seqs, vec![1, 3, 1], "exactly seq 1 again");
+        assert_eq!(answers, vec![GapAnswer::new("walter".into(), "petra".into(), vec![1], vec![2])]);
+
+        assert!(walter.answer_gap("petra".into(), vec![1]));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(cap.0.lock().expect("cap").0.len(), 3, "debounced");
+        walter.shutdown().await;
+        petra.shutdown().await;
+        drop(relay);
     }
 
     /// A seat that concluded it is locked out re-offers nothing, not even

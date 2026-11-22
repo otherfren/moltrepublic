@@ -43,6 +43,7 @@ pub mod dial;
 pub mod envelope;
 pub(crate) mod epoch_hold;
 pub mod file_plane;
+pub mod gap;
 pub mod group_ack;
 pub mod piece_want;
 pub mod poke;

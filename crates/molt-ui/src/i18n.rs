@@ -201,6 +201,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
                 other => other,
             }
         ),
+        E::OpenProposalsCap(n) => format!("{n} offene Vorschläge - auf eine Besiegelung warten"),
         E::Engine(t) => format!("Engine: {t}"),
         E::SeatEvicted => "Sitz anderswo wiederhergestellt - mit Link neu beitreten".to_string(),
     }
@@ -543,6 +544,14 @@ pub(crate) fn localize_recover_failed(lang: i32, e: &str) -> String {
             "Bereits wieder aufgenommen - neuen Link anfordern.".to_string()
         } else {
             "Already re-admitted - ask for a new link.".to_string()
+        };
+    }
+    // a cancel after Ready, the seal unseen (F2)
+    if e.starts_with("cancelled - the seat may already be re-admitted") {
+        return if lang == 1 {
+            "Abgebrochen - der Sitz ist vielleicht schon wieder aufgenommen.".to_string()
+        } else {
+            "Cancelled - the seat may already be re-admitted.".to_string()
         };
     }
     if lang != 1 {

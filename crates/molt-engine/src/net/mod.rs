@@ -35,7 +35,8 @@ mod decision_line;
 pub(crate) use decision_line::DecisionLines;
 mod delivery;
 #[cfg(test)]
-pub(crate) use delivery::ORDERED_PARK_GIVEUP_SECS;
+pub(crate) use delivery::{GAP_FALLBACK_SECS, GAP_PASS_GRACE_SECS};
+pub(crate) use delivery::SenderHold;
 use delivery::ACK_DEBOUNCE_SECS;
 mod demo_mesh;
 pub(crate) mod files;
@@ -60,9 +61,28 @@ pub(crate) struct DropSeam {
     pub(crate) seen: std::sync::atomic::AtomicU64,
     pub(crate) dropped: std::sync::atomic::AtomicU64,
     lost: Mutex<std::collections::HashSet<(MemberId, u64)>>,
+    chat: Mutex<Option<String>>,
 }
 
 impl DropSeam {
+    /// Whether this is the armed chat body's first arrival (then lost).
+    pub(crate) fn drops_chat(&self, body: &WorkspaceEvent) -> bool {
+        let WorkspaceEvent::Chat(msg) = body else { return false };
+        let Ok(mut armed) = self.chat.lock() else { return false };
+        if armed.as_deref() != Some(msg.body.as_str()) {
+            return false;
+        }
+        *armed = None;
+        self.dropped.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        true
+    }
+
+    pub(crate) fn arm_chat(&self, body: &str) {
+        if let Ok(mut armed) = self.chat.lock() {
+            *armed = Some(body.to_string());
+        }
+    }
+
     /// Whether this arrival of `from`'s envelope `seq` is lost.
     pub(crate) fn drops(&self, from: &str, seq: u64) -> bool {
         use std::sync::atomic::Ordering::SeqCst;
@@ -160,6 +180,25 @@ impl EngineSink for CmdSink {
                 generation: self.generation,
             })
             .await;
+    }
+
+    async fn gap_frame(&self, member: &MemberId, frame: &molt_net::gap::GapFrame) {
+        let cmd = match frame {
+            molt_net::gap::GapFrame::Want(w) => Command::NetGapWanted {
+                from: member.clone(),
+                of: w.of.clone(),
+                seqs: w.seqs.clone(),
+                generation: self.generation,
+            },
+            molt_net::gap::GapFrame::Answer(a) => Command::NetGapAnswered {
+                from: member.clone(),
+                to: a.to.clone(),
+                resent: a.resent.clone(),
+                gone: a.gone.clone(),
+                generation: self.generation,
+            },
+        };
+        let _ = self.execute(cmd).await;
     }
 
     async fn piece_wanted(&self, member: &MemberId, want: &molt_net::piece_want::PieceWanted) {

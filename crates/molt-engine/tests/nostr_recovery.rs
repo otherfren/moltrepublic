@@ -2421,7 +2421,11 @@ async fn a_cancel_after_ready_withdraws_the_unsealed_card() {
     eventually("the card on the coordinator", 60, 1, || open_proposals(&a)).await;
     eventually("the card at vera", 60, 1, || open_proposals(&v)).await;
     c.execute(Command::RecoverCancel).await.expect("cancel");
-    assert_eq!(read_session(&c).await.notice, "recover-cancelled");
+    // after Ready the rejoiner cannot know whether the card sealed
+    assert_eq!(
+        read_session(&c).await.notice,
+        format!("recover-failed:{}", molt_engine::RECOVER_CANCELLED_MAYBE_READMITTED)
+    );
     eventually("the card withdrawn on the coordinator", 60, 0, || open_proposals(&a)).await;
     eventually("the card withdrawn at vera", 60, 0, || open_proposals(&v)).await;
     assert_eq!(chain_len(&a).await, 1, "nothing sealed");
@@ -2438,6 +2442,94 @@ async fn a_cancel_after_ready_withdraws_the_unsealed_card() {
     // the ticket is live again: a new run on the same link gets the anchor
     let mut again = ManualRejoiner::start(&url, &link, &petra_phrase, true).await;
     again.anchor().await;
+}
+
+/// **F1 (v0.1.1, acceptance E1):** a cancel right after Ready while vera
+/// auto-approves at once (no gate): walter's own seal and vera's both wait
+/// out the settle, the withdrawal wins on every seat, nothing seals and
+/// the ticket is live again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_right_after_ready_beats_an_auto_approving_bystander() {
+    let relay = MockRelay::run().await.expect("in-process relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, v, petra_phrase) = found_three(tmp.path(), &url).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    // past the seal pacing round after the genesis, as in the field: a
+    // seal is held by nothing but the settle
+    tokio::time::sleep(Duration::from_secs(6)).await;
+
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart { link: link.clone(), phrase: petra_phrase.clone(), relays: Vec::new() })
+        .await
+        .expect("recover start");
+    eventually("the card (or its block) on the coordinator", 60, 1, || async {
+        open_proposals(&a).await + chain_len(&a).await - 1
+    })
+    .await;
+    c.execute(Command::RecoverCancel).await.expect("cancel");
+    eventually("the card withdrawn on the coordinator", 60, 0, || open_proposals(&a)).await;
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    assert_eq!(open_proposals(&v).await, 0, "vera holds no open card");
+    assert_eq!(chain_len(&v).await, 1, "vera sealed nothing");
+    assert_eq!(chain_len(&a).await, 1, "nothing sealed");
+
+    let mut again = ManualRejoiner::start(&url, &link, &petra_phrase, true).await;
+    again.anchor().await;
+}
+
+/// **F2 (v0.1.1, acceptance E2):** the run is cancelled after its block
+/// sealed and the group re-keyed, before the rejoiner joined (every wrap
+/// to it after the anchor is refused). The coordinator reports it; the
+/// rejoiner does not claim a clean cancel; a new link restores the seat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancel_after_the_rekey_is_reported_and_a_new_link_heals_it() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let gate = WrapGate::default();
+    let (_relay, url) = gated_relay(&gate).await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, petra_phrase, _) = found_republic(tmp.path(), &url, 2).await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let epoch = status_of(&a).await.mls_epoch;
+    *gate.to.lock().expect("lock") = rejoiner_anchor(&link, &petra_phrase);
+    gate.pass.store(1, SeqCst);
+    gate.refuse.store(usize::MAX, SeqCst);
+
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart { link, phrase: petra_phrase.clone(), relays: Vec::new() })
+        .await
+        .expect("recover start");
+    eventually("the seal", 90, 2, || chain_len(&a)).await;
+    eventually("the re-key", 60, 1, || async {
+        usize::from(status_of(&a).await.mls_epoch > epoch)
+    })
+    .await;
+    c.execute(Command::RecoverCancel).await.expect("cancel");
+    assert_eq!(
+        read_session(&c).await.notice,
+        format!("recover-failed:{}", molt_engine::RECOVER_CANCELLED_MAYBE_READMITTED),
+        "not a clean cancel"
+    );
+    let s = wait_for_secs(&a, "the coordinator's report", 60, |s| s.notice == "restore-abandoned:petra").await;
+    assert_eq!(s.notice, "restore-abandoned:petra");
+
+    gate.refuse.store(0, SeqCst);
+    let fresh = mint_for_petra(&a).await;
+    let c2 = engine(&tmp.path().join("rejoiner-2"));
+    adopt_relay(&c2, &url).await;
+    c2.execute(Command::RecoverStart { link: fresh, phrase: petra_phrase, relays: Vec::new() })
+        .await
+        .expect("recover start");
+    let s = wait_for_secs(&c2, "the second rejoin", 180, |s| {
+        s.notice.starts_with("recovered:") || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "the second rejoin: {:?}", s.notice);
+    assert_eq!(chain_len(&a).await, 3, "a second Restored block");
 }
 
 /// A relay that refuses group messages (kind 445) while held.

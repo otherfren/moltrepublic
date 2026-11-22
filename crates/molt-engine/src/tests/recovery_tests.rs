@@ -564,3 +564,17 @@ fn a_cancel_after_the_seal_says_a_new_link_is_needed() {
     st.cmd_recover_cancel().expect("cancel");
     assert_eq!(st.session.notice, format!("recover-failed:{}", crate::recovery::READMITTED_NEW_LINK));
 }
+
+/// F2 (v0.1.1): a cancel after the run asked for its card (its Ready, or
+/// a vote report) but before it saw the seal is not a clean cancel - the
+/// card may have sealed.
+#[test]
+fn a_cancel_after_ready_does_not_claim_a_clean_cancel() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut st = crate::tests::plain_state();
+    st.recovery.task = Some(tokio::spawn(std::future::pending::<()>()));
+    st.recovery.asked.store(true, std::sync::atomic::Ordering::SeqCst);
+    st.cmd_recover_cancel().expect("cancel");
+    assert_eq!(st.session.notice, format!("recover-failed:{}", crate::RECOVER_CANCELLED_MAYBE_READMITTED));
+}

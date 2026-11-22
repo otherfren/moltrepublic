@@ -1,7 +1,9 @@
 # Chain divergence and failed rejoin: findings
 
-**Status: Phase O and the isolated live runs done on two of three
-seats, Phase O on all three (2026-11-21); the tracing logs are missing.** Plan: `docs/chain/rejoin_divergence_analysis_plan.md`. Counts
+**Status: CONSUMED ANALYSIS (archived 2026-11-22); built on by
+`docs_archive/chain/rejoin_divergence_build_plan.md`. Phase O and the
+isolated live runs done on two of three seats, Phase O on all three
+(2026-11-21); the tracing logs are missing.** Plan: `docs_archive/chain/rejoin_divergence_analysis_plan.md`. Counts
 and shapes only; seats are A, B, C. Times are UTC. "Own envelopes" are
 the `Committed` events a node wrote itself: its seals and its re-serves.
 

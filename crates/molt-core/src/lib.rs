@@ -6515,6 +6515,36 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// An authenticated gap want landed (engine-internal, delivery
+    /// guarantee §10): `from` misses `seqs` of `of`'s stream. Never an MCP
+    /// tool.
+    NetGapWanted {
+        /// The MLS-authenticated asker.
+        from: MemberId,
+        /// Whose seqs; only that member answers.
+        of: MemberId,
+        /// The missing seqs.
+        seqs: Vec<u64>,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
+    /// An authenticated gap answer landed (engine-internal, §10): `from`
+    /// re-published `resent` for `to` and owes it none of `gone`. Never an
+    /// MCP tool.
+    NetGapAnswered {
+        /// The MLS-authenticated sender.
+        from: MemberId,
+        /// The asker.
+        to: MemberId,
+        /// Re-published just before the answer.
+        resent: Vec<u64>,
+        /// Never coming.
+        gone: Vec<u64>,
+        /// Transport incarnation (stale commands are dropped).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// The running piece fetch asks the actor to send a `PieceWanted` for
     /// the pieces still missing (engine-internal; the off-actor fetch job
     /// speaks to the actor, which holds the group runtime). Never an MCP
@@ -8461,6 +8491,9 @@ pub struct StatusView {
     /// (`chain_divergence_plan.md` S1).
     #[serde(default)]
     pub chain_sync: Box<ChainSync>,
+    /// Peers whose inbound stream is held behind a missing envelope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inbound_held: Vec<InboundHeld>,
     /// One row per roster seat: where it stands, as far as this node knows.
     #[serde(default)]
     pub seats: Vec<SeatSync>,
@@ -8474,6 +8507,13 @@ pub struct StatusView {
     /// The group's MLS epoch (0 = no group on this node).
     #[serde(default)]
     pub mls_epoch: u64,
+    /// This seat's own open proposals.
+    #[serde(default)]
+    pub open_proposals: usize,
+    /// The most open proposals a peer takes from one seat; at it, propose
+    /// is refused until one of them leaves the vote.
+    #[serde(default)]
+    pub open_proposals_max: usize,
 }
 
 /// One seat's standing as this node sees it (the Organization overview).
@@ -8531,6 +8571,22 @@ pub struct CatchUp {
     /// Buffered blocks of another branch.
     #[serde(default)]
     pub fork_candidates: u32,
+}
+
+/// One peer's held inbound stream ([`StatusView::inbound_held`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboundHeld {
+    /// The sender.
+    pub member: MemberId,
+    /// The lowest seq of its stream that is missing.
+    #[serde(default)]
+    pub missing_seq: u64,
+    /// Envelopes waiting behind it.
+    #[serde(default)]
+    pub held: u32,
+    /// When the hold began (unix seconds).
+    #[serde(default)]
+    pub since: u64,
 }
 
 /// This node's chain sync state ([`StatusView::chain_sync`]).
@@ -9063,6 +9119,10 @@ pub enum MoltError {
         /// How far ahead the peers are.
         peers_ahead: u64,
     },
+    /// This seat holds as many open proposals as a peer takes from one
+    /// proposer: a further one would be dropped by every receiver.
+    #[error("{0} open proposals - wait for a seal")]
+    OpenProposalsCap(usize),
     /// The engine task is gone or did not answer.
     #[error("engine: {0}")]
     Engine(String),

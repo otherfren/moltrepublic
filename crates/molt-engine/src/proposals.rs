@@ -921,6 +921,7 @@ impl State {
                 return Err(MoltError::CannotSign("no chain yet".into()));
             }
         }
+        self.open_cap_gate()?;
         let me = self.member();
         let id = ProposalId(self.mint_proposal_id());
         let env = self.make_env(
@@ -4694,6 +4695,7 @@ impl State {
             .filter(|(_, s)| matches!(s, crate::files_state::FileState::Persistent(_)))
             .map(|(id, _)| id)
             .collect();
+        let (open_proposals, open_proposals_max) = self.own_open_cards();
         StatusView {
             member: self.member(),
             members: roster,
@@ -4743,10 +4745,13 @@ impl State {
             // A5: distance and silence, beside the contradiction detector
             chain_lag: self.chain_lag(),
             chain_sync: Box::new(self.chain_sync()),
+            inbound_held: self.inbound_held_view(),
             seats: self.seat_syncs(&persistent),
             mls_epoch: self.group_net.as_ref().and_then(|g| g.mls.lock().ok().map(|m| m.epoch())).unwrap_or(0),
             persistent_files: u32::try_from(persistent.len()).unwrap_or(u32::MAX),
             evicted: self.delivery.evicted,
+            open_proposals,
+            open_proposals_max,
         }
     }
 }

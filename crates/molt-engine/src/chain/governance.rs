@@ -685,7 +685,7 @@ impl State {
         self.adopt_committed_block(block, id);
     }
 
-    /// B6 (`docs/chain/rejoin_divergence_build_plan.md`): the sealing line
+    /// B6 (`docs_archive/chain/rejoin_divergence_build_plan.md`): the sealing line
     /// at `height` - the roster seats heard within
     /// [`super::sync::SILENT_AFTER_SECS`] (this seat always), by name. Per
     /// height, never per proposal: two proposals at one height must not
@@ -1488,6 +1488,29 @@ impl State {
             .saturating_add(crate::proposals::PARKED_DECLINE_ID_WINDOW)
     }
 
+    /// `by`'s open cards, membership records included: what both sides of
+    /// the L3 cap count.
+    pub(crate) fn open_cards_by(&self, by: &str) -> usize {
+        self.proposals
+            .values()
+            .filter(|p| p.state == ProposalState::Proposed && p.by == by)
+            .count()
+    }
+
+    /// The sender twin of the L3 cap: a card every peer would drop is
+    /// never put up. Membership cards and cuts do not pass through it.
+    pub(crate) fn open_cap_gate(&self) -> Result<(), molt_core::MoltError> {
+        if self.open_cards_by(&self.member()) >= OPEN_CARDS_PER_PROPOSER_MAX {
+            return Err(molt_core::MoltError::OpenProposalsCap(OPEN_CARDS_PER_PROPOSER_MAX));
+        }
+        Ok(())
+    }
+
+    /// `(own open cards, the cap)` for `status`.
+    pub(crate) fn own_open_cards(&self) -> (usize, usize) {
+        (self.open_cards_by(&self.member()), OPEN_CARDS_PER_PROPOSER_MAX)
+    }
+
     /// Inbound: a peer proposed something (gossip). Record it as pending so it
     /// shows up and can be approved here. `by` is the authenticated wire
     /// sender — the proposer on a direct delivery, the serving peer on a
@@ -1537,16 +1560,9 @@ impl State {
         // L3: a flooding proposer may only crowd ITSELF — the newest card
         // is refused (the WP2 re-serve re-earns an honest one later), and
         // another member's cards are never evicted
-        if !self.proposals.contains_key(&id) {
-            let open_by = self
-                .proposals
-                .values()
-                .filter(|p| p.state == ProposalState::Proposed && p.by == by)
-                .count();
-            if open_by >= OPEN_CARDS_PER_PROPOSER_MAX {
-                tracing::warn!(%id, %by, "refusing a proposal beyond the per-proposer open cap");
-                return false;
-            }
+        if !self.proposals.contains_key(&id) && self.open_cards_by(by) >= OPEN_CARDS_PER_PROPOSER_MAX {
+            tracing::warn!(%id, %by, "refusing a proposal beyond the per-proposer open cap");
+            return false;
         }
         self.next_id = self.next_id.max(id.saturating_add(1));
         // SECURITY (symmetric to receive_membership_proposal): an id already

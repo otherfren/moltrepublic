@@ -48,6 +48,8 @@ mod governance_tests;
 #[cfg(test)]
 mod membership_tests;
 #[cfg(test)]
+mod open_cap_tests;
+#[cfg(test)]
 mod projection_tests;
 #[cfg(test)]
 mod sync_tests;

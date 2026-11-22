@@ -375,3 +375,17 @@ fn a_close_drops_the_waiting_init_and_consents() {
     assert!(!other.wallet_init_pending(), "nothing proposed into the next republic");
     assert!(!other.purse.probing && other.purse.height.is_some(), "the height still lands");
 }
+
+/// The init proposes once the probe answers: the cap refuses it there.
+#[test]
+fn an_init_at_the_open_cap_is_refused() {
+    let b = Builder::new(&ABC, 2);
+    let mut st = genesis_seat("a", &b, b.blocks.clone());
+    with_daemon(&mut st, 3000);
+    crate::chain::test_support::fill_to_open_cap(&mut st);
+    st.purse.init_gen = Some(1);
+    let seq = st.next_seq;
+    let r = st.cmd_net_wallet_probe(Some(3000), String::new(), Some(1));
+    assert!(matches!(r, Err(MoltError::OpenProposalsCap(64))), "{r:?}");
+    assert_eq!(st.next_seq, seq, "nothing recorded");
+}
