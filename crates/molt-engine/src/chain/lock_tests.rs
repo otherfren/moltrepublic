@@ -103,6 +103,18 @@ fn free_signing_and_the_lock_exclude_each_other_per_height() {
 }
 
 #[test]
+fn only_promise_only_state_is_released_into_a_free_mark() {
+    let mut a = Acceptor::default();
+    a.prepare(&slot(3), &b(2, "x"));
+    assert!(a.release_to_free(3));
+    assert!(a.signed_freely(3));
+    assert!(matches!(a.prepare(&slot(3), &b(9, "y")).reply, Reply::Nack { promised: None, .. }));
+    a.accept(&slot(4), &b(1, "x"), &v("p", 2));
+    assert!(!a.release_to_free(4), "an acceptance is never released");
+    assert!(!a.signed_freely(4));
+}
+
+#[test]
 fn settle_drops_decided_slots_and_keeps_recent_free_marks() {
     let mut a = Acceptor::default();
     a.prepare(&slot(10), &b(1, "x"));
@@ -259,6 +271,19 @@ enum Msg {
     Accept { slot: Slot, ballot: Ballot, value: Value },
     Reply { from: usize, reply: Reply },
     Decided { slot: Slot, value: Value },
+    /// A B6 signature `from` gave at `height` (§14 runs only).
+    Free { from: usize, height: u64, value: Value },
+}
+
+/// How the §14 runs release promises.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Release {
+    /// Never: no seat signs freely.
+    Off,
+    /// Once the free signers leave the lock no quorum (`|F| >= n - m`).
+    Rule,
+    /// The control: on the first free signer.
+    Eager,
 }
 
 #[derive(Clone, Copy)]
@@ -282,6 +307,7 @@ struct Seat {
     tallies: BTreeMap<u64, Tally>,
     seen_round: BTreeMap<u64, u64>,
     decided: BTreeMap<u64, Value>,
+    free_known: BTreeMap<u64, BTreeSet<usize>>,
 }
 
 #[derive(Default, Debug)]
@@ -294,6 +320,11 @@ struct Outcome {
     cross_ballot: usize,
     learned_twice: usize,
     undecided: usize,
+    /// Slots where a lock-chosen value and another free-sealable value meet.
+    lock_vs_free: usize,
+    /// Slots decided by the lock, and slots with a free-sealable value.
+    lock_chosen: usize,
+    free_sealable: usize,
 }
 
 struct Sim {
@@ -305,6 +336,9 @@ struct Sim {
     ghost: BTreeMap<u64, BTreeMap<(Ballot, Value), BTreeSet<usize>>>,
     /// A seat learned a second, different value for a height.
     learned_twice: usize,
+    /// Ghost: every free signature, by height.
+    free_ghost: BTreeMap<u64, BTreeMap<Value, BTreeSet<usize>>>,
+    release: Release,
     drop: u64,
     dup: u64,
     crash: u64,
@@ -325,10 +359,23 @@ impl Sim {
                     tallies: BTreeMap::new(),
                     seen_round: BTreeMap::new(),
                     decided: BTreeMap::new(),
+                    free_known: BTreeMap::new(),
                 }
             })
             .collect();
-        Self { cfg, rng: Rng(seed), seats, net: Vec::new(), ghost: BTreeMap::new(), learned_twice: 0, drop: 15, dup: 10, crash: 2 }
+        Self {
+            cfg,
+            rng: Rng(seed),
+            seats,
+            net: Vec::new(),
+            ghost: BTreeMap::new(),
+            learned_twice: 0,
+            free_ghost: BTreeMap::new(),
+            release: Release::Off,
+            drop: 15,
+            dup: 10,
+            crash: 2,
+        }
     }
 
     fn quorum(&self) -> Quorum {
@@ -446,7 +493,38 @@ impl Sim {
             }
             Msg::Reply { from, reply } => self.on_reply(i, from, reply),
             Msg::Decided { slot, value } => self.decide(i, &slot, &value, false),
+            Msg::Free { from, height, value: _ } => {
+                self.seats[i].free_known.entry(height).or_default().insert(from);
+                let known = self.seats[i].free_known.get(&height).map_or(0, BTreeSet::len);
+                let dead = match self.release {
+                    Release::Off => false,
+                    Release::Rule => known >= self.cfg.n - self.cfg.m,
+                    Release::Eager => true,
+                };
+                if dead && !self.seats[i].acceptor.signed_freely(height) {
+                    self.sign_freely(i, height, true);
+                }
+            }
         }
+    }
+
+    /// Seat `i` signs a wish freely at `height`, releasing promise-only
+    /// state first when `release`; durable before the signature leaves.
+    fn sign_freely(&mut self, i: usize, height: u64, release: bool) {
+        let acc = &mut self.seats[i].acceptor;
+        let ok = if acc.may_sign_freely(height) {
+            acc.sign_freely(height).is_some()
+        } else {
+            release && acc.release_to_free(height)
+        };
+        if !ok {
+            return;
+        }
+        self.seats[i].disk = serde_json::to_string(&self.seats[i].acceptor).expect("serializes");
+        // free signers agree among themselves; a lock value never equals one
+        let value = Value { digest: format!("free-{height}-{}", self.rng.below(2)), need: self.cfg.m };
+        self.free_ghost.entry(height).or_default().entry(value.clone()).or_default().insert(i);
+        self.send_all(i, &Msg::Free { from: i, height, value });
     }
 
     fn on_reply(&mut self, i: usize, from: usize, reply: Reply) {
@@ -495,6 +573,11 @@ impl Sim {
             } else if roll < 8 + self.crash {
                 let i = self.rng.below(self.cfg.n - self.cfg.dead);
                 self.restart(i);
+            } else if self.release != Release::Off && roll < 14 + self.crash {
+                // an activation race: a seat that still believes the height free
+                let i = self.rng.below(self.cfg.n - self.cfg.dead);
+                let h = 1 + self.rng.next_u64() % self.cfg.heights;
+                self.sign_freely(i, h, false);
             } else {
                 let k = self.rng.below(self.net.len());
                 let (to, msg) = if self.rng.chance(self.dup) { self.net[k].clone() } else { self.net.swap_remove(k) };
@@ -548,6 +631,23 @@ impl Sim {
                 out.cross_ballot += 1;
             }
         }
+        for (h, by) in &self.ghost {
+            let chosen: BTreeSet<&Value> = by.iter().filter(|((_, v), who)| who.len() >= v.need).map(|((_, v), _)| v).collect();
+            let free: BTreeSet<&Value> = self
+                .free_ghost
+                .get(h)
+                .map(|f| f.iter().filter(|(v, who)| who.len() >= v.need).map(|(v, _)| v).collect())
+                .unwrap_or_default();
+            out.lock_chosen += usize::from(!chosen.is_empty());
+            if chosen.iter().any(|c| free.iter().any(|f| f != c)) {
+                out.lock_vs_free += 1;
+            }
+        }
+        out.free_sealable = self
+            .free_ghost
+            .values()
+            .filter(|f| f.iter().any(|(v, who)| who.len() >= v.need))
+            .count();
         out
     }
 }
@@ -615,4 +715,35 @@ fn signatures_of_different_ballots_must_not_be_pooled() {
     let found = (0..SEEDS).find(|seed| run(cfg, *seed, false, false).cross_ballot > 0);
     assert!(found.is_some(), "no pooled-signature fork in {SEEDS} seeds");
     eprintln!("pooled-signature fork at seed {found:?}");
+}
+
+fn run_mixed(cfg: Config, seed: u64, release: Release) -> Outcome {
+    let mut sim = Sim::new(cfg, seed, false);
+    sim.release = release;
+    sim.chaos(400);
+    sim.outcome()
+}
+
+/// §14: seats that still sign freely (an activation race) beside the
+/// lock, and promise-only seats releasing once `|F| >= n - m`: never a
+/// lock-chosen value beside a different free-sealable one, never two lock
+/// values. Releasing on the first free signer instead must fork.
+#[test]
+fn simulation_with_free_signers_and_the_release_rule_never_forks() {
+    let plain = |n, m| Config { n, m, heights: 3, dead: 0, cuts: 0, restores: 0 };
+    for (name, cfg) in [("2-of-3", plain(3, 2)), ("3-of-5", plain(5, 3)), ("2-of-5", plain(5, 2)), ("2-of-2", plain(2, 2)), ("3-of-3", plain(3, 3))] {
+        let (mut chosen, mut free) = (0, 0);
+        for seed in 0..SEEDS {
+            let out = run_mixed(cfg, seed, Release::Rule);
+            assert_eq!(out.forks, 0, "{name}: lock fork at seed {seed}");
+            assert_eq!(out.lock_vs_free, 0, "{name}: lock beside free at seed {seed}");
+            chosen += out.lock_chosen;
+            free += out.free_sealable;
+        }
+        assert!(chosen > 0 && free > 0, "{name}: both paths decided somewhere ({chosen}, {free})");
+        eprintln!("{name}: lock-decided slots {chosen}, free-sealable slots {free}");
+    }
+    let found = (0..SEEDS).find(|seed| run_mixed(plain(5, 2), *seed, Release::Eager).lock_vs_free > 0);
+    assert!(found.is_some(), "the eager control found no fork");
+    eprintln!("eager release fork at seed {found:?}");
 }

@@ -40,9 +40,13 @@ const PLAN_EVERY_SECS: u64 = 5;
 /// bottleneck, and one at a time IS the pull pacing.
 const MIRROR_FETCHES_AT_ONCE: usize = 1;
 
-/// What this build announces in its declaration.
-fn own_caps() -> Vec<String> {
-    vec![molt_core::chain::RESTORE_CONSENT_V2_CAP.to_string()]
+/// What this build knows and, with `lock`, announces in its declaration.
+fn own_caps(lock: bool) -> Vec<String> {
+    let mut caps = vec![molt_core::chain::RESTORE_CONSENT_V2_CAP.to_string()];
+    if lock {
+        caps.push(molt_core::chain::CHAIN_LOCK_CAP.to_string());
+    }
+    caps
 }
 
 impl State {
@@ -96,7 +100,9 @@ impl State {
     /// [`DECL_REPEAT_SECS`]. Rides the 1 s delivery tick.
     pub(crate) fn mirror_decl_tick(&mut self, now: u64) {
         let sent = self.files.mirror_decl_sent;
-        if sent == 0 || now.saturating_sub(sent) >= DECL_REPEAT_SECS {
+        // B7: a changed lock capability is news at once
+        let cap_changed = self.chain.lock.announced != Some(self.lock_cap_on());
+        if sent == 0 || cap_changed || now.saturating_sub(sent) >= DECL_REPEAT_SECS {
             self.send_mirror_decl(now);
         }
     }
@@ -118,9 +124,10 @@ impl State {
             on: decl.on,
             quota: decl.quota,
             rev: decl.rev,
-            caps: own_caps(),
+            caps: own_caps(self.lock_cap_on()),
         };
         if self.publish_mirror_frame(frame.to_frame()) {
+            self.chain.lock.announced = Some(self.lock_cap_on());
             // never 0, the "not yet sent" mark
             self.files.mirror_decl_sent = now.max(1);
         }
@@ -646,7 +653,7 @@ impl State {
         let Some(a) = &mut self.active else {
             return;
         };
-        let ours = own_caps();
+        let ours = own_caps(true);
         caps.retain(|c| ours.contains(c));
         caps.sort();
         caps.dedup();

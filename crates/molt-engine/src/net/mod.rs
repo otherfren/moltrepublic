@@ -475,6 +475,12 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::FileRequested { .. }
             | WorkspaceEvent::FileWanted { .. }
             | WorkspaceEvent::FileServed { .. }
+            // B7: the sealing lock (unowed, see `unowed_on_the_wire`)
+            | WorkspaceEvent::LockPrepare { .. }
+            | WorkspaceEvent::LockPromise { .. }
+            | WorkspaceEvent::LockAccept { .. }
+            | WorkspaceEvent::LockAccepted { .. }
+            | WorkspaceEvent::LockNack { .. }
     )
 }
 

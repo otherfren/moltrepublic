@@ -190,6 +190,7 @@ pub struct WalletHandle {
     seat_active: std::sync::Arc<std::sync::atomic::AtomicU64>,
     drop_seam: std::sync::Arc<net::DropSeam>,
     seal_first: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    lock_seams: std::sync::Arc<chain::LockSeams>,
     farewells: Farewells,
 }
 
@@ -350,6 +351,34 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __dropped_inbound(&self) -> u64 {
         self.drop_seam.dropped.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Test seam (B7): this seat behaves like an older build - it
+    /// announces no lock capability and ignores every lock frame.
+    #[doc(hidden)]
+    pub fn __lock_cap_off(&self, off: bool) {
+        self.lock_seams.cap_off.store(off, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (B7): the takeover grace and the retransmit interval in
+    /// seconds; 0 restores a default.
+    #[doc(hidden)]
+    pub fn __lock_timing(&self, grace_secs: u64, retransmit_secs: u64) {
+        self.lock_seams.grace_secs.store(grace_secs, std::sync::atomic::Ordering::SeqCst);
+        self.lock_seams.retransmit_secs.store(retransmit_secs, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (B7): the next ballot this seat leads stops right after
+    /// its `LockAccept` left - a leader killed mid-height.
+    #[doc(hidden)]
+    pub fn __lock_stop_after_accept(&self) {
+        self.lock_seams.stop_after_accept.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (B7): this seat's lock stopped (the seam above fired).
+    #[doc(hidden)]
+    pub fn __lock_stopped(&self) -> bool {
+        self.lock_seams.stopped.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -580,6 +609,7 @@ fn spawn_actor(
     let seat_active = state.seat_active.clone();
     let drop_seam = state.drop_seam.clone();
     let seal_first = state.seal_first.clone();
+    let lock_seams = state.lock_seams.clone();
     if vault::receipts::lab_complain_at_spawn() {
         tracing::warn!("vault_lab=complain");
         vault_seams.lab.complain.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -616,6 +646,7 @@ fn spawn_actor(
         seat_active,
         drop_seam,
         seal_first,
+        lock_seams,
         farewells,
     }
 }
@@ -1106,6 +1137,8 @@ pub(crate) struct ChainProjection {
     pub(crate) fork_decisions: u64,
     /// The latest fork decision (S1 diagnostics).
     pub(crate) last_fork: Option<molt_core::ForkDecision>,
+    /// B7: the sealing lock (`chain/lock_wire.rs`).
+    pub(crate) lock: chain::LockRuntime,
 }
 
 /// Recovery on both sides of the open workspace: what this seat coordinates
@@ -1431,6 +1464,8 @@ pub(crate) struct State {
     /// B4 test seam: coordinate every recovery seal-first, as an older
     /// build does.
     pub(crate) seal_first: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The sealing lock's test seams (never a `Command`).
+    pub(crate) lock_seams: std::sync::Arc<chain::LockSeams>,
     /// Grant answers and asks of the open workspace (vault plan S4).
     pub(crate) vault_grants: vault::grant::GrantRuntime,
     /// The kind-445 group runtime of an open Nostr workspace (N5.2), with the
@@ -1748,6 +1783,7 @@ impl State {
             seat_active: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
             drop_seam: std::sync::Arc::default(),
             seal_first: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            lock_seams: std::sync::Arc::default(),
             vault_grants: vault::grant::GrantRuntime::default(),
             group_net: None,
             group_mls_parked: None,

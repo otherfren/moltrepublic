@@ -199,7 +199,9 @@ impl State {
     pub(crate) fn chain_approval_count(&self, id: u64) -> usize {
         // L2: the DISPLAYED count is the verified one — raw collected sigs
         // could inflate progress with junk a peer gossiped
-        self.chain.pending_sigs.get(&id).map(|p| p.verified.len()).unwrap_or(0)
+        let signed = self.chain.pending_sigs.get(&id).map(|p| p.verified.len()).unwrap_or(0);
+        // B7: at a locked height intents are the voices (§9)
+        signed.max(self.lock_voices(id))
     }
 
     /// The replay guard every AUTOMATIC co-sign runs (a consented restore,
@@ -213,6 +215,10 @@ impl State {
         };
         let me = self.member();
         let target = head.height + 1;
+        // B7: at a locked height the announced intent is the standing voice
+        if self.lock_mode(target) == LockMode::Lock && self.chain.lock.intent_sent.contains(&id) {
+            return true;
+        }
         self.chain.pending_sigs
             .get(&id)
             .is_some_and(|p| p.height == target && p.sigs.iter().any(|a| a.member == me))
@@ -316,7 +322,7 @@ impl State {
             tracing::warn!(id, reason = %why, "approval not signed");
             return;
         }
-        let (Some(sk), Some(head)) = (self.identity_sk.as_ref(), self.chain.head.as_ref()) else {
+        let (Some(_), Some(head)) = (self.identity_sk.as_ref(), self.chain.head.as_ref()) else {
             return;
         };
         let height = head.height + 1;
@@ -342,6 +348,23 @@ impl State {
                 return;
             }
         }
+        // B7: at a locked height the approval is an intent; a free signature
+        // passes the lock's one gate, durable before it leaves
+        match self.lock_mode(height) {
+            LockMode::Lock => {
+                self.lock_intent(id);
+                return;
+            }
+            LockMode::Free => {
+                if !self.lock_sign_freely(height) {
+                    tracing::warn!(id, height, "approval not signed reason=lock");
+                    return;
+                }
+            }
+        }
+        let Some(sk) = self.identity_sk.as_ref() else {
+            return;
+        };
         let bytes = approval_bytes(&self.republic_id(), height, &change);
         let sig = molt_storage::identity_sign(sk, &bytes);
         let me = self.member();
@@ -1257,6 +1280,7 @@ impl State {
         }
         self.sweep_consented_restores();
         self.judge_parked_approvals();
+        self.lock_on_head_moved();
     }
 
     /// B6 (D3): park an approval for head+2 - its signer holds one block
@@ -1612,6 +1636,10 @@ impl State {
             self.note_signer(by, height);
         }
         self.try_commit(id);
+        // B7 §14: a verified free signature is evidence for the lock too
+        if verified {
+            self.lock_note_free(by, height);
+        }
         false
     }
 
@@ -1706,6 +1734,15 @@ impl State {
                         sig: a.sig.clone(),
                     });
                 }
+            }
+            // B7: the own intent, the only one this seat may speak for
+            if self.chain.lock.intent_sent.contains(id) {
+                events.push(WorkspaceEvent::Approved {
+                    id: ProposalId(*id),
+                    by: self.member(),
+                    height: self.chain.head.as_ref().map_or(0, |h| h.height + 1),
+                    sig: String::new(),
+                });
             }
         }
         // the OWN declines, and only those: a decline carries no signature,

@@ -31,6 +31,7 @@ pub(crate) mod blob_parts;
 mod checkpoint;
 mod governance;
 mod lock;
+mod lock_wire;
 mod membership;
 mod projection;
 mod sync;
@@ -144,6 +145,7 @@ pub(crate) use governance::{ParkedApproval, PendingApproval, RELAYS_WAIT};
 pub(crate) use membership::{AnchorFirst, AttemptBook, NostrRekey, MINTED_TICKETS, RecoverSendCounts, PendingRecovery, RecoverProgressReport, REJOIN_NEEDS_A_LINK};
 #[cfg(test)]
 pub(crate) use membership::RECOVER_PART_MAX;
+pub(crate) use lock_wire::{LockMode, LockRuntime, LockSeams};
 
 use verify::*;
 

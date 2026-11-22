@@ -443,6 +443,8 @@ impl State {
             // signatures plus the returning seat's own consent
             let mut voices: std::collections::BTreeSet<String> =
                 self.chain.pending_sigs.get(&id).map(|p| p.verified.iter().cloned().collect()).unwrap_or_default();
+            // B7: at a locked height the survivors' intents are the voices
+            voices.extend(self.chain.lock.intents.get(&id).into_iter().flatten().cloned());
             if matches!(self.chain.proposal_changes.get(&id), Some(ChainChange::Membership { consent: Some(_), .. })) {
                 voices.insert(member.to_string());
             }
@@ -1019,6 +1021,7 @@ impl State {
         }
         let e = self.chain.peer_heights.entry(from.to_string()).or_insert(0);
         *e = (*e).max(height);
+        self.lock_note_peer_height(height);
     }
 
     /// S1: the sync state `status` reports.
@@ -1027,7 +1030,11 @@ impl State {
             serde_json::to_vec(&WorkspaceEvent::CheckpointServed { blob: blob.clone() })
                 .map_or(0, |b| u64::try_from(b.len()).unwrap_or(u64::MAX))
         });
+        let (lock_active, lock_ballot, lock_wait) = self.lock_status();
         molt_core::ChainSync {
+            lock_active,
+            lock_ballot,
+            lock_wait,
             head_hash: self.chain.head.as_ref().map(|h| h.hash.clone()).unwrap_or_default(),
             catchup_from: self.chain.catchup_from.unwrap_or(0),
             catchup_since: if self.chain.catchup_from.is_some() { self.chain.catchup_since } else { 0 },

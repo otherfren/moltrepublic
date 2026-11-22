@@ -1,9 +1,11 @@
 # The chain lock: fork-free sealing (B7)
 
-**Status: DESIGN + pure state machine BUILT (B7a, 2026-11-21); wiring
-PLANNED for v0.1.1 (`docs/chain/chain_lock_wiring_plan.md`, which also
-lists corrections to this design).** Module: `crates/molt-engine/src/chain/lock.rs`, simulation in
-`chain/lock_tests.rs`. Plan: `docs/chain/rejoin_divergence_build_plan.md`
+**Status: WIRING IN PROGRESS for v0.1.1 (B7a pure state machine
+2026-11-21; B7b wiring on a branch, `docs/chain/chain_lock_wiring_plan.md`);
+deviations in §14.** Modules:
+`crates/molt-engine/src/chain/lock.rs` (simulation in `lock_tests.rs`),
+the wiring `chain/lock_wire.rs` (`lock_wire_tests.rs`), over a relay
+`crates/molt-engine/tests/chain_lock.rs`. Plan: `docs/chain/rejoin_divergence_build_plan.md`
 B7; research: `docs/chain/chain_divergence_plan.md` S6. Threat model:
 honest seats, faulty network (loss, delay, duplication, reordering,
 restarts). No signed layout changes.
@@ -419,3 +421,85 @@ Red first, invented fixtures.
    grace.
 7. **Byzantine seats** are out of scope; ballots and `prev` stay
    unsigned (signing them would be a versioned layout, chain_reorg R6).
+
+## 14. As built (B7b)
+
+Where the wiring differs from §1-§13, and why.
+
+- **The two doors.** Every position signature leaves through
+  `State::lock_sign_freely` (the free mark durable first) or
+  `State::lock_acceptor_accept` (the acceptance durable first). The only
+  production `identity_sign` over `approval_bytes` outside the latter is
+  in `chain_sign_and_gossip_approval`, behind the former; every other
+  signing path (`approve`, the proposer's co-sign, `rebase_pending_approvals`,
+  `try_reorg`'s re-sign loop, `sign_held_approvals`, the cut co-sign,
+  `auto_approve_restore`, the wallet/vault paths) calls that function.
+  `serve_open_governance` and `reserve_signatures` only re-send
+  signatures that already exist.
+- **A split height must still decide (added; review it).** Activation is
+  not simultaneous: one seat already runs the lock at h (its own
+  `Prepare` is a promise), another still believes h free and signs
+  freely. Exclusivity keeps that safe, but nothing makes it live: in
+  2-of-2 neither path can ever reach its quorum, and the first full
+  suite run with the lock on stalled 30+ tests this way. Rule: let F be
+  the seats known to have signed freely at h (a verified free signature,
+  or a free `Nack`). Once F is non-empty and `|F| >= n - m`, a seat whose
+  lock state at h is promises only (`Acceptor::release_to_free`; an
+  acceptance is never released) trades it durably for a free mark, and a
+  seat without lock state there goes free. Proof: a value chosen by the
+  lock has `need` acceptors, none ever in F and none the releasing seat
+  (it only promised), so `n - |F| - 1 >= m` for an ordinary value; for a
+  restore of Z the acceptors also exclude Z, so `n - |F| - 2 >= max(m -
+  1, 1)`. Both contradict `|F| >= n - m`. The same
+  counts bound every later ballot: after the release fewer than `need`
+  non-free acceptors remain. Pinned by
+  `simulation_with_free_signers_and_the_release_rule_never_forks` (free
+  signers racing the lock, crashes, 1 500 seeds per shape, 2-of-2 to
+  2-of-5); releasing on the first free signer instead forks (2-of-5).
+- **Amnesia needs a marker (§6).** "No lock file = amnesia" would make
+  every seat of an upgraded republic amnesiac at head+1 at once, and the
+  height never decides. `prefs.chain_lock` is set after the first
+  successful lock write and travels with an export: file missing with the
+  marker set = amnesia; neither = a seat that never ran the lock (it only
+  signed freely; its replayed own signatures are marked free at their
+  heights before anything else). Residual: an export made by a pre-lock
+  build and imported after the lock ran is not seen as amnesiac.
+- **The amnesia floor** is fixed by the first peer height this seat hears
+  after the open (a block, catch-up samples, a cut proposal, a `Nack`'s
+  head), not only a catch-up answer; past the floor the file is written
+  and the seat is ordinary again.
+- **The lock file** is `{acceptor, values}`: `values` names the proposal id
+  (and the change of a membership change or cut) behind each accepted
+  digest, so a promise after a restart still tells the next leader what
+  it must force.
+- **A forced cut waits for all n promises** before the leader proposes
+  (§4.1 refined): with an unheard seat the escape cannot fire, and the
+  leader would re-propose a cut one present seat refuses. Waiting is
+  always safe.
+- **Retransmit** (§7): `Prepare` while phase 1 is short, `Accept` while a
+  proposed value is unsealed; an idle leader that holds its promises
+  sends nothing. A proposed but unsealed run restarts with a new ballot
+  after grace x (attempt + 1) plus the jitter.
+- **Takeover** (§5): the k-th seat starts its clock when it first holds a
+  ready value (intents reach `need`), asks for the block at k x grace and
+  opens its ballot `min(FALLBACK_ASK_SECS, grace)` later.
+- **Intents** are every `Approved` whose envelope author is the voter
+  (signed or not); an unsigned one is kept in the own log (R12), and the
+  own intents are re-served with the open governance. The display count
+  is the larger of verified signatures and standing voices.
+- **Lineage**: extended by one block when the head moves by one non-cut
+  block, recomputed otherwise (relink, tie-break, reorg, cut, adopt).
+- **Status**: `chain_sync.lock_active`, `lock_ballot` (`round:leader`,
+  highest seen at head+1), `lock_wait` (`promises k/q`, `acceptances
+  k/need`, `leader <seat>`, `amnesia`). Logs: `lock=prepare|promised|
+  propose|accepted|nack|yield|retry|takeover_ask|takeover|sealed|
+  amnesia_floor|amnesia_over|unwritten height= ballot=`.
+- **A capability change is announced at once** (the mirror declaration is
+  re-sent when this seat's lock capability flips), not on the next
+  repeat.
+
+Not done: the rejoiner's checklist (`recover_progress_for`, B4's file)
+still counts verified signatures, so under the lock the survivors'
+voices show only once the restore sealed. A 2-of-2 republic whose seat
+is amnesiac waits for that seat's floor to pass, which only another
+block moves (§13 Q4).

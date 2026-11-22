@@ -219,9 +219,14 @@ const WALLET_SCAN_SEGMENT: u64 = u64::MAX - 10;
 const PREFS_SEALED_SEGMENT: u64 = u64::MAX - 11;
 /// AAD segment marker for `wiki_draft.json`.
 const WIKI_DRAFT_SEGMENT: u64 = u64::MAX - 12;
+/// AAD segment marker for [`CHAIN_LOCK_FILE`].
+const CHAIN_LOCK_SEGMENT: u64 = u64::MAX - 13;
 /// The lowest reserved marker — a log file numbered at or above it is
 /// ignored (see [`list_sorted`]).
-const RESERVED_SEGMENT_FLOOR: u64 = WIKI_DRAFT_SEGMENT;
+const RESERVED_SEGMENT_FLOOR: u64 = CHAIN_LOCK_SEGMENT;
+/// B7: this seat's sealing-lock promises (`docs/chain/chain_lock_design.md`
+/// §6) - local, sealed, never exported.
+pub const CHAIN_LOCK_FILE: &str = "chain_lock.state";
 /// The content-bearing prefs of a phrase-sealed dir, sealed under the
 /// workspace key while `prefs.toml` keeps only the local switches.
 pub const PREFS_SEALED_FILE: &str = "prefs.sealed";
@@ -1844,6 +1849,25 @@ impl OpenedWorkspace {
         self.write_sealed_draft(KANBAN_DRAFT_FILE, &key, KANBAN_DRAFT_SEGMENT, draft)
     }
 
+    /// The sealing lock's state ([`CHAIN_LOCK_FILE`]); `None` = no file.
+    ///
+    /// # Errors
+    /// Unreadable, over the cap, or a frame that does not authenticate.
+    pub fn read_chain_lock(&self) -> Result<Option<Vec<u8>>, StorageError> {
+        let data = match read_capped(&self.dir.join(CHAIN_LOCK_FILE), READ_CAP_STATE, CHAIN_LOCK_FILE) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(StorageError::Corrupt(format!("reading {CHAIN_LOCK_FILE}: {e}"))),
+        };
+        decrypt_state_file(&chain_lock_key(&self.key, &self.id), &self.id, CHAIN_LOCK_SEGMENT, &data).map(Some)
+    }
+
+    /// Rewrite [`CHAIN_LOCK_FILE`] (atomic, sealed).
+    pub fn write_chain_lock(&self, bytes: &[u8]) -> Result<(), StorageError> {
+        let frame = encode_frame(&chain_lock_key(&self.key, &self.id), &self.id, CHAIN_LOCK_SEGMENT, 0, bytes)?;
+        write_atomic(&self.dir, CHAIN_LOCK_FILE, &frame, true)
+    }
+
     /// Rewrite `kanban_wakes.json` (atomic, sealed).
     pub fn write_kanban_wakes(&self, keys: &[String]) -> Result<(), StorageError> {
         let plain = serde_json::to_vec(keys)
@@ -2208,6 +2232,11 @@ fn kanban_draft_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
 /// The `wiki_draft.json` sub-key.
 fn wiki_draft_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(hkdf32(ws_key, "molt-wiki-draft", id))
+}
+
+/// The [`CHAIN_LOCK_FILE`] sub-key.
+fn chain_lock_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
+    Zeroizing::new(hkdf32(ws_key, "molt-chain-lock", id))
 }
 
 /// The `wallet_keys.state` sub-key.
@@ -3536,6 +3565,11 @@ enum WriterMsg {
         blocks: Vec<molt_core::ChainBlock>,
         ack: mpsc::SyncSender<bool>,
     },
+    /// Rewrite [`CHAIN_LOCK_FILE`], acking when durable (B7 §6).
+    PersistChainLock {
+        bytes: Vec<u8>,
+        ack: mpsc::SyncSender<bool>,
+    },
     /// Append one keys record, acking when durable (wallet design I4).
     PersistWalletKeys {
         record: Zeroizing<Vec<u8>>,
@@ -3906,6 +3940,14 @@ impl StorageHandle {
         blocks: Vec<molt_core::ChainBlock>,
     ) -> bool {
         self.send_acked(|ack| WriterMsg::PersistChain { blob, blocks, ack })
+    }
+
+    /// Rewrite the sealing lock's state and BLOCK until it is durable: the
+    /// promise, acceptance or free signature it records may leave only
+    /// after this returned `true` (B7 §6; the I4 precedent below).
+    #[must_use]
+    pub fn persist_chain_lock_blocking(&self, bytes: Vec<u8>) -> bool {
+        self.send_acked(|ack| WriterMsg::PersistChainLock { bytes, ack })
     }
 
     /// Append a keys record and BLOCK until it is durable: the attestation
@@ -4476,6 +4518,13 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                             ok = false;
                         }
                         let _ = ack.send(ok);
+                    }
+                    Ok(WriterMsg::PersistChainLock { bytes, ack }) => {
+                        let wrote = ws.write_chain_lock(&bytes);
+                        if let Err(e) = &wrote {
+                            tracing::error!(error = %e, "chain_lock=unwritten");
+                        }
+                        let _ = ack.send(wrote.is_ok());
                     }
                     Ok(WriterMsg::PersistWalletKeys { record, ack }) => {
                         let wrote = ws.append_wallet_keys(&record).and_then(|()| ws.sync());
@@ -5675,6 +5724,34 @@ mod tests {
 
     /// §6.1: the fired `task_start` keys live sealed beside the state,
     /// local to this node; absent reads as none fired.
+    #[test]
+    fn the_chain_lock_round_trips_sealed_and_durably() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(tmp.path(), &seed, &founded(42)).expect("create");
+        assert_eq!(ws.read_chain_lock().expect("read"), None, "absent = no file");
+        ws.write_chain_lock(br#"{"free":[7]}"#).expect("write");
+        assert_eq!(ws.read_chain_lock().expect("read").as_deref(), Some(&br#"{"free":[7]}"#[..]));
+        let raw = fs::read(ws.dir().join(CHAIN_LOCK_FILE)).expect("raw");
+        assert!(!raw.windows(b"free".len()).any(|w| w == b"free"), "sealed at rest");
+        let dir = ws.dir().to_path_buf();
+        let handle = start_writer(ws);
+        assert!(handle.persist_chain_lock_blocking(br#"{"free":[8]}"#.to_vec()), "acked when durable");
+        drop(handle);
+        let (ws, _) = open_eventually(&dir);
+        assert_eq!(ws.read_chain_lock().expect("read").as_deref(), Some(&br#"{"free":[8]}"#[..]));
+    }
+
+    fn open_eventually(dir: &Path) -> (OpenedWorkspace, LoadedState) {
+        for _ in 0..200 {
+            if let Ok(o) = open_workspace(dir) {
+                return o;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the writer never released the workspace");
+    }
+
     #[test]
     fn the_kanban_wakes_round_trip_sealed() {
         let tmp = tempfile::tempdir().expect("tmp");

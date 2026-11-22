@@ -505,10 +505,27 @@ impl State {
                         }
                     }
                 }
+                // B7: the voter's own frame is its standing intent - the
+                // only voice an unsigned approval (a locked height) carries
+                let intent = by == from
+                    && self.lock_cap_on()
+                    && self.plausible_wire_id(id.0)
+                    && !self.retired.contains(&id.0);
+                if intent {
+                    self.lock_note_intent(id.0, &by);
+                }
                 // A6: only the voter itself is told; a relayed vote is
                 // not its sender's to answer for
                 if self.receive_approval_via(&from, id.0, &by, height, &sig) && by == from {
                     self.tell_the_voter_it_was_dropped(id.0, &by, height);
+                }
+                if intent && sig.is_empty() {
+                    self.keep_peer_event(
+                        from.clone(),
+                        envelope.ts,
+                        WorkspaceEvent::Approved { id, by: by.clone(), height, sig: String::new() },
+                    );
+                    self.lock_drive();
                 }
                 // R12: a collected signature is ephemeral — keep the vote
                 // in the own log so a reopen counts it again. Only what
@@ -735,6 +752,23 @@ impl State {
                 if let Some(blob) = self.chain.blob_parts.accept(&blob_hash, index, total, &data) {
                     self.receive_checkpoint_blob(blob);
                 }
+            }
+            // B7 (`docs/chain/chain_lock_design.md` §7): the sealing lock;
+            // the ballot's leader of a Prepare/Accept is the link sender
+            WorkspaceEvent::LockPrepare { height, base, round } => {
+                self.lock_on_prepare(&from, height, base, round);
+            }
+            WorkspaceEvent::LockPromise { height, base, round, leader, accepted } => {
+                self.lock_on_promise(&from, height, base, round, leader, accepted);
+            }
+            WorkspaceEvent::LockAccept { height, base, round, digest, need, id, change } => {
+                self.lock_on_accept(&from, height, base, round, digest, need, id.0, change);
+            }
+            WorkspaceEvent::LockAccepted { height, base, round, leader, digest, sig } => {
+                self.lock_on_accepted(&from, height, base, round, leader, &digest, &sig);
+            }
+            WorkspaceEvent::LockNack { height, base, round, leader, promised, head } => {
+                self.lock_on_nack(&from, height, base, round, leader, promised, head);
             }
             // dynamic mesh membership ❸: a relayed mesh announce — authenticate
             // the ANNOUNCER by MLS decryption (the event author is only the

@@ -636,6 +636,7 @@ fn collect_entries(
             "transport.state" | "LOCK" => {}
             // local working copies and fired wakes: this node's, not history
             "wiki_draft.json" | "kanban_draft.json" | "kanban_wakes.json" | crate::PREFS_SEALED_FILE
+            | crate::CHAIN_LOCK_FILE
                 if !is_dir => {}
             "keys" | "tmp" if is_dir => {}
             "log" if is_dir => {
@@ -1128,7 +1129,7 @@ mod tests {
     fn local_drafts_stay_home_silently() {
         let tmp = tempfile::tempdir().expect("tmp");
         let (root, dir, _seed) = make_ws(tmp.path());
-        for f in ["wiki_draft.json", "kanban_draft.json", "kanban_wakes.json"] {
+        for f in ["wiki_draft.json", "kanban_draft.json", "kanban_wakes.json", crate::CHAIN_LOCK_FILE] {
             fs::write(dir.join(f), b"local").expect("draft");
         }
         let mut blob = Vec::new();
@@ -1137,7 +1138,7 @@ mod tests {
         assert_eq!(outcome.skipped, vec!["notes.txt".to_string()]);
         let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
             .expect("decrypt");
-        for f in ["wiki_draft.json", "kanban_draft.json", "kanban_wakes.json"] {
+        for f in ["wiki_draft.json", "kanban_draft.json", "kanban_wakes.json", crate::CHAIN_LOCK_FILE] {
             assert!(entry(&a, f).is_none(), "{f} travelled");
         }
     }
