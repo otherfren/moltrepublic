@@ -157,6 +157,18 @@ fn the_vault_and_the_board_have_no_generic_proposal_op() {
 }
 
 #[test]
+fn a_restore_sealed_after_its_withdrawal_asks_for_a_new_link() {
+    assert_eq!(
+        restore_sealed_after_withdrawal_copy(0, "petra"),
+        "Cancelled restore of petra sealed anyway - create a new link."
+    );
+    assert_eq!(
+        restore_sealed_after_withdrawal_copy(1, "petra"),
+        "Abgebrochene Wiederherstellung von petra wurde besiegelt - neuen Link erstellen."
+    );
+}
+
+#[test]
 fn a_dropped_proposal_names_the_sender_and_the_one_reason() {
     assert_eq!(
         proposal_dropped_copy(0, "petra:too-large"),

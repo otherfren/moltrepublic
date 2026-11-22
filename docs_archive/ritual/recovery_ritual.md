@@ -226,7 +226,29 @@ frame (every survivor stops signing it) and gives the ticket back; only
 the run's own key with its own attempt id withdraws. After the seal
 nothing is undone: `R` says `already re-admitted - a new link is needed`
 when it saw the sealed report (`RecoverProgress.sealed`), and a retry on
-the link hears `link outdated`.
+the link hears `link outdated`. The live link shows on `S` again.
+
+**A withdrawal is sticky (D1, 2026-11-22).** A seat that registered the
+proposer's `Withdrawn` drops the card's change and every held approval
+or seal for it, and never registers that id again: a re-served card, a
+late signature, a retry tick or a card that aged out (`retired`) reopen
+nothing. A withdrawal that outran its card is parked, kept in the own
+log and in the snapshot (`parked_withdrawals`), so the card arrives
+withdrawn after a restart too. Stickiness is by id, not by anchor: every
+run on one link derives the same anchor and consent, so the retry on the
+link proposes the same change under a new id.
+
+**Sealed after the withdrawal.** The withdrawal is ordinary gossip, and
+one survivor's signature plus the consent can seal: a seat that signed
+before the `Withdrawn` reached it (a held approval released by its own
+tick while the frame waits in the relay or the ordered park) seals the
+block, and a sealed block stands. `S` then re-keys nothing - the run is
+gone and its KeyPackage with it, so a Welcome would go to a dead key -
+and leaves the group as it is: it logs `restore_sealed_after_withdrawal
+member= height=`, raises the notice
+`restore-sealed-after-withdrawal:<member>`, marks the card applied and
+kills the old link (its anchor is in the chain). The seat keeps its old
+leaf until it rejoins with a new link, whose re-key removes it.
 
 **Anchor re-push (seal-first only).** The anchor is re-pushed over the
 group every 10 min while the seat stays unheard - by the node that
@@ -245,7 +267,12 @@ pieces and progress are taken as before. A B4 rejoiner without ids is
 served as before, unbound. An older rejoiner sends no withdrawal: one on
 the 15-minute deadline gives up before the Welcome and sends nothing (its
 `RecoverFailed` came only after a seal), so its card stays open until
-the consent window or a later restore of the seat ends it.
+the consent window or a later restore of the seat ends it. An older
+bystander (v0.0.20) honours a `Withdrawn` that arrives before it signs,
+like any withdrawn card, but keeps the change registered, loses a
+withdrawal parked ahead of its card on a restart and reopens a
+withdrawn card that aged out when it is delivered again; it seals in
+the race above as a new seat does.
 
 **❼–❽ Catch up (option A: over the recovery channel).** The Welcome carries the
 coordinator's **whole chain from genesis** — `R` has no mesh links yet, so the
@@ -398,14 +425,16 @@ The product never uses the seam.
   on the attempt, then `recovery-link:<link>` or `recovery-link-failed:<reason>`
   (a mint whose inbox no relay answers yet says why while it retries:
   `recovery-link-pending:<member>:no relay answers`; the link leaves the
-  notice once its ticket is spent, withdrawn, evicted or the workspace
-  closes)
+  notice once its ticket is spent, its attempt evicted or the workspace
+  closes, and shows again when a withdrawn run gives the ticket back)
   (`mesh-not-running` when the coordinator's mesh is not up — e.g. a reopen
   without a resumable transport — or the transport error when the off-actor
   queue provisioning fails, reported by the INTERNAL
   `Command::NetRecoverLinkFailed`, which also unregisters the dead mint's
-  ticket). Operational states are notices, never raw command errors; only
-  caller errors (unknown seat, no republic, no chain) reject hard. Pinned by
+  ticket). Operational states are notices; caller errors (unknown seat,
+  no republic, no chain) and the B3 gate verdicts known at mint time
+  (`seat still active`, `chain diverged`, D3) also answer the command as
+  an error. Pinned by
   `a_link_mint_without_a_running_mesh_reports_calmly_instead_of_erroring`
   (`two_instances.rs`) and
   `a_failed_queue_provisioning_reports_back_instead_of_silence` (`recovery.rs`).
@@ -494,7 +523,8 @@ The product never uses the seam.
   dialog through three calm states — pending, the copyable link (with the
   off-band/single-use/dies-with-the-session caution), or a localized failed
   explanation (`mesh-not-running` names THIS device's condition and says the
-  returning member need not be online) — never an error toast. Rejoiner: a "Recover"
+  returning member need not be online) — an error toast only for a gate
+  verdict the mint answers itself (D3). Rejoiner: a "Recover"
   first-run path (link + phrase → `RecoverStart`), progress rendered from the
   `recover-started:` / `recover-failed:` / `recovered:` notices. The rejoin
   notice is a real system line: `ChatMessage.kind = ChatKind::System` —

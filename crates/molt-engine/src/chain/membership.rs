@@ -225,6 +225,9 @@ pub(crate) fn nostr_rekey(
 /// Pending consented restores one seat may hold: a retry or two.
 const CONSENTED_PER_SEAT: usize = 3;
 
+/// Withdrawn restores a coordinator remembers (D1).
+const WITHDRAWN_KEPT: usize = 16;
+
 /// B3 refusals: the seat was heard recently / this node sees a fork / a
 /// link-less request from an older build.
 pub(crate) const SEAT_STILL_ACTIVE: &str = "seat still active";
@@ -357,6 +360,11 @@ impl State {
     pub(crate) fn admits_membership_proposal(&self, id: u64, change: &ChainChange) -> bool {
         if !self.plausible_wire_id(id) {
             tracing::warn!(%id, "refusing a membership proposal with an implausible id");
+            return false;
+        }
+        // D1: a withdrawn card is never reopened, not even once it aged out
+        if self.retired.contains(&id) || self.proposals.get(&id).is_some_and(|p| p.withdrawn) {
+            tracing::debug!(%id, "membership proposal withdrawn - dropped");
             return false;
         }
         // a change no vote could ever seal must not occupy the registry: it
@@ -524,9 +532,12 @@ impl State {
     /// re-key. Another card for the seat sealing sets the pending one aside:
     /// a v1 card is never swept and would hold the seat in flight for good.
     pub(super) fn coordinates_restore(&mut self, member: &str, block: &ChainChange) -> bool {
-        if self.recovery.pending.get(member).is_some_and(|p| p.card == *block) {
+        if let Some(p) = self.recovery.pending.get(member).filter(|p| p.card == *block) {
+            let ticket = p.ticket.clone();
+            self.recovery.links.retain(|(t, _)| *t != ticket);
             return true;
         }
+        self.restore_sealed_after_withdrawal(member, block);
         if !self.recovery.swept.get(member).is_some_and(|p| p.card == *block) {
             if let Some(p) = self.recovery.pending.remove(member) {
                 tracing::info!(%member, "recovery set aside: another card sealed");
@@ -876,6 +887,7 @@ impl State {
         if !ours || self.restore_sealed(&p.card) {
             return false;
         }
+        let withdrawn = p.clone();
         let card = p.card.clone();
         let ticket = p.ticket.clone();
         let ids: Vec<u64> = self
@@ -885,6 +897,10 @@ impl State {
             .filter(|(_, c)| **c == card)
             .map(|(id, _)| *id)
             .collect();
+        self.recovery.withdrawn.push_back((ids.clone(), withdrawn));
+        while self.recovery.withdrawn.len() > WITHDRAWN_KEPT {
+            self.recovery.withdrawn.pop_front();
+        }
         for id in ids {
             if self.proposals.get(&id).is_some_and(|r| r.state == ProposalState::Proposed) {
                 if let Err(e) = self.cmd_withdraw(ProposalId(id), None) {
@@ -900,10 +916,42 @@ impl State {
         self.recovery.pending.remove(member);
         self.recovery.anchor_first_seats.remove(&(member.to_string(), sender.to_string()));
         if self.recovery.spent_tickets.remove(&ticket) {
-            self.recovery.tickets.insert(ticket, member.to_string());
+            self.recovery.tickets.insert(ticket.clone(), member.to_string());
+            self.show_link_notice(&ticket);
         }
         self.snapshot_to_disk();
         true
+    }
+
+    /// D1: a `Restored` block for a card this node withdrew sealed anyway
+    /// (a seat signed before the withdrawal reached it). The block stands;
+    /// the run is gone, so nothing is re-keyed - the operator is told and
+    /// the seat restores with a new link.
+    fn restore_sealed_after_withdrawal(&mut self, member: &str, block: &ChainChange) {
+        let Some(at) = self.recovery.withdrawn.iter().position(|(_, p)| p.card == *block) else {
+            return;
+        };
+        let Some((ids, p)) = self.recovery.withdrawn.remove(at) else {
+            return;
+        };
+        let height = self.chain.head.as_ref().map_or(0, |h| h.height);
+        tracing::warn!(%member, height, "restore_sealed_after_withdrawal");
+        // its anchor is in the chain now: the old link can only fail
+        self.recovery.tickets.remove(&p.ticket);
+        self.recovery.spent_tickets.insert(p.ticket.clone());
+        if let Some(a) = self.recovery.anchor_first.remove(&p.ticket) {
+            a.abort();
+        }
+        self.recovery.links.retain(|(t, _)| *t != p.ticket);
+        for id in ids {
+            if let Some(r) = self.proposals.get_mut(&id).filter(|r| r.withdrawn) {
+                r.withdrawn = false;
+                r.settle_applied();
+                self.emit(Event::Applied { id: ProposalId(id), surface: Surface::Organization });
+            }
+        }
+        self.session.notice = format!("restore-sealed-after-withdrawal:{member}");
+        self.emit_session(crate::SessionScope::Full);
     }
 
     /// Every check of [`Self::verify_and_propose_restore`], changing

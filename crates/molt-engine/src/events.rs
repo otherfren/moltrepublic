@@ -640,6 +640,12 @@ impl State {
             },
             anchor_repushes: self.recovery.repushes.iter().map(|((m, a), (n, _))| (m.clone(), a.clone(), *n)).collect(),
             intents: self.lock_dumped_intents(),
+            parked_withdrawals: {
+                let mut v: Vec<(u64, String, u64)> =
+                    self.chain.pending_withdrawals.iter().map(|(id, (by, ts))| (*id, by.clone(), *ts)).collect();
+                v.sort();
+                v
+            },
         }
     }
 
@@ -781,6 +787,9 @@ impl State {
         self.recovery.seal_first_seats.extend(dump.seal_first_seats.iter().cloned());
         for (m, a, n) in &dump.anchor_repushes {
             self.recovery.repushes.insert((m.clone(), a.clone()), (*n, 0));
+        }
+        for (id, by, ts) in dump.parked_withdrawals.iter().take(crate::proposals::PARKED_DECLINE_IDS_MAX) {
+            self.chain.pending_withdrawals.insert(*id, (by.clone(), *ts));
         }
         self.recovery.attempts.minted = dump
             .minted_tickets
@@ -969,6 +978,8 @@ impl State {
         self.recovery.spent_tickets.clear();
         self.recovery.anchor_first_seats.clear();
         self.recovery.swept.clear();
+        self.recovery.withdrawn.clear();
+        self.recovery.links.clear();
         self.recovery.attempts = crate::chain::AttemptBook::default();
         self.chat.clear();
         self.chat_pos.clear();
