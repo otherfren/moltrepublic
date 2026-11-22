@@ -2488,7 +2488,10 @@ async fn without_a_settle_the_bystander_seals_before_the_cancel() {
     let relay = MockRelay::run().await.expect("in-process relay");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
-    let (a, b, v, petra_phrase) = found_three(tmp.path(), &url).await;
+    // a B6 race: the bystander seals on sight with the coordinator's
+    // collected signature; under the lock nothing seals without both
+    // survivors accepting in one ballot (the settle twin covers the lock)
+    let (a, b, v, petra_phrase) = found_three_as(tmp.path(), &url, 2, true).await;
     drop(b);
     a.__restore_settle_secs(Some(0));
     v.__restore_settle_secs(Some(0));
