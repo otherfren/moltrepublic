@@ -409,3 +409,59 @@ fn a_vote_refusal_answers_only_the_voter_and_only_once_per_debounce() {
     walter.deliver_gated("dora".to_string(), forged(3, "dora")).expect("ack");
     assert_eq!(refusals(&walter), once, "a second one within the debounce is not");
 }
+
+/// D4: a seat still catching up (a freshly restored one) is the one
+/// behind - a vote from ahead is not the voter's fault, so it earns no
+/// refusal that would sit on the voter's screen.
+#[test]
+fn a_seat_catching_up_answers_no_vote_refusal() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = crate::chain::test_support::Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = crate::chain::test_support::chain_peer("walter", &b, b.blocks.clone());
+    walter.chain.catchup_from = Some(1);
+    let before = walter.next_seq;
+    walter
+        .deliver_gated(
+            "petra".to_string(),
+            EventEnvelope {
+                prev_seq: 0,
+                seq: 1,
+                ts: 100,
+                by: "petra".to_string(),
+                body: WorkspaceEvent::Approved {
+                    id: molt_core::ProposalId(7),
+                    by: "petra".to_string(),
+                    height: 9,
+                    sig: "x".to_string(),
+                },
+            },
+        )
+        .expect("ack");
+    assert_eq!(walter.next_seq, before, "no VoteRefused while catching up");
+}
+
+/// D4: the voter's `vote-refused` notice for a peer clears once that
+/// peer's own vote counts here at the current height - it caught up.
+#[test]
+fn a_vote_refused_notice_clears_once_the_peer_votes_level() {
+    let b = crate::chain::test_support::Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = crate::chain::test_support::chain_peer_3("walter", &b);
+    let payload = serde_json::json!({ "op": "set_name", "value": "Petra's" });
+    crate::chain::test_support::wire(
+        &mut walter,
+        "petra",
+        1,
+        WorkspaceEvent::Proposed { id: molt_core::ProposalId(8), surface: molt_core::Surface::Organization, payload: payload.clone() },
+    );
+    walter.session.notice = "vote-refused:5:petra:0".to_string();
+    let change = molt_core::ChainChange::Applied { proposal_id: 8, surface: molt_core::Surface::Organization, payload };
+    let sig = molt_storage::identity_sign(b.key("petra"), &molt_core::chain::approval_bytes(&b.republic_id, 1, &change));
+    crate::chain::test_support::wire(
+        &mut walter,
+        "petra",
+        2,
+        WorkspaceEvent::Approved { id: molt_core::ProposalId(8), by: "petra".to_string(), height: 1, sig },
+    );
+    assert_eq!(walter.session.notice, "", "petra is level again");
+}

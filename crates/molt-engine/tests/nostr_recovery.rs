@@ -1682,12 +1682,13 @@ async fn a_link_for_a_seat_heard_seconds_ago_is_refused() {
         s.workspaces.iter().any(|w| w.members.iter().any(|m| m.name == "petra" && m.last_seen > 0))
     })
     .await;
-    a.execute(Command::RecoverInviteStart { member: "petra".to_string() }).await.expect("mint");
-    let s = wait_for(&a, "the mint's answer", |s| {
-        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
-    })
-    .await;
-    assert_eq!(s.notice, "recovery-link-failed:seat still active");
+    // D3: the command itself answers the refusal; the notice stays
+    let refused = a.execute(Command::RecoverInviteStart { member: "petra".to_string() }).await;
+    assert!(
+        matches!(&refused, Err(molt_core::MoltError::Recover(why)) if why == "seat still active"),
+        "{refused:?}"
+    );
+    assert_eq!(read_session(&a).await.notice, "recovery-link-failed:seat still active");
 }
 
 /// **Field failure 2026-09-12:** the rejoiner gave a relay a flat 10 s to
@@ -2408,10 +2409,121 @@ async fn a_cancel_after_ready_withdraws_the_unsealed_card() {
     eventually("the card withdrawn on the coordinator", 60, 0, || open_proposals(&a)).await;
     eventually("the card withdrawn at vera", 60, 0, || open_proposals(&v)).await;
     assert_eq!(chain_len(&a).await, 1, "nothing sealed");
+    // D2: the live link is back on the coordinator's notice
+    assert_eq!(read_session(&a).await.notice, format!("recovery-link:{link}"));
+
+    // D1: vera's gate opens - her held approval stays unsigned, the
+    // withdrawn card never seals (one presence tick and then some)
+    v.__seat_active_secs(0);
+    tokio::time::sleep(Duration::from_secs(35)).await;
+    assert_eq!(chain_len(&v).await, 1, "vera never sealed the withdrawn card");
+    assert_eq!(chain_len(&a).await, 1, "nothing sealed");
 
     // the ticket is live again: a new run on the same link gets the anchor
     let mut again = ManualRejoiner::start(&url, &link, &petra_phrase, true).await;
     again.anchor().await;
+}
+
+/// A relay that refuses group messages (kind 445) while held.
+#[derive(Debug, Clone, Default)]
+struct GroupGate {
+    hold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl nostr_relay_builder::builder::WritePolicy for GroupGate {
+    fn admit_event<'a>(
+        &'a self,
+        event: &'a nostr_relay_builder::prelude::Event,
+        _addr: &'a std::net::SocketAddr,
+    ) -> nostr_relay_builder::prelude::BoxedFuture<'a, nostr_relay_builder::builder::PolicyResult> {
+        Box::pin(async move {
+            if event.kind.as_u16() == 445 && self.hold.load(std::sync::atomic::Ordering::SeqCst) {
+                return nostr_relay_builder::builder::PolicyResult::Reject("blocked: test".to_string());
+            }
+            nostr_relay_builder::builder::PolicyResult::Accept
+        })
+    }
+}
+
+/// **D1 (v0.1.0 acceptance):** a third seat seals the cancelled run's card
+/// before the withdrawal reaches it. The block stands; the coordinator
+/// does not re-key for the dead run, says so, and a new link heals the
+/// seat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restore_sealed_after_its_withdrawal_is_reported_and_a_new_link_heals_it() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let gate = GroupGate::default();
+    let (_relay, url) = {
+        use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions};
+        let db = std::sync::Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions { events: true, max_events: None }));
+        let relay = nostr_relay_builder::LocalRelay::new(
+            nostr_relay_builder::builder::RelayBuilder::default().database(db).write_policy(gate.clone()),
+        );
+        relay.run().await.expect("relay runs");
+        let url = relay.url().await.to_string();
+        (relay, url)
+    };
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, v, petra_phrase) = found_three_at(tmp.path(), &url, 3).await;
+    v.__seat_active_secs(u64::MAX);
+    b.execute(Command::Chat { body: "still here".to_string(), quote: None, channel: molt_core::ChannelRef::Group })
+        .await
+        .expect("petra speaks");
+    wait_for(&v, "vera to hear petra", |s| {
+        s.workspaces.iter().any(|w| w.members.iter().any(|m| m.name == "petra" && m.last_seen > 0))
+    })
+    .await;
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let epoch = status_of(&a).await.mls_epoch;
+
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart { link, phrase: petra_phrase.clone(), relays: Vec::new() })
+        .await
+        .expect("recover start");
+    eventually("the card at vera with walter's signature", 60, 1, || async {
+        match v.execute(Command::LIST_ALL_PROPOSALS).await.expect("list") {
+            Reply::Proposals { proposals, .. } => proposals
+                .iter()
+                .filter(|p| p.state == molt_core::ProposalState::Proposed && p.approvals == 1)
+                .count(),
+            other => panic!("unexpected: {other:?}"),
+        }
+    })
+    .await;
+
+    // the group goes quiet on the relay: walter's withdrawal cannot reach vera
+    gate.hold.store(true, SeqCst);
+    c.execute(Command::RecoverCancel).await.expect("cancel");
+    eventually("the card withdrawn on the coordinator", 60, 0, || open_proposals(&a)).await;
+    // vera's gate opens: she signs and seals alone (walter + vera + consent)
+    v.__seat_active_secs(0);
+    eventually("vera seals", 90, 2, || chain_len(&v)).await;
+    gate.hold.store(false, SeqCst);
+
+    let s = wait_for_secs(&a, "the coordinator's report", 180, |s| {
+        s.notice == "restore-sealed-after-withdrawal:petra"
+    })
+    .await;
+    assert_eq!(s.notice, "restore-sealed-after-withdrawal:petra");
+    assert_eq!(chain_len(&a).await, 2, "the sealed block stands");
+    assert_eq!(status_of(&a).await.mls_epoch, epoch, "no re-key for the dead run");
+
+    // a new link restores the seat for real
+    let fresh = mint_for_petra(&a).await;
+    let c2 = engine(&tmp.path().join("rejoiner-2"));
+    adopt_relay(&c2, &url).await;
+    c2.execute(Command::RecoverStart { link: fresh, phrase: petra_phrase, relays: Vec::new() })
+        .await
+        .expect("recover start");
+    let s = wait_for_secs(&c2, "the second rejoin", 180, |s| {
+        s.notice.starts_with("recovered:") || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "the second rejoin: {:?}", s.notice);
+    assert_eq!(chain_len(&a).await, 3, "a second Restored block");
+    assert_eq!(status_of(&a).await.mls_epoch, epoch + 1, "one re-key, for the live run");
 }
 
 /// **Review R2:** once the re-admission sealed, a withdrawal changes

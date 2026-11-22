@@ -3519,6 +3519,10 @@ pub struct EngineStateDump {
     /// the re-push count survives a restart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub anchor_repushes: Vec<(MemberId, String, u32)>,
+    /// `(proposal, proposer, stamp)` of withdrawals whose card has not
+    /// arrived yet: the card must arrive withdrawn after a restart too.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked_withdrawals: Vec<(u64, MemberId, u64)>,
 }
 
 /// One collected approval signature of an open proposal, as a snapshot
