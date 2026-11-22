@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::{adopt_relay, hard_kill, read_session, wait_for};
+use common::{adopt_relay, hard_kill, read_session, wait_for, wait_for_secs};
 
 /// A node that runs the lock whatever the build default.
 fn engine(dir: &std::path::Path) -> WalletHandle {
@@ -588,4 +588,61 @@ async fn a_restored_seat_learns_every_capability_and_approves_the_enabling_vote(
     let link = s.notice.strip_prefix("recovery-link:").unwrap_or_else(|| panic!("mint: {:?}", s.notice));
     let invite = molt_engine::RecoveryInvite::parse(link).expect("a link");
     assert!(invite.consent_anchor.is_some(), "a v2 consent right after the restart");
+}
+
+/// Review R1, end to end over relays: the lock chose a restore (its
+/// leader accepted and stopped), then the run was cancelled and the
+/// coordinator withdrew the card. The chosen value seals anyway; the
+/// coordinator reports it and does not re-key; the next height decides.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_chosen_restore_seals_after_its_withdrawal_and_is_reported() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let ([mara, walter, dora], dora_phrase) = found_trio(tmp.path(), &url).await;
+    lock_on(&[&mara, &walter, &dora], true).await;
+    every_seat_announced(&[&mara, &walter, &dora]).await;
+    // dora lost: mara (first in the line) leads and stops right after her
+    // Accept leaves, before accepting herself; walter coordinates
+    for w in [&mara, &walter] {
+        w.__seat_active_secs(0);
+        w.__lock_timing(15, 3);
+    }
+    drop(dora);
+    mara.__lock_stop_after_accept();
+    let epoch = status(&walter).await.mls_epoch;
+    walter.execute(Command::RecoverInviteStart { member: "dora".to_string() }).await.expect("mint");
+    let s = wait_for(&walter, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s.notice.strip_prefix("recovery-link:").unwrap_or_else(|| panic!("mint: {:?}", s.notice)).to_string();
+    let rejoiner = engine(&tmp.path().join("dora-new"));
+    adopt_relay(&rejoiner, &url).await;
+    rejoiner.execute(Command::RecoverStart { link, phrase: dora_phrase, relays: Vec::new() }).await.expect("recover start");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    while !mara.__lock_stopped() {
+        assert!(tokio::time::Instant::now() < deadline, "mara never led the restore");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // walter accepts once his settle passed: chosen (the restore's need
+    // is one survivor); his seal waits a grace (15 s) as a learner, and
+    // the withdrawal lands inside it
+    tokio::time::sleep(Duration::from_secs(7)).await;
+    rejoiner.execute(Command::RecoverCancel).await.expect("cancel");
+    drop(rejoiner);
+    let ws = read_session(&mara).await.active_workspace.clone();
+    let _dir = hard_kill(mara, &tmp.path().join("mara"), &ws).await;
+    let mara = engine(&tmp.path().join("mara"));
+    adopt_relay(&mara, &url).await;
+    mara.__seat_active_secs(0);
+    mara.__lock_timing(15, 3);
+    mara.execute(Command::OpenWorkspace { id: ws }).await.expect("mara reopens");
+
+    let s = wait_for_secs(&walter, "the coordinator's report", 180, |s| s.notice == "restore-sealed-after-withdrawal:dora").await;
+    assert_eq!(s.notice, "restore-sealed-after-withdrawal:dora");
+    assert!(chain(&walter).await.iter().any(|(h, pid, _)| *h == 1 && *pid == 0), "the restore sealed at 1");
+    assert_eq!(status(&walter).await.mls_epoch, epoch, "no re-key for the dead run");
+    let forks = burst(&[&mara, &walter], &["mara", "walter"], "after", 1, 2, 180).await;
+    assert_eq!(forks, 0);
 }
