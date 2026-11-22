@@ -2175,3 +2175,65 @@ fn a_late_withdrawal_after_the_seat_came_back_reports_nothing() {
     coord.cmd_net_recover_peer_failed("dora", "cancelled", "0.0.21", &attempt, &npk).expect("ack");
     assert_eq!(coord.session.notice, "", "the seat is back");
 }
+
+/// **F1 under the lock:** a seat does not accept a `Restored` value before
+/// its settle has passed - a withdrawal right behind the card wins there
+/// too; without one it accepts once the settle has passed.
+#[test]
+fn under_the_lock_a_restore_is_accepted_only_after_its_settle() {
+    use molt_core::{ProposalId, WorkspaceEvent};
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let id = 8;
+    let (frame, change) = dora_card_frame(&b, id);
+    let settle = super::membership::RESTORE_SETTLE_SECS;
+    let accepted =
+        |w: &crate::State| w.chain.lock.outbox.iter().any(|e| matches!(e.body, WorkspaceEvent::LockAccepted { .. }));
+    // petra's ballot round = seq: a retrying leader always climbs
+    let accept = |w: &mut crate::State, seq: u64| {
+        let slot = w.lock_slot().expect("slot");
+        let value = w.lock_value(1, &change).expect("a value");
+        wire(
+            w,
+            "petra",
+            seq,
+            WorkspaceEvent::LockAccept {
+                height: 1,
+                base: slot.base,
+                round: 10 * seq,
+                digest: value.digest,
+                need: u64::try_from(value.need).expect("small"),
+                id: ProposalId(id),
+                change: Some(change.clone()),
+            },
+        );
+    };
+    let fresh = || {
+        let mut walter = chain_signer("walter", &b, b.blocks.clone());
+        walter.chain.lock.enabled_override = Some(true);
+        on_nostr(&mut walter, 10_000);
+        walter
+    };
+
+    // a withdrawal seconds behind the card: never accepted
+    let mut walter = fresh();
+    wire(&mut walter, "petra", 1, frame.clone());
+    accept(&mut walter, 2);
+    assert!(!accepted(&walter), "not accepted on sight");
+    wire(&mut walter, "petra", 3, WorkspaceEvent::Withdrawn { id: ProposalId(id), by: "petra".to_string() });
+    walter.presence.clock_override = Some(10_000 + settle + 1);
+    walter.cmd_net_delivery_tick().expect("tick");
+    accept(&mut walter, 4);
+    assert!(!accepted(&walter), "the withdrawal won");
+
+    // no withdrawal: accepted once the settle has passed
+    let mut walter = fresh();
+    wire(&mut walter, "petra", 1, frame);
+    accept(&mut walter, 2);
+    assert!(!accepted(&walter), "still settling");
+    walter.presence.clock_override = Some(10_000 + settle + 1);
+    walter.cmd_net_delivery_tick().expect("tick");
+    accept(&mut walter, 3);
+    assert!(accepted(&walter), "accepted after the settle");
+}

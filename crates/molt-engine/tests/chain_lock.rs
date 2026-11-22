@@ -143,6 +143,24 @@ async fn found_trio_as(root: &std::path::Path, url: &str, pre_lock: bool) -> ([W
     ([a, it.next().expect("walter"), it.next().expect("dora")], dora_phrase)
 }
 
+/// Each node has every other seat's status (a recovery link minted now
+/// carries the v2 consent).
+async fn every_seat_announced(nodes: &[&WalletHandle]) {
+    for w in nodes {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let Reply::Mirror(v) = w.execute(Command::ReadMirror).await.expect("read mirror") else {
+                panic!("read mirror");
+            };
+            if v.members.iter().all(|m| m.known) {
+                break;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "the seats never announced: {v:?}");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
 /// Wait until every seat runs the lock at its head+1.
 async fn lock_on(seats: &[&WalletHandle], on: bool) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
@@ -375,6 +393,9 @@ async fn a_consented_restore_under_the_lock_needs_both_survivors() {
     let tmp = tempfile::tempdir().expect("tmp");
     let ([mara, walter, dora], dora_phrase) = found_trio(tmp.path(), &url).await;
     lock_on(&[&mara, &walter, &dora], true).await;
+    // a link minted before every seat announced carries a v1 consent: a
+    // human vote, not the restore this test is about
+    every_seat_announced(&[&mara, &walter, &dora]).await;
     for w in [&mara, &walter] {
         w.__seat_active_secs(0);
         w.__lock_timing(5, 3);

@@ -200,3 +200,38 @@ fn a_flood_behind_a_gap_loses_nothing() {
         assert!(st.delivery.accepted["bob"].is_accepted(seq), "seq {seq} accepted");
     }
 }
+
+/// B7 behind an inbound gap: an intent is a stance (an `Approved` without
+/// a signature) and waits like one; the five lock frames carry their
+/// ballot and are idempotent in any order, so none of them waits.
+#[test]
+fn intents_wait_behind_a_gap_and_lock_frames_never_do() {
+    use molt_core::{ProposalId, WorkspaceEvent};
+    use super::delivery::order_sensitive;
+    let intent = WorkspaceEvent::Approved { id: ProposalId(1), by: "a".into(), height: 1, sig: String::new() };
+    assert!(order_sensitive(&intent));
+    let base = "ab".to_string();
+    let lock = [
+        WorkspaceEvent::LockPrepare { height: 1, base: base.clone(), round: 1 },
+        WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round: 1, leader: "a".into(), accepted: None },
+        WorkspaceEvent::LockAccept {
+            height: 1,
+            base: base.clone(),
+            round: 1,
+            digest: "d".into(),
+            need: 2,
+            id: ProposalId(1),
+            change: None,
+        },
+        WorkspaceEvent::LockAccepted {
+            height: 1,
+            base: base.clone(),
+            round: 1,
+            leader: "a".into(),
+            digest: "d".into(),
+            sig: "s".into(),
+        },
+        WorkspaceEvent::LockNack { height: 1, base, round: 1, leader: "a".into(), promised: None, head: 0 },
+    ];
+    assert!(lock.iter().all(|f| !order_sensitive(f)));
+}

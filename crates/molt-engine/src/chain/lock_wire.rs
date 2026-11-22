@@ -40,6 +40,8 @@ pub(crate) struct LockSeams {
     pub(crate) grace_secs: AtomicU64,
     /// Retransmit interval in seconds, 0 = [`LOCK_RETRANSMIT_SECS`].
     pub(crate) retransmit_secs: AtomicU64,
+    /// The restore settle step in seconds, 0 = `RESTORE_SETTLE_SECS`.
+    pub(crate) settle_secs: AtomicU64,
     /// The next leader to send a `LockAccept` stops right after it.
     pub(crate) stop_after_accept: AtomicBool,
     /// Lock activity of this seat has stopped (a killed leader).
@@ -921,6 +923,12 @@ impl State {
             return;
         }
         self.chain.lock.known.insert((slot.height, value.digest.clone()), (id, change.clone()));
+        // F1: a restore settles before this seat accepts it, so a withdrawal
+        // right behind the card wins here too
+        if matches!(change, ChainChange::Membership { op: MembershipOp::Restored, .. }) && self.restore_settling(id) {
+            tracing::debug!(height = slot.height, id, "lock=withheld reason=settling");
+            return;
+        }
         if let Some(why) = self.lock_withheld(id, &change, slot.height) {
             tracing::debug!(height = slot.height, id, reason = %why, "lock=withheld");
             return;

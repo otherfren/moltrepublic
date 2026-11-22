@@ -370,6 +370,13 @@ impl WalletHandle {
         self.lock_seams.cap.store(if off { 2 } else { 1 }, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: the restore settle step in seconds (F1); 0 restores the
+    /// default.
+    #[doc(hidden)]
+    pub fn __restore_settle_secs(&self, secs: u64) {
+        self.lock_seams.settle_secs.store(secs, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam (B7): this seat's next founding leaves the lock out of the
     /// charter - a republic as founded before the lock existed (B6 until a
     /// `set_features` vote enables it).

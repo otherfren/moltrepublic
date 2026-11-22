@@ -121,7 +121,7 @@ impl SenderHold {
 /// the chat stream (arrival is display order; a reaction toggles) and a
 /// member's stances (newest wins). Everything else is keyed, buffered or
 /// idempotent on its own and never waits.
-fn order_sensitive(body: &WorkspaceEvent) -> bool {
+pub(super) fn order_sensitive(body: &WorkspaceEvent) -> bool {
     matches!(
         body,
         WorkspaceEvent::Chat(_)

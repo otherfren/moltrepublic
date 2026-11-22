@@ -607,7 +607,7 @@ impl State {
 
     /// F1: whether `id` is still inside its settle here, counted from the
     /// first time this node judged it. Off without a real transport.
-    fn restore_settling(&mut self, id: u64) -> bool {
+    pub(crate) fn restore_settling(&mut self, id: u64) -> bool {
         if self.nostr.is_none() {
             return false;
         }
@@ -615,7 +615,11 @@ impl State {
         let open = &self.chain.proposal_changes;
         self.recovery.settle.retain(|i, _| open.contains_key(i));
         let since = *self.recovery.settle.entry(id).or_insert(now);
-        now.saturating_sub(since) < RESTORE_SETTLE_SECS
+        let settle = match self.lock_seams.settle_secs.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => RESTORE_SETTLE_SECS,
+            s => s,
+        };
+        now.saturating_sub(since) < settle
     }
 
     /// F1: retry the auto-approvals the settle held back (delivery tick).
