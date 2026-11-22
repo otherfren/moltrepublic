@@ -2356,6 +2356,7 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
         version: String::new(),
         consent: String::new(),
         started: 0,
+        caps: Vec::new(),
     });
     let payload = serde_json::to_vec(&request).expect("encode recover request");
     supervisor::send_framed(
@@ -2906,6 +2907,7 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
         anchor_first: false,
         version: String::new(),
         started: 0,
+        caps: Vec::new(),
     });
     supervisor::send_framed(
         &material1.transport,
@@ -4581,6 +4583,7 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
         version: String::new(),
         consent: String::new(),
         started: 0,
+        caps: Vec::new(),
     });
     let payload = serde_json::to_vec(&request).expect("encode recover request");
     supervisor::send_framed(

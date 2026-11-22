@@ -5819,6 +5819,9 @@ pub enum Command {
         /// an earlier run on the same link never replaces a later one.
         #[serde(default)]
         started: u64,
+        /// The rejoiner build's capabilities. Empty from an older rejoiner.
+        #[serde(default)]
+        caps: Vec<String>,
         /// Ritual incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,

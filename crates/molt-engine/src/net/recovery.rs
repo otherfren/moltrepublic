@@ -62,7 +62,7 @@ impl State {
         consent: String,
         reply: String,
         sender_npub: String,
-        (anchor_first, started): (bool, u64),
+        (anchor_first, started, caps): (bool, u64, Vec<String>),
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         if !self.net_scope_current(generation) {
@@ -151,6 +151,15 @@ impl State {
         // block's Welcome goes to a dead anchor, stranding the seat
         if self.readmission_in_flight(&member) {
             tracing::warn!(%member, "recovery request while a re-admission is pending - dropped");
+            return Ok(Reply::Ack);
+        }
+        // A-F2: no seat enters a republic in Strict Order Mode on a build
+        // without it - it would sign freely beside the lock
+        if self.lock_enabled() && !caps.iter().any(|c| c == molt_core::chain::CHAIN_LOCK_CAP) {
+            if !self.recovery.attempts.is_spent(&attempt) && proven() {
+                let why = crate::chain::LOCK_CHAIN_UNSUPPORTED.to_string();
+                self.refuse_recover_request(&member, &sender_npub, why, &attempt);
+            }
             return Ok(Reply::Ack);
         }
         // B4: the anchor first, the seal only on the rejoiner's Ready

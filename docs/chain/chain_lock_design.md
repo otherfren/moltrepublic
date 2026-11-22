@@ -759,6 +759,25 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   is lost on the forced path (L5); no divergence follows, the change is
   the chain's. Pinned: `a_forced_withdrawn_value_completes_with_any_promiser`,
   `lock_sim` (H1 halt on the old rule at seed 32).
+- **A-F2, the capability rule.** No seat enters a republic in Strict
+  Order Mode on a build without it: the rejoiner's request declares its
+  capabilities (`RecoverRequest.caps`, additive), and the coordinator
+  refuses one without the lock (`this republic uses Strict Order Mode -
+  needs a newer build`, told to the rejoiner;
+  `a_rejoiner_on_a_build_without_the_mode_is_refused`). The release rule
+  covers only a seat that was already there when the mode came on.
+- **Amnesia (decided rule, modelled in `lock_sim`, not built).** A seat
+  that lost its lock state asks the others; only seats that hold their
+  own state answer - an amnesiac seat does not answer at all and says so
+  (`amnesia - 1 of 2 seats answered`). With answers from max(m, n - m +
+  1) other seats it is passive up to the highest height they report it
+  may have touched, and leads above the highest round they saw from it
+  (`an_amnesiac_seat_waits_for_the_others_and_never_forks`; the control
+  forks). Two amnesiac seats at once can both wait for ever (2-of-3:
+  each needs both others): the exit is the recovery ritual for one of
+  them (status `amnesia - restore this seat with a new link`). Where
+  m = n no answer set proves anything: the recovery ritual is the only
+  exit, and a seat restored from a file backup is undetectable there.
 - **A-F3.** Lock state at a height on any lineage forbids a free
   signature there, also on a lineage without the enabling block - the
   signature is base-agnostic and would count free where the lock holds

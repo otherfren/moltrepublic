@@ -1316,7 +1316,7 @@ fn a_planted_restore_card_does_not_block_a_recovery() {
                 consent_for(&b, "dora", ""),
                 String::new(),
                 String::new(),
-                (false, 0),
+                (false, 0, vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]),
                 None,
             )
             .expect("ack");
@@ -1699,7 +1699,7 @@ fn a_ticketed_request_on_a_fork_is_refused_and_keeps_its_ticket() {
             String::new(),
             String::new(),
             String::new(),
-            (false, 0),
+            (false, 0, vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]),
             None,
         )
         .expect("ack");
@@ -1758,7 +1758,7 @@ fn a_link_less_request_is_refused_and_never_proposed() {
                 consent.clone(),
                 String::new(),
                 String::new(),
-                (false, 0),
+                (false, 0, vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]),
                 None,
             )
             .expect("ack");

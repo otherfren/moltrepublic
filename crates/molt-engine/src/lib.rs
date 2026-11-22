@@ -2705,6 +2705,7 @@ impl State {
                 sender_npub,
                 anchor_first,
                 started,
+                caps,
                 generation,
             } => self.cmd_net_recover_requested(
                 member,
@@ -2717,7 +2718,7 @@ impl State {
                 consent,
                 reply,
                 sender_npub,
-                (anchor_first, started),
+                (anchor_first, started, caps),
                 generation,
             ),
             Command::NetRecoverReady { member, ticket, attempt, sender, generation } => {

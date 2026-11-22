@@ -685,3 +685,31 @@ async fn the_lock_is_dark_in_this_build() {
         assert!(!molt_storage::read_prefs(&dir).chain_lock, "{name}: no lock marker");
     }
 }
+
+/// A-F2: no seat enters a republic in Strict Order Mode on a build
+/// without it - the coordinator refuses the restore with the reason, the
+/// rejoiner is told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejoiner_on_a_build_without_the_mode_is_refused() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let ([mara, walter, dora], dora_phrase) = found_trio(tmp.path(), &url).await;
+    lock_on(&[&mara, &walter, &dora], true).await;
+    every_seat_announced(&[&mara, &walter, &dora]).await;
+    mara.__seat_active_secs(0);
+    drop(dora);
+    mara.execute(Command::RecoverInviteStart { member: "dora".to_string() }).await.expect("mint");
+    let s = wait_for(&mara, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s.notice.strip_prefix("recovery-link:").unwrap_or_else(|| panic!("mint: {:?}", s.notice)).to_string();
+    let rejoiner = engine(&tmp.path().join("dora-old"));
+    rejoiner.__lock_cap_off(true);
+    adopt_relay(&rejoiner, &url).await;
+    rejoiner.execute(Command::RecoverStart { link, phrase: dora_phrase, relays: Vec::new() }).await.expect("recover start");
+    let s = wait_for(&rejoiner, "the refusal", |s| s.notice.starts_with("recover-failed:") || s.notice.starts_with("recovered:")).await;
+    assert!(s.notice.contains("needs a newer build"), "{:?}", s.notice);
+    let _ = walter;
+}
