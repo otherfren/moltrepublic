@@ -131,6 +131,7 @@ async fn found_trio(root: &std::path::Path, url: &str, lock: bool) -> [WalletHan
     let a = engine(&root.join("mara"));
     // B6 alone: a republic founded before the lock existed
     a.__found_pre_lock(!lock);
+    a.__lock_available(lock);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
         name: "Drei".to_string(),
@@ -150,6 +151,7 @@ async fn found_trio(root: &std::path::Path, url: &str, lock: bool) -> [WalletHan
     let mut joiners = Vec::new();
     for (name, link) in ["walter", "dora"].iter().zip(links) {
         let w = engine(&root.join(name));
+        w.__lock_available(lock);
         adopt_relay(&w, url).await;
         w.execute(Command::JoinStart { invite: link, member: (*name).to_string(), relays: Vec::new() })
             .await

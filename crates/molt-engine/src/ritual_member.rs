@@ -66,6 +66,8 @@ pub(crate) struct MemberSeat {
     /// The seat's vault key, salted with this founding `nostr_pk` (vault
     /// spec §5). Always sent: the joiner cannot know the charter yet.
     pub(crate) vault_pk: String,
+    /// The capabilities the JoinRequest declares (the lock, where on).
+    pub(crate) caps: Vec<String>,
 }
 
 impl MemberSeat {
@@ -86,6 +88,7 @@ impl MemberSeat {
             nostr_sk,
             nostr_pk,
             vault_pk,
+            caps: Vec::new(),
         })
     }
 }
@@ -291,6 +294,7 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
         nostr_sk,
         nostr_pk,
         vault_pk,
+        caps,
     } = seat;
     // the MLS member, built from the *same* identity key (concept §3.3: one
     // identity anchors both the genesis table and the MLS credential). Its
@@ -312,7 +316,7 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
         key_package: hex::encode(&key_package),
         relays: leg.declared_relays(),
         vault_pk: vault_pk.clone(),
-        caps: vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
+        caps,
     });
     // a failed announce is not fatal: the resend below is the retry
     if let Err(e) = leg.send(&join).await {

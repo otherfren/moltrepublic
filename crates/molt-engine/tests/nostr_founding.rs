@@ -2090,7 +2090,7 @@ async fn the_feature_set_is_bound_into_what_every_member_signs() {
     let s = wait_for(&b, "the charter", |s| s.join.awaiting_ratify).await;
     assert_eq!(
         s.join.proposed_features.as_deref(),
-        Some(["chain-lock".to_string(), "memory".to_string(), "wallet".to_string()].as_slice()),
+        Some(["memory".to_string(), "wallet".to_string()].as_slice()),
         "the joiner reviews the canonicalized selection it will sign"
     );
     b.execute(Command::JoinConfirmCharter).await.expect("ratify");
@@ -2118,7 +2118,7 @@ async fn the_feature_set_is_bound_into_what_every_member_signs() {
     b.execute(Command::CloseWorkspace).await.expect("close b");
 
     // BOTH geneses carry the canonicalized selection and verify over v5 bytes
-    let want = vec!["chain-lock".to_string(), "memory".to_string(), "wallet".to_string()];
+    let want = vec!["memory".to_string(), "wallet".to_string()];
     for (root, ws_id, who) in [(&root_a, &ws_id, "founder"), (&root_b, &b_ws_id, "joiner")] {
         let dir = molt_storage::find_workspace_dir(root, ws_id).expect("dir");
         let (ws, _) = molt_storage::open_workspace(&dir).expect("open");

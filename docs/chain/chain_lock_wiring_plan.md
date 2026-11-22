@@ -1,11 +1,12 @@
 # The chain lock: wiring plan (release v0.1.1)
 
-**Status: BUILT on a branch based on master 0.1.0 (2026-11-22),
-awaiting review and merge.** Design: `docs/chain/chain_lock_design.md`
-(§8 activation, §14 "As built"). The lock runs where the chain enabled
-it: every republic founded with this build (from height 1), an older
-republic after a `set_features` vote naming `chain-lock` (from the
-height after that block). Activation by capability is gone.
+**Status: BUILT, dark: not available in release builds, under review;
+the switch is `CHAIN_LOCK_AVAILABLE` (design, "The switch").** Design:
+`docs/chain/chain_lock_design.md` (§8 activation, §14 "As built"). With
+the switch on the lock runs where the chain enabled it: every republic
+founded with the lock on (from height 1), an older republic after a
+`set_features` vote naming `chain-lock` (from the height after that
+block). Activation by capability is gone.
 
 ## 1. What the lock is for
 
@@ -201,3 +202,44 @@ enabling-vote test went from 118 s to 32 s; the restore settle step has
 
 `vault_late_enable` `enable_then_cut_then_recover_and_read`, three runs
 each: lock 68, 54, 29 s; B6 39, 35, 36 s.
+
+## 11. Activation by the members (decided 2026-11-22, not built)
+
+- Enabled EXPLICITLY in the UI under Organization (where the feature set
+  lives), never silently. A republic founded on a build with the lock
+  starts WITHOUT it unless the members choose it. This REPLACES "every
+  founding of this build adds `chain-lock`". Open, to confirm when the
+  UI is built: the same choice in the founding wizard's feature step,
+  default off.
+- Name: everything a human reads says "Strict Order Mode" (DE "Strenge
+  Reihenfolge"), the action "Activate Strict Order Mode"; the key
+  `chain-lock`, code, wire events, status and log fields keep their names.
+- Choosing it opens a modal in plain words, no protocol vocabulary (no
+  quorum, ballot, promise, fork, height); rows computed for this
+  republic's n and m (example 2-of-3). Headline: "Strict Order Mode - one
+  decision at a time. No two versions of your republic, ever."
+
+  | | Today | With Strict Order Mode |
+  |---|---|---|
+  | Two conflicting decisions at once | rare, heals by itself | cannot happen |
+  | Network traffic | a lot | about a quarter |
+  | A member loses their device | one other member can bring it back | all remaining members must be online (here: 2 of 2) |
+  | Members that may be missing | n-m | min(m-1, n-m) |
+  | Taking a proposal back | usually works | only until it was called up |
+  | Switching it off | - | not possible |
+  | Using an older version of the app | works | no longer possible |
+
+  Below it one sentence: it pays off with many members or agents
+  proposing at once and everyone reliably online; not with members often
+  away for days, or a large republic with a small majority (2-of-5: 4 may
+  be missing today, 1 with the mode). The modal names seats on a build
+  without it, or not yet announced.
+- Confirming the modal PROPOSES the vote (the existing `set_features`
+  path, m of n); the lock is active from the height after that block.
+- MCP is co-equal: a read returns the same rows as data for this republic
+  (n, m, members needed to bring a device back, members that may be
+  missing with and without, seats lacking the capability); the `propose` description,
+  `status.chain_sync` and the refusal texts carry the same facts; no step
+  only the window can do.
+- Preconditions at propose and approve: every seat capable; m >= 2 (a
+  legacy m = 1 chain must not enable it).

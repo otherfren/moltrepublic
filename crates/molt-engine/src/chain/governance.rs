@@ -247,6 +247,10 @@ impl State {
         if self.chain.head.is_none() {
             return Some("no chain yet".to_string());
         }
+        // G: a chain that runs the lock is beyond this build: no signature
+        if self.lock_chain_unsupported() {
+            return Some(crate::chain::LOCK_CHAIN_UNSUPPORTED.to_string());
+        }
         let Some(change) = self.proposal_change(id) else {
             return Some("change unknown here".to_string());
         };
@@ -580,6 +584,10 @@ impl State {
         let Some(head) = self.chain.head.clone() else {
             return;
         };
+        // a chain that runs the lock is extended by the lock only
+        if self.lock_chain_unsupported() {
+            return;
+        }
         // already committed?
         if matches!(self.proposals.get(&id), Some(p) if p.state != ProposalState::Proposed) {
             return;

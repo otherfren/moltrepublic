@@ -92,7 +92,13 @@ async fn found_trio(root: &std::path::Path, url: &str) -> ([WalletHandle; 3], St
 
 /// [`found_trio`]; `pre_lock` founds a republic as before the lock existed.
 async fn found_trio_as(root: &std::path::Path, url: &str, pre_lock: bool) -> ([WalletHandle; 3], String) {
+    found_trio_with(root, url, pre_lock, true).await
+}
+
+/// `available = false`: the build default, the lock dark (G).
+async fn found_trio_with(root: &std::path::Path, url: &str, pre_lock: bool, available: bool) -> ([WalletHandle; 3], String) {
     let a = engine(&root.join("mara"));
+    a.__lock_available(available);
     a.__found_pre_lock(pre_lock);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
@@ -113,6 +119,7 @@ async fn found_trio_as(root: &std::path::Path, url: &str, pre_lock: bool) -> ([W
     let mut joiners = Vec::new();
     for (name, link) in ["walter", "dora"].iter().zip(links) {
         let w = engine(&root.join(name));
+        w.__lock_available(available);
         adopt_relay(&w, url).await;
         w.execute(Command::JoinStart { invite: link, member: (*name).to_string(), relays: Vec::new() })
             .await
@@ -645,4 +652,36 @@ async fn a_chosen_restore_seals_after_its_withdrawal_and_is_reported() {
     assert_eq!(status(&walter).await.mls_epoch, epoch, "no re-key for the dead run");
     let forks = burst(&[&mara, &walter], &["mara", "walter"], "after", 1, 2, 180).await;
     assert_eq!(forks, 0);
+}
+
+/// G: the lock ships dark. A founding with this build ratifies the
+/// features v0.1.0 does, the enabling vote is refused with the reason, and
+/// a long run writes nothing lock-related - no file, no version 4, no
+/// marker - so v0.1.0 still opens every workspace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_lock_is_dark_in_this_build() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let ([mara, walter, dora], _) = found_trio_with(tmp.path(), &url, false, false).await;
+    for w in [&mara, &walter, &dora] {
+        assert_eq!(status(w).await.features, vec!["memory".to_string()], "the v0.1.0 charter");
+        assert!(!status(w).await.chain_sync.lock_active);
+    }
+    let names = ["mara", "walter", "dora"];
+    burst(&[&mara, &walter, &dora], &names, "dark", 2, 6, 240).await;
+    let enable = serde_json::json!({ "op": "set_features", "value": "chain-lock memory" });
+    let err = mara
+        .execute(Command::Propose { surface: molt_core::Surface::Organization, payload: enable })
+        .await
+        .expect_err("refused");
+    assert!(err.to_string().contains("Strict Order Mode is not available in this build"), "{err}");
+    for (w, name) in [&mara, &walter, &dora].into_iter().zip(names) {
+        let ws = read_session(w).await.active_workspace.clone();
+        let dir = molt_storage::find_workspace_dir(&tmp.path().join(name), &ws).expect("workspace dir");
+        assert!(!dir.join(molt_storage::CHAIN_LOCK_FILE).exists(), "{name}: no lock file");
+        let version = molt_storage::read_manifest(&dir).expect("manifest").version;
+        assert!(version < molt_core::STORAGE_VERSION_LOCK, "{name}: manifest {version}");
+        assert!(!molt_storage::read_prefs(&dir).chain_lock, "{name}: no lock marker");
+    }
 }
