@@ -358,6 +358,9 @@ const CONTROL_FRAMES: &[(&[u8], ControlParser)] = &[
             }
         }
     }),
+    // the gap want and its answer (delivery guarantee §10): two tags, one parser
+    (crate::gap::GAP_WANT_TAG, parse_gap),
+    (crate::gap::GAP_ANSWER_TAG, parse_gap),
     // the mirror gossip (mirroring §3.4): a declaration, a hold status,
     // the ask - each its own tag, each its own version boundary
     (crate::mirror_gossip::MIRROR_DECL_TAG, |from, frame| {
@@ -410,6 +413,16 @@ const CONTROL_FRAMES: &[(&[u8], ControlParser)] = &[
     (crate::wallet_frames::WALLET_VIEW_RESP_TAG, parse_wallet),
 ];
 
+fn parse_gap(from: MemberId, frame: &[u8]) -> Option<MlsDecode> {
+    match crate::gap::GapFrame::from_frame(frame) {
+        Ok(f) => Some(MlsDecode::Gap(from, Box::new(f))),
+        Err(e) => {
+            tracing::debug!(error = %e, "dropping an unusable gap frame");
+            None
+        }
+    }
+}
+
 fn parse_wallet(from: MemberId, frame: &[u8]) -> Option<MlsDecode> {
     match crate::wallet_frames::WalletFrame::from_frame(frame) {
         Ok(f) => Some(MlsDecode::Wallet(from, Box::new(f))),
@@ -459,6 +472,8 @@ pub(crate) enum MlsDecode {
     /// series; a holder answers by re-publishing them. No state, no log
     /// event - like the poke.
     PieceWanted(MemberId, Box<crate::piece_want::PieceWanted>),
+    /// A gap want or answer (delivery guarantee §10): no log event.
+    Gap(MemberId, Box<crate::gap::GapFrame>),
     /// A mirror declaration (mirroring §3.4): gossip, no state of the log.
     MirrorDecl(MemberId, Box<crate::mirror_gossip::MirrorDeclFrame>),
     /// A mirror hold status: gossip.
@@ -652,6 +667,16 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
         &self,
         member: &MemberId,
         frame: &crate::wallet_frames::WalletFrame,
+    ) -> impl std::future::Future<Output = ()> + Send {
+        let _ = (member, frame);
+        async {}
+    }
+    /// An authenticated gap want or answer from `member` (delivery
+    /// guarantee §10). Default no-op (additive).
+    fn gap_frame(
+        &self,
+        member: &MemberId,
+        frame: &crate::gap::GapFrame,
     ) -> impl std::future::Future<Output = ()> + Send {
         let _ = (member, frame);
         async {}
@@ -1501,6 +1526,7 @@ impl<K: EngineSink> crate::epoch_hold::HeldIngest<HeldMessage> for MeshHeldInges
             // lands: stamp presence, drop the nudge (a late poke is noise)
             MlsDecode::Poke(_, _)
             | MlsDecode::PieceWanted(_, _)
+            | MlsDecode::Gap(_, _)
             | MlsDecode::MirrorDecl(_, _)
             | MlsDecode::MirrorStatus(_, _)
             | MlsDecode::MirrorWho(_)
@@ -1859,6 +1885,13 @@ where
                     sink.peer_seen(&peer.member).await;
                     if from == peer.member {
                         sink.wallet_frame(&from, &frame).await;
+                    }
+                    ack_all(acks);
+                }
+                MlsDecode::Gap(from, frame) => {
+                    sink.peer_seen(&peer.member).await;
+                    if from == peer.member && *frame.by() == from {
+                        sink.gap_frame(&from, &frame).await;
                     }
                     ack_all(acks);
                 }

@@ -62,6 +62,14 @@ const CONTROL_QUEUE: usize = 64;
 /// and a quiet live listener only proves itself by acking a round.
 const OPEN_ROUNDS: u32 = 2;
 
+/// Gap wants queued for the resend task before further ones are dropped
+/// (the asker re-asks).
+const GAP_QUEUE: usize = 16;
+
+/// One targeted resend per asker per this long: the bound that keeps a gap
+/// want from becoming a resend amplifier outside the hourly budget.
+const GAP_ANSWER_EVERY: Duration = Duration::from_secs(5);
+
 /// Test seam for the stall backoff, packed ms `first << 32 | cap` (`0` =
 /// production).
 static RESEND_BACKOFF_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -187,6 +195,8 @@ pub struct GroupHandle {
     /// Bounded and dropped-when-full, because each is worth exactly one
     /// best-effort attempt.
     controls: mpsc::Sender<Vec<u8>>,
+    /// Gap wants addressed at this node, awaiting their targeted resend.
+    gaps: mpsc::Sender<(MemberId, Vec<u64>)>,
     /// The engine's latest verdict on who can be reached: state, so a watch.
     reach: watch::Sender<OutboxReach>,
     /// Whether the outbox is mid-pass with own frames to publish - what
@@ -196,6 +206,7 @@ pub struct GroupHandle {
     inbox: Option<tokio::task::JoinHandle<()>>,
     ack: Option<tokio::task::JoinHandle<()>>,
     poke: Option<tokio::task::JoinHandle<()>>,
+    gap: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl GroupHandle {
@@ -219,6 +230,15 @@ impl GroupHandle {
         if let Some(poke) = self.poke.take() {
             let _ = poke.await;
         }
+        if let Some(gap) = self.gap.take() {
+            let _ = gap.await;
+        }
+    }
+
+    /// Queue a targeted resend of `seqs` for `to` (delivery guarantee
+    /// §10); `false` = dropped, the queue is full - the asker asks again.
+    pub fn answer_gap(&self, to: MemberId, seqs: Vec<u64>) -> bool {
+        self.gaps.try_send((to, seqs)).is_ok()
     }
 
     /// Queue the latest claim sheet for publication.
@@ -410,6 +430,18 @@ where
         controls_rx,
         stop_rx.clone(),
     ));
+    // a FIFTH: a targeted resend answers in seconds, never behind the
+    // outbox's pass or its hourly budget (delivery guarantee §10)
+    let (gaps, gaps_rx) = mpsc::channel(GAP_QUEUE);
+    let gap = tokio::spawn(gap_loop(
+        channel.clone(),
+        mls.clone(),
+        cfg.member.clone(),
+        log.clone(),
+        store.clone(),
+        gaps_rx,
+        stop_rx.clone(),
+    ));
     let (busy_tx, busy) = watch::channel(false);
     let (reach, reach_rx) = watch::channel(OutboxReach::default());
     let outbox = tokio::spawn(outbox_loop(
@@ -440,12 +472,84 @@ where
         stop,
         acks,
         controls,
+        gaps,
         reach,
         busy,
         outbox: Some(outbox),
         inbox: Some(inbox),
         ack: Some(ack),
         poke: Some(poke),
+        gap: Some(gap),
+    }
+}
+
+/// Answer gap wants: re-publish exactly the named own envelopes as fresh
+/// frames, then one [`crate::gap::GapAnswer`] naming what went out and
+/// what is not owed. Seqs past the publish cursor are the outbox's and
+/// left out. Per asker at most one answer per [`GAP_ANSWER_EVERY`].
+async fn gap_loop<L: OutboxLog, S: StateStore>(
+    channel: GroupChannel,
+    mls: MlsChannel,
+    me: MemberId,
+    log: L,
+    store: S,
+    mut rx: mpsc::Receiver<(MemberId, Vec<u64>)>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut answered: std::collections::HashMap<MemberId, tokio::time::Instant> =
+        std::collections::HashMap::new();
+    loop {
+        let (to, mut seqs) = tokio::select! {
+            got = rx.recv() => match got {
+                Some(g) => g,
+                None => return,
+            },
+            _ = stop.changed() => return,
+        };
+        let now = tokio::time::Instant::now();
+        if answered.get(&to).is_some_and(|t| now.duration_since(*t) < GAP_ANSWER_EVERY) {
+            tracing::debug!(%to, "gap_want=debounced");
+            continue;
+        }
+        answered.insert(to.clone(), now);
+        seqs.sort_unstable();
+        seqs.dedup();
+        seqs.truncate(crate::gap::GAP_MAX_SEQS);
+        let Some(&lo) = seqs.first() else { continue };
+        let cursor = store.load().await.group.unwrap_or_default().log_seq;
+        let envs = log.read_from(lo).await;
+        let (mut resent, mut gone) = (Vec::new(), Vec::new());
+        for seq in seqs.into_iter().filter(|s| *s <= cursor) {
+            let env = envs
+                .binary_search_by_key(&seq, |e| e.seq)
+                .ok()
+                .and_then(|i| envs.get(i))
+                .filter(|e| crate::supervisor::own_ackable(&me, e));
+            let Some(env) = env else {
+                gone.push(seq);
+                continue;
+            };
+            let Some(frame) = mls.group_frame(env) else {
+                if mls.evicted() {
+                    return;
+                }
+                continue;
+            };
+            match channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
+                Ok((_, report)) if !report.accepted.is_empty() => resent.push(seq),
+                Ok(_) => tracing::debug!(%to, seq, "gap resend accepted by no relay"),
+                Err(e) => tracing::debug!(%to, seq, error = %e, "gap resend failed"),
+            }
+        }
+        if resent.is_empty() && gone.is_empty() {
+            continue;
+        }
+        tracing::info!(%to, resent = resent.len(), gone = gone.len(), "gap_answered");
+        let ans = crate::gap::GapAnswer::new(me.clone(), to, resent, gone);
+        let Some(frame) = mls.group_control_frame(&ans.to_frame()) else { continue };
+        if let Err(e) = channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
+            tracing::debug!(error = %e, "publishing a gap answer failed");
+        }
     }
 }
 
@@ -1492,6 +1596,7 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
             | MlsDecode::GroupAck(..)
             | MlsDecode::Poke(..)
             | MlsDecode::PieceWanted(..)
+            | MlsDecode::Gap(..)
             | MlsDecode::MirrorDecl(..)
             | MlsDecode::MirrorStatus(..)
             | MlsDecode::MirrorWho(..)
@@ -1550,6 +1655,15 @@ async fn ingest_one<L: OutboxLog, S: StateStore, K: EngineSink>(
                 return Ingest::Nothing;
             }
             sink.piece_wanted(&from, &want).await;
+            Ingest::Nothing
+        }
+        MlsDecode::Gap(from, frame) => {
+            sink.peer_seen(&from).await;
+            if *frame.by() != from {
+                tracing::warn!(%from, claimed = %frame.by(), "a gap frame disowns its sender - dropped");
+                return Ingest::Nothing;
+            }
+            sink.gap_frame(&from, &frame).await;
             Ingest::Nothing
         }
         MlsDecode::MirrorDecl(from, decl) => {
