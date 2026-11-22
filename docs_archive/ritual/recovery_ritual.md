@@ -332,7 +332,7 @@ The group gets the complementary guarantees:
   security. A minted link dies with the coordinator's session; after a
   restart, mint again.
 - **No restore of a live seat, none by itself (B3, 2026-11-21,
-  `docs/chain/rejoin_divergence_build_plan.md`).** A coordinator refuses to
+  `docs_archive/chain/rejoin_divergence_build_plan.md`).** A coordinator refuses to
   mint, ingest, auto-approve or seal a `Restored` for a seat it heard
   within `SILENT_AFTER_SECS` (`seat still active`; "heard" = an
   MLS-authenticated frame of the seat's current leaf) or while it holds a

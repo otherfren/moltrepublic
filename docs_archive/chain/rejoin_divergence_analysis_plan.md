@@ -1,8 +1,9 @@
 # Chain divergence and failed rejoin: analysis and test plan
 
-**Status: Phases O and L (isolated) done 2026-11-21, results in
-`docs/chain/rejoin_divergence_findings.md`; §7 awaits the user before
-any production change. Q-a in §9 is open.** Successor of `docs/chain/chain_divergence_plan.md` (S1-S5 built
+**Status: EXECUTED (archived 2026-11-22). Findings:
+`docs_archive/chain/rejoin_divergence_findings.md`; §7 was built as
+`docs_archive/chain/rejoin_divergence_build_plan.md` (v0.1.0) except the
+rescue F-X1, which is open in `docs/chain/chain_rescue_plan.md`.** Successor of `docs/chain/chain_divergence_plan.md` (S1-S5 built
 in v0.0.18, S6 open). Its fix candidates (§7) become a build plan only
 after the analysis confirms them.
 

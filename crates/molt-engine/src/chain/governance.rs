@@ -654,7 +654,7 @@ impl State {
         self.adopt_committed_block(block, id);
     }
 
-    /// B6 (`docs/chain/rejoin_divergence_build_plan.md`): the sealing line
+    /// B6 (`docs_archive/chain/rejoin_divergence_build_plan.md`): the sealing line
     /// at `height` - the roster seats heard within
     /// [`super::sync::SILENT_AFTER_SECS`] (this seat always), by name. Per
     /// height, never per proposal: two proposals at one height must not

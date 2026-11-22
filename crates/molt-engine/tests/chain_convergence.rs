@@ -190,7 +190,7 @@ async fn sync_of(w: &WalletHandle) -> (String, u64) {
     }
 }
 
-/// B6 (`docs/chain/rejoin_divergence_build_plan.md`): three seats of a
+/// B6 (`docs_archive/chain/rejoin_divergence_build_plan.md`): three seats of a
 /// 2-of-3 republic propose in bursts and approve whatever they see, while
 /// every tenth inbound frame is lost on first arrival. All three end on one
 /// head hash with no restart, and

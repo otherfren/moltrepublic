@@ -2,7 +2,7 @@
 
 //! `dev_relay` without its rate limit and replay cap, for replaying a
 //! stored republic against it
-//! (`docs/chain/rejoin_divergence_analysis_plan.md`, Phase L).
+//! (`docs_archive/chain/rejoin_divergence_analysis_plan.md`, Phase L).
 //!
 //! ```text
 //! cargo run -p molt-net --example sandbox_relay -- [port]

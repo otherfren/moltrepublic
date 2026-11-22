@@ -1275,7 +1275,7 @@ fn the_wallet_rule_survives_a_cut() {
     assert_eq!(walter.wallet_view().phase, molt_core::wallet::WalletPhase::Bounds, "2-of-2 is outside W1");
 }
 
-/// B6 (`docs/chain/rejoin_divergence_build_plan.md`): a cut drops the
+/// B6 (`docs_archive/chain/rejoin_divergence_build_plan.md`): a cut drops the
 /// history a fork is healed with, so none is proposed, auto-proposed or
 /// co-signed while a peer is diverged or fork candidates are held.
 #[test]
