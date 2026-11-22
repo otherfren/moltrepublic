@@ -474,6 +474,15 @@ async fn a_vote_enables_the_lock_in_an_older_republic() {
     lock_on(&[&mara, &walter, &dora], false).await;
     let names = ["mara", "walter", "dora"];
     burst(&[&mara, &walter, &dora], &names, "pre", 1, 3, 180).await;
+    // R3: a pre-lock republic leaves no lock trace - v0.1.0 still opens it
+    for (w, name) in [&mara, &walter, &dora].into_iter().zip(names) {
+        let ws = read_session(w).await.active_workspace.clone();
+        let dir = molt_storage::find_workspace_dir(&tmp.path().join(name), &ws).expect("workspace dir");
+        assert!(!dir.join(molt_storage::CHAIN_LOCK_FILE).exists(), "{name}: no lock file");
+        let version = molt_storage::read_manifest(&dir).expect("manifest").version;
+        assert!(version < molt_core::STORAGE_VERSION_LOCK, "{name}: manifest {version}");
+        assert!(!molt_storage::read_prefs(&dir).chain_lock, "{name}: no lock marker");
+    }
     // every seat announced the capability before dora goes away
     let enable = serde_json::json!({ "op": "set_features", "value": "chain-lock memory" });
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);

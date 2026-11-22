@@ -445,7 +445,8 @@ impl State {
 
     /// `member` signed freely at `height` (verified, or its free `Nack`).
     pub(crate) fn lock_note_free(&mut self, member: &str, height: u64) {
-        if !self.lock_cap_on() || !self.lock_rostered(member) || member == self.member() {
+        // R3: a chain without the lock keeps no lock state (W7)
+        if !self.lock_cap_on() || !self.lock_enabled() || !self.lock_rostered(member) || member == self.member() {
             return;
         }
         if self.chain.lock.free_seen.entry(height).or_default().insert(member.to_string()) {
@@ -460,6 +461,7 @@ impl State {
         let next = self.chain.head.as_ref().map_or(0, |h| h.height + 1);
         // an amnesiac seat may have forgotten an acceptance: it stays passive
         if height != next
+            || !self.lock_enabled()
             || self.chain.lock.acceptor.signed_freely(height)
             || self.lock_amnesiac_at(height)
             || !self.lock_dead_at(height)

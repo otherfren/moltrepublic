@@ -1062,3 +1062,18 @@ fn a_backoff_after_yielding_to_a_restored_seat_is_dropped() {
     let run = dora.chain.lock.run.as_ref().expect("dora leads again at once");
     assert!(run.leader.ballot.round > 9, "above walter's ballot");
 }
+
+/// Review R3: where the chain does not run the lock, a peer's free
+/// signature writes no lock state - no file, no manifest bump, no marker.
+#[test]
+fn a_pre_lock_republic_writes_no_lock_state() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    mara.chain.lock.enabled_override = Some(false);
+    for m in ["walter", "dora"] {
+        mara.lock_note_free(m, 1);
+    }
+    mara.lock_tick();
+    assert!(mara.chain.lock.disk.is_none(), "nothing persisted");
+    assert!(!mara.chain.lock.acceptor.signed_freely(1), "no free mark");
+}
