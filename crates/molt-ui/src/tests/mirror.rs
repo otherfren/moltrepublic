@@ -34,6 +34,11 @@ fn recover_notices_parse_into_their_ui_effects() {
         parse_recover_notice("recovery-link-pending:ashi"),
         RecoverNotice::LinkPending("ashi".to_string())
     );
+    // review R8: a mint still waiting names why; the seat stays the seat
+    assert_eq!(
+        parse_recover_notice("recovery-link-pending:ashi:no relay answers"),
+        RecoverNotice::LinkPending("ashi".to_string())
+    );
     assert_eq!(
         parse_recover_notice("recovery-link-failed:mesh-not-running"),
         RecoverNotice::LinkFailed("mesh-not-running".to_string())

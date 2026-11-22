@@ -41,6 +41,11 @@ impl State {
     /// checked for cross-seat collision and proven-possessed HERE — before
     /// the ticket is spent and before it can reach a `Restored` block —
     /// exactly like `cmd_net_join_requested`.
+    ///
+    /// Every run on one link shares its transport key, so the run itself is
+    /// told apart by its attempt id (a hash of its KeyPackage): a replayed
+    /// earlier run never replaces a later one, and every answer names the
+    /// run it answers.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn cmd_net_recover_requested(
         &mut self,
@@ -54,12 +59,13 @@ impl State {
         consent: String,
         reply: String,
         sender_npub: String,
-        anchor_first: bool,
+        (anchor_first, started): (bool, u64),
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         if !self.net_scope_current(generation) {
             return Ok(Reply::Ack);
         }
+        let attempt = molt_net::invite::recover_attempt_id(&key_package);
         // the ticket must be a live one this node minted for THIS seat
         // (review R8): a member holding its own phrase must not spend
         // another seat's link
@@ -82,14 +88,6 @@ impl State {
                 }
             }
         };
-        // …and it must not collide with a seat that already holds it: the
-        // complete register (review C8) - founding anchors, every Restored
-        // block's anchor and the blob's working anchors. Relays replay every
-        // stored request wrap, and an accepted request's anchor is in here.
-        if !canonical.is_empty() && self.anchor_seen_in_chain(&canonical) {
-            tracing::debug!(%member, "recovery request reuses an anchored transport key - dropped");
-            return Ok(Reply::Ack);
-        }
         // PROOF-OF-POSSESSION (§2.1, the founding twin at `cmd_net_join_requested`):
         // the anchor claimed here must BE the key that sealed the gift wrap.
         // The seat proof already binds it under the identity key, so this does
@@ -109,15 +107,38 @@ impl State {
             );
             return Ok(Reply::Ack);
         }
+        // the seat proved: only such a sender is ever answered (review R4)
+        let proven = || {
+            self.seat_proof_holds(&member, &identity_pk, &key_package, &ticket, &seat_proof, &canonical, &relays)
+        };
+        // …and it must not collide with a seat that already holds it: the
+        // complete register (review C8) - founding anchors, every Restored
+        // block's anchor and the blob's working anchors. Relays replay every
+        // stored request wrap, and an accepted request's anchor is in here.
+        // A NEW run on a link whose re-admission sealed shares that anchor:
+        // it hears `link outdated` (review R2), a replay stays silent.
+        if !canonical.is_empty() && self.anchor_seen_in_chain(&canonical) {
+            if !self.recovery.attempts.is_spent(&attempt) && proven() {
+                self.answer_link_outdated(&member, &attempt, &canonical);
+            } else {
+                tracing::debug!(%member, "recovery request reuses an anchored transport key - dropped");
+            }
+            return Ok(Reply::Ack);
+        }
         // B3: a seat never restores itself - an older build's link-less
         // request is answered, never proposed
         if !ticketed {
-            // a build that asks anchor-first never self-services: its link
-            // is one this node forgot (a restart)
-            if anchor_first {
-                self.answer_link_outdated(&member, &ticket, &canonical);
+            let spent = self.recovery.spent_tickets.contains(&ticket);
+            if self.recovery.attempts.is_spent(&attempt) {
+                tracing::debug!(%member, "recover_request=replayed");
+            } else if !proven() {
+                tracing::debug!(%member, "recover_request=unproven");
+            } else if anchor_first || spent {
+                // a build that asks anchor-first never self-services: its
+                // link is one this node forgot (a restart) or spent
+                self.answer_link_outdated(&member, &attempt, &canonical);
             } else {
-                self.refuse_unsolicited(&member, &canonical, &sender_npub);
+                self.refuse_unsolicited(&member, &attempt, &canonical, &sender_npub);
             }
             return Ok(Reply::Ack);
         }
@@ -134,17 +155,21 @@ impl State {
             && self.transport_kind == Some(molt_core::TransportKind::Nostr)
             && !self.seal_first.load(std::sync::atomic::Ordering::SeqCst)
         {
-            // the same request again: a relay's replay, or a rejoiner that
-            // got no piece and cannot name the missing ones
-            if self
-                .recovery
-                .anchor_first
-                .get(&ticket)
-                .is_some_and(|a| a.key_package == key_package && a.new_nostr_pk == canonical)
-            {
+            let held = self.recovery.anchor_first.get(&ticket).map(|a| (a.attempt.clone(), a.started));
+            // the same run again: a relay's replay, or a rejoiner that got
+            // no piece and cannot name the missing ones
+            if held.as_ref().is_some_and(|(a, _)| *a == attempt) {
                 self.resend_anchor(&ticket, None, REASK_DEBOUNCE);
                 return Ok(Reply::Ack);
             }
+            // review R3: an earlier run replayed never replaces a later one
+            let older = held.as_ref().is_some_and(|(_, s)| started > 0 && *s > 0 && started < *s);
+            if self.recovery.attempts.was_seen(&ticket, &attempt) || older {
+                self.note_attempt_seen(&ticket, &attempt);
+                tracing::debug!(%member, "recover_request=superseded");
+                return Ok(Reply::Ack);
+            }
+            self.note_attempt_seen(&ticket, &attempt);
             if let Err(e) = self.check_restore_request(
                 &member,
                 &identity_pk,
@@ -155,18 +180,20 @@ impl State {
                 &relays,
                 &consent,
             ) {
-                // the same rejoiner's new run, refused: its open attempt is dead
+                // the same rejoiner's newer run, refused: its open attempt is dead
                 if self.recovery.anchor_first.get(&ticket).is_some_and(|a| a.new_nostr_pk == canonical) {
                     if let Some(a) = self.recovery.anchor_first.remove(&ticket) {
                         a.abort();
                     }
                 }
-                self.refuse_recover_request(&member, &sender_npub, e);
+                self.refuse_recover_request(&member, &sender_npub, e, &attempt);
                 return Ok(Reply::Ack);
             }
             let now = tokio::time::Instant::now();
-            let attempt = crate::chain::AnchorFirst {
+            let run = crate::chain::AnchorFirst {
                 member: member.to_string(),
+                attempt,
+                started,
                 identity_pk,
                 key_package,
                 seat_proof,
@@ -183,7 +210,7 @@ impl State {
                 counts: std::sync::Arc::default(),
             };
             // the anchor cannot travel as gift wraps: seal-first
-            if let Some(a) = self.start_anchor_first(&ticket, attempt) {
+            if let Some(a) = self.start_anchor_first(&ticket, run) {
                 self.propose_restore(
                     &member,
                     &a.identity_pk,
@@ -214,6 +241,69 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Review R10: a frame of `member` stamped `ts` arrived (the stamp is
+    /// the sender's, bounded by now).
+    pub(crate) fn note_frame_heard(&mut self, member: &str, ts: u64) {
+        let at = ts.min(self.presence_now());
+        let e = self.recovery.frame_heard.entry(member.to_string()).or_insert(0);
+        *e = (*e).max(at);
+    }
+
+    /// Review R10: when `member` was last heard, as the restore gate must
+    /// read it. A receipt stamped within the catch-up grace after this
+    /// open may be a replayed backlog frame of a lost device, so there only
+    /// the frame's own stamp counts; otherwise the later of the two.
+    #[allow(dead_code)] // restore_gate's reading; that function is wired separately
+    pub(crate) fn restore_heard_at(&self, member: &str) -> u64 {
+        const CATCH_UP_GRACE_SECS: u64 = 120;
+        let framed = self.recovery.frame_heard.get(member).copied().unwrap_or(molt_core::MemberInfo::NEVER);
+        let seen = self.member_last_seen(member);
+        let opened = self.recovery.opened_at;
+        let replayed = opened > 0 && seen >= opened && seen < opened.saturating_add(CATCH_UP_GRACE_SECS);
+        if replayed {
+            framed
+        } else {
+            framed.max(seen)
+        }
+    }
+
+    /// Whether the request's seat proof verifies against the seat's
+    /// anchored identity - for any ticket, minted here or not.
+    #[allow(clippy::too_many_arguments)] // one request's fields, not a bag
+    fn seat_proof_holds(
+        &self,
+        member: &str,
+        identity_pk: &str,
+        key_package: &str,
+        ticket: &str,
+        seat_proof: &str,
+        anchor: &str,
+        relays: &[String],
+    ) -> bool {
+        let anchored = self
+            .replica
+            .as_ref()
+            .and_then(|r| r.identities.iter().find(|i| i.member == member))
+            .map(|i| i.identity_pk.clone());
+        anchored.is_some_and(|pk| {
+            pk == identity_pk
+                && crate::founding::verify_seat_proof(
+                    &pk,
+                    ticket,
+                    key_package,
+                    &self.republic_id(),
+                    anchor,
+                    relays,
+                    seat_proof,
+                )
+        })
+    }
+
+    fn note_attempt_seen(&mut self, ticket: &str, attempt: &str) {
+        let live = self.recovery.tickets.clone();
+        self.recovery.attempts.note_seen(ticket, attempt, &live);
+    }
+
     /// Propose a verified request's `Restored` card now (the seal-first
     /// order, or an anchor-first attempt at its Ready), spending the
     /// ticket; a refusal answers the rejoiner. `true` = proposed.
@@ -231,6 +321,7 @@ impl State {
         reply: &str,
         sender_npub: &str,
     ) -> bool {
+        let attempt = molt_net::invite::recover_attempt_id(key_package);
         // NB: on a verified request, verify_and_propose_restore registers the
         // pending recovery BEFORE proposing (a lone coordinator commits the
         // block synchronously inside the propose, which consumes that entry)
@@ -252,10 +343,9 @@ impl State {
                 self.recovery.tickets.remove(ticket);
                 self.recovery.spent_tickets.insert(ticket.to_string());
                 // a relay re-delivers the request with the ticket spent: it
-                // is the same request, not a link-less one to refuse
-                self.recovery
-                    .unsolicited_cooldown
-                    .insert((member.to_string(), canonical.to_string()), crate::now_secs());
+                // is the same run, not one to answer
+                self.recovery.attempts.note_spent(&attempt);
+                self.clear_link_notice(ticket);
                 tracing::info!(%member, "recovery seat proof verified - proposing re-admission");
                 // the first checklist frame: the rejoiner learns the roster,
                 // the threshold and the voices already counted
@@ -263,9 +353,24 @@ impl State {
                 true
             }
             Err(e) => {
-                self.refuse_recover_request(member, sender_npub, e);
+                self.refuse_recover_request(member, sender_npub, e, &attempt);
                 false
             }
+        }
+    }
+
+    /// F1: a link is a bearer secret - once its ticket is spent, withdrawn
+    /// or its attempt evicted, the notice stops showing it.
+    pub(crate) fn clear_link_notice(&mut self, ticket: &str) {
+        let shows = self
+            .session
+            .notice
+            .strip_prefix("recovery-link:")
+            .and_then(crate::recovery::RecoveryInvite::parse)
+            .is_some_and(|inv| inv.ticket == ticket);
+        if shows {
+            self.session.notice.clear();
+            self.emit_session(SessionScope::Full);
         }
     }
 
@@ -273,14 +378,18 @@ impl State {
     /// the rejoiner (WP6) - answered only behind the ticket + PoP gates, so
     /// an unknown ticket stays a silent drop; the ticket is NOT spent (the
     /// same link with the right phrase still works).
-    fn refuse_recover_request(&mut self, member: &str, sender_npub: &str, e: String) {
+    fn refuse_recover_request(&mut self, member: &str, sender_npub: &str, e: String, attempt: &str) {
         self.session.notice = format!("recover-refused:{member}:{e}");
         self.emit_session(SessionScope::Full);
         tracing::warn!(%member, error = %e, "dropping an invalid recovery request");
         if !sender_npub.is_empty() {
             self.send_recover_frame(
                 sender_npub.to_string(),
-                molt_net::invite::RitualMsg::RecoverRefused { member: member.to_string(), reason: e },
+                molt_net::invite::RitualMsg::RecoverRefused {
+                    member: member.to_string(),
+                    reason: e,
+                    attempt: attempt.to_string(),
+                },
             );
         }
     }
@@ -311,6 +420,7 @@ impl State {
                 index,
                 total,
                 event: event.clone(),
+                attempt: attempt.attempt.clone(),
             })
             .collect();
         attempt.frames = frames;
@@ -348,6 +458,7 @@ impl State {
             if let Some(a) = self.recovery.anchor_first.remove(&oldest) {
                 tracing::info!(member = %a.member, open = MAX_ANCHOR_ATTEMPTS, "recover_attempt=evicted");
                 a.abort();
+                self.clear_link_notice(&oldest);
             }
         }
     }
@@ -370,11 +481,18 @@ impl State {
             None => (0..total).collect(),
         };
         let member = a.member.clone();
+        let run = a.attempt.clone();
         let msgs: Vec<molt_net::invite::RitualMsg> = wanted
             .iter()
             .filter_map(|i| {
                 let event = a.frames.get(usize::try_from(*i).ok()?)?.clone();
-                Some(molt_net::invite::RitualMsg::RecoverAnchor { member: member.clone(), index: *i, total, event })
+                Some(molt_net::invite::RitualMsg::RecoverAnchor {
+                    member: member.clone(),
+                    index: *i,
+                    total,
+                    event,
+                    attempt: run.clone(),
+                })
             })
             .collect();
         if msgs.is_empty() {
@@ -415,6 +533,25 @@ impl State {
         }
     }
 
+    /// The attempt a Want/Ready names, held for `ticket`: `None` when none
+    /// is held, `Some(false)` when the frame is not from that run.
+    fn held_run(&self, ticket: &str, member: &str, attempt: &str, sender: &str) -> Option<bool> {
+        self.recovery.anchor_first.get(ticket).map(|a| {
+            a.member == member && a.new_nostr_pk == sender && (attempt.is_empty() || a.attempt == attempt)
+        })
+    }
+
+    /// A Want/Ready for an attempt this node does not hold: answered only
+    /// for a ticket it minted and has not spent (review R4); anything else
+    /// is a relay's replay or a prober, dropped.
+    fn answer_unheld(&mut self, member: &str, ticket: &str, attempt: &str, sender: &str) {
+        if self.recovery.attempts.minted(ticket) && !self.recovery.spent_tickets.contains(ticket) {
+            self.answer_link_outdated(member, attempt, sender);
+        } else {
+            tracing::debug!(%member, "recover_frame=unknown_ticket");
+        }
+    }
+
     /// B4 step 3: the rejoiner misses anchor pieces - re-send them,
     /// debounced. An attempt this node does not hold is `link outdated`.
     pub(crate) fn cmd_net_recover_want(
@@ -422,6 +559,7 @@ impl State {
         member: &str,
         ticket: &str,
         missing: &[u32],
+        attempt: &str,
         sender: &str,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
@@ -429,15 +567,11 @@ impl State {
             return Ok(Reply::Ack);
         }
         let sender = molt_net::canonical_nostr_pk(sender).unwrap_or_default();
-        let Some(a) = self.recovery.anchor_first.get(ticket) else {
-            self.answer_link_outdated(member, ticket, &sender);
-            return Ok(Reply::Ack);
-        };
-        if a.member != member || a.new_nostr_pk != sender {
-            tracing::debug!(%member, "recover_want=not_from_the_rejoiner");
-            return Ok(Reply::Ack);
+        match self.held_run(ticket, member, attempt, &sender) {
+            None => self.answer_unheld(member, ticket, attempt, &sender),
+            Some(false) => tracing::debug!(%member, "recover_want=not_from_the_rejoiner"),
+            Some(true) => self.resend_anchor(ticket, Some(missing), WANT_DEBOUNCE),
         }
-        self.resend_anchor(ticket, Some(missing), WANT_DEBOUNCE);
         Ok(Reply::Ack)
     }
 
@@ -447,6 +581,7 @@ impl State {
         &mut self,
         member: &str,
         ticket: &str,
+        attempt: &str,
         sender: &str,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
@@ -454,10 +589,9 @@ impl State {
             return Ok(Reply::Ack);
         }
         let sender = molt_net::canonical_nostr_pk(sender).unwrap_or_default();
-        let ours = self.recovery.anchor_first.get(ticket).map(|a| a.member == member && a.new_nostr_pk == sender);
-        match ours {
+        match self.held_run(ticket, member, attempt, &sender) {
             None => {
-                self.answer_link_outdated(member, ticket, &sender);
+                self.answer_unheld(member, ticket, attempt, &sender);
                 return Ok(Reply::Ack);
             }
             Some(false) => {
@@ -472,13 +606,15 @@ impl State {
         let member = member.to_string();
         tracing::info!(%member, "recover_ready=received");
         if !self.recovery.tickets.get(ticket).is_some_and(|m| *m == member) {
+            let run = a.attempt.clone();
             a.abort();
-            self.answer_link_outdated(&member, ticket, &sender);
+            self.answer_link_outdated(&member, &run, &sender);
             return Ok(Reply::Ack);
         }
         if self.readmission_in_flight(&member) {
+            let run = a.attempt.clone();
             a.abort();
-            self.refuse_recover_request(&member, &sender, "another rejoin of this seat is running".to_string());
+            self.refuse_recover_request(&member, &sender, "another rejoin of this seat is running".to_string(), &run);
             return Ok(Reply::Ack);
         }
         let seat = (member.clone(), a.new_nostr_pk.clone());
@@ -509,53 +645,59 @@ impl State {
         }
     }
 
-    /// A Want/Ready for an attempt this node does not hold: a coordinator
-    /// that restarted lost it. Answered once per sender and window; a
-    /// ticket it spent itself stays silent (a relay's replay).
-    fn answer_link_outdated(&mut self, member: &str, ticket: &str, sender: &str) {
-        const OUTDATED_COOLDOWN_SECS: u64 = 1_800;
-        if sender.is_empty() || self.recovery.spent_tickets.contains(ticket) {
-            return;
-        }
+    /// One answer per key and window: relays replay 1059 wraps on every
+    /// resubscribe. The map is pruned and capped on every insert.
+    pub(crate) fn answer_once(&mut self, key: (String, String)) -> bool {
+        const ANSWER_COOLDOWN_SECS: u64 = 1_800;
+        const ANSWERS_MAX: usize = 256;
         let now = crate::now_secs();
-        let key = (format!("outdated:{member}"), sender.to_string());
-        if self
-            .recovery
-            .unsolicited_cooldown
-            .get(&key)
-            .is_some_and(|t| now.saturating_sub(*t) < OUTDATED_COOLDOWN_SECS)
-        {
+        let map = &mut self.recovery.unsolicited_cooldown;
+        map.retain(|_, t| now.saturating_sub(*t) < ANSWER_COOLDOWN_SECS);
+        if map.contains_key(&key) {
+            return false;
+        }
+        while map.len() >= ANSWERS_MAX {
+            let Some(oldest) = map.iter().min_by_key(|(_, t)| **t).map(|(k, _)| k.clone()) else {
+                break;
+            };
+            map.remove(&oldest);
+        }
+        map.insert(key, now);
+        true
+    }
+
+    /// `link outdated` to one run: a coordinator that restarted lost its
+    /// attempt, or the link's ticket is spent. Callers have authenticated
+    /// the run (a seat proof, or a ticket this node minted).
+    fn answer_link_outdated(&mut self, member: &str, attempt: &str, sender: &str) {
+        if sender.is_empty() || !self.answer_once((format!("outdated:{member}:{attempt}"), sender.to_string())) {
             return;
         }
-        self.recovery.unsolicited_cooldown.insert(key, now);
         tracing::warn!(%member, reason = LINK_OUTDATED, "recover_refused");
         self.send_recover_frame(
             sender.to_string(),
-            molt_net::invite::RitualMsg::RecoverRefused { member: member.to_string(), reason: LINK_OUTDATED.to_string() },
+            molt_net::invite::RitualMsg::RecoverRefused {
+                member: member.to_string(),
+                reason: LINK_OUTDATED.to_string(),
+                attempt: attempt.to_string(),
+            },
         );
     }
 
     /// B3: answer a link-less (self-service) request - an older build
-    /// restoring itself - with `rejoin needs a link`, once per
-    /// `(seat, anchor)` and window: relays replay 1059 wraps on every
-    /// resubscribe. Never proposed, so a live seat is never re-keyed by it.
-    fn refuse_unsolicited(&mut self, member: &str, anchor: &str, sender_npub: &str) {
-        const UNSOLICITED_COOLDOWN_SECS: u64 = 1_800;
-        let now = crate::now_secs();
-        self.recovery
-            .unsolicited_cooldown
-            .retain(|_, t| now.saturating_sub(*t) < UNSOLICITED_COOLDOWN_SECS);
-        let key = (member.to_string(), anchor.to_string());
+    /// restoring itself, its seat proof verified - with `rejoin needs a
+    /// link`, once per `(seat, anchor)` and window. Never proposed, so a
+    /// live seat is never re-keyed by it.
+    fn refuse_unsolicited(&mut self, member: &str, attempt: &str, anchor: &str, sender_npub: &str) {
         let proposed = |p: &crate::chain::PendingRecovery| {
             matches!(&p.card, molt_core::ChainChange::Membership { nostr_pk: Some(a), .. } if a == anchor)
         };
         let ours = self.recovery.pending.get(member).is_some_and(proposed)
             || self.recovery.swept.get(member).is_some_and(proposed);
-        if ours || self.recovery.unsolicited_cooldown.contains_key(&key) {
+        if ours || !self.answer_once((member.to_string(), anchor.to_string())) {
             tracing::debug!(%member, "recovery request already answered or proposed - dropped");
             return;
         }
-        self.recovery.unsolicited_cooldown.insert(key, now);
         tracing::warn!(%member, reason = crate::chain::REJOIN_NEEDS_A_LINK, "recover_refused");
         if !sender_npub.is_empty() {
             self.send_recover_frame(
@@ -563,20 +705,45 @@ impl State {
                 molt_net::invite::RitualMsg::RecoverRefused {
                     member: member.to_string(),
                     reason: crate::chain::REJOIN_NEEDS_A_LINK.to_string(),
+                    attempt: attempt.to_string(),
                 },
             );
         }
     }
 
-    /// A returning member's rejoin failed after its re-admission: log why,
-    /// when the frame came from that seat's latest re-anchor.
+    /// A returning member's run failed or was cancelled. With an attempt id
+    /// from that run's key it is withdrawn (review R2): an open anchor-first
+    /// attempt is dropped, an unsealed card withdrawn. Without one (an
+    /// older rejoiner, after its re-admission) it is only logged.
     pub(crate) fn cmd_net_recover_peer_failed(
         &mut self,
         member: &str,
         reason: &str,
         version: &str,
+        attempt: &str,
         sender: &str,
     ) -> Result<Reply, MoltError> {
+        let canonical = molt_net::canonical_nostr_pk(sender).unwrap_or_default();
+        if !attempt.is_empty() && !canonical.is_empty() {
+            let open = self
+                .recovery
+                .anchor_first
+                .iter()
+                .find(|(_, a)| a.member == member && a.attempt == attempt && a.new_nostr_pk == canonical)
+                .map(|(t, _)| t.clone());
+            if let Some(ticket) = open {
+                if let Some(a) = self.recovery.anchor_first.remove(&ticket) {
+                    a.abort();
+                }
+                self.clear_link_notice(&ticket);
+                tracing::info!(%member, stage = "anchor", "recover_withdrawn");
+                return Ok(Reply::Ack);
+            }
+            if self.withdraw_restore(member, attempt, &canonical) {
+                tracing::info!(%member, stage = "card", "recover_withdrawn");
+                return Ok(Reply::Ack);
+            }
+        }
         let anchor = self.chain.blocks.iter().rev().find_map(|b| match &b.change {
             molt_core::ChainChange::Membership {
                 op: molt_core::MembershipOp::Restored,
@@ -586,7 +753,6 @@ impl State {
             } if m == member => Some(nostr_pk.clone().unwrap_or_default()),
             _ => None,
         });
-        let canonical = molt_net::canonical_nostr_pk(sender).unwrap_or_default();
         if !anchor.is_some_and(|a| !a.is_empty() && a == canonical) {
             tracing::debug!(member = ?member, "recovery_failed frame=not_from_the_seat");
             return Ok(Reply::Ack);
@@ -622,6 +788,8 @@ impl State {
             roster: report.roster,
             approved: report.approved,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            attempt: report.attempt,
+            sealed: report.sealed,
         };
         self.send_recover_frame(to, msg);
     }
@@ -687,6 +855,9 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return;
         };
+        if self.recovery.opened_at == 0 {
+            self.recovery.opened_at = self.presence_now();
+        }
         self.recovery.seat_inbox = Some(crate::nostr_ritual::spawn_seat_inbox(
             net,
             self.net_scope,
@@ -880,6 +1051,8 @@ impl State {
         // register BEFORE the inbox can carry a request, so the spend-once
         // guard is armed the moment the returning member answers
         self.recovery.tickets.insert(ticket.clone(), member.clone());
+        self.recovery.attempts.note_minted(&ticket);
+        self.snapshot_to_disk();
         // ONE inbox per open workspace. Every mint subscribes the same filter
         // on the same anchor (kind 1059, #p = this seat), so a second
         // subscription would duplicate every delivery and add another set of
@@ -933,6 +1106,28 @@ impl State {
         tracing::info!(%member, "recovery link ready");
         self.session.notice = format!("recovery-link:{link}");
         self.emit_session(molt_core::SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// Review R8: the minted link's inbox is still not readable - the
+    /// pending notice says why, while it is still the one showing.
+    pub(crate) fn cmd_net_recover_link_waiting(
+        &mut self,
+        member: &str,
+        reason: &str,
+        generation: Option<u64>,
+    ) -> Result<Reply, MoltError> {
+        if !self.net_scope_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        let pending = format!("recovery-link-pending:{member}");
+        let shows = self.session.notice == pending
+            || self.session.notice.strip_prefix(&pending).is_some_and(|r| r.starts_with(':'));
+        let notice = format!("{pending}:{reason}");
+        if shows && self.session.notice != notice {
+            self.session.notice = notice;
+            self.emit_session(SessionScope::Full);
+        }
         Ok(Reply::Ack)
     }
 

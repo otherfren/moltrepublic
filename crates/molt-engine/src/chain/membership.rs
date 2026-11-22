@@ -28,6 +28,10 @@ pub(crate) struct RecoverProgressReport {
     /// The rejoiner's NEW transport anchor (the gift-wrap address); `None`
     /// on an anchor-less (loopback) recovery.
     pub to: Option<String>,
+    /// The run it reports to (`recover_attempt_id`).
+    pub attempt: String,
+    /// The block sealed: nothing can be withdrawn now.
+    pub sealed: bool,
 }
 
 /// The group's rejoin notification - the one thing members see. Since B3
@@ -49,6 +53,8 @@ pub(crate) struct PendingRecovery {
     pub reply: String,
     /// The card this request proposed: only its block re-keys with it.
     pub card: ChainChange,
+    /// The link's ticket: a withdrawn card gives it back.
+    pub ticket: String,
 }
 
 /// B4: an anchor-first recovery between the served anchor and the
@@ -57,6 +63,10 @@ pub(crate) struct PendingRecovery {
 /// a `RecoverWant` re-sends. Nothing is proposed while it lives.
 pub(crate) struct AnchorFirst {
     pub member: String,
+    /// The run (`recover_attempt_id` of its KeyPackage).
+    pub attempt: String,
+    /// The run's own start stamp (0 = an older rejoiner).
+    pub started: u64,
     pub identity_pk: String,
     pub key_package: String,
     pub seat_proof: String,
@@ -76,6 +86,71 @@ pub(crate) struct AnchorFirst {
     pub touched: tokio::time::Instant,
     pub logged_at: Option<tokio::time::Instant>,
     pub counts: std::sync::Arc<RecoverSendCounts>,
+}
+
+/// Runs remembered per ticket, spent runs and minted tickets: each a
+/// bounded ring, oldest out.
+const SEEN_PER_TICKET: usize = 16;
+const SPENT_ATTEMPTS: usize = 64;
+pub(crate) const MINTED_TICKETS: usize = 64;
+
+/// Review R1-R4: what ties a frame to one rejoin run, and which senders
+/// this coordinator answers at all.
+#[derive(Default)]
+pub(crate) struct AttemptBook {
+    /// Per ticket, the runs seen on it.
+    pub seen: std::collections::HashMap<String, std::collections::VecDeque<String>>,
+    /// Runs that proposed (spent their ticket): a replay stays silent.
+    pub spent: std::collections::VecDeque<String>,
+    /// Fingerprints of tickets this node minted: only their Want/Ready
+    /// earn a `link outdated`. Persisted.
+    pub minted: std::collections::VecDeque<String>,
+}
+
+/// Push onto a bounded ring unless present; `true` when new.
+fn ring_note(ring: &mut std::collections::VecDeque<String>, item: &str, cap: usize) -> bool {
+    if ring.iter().any(|x| x == item) {
+        return false;
+    }
+    ring.push_back(item.to_string());
+    while ring.len() > cap {
+        ring.pop_front();
+    }
+    true
+}
+
+/// A minted ticket's fingerprint: never the ticket itself.
+pub(crate) fn ticket_print(ticket: &str) -> String {
+    molt_net::invite::recover_attempt_id(&format!("ticket:{ticket}"))
+}
+
+impl AttemptBook {
+    /// Remember a run on `ticket`, forgetting tickets no longer live.
+    pub(crate) fn note_seen(&mut self, ticket: &str, attempt: &str, live: &std::collections::HashMap<String, String>) {
+        self.seen.retain(|t, _| live.contains_key(t) || t == ticket);
+        ring_note(self.seen.entry(ticket.to_string()).or_default(), attempt, SEEN_PER_TICKET);
+    }
+
+    pub(crate) fn was_seen(&self, ticket: &str, attempt: &str) -> bool {
+        self.seen.get(ticket).is_some_and(|r| r.iter().any(|x| x == attempt))
+    }
+
+    pub(crate) fn note_spent(&mut self, attempt: &str) {
+        ring_note(&mut self.spent, attempt, SPENT_ATTEMPTS);
+    }
+
+    pub(crate) fn is_spent(&self, attempt: &str) -> bool {
+        self.spent.iter().any(|x| x == attempt)
+    }
+
+    pub(crate) fn note_minted(&mut self, ticket: &str) {
+        ring_note(&mut self.minted, &ticket_print(ticket), MINTED_TICKETS);
+    }
+
+    pub(crate) fn minted(&self, ticket: &str) -> bool {
+        let print = ticket_print(ticket);
+        self.minted.iter().any(|x| *x == print)
+    }
 }
 
 /// Pieces handed to the send tasks and pieces a relay took.
@@ -287,7 +362,13 @@ impl State {
         // a change no vote could ever seal must not occupy the registry: it
         // would hold the pending cap and R3 for good (nothing sweeps it)
         if let Err(why) = self.sealable_membership(id, change) {
-            tracing::warn!(%id, reason = why, "refusing an unsealable membership proposal");
+            // F2: a re-served card of a restore this chain sealed is spent
+            // by its own block - expected on every catch-up
+            if self.restore_sealed(change) {
+                tracing::debug!(%id, reason = why, "membership proposal already sealed");
+            } else {
+                tracing::warn!(%id, reason = why, "refusing an unsealable membership proposal");
+            }
             return false;
         }
         // L3: bounded PER SEAT, so one member's cards never crowd out
@@ -524,7 +605,7 @@ impl State {
         if self.recovery.pending.contains_key(member) {
             return true;
         }
-        self.chain.proposal_changes.values().any(|c| {
+        self.chain.proposal_changes.iter().any(|(id, c)| {
             let ChainChange::Membership {
                 op: MembershipOp::Restored,
                 member: m,
@@ -536,6 +617,10 @@ impl State {
             else {
                 return false;
             };
+            // a withdrawn or declined card seals nowhere
+            if self.proposals.get(id).is_some_and(|p| p.state != ProposalState::Proposed) {
+                return false;
+            }
             m == member
                 && self.anchored_identity(m).as_deref() == Some(identity_pk.as_str())
                 && !nostr_pk.as_deref().is_some_and(|pk| self.anchor_seen_in_chain(pk))
@@ -707,6 +792,14 @@ impl State {
             }
             return;
         }
+        // F2: behind a peer's head, the card is judged against an old one
+        let behind = self.chain_lag().peers_ahead;
+        if behind > 0 {
+            if self.recovery.held_approvals.insert(id) {
+                tracing::info!(%id, %member, peers_ahead = behind, "restore_held reason=catching_up");
+            }
+            return;
+        }
         self.recovery.held_approvals.remove(&id);
         // replay guard: one signature per member per height
         if self.own_signature_stands(id) {
@@ -761,11 +854,56 @@ impl State {
                 key_package: key_package_hex.to_string(),
                 reply: reply.to_string(),
                 card: change,
+                ticket: ticket.to_string(),
             },
         );
         // §7e: a v1 consent binds neither relays nor position - the human card
         let cosign = self.config.self_cosign && (v2 || consent.is_none());
         Ok(self.propose_membership_with(MembershipOp::Restored, member, &anchored, anchor, relays, consent, cosign))
+    }
+
+    /// Review R2: the rejoiner withdrew the run whose card this node
+    /// proposed. Unsealed, the card is withdrawn through the ordinary
+    /// governance path (every survivor sees `Withdrawn` and stops signing),
+    /// the pending re-key is dropped and the ticket is live again. `false`
+    /// when there is no such unsealed card.
+    pub(crate) fn withdraw_restore(&mut self, member: &str, attempt: &str, sender: &str) -> bool {
+        let Some(p) = self.recovery.pending.get(member) else {
+            return false;
+        };
+        let ours = molt_net::invite::recover_attempt_id(&p.key_package) == attempt
+            && matches!(&p.card, ChainChange::Membership { nostr_pk: Some(a), .. } if a == sender);
+        if !ours || self.restore_sealed(&p.card) {
+            return false;
+        }
+        let card = p.card.clone();
+        let ticket = p.ticket.clone();
+        let ids: Vec<u64> = self
+            .chain
+            .proposal_changes
+            .iter()
+            .filter(|(_, c)| **c == card)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in ids {
+            if self.proposals.get(&id).is_some_and(|r| r.state == ProposalState::Proposed) {
+                if let Err(e) = self.cmd_withdraw(ProposalId(id), None) {
+                    tracing::warn!(%id, %member, error = %e, "recover_withdraw=card_kept");
+                    continue;
+                }
+            }
+            self.recovery.held_approvals.remove(&id);
+            self.recovery.held_seals.remove(&id);
+            self.chain.seal_held.remove(&id);
+            self.forget_vote(id);
+        }
+        self.recovery.pending.remove(member);
+        self.recovery.anchor_first_seats.remove(&(member.to_string(), sender.to_string()));
+        if self.recovery.spent_tickets.remove(&ticket) {
+            self.recovery.tickets.insert(ticket, member.to_string());
+        }
+        self.snapshot_to_disk();
+        true
     }
 
     /// Every check of [`Self::verify_and_propose_restore`], changing
@@ -912,9 +1050,8 @@ impl State {
             return None;
         };
         let card = self.chain.proposal_changes.get(&id)?;
-        if !self.recovery.pending.get(member).is_some_and(|p| p.card == *card) {
-            return None;
-        }
+        let pending = self.recovery.pending.get(member).filter(|p| p.card == *card)?;
+        let attempt = molt_net::invite::recover_attempt_id(&pending.key_package);
         let head = self.chain.head.as_ref()?;
         let roster: Vec<String> = head.identities.iter().map(|i| i.member.clone()).collect();
         let mut approved: BTreeSet<String> = self
@@ -931,6 +1068,8 @@ impl State {
             roster,
             approved: approved.into_iter().collect(),
             to: nostr_pk.clone(),
+            attempt,
+            sealed: false,
         })
     }
 
@@ -949,9 +1088,8 @@ impl State {
         else {
             return None;
         };
-        if !self.recovery.pending.get(member).is_some_and(|p| p.card == block.change) {
-            return None;
-        }
+        let pending = self.recovery.pending.get(member).filter(|p| p.card == block.change)?;
+        let attempt = molt_net::invite::recover_attempt_id(&pending.key_package);
         let head = self.chain.head.as_ref()?;
         let roster: Vec<String> = head.identities.iter().map(|i| i.member.clone()).collect();
         let mut approved: BTreeSet<String> =
@@ -965,6 +1103,8 @@ impl State {
             roster,
             approved: approved.into_iter().collect(),
             to: nostr_pk.clone(),
+            attempt,
+            sealed: true,
         })
     }
 
@@ -1266,6 +1406,8 @@ impl State {
         // the rejoiner's trust root, over the same 445 channel it just
         // joined - unless it verified the anchor before the seal (B4)
         if !anchor_first {
+            self.recovery.seal_first_seats.insert((member.to_string(), self.working_nostr_pk(member)));
+            self.snapshot_to_disk();
             self.serve_chain_anchor();
         }
         // …and the same quiet system line the mesh arm posts. It is encrypted

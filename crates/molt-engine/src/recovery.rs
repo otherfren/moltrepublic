@@ -17,6 +17,9 @@ use molt_core::Command;
 use molt_net::{invite, msg_id, supervisor, QueueId, SndQueueAddr, Transport, WrapKey};
 use tokio::sync::mpsc;
 
+/// A cancel after the re-admission sealed: nothing to withdraw.
+pub(crate) const READMITTED_NEW_LINK: &str = "already re-admitted - a new link is needed";
+
 /// A recovery link — `molt://recover/<segment>` — mirroring
 /// [`crate::FoundingInvite`], but for an *existing* seat. It carries a
 /// transport handover (the coordinator's recovery queue) and a single-use
@@ -586,6 +589,7 @@ pub async fn run_rejoin<T: Transport>(
         }),
         anchor_first: false,
         version: String::new(),
+        started: 0,
     });
     let payload = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
     supervisor::send_framed(

@@ -980,6 +980,7 @@ fn a_restored_commit_triggers_the_coordinators_rekey() {
             key_package: "beef".to_string(),
             reply: String::new(),
             card: change.clone(),
+            ticket: String::new(),
         },
     );
     let block = b.seal(1, change, &["petra", "walter"]);
@@ -1126,6 +1127,7 @@ fn a_restored_commit_without_a_pending_recovery_is_inert() {
         PendingRecovery {
             key_package: "beef".to_string(),
             reply: String::new(),
+            ticket: String::new(),
             card: ChainChange::Membership {
                 op: MembershipOp::Restored,
                 member: "dora".to_string(),
@@ -1314,7 +1316,7 @@ fn a_planted_restore_card_does_not_block_a_recovery() {
                 consent_for(&b, "dora", ""),
                 String::new(),
                 String::new(),
-                false,
+                (false, 0),
                 None,
             )
             .expect("ack");
@@ -1696,7 +1698,7 @@ fn a_ticketed_request_on_a_fork_is_refused_and_keeps_its_ticket() {
             String::new(),
             String::new(),
             String::new(),
-            false,
+            (false, 0),
             None,
         )
         .expect("ack");
@@ -1746,7 +1748,7 @@ fn a_link_less_request_is_refused_and_never_proposed() {
                 consent.clone(),
                 String::new(),
                 String::new(),
-                false,
+                (false, 0),
                 None,
             )
             .expect("ack");
@@ -1787,4 +1789,21 @@ fn a_restored_card_does_not_seal_while_the_seat_is_active() {
     walter.drain_held_seals();
     assert_eq!(walter.chain.head.as_ref().expect("head").height, 1, "sealed once the seat is silent");
     verify_chain(&walter.chain.blocks).expect("verifies");
+}
+
+/// F2: a node still catching up (a peer claims a higher head) judges a
+/// restore card against an old head - it holds its automatic approval
+/// and signs once level.
+#[test]
+fn a_node_that_is_behind_holds_its_restore_approval() {
+    let b = Builder::new(&["petra", "walter", "dora"], 3);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    walter.note_peer_height("petra", 40);
+    register_v2(&mut walter, &b, 7, &"dd".repeat(32), 0);
+    let signed = |w: &crate::State| w.chain.pending_sigs.get(&7).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
+    assert!(walter.chain.proposal_changes.contains_key(&7), "the card registers");
+    assert!(!signed(&walter), "behind: held");
+    walter.chain.peer_heights.clear();
+    walter.retry_held_restore_approvals();
+    assert!(signed(&walter), "level: signed");
 }

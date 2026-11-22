@@ -3506,6 +3506,19 @@ pub struct EngineStateDump {
     /// holds the anchor, so a restart must not start re-pushing it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub anchor_first_seats: Vec<(MemberId, String)>,
+    /// Fingerprints of the recovery tickets this node minted, newest last
+    /// (bounded): a Want/Ready for one of them earns `link outdated` after
+    /// a restart. Never the tickets themselves.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub minted_tickets: Vec<String>,
+    /// `(seat, new anchor)` this node restored seal-first: it alone
+    /// re-pushes that anchor.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seal_first_seats: Vec<(MemberId, String)>,
+    /// `(seat, new anchor, pushes)` of each unfinished seal-first restore:
+    /// the re-push count survives a restart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub anchor_repushes: Vec<(MemberId, String, u32)>,
 }
 
 /// One collected approval signature of an open proposal, as a snapshot
@@ -5672,6 +5685,10 @@ pub enum Command {
         /// out before anything is proposed.
         #[serde(default)]
         anchor_first: bool,
+        /// Unix second the rejoiner's run started (0 = an older rejoiner):
+        /// an earlier run on the same link never replaces a later one.
+        #[serde(default)]
+        started: u64,
         /// Ritual incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -5684,6 +5701,9 @@ pub enum Command {
         member: MemberId,
         /// The link's ticket.
         ticket: String,
+        /// The run that is ready ("" = an older rejoiner).
+        #[serde(default)]
+        attempt: String,
         /// The gift wrap's proven author (the rejoiner's new anchor), hex.
         sender: String,
         /// Workspace net scope.
@@ -5698,6 +5718,9 @@ pub enum Command {
         ticket: String,
         /// Indexes not received.
         missing: Vec<u32>,
+        /// The run asking ("" = an older rejoiner).
+        #[serde(default)]
+        attempt: String,
         /// The gift wrap's proven author, hex.
         sender: String,
         /// Workspace net scope.
@@ -5976,6 +5999,17 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// A minted link's inbox is not readable yet and keeps retrying
+    /// (engine-internal, review R8): the pending notice names why.
+    NetRecoverLinkWaiting {
+        /// The returning member the link is minted for.
+        member: MemberId,
+        /// Why it waits, one fact.
+        reason: String,
+        /// Workspace scope.
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// The founder's off-actor SMP provisioning failed (e.g. the server is
     /// unreachable), so the founding can never seal (engine-internal). The
     /// engine fails the create run rather than leaving it stuck. Not a tool.
@@ -6019,9 +6053,9 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
-    /// A returning member reports that its rejoin failed after the
-    /// re-admission (engine-internal, from the recovery inbox): logged so
-    /// the coordinator sees why. Display data only.
+    /// A returning member reports that its rejoin failed or was cancelled
+    /// (engine-internal, from the recovery inbox). With an `attempt` it
+    /// withdraws that run; without one it is only logged.
     NetRecoverPeerFailed {
         /// The seat.
         member: MemberId,
@@ -6029,6 +6063,9 @@ pub enum Command {
         reason: String,
         /// The rejoiner's build version.
         version: String,
+        /// The run withdrawn ("" = an older rejoiner: log only).
+        #[serde(default)]
+        attempt: String,
         /// The gift wrap's sealing key (the rejoiner's new anchor), hex.
         sender: String,
     },

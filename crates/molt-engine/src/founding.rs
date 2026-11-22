@@ -880,6 +880,7 @@ pub(crate) fn recover_command(
             .unwrap_or_default(),
         sender_npub,
         anchor_first: r.anchor_first,
+        started: r.started,
         generation: Some(generation),
     }
 }
@@ -3201,6 +3202,7 @@ mod tests {
             }),
             anchor_first: false,
             version: String::new(),
+            started: 0,
         };
         let Command::NetRecoverRequested {
             member,
@@ -3234,6 +3236,7 @@ mod tests {
             anchor_first: false,
             version: String::new(),
             consent: String::new(),
+            started: 0,
         };
         let Command::NetRecoverRequested { reply, .. } = recover_command(bare, String::new(), 1) else {
             panic!("expected NetRecoverRequested");

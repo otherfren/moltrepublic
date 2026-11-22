@@ -272,7 +272,9 @@ pub(crate) enum RecoverNotice {
 /// Split a session notice into its recovery reading (verbatim payload —
 /// an error may itself contain colons).
 pub(crate) fn parse_recover_notice(notice: &str) -> RecoverNotice {
-    if let Some(member) = notice.strip_prefix("recovery-link-pending:") {
+    if let Some(rest) = notice.strip_prefix("recovery-link-pending:") {
+        // `<member>:<why it still waits>` while the inbox retries
+        let member = rest.split_once(':').map_or(rest, |(m, _)| m);
         RecoverNotice::LinkPending(member.to_string())
     } else if let Some(reason) = notice.strip_prefix("recovery-link-failed:") {
         RecoverNotice::LinkFailed(reason.to_string())

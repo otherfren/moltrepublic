@@ -471,6 +471,27 @@ pub struct RecoverRequest {
     /// The rejoiner's build version ("" = older than the anchor-first order).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
+    /// Unix second this run started (0 = an older rejoiner). Of two runs
+    /// on one link the coordinator keeps the later; the rumor is sealed by
+    /// the rejoiner's key, so a relay cannot change it.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub started: u64,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// The id of one rejoin run: its fresh KeyPackage, hashed. Every frame of
+/// the run names it, so an answer to another run on the same link (same
+/// transport key) is told apart. Bound by the seat proof through the
+/// KeyPackage, and derived, never trusted from the wire.
+pub fn recover_attempt_id(key_package_hex: &str) -> String {
+    use sha2::Digest;
+    let mut h = Sha256::new();
+    h.update(b"molt-recover-attempt-v1");
+    h.update(key_package_hex.as_bytes());
+    hex::encode(&h.finalize()[..16])
 }
 
 /// One member's seal signature over the final roster table.
@@ -595,6 +616,13 @@ pub enum RitualMsg {
         /// The coordinator's build version ("" = a build before 0.0.18).
         #[serde(default)]
         version: String,
+        /// The run this answers (`recover_attempt_id`); "" from an older
+        /// build.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        attempt: String,
+        /// The report of the sealed block: nothing can be withdrawn now.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        sealed: bool,
     },
     /// coordinator → returning member: the recovery request was REFUSED
     /// (`recovery_auto_approval.md` WP6) — sent only to a sender that passed
@@ -608,6 +636,10 @@ pub enum RitualMsg {
         member: String,
         /// Why, verbatim from the coordinator's validation ladder.
         reason: String,
+        /// The run this answers (`recover_attempt_id`); "" from an older
+        /// build.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        attempt: String,
     },
     /// coordinator -> returning member (anchor-first order): one piece of
     /// the chain anchor, sent before anything is proposed. `event` is the
@@ -623,6 +655,10 @@ pub enum RitualMsg {
         total: u32,
         /// JSON of the anchor event.
         event: String,
+        /// The run this answers (`recover_attempt_id`); "" from an older
+        /// build.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        attempt: String,
     },
     /// returning member -> coordinator: re-send these anchor pieces.
     RecoverWant {
@@ -632,6 +668,10 @@ pub enum RitualMsg {
         ticket: String,
         /// Indexes not received.
         missing: Vec<u32>,
+        /// The run asking (`recover_attempt_id`); "" from an older
+        /// build.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        attempt: String,
     },
     /// returning member -> coordinator: the anchor verified - propose,
     /// seal and re-key now.
@@ -640,10 +680,16 @@ pub enum RitualMsg {
         member: String,
         /// The link's ticket.
         ticket: String,
+        /// The run that is ready (`recover_attempt_id`); "" from an older
+        /// build.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        attempt: String,
     },
-    /// returning member -> coordinator: the rejoin failed after the
-    /// re-admission, so the coordinator can log why. Display data only; an
-    /// older coordinator drops the unknown variant.
+    /// returning member -> coordinator: the rejoin failed or was
+    /// cancelled. With an `attempt` it withdraws that run (its open
+    /// attempt, or its card while unsealed); without one (an older
+    /// rejoiner, after the re-admission) it is only logged. An older
+    /// coordinator drops the unknown variant.
     RecoverFailed {
         /// The seat that failed to come back.
         member: String,
@@ -652,6 +698,10 @@ pub enum RitualMsg {
         /// The rejoiner's build version.
         #[serde(default)]
         version: String,
+        /// The run withdrawn (`recover_attempt_id`); "" from an older
+        /// build.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        attempt: String,
     },
     /// coordinator → returning member: the MLS **Welcome** that re-admits a
     /// recovered seat (`recovery_ritual.md` §4 ❺–❻), sent on the rejoiner's reply
@@ -700,17 +750,19 @@ mod tests {
     /// B4 byte pins: the anchor-first vocabulary on the wire.
     #[test]
     fn the_anchor_first_frames_have_a_pinned_shape() {
-        let ready = RitualMsg::RecoverReady { member: "petra".into(), ticket: "ab".into() };
+        let ready = RitualMsg::RecoverReady { member: "petra".into(), ticket: "ab".into(), attempt: String::new() };
         assert_eq!(
             serde_json::to_string(&ready).expect("json"),
             r#"{"kind":"recover_ready","member":"petra","ticket":"ab"}"#
         );
-        let want = RitualMsg::RecoverWant { member: "petra".into(), ticket: "ab".into(), missing: vec![1, 3] };
+        let want =
+            RitualMsg::RecoverWant { member: "petra".into(), ticket: "ab".into(), missing: vec![1, 3], attempt: String::new() };
         assert_eq!(
             serde_json::to_string(&want).expect("json"),
             r#"{"kind":"recover_want","member":"petra","ticket":"ab","missing":[1,3]}"#
         );
-        let part = RitualMsg::RecoverAnchor { member: "petra".into(), index: 0, total: 2, event: "{}".into() };
+        let part =
+            RitualMsg::RecoverAnchor { member: "petra".into(), index: 0, total: 2, event: "{}".into(), attempt: String::new() };
         assert_eq!(
             serde_json::to_string(&part).expect("json"),
             r#"{"kind":"recover_anchor","member":"petra","index":0,"total":2,"event":"{}"}"#
@@ -730,6 +782,7 @@ mod tests {
             reply: None,
             anchor_first,
             version: version.into(),
+            started: 0,
         }
     }
 
@@ -744,6 +797,79 @@ mod tests {
         assert!(new.ends_with(r#""reply":null,"anchor_first":true,"version":"0.0.21"}"#), "{new}");
         let parsed: RitualMsg = serde_json::from_str(old).expect("old frame");
         assert!(matches!(parsed, RitualMsg::Recover(r) if !r.anchor_first && r.version.is_empty()));
+    }
+
+    /// Review R1/R3: every frame of a run names it. The fields are absent
+    /// when empty (the B4 pins above hold) and named when set.
+    #[test]
+    fn the_attempt_binding_is_additive() {
+        let refused = RitualMsg::RecoverRefused { member: "petra".into(), reason: "x".into(), attempt: "a1".into() };
+        assert_eq!(
+            serde_json::to_string(&refused).expect("json"),
+            r#"{"kind":"recover_refused","member":"petra","reason":"x","attempt":"a1"}"#
+        );
+        let bare = RitualMsg::RecoverRefused { member: "petra".into(), reason: "x".into(), attempt: String::new() };
+        assert_eq!(
+            serde_json::to_string(&bare).expect("json"),
+            r#"{"kind":"recover_refused","member":"petra","reason":"x"}"#
+        );
+        let failed = RitualMsg::RecoverFailed {
+            member: "petra".into(),
+            reason: "cancelled".into(),
+            version: "0.0.21".into(),
+            attempt: "a1".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&failed).expect("json"),
+            r#"{"kind":"recover_failed","member":"petra","reason":"cancelled","version":"0.0.21","attempt":"a1"}"#
+        );
+        let progress = RitualMsg::RecoverProgress {
+            member: "petra".into(),
+            need: 2,
+            roster: vec!["petra".into()],
+            approved: Vec::new(),
+            version: "0.0.21".into(),
+            attempt: "a1".into(),
+            sealed: true,
+        };
+        assert!(
+            serde_json::to_string(&progress).expect("json").ends_with(r#""version":"0.0.21","attempt":"a1","sealed":true}"#)
+        );
+        let mut r = request(true, "0.0.21");
+        r.started = 1_700_000_000;
+        let json = serde_json::to_string(&RitualMsg::Recover(r)).expect("json");
+        assert!(json.ends_with(r#""version":"0.0.21","started":1700000000}"#), "{json}");
+        // derived from the KeyPackage: two runs differ, one run is stable
+        assert_eq!(recover_attempt_id("bb"), recover_attempt_id("bb"));
+        assert_ne!(recover_attempt_id("bb"), recover_attempt_id("bc"));
+        assert_eq!(recover_attempt_id("bb").len(), 32);
+    }
+
+    /// An older build reads the attempt-bound refusal, failure and request
+    /// as before (unknown fields ignored).
+    #[test]
+    fn an_older_parser_reads_the_attempt_bound_frames() {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum B4Msg {
+            RecoverRefused { member: String, reason: String },
+            RecoverFailed { member: String, reason: String },
+        }
+        let refused = RitualMsg::RecoverRefused { member: "petra".into(), reason: "x".into(), attempt: "a1".into() };
+        let json = serde_json::to_string(&refused).expect("json");
+        assert!(matches!(serde_json::from_str::<B4Msg>(&json), Ok(B4Msg::RecoverRefused { member, reason }) if member == "petra" && reason == "x"));
+        let failed = RitualMsg::RecoverFailed {
+            member: "petra".into(),
+            reason: "cancelled".into(),
+            version: String::new(),
+            attempt: "a1".into(),
+        };
+        let json = serde_json::to_string(&failed).expect("json");
+        assert!(matches!(serde_json::from_str::<B4Msg>(&json), Ok(B4Msg::RecoverFailed { member, reason }) if member == "petra" && reason == "cancelled"));
+        let mut r = request(true, "0.0.21");
+        r.started = 5;
+        let json = serde_json::to_string(&RitualMsg::Recover(r)).expect("json");
+        assert!(matches!(serde_json::from_str::<OlderRitualMsg>(&json), Ok(OlderRitualMsg::Recover(r)) if r.member == "petra"));
     }
 
     /// What an older build parses with: its `RitualMsg` lacks the new
@@ -769,9 +895,9 @@ mod tests {
         let old: OlderRitualMsg = serde_json::from_str(&new).expect("an old build reads the request");
         assert!(matches!(old, OlderRitualMsg::Recover(r) if r.member == "petra"));
         for msg in [
-            RitualMsg::RecoverReady { member: "petra".into(), ticket: "ab".into() },
-            RitualMsg::RecoverWant { member: "petra".into(), ticket: "ab".into(), missing: vec![0] },
-            RitualMsg::RecoverAnchor { member: "petra".into(), index: 0, total: 1, event: "{}".into() },
+            RitualMsg::RecoverReady { member: "petra".into(), ticket: "ab".into(), attempt: "a1".into() },
+            RitualMsg::RecoverWant { member: "petra".into(), ticket: "ab".into(), missing: vec![0], attempt: "a1".into() },
+            RitualMsg::RecoverAnchor { member: "petra".into(), index: 0, total: 1, event: "{}".into(), attempt: "a1".into() },
         ] {
             let json = serde_json::to_string(&msg).expect("json");
             assert!(serde_json::from_str::<OlderRitualMsg>(&json).is_err(), "{json}");
@@ -920,6 +1046,7 @@ mod tests {
             }),
             anchor_first: false,
             version: String::new(),
+            started: 0,
         });
         let json = serde_json::to_string(&msg).expect("serialize");
         assert!(json.contains("\"kind\":\"recover\""), "tagged as recover: {json}");

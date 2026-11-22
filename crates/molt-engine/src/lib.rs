@@ -314,14 +314,16 @@ impl WalletHandle {
 
     /// Test seam (B3): a seat heard within `secs` counts as still active
     /// for the restore gates (production: 120 s). A test that drops a
-    /// node and restores it at once sets 0.
+    /// node and restores it at once sets 0. Inert until a test arms it;
+    /// no `Command` reaches it, so MCP and GUI cannot.
     #[doc(hidden)]
     pub fn __seat_active_secs(&self, secs: u64) {
         self.seat_active.store(secs, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (B4): this coordinator ignores `anchor_first` and seals
-    /// first, as a build before B4 does.
+    /// first, as a build before B4 does. Inert until a test arms it; no
+    /// `Command` reaches it, so MCP and GUI cannot.
     #[doc(hidden)]
     pub fn __seal_first(&self, on: bool) {
         self.seal_first.store(on, std::sync::atomic::Ordering::SeqCst);
@@ -336,13 +338,15 @@ impl WalletHandle {
 
     /// Test seam: drop every `n`-th inbound peer envelope before it is
     /// accepted, as a lossy relay would (the sender's resend re-earns it);
-    /// 0 stops dropping.
+    /// 0 stops dropping. Inert until a test arms it; no `Command` reaches
+    /// it, so MCP and GUI cannot.
     #[doc(hidden)]
     pub fn __drop_inbound_every(&self, n: u64) {
         self.drop_seam.every.store(n, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Test seam: how many inbound envelopes the drop seam swallowed.
+    /// Test seam: how many inbound envelopes the drop seam swallowed. A
+    /// read only; no `Command` reaches it.
     #[doc(hidden)]
     pub fn __dropped_inbound(&self) -> u64 {
         self.drop_seam.dropped.load(std::sync::atomic::Ordering::SeqCst)
@@ -1079,9 +1083,7 @@ pub(crate) struct ChainProjection {
     pub(crate) heal_next_at: u64,
     pub(crate) heal_backoff: u64,
     pub(crate) beacon_at: u64,
-    /// S4a: anchor re-pushes per restored seat (count, last) and the next
-    /// check.
-    pub(crate) anchor_repush: HashMap<MemberId, (u32, u64)>,
+    /// S4a: the next anchor re-push check.
     pub(crate) repush_check_at: u64,
     /// S5: per proposal, the height it became sealable at here and when;
     /// and the height a fallback sealer already asked its peers about.
@@ -1152,6 +1154,21 @@ pub(crate) struct RecoveryState {
     /// Recoveries whose card the sweep dropped as dead, one per seat: not
     /// in flight (R3), but a reorg can still seal the card.
     pub(crate) swept: HashMap<String, chain::PendingRecovery>,
+    /// Review R1-R4: runs seen per ticket, spent runs, minted tickets.
+    pub(crate) attempts: chain::AttemptBook,
+    /// The running rejoiner's quit: it withdraws its run, then ends.
+    pub(crate) quit: Option<tokio::sync::oneshot::Sender<()>>,
+    /// The running rejoiner saw its re-admission seal.
+    pub(crate) readmitted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Review R5: `(seat, anchor)` this node restored seal-first, and each
+    /// unfinished restore's anchor re-pushes `(count, last)`; persisted.
+    pub(crate) seal_first_seats: std::collections::HashSet<(String, String)>,
+    pub(crate) repushes: BTreeMap<(String, String), (u32, u64)>,
+    /// When this workspace's group runtime came up (presence clock).
+    pub(crate) opened_at: u64,
+    /// Review R10: per seat, the newest own stamp of a frame it sent
+    /// (bounded by the receipt time) - what the restore gate reads.
+    pub(crate) frame_heard: HashMap<MemberId, u64>,
     /// Recovery tickets this node has minted and is still listening for — the
     /// spend-once guard. A ticket is inserted when a recovery link is minted and
     /// removed the moment a valid request spends it, so a replayed request on a
@@ -1746,6 +1763,13 @@ impl State {
                 spent_tickets: std::collections::HashSet::new(),
                 anchor_first_seats: std::collections::HashSet::new(),
                 swept: HashMap::new(),
+                attempts: chain::AttemptBook::default(),
+                quit: None,
+                readmitted: std::sync::Arc::default(),
+                seal_first_seats: std::collections::HashSet::new(),
+                repushes: BTreeMap::new(),
+                opened_at: 0,
+                frame_heard: HashMap::new(),
                 tickets: HashMap::new(),
                 mesh_window: std::collections::HashSet::new(),
                 mesh_extension_at: std::collections::HashMap::new(),
@@ -2556,6 +2580,7 @@ impl State {
                 reply,
                 sender_npub,
                 anchor_first,
+                started,
                 generation,
             } => self.cmd_net_recover_requested(
                 member,
@@ -2568,14 +2593,14 @@ impl State {
                 consent,
                 reply,
                 sender_npub,
-                anchor_first,
+                (anchor_first, started),
                 generation,
             ),
-            Command::NetRecoverReady { member, ticket, sender, generation } => {
-                self.cmd_net_recover_ready(&member, &ticket, &sender, generation)
+            Command::NetRecoverReady { member, ticket, attempt, sender, generation } => {
+                self.cmd_net_recover_ready(&member, &ticket, &attempt, &sender, generation)
             }
-            Command::NetRecoverWant { member, ticket, missing, sender, generation } => {
-                self.cmd_net_recover_want(&member, &ticket, &missing, &sender, generation)
+            Command::NetRecoverWant { member, ticket, missing, attempt, sender, generation } => {
+                self.cmd_net_recover_want(&member, &ticket, &missing, &attempt, &sender, generation)
             }
             Command::NetRecoverLinkReady {
                 member,
@@ -2588,6 +2613,9 @@ impl State {
                 ticket,
                 generation,
             } => self.cmd_net_recover_link_failed(member, reason, ticket, generation),
+            Command::NetRecoverLinkWaiting { member, reason, generation } => {
+                self.cmd_net_recover_link_waiting(&member, &reason, generation)
+            }
             Command::NetTestS3 {
                 target,
                 endpoint,
@@ -2643,8 +2671,8 @@ impl State {
             Command::NetRecoverNote { note, generation } => {
                 self.cmd_net_recover_note(note, generation)
             }
-            Command::NetRecoverPeerFailed { member, reason, version, sender } => {
-                self.cmd_net_recover_peer_failed(&member, &reason, &version, &sender)
+            Command::NetRecoverPeerFailed { member, reason, version, attempt, sender } => {
+                self.cmd_net_recover_peer_failed(&member, &reason, &version, &attempt, &sender)
             }
             Command::NetRecoverProgress { member, need, roster, approved, generation } => {
                 self.cmd_net_recover_progress(member, need, roster, approved, generation)

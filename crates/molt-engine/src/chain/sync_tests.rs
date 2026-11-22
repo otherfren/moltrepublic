@@ -1255,16 +1255,20 @@ fn the_head_beacon_goes_out_periodically() {
     assert_eq!(walter.next_seq, before + 1, "one beacon");
 }
 
-/// S4a: a restored seat never heard from since its `Restored` block gets
-/// the anchor bootstrap again every ten minutes, for as long as it stays
-/// unheard (B4: no count, no window).
+/// S4a, review R5: a seal-first restore THIS node coordinated gets the
+/// anchor bootstrap again every ten minutes while the seat stays unheard -
+/// at most [`super::sync::ANCHOR_REPUSH_MAX`] times. Each push is stored
+/// on the relays, so a listening rejoiner can read any of them; the count
+/// bounds this node's work, not the rejoiner's wait.
 #[test]
-fn an_unfinished_restore_gets_its_anchor_again() {
+fn an_unfinished_restore_gets_its_anchor_again_a_bounded_number_of_times() {
     let mut b = Builder::new(&["petra", "walter", "dora"], 2);
-    b.commit_restored("dora", &"ab".repeat(32), &["petra", "walter"]);
+    let anchor = "ab".repeat(32);
+    b.commit_restored("dora", &anchor, &["petra", "walter"]);
     let mut walter = chain_peer("walter", &b, b.blocks.clone());
     let height = walter.chain.blocks.last().expect("block").height;
     walter.chain.block_ts.insert(height, 500);
+    walter.recovery.seal_first_seats.insert(("dora".to_string(), anchor.clone()));
     walter.presence.clock_override = Some(1_000);
     let before = walter.next_seq;
     walter.chain_heal_tick();
@@ -1277,7 +1281,77 @@ fn an_unfinished_restore_gets_its_anchor_again() {
         walter.presence.clock_override = Some(1_000 + i * 600);
         walter.chain_heal_tick();
     }
-    assert_eq!(walter.chain.anchor_repush.get("dora").map(|e| e.0), Some(300), "two days on, still every ten minutes");
+    // every push counts; a spent count pushes no more
+    let max = super::sync::ANCHOR_REPUSH_MAX;
+    assert_eq!(walter.recovery.repushes.get(&("dora".to_string(), anchor)).map(|e| e.0), Some(max));
+}
+
+/// Review R5: a node that did not coordinate the restore pushes only one
+/// sealed after it opened - an older one it cannot know anybody waits for.
+#[test]
+fn a_bystander_pushes_only_a_restore_sealed_after_its_open() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_restored("dora", &"ab".repeat(32), &["petra", "walter"]);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    let height = walter.chain.blocks.last().expect("block").height;
+    walter.recovery.opened_at = 900;
+    walter.chain.block_ts.insert(height, 500);
+    walter.presence.clock_override = Some(2_000);
+    let before = walter.next_seq;
+    walter.chain_heal_tick();
+    assert_eq!(walter.next_seq, before, "sealed before this open: no push");
+    walter.chain.block_ts.insert(height, 950);
+    walter.presence.clock_override = Some(2_000 + 600);
+    walter.chain_heal_tick();
+    assert!(walter.next_seq > before, "sealed after this open: pushed");
+}
+
+/// Review R5: a new attempt for the seat supersedes the unfinished
+/// restore - its rejoiner is gone, nothing is pushed for it.
+#[test]
+fn a_superseded_restore_gets_no_re_push() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let anchor = "ab".repeat(32);
+    b.commit_restored("dora", &anchor, &["petra", "walter"]);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    let height = walter.chain.blocks.last().expect("block").height;
+    walter.chain.block_ts.insert(height, 500);
+    walter.recovery.seal_first_seats.insert(("dora".to_string(), anchor));
+    walter.recovery.pending.insert(
+        "dora".to_string(),
+        crate::chain::PendingRecovery {
+            key_package: "beef".to_string(),
+            reply: String::new(),
+            card: ChainChange::Membership {
+                op: molt_core::MembershipOp::Restored,
+                member: "dora".to_string(),
+                identity_pk: b.pk("dora"),
+                nostr_pk: Some("cd".repeat(32)),
+                relays: Vec::new(),
+                consent: None,
+            },
+            ticket: String::new(),
+        },
+    );
+    walter.presence.clock_override = Some(1_000);
+    let before = walter.next_seq;
+    walter.chain_heal_tick();
+    assert_eq!(walter.next_seq, before, "a new run for the seat is under way");
+}
+
+/// Review R5: the push count rides the engine snapshot, so a restart does
+/// not start the count over.
+#[test]
+fn the_re_push_count_survives_a_restart() {
+    let b = Builder::new(&["petra", "walter"], 2);
+    let (mut walter, _tmp, dir) = crate::tests::stored_chain_signer(&b, "walter", &["petra", "walter"]);
+    let seat = ("petra".to_string(), "ab".repeat(32));
+    walter.recovery.seal_first_seats.insert(seat.clone());
+    walter.recovery.repushes.insert(seat.clone(), (5, 0));
+    walter.snapshot_to_disk();
+    let back = crate::tests::reopen_chain_signer(walter, &dir, &b, "walter", true);
+    assert_eq!(back.recovery.repushes.get(&seat).map(|e| e.0), Some(5));
+    assert!(back.recovery.seal_first_seats.contains(&seat));
 }
 
 /// B4: an anchor-first rejoiner verified the anchor before the seal, so

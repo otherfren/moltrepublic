@@ -505,6 +505,9 @@ pub(crate) fn localize_recover_note(lang: i32, n: &str) -> String {
     if let Some(h) = n.strip_prefix("block ").and_then(|r| r.strip_suffix(" received")) {
         return format!("Block {h} empfangen");
     }
+    if let Some(r) = n.strip_prefix("⚠ refused, maybe an earlier run: ") {
+        return format!("⚠ abgelehnt, evtl. ein früherer Lauf: {r}");
+    }
     if let Some(h) = n.strip_prefix("chain verified up to block ") {
         return format!("Kette geprüft bis Block {h}");
     }
@@ -534,6 +537,14 @@ pub(crate) fn localize_recover_note(lang: i32, n: &str) -> String {
 /// The rejoiner's recovery FAILURE line (E6): the wrapper prefixes
 /// localize, the wrapped error rides verbatim.
 pub(crate) fn localize_recover_failed(lang: i32, e: &str) -> String {
+    // a cancel after the seal (review R2)
+    if e.starts_with("already re-admitted") {
+        return if lang == 1 {
+            "Bereits wieder aufgenommen - neuen Link anfordern.".to_string()
+        } else {
+            "Already re-admitted - ask for a new link.".to_string()
+        };
+    }
     if lang != 1 {
         return e.to_string();
     }

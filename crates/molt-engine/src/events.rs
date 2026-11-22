@@ -614,6 +614,13 @@ impl State {
                 v.sort();
                 v
             },
+            minted_tickets: self.recovery.attempts.minted.iter().cloned().collect(),
+            seal_first_seats: {
+                let mut v: Vec<(String, String)> = self.recovery.seal_first_seats.iter().cloned().collect();
+                v.sort();
+                v
+            },
+            anchor_repushes: self.recovery.repushes.iter().map(|((m, a), (n, _))| (m.clone(), a.clone(), *n)).collect(),
         }
     }
 
@@ -752,6 +759,18 @@ impl State {
         // for `reverify_all_pending` after the chain adoption
         self.chain.own_approvals.extend(dump.own_approvals.iter().copied());
         self.recovery.anchor_first_seats.extend(dump.anchor_first_seats.iter().cloned());
+        self.recovery.seal_first_seats.extend(dump.seal_first_seats.iter().cloned());
+        for (m, a, n) in &dump.anchor_repushes {
+            self.recovery.repushes.insert((m.clone(), a.clone()), (*n, 0));
+        }
+        self.recovery.attempts.minted = dump
+            .minted_tickets
+            .iter()
+            .rev()
+            .take(crate::chain::MINTED_TICKETS)
+            .rev()
+            .cloned()
+            .collect();
         let me = self.member();
         for v in dump.votes {
             let mine = v.member == me && self.chain.own_approvals.contains(&v.id);
@@ -775,6 +794,10 @@ impl State {
         // one workspace deliberately does not pass through here
         self.net_scope += 1;
         self.recovery.tickets.clear();
+        // F1: the link's ticket dies here, and the link is a bearer secret
+        if self.session.notice.starts_with("recovery-link:") {
+            self.session.notice.clear();
+        }
         self.recovery.mesh_window.clear();
         self.recovery.mesh_extension_at.clear();
         self.presence.poke_at.clear();
@@ -910,7 +933,10 @@ impl State {
         self.chain.heal_next_at = 0;
         self.chain.heal_backoff = 0;
         self.chain.beacon_at = 0;
-        self.chain.anchor_repush.clear();
+        self.recovery.repushes.clear();
+        self.recovery.seal_first_seats.clear();
+        self.recovery.opened_at = 0;
+        self.recovery.frame_heard.clear();
         self.chain.repush_check_at = 0;
         self.chain.ready_at.clear();
         self.chain.fallback_asked = None;
@@ -922,6 +948,7 @@ impl State {
         self.recovery.spent_tickets.clear();
         self.recovery.anchor_first_seats.clear();
         self.recovery.swept.clear();
+        self.recovery.attempts = crate::chain::AttemptBook::default();
         self.chat.clear();
         self.chat_pos.clear();
         // the compaction state belongs to the workspace we are leaving:

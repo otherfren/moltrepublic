@@ -136,6 +136,10 @@ fn e6_maps_render_german_and_keep_tails() {
     );
     assert_eq!(localize_recover_note(1, "asked the coordinator again"), "Koordinator erneut gefragt");
     assert_eq!(
+        localize_recover_note(1, "⚠ refused, maybe an earlier run: seat still active"),
+        "⚠ abgelehnt, evtl. ein früherer Lauf: seat still active"
+    );
+    assert_eq!(
         localize_recover_failed(1, "recovery request: relay refused"),
         "Recovery-Anfrage: relay refused"
     );

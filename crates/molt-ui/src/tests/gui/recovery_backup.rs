@@ -303,6 +303,27 @@ fn a_lost_attempt_reads_as_an_outdated_link() {
     assert_eq!(ui.get_rv_error().as_str(), "Link outdated - ask for a new link.");
 }
 
+/// Review R2: a cancel after the re-admission sealed reads as one fact.
+#[test]
+fn a_cancel_after_the_seal_reads_as_new_link_needed() {
+    i_slint_backend_testing::init_no_event_loop();
+    for (lang, want) in [
+        ("en", "Already re-admitted - ask for a new link."),
+        ("de", "Bereits wieder aufgenommen - neuen Link anfordern."),
+    ] {
+        let ui = AppWindow::new().expect("headless window");
+        apply_strings(&ui, i32::from(lang == "de"));
+        let chat_ui: Arc<Mutex<ChatUiState>> = Arc::new(Mutex::new(ChatUiState::default()));
+        let sv = SessionView {
+            language: lang.to_string(),
+            notice: "recover-failed:already re-admitted - a new link is needed".to_string(),
+            ..SessionView::default()
+        };
+        apply_session(&ui, &sv, true, &chat_ui);
+        assert_eq!(ui.get_rv_error().as_str(), want);
+    }
+}
+
 /// B2/B3 notices reach the GUI as one compact fact each, in both languages.
 #[test]
 fn an_evicted_or_locked_out_seat_says_so() {

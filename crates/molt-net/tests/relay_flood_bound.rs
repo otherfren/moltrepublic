@@ -19,6 +19,8 @@ use molt_net::relay_runtime::{RelayDownReason, RelayHealth, RelayRuntime};
 use nostr::{Alphabet, EventBuilder, Filter, Keys, Kind, SingleLetterTag, Tag, Timestamp};
 use nostr_relay_builder::MockRelay;
 
+mod common;
+
 const H: &str = "6d6f6c74";
 
 fn dialer() -> Dialer {
@@ -297,6 +299,27 @@ async fn the_first_answer_opens_the_gate_a_silent_relay_does_not() {
     assert!(began.elapsed() < Duration::from_secs(5), "returned at the first answer");
     let st = sub.read_state(Duration::from_millis(500)).await;
     assert!(st.any() && !st.full(), "the silent relay never answered: {st:?}");
+}
+
+/// Review R7: a relay down at subscribe that comes up later is outside
+/// the gate's denominator, but its answer still opens `first_read` - a
+/// rejoiner whose only other relay never answers must not wait forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_that_comes_up_late_opens_the_first_read() {
+    let now = Timestamp::now().as_secs();
+    let silent = scripted_relay(Vec::new(), Script::SamePage).await;
+    let late = scripted_relay(events(3, now - 10, 1), Script::Honest).await;
+    let target = late.url.trim_start_matches("ws://").trim_end_matches('/').to_string();
+    let proxy = common::proxy::Cuttable::run(target).await;
+    proxy.cut().await;
+    let rt = RelayRuntime::new(dialer(), vec![silent.url.clone(), format!("ws://127.0.0.1:{}", proxy.port)])
+        .with_backoff(Duration::from_millis(50), Duration::from_millis(200));
+    let mut sub = rt.subscribe(filter()).await.expect("the silent relay accepts the REQ");
+    assert!(!sub.first_read(Duration::from_millis(500)).await.any(), "nothing answered yet");
+    proxy.restore();
+    let st = sub.first_read(Duration::from_secs(10)).await;
+    assert!(st.any(), "the late relay answered: {st:?}");
+    assert!(!st.full(), "the silent relay still has not: {st:?}");
 }
 
 /// The plan's scale: 12 000 stored events against the production bound
