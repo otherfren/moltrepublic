@@ -241,3 +241,119 @@ fn status_names_the_own_open_count_and_the_cap() {
     assert_eq!(wire["open_proposals"], json!(2));
     assert_eq!(wire["open_proposals_max"], json!(64));
 }
+
+const SEATS4: [&str; 4] = ["a", "b", "c", "r"];
+
+/// Feed `from`'s open-governance re-serve into `to`.
+fn reserve(from: &crate::State, to: &mut crate::State, seq: &mut u64) {
+    for body in from.open_governance_events() {
+        *seq += 1;
+        wire(to, &from.member(), *seq, body);
+    }
+}
+
+/// `n` cards `who` proposes and delivers to `to` directly.
+fn deliver_own(who: &mut crate::State, to: &mut crate::State, n: usize, seq: &mut u64) -> Vec<u64> {
+    let mut ids = Vec::new();
+    for i in 0..n {
+        let id = propose(who, Surface::Memory, note(1_000 + i));
+        let p = who.proposals[&id].clone();
+        *seq += 1;
+        wire(to, &who.member(), *seq, WorkspaceEvent::Proposed { id: ProposalId(id), surface: p.surface, payload: p.payload });
+        ids.push(id);
+    }
+    ids
+}
+
+/// The v0.1.1 acceptance shape: a coordinator carrying 15 foreign open
+/// cards besides 56 of its own re-serves them to a fresh seat, then puts
+/// up five new cards. Each card is charged to its minting seat only.
+#[test]
+fn a_reserved_foreign_card_is_not_charged_to_the_reserver() {
+    let b = Builder::new(&SEATS4, 2);
+    let mut a = genesis_seat("a", &b, b.blocks.clone());
+    let mut bb = genesis_seat("b", &b, b.blocks.clone());
+    let mut c = genesis_seat("c", &b, b.blocks.clone());
+    let mut r = genesis_seat("r", &b, b.blocks.clone());
+    let (mut sa, mut sb, mut sc) = (0, 0, 0);
+    let from_a = deliver_own(&mut a, &mut c, 13, &mut sa);
+    deliver_own(&mut bb, &mut c, 2, &mut sb);
+    for i in 0..56 {
+        propose(&mut c, Surface::Memory, note(i));
+    }
+    assert_eq!(c.status().open_proposals, 56);
+
+    reserve(&c, &mut r, &mut sc);
+    assert_eq!(r.proposals.len(), 71, "every re-served card lands");
+    let fresh = deliver_own(&mut c, &mut r, 5, &mut sc);
+    for id in &fresh {
+        assert_eq!(r.proposals.get(id).map(|p| p.state), Some(ProposalState::Proposed), "card {id}");
+        r.cmd_approve(ProposalId(*id), None).expect("approvable");
+    }
+    assert_eq!(c.status().open_proposals, 61);
+    assert_eq!(open_by(&r, "a"), 13, "the board names the minter");
+    assert_eq!(open_by(&r, "b"), 2);
+    assert_eq!(open_by(&r, "c"), 61);
+    assert_eq!(r.proposals[&from_a[0]].relayed_by, "c", "and who relayed it");
+
+    // the minter's own delivery confirms the card
+    let p = a.proposals[&from_a[0]].clone();
+    sa += 1;
+    wire(&mut r, "a", sa, WorkspaceEvent::Proposed { id: ProposalId(from_a[0]), surface: p.surface, payload: p.payload });
+    assert!(r.proposals[&from_a[0]].relayed_by.is_empty());
+}
+
+/// A relayer cannot spend a third seat's cap: cards in another seat's id
+/// stripe that the relayer delivers count against the relayer's own
+/// relay budget, never against that seat.
+#[test]
+fn a_reserver_cannot_exhaust_a_third_seats_cap() {
+    let b = Builder::new(&SEATS4, 2);
+    let mut a = genesis_seat("a", &b, b.blocks.clone());
+    let mut r = genesis_seat("r", &b, b.blocks.clone());
+    let a_stripe: Vec<u64> = (1..4_000u64).filter(|id| r.minting_seat(*id).as_deref() == Some("a")).collect();
+    let budget = OPEN_CARDS_PER_PROPOSER_MAX * 3;
+    for (seq, id) in a_stripe.iter().take(budget + 10).enumerate() {
+        wire(
+            &mut r,
+            "b",
+            u64::try_from(seq).expect("small") + 1,
+            WorkspaceEvent::Proposed { id: ProposalId(*id), surface: Surface::Memory, payload: note(usize::try_from(*id).expect("small")) },
+        );
+    }
+    let relayed = r.proposals.values().filter(|p| p.relayed_by == "b").count();
+    assert_eq!(relayed, budget, "the relay budget bounds the forger");
+    // past the squatted ids: an id collision is its own guard (A1)
+    a.next_id = a_stripe[budget + 10] + 1;
+    let mut sa = 0;
+    let real = deliver_own(&mut a, &mut r, OPEN_CARDS_PER_PROPOSER_MAX, &mut sa);
+    assert!(real.iter().all(|id| r.proposals.get(id).is_some_and(|p| p.relayed_by.is_empty())), "a's own cap is whole");
+}
+
+/// The real proposer withdraws a card that reached this seat through a
+/// re-serve; the re-server cannot. A restored seat may pull back its own
+/// card that came home through a re-serve.
+#[test]
+fn a_reserved_card_is_withdrawn_by_its_minter_only() {
+    let b = Builder::new(&SEATS4, 2);
+    let mut a = genesis_seat("a", &b, b.blocks.clone());
+    let mut c = genesis_seat("c", &b, b.blocks.clone());
+    let mut r = genesis_seat("r", &b, b.blocks.clone());
+    let (mut sa, mut sc, mut sr) = (0, 0, 0);
+    let ids = deliver_own(&mut a, &mut c, 2, &mut sa);
+    let own = deliver_own(&mut r, &mut c, 1, &mut sr);
+    let mut fresh_r = genesis_seat("r", &b, b.blocks.clone());
+    reserve(&c, &mut fresh_r, &mut sc);
+    reserve(&c, &mut r, &mut sc);
+
+    sc += 1;
+    wire(&mut r, "c", sc, WorkspaceEvent::Withdrawn { id: ProposalId(ids[0]), by: "c".to_string() });
+    assert_eq!(r.proposals[&ids[0]].state, ProposalState::Proposed, "the re-server cannot pull it back");
+    sa += 1;
+    wire(&mut r, "a", sa, WorkspaceEvent::Withdrawn { id: ProposalId(ids[0]), by: "a".to_string() });
+    assert!(r.proposals[&ids[0]].withdrawn, "the minter can");
+
+    assert_eq!(fresh_r.proposals[&own[0]].by, "r");
+    fresh_r.cmd_withdraw(ProposalId(own[0]), None).expect("the restored seat pulls back its own card");
+    assert_eq!(fresh_r.status().open_proposals, 0);
+}
