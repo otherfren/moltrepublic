@@ -567,7 +567,7 @@ async fn gap_loop<L: OutboxLog, S: StateStore>(
         refused.retain(|_, t| now.duration_since(*t) < GAP_RESEND_REFUSE);
         let cursor = store.load().await.group.unwrap_or_default().log_seq;
         if let Some((after, upto)) = ask.range.take() {
-            if listed.get(&to).is_none_or(|t| now.duration_since(*t) >= GAP_LIST_EVERY) {
+            if listed.get(&to).map_or(true, |t| now.duration_since(*t) >= GAP_LIST_EVERY) {
                 listed.insert(to.clone(), now);
                 let upto = upto.min(cursor).min(after.saturating_add(crate::gap::GAP_RANGE_MAX));
                 if upto > after {

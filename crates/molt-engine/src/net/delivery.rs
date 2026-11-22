@@ -49,6 +49,9 @@ pub(crate) const GAP_FALLBACK_SECS: u64 = 60;
 /// missing one is settled.
 const SETTLED_MAX: usize = 1024;
 
+/// Seqs above the frontier remembered as seen this session, per sender.
+const SESSION_MAX: usize = 65_536;
+
 /// Re-publications of a listed seq that never landed before it is given up.
 const LISTED_TRIES: u8 = 3;
 
@@ -376,6 +379,10 @@ impl State {
         }
         hold.missing.remove(&envelope.seq);
         hold.session.insert(envelope.seq);
+        // a sender naming endless far-ahead seqs keeps only its lowest
+        while hold.session.len() > SESSION_MAX {
+            hold.session.pop_last();
+        }
         if prev_missing {
             hold.note_missing(envelope.prev_seq, now);
         }
