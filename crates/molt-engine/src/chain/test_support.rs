@@ -454,6 +454,16 @@ pub(crate) fn propose(st: &mut crate::State, surface: Surface, payload: serde_js
     }
 }
 
+/// Fill `st` to the open-card cap with its own cards, as records only.
+pub(crate) fn fill_to_open_cap(st: &mut crate::State) {
+    let me = st.member();
+    for i in 0..super::governance::OPEN_CARDS_PER_PROPOSER_MAX {
+        let id = st.mint_proposal_id();
+        let payload = serde_json::json!({ "op": "add_note", "title": format!("cap{i}") });
+        st.proposals.insert(id, molt_core::ProposalRecord::new(Surface::Memory, payload, me.clone()));
+    }
+}
+
 /// A real MLS KeyPackage for `member`, signed with its roster key, as hex.
 pub(crate) fn kp_hex_for(b: &Builder, member: &str) -> String {
     let mls = molt_net::MlsMember::new(b.key(member), member).expect("mls member");

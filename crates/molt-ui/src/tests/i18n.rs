@@ -196,6 +196,13 @@ fn engine_errors_render_in_the_active_language() {
     assert!(super::localize_error(1, &e).contains("versiegelt"));
 }
 
+#[test]
+fn the_open_proposal_cap_renders_in_both_languages() {
+    let e = molt_core::MoltError::OpenProposalsCap(64);
+    assert_eq!(super::localize_error(0, &e), "64 open proposals - wait for a seal");
+    assert_eq!(super::localize_error(1, &e), "64 offene Vorschläge - auf eine Besiegelung warten");
+}
+
 /// The handle charset refusal (audit #20) reads German on both doors.
 #[test]
 fn the_handle_charset_refusal_renders_in_german() {

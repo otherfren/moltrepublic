@@ -858,3 +858,16 @@ fn a_reorg_dropping_the_enable_block_hides_the_vault_again() {
     assert!(st.snapshot(Surface::Vault, None, None).vault.is_none());
     assert!(st.vault_state().versions.is_empty(), "the deposit went with its branch");
 }
+
+/// The open-card cap refuses a seal before anything is held.
+#[test]
+fn a_seal_at_the_open_cap_holds_nothing() {
+    let b = Builder::vault();
+    let mut st = seat("a", &b, b.blocks.clone());
+    crate::chain::test_support::fill_to_open_cap(&mut st);
+    let seq = st.next_seq;
+    let r = st.cmd_vault_seal("n".into(), "text".into(), SecretText("one".into()));
+    assert!(matches!(r, Err(MoltError::OpenProposalsCap(64))), "{r:?}");
+    assert_eq!(st.next_seq, seq, "nothing recorded");
+    assert!(st.files.vault.held.is_empty(), "no payload left behind");
+}
