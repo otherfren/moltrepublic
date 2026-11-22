@@ -1,14 +1,11 @@
 # The chain lock: wiring plan (release v0.1.1)
 
-**Status: WIRED, OFF BY DEFAULT (2026-11-22).** Design:
-`docs/chain/chain_lock_design.md` (§14 "As built"). The wiring is on a
-worktree branch based on master after R10; the first attempt's two WIP
-commits (`wip/chain-lock-wiring`) are merged into it. The lock runs only
-where `CHAIN_LOCK_DEFAULT_ON` (`chain/lock_wire.rs`) or the test seam
-`__lock_cap_off(false)` turns it on; with it off a seat is B6 exactly.
-The default stays off because the release rule as first built had a
-liveness counterexample (§5) and the corrected rule leaves one residual
-that needs a product decision.
+**Status: WIRED, OFF BY DEFAULT (2026-11-22), on a branch based on
+master 0.1.0.** Design: `docs/chain/chain_lock_design.md` (§14 "As
+built"). The lock runs only where `CHAIN_LOCK_DEFAULT_ON`
+(`chain/lock_wire.rs`) or the test seam `__lock_cap_off(false)` turns it
+on; off, a seat is B6 exactly. It stays off until activation is one
+agreed height instead of a race (§5); §8 proposes how, for a decision.
 
 ## 1. What the lock is for
 
@@ -62,17 +59,19 @@ turn one into an `Approved`.
 
 ## 4. Steps
 
-1. Merge the WIP onto master: done (conflicts were additive: dump
-   fields, the seam beside `seal_first`, re-exports).
-2. Re-derive the signing paths: done (§3).
+1. Merge the WIP onto master, then master 0.1.0: done (all conflicts
+   additive: dump fields, the seam beside `seal_first`, re-exports).
+2. Re-derive the signing paths: done, re-checked after each merge (§3).
 3. Review the release rule: a counterexample found and corrected (§5).
-4. Suite with the lock off: green. With the lock on: see §6.
-5. Lossy trio and lock integration tests, five runs each: see §7.
-6. Traffic measurement over Tor against a real relay: open.
-7. Clippy 0 per crate; the GUI check through the live-preview chain;
-   `molt-net` and `molt-mcp` suites: see §6.
-8. Acceptance on field copies: open.
-9. Switch the default on: blocked on the decision in §5.
+4. Suites with the lock off: green. With the lock on: §6 (13 vault
+   tests stall on the activation race).
+5. Lossy trio and lock integration tests, five runs each: done (§7).
+6. Decide activation (§8): OPEN, the user's decision.
+7. Build the chosen activation; re-run the lock-on suite (the 13 vault
+   tests are its acceptance check).
+8. Traffic measurement over Tor against a real relay: open.
+9. Acceptance on field copies: open.
+10. Switch the default on.
 
 ## 5. The release rule (review result)
 
@@ -140,3 +139,60 @@ intents freely once per height that turns free; the flip test then
 passed 12 of 12 under the same load (1 of 8 failed before).
 The keystone (bursts, loss) had 0 fork decisions in all five runs,
 63-85 s.
+
+## 8. Proposal: one agreed activation height (for decision)
+
+The race: whether a height is locked is each seat's own belief, built
+from capability announcements that arrive at different times. Both
+variants replace the belief by a fact every seat reads from the chain,
+so no honest seat signs freely at a height another seat locks. Both use
+the existing feature machinery (`docs_archive/ritual/charter_features.md`)
+with one new key, `chain-lock`; no new layout, no tag bump - the key is
+content inside bytes that already carry feature keys. Either way: the
+lock is active at height h iff `chain-lock` is in the effective feature
+set at h - 1; the capability only gates who may propose or ratify it.
+D1 says feature keys are surface keys; `chain-lock` is the first that is
+not, which the decision accepts or not.
+
+### A. Fixed at the founding
+
+- Wire: nothing new. The wizard offers `chain-lock` (checked by
+  default); it rides the charter's feature list like `vault`.
+- Signed bytes: the roster's feature list (roster-v5 layout, unchanged)
+  names the key; the genesis is block 0 of a locked republic.
+- Existing republics: cannot use A; they stay B6 (or use B).
+- Older build: refuses to ratify a charter with a key it cannot render
+  (`charter_features.md` §3) - an older member fails honestly at the
+  founding, never mixed in.
+  A seat later restored onto an older build reads the key (union fold)
+  but runs B6; the release rule covers exactly that case.
+- To build: the key in the feature vocabulary and the wizard;
+  `lock_mode` reads the effective features instead of `seat_caps`; byte
+  pins for a roster with the key; founding tests (`vault_support`
+  founds with it).
+- Vault tests: resolves all 13. Each founds a fresh 2-of-4 republic and
+  proposes at once; locked from height 1, no seat signs freely, so the
+  straddled first deposit cannot occur.
+
+### B. Named by a chain block
+
+- Wire: nothing new. A `set_features` vote adding `chain-lock`, proposed
+  and approved only while every roster seat announced the capability.
+- Signed bytes: an ordinary `Applied` set_features block (existing
+  layout); the lock starts at the height after it. A cut carries the
+  effective features already (checkpoint-v7), so pruned holders agree.
+- Existing republics: one vote, m-of-n; after it every height is
+  locked. Until then B6.
+- Older build: the union fold keeps the unknown key (read-tolerant), it
+  keeps signing freely - but none exists at the vote, by the gate. A
+  seat restored onto an older build later is the release rule's case.
+- To build: the key in `validate_org_payload` and the propose gate (all
+  capable), `lock_mode` from the effective features, tests for the vote,
+  a cut across it, a pruned holder, the old-build read.
+- Vault tests: resolves none directly - they never vote, so they stay
+  B6 and pass as with the lock off today. Combined with A (a founding
+  sets it, a vote sets it for older republics) all 13 pass locked.
+
+Recommendation: A and B together (A for new republics, B to upgrade
+existing ones); the automatic capability race goes away, the release
+rule stays only for a seat restored onto an older build.

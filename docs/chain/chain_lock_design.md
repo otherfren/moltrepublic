@@ -1,7 +1,8 @@
 # The chain lock: fork-free sealing (B7)
 
-**Status: WIRING IN PROGRESS for v0.1.1 (B7a pure state machine
-2026-11-21; B7b wiring on a branch, `docs/chain/chain_lock_wiring_plan.md`);
+**Status: WIRED, OFF BY DEFAULT (B7a pure state machine, B7b wiring,
+2026-11-22, on a branch); activation by an agreed height is proposed in
+`docs/chain/chain_lock_wiring_plan.md` §8 and awaits a decision;
 deviations in §14.** Modules:
 `crates/molt-engine/src/chain/lock.rs` (simulation in `lock_tests.rs`),
 the wiring `chain/lock_wire.rs` (`lock_wire_tests.rs`), over a relay
