@@ -65,9 +65,9 @@ pub(super) enum SealerWait {
 /// debounce, so its request is not swallowed by a recent one).
 pub(super) const FALLBACK_ASK_SECS: u64 = 30;
 
-pub(super) fn sealer_wait(rank: u64, waited: u64) -> SealerWait {
-    let turn = rank.saturating_mul(SEALER_GRACE_SECS);
-    if rank == 0 || waited >= turn.saturating_add(FALLBACK_ASK_SECS) {
+pub(super) fn sealer_wait(rank: u64, waited: u64, grace: u64) -> SealerWait {
+    let turn = rank.saturating_mul(grace);
+    if rank == 0 || waited >= turn.saturating_add(FALLBACK_ASK_SECS.min(grace)) {
         SealerWait::Seal
     } else if waited >= turn {
         SealerWait::Ask
@@ -739,7 +739,7 @@ impl State {
             .unwrap_or(line.len());
         let rank = u64::try_from(rank).unwrap_or(u64::MAX);
         let waited = now.saturating_sub(since);
-        let turn = sealer_wait(rank, waited);
+        let turn = sealer_wait(rank, waited, self.lock_grace());
         // waiting on a seat ahead: hand it the signatures held here, once,
         // or it may lack one it needs and the wait runs to the fallback
         if fresh && turn != SealerWait::Seal {

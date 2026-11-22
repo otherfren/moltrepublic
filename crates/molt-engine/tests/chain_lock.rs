@@ -459,6 +459,11 @@ async fn a_vote_enables_the_lock_in_an_older_republic() {
     let (_relay, url) = relay().await;
     let tmp = tempfile::tempdir().expect("tmp");
     let ([mara, walter, dora], _) = found_trio_as(tmp.path(), &url, true).await;
+    // dora, first in the sealing line, is away during the vote: a short
+    // fallback grace instead of sitting out the real 60 s
+    for w in [&mara, &walter, &dora] {
+        w.__lock_timing(5, 3);
+    }
     lock_on(&[&mara, &walter, &dora], false).await;
     let names = ["mara", "walter", "dora"];
     burst(&[&mara, &walter, &dora], &names, "pre", 1, 3, 180).await;
@@ -485,6 +490,7 @@ async fn a_vote_enables_the_lock_in_an_older_republic() {
     lock_on(&[&walter], true).await;
     assert_eq!(status(&walter).await.chain_sync.lock_since, since);
     let dora = engine(&tmp.path().join("dora"));
+    dora.__lock_timing(5, 3);
     adopt_relay(&dora, &url).await;
     dora.execute(Command::OpenWorkspace { id: ws }).await.expect("dora reopens");
     lock_on(&[&dora], true).await;

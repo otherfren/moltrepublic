@@ -385,7 +385,8 @@ impl WalletHandle {
         self.lock_seams.found_pre_lock.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Test seam (B7): the takeover grace and the retransmit interval in
+    /// Test seam: the fallback grace of both sealing lines (B6's sealer
+    /// turn and the lock's takeover) and the lock's retransmit interval in
     /// seconds; 0 restores a default.
     #[doc(hidden)]
     pub fn __lock_timing(&self, grace_secs: u64, retransmit_secs: u64) {

@@ -2570,11 +2570,11 @@ fn one_sealer_at_a_time() {
     hear(&mut dora, T, &[]);
     assert_eq!(dora.turn_holder(1).as_deref(), Some("dora"), "this seat is never silent to itself");
 
-    assert_eq!(sealer_wait(0, 0), SealerWait::Seal);
-    assert_eq!(sealer_wait(1, SEALER_GRACE_SECS - 1), SealerWait::Wait);
-    assert_eq!(sealer_wait(1, SEALER_GRACE_SECS), SealerWait::Ask);
-    assert_eq!(sealer_wait(1, SEALER_GRACE_SECS + FALLBACK_ASK_SECS), SealerWait::Seal);
-    assert_eq!(sealer_wait(2, SEALER_GRACE_SECS + FALLBACK_ASK_SECS), SealerWait::Wait);
+    assert_eq!(sealer_wait(0, 0, SEALER_GRACE_SECS), SealerWait::Seal);
+    assert_eq!(sealer_wait(1, SEALER_GRACE_SECS - 1, SEALER_GRACE_SECS), SealerWait::Wait);
+    assert_eq!(sealer_wait(1, SEALER_GRACE_SECS, SEALER_GRACE_SECS), SealerWait::Ask);
+    assert_eq!(sealer_wait(1, SEALER_GRACE_SECS + FALLBACK_ASK_SECS, SEALER_GRACE_SECS), SealerWait::Seal);
+    assert_eq!(sealer_wait(2, SEALER_GRACE_SECS + FALLBACK_ASK_SECS, SEALER_GRACE_SECS), SealerWait::Wait);
 }
 
 const T: u64 = 1_751_000_000;
