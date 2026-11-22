@@ -598,6 +598,25 @@ Where the wiring differs from §1-§13, and why.
   re-sent when this seat's lock capability flips), not on the next
   repeat.
 
+**Residual outside the threat model: colluders.** Seats running modified
+code that reach `need` acceptances of a value at one ballot make it the
+slot's chosen value, even when no honest seat registers or verifies it
+(a forged vault deposit). Every later leader must force it, cannot, and
+the height stalls; B6 let the honest card seal beside the refused block.
+The vault keystone `a_forged_depositor_is_refused_by_approver_and_verifier`
+therefore runs on a pre-lock republic. Closing it needs acceptors that
+refuse what verification refuses and leaders that may skip a forced
+value the walk would reject - a Byzantine extension, not built.
+
+**Exposed elsewhere: two founding wallet inits.** When two seats both
+auto-propose `wallet_init` at a founding, a seat consents only to the
+init cards it saw at its first claim (`wallet_founding_claim`). The
+lock's leader takes the first card with `need` intents, which can be the
+one a third seat never claimed; the n-of-n DKG then aborts `not ready`.
+`wallet_scan.rs` failed 2 of 7 runs this way, B6 0 of 8. Proposed fix
+(a consent change, for decision): a seat's founding claim takes in every
+init card it sees before one applies.
+
 Not done: a 2-of-2
 republic whose seat is amnesiac waits for that seat's floor to pass,
 which only another block moves (§13 Q4). The rejoiner's checklist now

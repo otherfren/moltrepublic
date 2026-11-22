@@ -198,10 +198,7 @@ impl State {
 
     /// This build runs the lock (an older-build seam turns it off).
     pub(crate) fn lock_cap_on(&self) -> bool {
-        match self.lock_seams.cap.load(SeqCst) {
-            2 => false,
-            _ => true,
-        }
+        self.lock_seams.cap.load(SeqCst) != 2
     }
 
     #[cfg(test)]

@@ -13,7 +13,7 @@ use molt_engine::WalletHandle;
 use nostr_relay_builder::MockRelay;
 
 mod vault_support;
-use vault_support::{close_and_open, found_n_at};
+use vault_support::{close_and_open, found_n_at, found_n_pre_lock};
 
 async fn vault_view(w: &WalletHandle) -> VaultView {
     match w
@@ -128,7 +128,10 @@ async fn a_forged_depositor_is_refused_by_approver_and_verifier() {
     let relay = MockRelay::run().await.expect("in-process relay");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
-    let all = found_n_at(tmp.path(), &url, 4, 2, &["vault"]).await;
+    // seats running modified code are outside the lock's threat model:
+    // colluders reaching m can pin a slot to a value no honest seat
+    // verifies (chain_lock_design.md §14); B6 keeps this height live
+    let all = found_n_pre_lock(tmp.path(), &url, 4, 2, &["vault"]).await;
     let (a, b, c, d) = (&all[0], &all[1], &all[2], &all[3]);
     c.__vault_skip_checks(true);
     d.__vault_skip_checks(true);
