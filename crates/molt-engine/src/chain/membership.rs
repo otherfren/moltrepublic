@@ -585,14 +585,15 @@ impl State {
 
     /// B3, the sealer's hook: hold a `Restored` card while
     /// [`Self::restore_gate`] refuses it. The card stays open; the delivery
-    /// tick retries it like any held seal.
-    pub(crate) fn restore_seal_held(&mut self, id: u64, change: &ChainChange) -> bool {
+    /// tick retries it like any held seal. `settle` is off for a value the
+    /// lock already chose: the settle ran at acceptance.
+    pub(crate) fn restore_seal_held(&mut self, id: u64, change: &ChainChange, settle: bool) -> bool {
         let ChainChange::Membership { op: MembershipOp::Restored, member, .. } = change else {
             return false;
         };
         let Some(why) = self.restore_gate(member) else {
             self.recovery.held_seals.remove(&id);
-            if self.restore_settling(id) {
+            if settle && self.restore_settling(id) {
                 self.chain.seal_held.insert(id);
                 return true;
             }
@@ -614,6 +615,10 @@ impl State {
         let now = self.presence_now();
         let open = &self.chain.proposal_changes;
         self.recovery.settle.retain(|i, _| open.contains_key(i));
+        // a withdrawn card settles nothing (re-armed, it never would)
+        if !open.contains_key(&id) {
+            return false;
+        }
         let since = *self.recovery.settle.entry(id).or_insert(now);
         // the coordinator's withdrawal may wait behind a gap in its stream
         let settle = match self.drop_seam.restore_settle.load(std::sync::atomic::Ordering::SeqCst) {

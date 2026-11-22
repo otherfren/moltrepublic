@@ -658,7 +658,7 @@ impl State {
         } else if valid.len() + consented < need {
             return;
         }
-        if self.restore_seal_held(id, &change) {
+        if self.restore_seal_held(id, &change, true) {
             return;
         }
         // S5/B6: one sealer per height; the others wait their turn

@@ -2302,3 +2302,50 @@ fn under_the_lock_a_restore_is_accepted_only_after_its_settle() {
     accept(&mut walter, 3);
     assert!(accepted(&walter), "accepted after the settle");
 }
+
+/// Review R1: a restore CHOSEN under the lock seals even when its card is
+/// withdrawn after the choice - the quorum decided; the settle belongs at
+/// acceptance. Held, every later leader would be forced to it for good.
+#[test]
+fn a_chosen_restore_seals_after_its_withdrawal() {
+    use molt_core::{ProposalId, WorkspaceEvent};
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let id = 8;
+    let (frame, change) = dora_card_frame(&b, id);
+    let settle = super::membership::RESTORE_SETTLE_SECS;
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    walter.chain.lock.enabled_override = Some(true);
+    on_nostr(&mut walter, 10_000);
+    wire(&mut walter, "petra", 1, frame);
+    walter.presence.clock_override = Some(10_000 + settle + 1);
+    walter.cmd_net_delivery_tick().expect("tick");
+    let slot = walter.lock_slot().expect("slot");
+    let value = walter.lock_value(1, &change).expect("a value");
+    wire(
+        &mut walter,
+        "petra",
+        2,
+        WorkspaceEvent::LockAccept {
+            height: 1,
+            base: slot.base,
+            round: 20,
+            digest: value.digest,
+            need: u64::try_from(value.need).expect("small"),
+            id: ProposalId(id),
+            change: Some(change.clone()),
+        },
+    );
+    assert!(
+        walter.chain.lock.outbox.iter().any(|e| matches!(e.body, WorkspaceEvent::LockAccepted { .. })),
+        "walter accepted: the value is chosen"
+    );
+    wire(&mut walter, "petra", 3, WorkspaceEvent::Withdrawn { id: ProposalId(id), by: "petra".to_string() });
+    let grace = walter.lock_grace();
+    for t in [grace + 1, grace + settle + 2, 2 * grace + 2 * settle + 3] {
+        walter.presence.clock_override = Some(10_000 + settle + 1 + t);
+        walter.cmd_net_delivery_tick().expect("tick");
+    }
+    assert_eq!(walter.chain.head.as_ref().map(|h| h.height), Some(1), "the chosen restore sealed");
+}

@@ -1105,7 +1105,7 @@ impl State {
         if self.lock_seam(&self.lock_seams.stopped) || self.lock_slot().as_ref() != Some(slot) {
             return false;
         }
-        if self.restore_seal_held(id, &change) {
+        if self.restore_seal_held(id, &change, false) {
             // the tick retries it once the gate opens
             self.chain.lock.learned = Some(Learned { slot: slot.clone(), sealable: s.clone(), since: 0, id, change });
             return false;
