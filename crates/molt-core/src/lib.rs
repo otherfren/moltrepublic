@@ -2046,6 +2046,10 @@ pub struct OutboundCursor {
     /// to until a plausible sheet ends the episode.
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub ahead_rounds: u32,
+    /// The peer's `high` when the ack-ahead episode began: a later sheet
+    /// at or above it may still carry that stale window and ends nothing.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub ahead_high: u64,
     /// The `high` of the last sheet that moved `acked_floor`.
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub ack_high: u64,
@@ -2095,8 +2099,10 @@ pub struct AcceptedWindow {
     pub proof: RestoreProof,
 }
 
-/// Where an [`AcceptedWindow`] came from.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Where an [`AcceptedWindow`] came from. Decoding is tolerant: a value
+/// this build does not know (a development build's) reads as `Unknown`, so
+/// a workspace never fails to open over it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RestoreProof {
     /// Written by an older build: nothing known about the sender's restores.
@@ -2109,6 +2115,17 @@ pub enum RestoreProof {
     Merge,
     /// Reset by the operator (`Command::ResyncSeat`).
     Operator,
+}
+
+impl<'de> Deserialize<'de> for RestoreProof {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "current" => RestoreProof::Current,
+            "merge" => RestoreProof::Merge,
+            "operator" => RestoreProof::Operator,
+            _ => RestoreProof::Unknown,
+        })
+    }
 }
 
 impl RestoreProof {
@@ -3567,7 +3584,7 @@ pub struct ProposalRecord {
     /// Per foreign member: `(stamp, wire seq)` of the newest stance applied
     /// here. A stance at or below it (a re-delivery) is ignored. Additive,
     /// skipped when empty.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty", deserialize_with = "tolerant_stances")]
     pub stances: BTreeMap<MemberId, (u64, u64)>,
     /// Who proposed it: the seat whose stripe the id falls on, however
     /// the card arrived ("" = unknown, a pre-field record; a record from
@@ -3615,6 +3632,13 @@ pub struct ProposalRecord {
     /// before an approve (item 3). Gone once the height decides.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pending_completion: bool,
+}
+
+/// [`ProposalRecord::stances`] of another shape (a development build's)
+/// read as empty: a card never fails to load over it.
+fn tolerant_stances<'de, D: serde::Deserializer<'de>>(d: D) -> Result<BTreeMap<MemberId, (u64, u64)>, D::Error> {
+    let v = Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
 }
 
 impl ProposalRecord {
@@ -9472,6 +9496,30 @@ pub enum MoltError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A development build wrote other `proof` values, extra window fields
+    /// and an older `stances` shape: all of it decodes, the unknown parts
+    /// as their defaults - a workspace never fails to open over them.
+    #[test]
+    fn a_development_builds_window_and_card_still_decode() {
+        let w: AcceptedWindow = serde_json::from_str(
+            r#"{"high":7,"bits":[1],"proof":"evidence","restore":"ab","stamp":9,"stamp_seq":3,"born":2}"#,
+        )
+        .expect("an older dev window decodes");
+        assert_eq!((w.high, w.proof), (7, RestoreProof::Unknown));
+        let w: AcceptedWindow = serde_json::from_str(r#"{"high":7,"proof":"merge"}"#).expect("current shape");
+        assert_eq!(w.proof, RestoreProof::Merge);
+        let card = serde_json::json!({
+            "surface": "memory", "payload": {}, "approvals": 0, "state": "proposed",
+            "stances": {"dora": 5}
+        });
+        let card: ProposalRecord = serde_json::from_value(card).expect("an older stances shape decodes");
+        assert!(card.stances.is_empty());
+        let mut fresh = ProposalRecord::new(Surface::Memory, Value::Null, String::new());
+        fresh.stances.insert("dora".to_string(), (5, 10));
+        let back: ProposalRecord = serde_json::from_value(serde_json::to_value(&fresh).expect("json")).expect("round trip");
+        assert_eq!(back.stances, fresh.stances);
+    }
 
     #[test]
     fn a_run_log_keeps_only_the_newest_lines() {

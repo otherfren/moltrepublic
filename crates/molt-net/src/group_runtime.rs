@@ -744,6 +744,12 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
         refuse_ack_ahead(log, store, from, window.high).await;
         return;
     }
+    // an open episode ends only on a sheet below the stale high: one at or
+    // above it may be that same stale window, now overtaken by this log
+    if held.ack_ahead && window.high >= held.ahead_high {
+        tracing::debug!(%from, window_high = window.high, ahead_high = held.ahead_high, "ack_ahead_held");
+        return;
+    }
     let envs = log.read_from(old.saturating_add(1)).await;
     // only a sheet written after the one that set the floor can contradict it
     let regressing = ack.at > held.ack_at
@@ -780,6 +786,7 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
             if cursor.ack_ahead {
                 cursor.ack_ahead = false;
                 cursor.ahead_rounds = 0;
+                cursor.ahead_high = 0;
                 changed = true;
             }
             // only ever forward: another sheet may have moved it meanwhile
@@ -876,6 +883,7 @@ async fn refuse_ack_ahead<L: OutboxLog, S: StateStore>(log: &L, store: &S, from:
             let cursor = state.outbound.entry(from.clone()).or_default();
             cursor.ack_ahead = true;
             cursor.ahead_rounds = 0;
+            cursor.ahead_high = window_high;
             cursor.acked_floor = 0;
             cursor.ack_seen = true;
             let mut group = state.group.unwrap_or_default();
@@ -1017,6 +1025,7 @@ async fn persist_cursor<S: StateStore>(store: &S, start: u64, published_through:
 }
 
 /// The stall clock's verdict on one fired round.
+#[derive(Debug)]
 enum StallRound {
     /// No floor is proven any more — nothing to re-offer.
     NoFloor,
@@ -1027,6 +1036,39 @@ enum StallRound {
     /// A round was granted (`heal` = the evidence-driven one) and the
     /// cursor rewound to the floor.
     Granted { floor: u64, heal: bool },
+}
+
+/// Decide one stall round on `state`: the floor it rewinds to and the
+/// budget it spends - and count it against every ack-ahead peer.
+fn plan_round(
+    state: &mut TransportState,
+    cfg: &GroupNetConfig,
+    envs: &[EventEnvelope],
+    reach: &OutboxReach,
+    open: bool,
+    now: u64,
+) -> StallRound {
+    let f = match reachable_floor(state, cfg, envs, reach, open) {
+        Ok(Some(f)) => f,
+        Ok(None) => return StallRound::NoFloor,
+        Err(q) => return StallRound::Quiet(q),
+    };
+    let mut cur = state.group.unwrap_or_default();
+    let heal = if consume_resend_round(&mut cur, now) {
+        false
+    } else if consume_heal_round(&mut cur, now) {
+        // spent — but fresh evidence of a lagging listener (a claim sheet
+        // since the last round) buys the one heal round
+        true
+    } else {
+        return StallRound::Spent(f);
+    };
+    state.group = Some(cur); // the consumed budget
+    for c in state.outbound.values_mut().filter(|c| c.ack_ahead) {
+        c.ahead_rounds = c.ahead_rounds.saturating_add(1);
+    }
+    rewind_group_to(state, f);
+    StallRound::Granted { floor: f, heal }
 }
 
 /// A doubling delay: starts at [`RESEND_AFTER_SECS`], doubles per
@@ -1534,35 +1576,8 @@ async fn outbox_loop<L, S, K>(
         let now_wall = wall_secs();
         store
             .update(|state| {
-                let f = match reachable_floor(state, &cfg, &envs, &reach_now, open) {
-                    Ok(Some(f)) => f,
-                    Ok(None) => {
-                        round = StallRound::NoFloor;
-                        return false;
-                    }
-                    Err(q) => {
-                        round = StallRound::Quiet(q);
-                        return false;
-                    }
-                };
-                let mut cur = state.group.unwrap_or_default();
-                let heal = if consume_resend_round(&mut cur, now_wall) {
-                    false
-                } else if consume_heal_round(&mut cur, now_wall) {
-                    // spent — but fresh evidence of a lagging listener (a
-                    // claim sheet since the last round) buys the one heal round
-                    true
-                } else {
-                    round = StallRound::Spent(f);
-                    return false;
-                };
-                state.group = Some(cur); // the consumed budget
-                for c in state.outbound.values_mut().filter(|c| c.ack_ahead) {
-                    c.ahead_rounds = c.ahead_rounds.saturating_add(1);
-                }
-                rewind_group_to(state, f);
-                round = StallRound::Granted { floor: f, heal };
-                true
+                round = plan_round(state, &cfg, &envs, &reach_now, open, now_wall);
+                matches!(round, StallRound::Granted { .. })
             })
             .await;
         let f = match round {
@@ -3254,16 +3269,48 @@ mod tests {
         let cfg = GroupNetConfig::fast("walter".into(), vec!["petra".into()]);
         let reach = OutboxReach::default();
         let mut st = <crate::MemStateStore as StateStore>::load(&store).await;
-        assert_eq!(reachable_floor(&st, &cfg, &envs, &reach, false), Ok(Some(0)), "owed while rounds remain");
-        if let Some(c) = st.outbound.get_mut("petra") {
-            c.ahead_rounds = RESEND_GIVEUP_ROUNDS;
+        let t0 = 1_700_000_000;
+        for round in 0..RESEND_GIVEUP_ROUNDS {
+            let planned = plan_round(&mut st, &cfg, &envs, &reach, false, t0 + 3_600 * u64::from(round));
+            assert!(matches!(planned, StallRound::Granted { floor: 0, .. }), "round {round}: {planned:?}");
         }
-        assert_eq!(reachable_floor(&st, &cfg, &envs, &reach, false), Ok(None), "left alone after the give-up rounds");
+        assert_eq!(st.outbound["petra"].ahead_rounds, RESEND_GIVEUP_ROUNDS, "every round counted");
+        assert!(
+            matches!(plan_round(&mut st, &cfg, &envs, &reach, false, t0 + 3_600 * 99), StallRound::NoFloor),
+            "left alone after the give-up rounds"
+        );
         // a plausible sheet ends the episode and the peer is owed again
         store.update(|s| { *s = st.clone(); true }).await;
         apply_group_ack(&log, &store, &me, &from, &sheet_at(200, 1..=4)).await;
         let cursor = petra_cursor(&store).await;
         assert_eq!((cursor.ack_ahead, cursor.ahead_rounds, cursor.acked_floor), (false, 0, 4));
+    }
+
+    /// A peer that held this seat's previous incarnation keeps sending the
+    /// same frozen sheet; once this log has grown past that stale high the
+    /// sheet looks plausible, but it ends nothing - acking below it would
+    /// mark frames the peer never had. Only a sheet below the stale high
+    /// (the peer reset its window) ends the episode.
+    #[tokio::test]
+    async fn a_frozen_stale_sheet_does_not_end_the_episode_once_the_log_passes_it() {
+        let log = crate::MemLog::default();
+        let store = crate::MemStateStore::default();
+        for seq in 1..=10u64 {
+            log.push(walter_event(seq));
+        }
+        let (me, from) = ("walter".to_string(), "petra".to_string());
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(1, 3..=12)).await;
+        assert!(petra_cursor(&store).await.ack_ahead);
+        for seq in 11..=20u64 {
+            log.push(walter_event(seq));
+        }
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(2, 3..=12)).await;
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(3, 3..=15)).await;
+        let cursor = petra_cursor(&store).await;
+        assert_eq!((cursor.ack_ahead, cursor.acked_floor), (true, 0), "the stale window marked nothing acked");
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(4, 1..=5)).await;
+        let cursor = petra_cursor(&store).await;
+        assert_eq!((cursor.ack_ahead, cursor.acked_floor), (false, 5), "a reset window's sheet ends it");
     }
 
     /// The seq at `high - 1024` is still an explicit bit of the window; only

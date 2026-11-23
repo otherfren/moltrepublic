@@ -2898,8 +2898,20 @@ async fn a_seat_that_kept_its_old_window_hears_the_restored_seat_after_a_resync(
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     v.__skip_rekey_reset(false);
+    let restore_height = u64::try_from(chain_len(&v).await).expect("small") - 1;
     v.execute(Command::ResyncSeat { member: "petra".to_string(), give_up: false }).await.expect("resync");
     assert!(sees_batch_once(&v, "stale", 40, 120).await, "the owed tail never reached vera after the resync");
+    // the new device's catch-up requests, re-delivered, now take effect: its
+    // head as vera records it is past the restore
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let seats = status_of(&v).await.seats;
+        if seats.iter().any(|s| s.member == "petra" && s.head_height.is_some_and(|h| h >= restore_height)) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "vera never took the new device's request: {seats:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     approve_value(&v, "Rook Club").await;
     wait_for_secs(&c, "vera's vote to seal the new device's proposal", 90, |s| {
         s.workspaces.iter().any(|w| w.name == "Rook Club")

@@ -121,23 +121,31 @@ fn a_legacy_window_is_never_reset_by_repeats_however_late() {
     assert_eq!(streak(&walter), 40);
 }
 
-/// The hint counts only a legacy window; 32 fresh frames in a row end it.
+/// The hint counts only a legacy window, and only while nothing of the seat
+/// was accepted this session: a healthy legacy window whose seat speaks,
+/// then re-offers a 40-frame tail, shows nothing; a fresh frame ends a
+/// shown hint.
 #[test]
-fn the_repeat_hint_counts_only_a_legacy_window_and_clears() {
+fn the_repeat_hint_counts_only_a_legacy_window_nothing_was_accepted_into() {
     let (mut current, _) = bystander();
     for seq in 1..=40u64 {
         dora_at(&mut current, seq, T + seq, chat(100 + small(seq), "old"));
     }
     assert_eq!(streak(&current), 0, "a window of this build never counts");
-    let (mut legacy, _) = legacy_bystander();
+    let (mut healthy, _) = legacy_bystander();
+    dora_at(&mut healthy, 41, T + 41, chat(1, "fresh"));
     for seq in 1..=40u64 {
-        dora_at(&mut legacy, seq, T + seq, chat(100 + small(seq), "old"));
+        dora_at(&mut healthy, seq, T + seq, chat(100 + small(seq), "old"));
     }
-    assert_eq!(streak(&legacy), 40);
-    for seq in 41..=72u64 {
-        dora_at(&mut legacy, seq, T + seq, chat(small(seq), "fresh"));
+    assert_eq!(streak(&healthy), 0, "a resend round to a seat that speaks is no hint");
+    assert_eq!(window(&healthy).proof, RestoreProof::Unknown, "accepting proves nothing about the restore");
+    let (mut stale, _) = legacy_bystander();
+    for seq in 1..=40u64 {
+        dora_at(&mut stale, seq, T + seq, chat(100 + small(seq), "old"));
     }
-    assert_eq!(streak(&legacy), 0, "32 fresh frames in a row end the episode");
+    assert_eq!(streak(&stale), 40, "rising repeats with nothing accepted");
+    dora_at(&mut stale, 41, T + 41, chat(1, "fresh"));
+    assert_eq!(streak(&stale), 0, "a fresh frame ends the hint");
 }
 
 /// The merge is THE reset; the block - live, re-applied - resets nothing,
@@ -296,6 +304,166 @@ fn re_delivered_history_never_acts_after_a_reset() {
     }
 }
 
+/// (M1, the field shape) A legacy window with an old high of 5000; the new
+/// device speaks below it and is dropped; the operator resyncs. The seat's
+/// `ChainRequest` then takes its live effects - served, its divergence mark
+/// cleared, its head recorded - although its seq is far below the old high
+/// and the test leaves every gate alone.
+#[test]
+fn after_a_resync_of_a_legacy_window_the_seats_requests_act() {
+    let (mut walter, block) = bystander();
+    let genesis = walter.chain.head.clone().expect("the genesis");
+    block_at(&mut walter, 1, T + 100, block);
+    let mut stale = AcceptedWindow::default();
+    for seq in 4_990..=5_000u64 {
+        assert!(stale.accept(seq));
+    }
+    walter.delivery.accepted.insert("dora".to_string(), stale);
+    walter.delivery.inbound.clear();
+    walter.delivery.dups.clear();
+    walter.delivery.seen_high.clear();
+    walter.chain.request_seq.insert("dora".to_string(), 5_000);
+    walter.chain.peer_claim_seq.insert("dora".to_string(), 5_000);
+    // the new device holds the genesis and asks for what follows
+    let known = vec![molt_core::HeightHash { height: genesis.height, hash: genesis.hash.clone() }];
+    let req = |known: Vec<molt_core::HeightHash>| WorkspaceEvent::ChainRequest { from_height: genesis.height + 1, known };
+    for seq in 1..=10u64 {
+        dora_at(&mut walter, seq, T + seq, chat(small(seq), "lost"));
+    }
+    dora_at(&mut walter, 11, T + 11, req(known.clone()));
+    assert!(!walter.chain.served_at.contains_key("dora"), "dropped as already seen");
+    walter.chain.diverged.insert(
+        "dora".to_string(),
+        molt_core::ChainDivergence { peer: "dora".to_string(), since_height: 0, seen_ts: T },
+    );
+    walter.cmd_resync_seat("dora".to_string(), false).expect("resync");
+    for seq in 1..=10u64 {
+        dora_at(&mut walter, seq, T + seq, chat(small(seq), "lost"));
+    }
+    dora_at(&mut walter, 11, T + 11, req(known));
+    assert_eq!(bodies(&walter, "lost"), 10);
+    assert!(walter.chain.served_at.contains_key("dora"), "the catch-up was served");
+    assert!(!walter.chain.diverged.contains_key("dora"), "the mark was cleared");
+    let mut seats = walter.seat_syncs(&std::collections::HashSet::new());
+    walter.fill_seat_reports(&mut seats);
+    let dora = seats.iter().find(|s| s.member == "dora").expect("dora's row");
+    assert_eq!(dora.head_height, Some(genesis.height), "the seat head was recorded");
+}
+
+/// (M6) `give_up` ends the wait in every state it is accepted in - here with
+/// nothing held at all: the row goes, the next frame is the baseline.
+#[test]
+fn give_up_with_nothing_held_ends_the_wait() {
+    let (mut walter, _) = bystander();
+    walter.cmd_resync_seat("dora".to_string(), false).expect("resync");
+    assert!(walter.inbound_held_view().iter().any(|r| r.member == "dora" && r.from_start));
+    walter.cmd_resync_seat("dora".to_string(), true).expect("give up");
+    assert!(walter.inbound_held_view().iter().all(|r| r.member != "dora"), "the waiting row stays");
+    let far =
+        molt_core::EventEnvelope { prev_seq: 2_990, seq: 3_000, ts: T, by: "dora".to_string(), body: chat(1, "far") };
+    walter.cmd_net_delivered("dora".to_string(), far, None).expect("ack");
+    assert_eq!(bodies(&walter, "far"), 1, "the next frame is the baseline");
+    assert!(walter.cmd_resync_seat("dora".to_string(), true).is_err(), "nothing waits any more");
+}
+
+fn mls_key(seed: u8) -> molt_storage::SigningKey {
+    molt_storage::SigningKey::from_bytes(&[seed; 32])
+}
+
+/// walter's and petra's group states with dora in it, and dora's new
+/// device's KeyPackage.
+fn mls_group() -> (molt_net::MlsMember, molt_net::MlsMember, Vec<u8>) {
+    let mut walter = molt_net::MlsMember::new(&mls_key(1), "walter").expect("walter");
+    let mut petra = molt_net::MlsMember::new(&mls_key(2), "petra").expect("petra");
+    let mut dora = molt_net::MlsMember::new(&mls_key(3), "dora").expect("dora");
+    walter.create_group().expect("group");
+    let welcome = walter
+        .add_members(&[petra.key_package().expect("kp"), dora.key_package().expect("kp")])
+        .expect("add")
+        .expect("welcome");
+    petra.join_from_welcome(&welcome).expect("petra joins");
+    dora.join_from_welcome(&welcome).expect("dora joins");
+    let dora2 = molt_net::MlsMember::new(&mls_key(4), "dora").expect("dora's new device");
+    (walter, petra, dora2.key_package().expect("kp"))
+}
+
+/// The on-disk pair (dora's window, the ratchet) after `persist` ran with
+/// window saves refused, then allowed: both old, then both new.
+fn assert_disk_pair_moves_together(
+    st: &mut crate::State,
+    dir: &std::path::Path,
+    mls: &std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>,
+) {
+    let disk = |dir: &std::path::Path| {
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        molt_storage::peek_transport_state(dir).unwrap_or_default()
+    };
+    let persist = |st: &mut crate::State| {
+        if let Some(snap) = st.ratchet_snapshot(mls) {
+            if let Some(active) = st.active.as_ref() {
+                assert!(active.handle.merge_mls_async(snap));
+            }
+        }
+    };
+    st.drop_seam.refuse_saves.store(true, std::sync::atomic::Ordering::SeqCst);
+    persist(st);
+    let ts = disk(dir);
+    assert!(ts.mls.is_none(), "the merged ratchet reached the disk before the reset");
+    assert_eq!(ts.accepted.get("dora").map(|w| w.high), Some(40), "both old");
+    st.drop_seam.refuse_saves.store(false, std::sync::atomic::Ordering::SeqCst);
+    st.save_accepted_if_due(st.presence_now());
+    persist(st);
+    let ts = disk(dir);
+    assert!(ts.mls.is_some(), "the ratchet persists once the reset is queued");
+    let w = ts.accepted.get("dora").cloned().unwrap_or_default();
+    assert_eq!((w.proof, w.high), (RestoreProof::Merge, 0), "both new");
+}
+
+/// A stored seat holding dora's window over 1..=40, saved.
+fn stored_bystander(member: &str) -> (crate::State, tempfile::TempDir, std::path::PathBuf) {
+    let b = Builder::new(&SEATS, 2);
+    let (mut st, tmp, dir) = crate::tests::support::stored_chain_signer(&b, member, &SEATS);
+    for seq in 1..=40u64 {
+        wire(&mut st, "dora", seq, chat(100 + small(seq), "old"));
+    }
+    st.save_accepted_now();
+    (st, tmp, dir)
+}
+
+/// (M2) THE COMMITTER: its own re-key merges inside its group state; the
+/// earliest ratchet persist after it finds the re-key listed, resets the
+/// window first and holds the ratchet until that reset is queued - the
+/// disk pair is both-old or both-new.
+#[test]
+fn the_committers_ratchet_never_reaches_the_disk_before_its_reset() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let (mut walter, _tmp, dir) = stored_bystander("walter");
+    let (mut walter_mls, _petra_mls, dora2) = mls_group();
+    walter_mls.restore_member("dora", &dora2).expect("the re-key");
+    let mls = std::sync::Arc::new(std::sync::Mutex::new(walter_mls));
+    assert_disk_pair_moves_together(&mut walter, &dir, &mls);
+}
+
+/// (M3) A BYSTANDER whose `NetPeerRekeyed` was lost (its inbox aborted
+/// between the merge and the send): the group's own list still names the
+/// seat; the next beat resets it and the ratchet persists again.
+#[test]
+fn a_lost_rekey_report_is_drained_and_the_ratchet_persists_again() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let (mut petra, _tmp, dir) = stored_bystander("petra");
+    let (mut walter_mls, mut petra_mls, dora2) = mls_group();
+    let (commit, _w) = walter_mls.restore_member("dora", &dora2).expect("the re-key");
+    petra_mls.decrypt(&commit).expect("petra merges");
+    let mls = std::sync::Arc::new(std::sync::Mutex::new(petra_mls));
+    petra.group_mls_parked = Some(mls.clone());
+    assert_disk_pair_moves_together(&mut petra, &dir, &mls);
+    assert!(!mls.lock().expect("mls").rekeys_pending(), "drained");
+}
+
 /// An unchanged sheet is not republished although its stamp moved.
 #[test]
 fn an_unchanged_sheet_is_the_same_sheet() {
@@ -314,22 +482,3 @@ fn an_unchanged_sheet_is_the_same_sheet() {
     assert!(!crate::net::delivery::same_sheet(Some(&last), &moved));
 }
 
-/// (R8) A reset the writer refused stays dirty, is retried on the next
-/// beat, and holds every ratchet persist until it is queued.
-#[test]
-fn a_refused_reset_save_holds_the_ratchet() {
-    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
-    let _guard = rt.enter();
-    let b = Builder::new(&SEATS, 2);
-    let (mut walter, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "walter", &SEATS);
-    walter.drop_seam.refuse_saves.store(true, std::sync::atomic::Ordering::SeqCst);
-    walter.cmd_net_peer_rekeyed("dora".to_string(), None).expect("ack");
-    assert!(walter.delivery.reset_unsaved && walter.delivery.accepted_dirty, "kept dirty");
-    assert!(!walter.ratchet_may_persist(), "the ratchet waits for the reset");
-    walter.save_accepted_if_due(walter.presence_now());
-    assert!(walter.delivery.reset_unsaved, "still refused");
-    walter.drop_seam.refuse_saves.store(false, std::sync::atomic::Ordering::SeqCst);
-    walter.save_accepted_if_due(walter.presence_now());
-    assert!(!walter.delivery.reset_unsaved && !walter.delivery.accepted_dirty, "queued on the next beat");
-    assert!(walter.ratchet_may_persist());
-}

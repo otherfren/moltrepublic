@@ -76,17 +76,6 @@ pub(crate) struct DropSeam {
     pub(crate) refuse_saves: std::sync::atomic::AtomicBool,
 }
 
-/// The live ratchet to persist - none while a merged re-key is not yet
-/// handled by the engine: its window reset must reach the writer first.
-/// Checked under the same lock the merge takes, so no merge slips between.
-pub(crate) fn ratchet_snapshot(mls: &Arc<Mutex<molt_net::MlsMember>>) -> Option<Vec<u8>> {
-    let g = mls.lock().ok()?;
-    if g.rekeys_unreported() > 0 {
-        return None;
-    }
-    g.snapshot().ok()
-}
-
 impl DropSeam {
     pub(crate) fn keeps_window_on_rekey(&self) -> bool {
         self.skip_rekey_reset.load(std::sync::atomic::Ordering::SeqCst)
@@ -759,7 +748,7 @@ impl State {
             None => self.group_mls_parked.take(),
         };
         if let Some(mls) = mls.filter(|_| ratchet_ok) {
-            let snap = crate::net::ratchet_snapshot(&mls);
+            let snap = self.ratchet_snapshot(&mls);
             if let (Some(active), Some(snap)) = (self.active.as_ref(), snap) {
                 if !active.handle.persist_crypto_blocking(Some(snap), None) {
                     tracing::error!("the group ratchet did not reach the disk on close");
@@ -887,13 +876,15 @@ impl State {
                 None => return,
             },
         };
+        // a re-key the aborted inbox merged but never reported
+        self.drain_rekeys(&mls);
         self.group_net = self.build_group_net_shared(mls.clone());
         if self.group_net.is_some() {
             self.recompute_net_health();
             return;
         }
         // the stopped outbox may have advanced it since the last merge
-        let snap = if self.ratchet_may_persist() { crate::net::ratchet_snapshot(&mls) } else { None };
+        let snap = self.ratchet_snapshot(&mls);
         if let (Some(active), Some(snap)) = (self.active.as_ref(), snap) {
             let _ = active.handle.merge_mls_async(snap);
         }

@@ -1492,6 +1492,10 @@ impl State {
                 return false;
             }
         };
+        // the re-key merged: forget the seat's old window BEFORE anything
+        // records - a record may persist the ratchet (§11)
+        let mls = group.mls.clone();
+        self.drain_rekeys(&mls);
         let payload = molt_net::welcome::WelcomePayload {
             welcome: rekey.welcome.clone(),
             rotation_seed,
@@ -1520,16 +1524,6 @@ impl State {
             self.cmd_tx.clone(),
         );
         self.record(commit_env);
-        // **Forget the seat's OLD accept window.** The returning member is a
-        // new incarnation whose log seq space restarts at 1, so the marks from
-        // the lost device swallow every fresh envelope as a duplicate — its
-        // chat, and the `ChainRequest` that pulls everything above the anchor.
-        //
-        // The mesh does this at its authenticated recovery-announce
-        // (`cmd_net_recover_announced`), which a Nostr republic has no
-        // equivalent of. It does have a stronger one: this re-key runs only
-        // behind a threshold-committed `Restored` block for exactly this seat.
-        self.reset_after_rekey(member);
         // the rejoiner's trust root, over the same 445 channel it just
         // joined - unless it verified the anchor before the seal (B4)
         if !anchor_first {
