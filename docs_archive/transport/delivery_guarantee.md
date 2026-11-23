@@ -797,10 +797,12 @@ floor: without the operator the wait does not end.
 **Re-delivered history never acts.** The newest seq SEEN from a sender in
 its current incarnation (applied, held or dropped; the window's `high`
 before any arrival) is the source of "newest": a `ChainRequest` (round,
-serve, divergence clear, claim, seat head), a `VoteRefused` (notice) and a
-`Committed` block's divergence mark act only for a frame at that seq; an
-older one is applied to state as history. A merge reset starts it anew; an
-operator resync keeps it.
+serve, divergence clear, claim, seat head) and a `VoteRefused` (notice)
+act only for a frame at that seq; an older one is applied to state as
+history. A merge reset starts it anew; an operator resync keeps it. A
+`Committed` block's divergence mark keeps its rule - excused only by a
+newer frame that showed the sender on this branch (`peer_on_branch`) -
+which an operator resync keeps too.
 
 **Stances** are ordered per card and member by (stamp, wire seq): the
 kept own-log event carries the wire seq in `prev_seq` (it is never

@@ -1356,10 +1356,6 @@ impl State {
     /// block is from a branch `from` has left, not a divergence. Evidence
     /// below it is a shared prefix and proves nothing (review R4).
     fn left_that_branch(&self, from: &str, seq: Option<u64>, block_height: u64) -> bool {
-        // a block re-delivered behind a newer frame of its sender is history
-        if seq.is_some_and(|s| !self.newest_seen(from, s)) {
-            return true;
-        }
         let (Some(seq), Some((at, height, hash))) = (seq, self.chain.peer_on_branch.get(from)) else {
             return false;
         };
