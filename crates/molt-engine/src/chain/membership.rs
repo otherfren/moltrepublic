@@ -1526,9 +1526,7 @@ impl State {
         // merged epoch are on disk BEFORE anything is published. A kill
         // after that leaves this seat at most an epoch ahead, and the outbox
         // re-offers the logged commit; never an epoch behind (§11)
-        self.record(commit_env);
-        let queued = self.persist_ratchet_now();
-        if !queued || !self.active.as_ref().is_some_and(|a| a.handle.flush_blocking()) {
+        if !self.record_own_commit(commit_env, &mls) {
             tracing::warn!(%member, "rekey_persist=unconfirmed");
         }
         if !parked {

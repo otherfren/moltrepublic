@@ -764,9 +764,12 @@ trusted: every later restore of that seat reaches it as a merge.
 - **The committer persists before it publishes.** No peer sends a seat its
   own commit back, so a committer whose merged epoch missed the disk stays
   an epoch behind for good (every frame `past epoch` or opaque). The
-  coordinator therefore logs the commit, persists the ratchet through the
-  gate above (no debounce) and flushes the writer before the delivery task
-  starts. A kill after that leaves it at most AHEAD of the group: the
+  coordinator therefore logs the commit and the ratchet through the gate
+  above as ONE writer step (`append_with_mls_blocking`, synced, acked with
+  the write's result; `rekey_persist=unconfirmed` when it failed). The
+  outbox reads the log through the same writer, so no read returns the
+  commit before its epoch is on disk; the delivery task starts after. A
+  kill after that leaves it at most AHEAD of the group: the
   outbox publishes own log entries from its persisted cursor, so the
   logged commit goes out at the reopen, sealed under the exporter of the
   epoch it was made at (the ring is part of the MLS snapshot). The late
@@ -775,7 +778,9 @@ trusted: every later restore of that seat reaches it as a merge.
   block is applied in the same handler, before the re-key, and rides the
   same outbox ahead of it. Not re-sent: the Welcome - the reopened
   coordinator answers the device `link outdated`, and a restore by a new
-  link re-keys on top. Founding's `add_members` is written whole at the
+  link re-keys on top. That link mints only once the seat was silent for
+  the window (120 s): before, the mint answers `seat still active`
+  (`restore_gate`); the test sets the window to 0. Founding's `add_members` is written whole at the
   seal (the ritual's first disk write). Pins:
   `a_coordinator_killed_right_after_its_rekey_reopens_at_the_new_epoch`,
   `a_coordinator_killed_before_its_rekey_went_out_publishes_it_at_the_reopen`.
@@ -785,13 +790,25 @@ trusted: every later restore of that seat reaches it as a merge.
   `MlsCommit` was made at an epoch >= the ratchet's); today it shows only
   as `N new messages unreadable` - the frames' epoch sits inside the outer
   layer, so the inbound side cannot tell "newer epoch" from opaque.
+  (c) An own commit that never left races a later one. Coordinator C makes
+  K_C at epoch N, persists, dies before any relay took it; the device gets
+  a new link from seat S, which makes K_S at N. C reopens and re-offers
+  K_C: with the lower digest every seat rewinds onto it (the second
+  restore undone, the device locked out again); after two or more commits
+  during the outage the others ignore K_C and C stays split. v0.1.1 had
+  the same (its log re-offered the commit too). Planned fix: remember the
+  first relay OK for an own commit durably; at the open an own commit
+  never published is rolled back to the prior slot (persisted with the
+  snapshot) instead of re-offered.
 - Pins: `mls::tests::the_evicted_leaf_cannot_speak_after_the_rekey` and
   the exporter-ring test (an old-epoch frame is refused after the merge),
   `mls::tests::a_merged_rekey_stays_listed_until_taken`,
   `net::restore_reset_tests` (`the_merge_resets_once_and_the_block_resets_nothing`,
   `a_first_contact_window_is_trusted_at_any_time`,
   `the_committers_ratchet_never_reaches_the_disk_before_its_reset`,
-  `a_lost_rekey_report_is_drained_and_the_ratchet_persists_again`).
+  `a_lost_rekey_report_is_drained_and_the_ratchet_persists_again`,
+  `an_own_commit_is_logged_with_its_ratchet_in_one_write`,
+  `an_own_commit_without_its_ratchet_is_not_called_durable`).
 
 **2. A legacy window is left alone.** A window an older build wrote
 (`proof` absent, `unknown`) is neither reset nor proven stale: nothing

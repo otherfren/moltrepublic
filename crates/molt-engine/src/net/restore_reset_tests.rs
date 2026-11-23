@@ -570,3 +570,50 @@ fn an_unchanged_sheet_is_the_same_sheet() {
     assert!(!crate::net::delivery::same_sheet(Some(&last), &moved));
 }
 
+
+fn own_commit(st: &mut crate::State) -> molt_core::EventEnvelope {
+    let me = st.member();
+    st.make_env(me, WorkspaceEvent::MlsCommit { commit: "00".to_string(), stamp: 0 })
+}
+
+/// (B2) The coordinator's own re-key commit and the ratchet that merged it
+/// reach the log in one writer step: the outbox's log read that returns the
+/// commit finds the new epoch on disk.
+#[test]
+fn an_own_commit_is_logged_with_its_ratchet_in_one_write() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let (mut walter, _tmp, dir) = stored_bystander("walter");
+    let (mut walter_mls, _petra_mls, dora2) = mls_group();
+    walter_mls.restore_member("dora", &dora2).expect("the re-key");
+    let epoch = walter_mls.epoch();
+    let mls = std::sync::Arc::new(std::sync::Mutex::new(walter_mls));
+    walter.drain_rekeys(&mls);
+    let env = own_commit(&mut walter);
+    let seq = env.seq;
+    assert!(walter.record_own_commit(env, &mls), "durable");
+    let handle = walter.active.as_ref().expect("stored").handle.clone();
+    let read = rt.block_on(handle.read_log_from(seq));
+    assert!(read.iter().any(|e| matches!(e.body, WorkspaceEvent::MlsCommit { .. })), "the commit is logged");
+    let ts = molt_storage::peek_transport_state(&dir).unwrap_or_default();
+    let disk = molt_net::MlsMember::restore(&ts.mls.expect("the ratchet is on disk")).expect("restores");
+    assert_eq!(disk.epoch(), epoch, "at the commit's epoch");
+}
+
+/// (B3) A pair that is not durable says so: the reset not queued (saves
+/// refused) holds the ratchet back, and the commit is logged without it.
+#[test]
+fn an_own_commit_without_its_ratchet_is_not_called_durable() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let (mut walter, _tmp, dir) = stored_bystander("walter");
+    let (mut walter_mls, _petra_mls, dora2) = mls_group();
+    walter_mls.restore_member("dora", &dora2).expect("the re-key");
+    let mls = std::sync::Arc::new(std::sync::Mutex::new(walter_mls));
+    walter.drop_seam.refuse_saves.store(true, std::sync::atomic::Ordering::SeqCst);
+    walter.drain_rekeys(&mls);
+    let env = own_commit(&mut walter);
+    assert!(!walter.record_own_commit(env, &mls), "a held ratchet is not durable");
+    assert!(walter.active.as_ref().expect("stored").handle.flush_blocking(), "drained");
+    assert!(molt_storage::peek_transport_state(&dir).unwrap_or_default().mls.is_none(), "nothing claimed");
+}

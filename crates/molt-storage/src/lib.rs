@@ -3532,6 +3532,9 @@ struct WalletSeat {
 
 enum WriterMsg {
     Append(EventEnvelope),
+    /// One envelope and the MLS snapshot that merged it, written and synced
+    /// as one step: no log read sees the envelope before the snapshot.
+    AppendWithMls { env: EventEnvelope, mls: Vec<u8>, ack: mpsc::SyncSender<bool> },
     Prefs(WorkspacePrefs),
     /// Rewrite the manifest's display name (an applied `set_name`): the
     /// plaintext identity card must agree with the replayed state so the
@@ -3959,6 +3962,15 @@ impl StorageHandle {
         self.merge_crypto_blocking(mls, smp_queues, Some(mesh), false)
     }
 
+    /// Append `env` and merge `mls` into `transport.state` as one writer
+    /// step, then sync; `true` only when both are durable. For an own MLS
+    /// commit: the outbox reads the log through this writer, so the commit
+    /// cannot leave before the epoch it moved to is on disk.
+    #[must_use]
+    pub fn append_with_mls_blocking(&self, env: EventEnvelope, mls: Vec<u8>) -> bool {
+        self.send_acked(|ack| WriterMsg::AppendWithMls { env, mls, ack })
+    }
+
     /// Fire-and-forget MLS-snapshot merge (delivery guarantee §4.6 / E6, the
     /// debounced ratchet persist): merges ONLY the MLS blob, no seal, does
     /// not wait for the fsync. `try_send`, never `send` — this rides the
@@ -4298,6 +4310,26 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                     rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
                 };
                 match msg {
+                    Ok(WriterMsg::AppendWithMls { env, mls, ack }) => {
+                        let ok = match ws.append(&env) {
+                            Ok(()) => {
+                                let mut ts = ws.read_transport_state();
+                                ts.mls = Some(mls);
+                                ws.write_transport_state(&ts).and_then(|()| ws.sync())
+                            }
+                            Err(e) => Err(e),
+                        };
+                        let ok = match ok {
+                            Ok(()) => true,
+                            Err(e) => {
+                                fail(&failed_flag, "append with ratchet", &e);
+                                false
+                            }
+                        };
+                        dirty = false;
+                        last_sync = Instant::now();
+                        let _ = ack.send(ok);
+                    }
                     Ok(WriterMsg::Append(env)) => {
                         if let Err(e) = ws.append(&env) {
                             fail(&failed_flag, "append", &e);
@@ -5697,6 +5729,29 @@ mod tests {
             !handle.persist_crypto_blocking(Some(b"mls".to_vec()), None),
             "…and neither is a ratchet snapshot"
         );
+        assert!(
+            !handle.append_with_mls_blocking(founded(8), b"mls".to_vec()),
+            "…nor a commit with its ratchet"
+        );
+    }
+
+    /// An own commit and the ratchet that merged it are one write: a log
+    /// read that returns the commit finds the ratchet on disk.
+    #[test]
+    fn a_commit_and_its_ratchet_are_one_write() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let created = create_workspace(tmp.path(), &seed, &founded(7)).expect("create");
+        let dir = created.dir().to_path_buf();
+        let handle = start_writer(created);
+        let mut env = founded(9);
+        env.seq = 2;
+        assert!(handle.append_with_mls_blocking(env, b"epoch-2".to_vec()), "durable");
+        let rt = tokio::runtime::Builder::new_current_thread().build().expect("rt");
+        let read = rt.block_on(handle.read_log_from(2));
+        assert_eq!(read.len(), 1, "the commit is in the log");
+        let ts = peek_transport_state(&dir).unwrap_or_default();
+        assert_eq!(ts.mls.as_deref(), Some(&b"epoch-2"[..]), "with its ratchet");
     }
 
     /// **M5: a `transport.state` from a newer build stops the open, instead
