@@ -2427,6 +2427,49 @@ fn an_import_without_amnesia_forks() {
     assert!(r.violations.contains_key("lock-lock"), "{}", summary(&cfg, &r));
 }
 
+/// R-a (the floor as built: 1 + max(own head, first peer head)) lets a
+/// seat that lost its lock state and its chain tail take part again on
+/// the word of a lagging peer, and a second value is chosen; R-c keeps it
+/// passive within the same bound.
+#[test]
+fn the_first_peer_head_floor_forks_after_a_tail_loss() {
+    let steps = [
+        "deliver B->C Card(Y)",
+        "B intent Y",
+        "C intent Y",
+        "deliver C->B Intent(Y)",
+        "deliver A->B Card(X)",
+        "A intent X",
+        "B intent X",
+        "deliver B->A Intent(X)",
+        "A opens a ballot",
+        "deliver A->B Prepare(r1)",
+        "deliver B->A Promise(1:A)",
+        "deliver A->B Accept(r1, X)",
+        "B LOSES its lock state and its chain tail",
+        "deliver B->C Ask",
+        "deliver C->B Report(head s-2, touched s-1, round 0, latest -)",
+        "B adopts block s-1",
+        "C adopts block s-1",
+    ];
+    for (rule, forks) in [(Rule::A, true), (Rule::C, false)] {
+        let mut cfg = shape_amnesia(3, 2, rule);
+        cfg.behind = bit(2);
+        cfg.max_msgs = 24;
+        cfg.max_states = 10_000;
+        cfg.v2 = true;
+        cfg.v3 = true;
+        cfg.evidence = 2;
+        let mut steps = steps.to_vec();
+        if forks {
+            // the recovered seat leads at once; under R-c it is still passive
+            steps.push("B opens a ballot");
+        }
+        let r = cfg.explore_after(&steps, false);
+        assert_eq!(r.violations.contains_key("lock-lock"), forks, "{rule:?}: {}", summary(&cfg, &r));
+    }
+}
+
 /// O2 with one deviating seat: master signs a change no honest seat
 /// approved (a bare forced Accept), the one-signer rule too (a made-up
 /// holding in a promise), two distinct signers hold within the bound.
@@ -2671,6 +2714,52 @@ fn scenario(name: &str) -> (Config, Vec<&'static str>) {
                 "deliver A->C Prepare(r1)",
                 "deliver C->A Promise(1:A)",
                 "deliver A->C Accept(r1, X)",
+            ];
+            (cfg, prefix)
+        }
+        // 4 seats, m = 3, C and D one block behind; the prefix from `LOCK_PREFIX`
+        "amnesia4" => {
+            let mut cfg = shape_amnesia(4, 3, rule_from_env());
+            cfg.behind = bit(2) | bit(3);
+            cfg.max_msgs = 32;
+            cfg.max_ballots = 2;
+            (cfg, vec![])
+        }
+        // a forgotten blank PROMISE (n < 2m - 1): B promised A's 2:A, loses
+        // state and tail; the lagging C and D answer its ask (R-b: enough)
+        "amnesia4_promise" => {
+            let mut cfg = shape_amnesia(4, 3, rule_from_env());
+            cfg.behind = bit(2) | bit(3);
+            cfg.max_msgs = 48;
+            cfg.max_ballots = 2;
+            let prefix = vec![
+                "deliver B->C Card(Y)",
+                "deliver B->D Card(Y)",
+                "B intent Y",
+                "C intent Y",
+                "D intent Y",
+                "deliver B->C Intent(Y)",
+                "deliver D->C Intent(Y)",
+                "deliver A->C Card(X)",
+                "deliver A->D Card(X)",
+                "A intent X",
+                "C intent X",
+                "D intent X",
+                "A opens a ballot",
+                "A opens a ballot",
+                "deliver A->B Prepare(r2)",
+                "deliver B->A Promise(2:A)",
+                "B LOSES its lock state and its chain tail",
+                "deliver B->C Ask",
+                "deliver B->D Ask",
+                "deliver C->B Report(head s-2, touched s-1, round 0, latest -)",
+                "deliver D->B Report(head s-2, touched s-1, round 0, latest -)",
+                "B adopts block s-1",
+                "C adopts block s-1",
+                "D adopts block s-1",
+                "deliver C->A Intent(X)",
+                "deliver D->A Intent(X)",
+                "C opens a ballot",
             ];
             (cfg, prefix)
         }
