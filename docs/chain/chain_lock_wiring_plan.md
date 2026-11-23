@@ -298,3 +298,108 @@ Findings, not decisions; F1-F5 are fixed (design §14, "Review 6").
   unmodified software.
 - Note for the explorer's author: the header of `chain/lock_explore_tests.rs`
   names functions that no longer exist (not edited here).
+- (g) An alternative to the whole mode: one block signature per seat and
+  round (the operators' E0), §13. To be weighed when the design resumes.
+
+## 13. Alternative: one block signature per seat and round (operators' E0)
+
+**Status: NOT a plan. User decision 2026-11-23: E0 is folded in here as an
+alternative to the mode, not built as a format of its own.** Source: an
+operators' wish list from a live 2-of-3 republic (anonymised; seats A/B/C).
+
+### 13.1 The proposal
+
+- An approval names a change, with no height. A BLOCK signature covers
+  `(republic_id, height, prev, change, round)`.
+- Each seat signs at most one block per `(height, round)` and stores that
+  durably. A split vote opens round + 1.
+- It is activated by an n-of-n organization vote. It is a new signed format
+  with versioning (block and approval layouts, `verify_chain` dual path).
+
+### 13.2 Shared with the mode as built
+
+| | mode | E0 |
+|---|---|---|
+| approval of a change, not a position | yes: approvals of a digest (sixth review, `4ccdae48`) | yes |
+| durable "what did I sign" | `chain_lock.state`, written before the frame (§2) | the last signed `(height, round)` |
+| round/ballot | ballots (design §5) | rounds |
+| restored or imported device forgets | §12 (b), (c) | the same: a device that lost its `(height, round)` record may sign twice |
+| ending a split | leader per ballot | needs a leader or a deterministic tie-break as well |
+
+### 13.3 Where it differs
+
+1. **Signed bytes change.** Every seat must verify the new layout before
+   any seat signs it, which is a flag day. An older build stops at the first
+   new block. The mode keeps `approval_bytes` and the block layout
+   unchanged (§1); an older build only drops lock frames.
+2. **Signing `prev` ends relinking.** CLAUDE.md: "Signatures are
+   position-bound. Members sign over `republic_id ‖ height ‖ change` ...
+   `prev` is a structural hash-link `verify_chain` checks, not part of the
+   member signature." `chain/sync.rs` `relink_onto_variant` relies on
+   exactly that: two blocks with the same change but different
+   attestation lists are one decision, and ours re-link above theirs with
+   no re-sign. The mode needs relinking too (design §10, "leader sealed,
+   block never arrived": the re-sealed variant is re-linked by R1). Under
+   E0 a variant has different signed bytes, so every block above it must
+   be re-signed. That is a re-vote of history.
+3. **No phase 1.** The mode's rule "a new leader first learns what was
+   accepted" (promises from Q1 = n - m + 1) has no counterpart. Round
+   r + 1 cannot know whether round r completed somewhere. Without that
+   knowledge it forks. 2-of-3 schedule:
+
+   | step | A | B | C |
+   |---|---|---|---|
+   | round 1 at h | signs X | signs X | - |
+   | | seals X; the block to C is lost | | sees no block; opens round 2 |
+   | round 2 at h | - | signs Y (a new round, so allowed) | signs Y, seals Y |
+   | result | X at h | | Y at h: fork |
+
+   The two ways to close it each cost something:
+   - (i) "In round r + 1 sign only what you signed before." In 2-of-3 a
+     three-way split (A:X, B:Y, C:Z) then never reaches m: a livelock,
+     unless something releases a stuck value. That release is the mode's
+     forced-value machinery again.
+   - (ii) "Open round r + 1 only once all n seats reported round r." One
+     lost seat then stops the republic.
+4. **One signature per (height, round) is safe only if quorums
+   intersect.** Two blocks in the same round need two sets of m signers.
+   They share a seat (which refuses the second) only when 2m > n.
+
+   | (n, m) | 2m > n | E0 alone within one round |
+   |---|---|---|
+   | 2-of-3, 3-of-4, 3-of-5 | yes | safe |
+   | 2-of-4 | no (2 + 2 = 4) | {A,B} sign X, {C,D} sign Y: fork |
+   | 2-of-5 | no | {A,B} sign X, {C,D} sign Y, E idle: fork |
+
+   The mode covers m ≤ n/2 with flexible quorums: phase 1 needs
+   n - m + 1 promises (4 of 5 at 2-of-5), so Q1 + Q2 > n (design §3.3).
+
+### 13.4 Comparison
+
+| | mode (built, dark) | E0 |
+|---|---|---|
+| signed format change | none | approval + block layout, versioned |
+| flag day | no; older builds drop lock frames | yes |
+| works for m ≤ n/2 | yes (Q1 = n - m + 1) | no, forks in one round |
+| fork-freedom argument | Flexible Paxos per slot (design §3.3), checked exhaustively in `lock_explore_tests.rs` | quorum intersection within a round only; across rounds none (13.3, item 3) |
+| messages per block | measured 17-22 frames (§10, loopback, 2-of-3, 10 % loss) | not measured; about B6's pattern (each seat broadcasts its signature) plus a round per split |
+| a lost seat | needs n - m + 1 promisers; a restore needs both survivors in 2-of-3 (§6) | m signers suffice per round; variant (ii) above stalls |
+| amnesia | open, §12 (b), (c) | the same problem, unsolved |
+| complexity already paid for | `lock.rs`, `lock_wire.rs`, the simulator and explorer, six reviews | none built; a new verifier path, migration, re-sign of variants |
+
+### 13.5 Recommendation and its condition
+
+Do not build E0 as a format of its own. When the mode's design resumes,
+evaluate "sign `prev` + one signature per (height, round)" as a
+SIMPLIFICATION candidate for republics with 2m > n only. It would remove
+the forced-value rule that six review rounds kept breaking (§12 (a)).
+Before that, these must be shown:
+
+- a model in `lock_explore_tests.rs` terms: the same seats, a lost block,
+  a split and a restore, explored for round r + 1 under rule (i) or (ii),
+  with the livelock or the stall found or excluded;
+- the relinking consequence: what replaces `relink_onto_variant` and R1
+  when an attestation variant must be re-signed;
+- the migration: the activation block, how a seat on the old format is
+  stopped (not forked), and what happens to republics with 2m ≤ n (they
+  keep B6 or the mode).
