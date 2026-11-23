@@ -475,7 +475,8 @@ impl State {
         // with cannot be ordered against that history (N4b §3.1a: a
         // rejoiner enters mid-stream): its first envelope is the baseline.
         let window = self.delivery.accepted.get(&from);
-        let has_history = window.is_some_and(|w| w.high > 0);
+        // a window reset for a restore owes the new incarnation from its start
+        let has_history = window.is_some_and(|w| w.high > 0 || !w.restore.is_empty());
         let is_dup = window.is_some_and(|w| w.is_accepted(envelope.seq));
         let prev_missing = envelope.prev_seq != 0
             && has_history
@@ -986,6 +987,9 @@ impl State {
     /// crash-regression from seconds to half a minute.
     pub(crate) fn cmd_net_delivery_tick(&mut self) -> Result<Reply, MoltError> {
         let now = self.presence_now();
+        if let Some((member, seq)) = self.drop_seam.take_regress() {
+            self.regress_window(&member, seq, now);
+        }
         self.save_accepted_if_due(now);
         self.persist_mls_if_due(now);
         self.flush_due_acks(now);
@@ -1016,6 +1020,23 @@ impl State {
     /// per owed sender, carrying this node's accept window over THAT
     /// sender's events. Best-effort off the actor (the send_ping path); a
     /// lost ack is re-armed by the sender's next resend arriving as a dup.
+    /// Test seam body: keep only `member`'s accept marks at or below `seq`.
+    fn regress_window(&mut self, member: &MemberId, seq: u64, now: u64) {
+        let Some(old) = self.delivery.accepted.get(member).cloned() else { return };
+        let mut w = molt_core::AcceptedWindow { restore: old.restore.clone(), ..Default::default() };
+        for s in seq.saturating_sub(molt_core::ACCEPT_WINDOW_BITS)..=seq.min(old.high) {
+            if s > 0 && old.is_accepted(s) {
+                let _ = w.accept(s);
+            }
+        }
+        w.frontier = old.frontier.min(w.high);
+        w.links = old.links.iter().copied().filter(|(_, s)| *s <= w.high).collect();
+        self.delivery.accepted.insert(member.clone(), w);
+        self.delivery.inbound.remove(member);
+        self.delivery.accepted_dirty = true;
+        self.delivery.ack_due.insert(member.clone(), now);
+    }
+
     pub(crate) fn flush_due_acks(&mut self, now: u64) {
         if self.delivery.ack_due.is_empty() {
             return;

@@ -271,3 +271,99 @@ async fn under_the_lock_a_message_missed_while_away_lands_exactly_once() {
     a.execute(Command::CloseWorkspace).await.expect("close a");
     b.execute(Command::CloseWorkspace).await.expect("close b");
 }
+
+#[derive(Clone)]
+struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Capture {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("log buffer").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+    type Writer = Capture;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+/// The one buffer this binary logs into (a global subscriber installs once).
+fn capture_logs() -> std::sync::Arc<std::sync::Mutex<Vec<u8>>> {
+    static BUF: std::sync::OnceLock<std::sync::Arc<std::sync::Mutex<Vec<u8>>>> = std::sync::OnceLock::new();
+    std::sync::Arc::clone(BUF.get_or_init(|| {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _ = tracing_subscriber::fmt()
+            .with_writer(Capture(std::sync::Arc::clone(&buf)))
+            .with_env_filter(tracing_subscriber::EnvFilter::new("info"))
+            .with_ansi(false)
+            .without_time()
+            .try_init();
+        buf
+    }))
+}
+
+/// **WP1 step 2: a receiver whose window regressed after a hard stop** (the
+/// window saved less recently than the ack went out). Its next sheet no
+/// longer holds what walter's floor counts as acked: walter rewinds that
+/// floor and re-offers the tail; petra applies none of it twice and
+/// reports no message lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_receiver_whose_window_regressed_gets_the_tail_again_and_applies_it_once() {
+    let logs = capture_logs();
+    let (relay, _db) = prunable_relay().await;
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b) = found_two_of_two_as(tmp.path(), &url, true).await;
+    for i in 0..20 {
+        a.execute(Command::Chat { body: format!("tail {i}"), quote: None, channel: molt_core::ChannelRef::default() })
+            .await
+            .expect("walter sends");
+    }
+    assert!(wait_for_chat(&b, "tail 19", 60).await, "the tail reached petra");
+    let ws = read_session(&a).await.workspaces[0].id.clone();
+    let dir = molt_storage::find_workspace_dir(&tmp.path().join("founder"), &ws).expect("walter's dir");
+    let cursor = |ts: &molt_core::TransportState| ts.outbound.get("petra").copied().unwrap_or_default();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    let acked = loop {
+        let ts = molt_storage::peek_transport_state(&dir).unwrap_or_default();
+        let head = ts.group.map_or(0, |g| g.log_seq);
+        if cursor(&ts).acked_floor >= head && head > 0 {
+            break cursor(&ts).acked_floor;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "petra never acked the tail: {:?}", cursor(&ts));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let lost_before = String::from_utf8_lossy(&logs.lock().expect("logs")).matches("inbound_gap_lost").count();
+    b.__regress_window("walter", acked.saturating_sub(15));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let ts = molt_storage::peek_transport_state(&dir).unwrap_or_default();
+        if cursor(&ts).regressed_from > 0 && cursor(&ts).acked_floor < acked {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "walter never rewound: {:?}", cursor(&ts));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let ts = molt_storage::peek_transport_state(&dir).unwrap_or_default();
+        if cursor(&ts).regressed_from == 0 && cursor(&ts).acked_floor >= acked {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the re-offered tail never landed: {:?}", cursor(&ts));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let bodies: Vec<String> =
+        read_chat(&b).await.iter().filter_map(|r| r.get("body").and_then(|v| v.as_str()).map(str::to_string)).collect();
+    for i in 0..20 {
+        assert_eq!(bodies.iter().filter(|m| **m == format!("tail {i}")).count(), 1, "tail {i} applied twice or lost");
+    }
+    let text = String::from_utf8_lossy(&logs.lock().expect("logs")).to_string();
+    assert_eq!(text.matches("inbound_gap_lost").count(), lost_before, "a false loss was reported");
+    assert!(text.contains("ack_regressed"), "the rewind warned");
+}

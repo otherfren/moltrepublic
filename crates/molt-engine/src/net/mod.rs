@@ -70,11 +70,18 @@ pub(crate) struct DropSeam {
     /// nothing, as a reset lost to a kill before the window save.
     pub(crate) skip_rekey_reset: std::sync::atomic::AtomicBool,
     pub(crate) skip_block_reset: std::sync::atomic::AtomicBool,
+    /// Forget a sender's accept marks above a seq, as a window saved less
+    /// recently than the ack that went out.
+    pub(crate) regress: Mutex<Option<(MemberId, u64)>>,
 }
 
 impl DropSeam {
     pub(crate) fn keeps_window_on_rekey(&self) -> bool {
         self.skip_rekey_reset.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn take_regress(&self) -> Option<(MemberId, u64)> {
+        self.regress.lock().ok().and_then(|mut r| r.take())
     }
 
     pub(crate) fn keeps_window_on_block(&self) -> bool {
