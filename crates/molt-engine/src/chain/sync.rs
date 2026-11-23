@@ -66,6 +66,40 @@ pub(super) const ANCHOR_REPUSH_MAX: u32 = 12;
 /// S4: fork candidates that never linked are dropped after this long.
 const CANDIDATE_TTL_SECS: u64 = 1_200;
 
+/// G3: a catch-up round repeating this often without progress is stuck.
+pub(crate) const HEAL_LOOP_ROUNDS: u32 = 3;
+/// H1: refused blocks kept for `status`.
+const REFUSALS_KEPT: usize = 8;
+/// A4: an identical log line goes out once per key per this long.
+const LOG_GATE_SECS: u64 = 60;
+
+/// H1: the stable code of a block refusal, from the verifier's text.
+pub(crate) fn refusal_rule(error: &str) -> &'static str {
+    const RULES: &[(&str, &str)] = &[
+        ("does not follow", "height"),
+        ("does not link to its predecessor", "link"),
+        ("a genesis cannot appear", "genesis_late"),
+        ("is applied twice", "double_apply"),
+        ("must be exactly its block height", "cut_upto"),
+        ("valid approvals, threshold is", "threshold"),
+        ("consent is spent", "consent_spent"),
+        ("consent is stale", "consent_stale"),
+        ("consent does not verify", "consent_invalid"),
+        ("consent is malformed", "consent_malformed"),
+        ("twice - consent plus", "consent_twice"),
+        ("carries a consent on a non-restore", "consent_misplaced"),
+        ("unknown member", "unknown_member"),
+        ("anchored identity key", "restore_key"),
+        ("`joined` is not supported", "joined"),
+        ("own projection", "cut_state"),
+        ("below the blob coverage", "cut_floor"),
+        ("legacy checkpoint", "cut_kind"),
+        ("vault checkpoint outside", "cut_kind"),
+        ("vault", "vault"),
+    ];
+    RULES.iter().find(|(needle, _)| error.contains(needle)).map_or("other", |(_, rule)| rule)
+}
+
 /// How many `(height, hash)` samples a fork-aware catch-up request carries.
 const KNOWN_HEADS_MAX: usize = 16;
 
@@ -110,7 +144,8 @@ impl State {
                 let expected = self.republic_id();
                 if let ChainChange::Genesis { republic_id, .. } = &block.change {
                     if !expected.is_empty() && *republic_id != expected {
-                        tracing::warn!(%republic_id, "refusing a genesis for another republic");
+                        let hash = self.note_refused(from, &block, "genesis_foreign");
+                        tracing::warn!(%republic_id, %hash, %from, rule = "genesis_foreign", "refusing a genesis for another republic");
                         return;
                     }
                 }
@@ -132,6 +167,10 @@ impl State {
         };
         if block.height == head.height + 1 {
             if block.prev != head.hash {
+                if self.left_that_branch(from, seq) {
+                    tracing::debug!(%from, height = block.height, "fork=stale_block");
+                    return;
+                }
                 // the sender built on a block we do not hold: another branch
                 self.note_divergence(from, head.height, &block);
                 self.stash_fork_candidate(block);
@@ -140,19 +179,21 @@ impl State {
             }
             // the buffered suffix drains behind it — ONE write for the
             // whole batch, at the end
+            let (height, hash) = (block.height, block_hash(&self.republic_id(), &block));
             let applied = self.in_block_batch(|st| {
-                let ok = st.apply_next_block(block);
+                let ok = st.apply_next_block(from, block);
                 if ok {
                     st.drain_buffered_blocks();
                 }
                 ok
             });
             if applied {
+                self.note_on_branch(from, seq, height, hash);
                 self.clear_divergence(from);
                 self.persist_chain_now();
             }
         } else if block.height <= head.height {
-            self.tie_break(from, block);
+            self.tie_break(from, seq, block);
         } else {
             // a gap: we are behind. Buffer this block and ask the mesh for the
             // blocks we are missing (any survivor re-serves them). L3: only
@@ -168,10 +209,12 @@ impl State {
                         && block.height <= blob.upto.saturating_add(CATCHUP_BUFFER_WINDOW)
                 });
             if block.height > head.height.saturating_add(CATCHUP_BUFFER_WINDOW) && !anchor_ok {
-                tracing::warn!(height = block.height, head = head.height, "refusing to buffer a block far past the head");
+                let hash = self.note_refused(from, &block, "far_future");
+                tracing::warn!(height = block.height, head = head.height, %hash, %from, rule = "far_future", "refusing to buffer a block far past the head");
                 return;
             }
             self.chain.pending_blocks.retain(|h, _| *h > head.height);
+            self.chain.pending_from.insert(block.height, from.to_string());
             self.chain.pending_blocks.insert(block.height, block);
             shed_highest(&mut self.chain.pending_blocks);
             self.try_adopt_from_blob();
@@ -181,12 +224,14 @@ impl State {
 
     /// Verify a block against the current head, append + apply it, and run the
     /// post-apply bookkeeping. Returns whether it was accepted.
-    fn apply_next_block(&mut self, block: ChainBlock) -> bool {
+    fn apply_next_block(&mut self, from: &str, block: ChainBlock) -> bool {
         // no probe clone: `append_committed_block` verifies before it appends,
         // so an unverifiable block never touches the chain. The probe used to
         // verify the whole chain a SECOND time per block — an exact doubling
         // of the catch-up cost that bought nothing.
-        if self.append_committed_block(block.clone()) {
+        if self.append_block_from(from, block.clone()) {
+            // the head moved: no refused block of ours repeats any more
+            self.chain.heal_loops.retain(|l| !l.asker);
             let now = self.presence_now();
             self.chain.applied_at.push_back(now);
             self.after_block_applied(&block);
@@ -208,12 +253,15 @@ impl State {
             let Some(block) = self.chain.pending_blocks.remove(&next) else {
                 break;
             };
-            if !self.apply_next_block(block) {
+            let from = self.chain.pending_from.remove(&next).unwrap_or_default();
+            if !self.apply_next_block(&from, block) {
                 break;
             }
         }
         let head_h = self.chain.head.as_ref().map_or(0, |h| h.height);
         self.chain.pending_blocks.retain(|h, _| *h > head_h);
+        let buffered: BTreeSet<u64> = self.chain.pending_blocks.keys().copied().collect();
+        self.chain.pending_from.retain(|h, _| buffered.contains(h));
     }
 
     /// Broadcast a catch-up request for every block from `from` onward (deduped
@@ -226,11 +274,7 @@ impl State {
         }
         self.chain.catchup_from = Some(from);
         self.chain.catchup_since = self.presence_now();
-        let me = self.member();
-        tracing::info!(from, "chain_catchup=requested");
-        let known = self.known_heads();
-        let env = self.make_env(me, WorkspaceEvent::ChainRequest { from_height: from, known });
-        self.record(env);
+        self.send_chain_request(from, false);
     }
 
     /// Our `(height, hash)` samples, head first, going back geometrically
@@ -293,7 +337,13 @@ impl State {
     fn send_chain_request(&mut self, from: u64, dense: bool) {
         let known = if dense { self.dense_known_heads() } else { self.known_heads() };
         let me = self.member();
-        tracing::info!(from, dense, known = known.len(), "chain_catchup=requested");
+        self.chain.requests_sent = self.chain.requests_sent.wrapping_add(1);
+        let first = known.first().map(|k| short_hash(&k.hash).to_string()).unwrap_or_default();
+        let last = known.last().map(|k| short_hash(&k.hash).to_string()).unwrap_or_default();
+        let line = format!("{from}:{dense}:{}:{first}:{last}", known.len());
+        if let Some(repeated) = self.log_gate("requested", &line) {
+            tracing::info!(from, dense, known = known.len(), first = %first, last = %last, repeated, "chain_catchup=requested");
+        }
         let env = self.make_env(me, WorkspaceEvent::ChainRequest { from_height: from, known });
         self.record(env);
     }
@@ -315,7 +365,7 @@ impl State {
         }
         self.chain.served_at.insert(peer.to_string(), now);
         tracing::info!(%peer, fork, "fork=served_winner");
-        self.serve_chain_from(fork);
+        self.serve_chain_from(peer, fork);
     }
 
     /// Whether this seat is first in the sealing line (S5): the one that
@@ -494,6 +544,12 @@ impl State {
             .map(|d| (d.peer.clone(), d.since_height))
             .unwrap_or_else(|| (String::new(), self.chain.fork_candidates.keys().next().copied().unwrap_or(0)));
         let secs = now.saturating_sub(self.chain.heal_since);
+        self.announce_heal_stuck(&peer, since, secs);
+    }
+
+    /// The loud half of a stuck heal: a warning, a wake, a chat line from
+    /// this seat and the session notice.
+    fn announce_heal_stuck(&mut self, peer: &str, since: u64, secs: u64) {
         tracing::warn!(%peer, since, secs, "chain_heal_stuck");
         self.wake_trigger(molt_core::kanban_wake::CHAIN_STUCK_REASON, "");
         let me = self.member();
@@ -623,11 +679,24 @@ impl State {
         }
         let Some(f) = fork else {
             // nothing links yet: ask for the run below the lowest candidate
-            if let Some(lowest) = self.chain.fork_candidates.keys().next().copied() {
+            if let Some((lowest, cand)) = self.chain.fork_candidates.iter().next().map(|(h, c)| (*h, c.clone())) {
                 if lowest > anchor.saturating_add(1) {
                     let want = lowest.saturating_sub(1).max(anchor.saturating_add(1));
                     let suppressed = self.chain.catchup_from == Some(want);
-                    tracing::debug!(%from, lowest, requested = want, suppressed, "fork=unlinked");
+                    let theirs = block_hash(&rid, &cand);
+                    let ours = ours_at(self, lowest);
+                    let mine = ours.as_ref().map(|b| block_hash(&rid, b)).unwrap_or_default();
+                    let (mine_id, theirs_id) = (ours.as_ref().map_or(0, applied_id), applied_id(&cand));
+                    let line = format!("{want}:{mine}:{theirs}");
+                    if let Some(repeated) = self.log_gate(&format!("unlinked:{from}:{lowest}"), &line) {
+                        tracing::info!(
+                            %from, lowest, requested = want, suppressed, mine = short_hash(&mine), theirs = short_hash(&theirs),
+                            mine_id, theirs_id, repeated, "fork=unlinked"
+                        );
+                    }
+                    if !from.is_empty() {
+                        self.note_heal_round(from, true, lowest, &theirs, "unlinked");
+                    }
                     self.request_catchup(want);
                 }
             }
@@ -670,7 +739,9 @@ impl State {
             return;
         }
         if let Err(e) = self.walk_own(&candidate) {
-            tracing::warn!(%from, fork = f, error = %e, "the other branch does not verify - dropped");
+            let rule = refusal_rule(&e);
+            let hash = self.note_refused(from, &suffix[0], rule);
+            tracing::warn!(%from, fork = f, %hash, rule, error = %e, "the other branch does not verify - dropped");
             self.note_fork(from, f, "dropped", &mine, &theirs, ids);
             self.chain.fork_candidates.clear();
             return;
@@ -748,7 +819,11 @@ impl State {
         }
         self.chain.fork_candidates.clear();
         if let Err(e) = self.walk_own(&candidate) {
-            tracing::warn!(%from, fork = f, error = %e, "attestation variant does not verify - dropped");
+            let rule = refusal_rule(&e);
+            if let Some(b) = candidate.iter().find(|b| b.height == f).cloned() {
+                self.note_refused(from, &b, rule);
+            }
+            tracing::warn!(%from, fork = f, rule, error = %e, "attestation variant does not verify - dropped");
             self.note_fork(from, f, "dropped", mine, theirs, ids);
             return;
         }
@@ -787,14 +862,20 @@ impl State {
     /// block we hold from `from` onward (as `Committed`, re-authored so the
     /// outbox fans it out). A single survivor thus reconstitutes the chain for
     /// everyone — independent of who originally committed each block.
-    pub(crate) fn serve_chain_from(&mut self, from: u64) {
+    pub(crate) fn serve_chain_from(&mut self, peer: &str, from: u64) {
         let blocks: Vec<ChainBlock> = self
             .chain.blocks
             .iter()
             .filter(|b| b.height >= from)
             .cloned()
             .collect();
-        tracing::info!(from, blocks = blocks.len(), "chain_catchup=served");
+        let rid = self.republic_id();
+        let first = blocks.first().map(|b| short_hash(&block_hash(&rid, b)).to_string()).unwrap_or_default();
+        let last = blocks.last().map(|b| short_hash(&block_hash(&rid, b)).to_string()).unwrap_or_default();
+        let line = format!("{from}:{}:{first}:{last}", blocks.len());
+        if let Some(repeated) = self.log_gate(&format!("served:{peer}"), &line) {
+            tracing::info!(%peer, from, blocks = blocks.len(), first = %first, last = %last, repeated, "chain_catchup=served");
+        }
         if blocks.is_empty() {
             return;
         }
@@ -898,13 +979,15 @@ impl State {
     /// a duplicate broadcast, ignore; a different block at the tip with a
     /// smaller hash wins the single branch, so adopt it and re-base the
     /// displaced proposal. A deeper conflict is logged (deep reorg is Phase 3).
-    fn tie_break(&mut self, from: &str, block: ChainBlock) {
+    fn tie_break(&mut self, from: &str, seq: Option<u64>, block: ChainBlock) {
         let Some(existing) = self.chain.blocks.iter().find(|b| b.height == block.height) else {
             return;
         };
         if existing == &block {
             // duplicate broadcast of the block we already hold: the sender
             // holds our history at this height
+            let hash = block_hash(&self.republic_id(), &block);
+            self.note_on_branch(from, seq, block.height, hash);
             self.clear_divergence(from);
             return;
         }
@@ -939,6 +1022,10 @@ impl State {
             return;
         }
         if !shared_prev || !is_tip {
+            if self.left_that_branch(from, seq) {
+                tracing::debug!(%from, height = block.height, "fork=stale_block");
+                return;
+            }
             let since = if shared_prev { block.height } else { block.height.saturating_sub(1) };
             self.note_divergence(from, since, &block);
             self.stash_fork_candidate(block);
@@ -952,7 +1039,8 @@ impl State {
             return;
         }
         if is_tip && incoming < current && !signed {
-            tracing::warn!(height = block.height, "tie-break contender without a valid threshold - dropped");
+            let hash = self.note_refused(from, &block, "threshold");
+            tracing::warn!(height = block.height, %hash, %from, rule = "threshold", "tie-break contender without a valid threshold - dropped");
             return;
         }
         if is_tip && incoming < current {
@@ -1066,6 +1154,8 @@ impl State {
     pub(crate) fn forget_peer_claim(&mut self, member: &str) {
         self.chain.peer_heights.remove(member);
         self.chain.peer_claim_seq.remove(member);
+        self.chain.peer_on_branch.remove(member);
+        self.chain.heal_loops.retain(|l| l.peer != member);
         // D3: a new device's declarations carry its own clock
         self.files.caps_at.remove(member);
     }
@@ -1115,8 +1205,189 @@ impl State {
             last_fork: self.chain.last_fork.clone(),
             blob_bytes,
             blob_cap: u64::try_from(Self::served_blob_cap()).unwrap_or(u64::MAX),
+            refused: self.chain.refusals.iter().cloned().collect(),
+            heal_stuck: self.heal_stuck(),
         }
     }
+
+    /// G3: the oldest catch-up round that repeats, else a divergence that
+    /// went loud.
+    fn heal_stuck(&self) -> Option<molt_core::HealStuck> {
+        let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        let looping = self
+            .chain
+            .heal_loops
+            .iter()
+            .filter(|l| l.rounds >= HEAL_LOOP_ROUNDS && (!l.asker || l.height > head))
+            .min_by_key(|l| l.since)
+            .map(|l| molt_core::HealStuck { peer: l.peer.clone(), since: l.since, height: l.height, rule: l.rule.clone() });
+        looping.or_else(|| {
+            self.chain.heal_escalated.then(|| {
+                let (peer, height) = self
+                    .chain
+                    .diverged
+                    .values()
+                    .min_by_key(|d| d.since_height)
+                    .map(|d| (d.peer.clone(), d.since_height))
+                    .unwrap_or_default();
+                molt_core::HealStuck { peer, since: self.chain.heal_since, height, rule: String::new() }
+            })
+        })
+    }
+
+    /// H1: keep a refused block for `status` and count it as a heal round
+    /// with its sender; the block's short hash, for the caller's line.
+    pub(crate) fn note_refused(&mut self, from: &str, block: &ChainBlock, rule: &str) -> String {
+        let full = block_hash(&self.republic_id(), block);
+        let hash = short_hash(&full).to_string();
+        let at = self.presence_now();
+        self.chain.refusals.push_back(molt_core::BlockRefusal {
+            height: block.height,
+            hash: hash.clone(),
+            from: from.to_string(),
+            rule: rule.to_string(),
+            at,
+        });
+        while self.chain.refusals.len() > REFUSALS_KEPT {
+            self.chain.refusals.pop_front();
+        }
+        if !from.is_empty() && from != self.member() {
+            self.note_heal_round(from, true, block.height, &full, rule);
+        }
+        hash
+    }
+
+    /// G3: one more round with `peer` that moved nothing - the same refused
+    /// block (`asker`) or the same request. Loud once at
+    /// [`HEAL_LOOP_ROUNDS`].
+    fn note_heal_round(&mut self, peer: &str, asker: bool, height: u64, key: &str, rule: &str) {
+        let now = self.presence_now();
+        let pos = self.chain.heal_loops.iter().position(|l| l.peer == peer && l.asker == asker);
+        let same = pos.is_some_and(|i| self.chain.heal_loops[i].height == height && self.chain.heal_loops[i].key == key);
+        // the asker's round is one of its own requests: a served batch
+        // repeats its refused block per frame, not per round
+        let mark = (peer.to_string(), asker);
+        let asked = self.chain.requests_sent;
+        if same && asker && self.chain.round_marks.get(&mark) == Some(&asked) {
+            return;
+        }
+        self.chain.round_marks.insert(mark, asked);
+        let i = match pos {
+            Some(i) if same => {
+                let l = &mut self.chain.heal_loops[i];
+                l.rounds = l.rounds.saturating_add(1);
+                l.rule = rule.to_string();
+                i
+            }
+            _ => {
+                let fresh = molt_core::HealLoop {
+                    peer: peer.to_string(),
+                    asker,
+                    height,
+                    key: key.to_string(),
+                    rounds: 1,
+                    since: now,
+                    rule: rule.to_string(),
+                    loud: false,
+                };
+                match pos {
+                    Some(i) => {
+                        self.chain.heal_loops[i] = fresh;
+                        i
+                    }
+                    None => {
+                        self.chain.heal_loops.push(fresh);
+                        self.chain.heal_loops.len() - 1
+                    }
+                }
+            }
+        };
+        let l = &mut self.chain.heal_loops[i];
+        if l.rounds >= HEAL_LOOP_ROUNDS && !l.loud {
+            l.loud = true;
+            let (rounds, since, rule) = (l.rounds, l.since, l.rule.clone());
+            tracing::info!(%peer, asker, height, rounds, rule = %rule, "heal=stuck");
+            self.announce_heal_stuck(peer, height, now.saturating_sub(since));
+        }
+    }
+
+    /// A catch-up request from `from` (frame `seq`): its top sample on our
+    /// branch is evidence it left any other; a request that repeats while
+    /// both heads stand still is a heal round, one beyond our head ends it.
+    pub(crate) fn note_request_round(
+        &mut self,
+        from: &str,
+        seq: u64,
+        known: &[molt_core::HeightHash],
+        serve_from: u64,
+        beyond_head: bool,
+    ) {
+        let top = known.iter().max_by_key(|k| k.height);
+        if let Some(top) = top {
+            if self.holds_block(top.height, &top.hash) {
+                self.note_on_branch(from, Some(seq), top.height, top.hash.clone());
+            }
+        }
+        if beyond_head {
+            self.chain.heal_loops.retain(|l| l.peer != from || l.asker);
+            return;
+        }
+        let key = top.map(|k| k.hash.clone()).unwrap_or_default();
+        self.note_heal_round(from, false, serve_from, &key, "");
+    }
+
+    /// F1: frame `seq` of `from` showed it holding our block at `height`.
+    fn note_on_branch(&mut self, from: &str, seq: Option<u64>, height: u64, hash: String) {
+        let Some(seq) = seq else { return };
+        if from.is_empty() || self.chain.peer_on_branch.get(from).is_some_and(|(at, _, _)| *at >= seq) {
+            return;
+        }
+        self.chain.peer_on_branch.insert(from.to_string(), (seq, height, hash));
+    }
+
+    /// F1: a newer frame of `from` than this one showed it on our branch,
+    /// and we still hold what it named - the block is from a branch `from`
+    /// has left, not a divergence.
+    fn left_that_branch(&self, from: &str, seq: Option<u64>) -> bool {
+        let (Some(seq), Some((at, height, hash))) = (seq, self.chain.peer_on_branch.get(from)) else {
+            return false;
+        };
+        seq < *at && self.holds_block(*height, hash)
+    }
+
+    /// A4: whether a line under `key` goes out now - `Some(folded)` with
+    /// how many identical lines were held back since the last one, `None`
+    /// while the same text repeats within [`LOG_GATE_SECS`].
+    pub(crate) fn log_gate(&mut self, key: &str, text: &str) -> Option<u32> {
+        let now = self.presence_now();
+        if let Some((last, at, folded)) = self.chain.log_gate.get_mut(key) {
+            if last == text && now.saturating_sub(*at) < LOG_GATE_SECS {
+                *folded = folded.saturating_add(1);
+                return None;
+            }
+            let held = *folded;
+            *last = text.to_string();
+            *at = now;
+            *folded = 0;
+            return Some(held);
+        }
+        self.chain.log_gate.insert(key.to_string(), (text.to_string(), now, 0));
+        Some(0)
+    }
+
+    /// G3: loops restored from the snapshot count again only after one
+    /// fresh round.
+    pub(crate) fn restore_heal_loops(&mut self, loops: &[molt_core::HealLoop]) {
+        self.chain.heal_loops = loops
+            .iter()
+            .cloned()
+            .map(|mut l| {
+                l.rounds = l.rounds.min(HEAL_LOOP_ROUNDS - 1);
+                l
+            })
+            .collect();
+    }
+
 
     /// A5: how far the peers are ahead, and who has gone quiet. The two
     /// facts a partitioned seat cannot see for itself - `chain_diverged`

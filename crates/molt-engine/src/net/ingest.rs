@@ -671,6 +671,7 @@ impl State {
                     .chain.head
                     .as_ref()
                     .is_some_and(|h| from_height > h.height);
+                self.note_request_round(&from, envelope.seq, &known, from_height, beyond_head);
                 let recently = self
                     .chain.served_at
                     .get(&from)
@@ -680,7 +681,7 @@ impl State {
                     tracing::info!(%from, from_height, reason, "chain_catchup=not_served");
                 } else {
                     self.chain.served_at.insert(from.clone(), now);
-                    self.serve_chain_from(from_height);
+                    self.serve_chain_from(&from, from_height);
                     // WP2: the requester is (re)joining the conversation — beyond
                     // the committed suffix it also lost the ephemeral open
                     // governance state with its RAM, so re-serve that too

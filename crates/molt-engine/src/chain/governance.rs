@@ -1112,6 +1112,12 @@ impl State {
     /// state. Returns whether it was accepted. **Does not persist** — the
     /// caller does, once per batch ([`State::persist_chain_now`]).
     pub(super) fn append_committed_block(&mut self, block: ChainBlock) -> bool {
+        let me = self.member();
+        self.append_block_from(&me, block)
+    }
+
+    /// [`Self::append_committed_block`] for a block `from` delivered.
+    pub(super) fn append_block_from(&mut self, from: &str, block: ChainBlock) -> bool {
         // verify BEFORE appending — the block only ever touches `self.chain.blocks`
         // once it has passed, so there is nothing to roll back
         match self.extend_own(&block) {
@@ -1127,7 +1133,9 @@ impl State {
             Err(e) => {
                 // routine, not an internal fault: a stale re-serve during
                 // catch-up and a hostile peer both land here
-                tracing::warn!(height = block.height, error = %e, "refused a chain block");
+                let rule = super::refusal_rule(&e);
+                let hash = self.note_refused(from, &block, rule);
+                tracing::warn!(height = block.height, %hash, %from, rule, error = %e, "refused a chain block");
                 false
             }
         }

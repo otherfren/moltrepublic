@@ -58,6 +58,8 @@ mod sync_tests;
 #[cfg(test)]
 mod stance_tests;
 #[cfg(test)]
+mod heal_diag_tests;
+#[cfg(test)]
 mod verify_tests;
 #[cfg(test)]
 mod vault_founding_tests;
@@ -152,7 +154,7 @@ pub(crate) use membership::{AnchorFirst, AttemptBook, NostrRekey, MINTED_TICKETS
 #[cfg(test)]
 pub(crate) use membership::RECOVER_PART_MAX;
 pub(crate) use lock_wire::{LockMode, LockRuntime, LockSeams, CHAIN_LOCK_AVAILABLE, LOCK_CHAIN_UNSUPPORTED};
-pub(crate) use sync::PeerClaim;
+pub(crate) use sync::{refusal_rule, PeerClaim};
 
 use verify::*;
 

@@ -217,6 +217,38 @@ state; a signature is only its expression at one head+1.
 - `approve` on a card this seat already approved re-sends its signature
   and answers the same vote; it never counts twice.
 
+### 7.2 Divergence is judged by the peer's latest report (v0.1.2)
+
+- A peer is marked diverged by a block of another branch only when no
+  NEWER frame of that peer (by its log seq) showed it on this branch: a
+  catch-up request whose top sample this node holds, a block it delivered
+  that extended this chain, or a duplicate of a block held here - and only
+  while this node still holds the block that frame named. A late first
+  delivery of a block from a branch the peer has since left is dropped
+  (`fork=stale_block`, debug): it is neither marked nor stashed.
+- A refused delivered block is logged as `refused a chain block height=
+  hash=<12 hex> from= rule= error=` and kept (the last 8) in
+  `status.chain_sync.refused`. The `rule` codes are stable: `height`,
+  `link`, `genesis_late`, `genesis_foreign`, `double_apply`, `cut_upto`,
+  `cut_state`, `cut_floor`, `cut_kind`, `threshold`, `consent_spent`,
+  `consent_stale`, `consent_invalid`, `consent_malformed`, `consent_twice`,
+  `consent_misplaced`, `unknown_member`, `restore_key`, `joined`, `vault`,
+  `far_future`, `other`.
+- A catch-up round that moves nothing is a heal round: on the server, the
+  same peer asking from the same height with the same top sample; on the
+  asker, the same refused (or unlinkable) block from the same peer. Three
+  rounds in a row set `status.chain_sync.heal_stuck` (peer, since, height,
+  rule) and announce it once through the `chain_heal_stuck` path (warning,
+  wake, chat line, notice). A head move of the asker, or a request at or
+  beyond the server's head, ends the round. The rounds are part of the
+  snapshot; after a restart one more round re-flags with the original
+  `since`. A divergence that went loud (`chain_heal_stuck` after 900 s)
+  reads there too.
+- `fork=unlinked` logs at info with both hashes and proposal ids; the
+  `chain_catchup=requested` / `served` lines carry the first and last hash
+  of their range. An identical line goes out once per key per minute, the
+  next one carries `repeated=<n>`.
+
 ## 8. Threshold and recovery fall out of the chain
 
 - **Real threshold, no FROST.** A gated change is authorized iff its block
