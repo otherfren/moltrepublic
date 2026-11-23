@@ -778,6 +778,21 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   them (status `amnesia - restore this seat with a new link`). Where
   m = n no answer set proves anything: the recovery ritual is the only
   exit, and a seat restored from a file backup is undetectable there.
+- **Operability (C-MED-3, C-MED-6, B-F3, B-F6, B-F7, D-F3).** A card whose
+  ballot went stale stays behind the other ready cards across heights
+  until it is retired (a never-sealable card no longer costs a timeout
+  at every height; `a_stale_card_stays_behind_at_the_next_height`). A
+  withholding acceptor logs its reason at INFO once per height and card;
+  the leader's status names the promisers whose acceptance is missing
+  (`acceptances 1/2 missing walter`). Not built: an answer frame that
+  carries the reason to the leader. The manifest version is raised in
+  memory only once it is on disk, and an open heals a lock file whose
+  raise never landed (`a_lock_file_raises_the_version_at_open`); the
+  marker alone keeps version 4 through a seal round trip
+  (`a_lock_marker_keeps_the_lock_version_through_sealing`). Lock
+  deadlines run on a monotonic clock. An unowed lock frame never takes
+  the link of the owed envelope that shares its `prev_seq` - it stalled
+  the sender's frontier (`an_unowed_lock_frame_never_takes_an_owed_link`).
 - **A-F3.** Lock state at a height on any lineage forbids a free
   signature there, also on a lineage without the enabling block - the
   signature is base-agnostic and would count free where the lock holds

@@ -1674,3 +1674,50 @@ fn the_mode_needs_two_approvals_per_decision() {
     let err = mara.cmd_propose(Surface::Organization, enable).expect_err("refused");
     assert!(err.to_string().contains(LOCK_NEEDS_TWO), "{err}");
 }
+
+/// C-MED-3: a card whose ballot went stale stays behind the other ready
+/// cards at the next height too - a never-sealable card no longer costs
+/// a timeout at every height.
+#[test]
+fn a_stale_card_stays_behind_at_the_next_height() {
+    let mut b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let first = note(&mut dora, "first");
+    let other = note(&mut dora, "other");
+    dora.lock_note_intent(first, "mara");
+    dora.lock_note_intent(other, "mara");
+    dora.chain.own_approvals.clear();
+    dora.lock_start(0);
+    let (base, round) = {
+        let run = dora.chain.lock.run.as_ref().expect("dora leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    wire(&mut dora, "mara", 1, WorkspaceEvent::LockPromise { height: 1, base, round, leader: "dora".into(), accepted: None });
+    assert_eq!(dora.chain.lock.run.as_ref().and_then(|r| r.value.as_ref()).map(|(id, _)| *id), Some(first));
+    let mut now = T;
+    while dora.chain.lock.run.as_ref().map(|r| r.leader.ballot.round) == Some(round) {
+        now += 10;
+        hear(&mut dora, now, &SEATS);
+        dora.lock_tick();
+    }
+    // height 1 is decided elsewhere with a third card
+    b.commit_applied(9, &["mara", "walter"]);
+    dora.receive_block_from("mara", b.blocks[1].clone());
+    assert_eq!(dora.chain.head.as_ref().map(|h| h.height), Some(1));
+    let slot = dora.lock_slot().expect("slot");
+    let chosen = dora.lock_choose(&slot, None).map(|(id, _, _)| id);
+    assert_eq!(chosen, Some(other), "the stale card waits behind the ready one");
+}
+
+/// B-F7: the lock's deadlines run on a monotonic clock (a wall-clock jump
+/// neither stalls nor fires them); the test clock still drives it.
+#[test]
+fn the_lock_clock_is_monotonic_and_follows_the_test_clock() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    mara.presence.clock_override = None;
+    let (a, c) = (mara.lock_now(), mara.lock_now());
+    assert!(c >= a);
+    mara.presence.clock_override = Some(5);
+    assert_eq!(mara.lock_now(), 5);
+}

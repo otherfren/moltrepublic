@@ -426,13 +426,18 @@ impl State {
     /// left unaccepted (the D7 decline park) stays missing and refused.
     fn deliver_tracked(&mut self, from: &MemberId, env: EventEnvelope) -> Result<Reply, MoltError> {
         let (seq, prev) = (env.seq, env.prev_seq);
+        // D-F3: an unowed frame shares its prev with the next owed envelope;
+        // linking it would take that envelope's link and stall the frontier
+        let unowed = molt_core::unowed_on_the_wire(&env.body);
         let reply = self.deliver_gated(from.clone(), env);
         let accepted = self.delivery.accepted.get(from).is_some_and(|w| w.is_accepted(seq));
         let now = self.presence_now();
         let Some(hold) = self.delivery.inbound.get_mut(from) else { return reply };
         if accepted {
             hold.refused.remove(&seq);
-            hold.link(prev, seq);
+            if !unowed {
+                hold.link(prev, seq);
+            }
             self.store_frontier(from);
         } else {
             hold.refused.insert(seq);

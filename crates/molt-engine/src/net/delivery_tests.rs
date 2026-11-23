@@ -445,3 +445,21 @@ fn behind_a_gap_a_lock_frame_passes_and_an_intent_waits() {
     land(&mut st, bob_env(far, far - 1, WorkspaceEvent::LockPrepare { height: 9, base: "ab".into(), round: 1 }));
     assert!(!accepted(&st, far), "far ahead of the frontier even a lock frame is buffered");
 }
+
+/// D-F3: a lock frame is unowed, so it shares its `prev_seq` with the
+/// next owed envelope. Arriving after that envelope above a gap, it must
+/// not take the envelope's link: the frontier reaches the owed envelope
+/// once the hole closes.
+#[test]
+fn an_unowed_lock_frame_never_takes_an_owed_link() {
+    use molt_core::WorkspaceEvent;
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    // seq 2 is missing; the owed seq 4 and the unowed seq 3 both name it
+    land(&mut st, bob_env(4, 2, WorkspaceEvent::Withdrawn { id: molt_core::ProposalId(7), by: "bob".into() }));
+    assert!(accepted(&st, 4), "an owed, order-free envelope is accepted above the gap");
+    land(&mut st, bob_env(3, 2, WorkspaceEvent::LockPrepare { height: 1, base: "ab".into(), round: 1 }));
+    land(&mut st, chat_env(2, 1, "the hole"));
+    let frontier = st.delivery.accepted["bob"].frontier;
+    assert!(frontier >= 4, "the frontier passes the owed envelope: {frontier}");
+}

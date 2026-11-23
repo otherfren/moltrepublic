@@ -1733,8 +1733,13 @@ impl OpenedWorkspace {
         if self.manifest.version >= molt_core::STORAGE_VERSION_LOCK {
             return Ok(());
         }
-        self.manifest.version = molt_core::STORAGE_VERSION_LOCK;
-        write_manifest(&self.dir, &self.manifest)
+        // B-F3: the version is raised in memory only once it is on disk -
+        // else a failed write leaves every later call a no-op at v3
+        let mut raised = self.manifest.clone();
+        raised.version = molt_core::STORAGE_VERSION_LOCK;
+        write_manifest(&self.dir, &raised)?;
+        self.manifest = raised;
+        Ok(())
     }
 
     /// WP4b stage 5 (see [`Self::bump_lock_version`] for the lock's twin).
@@ -1742,8 +1747,11 @@ impl OpenedWorkspace {
         if self.manifest.version >= molt_core::STORAGE_VERSION_PRUNED {
             return Ok(());
         }
-        self.manifest.version = molt_core::STORAGE_VERSION_PRUNED;
-        write_manifest(&self.dir, &self.manifest)
+        let mut raised = self.manifest.clone();
+        raised.version = molt_core::STORAGE_VERSION_PRUNED;
+        write_manifest(&self.dir, &raised)?;
+        self.manifest = raised;
+        Ok(())
     }
 
     /// Rewrite `chain.state` atomically (via `tmp/`, mode 0600). The chain is
@@ -2914,8 +2922,18 @@ pub fn open_workspace(ws_dir: &Path) -> Result<(OpenedWorkspace, LoadedState), S
     // re-read under the flock: a seal_at_rest may have raced the pre-check
     // (its marker + key deletion land under the flock we now hold) — the
     // stale copy would misreport a healthy sealed dir as corruption
-    let manifest = read_manifest(ws_dir)?;
+    let mut manifest = read_manifest(ws_dir)?;
     openable_gate(&manifest)?;
+    // B-F3: a lock file whose version raise did not reach the disk is
+    // healed here, before an older build could open the directory again
+    if ws_dir.join(CHAIN_LOCK_FILE).exists() && manifest.version < molt_core::STORAGE_VERSION_LOCK {
+        let mut raised = manifest.clone();
+        raised.version = molt_core::STORAGE_VERSION_LOCK;
+        match write_manifest(ws_dir, &raised) {
+            Ok(()) => manifest = raised,
+            Err(e) => tracing::warn!(error = %e, "lock version not raised"),
+        }
+    }
 
     let (key, id) = open_key_material(ws_dir, &manifest)?;
     let transport = open_transport_state(ws_dir, &key, &id)?;

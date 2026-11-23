@@ -164,7 +164,9 @@ pub(crate) struct LockRuntime {
     /// Cards proposed freely at a height whose ballot went stale there,
     /// longest stale first: skipped while another card is ready, then
     /// taken in turn (R5, T2).
-    stale_ids: BTreeMap<u64, Vec<u64>>,
+    stale_ids: Vec<u64>,
+    /// The last withheld acceptance logged at INFO (C-MED-6, once each).
+    withheld_logged: Option<(u64, u64, String)>,
     /// The seats among them seen holding an acceptance there.
     accepted_seen: BTreeMap<u64, BTreeSet<String>>,
     /// Heights where this seat holds its own free signature beside lock
@@ -272,6 +274,17 @@ impl State {
 
     fn lock_listens(&self) -> bool {
         self.is_chain_governed() && self.lock_cap_on() && !self.lock_seam(&self.lock_seams.stopped)
+    }
+
+    /// The lock's clock (B-F7): monotonic, so a wall-clock jump neither
+    /// stalls a deadline nor fires every one at once; the test clock
+    /// drives it like presence.
+    pub(crate) fn lock_now(&self) -> u64 {
+        static START: std::sync::OnceLock<(std::time::Instant, u64)> = std::sync::OnceLock::new();
+        self.presence.clock_override.unwrap_or_else(|| {
+            let (at, wall) = START.get_or_init(|| (std::time::Instant::now(), crate::now_secs()));
+            wall + at.elapsed().as_secs()
+        })
     }
 
     pub(crate) fn lock_grace(&self) -> u64 {
@@ -808,7 +821,7 @@ impl State {
     /// The B6 choice (§5): the smallest open id whose intents reach its
     /// `need`; a cut only with every seat's promise in hand (§4.1).
     fn lock_choose(&self, slot: &Slot, promised: Option<&BTreeSet<String>>) -> Option<(u64, ChainChange, Value)> {
-        let order = self.chain.lock.stale_ids.get(&slot.height).cloned().unwrap_or_default();
+        let order = self.chain.lock.stale_ids.clone();
         let stale: BTreeSet<u64> = order.iter().copied().collect();
         // R5: a card whose ballot went stale waits while another is ready;
         // once every ready card went stale they take turns (T2)
@@ -978,7 +991,7 @@ impl State {
         if ballot.leader == me {
             return;
         }
-        let now = self.presence_now();
+        let now = self.lock_now();
         let yielded = match &self.chain.lock.run {
             Some(run) if run.leader.slot == *slot && run.leader.ballot < *ballot => Some(run.attempt + 1),
             _ => None,
@@ -1014,7 +1027,7 @@ impl State {
         if self.lock_restore_subjects().contains(&me) {
             return;
         }
-        let now = self.presence_now();
+        let now = self.lock_now();
         let seen = self.chain.lock.seen.get(&slot).map_or(0, |b| b.round);
         let round = self.chain.lock.acceptor.next_round(&slot).max(seen + 1);
         let ballot = Ballot { round, leader: me.clone() };
@@ -1105,7 +1118,7 @@ impl State {
                     // value from completing it (S1)
                     let (heard, started) =
                         self.chain.lock.run.as_ref().map_or((0, 0), |r| (r.leader.heard(), r.started));
-                    let waiting = self.presence_now() < started + self.lock_retransmit();
+                    let waiting = self.lock_now() < started + self.lock_retransmit();
                     if heard < n && waiting {
                         tracing::debug!(height = slot.height, id, heard, "lock=forced_waits_for_hearing");
                         return;
@@ -1124,7 +1137,7 @@ impl State {
                 None => return,
             },
         };
-        let now = self.presence_now();
+        let now = self.lock_now();
         let Some(run) = self.chain.lock.run.as_mut() else { return };
         let Some(value) = run.leader.propose(own) else { return };
         run.value = Some((id, change.clone()));
@@ -1264,7 +1277,11 @@ impl State {
             self.lock_withheld(id, &change, slot.height)
         };
         if let Some(why) = withheld {
-            tracing::debug!(height = slot.height, id, reason = %why, "lock=withheld");
+            let key = (slot.height, id, why.clone());
+            if self.chain.lock.withheld_logged.as_ref() != Some(&key) {
+                tracing::info!(height = slot.height, id, reason = %why, "lock=withheld");
+                self.chain.lock.withheld_logged = Some(key);
+            }
             self.chain.lock.retry_accept =
                 Some((slot.clone(), ballot.clone(), value.clone(), id, wire_change(&change), forced));
             return;
@@ -1333,7 +1350,7 @@ impl State {
         if ballot.leader == self.member() {
             self.lock_seal(slot, &sealable, id, change);
         } else if self.chain.lock.learned.as_ref().map_or(true, |l| Some(&l.slot) != current.as_ref()) {
-            let since = self.presence_now();
+            let since = self.lock_now();
             self.chain.lock.learned = Some(Learned { slot: slot.clone(), sealable, since, id, change });
         }
     }
@@ -1616,7 +1633,8 @@ impl State {
         lock.free_seen.retain(|h, _| *h > head);
         lock.locked_seen.retain(|h, _| *h > head);
         lock.accepted_seen.retain(|h, _| *h > head);
-        lock.stale_ids.retain(|h, _| *h > head);
+        // C-MED-3: a card stale at one height stays behind the others at
+        // the next (a never-sealable card no longer costs every height)
         lock.passive.retain(|h| *h > head);
         if lock.learned.as_ref().is_some_and(|l| l.slot.height <= head) {
             lock.learned = None;
@@ -1639,6 +1657,7 @@ impl State {
             self.chain.lock.intents.remove(id);
         }
         self.chain.lock.intent_sent.retain(|id| open.contains(id));
+        self.chain.lock.stale_ids.retain(|id| open.contains(id));
         self.chain.lock.intent_at.retain(|id, _| open.contains(id));
         let slot = self.lock_slot();
         if self.chain.lock.run.as_ref().is_some_and(|r| Some(&r.leader.slot) != slot.as_ref()) {
@@ -1727,7 +1746,7 @@ impl State {
                 self.lock_acceptor_accept(&s, &b, &v, id, change, forced);
             }
         }
-        let now = self.presence_now();
+        let now = self.lock_now();
         let grace = self.lock_grace();
         if let Some(l) = self.chain.lock.learned.clone() {
             if l.slot == slot && now >= l.since + grace {
@@ -1756,7 +1775,7 @@ impl State {
             }
             if stale {
                 if let Some(id) = free_pick {
-                    let order = self.chain.lock.stale_ids.entry(slot.height).or_default();
+                    let order = &mut self.chain.lock.stale_ids;
                     order.retain(|x| *x != id);
                     order.push(id);
                 }
@@ -2002,13 +2021,15 @@ impl State {
                 }
                 None => "no value ready".to_string(),
                 Some(v) => {
-                    let have = self
-                        .chain
-                        .lock
-                        .sigs
-                        .get(&(run.leader.slot.clone(), q, v.digest.clone()))
-                        .map_or(0, BTreeMap::len);
-                    format!("acceptances {have}/{}", v.need)
+                    let by = self.chain.lock.sigs.get(&(run.leader.slot.clone(), q, v.digest.clone()));
+                    let have = by.map_or(0, BTreeMap::len);
+                    let missing: Vec<String> = run
+                        .promised
+                        .iter()
+                        .filter(|m| !by.is_some_and(|b| b.contains_key(*m)))
+                        .cloned()
+                        .collect();
+                    format!("acceptances {have}/{} missing {}", v.need, missing.join(","))
                 }
             }
         } else if let Some(b) = self.chain.lock.seen.iter().filter(|(s, _)| s.height == next).map(|(_, b)| b).max() {
