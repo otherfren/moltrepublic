@@ -1,6 +1,7 @@
 # The chain lock: wiring plan (release v0.1.1)
 
-**Status: BUILT, dark: not available in release builds, under review;
+**Status: BUILT, dark, POSTPONED (user decision 2026-11-23): not
+available in release builds; the open design decisions are in §12;
 the switch is `CHAIN_LOCK_AVAILABLE` (design, "The switch").** Design:
 `docs/chain/chain_lock_design.md` (§8 activation, §14 "As built"). With
 the switch on the lock runs where the chain enabled it: after a

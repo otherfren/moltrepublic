@@ -1,6 +1,8 @@
 # The chain lock: fork-free sealing (B7)
 
-**Status: BUILT, dark: not available in release builds, under review
+**Status: BUILT, dark, POSTPONED (user decision 2026-11-23): not
+available in release builds; six review rounds, open design decisions in
+the wiring plan §12. Do not switch it on.
 (B7a pure state machine, B7b wiring, 2026-11-22). Review rounds three
 and four found a halt and a fork in 2-of-3 that are not fixed in the
 release tree. With the switch on the lock runs where the chain enabled
