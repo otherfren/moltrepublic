@@ -2793,6 +2793,8 @@ async fn restore_with_vera_missing_the_reset(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     v.__skip_restore_reset(rekey, block);
+    // the old device spoke seconds, not minutes, before the restore
+    v.__evidence_skew_secs(Some(0));
     drop(b);
     let link = mint_for_petra(&a).await;
     let c = engine(&root.join("rejoiner"));

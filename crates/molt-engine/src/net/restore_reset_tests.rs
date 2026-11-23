@@ -233,6 +233,23 @@ fn a_fresh_frame_accepted_first_does_not_hide_the_evidence() {
     assert_eq!(window(&walter).proof, RestoreProof::Evidence);
 }
 
+/// A first-contact window born well before the restore holds the old
+/// device: the block resets it at once, and the open does the same for one
+/// the block never reached.
+#[test]
+fn a_window_born_long_before_the_restore_resets_on_the_block_or_at_open() {
+    let (mut walter, block) = bystander();
+    block_at(&mut walter, 1, T + 2_000, block.clone());
+    assert_eq!(window(&walter).proof, RestoreProof::Block);
+    let (mut vera, _) = bystander();
+    vera.drop_seam.skip_block_reset.store(true, std::sync::atomic::Ordering::SeqCst);
+    block_at(&mut vera, 1, T + 2_000, block);
+    vera.drop_seam.skip_block_reset.store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(window(&vera).proof, RestoreProof::Pending);
+    vera.reconcile_restore_windows();
+    assert_eq!(window(&vera).proof, RestoreProof::Block);
+}
+
 /// A seat never restored keeps its window at open.
 #[test]
 fn the_open_leaves_unrestored_seats_alone() {

@@ -753,9 +753,12 @@ since the restore (below).
   keyed to a DIFFERENT known restore holds that device's stream - reset to
   `block`. A `merge_pending` window whose anchor differs adopts it as
   `merge`. A `pending` window whose first accepted frame (`born`) is newer
-  than the restore's seal holds only the new device: `merge`. Any other
-  `pending` or unkeyed window is only keyed (`adopted`); the evidence
-  rule resets it if it predates the restore. Two restores of one
+  than the restore's seal holds only the new device: `merge`; one born
+  more than the skew bound (900 s) before it holds the old one: reset
+  (`block`); a seal not stamped yet (this seat sealed it) counts as now.
+  Any other `pending` or unkeyed window is only keyed (`adopted`); the
+  evidence rule resets it if it predates the restore. The open judges a
+  `pending` window the same way. Two restores of one
   seat each reset once; the second's block never meets a stale merge key.
 - **At open** (`reconcile_restore_windows`): an unkeyed window of a seat the
   chain shows restored is keyed to its latest anchor, never reset.

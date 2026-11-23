@@ -319,12 +319,21 @@ impl State {
             return;
         }
         let Some(w) = self.delivery.accepted.get(member) else { return };
+        // our own seal is stamped only after it settles: it is now
+        let sealed = match self.restore_sealed_at(member) {
+            0 => self.presence_now(),
+            t => t,
+        };
         let next = match w.proof {
             P::MergePending if w.restore != anchor => P::Merge,
             _ if w.restore == anchor => return,
             // a first contact made after the restore holds only the new
-            // device; an unknown seal stamp gives it the benefit
-            P::Pending if w.born > self.restore_sealed_at(member) => P::Merge,
+            // device; one made clearly before it holds the old one
+            P::Pending if w.born > sealed => P::Merge,
+            P::Pending if w.born > 0 && w.born.saturating_add(self.drop_seam.evidence_skew()) <= sealed => {
+                self.forget_incarnation(member, anchor, P::Block);
+                return;
+            }
             P::Pending => P::Adopted,
             P::Unknown if w.restore.is_empty() => P::Adopted,
             _ => {
@@ -341,18 +350,26 @@ impl State {
 
     /// At open: an unkeyed window of a restored seat is keyed to the chain's
     /// latest restore of it, never reset - the evidence rule finds the ones
-    /// that predate it.
+    /// that predate it; a first-contact window is judged by its birth.
     pub(crate) fn reconcile_restore_windows(&mut self) {
         let me = self.member();
-        for (member, anchor) in &self.chain.anchors {
-            if *member == me {
+        let mut anchors: Vec<(MemberId, String)> =
+            self.chain.anchors.iter().filter(|(m, _)| **m != me).map(|(m, a)| (m.clone(), a.clone())).collect();
+        anchors.sort();
+        for (member, anchor) in anchors {
+            let Some((proof, unkeyed)) = self.delivery.accepted.get(&member).map(|w| (w.proof, w.restore.is_empty())) else {
                 continue;
-            }
-            if let Some(w) = self.delivery.accepted.get_mut(member) {
-                if w.restore.is_empty() && w.proof == molt_core::RestoreProof::Unknown {
-                    w.restore = anchor.clone();
+            };
+            match proof {
+                // a first contact the block never reached: judged as the block would
+                molt_core::RestoreProof::Pending => self.reset_for_restore(&member, &anchor),
+                molt_core::RestoreProof::Unknown if unkeyed => {
+                    if let Some(w) = self.delivery.accepted.get_mut(&member) {
+                        w.restore = anchor;
+                    }
                     self.delivery.accepted_dirty = true;
                 }
+                _ => {}
             }
         }
     }
