@@ -122,6 +122,29 @@ fn the_open_leaves_unrestored_seats_and_fresh_windows_alone() {
     assert!(walter.delivery.accepted["petra"].is_accepted(2), "petra was never restored");
 }
 
+/// After a restore reset the new incarnation is owed from its first seq: a
+/// later envelope is ordered behind its missing predecessors instead of
+/// becoming a baseline the sheet would ack everything below.
+#[test]
+fn a_reset_window_orders_the_new_incarnation_from_its_start() {
+    let (mut walter, block) = bystander();
+    wire(&mut walter, "petra", 1, WorkspaceEvent::Committed(block));
+    let env = |seq: u64, prev: u64, id: u8, body: &str| molt_core::EventEnvelope {
+        prev_seq: prev,
+        seq,
+        ts: 1_751_000_100 + seq,
+        by: "dora".to_string(),
+        body: chat(id, body),
+    };
+    walter.cmd_net_delivered("dora".to_string(), env(50, 40, 2, "later"), None).expect("ack");
+    assert_eq!(bodies(&walter, "later"), 0, "held behind its predecessor");
+    assert!(!window(&walter).is_accepted(50), "not acked before what it follows");
+    walter.cmd_net_delivered("dora".to_string(), env(40, 0, 1, "first"), None).expect("ack");
+    assert_eq!((bodies(&walter, "first"), bodies(&walter, "later")), (1, 1));
+    let order: Vec<&str> = walter.chat.iter().filter(|m| m.body == "first" || m.body == "later").map(|m| m.body.as_str()).collect();
+    assert_eq!(order, ["first", "later"]);
+}
+
 fn deliver_at(st: &mut crate::State, seq: u64, ts: u64, body: WorkspaceEvent) {
     let env = molt_core::EventEnvelope { prev_seq: 0, seq, ts, by: "dora".to_string(), body };
     st.cmd_net_delivered("dora".to_string(), env, None).expect("a wire delivery acks");

@@ -53,6 +53,14 @@ pub struct GroupAck {
     pub by: MemberId,
     /// subject → what `by` accepted of THAT SUBJECT's log seqs.
     pub claims: BTreeMap<MemberId, AcceptedWindow>,
+    /// `by`'s wall clock in milliseconds when it wrote the sheet: orders its
+    /// sheets, so a late older one never rewinds a floor. 0 = an older build.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub at: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 /// Why a plaintext is not a usable ack.
@@ -83,10 +91,14 @@ impl GroupAck {
     /// A sheet from `by` over `claims`.
     #[must_use]
     pub fn new(by: MemberId, claims: BTreeMap<MemberId, AcceptedWindow>) -> GroupAck {
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
         GroupAck {
             v: GROUP_ACK_V,
             by,
             claims,
+            at,
         }
     }
 
@@ -171,6 +183,24 @@ mod tests {
         );
         let mesh = [crate::MESH_ACK_TAG, br#"{"high":9,"bits":[1]}"#].concat();
         assert_eq!(GroupAck::from_frame(&mesh), Err(GroupAckError::NotAnAck));
+    }
+
+    /// The stamp is additive: an older sheet reads as unstamped, and an
+    /// older reader takes a stamped sheet as before.
+    #[test]
+    fn the_stamp_is_additive_both_ways() {
+        let old = [GROUP_ACK_TAG, br#"{"v":1,"by":"petra","claims":{"walter":{"high":3}}}"#].concat();
+        assert_eq!(GroupAck::from_frame(&old).expect("an older sheet").at, 0);
+        #[derive(Deserialize)]
+        struct OlderGroupAck {
+            v: u32,
+            claims: BTreeMap<MemberId, AcceptedWindow>,
+        }
+        let ack = GroupAck::new("petra".to_string(), BTreeMap::from([("walter".to_string(), win(3))]));
+        assert!(ack.at > 0);
+        let json = serde_json::to_vec(&ack).expect("json");
+        let read: OlderGroupAck = serde_json::from_slice(&json).expect("an older reader");
+        assert_eq!((read.v, read.claims["walter"].high), (1, 3));
     }
 
     /// A future version is refused, not read as v1.

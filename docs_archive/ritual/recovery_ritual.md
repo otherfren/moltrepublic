@@ -319,9 +319,10 @@ re-key merge, and authoritatively when it applies the `Restored` block -
 coordinator, bystander, a seat catching up, a seat reopening. The reset is
 keyed to the block's transport anchor and persisted with the window, so a
 replay or the merge arriving after the block never resets twice; a seat
-whose window predates the restore resets at its next open. `R` refuses an
-ack that names seqs above its own log and re-offers its tail instead
-(`delivery_guarantee.md` §11).
+whose window predates the restore resets at its next open and is owed
+`R`'s stream from its start. `R` refuses an ack that names seqs above its
+own log, and rewinds a peer whose later ack no longer holds what an earlier
+one acked; either way it re-offers its tail (`delivery_guarantee.md` §11).
 
 ---
 

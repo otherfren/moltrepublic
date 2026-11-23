@@ -2023,6 +2023,17 @@ pub struct OutboundCursor {
     /// previous incarnation of this seat, so nothing it claims is proven.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ack_ahead: bool,
+    /// The `high` of the last sheet that moved `acked_floor`.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub ack_high: u64,
+    /// The peer's stamp on the last sheet that moved `acked_floor` (0 =
+    /// none, or an older peer): only a sheet stamped later may rewind.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub ack_at: u64,
+    /// The floor a regression episode rewound from; it ends once the floor
+    /// is back there (0 = none).
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub regressed_from: u64,
 }
 
 /// The receive-side accept window (delivery guarantee,

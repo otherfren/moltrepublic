@@ -373,6 +373,16 @@ impl WalletHandle {
         self.drop_seam.skip_block_reset.store(block, SeqCst);
     }
 
+    /// Test seam: on the next delivery beat, forget `member`'s accept marks
+    /// above `seq` and ack at once, as after a hard stop that saved the
+    /// window less recently than the ack went out. No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __regress_window(&self, member: &str, seq: u64) {
+        if let Ok(mut r) = self.drop_seam.regress.lock() {
+            *r = Some((member.to_string(), seq));
+        }
+    }
+
     /// Test seam: how many inbound envelopes the drop seam swallowed. A
     /// read only; no `Command` reaches it.
     #[doc(hidden)]
