@@ -216,7 +216,21 @@ fn a_first_contact_before_the_catch_up_block_is_not_reset() {
     block_at(&mut walter, 1, T + 100, block);
     let w = window(&walter);
     assert!(w.is_accepted(3), "the catch-up block replayed the seat: {w:?}");
-    assert_eq!((w.restore.as_str(), w.proof), (anchor().as_str(), RestoreProof::Adopted));
+    assert_eq!((w.restore.as_str(), w.proof), (anchor().as_str(), RestoreProof::Merge), "born after the restore");
+}
+
+/// The new device's frames arrive out of order: one accepted above the old
+/// high mark first must not hide the dropped, earlier-written ones from
+/// the evidence rule.
+#[test]
+fn a_fresh_frame_accepted_first_does_not_hide_the_evidence() {
+    let (mut walter, block) = bystander();
+    block_at(&mut walter, 1, T + 100, block);
+    dora_at(&mut walter, 41, T + 210, chat(2, "later, fresh"));
+    assert_eq!(bodies(&walter, "later, fresh"), 1);
+    dora_at(&mut walter, 5, T + 205, chat(1, "earlier, dropped"));
+    assert_eq!(bodies(&walter, "earlier, dropped"), 1, "the evidence frame lands");
+    assert_eq!(window(&walter).proof, RestoreProof::Evidence);
 }
 
 /// A seat never restored keeps its window at open.

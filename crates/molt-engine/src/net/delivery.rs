@@ -322,6 +322,9 @@ impl State {
         let next = match w.proof {
             P::MergePending if w.restore != anchor => P::Merge,
             _ if w.restore == anchor => return,
+            // a first contact made after the restore holds only the new
+            // device; an unknown seal stamp gives it the benefit
+            P::Pending if w.born > self.restore_sealed_at(member) => P::Merge,
             P::Pending => P::Adopted,
             P::Unknown if w.restore.is_empty() => P::Adopted,
             _ => {
@@ -460,7 +463,15 @@ impl State {
 
     pub(super) fn note_fresh(&mut self, from: &MemberId, seq: u64, ts: u64) {
         if let Some(w) = self.delivery.accepted.get_mut(from) {
-            if (ts, seq) > (w.stamp, w.stamp_seq) {
+            if w.born == 0 {
+                w.born = ts;
+            }
+            // a window not proven to postdate the seat's restore keeps the
+            // stamp it had: a frame of the new device accepted out of order
+            // must not lift the evidence bar over the ones it dropped
+            let unproven = w.proof == molt_core::RestoreProof::Adopted
+                || (w.proof == molt_core::RestoreProof::Unknown && !w.restore.is_empty());
+            if !unproven && (ts, seq) > (w.stamp, w.stamp_seq) {
                 w.stamp = ts;
                 w.stamp_seq = seq;
             }

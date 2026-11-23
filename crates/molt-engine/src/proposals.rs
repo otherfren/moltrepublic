@@ -1520,8 +1520,8 @@ impl State {
             || member_parked >= PARKED_DECLINES_PER_MEMBER_MAX
     }
 
-    /// Whether `by`'s stance on card `id` stamped `ts` is newer than the
-    /// last one applied from it, recording it if so. A re-delivered older
+    /// Whether `by`'s stance on card `id` stamped `ts` is not older than
+    /// the last one applied from it, recording it if so. A re-delivered older
     /// stance (after a reset or a rewind) would otherwise be judged against
     /// the other seats' CURRENT stances. Stamps, not seqs: the own log keeps
     /// the wire stamp, so the replay rebuilds the same marks.
@@ -1530,7 +1530,9 @@ impl State {
             return true;
         }
         let Some(p) = self.proposals.get_mut(&id) else { return true };
-        if p.stances.get(by).is_some_and(|t| ts <= *t) {
+        // the same second is no order: a re-signed approval after a re-base
+        // is often stamped with its original's second
+        if p.stances.get(by).is_some_and(|t| ts < *t) {
             return false;
         }
         p.stances.insert(by.to_string(), ts);

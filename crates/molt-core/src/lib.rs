@@ -2105,6 +2105,11 @@ pub struct AcceptedWindow {
     /// `(stamp, stamp_seq)` (stamps are whole seconds).
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub stamp_seq: u64,
+    /// Receiver-local: the stamp of the first envelope this window
+    /// accepted (0 = unknown) - a first contact after a restore holds no
+    /// earlier incarnation.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub born: u64,
 }
 
 /// How an [`AcceptedWindow`] came to count under its `restore` anchor.

@@ -752,9 +752,10 @@ since the restore (below).
 - **A block** (`settle_block`'s `Restored` arm, on every seat): a window
   keyed to a DIFFERENT known restore holds that device's stream - reset to
   `block`. A `merge_pending` window whose anchor differs adopts it as
-  `merge`. A `pending` or unkeyed window is only keyed (`adopted`): it may
-  be a first contact made before the catch-up reached this block, and the
-  evidence rule resets it if it predates the restore. Two restores of one
+  `merge`. A `pending` window whose first accepted frame (`born`) is newer
+  than the restore's seal holds only the new device: `merge`. Any other
+  `pending` or unkeyed window is only keyed (`adopted`); the evidence
+  rule resets it if it predates the restore. Two restores of one
   seat each reset once; the second's block never meets a stale merge key.
 - **At open** (`reconcile_restore_windows`): an unkeyed window of a seat the
   chain shows restored is keyed to its latest anchor, never reset.
@@ -764,7 +765,10 @@ since the restore (below).
   `Restored` block's `Committed` stamp, if known - and (b) everything the
   window accepted: `(ts, seq)` above `(stamp, stamp_seq)`, the newest
   accepted stamp and its highest seq (stamps are whole seconds; a later
-  frame of the same second has a higher seq). A healthy window has
+  frame of the same second has a higher seq). A window not proven to
+  postdate the restore (`adopted`, or keyed at open) keeps the bar it had:
+  a new-device frame accepted out of order must not lift it over the ones
+  it dropped. A healthy window has
   accepted every frame it holds, so none of its duplicates is newer. With
   no accepted stamp known (an older build's window, until its first fresh
   accept) the reference is the open time plus the wire skew bound (900 s).
