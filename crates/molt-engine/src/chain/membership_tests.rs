@@ -1405,6 +1405,7 @@ fn announce(st: &mut crate::State, from: &str, caps: &[&str]) {
         0,
         caps.iter().map(|c| (*c).to_string()).collect(),
         0,
+        "",
     )
     .expect("declaration");
 }
@@ -1498,7 +1499,7 @@ fn capabilities_follow_a_declaration_with_a_lower_revision() {
     let b = Builder::new(&ROSTER, 2);
     let (mut petra, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
     let decl = |st: &mut crate::State, from: &str, rev: u64, caps: &[&str]| {
-        st.cmd_net_mirror_decl(&from.to_string(), true, 0, rev, caps.iter().map(|c| (*c).to_string()).collect(), 0)
+        st.cmd_net_mirror_decl(&from.to_string(), true, 0, rev, caps.iter().map(|c| (*c).to_string()).collect(), 0, "")
             .expect("declaration");
     };
     decl(&mut petra, "walter", 1_700_000_000, &[cap]);
@@ -2394,7 +2395,7 @@ fn a_reordered_older_declaration_keeps_the_newer_capabilities() {
     let (mut petra, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
     petra.presence.clock_override = Some(1_000);
     let decl = |st: &mut crate::State, caps: &[&str], at: u64| {
-        st.cmd_net_mirror_decl(&"walter".to_string(), false, 0, 0, caps.iter().map(|c| (*c).to_string()).collect(), at)
+        st.cmd_net_mirror_decl(&"walter".to_string(), false, 0, 0, caps.iter().map(|c| (*c).to_string()).collect(), at, "")
             .expect("declaration");
     };
     let known = |st: &crate::State| st.active.as_ref().expect("active").prefs.seat_caps.get("walter").cloned();
@@ -2419,7 +2420,7 @@ fn a_new_incarnation_resets_the_declaration_order() {
     let b = Builder::new(&ROSTER, 2);
     let (mut petra, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
     let decl = |st: &mut crate::State, caps: &[&str], at: u64| {
-        st.cmd_net_mirror_decl(&"walter".to_string(), false, 0, 0, caps.iter().map(|c| (*c).to_string()).collect(), at)
+        st.cmd_net_mirror_decl(&"walter".to_string(), false, 0, 0, caps.iter().map(|c| (*c).to_string()).collect(), at, "")
             .expect("declaration");
     };
     decl(&mut petra, &[], 200);

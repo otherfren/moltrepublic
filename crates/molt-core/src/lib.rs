@@ -6675,6 +6675,9 @@ pub enum Command {
         /// The declarer's clock at sending; 0 from an older build.
         #[serde(default)]
         at: u64,
+        /// The declarer's build; empty from a build older than v0.1.2.
+        #[serde(default)]
+        build: String,
         /// Transport incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -8559,6 +8562,11 @@ pub struct StatusView {
     /// The group relays this node cannot dial, and why.
     #[serde(default)]
     pub missing_relays: Vec<crate::relay::InviteRelayVerdict>,
+    /// Group relays that refused something since this node started
+    /// (`relay_pool.md` §5.2). A refusal is an answer: none of these is
+    /// unreachable on its account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_refusals: Vec<RelayRefusals>,
     /// Whether the open workspace is a chain-governed republic. Recovery
     /// (link mint + rejoin) exists only here — a frontend offers the
     /// per-member "recovery link" action exactly when this is true (demo
@@ -8622,6 +8630,24 @@ pub struct StatusView {
     pub open_proposals_max: usize,
 }
 
+/// One relay's refusals ([`StatusView::relay_refusals`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayRefusals {
+    /// The relay URL (normalized).
+    pub url: String,
+    /// Transient refusals (busy, rate-limited, other `error:`) in the last hour.
+    #[serde(default)]
+    pub busy: u32,
+    /// Shape of the latest refusal: `busy`, `rate_limited`, `error`,
+    /// `invalid`, `blocked`, `pow`, `restricted`, `unsupported`,
+    /// `auth_required` or `unprefixed`.
+    #[serde(default)]
+    pub last_refusal: String,
+    /// When it came (unix seconds).
+    #[serde(default)]
+    pub last_refusal_at: u64,
+}
+
 /// One seat's standing as this node sees it (the Organization overview).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeatSync {
@@ -8642,6 +8668,21 @@ pub struct SeatSync {
     /// predates the seat's restore); 0 = none.
     #[serde(default, skip_serializing_if = "u32_is_zero")]
     pub dup_streak: u32,
+    /// The seat's build as its latest declaration named it; absent =
+    /// unknown (older than v0.1.2, or not heard yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    /// The head the seat last reported (its catch-up request or beacon):
+    /// the block hash, 12 hex. The own seat: its head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_hash: Option<String>,
+    /// The height of that reported head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_height: Option<u64>,
+    /// This node and the seat refuse each other's blocks
+    /// ([`StatusView::chain_diverged`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diverged: bool,
 }
 
 /// Whether an own envelope stays out of the delivery guarantee and the G7

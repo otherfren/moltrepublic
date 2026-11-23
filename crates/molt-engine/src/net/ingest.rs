@@ -654,6 +654,7 @@ impl State {
                 // A5: the requester's own samples say where it stands
                 if let Some(top) = known.iter().max_by_key(|h| h.height) {
                     self.note_peer_claim(&from, top.height, Some(envelope.seq), crate::chain::PeerClaim::Head);
+                    self.note_seat_head(&from, top);
                     // its head is a block we hold: the requester is on our branch
                     if self.holds_block(top.height, &top.hash) {
                         self.clear_divergence(&from);

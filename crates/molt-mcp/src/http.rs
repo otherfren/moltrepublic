@@ -31,6 +31,7 @@ use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tower_service::Service;
 
+use crate::log_throttle::LogThrottle;
 use crate::{
     call_tool, live_tokens, supported_versions, tool_defs, tools, Credentials, Scope,
     INSTRUCTIONS, MAX_RPC_LINE,
@@ -41,12 +42,13 @@ use crate::{
 pub(crate) struct Http {
     svc: StreamableHttpService<Seat, LocalSessionManager>,
     handle: WalletHandle,
+    throttle: Arc<LogThrottle>,
 }
 
 impl Http {
     /// `loopback_only` keeps rmcp's `Host` check (DNS rebinding); a wider
     /// `[mcp].allow` disables it - the peer-IP allowlist is the gate there.
-    pub(crate) fn new(handle: WalletHandle, loopback_only: bool) -> Self {
+    pub(crate) fn new(handle: WalletHandle, loopback_only: bool, throttle: Arc<LogThrottle>) -> Self {
         let mut config = StreamableHttpServerConfig::default()
             .with_legacy_session_mode(false)
             .with_json_response(true)
@@ -60,7 +62,7 @@ impl Http {
             Arc::new(LocalSessionManager::default()),
             config,
         );
-        Self { svc, handle }
+        Self { svc, handle, throttle }
     }
 
     /// A connection whose requests have all been refused is closed at
@@ -81,11 +83,12 @@ impl Http {
             let handle = self.handle.clone();
             let creds = creds.clone();
             let seen = seen.clone();
+            let throttle = self.throttle.clone();
             async move {
                 // per request: a kept-alive connection must not outlive a revoked key
                 let live = live_tokens(&handle).await;
                 let creds = live.as_ref().unwrap_or(&creds);
-                Ok::<_, Infallible>(gate(creds, &seen, peer, req, &mut inner).await)
+                Ok::<_, Infallible>(gate(creds, &seen, peer, req, &mut inner, &throttle).await)
             }
         });
         let conn = hyper::server::conn::http1::Builder::new()
@@ -118,6 +121,7 @@ async fn gate(
     peer: SocketAddr,
     mut req: Request<Incoming>,
     inner: &mut StreamableHttpService<Seat, LocalSessionManager>,
+    throttle: &LogThrottle,
 ) -> Response<Body> {
     let given = req
         .headers()
@@ -129,7 +133,9 @@ async fn gate(
         })
         .unwrap_or("");
     let Some(scope) = creds.scope_for(given) else {
-        tracing::warn!(%peer, "MCP HTTP refused: missing or invalid bearer token");
+        if let Some(d) = throttle.hit("refused_bearer") {
+            tracing::warn!(%peer, count = d.count, window_s = d.window_s, "MCP HTTP refused: missing or invalid bearer token");
+        }
         return empty(StatusCode::UNAUTHORIZED)
             .header(header::WWW_AUTHENTICATE, "Bearer realm=\"moltrepublic\"")
             .body(Empty::new().boxed())

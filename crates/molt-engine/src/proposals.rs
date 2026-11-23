@@ -4702,6 +4702,24 @@ impl State {
         rows
     }
 
+    /// The group relays' refusal tallies, in pool order, keyed as the
+    /// publish path dials them.
+    fn relay_refusals(&self) -> Vec<molt_core::RelayRefusals> {
+        let seen = molt_net::relay_refusal::refusals();
+        self.dialable_group_relays()
+            .iter()
+            .filter_map(|url| {
+                let r = seen.get(url)?;
+                Some(molt_core::RelayRefusals {
+                    url: url.clone(),
+                    busy: r.busy,
+                    last_refusal: r.last_shape.to_string(),
+                    last_refusal_at: r.last_at,
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn status(&self) -> StatusView {
         // the activity trio counts REAL last-seen stamps per window; the
         // local member always counts (it is the one asking), a never-seen
@@ -4775,6 +4793,7 @@ impl State {
                 .map(|n| n.relays.clone())
                 .unwrap_or_default(),
             missing_relays: self.missing_group_relays(),
+            relay_refusals: self.relay_refusals(),
             // recovery exists exactly here — the frontends key the per-member
             // "recovery link" action on this (never on the member's presence:
             // a recovery link is FOR an unreachable member)
@@ -4802,7 +4821,11 @@ impl State {
             chain_lag: self.chain_lag(),
             chain_sync: Box::new(self.chain_sync()),
             inbound_held: self.inbound_held_view(),
-            seats: self.seat_syncs(&persistent),
+            seats: {
+                let mut seats = self.seat_syncs(&persistent);
+                self.fill_seat_reports(&mut seats);
+                seats
+            },
             mls_epoch: self.group_net.as_ref().and_then(|g| g.mls.lock().ok().map(|m| m.epoch())).unwrap_or(0),
             persistent_files: u32::try_from(persistent.len()).unwrap_or(u32::MAX),
             evicted: self.delivery.evicted,

@@ -222,6 +222,13 @@ WARN molt_mcp: [mcp].token empty - TCP MCP off addr=127.0.0.1:4040
 WARN molt_mcp: MCP connection refused: peer IP not on the allowlist peer=192.168.1.50:41022
 ```
 
+Connections log at DEBUG; INFO carries at most one `mcp_clients via=
+count= window_s=` line per minute per protocol (`count` = connections
+since the previous line, `window_s` = seconds since it; the first after
+a quiet spell speaks at once), so a polling client no longer fills the
+log. The refusals (bad bearer, allowlist, too many open) stay WARN under
+the same rule, one line per minute per kind with its `count`.
+
 If a client hangs or gets a connection reset with no JSON reply, check that
 `WARN ... peer IP not on the allowlist` line first — the allowlist drops the socket
 before the protocol ever starts.

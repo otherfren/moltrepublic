@@ -99,6 +99,10 @@ pub struct MirrorDeclFrame {
     /// Absent on an older build.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub at: u64,
+    /// The sender's build (its crate version); absent before v0.1.2.
+    /// Ordered with `caps` by `at`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub build: String,
 }
 
 fn is_zero(v: &u64) -> bool {
@@ -255,12 +259,43 @@ mod tests {
         assert_eq!(MirrorDeclFrame::from_frame(&capable.to_frame()).expect("caps"), capable);
     }
 
+    /// The declaration exactly as v0.1.0 and v0.1.1 define it (identical
+    /// in both tags), as the old reader of a new frame.
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct DeclV011 {
+        v: u32,
+        by: MemberId,
+        on: bool,
+        quota: u64,
+        rev: u64,
+        #[serde(default)]
+        caps: Vec<String>,
+    }
+
+    /// `build` is additive both ways: a v0.1.1 declaration reads with no
+    /// build, and a v0.1.1 reader takes a declaration that carries one.
+    #[test]
+    fn the_build_field_crosses_old_readers_and_old_writers() {
+        let mut old = MIRROR_DECL_TAG.to_vec();
+        old.extend_from_slice(br#"{"v":1,"by":"p","on":true,"quota":5,"rev":9,"caps":["molt-restore-consent-v2"]}"#);
+        let decl = MirrorDeclFrame::from_frame(&old).expect("a v0.1.1 declaration parses");
+        assert_eq!(decl.build, "");
+        assert_eq!(decl.to_frame(), old, "no build, no field");
+        let new = MirrorDeclFrame { build: "0.1.2".into(), at: 77, ..decl };
+        let frame = new.to_frame();
+        assert_eq!(MirrorDeclFrame::from_frame(&frame).expect("round trip"), new);
+        let body = frame.strip_prefix(MIRROR_DECL_TAG).expect("tag");
+        let seen: DeclV011 = serde_json::from_slice(body).expect("a v0.1.1 reader takes it");
+        assert_eq!((seen.by.as_str(), seen.rev, seen.caps.len()), ("p", 9, 1));
+    }
+
     /// Each frame round-trips under its own tag only; the tags never
     /// cross each other or the poke's.
     #[test]
     fn the_three_frames_round_trip_and_keep_to_their_tags() {
         let decl =
-            MirrorDeclFrame { v: MIRROR_V, by: "petra".into(), on: true, quota: 5, rev: 9, caps: Vec::new(), at: 0 };
+            MirrorDeclFrame { v: MIRROR_V, by: "petra".into(), on: true, quota: 5, rev: 9, caps: Vec::new(), at: 0, build: String::new() };
         let status = MirrorStatusFrame {
             v: MIRROR_V,
             by: "petra".into(),

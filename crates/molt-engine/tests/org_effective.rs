@@ -387,3 +387,28 @@ async fn a_rejected_verdict_reaches_a_reopened_node() {
     a.execute(Command::OpenWorkspace { id }).await.expect("reopen");
     wait_for_card(&a, "set_name", molt_core::ProposalState::Rejected).await;
 }
+
+/// A group relay's refusals reach `status.relay_refusals`, keyed by the
+/// url the group lists; a relay that refused nothing is not listed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_relay_refusal_reaches_the_status() {
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, _b) = found_pair(&tmp.path().join("workspaces"), &[&url], "Refusal Gilde").await;
+    let status = || async {
+        match a.execute(Command::Status).await.expect("status") {
+            Reply::Status(st) => st,
+            other => panic!("unexpected: {other:?}"),
+        }
+    };
+    let st = status().await;
+    assert!(st.relay_refusals.is_empty(), "{:?}", st.relay_refusals);
+    let listed = st.relays.first().cloned().expect("a group relay");
+    molt_net::relay_refusal::record(&listed, molt_net::relay_refusal::classify("error: database is locked"));
+    let st = status().await;
+    assert_eq!(st.relay_refusals.len(), 1, "{:?}", st.relay_refusals);
+    let r = &st.relay_refusals[0];
+    assert_eq!((r.url.as_str(), r.busy, r.last_refusal.as_str()), (listed.as_str(), 1, "busy"));
+    assert!(r.last_refusal_at > 0);
+}

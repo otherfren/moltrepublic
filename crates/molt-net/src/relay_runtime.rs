@@ -1249,7 +1249,13 @@ async fn read_session(
             // the idle bound (review finding).
             Ok(RelayMessage::Closed { message, .. }) => {
                 if !message.starts_with("auth-required:") {
-                    tracing::warn!(relay = %url, reason = %relay_reason(&message), "relay closed the subscription");
+                    let refusal = crate::relay_refusal::classify(&message);
+                    // an empty reason is a served ids-filter ending, no refusal
+                    if !message.is_empty() && crate::relay_refusal::record(url, refusal) {
+                        tracing::warn!(relay = %url, shape = refusal.shape, reason = %relay_reason(&message), "relay closed the subscription");
+                    } else {
+                        tracing::debug!(relay = %url, shape = refusal.shape, reason = %relay_reason(&message), "relay closed the subscription");
+                    }
                     return SessionEnd::Died;
                 }
             }
@@ -1555,15 +1561,19 @@ impl PoolSlot {
     fn tripped(&mut self) {
         self.ws = None;
         self.failures = self.failures.saturating_add(1);
-        let secs = 1u64 << self.failures.saturating_sub(1).min(6);
-        self.down_until =
-            Some(tokio::time::Instant::now() + Duration::from_secs(secs.min(60)));
+        self.down_until = Some(tokio::time::Instant::now() + breaker_delay(self.failures));
     }
 
     fn healthy(&mut self) {
         self.failures = 0;
         self.down_until = None;
     }
+}
+
+/// The breaker's delay after `n` consecutive failures: 1 s doubling to 60 s.
+fn breaker_delay(n: u32) -> Duration {
+    let secs = 1u64 << n.saturating_sub(1).min(6);
+    Duration::from_secs(secs.min(60))
 }
 
 // manual: RelayWs holds no secrets, but Debug on a live socket is noise
@@ -1644,7 +1654,7 @@ impl PublishPool {
             }
         }
         if let Some(ws) = guard.ws.as_mut() {
-            match send_and_await_ok(ws, event, timeouts.publish).await {
+            match send_until_settled(ws, url, event, timeouts.publish).await {
                 Ok(verdict) => {
                     guard.healthy();
                     return verdict;
@@ -1665,7 +1675,7 @@ impl PublishPool {
         }
         let outcome = async {
             let mut ws = connect_bounded(dialer, url, timeouts.connect).await?;
-            let verdict = send_and_await_ok(&mut ws, event, timeouts.publish)
+            let verdict = send_until_settled(&mut ws, url, event, timeouts.publish)
                 .await
                 .map_err(RecvFail::into_error)?;
             Ok::<(RelayWs, Result<(), NetError>), NetError>((ws, verdict))
@@ -1717,12 +1727,55 @@ async fn send_and_await_ok(
                         "relay requires AUTH to publish - refused to link the publish key: {}", relay_reason(&message)
                     )))
                 } else {
-                    Err(NetError::Unreachable(format!("relay refused: {}", relay_reason(&message))))
+                    let refusal = crate::relay_refusal::classify(&message);
+                    Err(NetError::Refused {
+                        reason: relay_reason(&message),
+                        shape: refusal.shape,
+                        transient: refusal.class == crate::relay_refusal::RefusalClass::Transient,
+                    })
                 });
             }
             // frames for other events / notices are not our OK
             _ => {}
         }
+    }
+}
+
+/// [`send_and_await_ok`], asking again on the same socket while the relay
+/// answers with a TRANSIENT refusal: on the breaker's schedule
+/// ([`breaker_delay`]) and within one `timeout` from the first send, so a
+/// relay that always errors costs one publish deadline per event. Every
+/// refusal is counted (`relay_refusal`); the first of a shape per relay per
+/// hour reaches WARN.
+async fn send_until_settled(
+    ws: &mut RelayWs,
+    url: &str,
+    event: &Event,
+    timeout: Duration,
+) -> Result<Result<(), NetError>, RecvFail> {
+    use crate::relay_refusal::{record, Refusal, RefusalClass};
+    let began = tokio::time::Instant::now();
+    let mut retries: u32 = 0;
+    loop {
+        let verdict = send_and_await_ok(ws, event, timeout).await?;
+        let Err(NetError::Refused { reason, shape, transient }) = &verdict else {
+            return Ok(verdict);
+        };
+        let class = if *transient { RefusalClass::Transient } else { RefusalClass::Permanent };
+        let first = record(url, Refusal { class, shape });
+        let delay = breaker_delay(retries.saturating_add(1));
+        if *transient && began.elapsed() + delay < timeout {
+            tracing::debug!(relay = %url, shape, retry_in_ms = delay.as_millis(), reason = %reason, "relay refused - retrying");
+            tokio::time::sleep(delay).await;
+            retries = retries.saturating_add(1);
+            continue;
+        }
+        if first {
+            tracing::warn!(relay = %url, shape, retries, reason = %reason, "relay refused the event");
+        } else {
+            tracing::debug!(relay = %url, shape, retries, reason = %reason, "relay refused the event");
+        }
+        return Ok(verdict);
     }
 }
 
@@ -1781,7 +1834,10 @@ async fn gather_publish(
                 report.accepted.push(url);
                 grace_until.get_or_insert_with(|| tokio::time::Instant::now() + PUBLISH_GRACE);
             }
-            Err(e) => report.failed.push((url, e.to_string())),
+            Err(e) => {
+                warn_unless_refused(&url, &e);
+                report.failed.push((url, e.to_string()));
+            }
         }
     }
     if !pending.is_empty() {
@@ -1789,12 +1845,19 @@ async fn gather_publish(
         tokio::spawn(async move {
             while let Some((url, outcome)) = pending.next().await {
                 if let Err(e) = outcome {
-                    tracing::warn!(relay = %url, error = %e, "publish rejected");
+                    warn_unless_refused(&url, &e);
                 }
             }
         });
     }
     finish_publish_report(report)
+}
+
+/// One relay's failed attempt; a refusal was logged where it was counted.
+fn warn_unless_refused(url: &str, e: &NetError) {
+    if !matches!(e, NetError::Refused { .. }) {
+        tracing::warn!(relay = %url, error = %e, "publish rejected");
+    }
 }
 
 /// The gate both publish paths apply BEFORE any relay sees the event.
@@ -1825,9 +1888,6 @@ fn publish_gate(no_relays: bool, size_budget: Option<u64>, event: &Event) -> Res
 /// The shared ≥1-OK reduction: log per-relay failures, fail typed when
 /// NOTHING accepted, warn on a partial landing.
 fn finish_publish_report(report: PublishReport) -> Result<PublishReport, NetError> {
-    for (url, e) in &report.failed {
-        tracing::warn!(relay = %url, error = %e, "publish rejected");
-    }
     if report.accepted.is_empty() {
         let mut reasons: Vec<&str> = Vec::new();
         for (_, e) in &report.failed {
@@ -1867,7 +1927,7 @@ async fn publish_one(
     timeouts: RelayTimeouts,
 ) -> Result<(), NetError> {
     let mut ws = connect_bounded(dialer, url, timeouts.connect).await?;
-    let verdict = send_and_await_ok(&mut ws, event, timeouts.publish)
+    let verdict = send_until_settled(&mut ws, url, event, timeouts.publish)
         .await
         .map_err(RecvFail::into_error)?;
     // a relay that stops reading must not hold the close open

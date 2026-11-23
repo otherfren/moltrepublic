@@ -31,6 +31,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWr
 use tokio::net::TcpListener;
 
 mod http;
+mod log_throttle;
 mod quests;
 
 /// The protocol versions this server serves in SHAPE, both transports.
@@ -290,6 +291,8 @@ struct Acceptor {
     slots: std::sync::Arc<tokio::sync::Semaphore>,
     http_face: http::Http,
     conns: tokio::task::JoinSet<()>,
+    /// Connect and refusal lines: one per kind per minute, with a count.
+    throttle: std::sync::Arc<log_throttle::LogThrottle>,
 }
 
 impl Acceptor {
@@ -302,8 +305,10 @@ impl Acceptor {
         pre_auth: std::time::Duration,
     ) -> Acceptor {
         let loopback_only = !allow_all && allowlist.iter().all(|ip| ip.is_loopback());
-        let http_face = http::Http::new(handle.clone(), loopback_only);
+        let throttle = std::sync::Arc::new(log_throttle::LogThrottle::default());
+        let http_face = http::Http::new(handle.clone(), loopback_only, throttle.clone());
         Acceptor {
+            throttle,
             handle,
             listener,
             allow_all,
@@ -329,13 +334,18 @@ impl Acceptor {
             }
         };
         if !self.allow_all && !self.allowlist.contains(&peer.ip()) {
-            tracing::warn!(%peer, "MCP connection refused: peer IP not on the allowlist");
+            if let Some(d) = self.throttle.hit("refused_allowlist") {
+                tracing::warn!(%peer, count = d.count, window_s = d.window_s, "MCP connection refused: peer IP not on the allowlist");
+            }
             return; // sock dropped here -> connection closed
         }
         let Ok(permit) = self.slots.clone().try_acquire_owned() else {
-            tracing::warn!(%peer, max = MAX_CONNECTIONS, "MCP connection refused: too many open");
+            if let Some(d) = self.throttle.hit("refused_full") {
+                tracing::warn!(%peer, max = MAX_CONNECTIONS, count = d.count, window_s = d.window_s, "MCP connection refused: too many open");
+            }
             return;
         };
+        let throttle = self.throttle.clone();
         let h = self.handle.clone();
         let http_face = self.http_face.clone();
         let fallback = self.fallback.clone();
@@ -356,7 +366,11 @@ impl Acceptor {
                 return;
             };
             let is_http = matches!(peeked, Ok(1) if first[0].is_ascii_uppercase());
-            tracing::info!(%peer, via = if is_http { "http" } else { "line" }, "MCP client connected");
+            let via = if is_http { "http" } else { "line" };
+            tracing::debug!(%peer, via, "MCP client connected");
+            if let Some(d) = throttle.hit(via) {
+                tracing::info!(via, count = d.count, window_s = d.window_s, "mcp_clients");
+            }
             let outcome = if is_http {
                 http_face.serve(sock, creds, peer, deadline).await
             } else {
@@ -2275,7 +2289,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "status",
             command: "status",
             scope: Scope::Seat,
-            description: "Read a one-shot status summary of the group and surfaces. `founded_ts` is the founder's founding stamp, the same on every copy. `surfaces[].implemented` says a real engine stands behind a surface; the others are listed and gated but carry nothing yet. `chain_lag.peers_ahead` = how many blocks the furthest peer on this branch reported beyond this node's head, named in `chain_sync.ahead_peer`/`ahead_height` (0 = level; anything else means votes cast here would not count, and approve/decline refuse); `chain_lag.silent` lists seats unheard-of, with the age of the last sighting (0 = never seen, age unknown). `chain_diverged` is the other failure and a different one: a peer on another branch. `chain_sync` = how this node syncs: `head_hash`, the open catch-up (`catchup_from`, `catchup_since`; 0 = none), buffered blocks of another branch (`fork_candidates`, `fork_lowest`, `fork_highest`), `fork_decisions` since open and `last_fork` (peer, height, outcome kept|rebased|relinked|dropped|tip_swapped, both short hashes), and `blob_bytes` against `blob_cap` (a checkpoint blob over the cap cannot be served in one frame). `seats` = one row per seat: `last_seen` (0 = never), `height` (this node's head for itself, else the head a peer last reported, raised by blocks it sent since - a quiet seat may be further; null = never reported), `signed` (highest height it signed for), `files` (persistent shares it holds whole, of `persistent_files`), `dup_streak` (its messages this node rejects as already seen; 0 = none). `evicted` = this seat was re-keyed for another device: it neither reads nor publishes until a rejoin with a link. `open_proposals` = this seat's open proposals; at `open_proposals_max` propose is refused until one leaves the vote.",
+            description: "Read a one-shot status summary of the group and surfaces. `founded_ts` is the founder's founding stamp, the same on every copy. `surfaces[].implemented` says a real engine stands behind a surface; the others are listed and gated but carry nothing yet. `chain_lag.peers_ahead` = how many blocks the furthest peer on this branch reported beyond this node's head, named in `chain_sync.ahead_peer`/`ahead_height` (0 = level; anything else means votes cast here would not count, and approve/decline refuse); `chain_lag.silent` lists seats unheard-of, with the age of the last sighting (0 = never seen, age unknown). `chain_diverged` is the other failure and a different one: a peer on another branch. `chain_sync` = how this node syncs: `head_hash`, the open catch-up (`catchup_from`, `catchup_since`; 0 = none), buffered blocks of another branch (`fork_candidates`, `fork_lowest`, `fork_highest`), `fork_decisions` since open and `last_fork` (peer, height, outcome kept|rebased|relinked|dropped|tip_swapped, both short hashes), and `blob_bytes` against `blob_cap` (a checkpoint blob over the cap cannot be served in one frame). `seats` = one row per seat: `last_seen` (0 = never), `height` (this node's head for itself, else the head a peer last reported, raised by blocks it sent since - a quiet seat may be further; null = never reported), `signed` (highest height it signed for), `files` (persistent shares it holds whole, of `persistent_files`), `dup_streak` (its messages this node rejects as already seen; 0 = none), `build` (the version its latest declaration named; absent = unknown: older than v0.1.2 or not heard yet), `head_hash` (12 hex) and `head_height` (the head it last reported in a catch-up request or beacon; the own seat: its head), `diverged` (true = on another branch, see chain_diverged). `evicted` = this seat was re-keyed for another device: it neither reads nor publishes until a rejoin with a link. `open_proposals` = this seat's open proposals; at `open_proposals_max` propose is refused until one leaves the vote. `relay_refusals` (absent = none) = group relays that answered an event with a refusal since start: `busy` = transient refusals in the last hour (retried there), `last_refusal` = the latest shape (busy, rate_limited, error, invalid, blocked, pow, restricted, unsupported, auth_required, unprefixed) at `last_refusal_at`; a refusing relay is not unreachable.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::Status),
         },

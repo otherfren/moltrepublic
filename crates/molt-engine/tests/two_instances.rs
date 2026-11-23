@@ -48,6 +48,7 @@ async fn announce_v2(w: &WalletHandle, seats: &[&str]) {
             rev: 0,
             caps: vec![molt_core::chain::RESTORE_CONSENT_V2_CAP.to_string()],
             at: 0,
+            build: String::new(),
             generation: None,
         })
         .await

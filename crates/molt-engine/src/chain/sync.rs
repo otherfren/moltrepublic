@@ -1214,6 +1214,7 @@ impl State {
                     files: u32::try_from(files).unwrap_or(u32::MAX),
                     dup_streak: self.dup_streak(&member),
                     member,
+                    ..Default::default()
                 }
             })
             .collect()

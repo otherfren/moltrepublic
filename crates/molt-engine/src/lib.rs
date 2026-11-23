@@ -1467,6 +1467,8 @@ pub(crate) struct State {
     pub(crate) parked: chat::ParkedRefs,
     /// Wire decision lines: the id lookup and the lines held until decided.
     pub(crate) decision_lines: net::DecisionLines,
+    /// Each seat's own reports: build and head (`status.seats[]`).
+    pub(crate) seat_reports: net::SeatReports,
     pub(crate) files: FilePlane,
     /// The GUI's last published rendering claim (`gui_over_mcp.md`):
     /// written only by `Command::UiPublish` (the window's live mirror),
@@ -1818,6 +1820,7 @@ impl State {
             compacted_at: 0,
             parked: chat::ParkedRefs::new(),
             decision_lines: net::DecisionLines::default(),
+            seat_reports: net::SeatReports::default(),
             files: FilePlane {
                 wiki_base_fetch: None,
                 wiki_base_next_try: 0,
@@ -2157,11 +2160,11 @@ impl State {
             Command::ReadMirror => Ok(Reply::Mirror(Box::new(self.mirror_view()))),
             Command::SetMirror { on, quota_bytes } => self.cmd_set_mirror(on, quota_bytes),
             Command::SetMirrorDir { path } => self.cmd_set_mirror_dir(path),
-            Command::NetMirrorDecl { from, on, quota, rev, caps, at, generation } => {
+            Command::NetMirrorDecl { from, on, quota, rev, caps, at, build, generation } => {
                 if !self.net_generation_current(generation) {
                     return Ok(Reply::Ack);
                 }
-                self.cmd_net_mirror_decl(&from, on, quota, rev, caps, at)
+                self.cmd_net_mirror_decl(&from, on, quota, rev, caps, at, &build)
             }
             Command::NetMirrorStatus { from, holds, serving, gen, page, pages, generation } => {
                 if !self.net_generation_current(generation) {
