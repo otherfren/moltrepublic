@@ -2111,3 +2111,71 @@ fn the_mode_is_not_offered_where_every_seat_must_approve() {
     assert!(err.to_string().contains(LOCK_NEEDS_FEWER), "{err}");
     assert_eq!(mara.lock_not_capable().as_deref(), Some(LOCK_NEEDS_FEWER));
 }
+
+/// mara never got dora's card x; dora sends it forced at height 1, only
+/// her own acceptance behind it (the Accept to walter was lost, walter
+/// died).
+fn forced_without_card(b: &Builder) -> (crate::State, u64, ChainChange) {
+    let mut mara = seat("mara", b);
+    let mut dora = seat("dora", b);
+    let x = note(&mut dora, "x");
+    let change = dora.proposal_change(x).expect("x");
+    let slot = mara.lock_slot().expect("slot");
+    let v = mara.lock_value(1, &change).expect("value");
+    mara.chain.lock.outbox.clear();
+    wire(
+        &mut mara,
+        "dora",
+        1,
+        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 5, digest: v.digest, need: 2, id: ProposalId(x), change: Some(change.clone()), forced: true, evidence: vec![evidence_of(b, "dora", &change)] },
+    );
+    (mara, x, change)
+}
+
+/// Explorer: a seat asked to complete a forced value it has no card for
+/// registers the carried change as a withdrawn "pending completion" card
+/// (its proposer and content readable), so the operator's approve has a
+/// record - and the height decides. Without it the approve had nothing to
+/// name: a permanent halt.
+#[test]
+fn a_forced_value_without_its_card_is_completed_by_an_approve() {
+    let b = Builder::new(&SEATS, 2);
+    let (mut mara, x, change) = forced_without_card(&b);
+    let card = mara.proposals.get(&x).expect("registered");
+    assert!(card.pending_completion && card.withdrawn && card.state != ProposalState::Proposed, "{card:?}");
+    assert_eq!(card.by, "dora");
+    let ChainChange::Applied { payload, .. } = &change else { panic!("applied") };
+    assert_eq!(&card.payload, payload, "the operator reads what it completes");
+    assert!(mara.cmd_approve(ProposalId(x), None).is_err(), "not before the prompt");
+    let later = mara.lock_now() + mara.lock_retransmit();
+    mara.presence.clock_override = Some(later);
+    mara.lock_tick();
+    let (_, _, wait) = mara.lock_status();
+    assert_eq!(wait, format!("decision {x} may already be made - approve to complete it"));
+    mara.cmd_approve(ProposalId(x), None).expect("the exit approve");
+    assert!(sent_kinds(&mara).contains(&"accepted"), "{:?}", sent_kinds(&mara));
+    // the height decides with x: the card reads applied
+    let b = b;
+    let block = b.seal(1, change, &["dora", "mara"]);
+    mara.receive_block_from("dora", block);
+    assert_eq!(mara.chain.head.as_ref().map(|h| h.height), Some(1));
+    assert!(mara.proposals.get(&x).is_some_and(|p| p.state == ProposalState::Applied && !p.pending_completion));
+}
+
+/// Explorer, the negative: such a card is never open (no free pick, no
+/// ordinary approve), and one the operator ignores does not outlive its
+/// height - another value decides it once the absent seats are heard.
+#[test]
+fn a_pending_completion_card_never_opens_and_goes_with_its_height() {
+    let b = Builder::new(&SEATS, 2);
+    let (mut mara, x, _) = forced_without_card(&b);
+    let slot = mara.lock_slot().expect("slot");
+    assert!(mara.lock_choose(&slot, None).is_none_or(|(id, _, _)| id != x), "never a free pick");
+    assert!(matches!(mara.cmd_approve(ProposalId(x), None), Err(molt_core::MoltError::AlreadyTerminal(..))));
+    let mut b = b;
+    b.commit_applied(70, &["dora", "walter"]);
+    mara.receive_block_from("dora", b.blocks[1].clone());
+    assert_eq!(mara.chain.head.as_ref().map(|h| h.height), Some(1));
+    assert!(!mara.proposals.contains_key(&x), "gone with its height");
+    assert!(mara.chain.lock.needs_approval.is_none());
+}

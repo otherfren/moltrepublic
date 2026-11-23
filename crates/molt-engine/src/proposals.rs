@@ -2053,6 +2053,7 @@ impl State {
             superseded: p.superseded,
             superseded_kind: p.superseded_kind,
             withdrawn: p.withdrawn,
+            pending_completion: p.pending_completion,
             sealing: self.chain.seal_held.contains(&id),
             void: (p.surface == Surface::Quests && p.state == ProposalState::Applied)
                 .then(|| self.kanban_void(id))

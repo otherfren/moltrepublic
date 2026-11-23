@@ -198,6 +198,7 @@ fn system_lines_interleave_by_time_and_tolerate_unknown_proposals() {
         mine: false,
         superseded: false,
         superseded_kind: None,
+        pending_completion: false,
         withdrawn: false,
         sealing: false,
         void: None,

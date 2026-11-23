@@ -1351,7 +1351,10 @@ impl State {
             if self.lock_forced_vouched(slot.height, &ballot.leader, id, &change, &evidence) {
                 self.lock_forced_invalid(id, &change, slot.height)
             } else {
-                // the exit: the status asks this seat's human to approve
+                // the exit: the status asks this seat's human to approve -
+                // a card it never had is registered first, so the human
+                // reads what it is asked to complete
+                self.lock_register_completion(id, &change, &ballot.leader);
                 let me = self.member();
                 let subjects = self.lock_restore_subjects();
                 let waiting: Vec<String> = self
@@ -1672,6 +1675,24 @@ impl State {
         self.lock_acceptor_accept(&slot, &ballot, &value, id, change, forced.then_some(evidence));
     }
 
+    /// A forced `Applied` value whose card never reached this seat: a
+    /// withdrawn record marked `pending_completion` (its proposer from the
+    /// id's stripe), never open, never a free pick; dropped when the
+    /// height decides without it.
+    fn lock_register_completion(&mut self, id: u64, change: &ChainChange, sender: &str) {
+        let ChainChange::Applied { surface, payload, .. } = change else { return };
+        if self.proposals.contains_key(&id) || self.retired.contains(&id) {
+            return;
+        }
+        let by = self.minting_seat(id).unwrap_or_else(|| sender.to_string());
+        let mut card = molt_core::ProposalRecord::new(*surface, payload.clone(), by);
+        card.state = ProposalState::Rejected;
+        card.withdrawn = true;
+        card.pending_completion = true;
+        tracing::info!(id, "lock=pending_completion");
+        self.proposals.insert(id, card);
+    }
+
     /// The id the status asks a human to approve: a withheld forced value
     /// still unvouched one retry interval after its first refusal.
     pub(crate) fn lock_prompt(&self) -> Option<u64> {
@@ -1865,6 +1886,23 @@ impl State {
             lock.needs_approval = None;
         }
         lock.approved_forced.clear();
+        // a completion card whose height decided without it goes
+        let stale: Vec<u64> = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| p.pending_completion && p.state != ProposalState::Applied)
+            .map(|(id, _)| *id)
+            .collect();
+        let asked = self.chain.lock.needs_approval.as_ref().map(|n| n.id);
+        for id in stale.into_iter().filter(|id| Some(*id) != asked) {
+            self.proposals.remove(&id);
+        }
+        for p in self.proposals.values_mut().filter(|p| p.pending_completion) {
+            if p.state == ProposalState::Applied {
+                p.pending_completion = false;
+            }
+        }
+        let lock = &mut self.chain.lock;
         if lock.learned.as_ref().is_some_and(|l| l.slot.height <= head) {
             lock.learned = None;
         }

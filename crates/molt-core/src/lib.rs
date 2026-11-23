@@ -3497,6 +3497,11 @@ pub struct ProposalRecord {
     /// card counts against this relayer's relay budget, not `by`'s cap.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub relayed_by: MemberId,
+    /// Strict Order Mode: a withdrawn card this seat never had, registered
+    /// from a forced value it is asked to complete - its content readable
+    /// before an approve (item 3). Gone once the height decides.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_completion: bool,
 }
 
 impl ProposalRecord {
@@ -3519,6 +3524,7 @@ impl ProposalRecord {
             withdrawn: false,
             wiki_rev: None,
             relayed_by: MemberId::new(),
+            pending_completion: false,
         }
     }
 
@@ -7512,6 +7518,9 @@ pub struct ProposalView {
     /// [`ProposalRecord::withdrawn`]) — labelled "pulled back".
     #[serde(default)]
     pub withdrawn: bool,
+    /// See [`ProposalRecord::pending_completion`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_completion: bool,
     /// Threshold is reached here and the seal waits out its pacing round
     /// (C1, G14) — "approvals 2 of 2, state proposed" read as a
     /// contradiction. Reader-relative like `approved_by_me`: another node
