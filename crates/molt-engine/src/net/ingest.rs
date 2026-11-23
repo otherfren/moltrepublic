@@ -135,6 +135,7 @@ impl State {
             return Ok(Reply::Ack);
         }
         self.note_fresh(&from);
+        self.note_seen(&from, envelope.seq);
         match envelope.body {
             WorkspaceEvent::Chat(mut msg) => {
                 msg.from = from.clone(); // defense in depth: the link decides

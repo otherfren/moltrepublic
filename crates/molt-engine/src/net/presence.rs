@@ -199,20 +199,11 @@ impl State {
         member: MemberId,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        if self.net_generation_current(generation) {
-            if self.drop_seam.keeps_window_on_rekey() {
-                // the seam: the window an older build kept after losing the reset
-                if let Some(w) = self.delivery.accepted.get_mut(&member) {
-                    w.proof = molt_core::RestoreProof::Unknown;
-                }
-            } else {
-                self.reset_after_rekey(&member);
-            }
-        }
-        // handled: the reset is queued (or held, holding the ratchet with it)
-        let mls = self.group_net.as_ref().map(|g| g.mls.clone()).or_else(|| self.group_mls_parked.clone());
-        if let Some(mut m) = mls.as_ref().and_then(|m| m.lock().ok()) {
-            m.rekey_reported();
+        // the group's own list is the source; the message only wakes it
+        if let Some(mls) = self.group_mls() {
+            self.drain_rekeys(&mls);
+        } else if self.net_generation_current(generation) {
+            self.rekey_reset(&member);
         }
         Ok(Reply::Ack)
     }
@@ -241,7 +232,7 @@ impl State {
         if let Some(group) = self.group_net.take() {
             let mls = group.mls.clone();
             tokio::spawn(async move { group.handle.shutdown().await });
-            let snap = if self.ratchet_may_persist() { crate::net::ratchet_snapshot(&mls) } else { None };
+            let snap = self.ratchet_snapshot(&mls);
             if let (Some(active), Some(snap)) = (self.active.as_ref(), snap) {
                 let _ = active.handle.merge_mls_async(snap);
             }

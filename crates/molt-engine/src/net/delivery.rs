@@ -55,18 +55,19 @@ const SESSION_MAX: usize = 65_536;
 /// Re-publications of a listed seq that never landed before it is given up.
 const LISTED_TRIES: u8 = 3;
 
-/// Repeats in a row from one seat that make a hint.
+/// Repeats from one seat that make a hint.
 const DUP_EPISODE_MIN: u32 = 32;
 
-/// One seat's run of frames a legacy window drops as already seen.
+/// One seat's run of frames a legacy window drops as already seen, while
+/// nothing of that seat was accepted this session.
 #[derive(Debug, Default)]
 pub(crate) struct DupEpisode {
     first_seq: u64,
     last_seq: u64,
     count: u32,
     warned: bool,
-    /// Fresh accepts in a row since the last counted repeat.
-    clean: u32,
+    /// A frame of the seat was accepted this session: no more counting.
+    fresh_seen: bool,
 }
 
 /// One missing seq of a sender's stream.
@@ -282,7 +283,10 @@ impl State {
     fn forget_incarnation(&mut self, member: &str, proof: molt_core::RestoreProof) {
         let member = member.to_string();
         let high = self.delivery.accepted.get(&member).map_or(0, |w| w.high);
-        if proof == molt_core::RestoreProof::Merge {
+        // a resync of a window an older build wrote may face another
+        // incarnation than it describes: forget that one's gates too
+        let legacy = self.delivery.accepted.get(&member).map_or(true, |w| w.proof == molt_core::RestoreProof::Unknown);
+        if proof == molt_core::RestoreProof::Merge || legacy {
             self.reset_peer_accept_window(&member);
         } else {
             self.forget_inbound(&member);
@@ -316,6 +320,50 @@ impl State {
         true
     }
 
+    /// The live group ratchet, running or parked.
+    pub(crate) fn group_mls(&self) -> Option<std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>> {
+        self.group_net.as_ref().map(|g| g.mls.clone()).or_else(|| self.group_mls_parked.clone())
+    }
+
+    /// Reset every seat `mls` lists as re-keyed by a merged commit -
+    /// received or this node's own. The list inside the group state is the
+    /// source, so a lost `NetPeerRekeyed` loses nothing: every beat, every
+    /// ratchet persist and every runtime rebuild drains it.
+    pub(crate) fn drain_rekeys(&mut self, mls: &std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>) {
+        let taken = mls.lock().map(|mut m| m.take_rekeyed()).unwrap_or_default();
+        let me = self.member();
+        for member in taken.into_iter().filter(|m| *m != me) {
+            self.rekey_reset(&member);
+        }
+    }
+
+    pub(crate) fn rekey_reset(&mut self, member: &str) {
+        if self.drop_seam.keeps_window_on_rekey() {
+            // the seam: the window an older build kept after losing the reset
+            if let Some(w) = self.delivery.accepted.get_mut(member) {
+                w.proof = molt_core::RestoreProof::Unknown;
+            }
+            self.delivery.dups.remove(member);
+            self.delivery.seen_high.remove(member);
+        } else {
+            self.reset_after_rekey(member);
+        }
+    }
+
+    /// The ratchet to persist: none until every re-key it holds is drained
+    /// and its window reset queued - checked under the lock the merge takes.
+    pub(crate) fn ratchet_snapshot(&mut self, mls: &std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>) -> Option<Vec<u8>> {
+        self.drain_rekeys(mls);
+        if !self.ratchet_may_persist() {
+            return None;
+        }
+        let g = mls.lock().ok()?;
+        if g.rekeys_pending() {
+            return None;
+        }
+        g.snapshot().ok()
+    }
+
     /// A re-key commit merged that re-admitted `member`: THE reset of a
     /// restore. The group runtime hands the merge over the same ordered
     /// sink as the frames, and no past epoch is kept, so every frame of
@@ -325,15 +373,11 @@ impl State {
         self.forget_incarnation(member, molt_core::RestoreProof::Merge);
     }
 
-    /// The highest seq seen from `from` in its current incarnation -
-    /// applied, held or dropped. Before any arrival this session, the
-    /// window's high.
+    /// The highest seq accepted or held from `from` in its current
+    /// incarnation this session - never a dropped duplicate, never a stored
+    /// window's high (it may describe another device).
     pub(crate) fn seen_high(&self, from: &str) -> u64 {
-        self.delivery
-            .seen_high
-            .get(from)
-            .copied()
-            .unwrap_or_else(|| self.delivery.accepted.get(from).map_or(0, |w| w.high))
+        self.delivery.seen_high.get(from).copied().unwrap_or(0)
     }
 
     /// Whether frame `seq` of `from` is the newest seen from it: only such
@@ -343,7 +387,7 @@ impl State {
         seq >= self.seen_high(from)
     }
 
-    fn note_seen(&mut self, from: &MemberId, seq: u64) {
+    pub(super) fn note_seen(&mut self, from: &MemberId, seq: u64) {
         let high = self.seen_high(from).max(seq);
         self.delivery.seen_high.insert(from.clone(), high);
     }
@@ -367,14 +411,23 @@ impl State {
             if !running {
                 return Err(MoltError::Engine(format!("no resync of {member} waiting")));
             }
-            let to = self.delivery.inbound.get(&member).and_then(|h| h.held.keys().next().map(|s| s - 1));
+            // the new start: below what is held, else what was accepted;
+            // nothing at all - the next frame is the baseline
+            let hold = self.delivery.inbound.get(&member);
+            let to = hold.and_then(|h| h.held.keys().next().map(|s| s - 1)).or_else(|| hold.map(|_| self.seen_high(&member)));
+            let frontier = hold.map_or(0, |h| h.frontier);
+            tracing::warn!(%member, count = to.unwrap_or(0).saturating_sub(frontier), first = frontier + 1, via = "operator", "inbound_gap_lost");
             if let Some(hold) = self.delivery.inbound.get_mut(&member) {
                 hold.from_start = false;
             }
-            if let Some(to) = to {
-                let frontier = self.delivery.inbound.get(&member).map_or(0, |h| h.frontier);
-                tracing::warn!(%member, count = to.saturating_sub(frontier), first = frontier + 1, via = "operator", "inbound_gap_lost");
-                self.give_up_through(&member, to, "operator");
+            match to {
+                Some(to) => self.give_up_through(&member, to, "operator"),
+                None => {
+                    if let Some(w) = self.delivery.accepted.get_mut(&member) {
+                        w.proof = molt_core::RestoreProof::Current;
+                    }
+                    self.save_accepted_now();
+                }
             }
             self.emit_session(crate::SessionScope::Full);
             return Ok(Reply::Ack);
@@ -406,12 +459,14 @@ impl State {
     }
 
     /// A hint, no action: a window an older build wrote dropping frames of
-    /// `from` as already seen, at rising seqs. A genuine re-offer of a tail
-    /// can trip it too.
+    /// `from` as already seen, at rising seqs, while nothing of `from` was
+    /// accepted this session - a seat whose frames are accepted is not
+    /// behind a stale window, or that window was overtaken (unprovable;
+    /// the operator action stays).
     pub(super) fn note_dup(&mut self, from: &MemberId, seq: u64) {
         let legacy = self.delivery.accepted.get(from).is_some_and(|w| w.proof == molt_core::RestoreProof::Unknown);
         let e = self.delivery.dups.entry(from.clone()).or_default();
-        if !legacy || (e.count > 0 && seq <= e.last_seq) {
+        if !legacy || e.fresh_seen || (e.count > 0 && seq <= e.last_seq) {
             return;
         }
         if e.count == 0 {
@@ -419,7 +474,6 @@ impl State {
         }
         e.count = e.count.saturating_add(1);
         e.last_seq = seq;
-        e.clean = 0;
         if e.count == DUP_EPISODE_MIN && !e.warned {
             e.warned = true;
             tracing::warn!(%from, first_seq = e.first_seq, last_seq = seq, count = e.count, "dup_streak");
@@ -427,14 +481,14 @@ impl State {
     }
 
     pub(super) fn note_fresh(&mut self, from: &MemberId) {
-        let Some(e) = self.delivery.dups.get_mut(from) else { return };
-        e.clean = e.clean.saturating_add(1);
-        if e.clean >= DUP_EPISODE_MIN {
-            if e.warned {
-                tracing::info!(%from, count = e.count, "dup_streak_cleared");
-            }
-            self.delivery.dups.remove(from);
+        let e = self.delivery.dups.entry(from.clone()).or_default();
+        if e.fresh_seen {
+            return;
         }
+        if e.warned {
+            tracing::info!(%from, count = e.count, "dup_streak_cleared");
+        }
+        *e = DupEpisode { fresh_seen: true, ..DupEpisode::default() };
     }
 
     /// Mark `seq` from `from` as engine-accepted (delivery guarantee §4.2 —
@@ -471,7 +525,8 @@ impl State {
         // REUSES sender generations — which every peer replay-rejects and
         // silently drops.
         if let Some(group) = self.group_net.as_ref() {
-            let snap = crate::net::ratchet_snapshot(&group.mls);
+            let mls = group.mls.clone();
+            let snap = self.ratchet_snapshot(&mls);
             if let (Some(snap), Some(active)) = (snap, self.active.as_ref()) {
                 if active.handle.merge_mls_async(snap) {
                     self.delivery.mls_persisted_at = now;
@@ -548,7 +603,6 @@ impl State {
             tracing::warn!(%from, claimed = %envelope.by, "dropping a delivery whose author does not match its link");
             return Ok(Reply::Ack);
         }
-        self.note_seen(&from, envelope.seq);
         // G7 in-order hold (§10). A sender we hold NO accepted history
         // with cannot be ordered against that history (N4b §3.1a: a
         // rejoiner enters mid-stream): its first envelope is the baseline.
@@ -602,6 +656,7 @@ impl State {
     /// Keep a decrypted envelope unaccepted until it may be applied; past
     /// [`HOLD_BYTES_MAX`] shed the highest seq of the largest buffer.
     fn hold_envelope(&mut self, from: &MemberId, env: EventEnvelope, now: u64) {
+        self.note_seen(from, env.seq);
         let size = serde_json::to_vec(&env).map_or(1024, |b| b.len());
         if let Some(hold) = self.delivery.inbound.get_mut(from) {
             hold.since.get_or_insert(now);
@@ -1078,6 +1133,9 @@ impl State {
     /// crash-regression from seconds to half a minute.
     pub(crate) fn cmd_net_delivery_tick(&mut self) -> Result<Reply, MoltError> {
         let now = self.presence_now();
+        if let Some(mls) = self.group_mls() {
+            self.drain_rekeys(&mls);
+        }
         if let Some((member, seq)) = self.drop_seam.take_regress() {
             self.regress_window(&member, seq, now);
         }
@@ -1100,6 +1158,9 @@ impl State {
         // A2.2: held seals land once their round has passed
         self.drain_held_seals();
         self.lock_tick();
+        if self.drop_seam.beacon_now.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.chain.beacon_at = 1;
+        }
         self.chain_heal_tick();
         self.sign_held_approvals();
         self.wake_tick();
