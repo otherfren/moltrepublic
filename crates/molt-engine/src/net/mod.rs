@@ -73,6 +73,8 @@ pub(crate) struct DropSeam {
     /// Forget a sender's accept marks above a seq, as a window saved less
     /// recently than the ack that went out.
     pub(crate) regress: Mutex<Option<(MemberId, u64)>>,
+    /// The evidence rule's skew bound in seconds plus one (0 = the constant).
+    pub(crate) evidence_skew: std::sync::atomic::AtomicU64,
 }
 
 impl DropSeam {
@@ -82,6 +84,13 @@ impl DropSeam {
 
     pub(crate) fn take_regress(&self) -> Option<(MemberId, u64)> {
         self.regress.lock().ok().and_then(|mut r| r.take())
+    }
+
+    pub(crate) fn evidence_skew(&self) -> u64 {
+        match self.evidence_skew.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => ingest::WIRE_STAMP_SKEW_SECS,
+            v => v - 1,
+        }
     }
 
     pub(crate) fn keeps_window_on_block(&self) -> bool {

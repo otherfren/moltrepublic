@@ -2793,6 +2793,8 @@ async fn restore_with_vera_missing_the_reset(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     v.__skip_restore_reset(rekey, block);
+    // the old device spoke seconds, not minutes, before the restore
+    v.__evidence_skew_secs(Some(0));
     drop(b);
     let link = mint_for_petra(&a).await;
     let c = engine(&root.join("rejoiner"));
@@ -2881,17 +2883,26 @@ async fn a_bystander_that_missed_the_live_reset_hears_the_restored_seat() {
     .await;
 }
 
-/// **WP1, the state v0.1.0/v0.1.1 left in the field.** Both resets lost:
-/// vera drops the restored seat's frames as already seen and acks them; the
-/// new device refuses the ack (it names seqs above its own log) and keeps
-/// them owed. Vera's next open resets the unkeyed window, and the owed tail
-/// arrives, each message once.
+/// **WP1, the state v0.1.0/v0.1.1 left in the field.** Both resets lost
+/// (and no evidence rule): vera drops the restored seat's frames as already
+/// seen and acks them; the new device refuses the ack (it names seqs above
+/// its own log) and keeps them owed. Vera updates: her open only keys the
+/// window; the first re-offered frame written after the restore and after
+/// everything the window accepted proves it stale, the window resets, and
+/// everything sent since the restore - chat and the open vote - arrives
+/// once; vera's vote then seals the vote.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_window_missed_before_this_build_heals_at_the_next_open() {
+async fn a_window_missed_before_this_build_heals_on_evidence_after_the_update() {
     let (_relay, url) = roomy_relay().await;
     let tmp = tempfile::tempdir().expect("tmp");
     let (_a, v, c, vera_ws) = restore_with_vera_missing_the_reset(tmp.path(), &url, true, true).await;
     send_batch(&c, "stale", 40).await;
+    c.execute(Command::Propose {
+        surface: molt_core::Surface::Organization,
+        payload: serde_json::json!({"op": "set_name", "value": "Rook Club"}),
+    })
+    .await
+    .expect("propose");
     assert!(!sees_batch_once(&v, "stale", 40, 10).await, "the lost reset is the red state");
     let c_ws = read_session(&c).await.workspaces[0].id.clone();
     let c_dir = molt_storage::find_workspace_dir(&tmp.path().join("rejoiner"), &c_ws).expect("the new device's dir");
@@ -2921,58 +2932,6 @@ async fn a_window_missed_before_this_build_heals_at_the_next_open() {
     v.execute(Command::CloseWorkspace).await.expect("vera closes");
     v.execute(Command::OpenWorkspace { id: vera_ws }).await.expect("vera reopens");
     assert!(sees_batch_once(&v, "stale", 40, 120).await, "the owed tail never reached vera after the heal");
-}
-
-/// **WP1 step 2, the field shape end to end.** Vera missed both resets; the
-/// new device spoke past the old incarnation's high mark, so vera's stale
-/// sheets stopped looking impossible and walked the new device's floor
-/// over everything vera had dropped. Vera updates (reopens): the window
-/// resets, her next sheet no longer holds what was acked, the new device
-/// rewinds and re-offers, and everything it sent since the restore - chat
-/// and the open vote - arrives exactly once; vera's vote then seals it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_tail_falsely_acked_past_the_old_high_mark_arrives_after_the_heal() {
-    let (_relay, url) = roomy_relay().await;
-    let tmp = tempfile::tempdir().expect("tmp");
-    let (_a, v, c, vera_ws) = restore_with_vera_missing_the_reset(tmp.path(), &url, true, true).await;
-    const N: usize = 200;
-    send_batch(&c, "since", N).await;
-    c.execute(Command::Propose {
-        surface: molt_core::Surface::Organization,
-        payload: serde_json::json!({"op": "set_name", "value": "Rook Club"}),
-    })
-    .await
-    .expect("propose");
-    let c_ws = read_session(&c).await.workspaces[0].id.clone();
-    let c_dir = molt_storage::find_workspace_dir(&tmp.path().join("rejoiner"), &c_ws).expect("the new device's dir");
-    // the red state: the floor passed frames vera dropped
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    loop {
-        let ts = molt_storage::peek_transport_state(&c_dir).unwrap_or_default();
-        let head = ts.group.map_or(0, |g| g.log_seq);
-        let cur = ts.outbound.get("vera").copied().unwrap_or_default();
-        if !cur.ack_ahead && head > 0 && cur.acked_floor >= head {
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "vera's stale sheets never passed the head: {cur:?} head={head}");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    assert!(!sees_batch_once(&v, "since", N, 5).await, "vera dropped part of the batch, yet it counts as acked");
-    v.__skip_restore_reset(false, false);
-    v.execute(Command::CloseWorkspace).await.expect("vera closes");
-    v.execute(Command::OpenWorkspace { id: vera_ws }).await.expect("vera reopens");
-    send_batch(&c, "after", 1).await;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    loop {
-        let cur = molt_storage::peek_transport_state(&c_dir).unwrap_or_default().outbound.get("vera").copied().unwrap_or_default();
-        if cur.regressed_from > 0 {
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "the new device never rewound vera's floor: {cur:?}");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert!(sees_batch_once(&v, "since", N, 180).await, "the falsely acked tail never reached vera");
-    assert!(sees_batch_once(&v, "after", 1, 60).await);
     approve_value(&v, "Rook Club").await;
     wait_for_secs(&c, "vera's vote to seal the new device's proposal", 90, |s| {
         s.workspaces.iter().any(|w| w.name == "Rook Club")

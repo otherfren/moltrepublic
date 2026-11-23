@@ -129,6 +129,8 @@ pub(crate) struct SenderHold {
     /// The sender answers gap wants: its duplicates are targeted resends
     /// for other askers, never evidence about our gaps.
     answers: bool,
+    /// A window reset for a restore: owed from seq 0.
+    from_start: bool,
 }
 
 impl SenderHold {
@@ -218,6 +220,12 @@ impl SenderHold {
     }
 }
 
+/// Whether `next` claims what `last` claimed: the stamp alone changes on
+/// every sheet, and a duplicate burst must not republish an unchanged one.
+pub(super) fn same_sheet(last: Option<&molt_net::group_ack::GroupAck>, next: &molt_net::group_ack::GroupAck) -> bool {
+    last.is_some_and(|l| l.by == next.by && l.claims == next.claims)
+}
+
 /// Whether an envelope's effect depends on its sender's earlier envelopes:
 /// the chat stream (arrival is display order; a reaction toggles) and a
 /// member's stances (newest wins). A withdrawal is terminal and parks on
@@ -263,58 +271,181 @@ impl State {
         self.delivery.dups.remove(member);
     }
 
-    /// [`Self::reset_peer_accept_window`], leaving an empty window keyed
-    /// `restore` so the same restore never resets it again (§11).
-    fn forget_incarnation(&mut self, member: &str, restore: &str, via: &str) {
+    /// [`Self::reset_peer_accept_window`], leaving an empty window keyed to
+    /// `restore` with `proof`, written at once: a reset a kill can lose is
+    /// the fault this exists for (§11).
+    fn forget_incarnation(&mut self, member: &str, restore: &str, proof: molt_core::RestoreProof) {
         let member = member.to_string();
         let high = self.delivery.accepted.get(&member).map_or(0, |w| w.high);
         self.reset_peer_accept_window(&member);
-        let window = molt_core::AcceptedWindow { restore: restore.to_string(), ..Default::default() };
+        let window = molt_core::AcceptedWindow { restore: restore.to_string(), proof, ..Default::default() };
         self.delivery.accepted.insert(member.clone(), window);
+        self.save_accepted_now();
+        tracing::info!(%member, high, via = proof.label(), "accept_window_reset");
+    }
+
+    fn save_accepted_now(&mut self) {
+        self.delivery.reset_saves = self.delivery.reset_saves.saturating_add(1);
         self.delivery.accepted_dirty = true;
-        tracing::info!(%member, high, via, "accept_window_reset");
+        if let Some(active) = self.active.as_ref() {
+            active.handle.save_accepted(self.delivery.accepted.clone());
+            self.delivery.accepted_dirty = false;
+            self.delivery.accepted_saved_at = self.presence_now();
+        }
     }
 
     /// A re-key commit merged that re-admitted `member`. Always safe: before
     /// the merge no frame of the new device can be decrypted here, so the
-    /// window holds the old incarnation only.
+    /// window holds the old incarnation only. It is the merge of the
+    /// restore whose block was applied here last, if that one's merge is
+    /// still due; else of one whose block is still to come.
     pub(crate) fn reset_after_rekey(&mut self, member: &str) {
-        self.forget_incarnation(member, molt_core::RESTORE_REKEYED, "rekey");
+        use molt_core::RestoreProof as P;
+        let (restore, proof) = match self.delivery.accepted.get(member) {
+            Some(w) if matches!(w.proof, P::Adopted | P::Block) => (w.restore.clone(), P::Merge),
+            _ => (self.chain.anchors.get(member).cloned().unwrap_or_default(), P::MergePending),
+        };
+        self.forget_incarnation(member, &restore, proof);
     }
 
-    /// A `Restored` block for `member` installing `anchor` is applied: reset
-    /// unless this window already counts under that restore. A window reset
-    /// by the re-key merge is adopted, not reset: the new device may have
-    /// delivered into it since.
+    /// A `Restored` block for `member` installing `anchor` is applied. A
+    /// window keyed to an earlier known restore holds that device's stream:
+    /// reset. A first-contact or unkeyed window is only keyed - the evidence
+    /// rule resets it if it predates the restore - and a merged one whose
+    /// block this is adopts the anchor.
     pub(crate) fn reset_for_restore(&mut self, member: &str, anchor: &str) {
+        use molt_core::RestoreProof as P;
         if anchor.is_empty() || member == self.member() || self.drop_seam.keeps_window_on_block() {
             return;
         }
-        match self.delivery.accepted.get_mut(member) {
-            Some(w) if w.restore == anchor => {}
-            Some(w) if w.restore == molt_core::RESTORE_REKEYED => {
-                w.restore = anchor.to_string();
-                self.delivery.accepted_dirty = true;
+        let Some(w) = self.delivery.accepted.get(member) else { return };
+        // our own seal is stamped only after it settles: it is now
+        let sealed = match self.restore_sealed_at(member) {
+            0 => self.presence_now(),
+            t => t,
+        };
+        let next = match w.proof {
+            P::MergePending if w.restore != anchor => P::Merge,
+            _ if w.restore == anchor => return,
+            // a first contact made after the restore holds only the new
+            // device; one made clearly before it holds the old one
+            P::Pending if w.born > sealed => P::Merge,
+            P::Pending if w.born > 0 && w.born.saturating_add(self.drop_seam.evidence_skew()) <= sealed => {
+                self.forget_incarnation(member, anchor, P::Block);
+                return;
             }
-            _ => self.forget_incarnation(member, anchor, "block"),
+            P::Pending => P::Adopted,
+            P::Unknown if w.restore.is_empty() => P::Adopted,
+            _ => {
+                self.forget_incarnation(member, anchor, P::Block);
+                return;
+            }
+        };
+        if let Some(w) = self.delivery.accepted.get_mut(member) {
+            w.restore = anchor.to_string();
+            w.proof = next;
+            self.delivery.accepted_dirty = true;
         }
     }
 
-    /// At open: every restored seat whose window does not count under the
-    /// chain's latest restore of it is reset once - the state a lost reset
-    /// left behind, and every window an older build wrote for a restored
-    /// seat. A merge-reset window waits for its block.
+    /// At open: an unkeyed window of a restored seat is keyed to the chain's
+    /// latest restore of it, never reset - the evidence rule finds the ones
+    /// that predate it; a first-contact window is judged by its birth.
     pub(crate) fn reconcile_restore_windows(&mut self) {
         let me = self.member();
         let mut anchors: Vec<(MemberId, String)> =
             self.chain.anchors.iter().filter(|(m, _)| **m != me).map(|(m, a)| (m.clone(), a.clone())).collect();
         anchors.sort();
         for (member, anchor) in anchors {
-            let Some(restore) = self.delivery.accepted.get(&member).map(|w| w.restore.as_str()) else { continue };
-            if restore != anchor && restore != molt_core::RESTORE_REKEYED {
-                self.forget_incarnation(&member, &anchor, "open");
+            let Some((proof, unkeyed)) = self.delivery.accepted.get(&member).map(|w| (w.proof, w.restore.is_empty())) else {
+                continue;
+            };
+            match proof {
+                // a first contact the block never reached: judged as the block would
+                molt_core::RestoreProof::Pending => self.reset_for_restore(&member, &anchor),
+                molt_core::RestoreProof::Unknown if unkeyed => {
+                    if let Some(w) = self.delivery.accepted.get_mut(&member) {
+                        w.restore = anchor;
+                    }
+                    self.delivery.accepted_dirty = true;
+                }
+                _ => {}
             }
         }
+    }
+
+    /// The seal stamp of `member`'s latest `Restored` block (0 = unknown).
+    fn restore_sealed_at(&self, member: &str) -> u64 {
+        self.chain
+            .blocks
+            .iter()
+            .rev()
+            .find(|b| matches!(&b.change, molt_core::ChainChange::Membership { op: molt_core::MembershipOp::Restored, member: m, .. } if m == member))
+            .and_then(|b| self.chain.block_ts.get(&b.height).copied())
+            .unwrap_or(0)
+    }
+
+    /// Whether a dropped duplicate from `from` stamped `ts` proves its window
+    /// predates the seat's latest restore: the frame was written after the
+    /// restore and after everything the window accepted, so its mark can
+    /// only be the old incarnation's. With no accepted stamp known, the
+    /// open time plus the skew bound stands in for it.
+    fn dup_proves_stale(&self, from: &str, seq: u64, ts: u64) -> Option<String> {
+        if self.drop_seam.keeps_window_on_block() {
+            return None;
+        }
+        let anchor = self.chain.anchors.get(from)?;
+        let w = self.delivery.accepted.get(from)?;
+        let proven = matches!(
+            w.proof,
+            molt_core::RestoreProof::Block | molt_core::RestoreProof::Merge | molt_core::RestoreProof::Evidence | molt_core::RestoreProof::Operator
+        );
+        if w.restore == *anchor && proven {
+            return None;
+        }
+        let newer = if w.stamp > 0 {
+            (ts, seq) > (w.stamp, w.stamp_seq)
+        } else if self.delivery.opened_at > 0 {
+            ts > self.delivery.opened_at.saturating_add(self.drop_seam.evidence_skew())
+        } else {
+            return None;
+        };
+        (newer && ts > self.restore_sealed_at(from)).then(|| anchor.clone())
+    }
+
+    /// The operator resets `member`'s inbound state, as the evidence rule
+    /// does; the gap asks and the sender's rewind then re-deliver its
+    /// retained history. A second call while that runs changes nothing.
+    pub(crate) fn cmd_resync_seat(&mut self, member: MemberId) -> Result<Reply, MoltError> {
+        if self.active.is_none() && self.replica.is_none() {
+            return Err(MoltError::Engine("no open republic".to_string()));
+        }
+        if member == self.member() {
+            return Err(MoltError::Engine("cannot resync the own seat".to_string()));
+        }
+        if !self.roster().contains(&member) {
+            return Err(MoltError::Engine(format!("{member} is not a seat")));
+        }
+        if self.resync_running(&member) {
+            return Err(MoltError::Engine(format!("resync of {member} running")));
+        }
+        let anchor = self.chain.anchors.get(&member).cloned().unwrap_or_default();
+        self.forget_incarnation(&member, &anchor, molt_core::RestoreProof::Operator);
+        self.emit_session(crate::SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// An operator resync still filling: nothing accepted yet, or a gap
+    /// still asked for.
+    fn resync_running(&self, member: &str) -> bool {
+        let Some(w) = self.delivery.accepted.get(member) else { return false };
+        w.proof == molt_core::RestoreProof::Operator
+            && (w.high == 0
+                || self
+                    .delivery
+                    .inbound
+                    .get(member)
+                    .is_some_and(|h| !h.held.is_empty() || !h.missing.is_empty() || h.listing.is_some()))
     }
 
     /// `member`'s current drop episode size once it warned, else 0.
@@ -322,15 +453,17 @@ impl State {
         self.delivery.dups.get(member).filter(|e| e.warned).map_or(0, |e| e.count)
     }
 
-    /// The fault signature of a window that predates the sender's restore:
-    /// dropped frames authored after everything accepted from it, at rising
-    /// seqs. A resend round or a re-read after a restart re-offers frames
-    /// this node accepted, so their stamps are never newer.
-    pub(super) fn note_dup(&mut self, from: &MemberId, seq: u64, ts: u64) {
-        let stamp = self.delivery.accepted.get(from).map_or(0, |w| w.stamp);
+    /// A dropped duplicate. `true` = it proved the window stale: the window
+    /// was reset and the caller delivers the frame again.
+    pub(super) fn note_dup(&mut self, from: &MemberId, seq: u64, ts: u64) -> bool {
+        if let Some(anchor) = self.dup_proves_stale(from, seq, ts) {
+            self.forget_incarnation(from, &anchor, molt_core::RestoreProof::Evidence);
+            return true;
+        }
+        let (stamp, stamp_seq) = self.delivery.accepted.get(from).map_or((0, 0), |w| (w.stamp, w.stamp_seq));
         let e = self.delivery.dups.entry(from.clone()).or_default();
-        if stamp == 0 || ts <= stamp || (e.count > 0 && seq <= e.last_seq) {
-            return;
+        if stamp == 0 || (ts, seq) <= (stamp, stamp_seq) || (e.count > 0 && seq <= e.last_seq) {
+            return false;
         }
         if e.count == 0 {
             e.first_seq = seq;
@@ -342,11 +475,23 @@ impl State {
             e.warned = true;
             tracing::warn!(%from, first_seq = e.first_seq, last_seq = seq, count = e.count, "dup_streak");
         }
+        false
     }
 
-    pub(super) fn note_fresh(&mut self, from: &MemberId, ts: u64) {
+    pub(super) fn note_fresh(&mut self, from: &MemberId, seq: u64, ts: u64) {
         if let Some(w) = self.delivery.accepted.get_mut(from) {
-            w.stamp = w.stamp.max(ts);
+            if w.born == 0 {
+                w.born = ts;
+            }
+            // a window not proven to postdate the seat's restore keeps the
+            // stamp it had: a frame of the new device accepted out of order
+            // must not lift the evidence bar over the ones it dropped
+            let unproven = w.proof == molt_core::RestoreProof::Adopted
+                || (w.proof == molt_core::RestoreProof::Unknown && !w.restore.is_empty());
+            if !unproven && (ts, seq) > (w.stamp, w.stamp_seq) {
+                w.stamp = ts;
+                w.stamp_seq = seq;
+            }
         }
         let Some(e) = self.delivery.dups.get_mut(from) else { return };
         e.clean = e.clean.saturating_add(1);
@@ -363,12 +508,14 @@ impl State {
     /// held it: the envelope is a duplicate/resend and the caller drops it
     /// (G2). Freshness dirties the window for the debounced persist.
     pub(crate) fn accept_envelope(&mut self, from: &MemberId, seq: u64) -> bool {
-        // a window born now counts under the sender's latest restore
-        if !self.delivery.accepted.contains_key(from) {
-            let restore = self.chain.anchors.get(from).cloned().unwrap_or_default();
-            self.delivery.accepted.insert(from.clone(), molt_core::AcceptedWindow { restore, ..Default::default() });
-        }
-        let fresh = self.delivery.accepted.entry(from.clone()).or_default().accept(seq);
+        // first contact: the chain may not have caught up with this seat's
+        // restores yet, so the next one applied adopts the window
+        let window = self
+            .delivery
+            .accepted
+            .entry(from.clone())
+            .or_insert_with(|| molt_core::AcceptedWindow { proof: molt_core::RestoreProof::Pending, ..Default::default() });
+        let fresh = window.accept(seq);
         if fresh {
             self.delivery.accepted_dirty = true;
         }
@@ -476,7 +623,8 @@ impl State {
         // rejoiner enters mid-stream): its first envelope is the baseline.
         let window = self.delivery.accepted.get(&from);
         // a window reset for a restore owes the new incarnation from its start
-        let has_history = window.is_some_and(|w| w.high > 0 || !w.restore.is_empty());
+        let from_start = window.is_some_and(|w| w.high == 0 && w.proof.is_reset());
+        let has_history = window.is_some_and(|w| w.high > 0) || from_start;
         let is_dup = window.is_some_and(|w| w.is_accepted(envelope.seq));
         let prev_missing = envelope.prev_seq != 0
             && has_history
@@ -487,7 +635,10 @@ impl State {
             return self.deliver_gated(from, envelope);
         }
         let now = self.presence_now();
-        let hold = self.delivery.inbound.entry(from.clone()).or_insert_with(|| SenderHold::new(start, links));
+        let hold = self.delivery.inbound.entry(from.clone()).or_insert_with(|| SenderHold {
+            from_start,
+            ..SenderHold::new(start, links)
+        });
         if is_dup || hold.held.contains_key(&envelope.seq) {
             hold.passed(envelope.seq, now);
             if is_dup {
@@ -736,6 +887,16 @@ impl State {
                     hold.passed_at = None;
                 }
             }
+            // a reset window of a sender that answers no want (an older
+            // build) cannot be filled from its start: past the fallback
+            // what is held becomes the baseline, loudly
+            let baseline = if hold.from_start && !hold.answers {
+                hold.since
+                    .filter(|s| now.saturating_sub(*s) >= GAP_FALLBACK_SECS)
+                    .and(hold.held.keys().next().map(|s| s - 1))
+            } else {
+                None
+            };
             // listed seqs whose re-publication did not land count a try
             let mut given_up = Vec::new();
             if let Some(l) = hold.listing.as_mut() {
@@ -817,6 +978,12 @@ impl State {
             }
             if let Some(to) = jump {
                 self.give_up_through(&m, to, "resend_passed");
+            }
+            if let Some(to) = baseline {
+                if let Some(hold) = self.delivery.inbound.get_mut(&m) {
+                    hold.from_start = false;
+                }
+                self.give_up_through(&m, to, "baseline");
             }
             for (seq, via) in settle {
                 self.settle_gap(&m, seq, via);
@@ -970,7 +1137,7 @@ impl State {
             return;
         }
         let ack = molt_net::group_ack::GroupAck::new(self.member(), claims);
-        if self.delivery.last_group_ack.as_ref() == Some(&ack) {
+        if same_sheet(self.delivery.last_group_ack.as_ref(), &ack) {
             return; // nothing changed — say nothing
         }
         if let Some(group) = self.group_net.as_ref() {
@@ -1023,7 +1190,7 @@ impl State {
     /// Test seam body: keep only `member`'s accept marks at or below `seq`.
     fn regress_window(&mut self, member: &MemberId, seq: u64, now: u64) {
         let Some(old) = self.delivery.accepted.get(member).cloned() else { return };
-        let mut w = molt_core::AcceptedWindow { restore: old.restore.clone(), ..Default::default() };
+        let mut w = molt_core::AcceptedWindow { restore: old.restore.clone(), proof: old.proof, ..Default::default() };
         for s in seq.saturating_sub(molt_core::ACCEPT_WINDOW_BITS)..=seq.min(old.high) {
             if s > 0 && old.is_accepted(s) {
                 let _ = w.accept(s);

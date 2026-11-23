@@ -240,7 +240,7 @@ DENY_TOOLS=(propose withdraw wiki_edit quests_propose propose_checkpoint poke
             encrypt_workspace decrypt_workspace wiki_export files_export
             restore_start restore_cancel restore_finish
             create_start create_cancel create_propose create_finish
-            recover_invite_start recover_start recover_cancel confirm_seed_backup
+            recover_invite_start recover_start recover_cancel confirm_seed_backup resync_seat
             join_start join_confirm_charter join_decline_charter join_finish join_cancel
             wiki_draft_save wiki_draft_load quests_draft_save quests_draft_load)
 [[ "$VOTING" == "ja" ]] || DENY_TOOLS+=(approve decline)

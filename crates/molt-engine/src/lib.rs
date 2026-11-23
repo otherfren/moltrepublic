@@ -363,14 +363,23 @@ impl WalletHandle {
         self.drop_seam.restore_settle.store(v, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Test seam: a merged re-key commit (`rekey`) and an applied
-    /// `Restored` block (`block`) forget no window, as a reset lost to a
-    /// kill before the window save. No `Command` reaches it.
+    /// Test seam: a merged re-key commit (`rekey`) forgets no window, as a
+    /// reset lost to a kill before the window save; `block` turns off the
+    /// block and evidence resets too (a build before them). No `Command`
+    /// reaches it.
     #[doc(hidden)]
     pub fn __skip_restore_reset(&self, rekey: bool, block: bool) {
         use std::sync::atomic::Ordering::SeqCst;
         self.drop_seam.skip_rekey_reset.store(rekey, SeqCst);
         self.drop_seam.skip_block_reset.store(block, SeqCst);
+    }
+
+    /// Test seam: the evidence rule's skew bound in seconds (`None` = the
+    /// constant). No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __evidence_skew_secs(&self, secs: Option<u64>) {
+        let v = secs.map_or(0, |s| s.saturating_add(1));
+        self.drop_seam.evidence_skew.store(v, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam: on the next delivery beat, forget `member`'s accept marks
@@ -861,6 +870,11 @@ pub(crate) struct DeliveryState {
     /// Per sender: frames dropped as already seen that are newer than
     /// anything accepted from it (`net/delivery.rs`). Runtime-only.
     pub(crate) dups: std::collections::HashMap<MemberId, net::DupEpisode>,
+    /// When this workspace was opened (presence clock): the evidence
+    /// reference for a window with no accepted stamp.
+    pub(crate) opened_at: u64,
+    /// Window resets handed to the writer at once (a test probe).
+    pub(crate) reset_saves: u64,
     /// Test override of `HOLD_BYTES_MAX` (`None` = the constant).
     pub(crate) hold_bytes_cap: Option<usize>,
     /// Since when no stored replay is coming in (gap wants wait for it).
@@ -2732,6 +2746,7 @@ impl State {
                 })
             }
             Command::RecoverInviteStart { member } => self.cmd_recover_invite_start(member),
+            Command::ResyncSeat { member } => self.cmd_resync_seat(member),
             Command::RecoverStart { link, phrase, relays } => {
                 self.cmd_recover_start(link, phrase, relays)
             }

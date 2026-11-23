@@ -2041,6 +2041,10 @@ pub struct OutboundCursor {
     /// previous incarnation of this seat, so nothing it claims is proven.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub ack_ahead: bool,
+    /// When the current ack-ahead episode began (wall seconds; 0 = none,
+    /// or the episode stopped re-offering).
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub ahead_since: u64,
     /// The `high` of the last sheet that moved `acked_floor`.
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub ack_high: u64,
@@ -2085,20 +2089,83 @@ pub struct AcceptedWindow {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<(u64, u64)>,
     /// Receiver-local: the transport anchor of the sender's `Restored`
-    /// block this window counts under, or [`RESTORE_REKEYED`]. Empty = no
-    /// restore known (and every window an older build wrote).
+    /// block this window counts under ("" = none known; every window an
+    /// older build wrote). [`Self::proof`] says how it came to count there.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub restore: String,
+    /// Receiver-local: how this window relates to [`Self::restore`].
+    #[serde(default, skip_serializing_if = "RestoreProof::is_unknown")]
+    pub proof: RestoreProof,
     /// Receiver-local: the newest envelope stamp accepted from the sender
     /// (0 = unknown).
     #[serde(default, skip_serializing_if = "u64_is_zero")]
     pub stamp: u64,
+    /// Receiver-local: the highest seq accepted at [`Self::stamp`] - a
+    /// frame is newer than everything accepted iff `(ts, seq)` is above
+    /// `(stamp, stamp_seq)` (stamps are whole seconds).
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub stamp_seq: u64,
+    /// Receiver-local: the stamp of the first envelope this window
+    /// accepted (0 = unknown) - a first contact after a restore holds no
+    /// earlier incarnation.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub born: u64,
 }
 
-/// [`AcceptedWindow::restore`] after a re-key merge reset whose `Restored`
-/// block was not matched yet: that block adopts the window instead of
-/// resetting it.
-pub const RESTORE_REKEYED: &str = "rekeyed";
+/// How an [`AcceptedWindow`] came to count under its `restore` anchor.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreProof {
+    /// Nothing known: written by an older build, or keyed at open.
+    #[default]
+    Unknown,
+    /// Born by first contact; the next applied block adopts it.
+    Pending,
+    /// A block adopted it without a reset; that restore's merge is due.
+    Adopted,
+    /// Reset by the block for `restore`; its merge is due.
+    Block,
+    /// Reset by the merge of the restore `restore` names.
+    Merge,
+    /// Reset by a merge whose block is not applied yet; `restore` is the
+    /// anchor before it.
+    MergePending,
+    /// Reset on a dropped frame newer than the restore and than anything
+    /// the window accepted.
+    Evidence,
+    /// Reset by the operator (`Command::ResyncSeat`).
+    Operator,
+}
+
+impl RestoreProof {
+    fn is_unknown(&self) -> bool {
+        *self == RestoreProof::Unknown
+    }
+
+    /// Whether a reset made this window postdate a restore.
+    #[must_use]
+    pub fn is_reset(self) -> bool {
+        matches!(
+            self,
+            RestoreProof::Block | RestoreProof::Merge | RestoreProof::MergePending | RestoreProof::Evidence | RestoreProof::Operator
+        )
+    }
+
+    /// The log label of a reset.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            RestoreProof::Unknown => "unknown",
+            RestoreProof::Pending => "pending",
+            RestoreProof::Adopted => "adopted",
+            RestoreProof::Block => "block",
+            RestoreProof::Merge => "merge",
+            RestoreProof::MergePending => "merge_pending",
+            RestoreProof::Evidence => "evidence",
+            RestoreProof::Operator => "operator",
+        }
+    }
+}
 
 impl AcceptedWindow {
     /// The window as a peer may see it: the receiver-local fields stripped.
@@ -3529,6 +3596,11 @@ pub struct ProposalRecord {
     /// Additive, skipped when empty so pre-field dumps stay byte-identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub voted: Vec<MemberId>,
+    /// Per foreign member: the stamp of the newest stance applied here. A
+    /// stance stamped at or before it (a re-delivery) is ignored. Additive,
+    /// skipped when empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub stances: BTreeMap<MemberId, u64>,
     /// Who proposed it: the seat whose stripe the id falls on, however
     /// the card arrived ("" = unknown, a pre-field record; a record from
     /// before v0.1.1 may name the re-server that delivered it). A DISPLAY
@@ -3591,6 +3663,7 @@ impl ProposalRecord {
             declined_by: MemberId::new(),
             decliners: Vec::new(),
             voted: Vec::new(),
+            stances: BTreeMap::new(),
             by,
             superseded: false,
             superseded_kind: None,
@@ -5826,6 +5899,14 @@ pub enum Command {
         /// Ritual incarnation (stale ritual commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
+    },
+    /// **Resync one seat** (`delivery_guarantee.md` §11): forget what this
+    /// node holds as accepted from `member`, so its retained history is
+    /// delivered again - for a window that predates the seat's restore and
+    /// no longer meets a newer duplicate. A human decision: a tool.
+    ResyncSeat {
+        /// The seat whose inbound state is reset (a roster member, not self).
+        member: MemberId,
     },
     /// A surviving coordinator **mints a recovery link** for a member who lost
     /// its device (`recovery_ritual.md` §3): a human decision (an existing seat,

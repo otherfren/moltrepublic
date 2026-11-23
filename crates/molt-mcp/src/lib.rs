@@ -3144,6 +3144,22 @@ pub fn tools() -> Vec<ToolDef> {
             }),
         },
         ToolDef {
+            name: "resync_seat",
+            command: "resync_seat",
+            scope: Scope::Seat,
+            description: "Resync one seat whose messages this node drops as already seen (`status.seats[].dup_streak`, or a seat restored while this node held an old window): forget what this node holds as accepted from it, so its messages are delivered again; re-fetches that seat's retained history. Progress shows in `status.inbound_held` for that seat. Refused for the own seat and a non-seat; a second call while one runs answers 'resync of <seat> running'.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "member": { "type": "string", "description": "the seat to resync (a roster member, not this node)" }
+                },
+                "required": ["member"]
+            }),
+            build: |args| Ok(Command::ResyncSeat {
+                member: str_arg(args, "member")?,
+            }),
+        },
+        ToolDef {
             name: "recover_start",
             command: "recover_start",
             scope: Scope::Seat,
