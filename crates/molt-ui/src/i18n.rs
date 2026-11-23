@@ -1072,6 +1072,10 @@ lexicon! {
     os_other_branch_at: "other branch at", "anderer Zweig bei";
     os_other_branch: "other branch", "anderer Zweig";
     os_dropped: "its messages are dropped here as already seen", "seine Nachrichten werden hier als schon gesehen verworfen";
+    os_resync: "Fetch history again", "Verlauf neu holen";
+    os_resync_ask_pre: "Re-fetch ", "Den gespeicherten Verlauf von ";
+    os_resync_ask_post: "'s retained history? Their live messages wait until it is through.", " neu holen? Seine Live-Nachrichten warten, bis er durch ist.";
+    os_fetching: "fetching history", "Verlauf wird geholt";
     os_dropped_tip: "This node missed its restore; restart this node on 0.1.2 or newer.", "Dieser Knoten hat seine Wiederherstellung verpasst; starte diesen Knoten mit 0.1.2 oder neuer neu.";
     oa_col_surface: "Surface", "Bereich";
     oa_pending: "Pending", "Offen";

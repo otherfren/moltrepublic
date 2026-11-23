@@ -1115,6 +1115,21 @@ fn the_seat_table_shows_build_head_and_faults() {
     assert_eq!(de[4].note, "seine Nachrichten werden hier als schon gesehen verworfen");
 }
 
+/// A seat counts as fetching while this node holds its inbound stream.
+#[test]
+fn a_held_seat_reads_as_fetching_and_a_dropped_one_as_dropped() {
+    use crate::surfaces::{mark_fetching, seat_rows};
+    use molt_core::{InboundHeld, SeatSync};
+    let seats = vec![
+        SeatSync { member: "ana".into(), ..SeatSync::default() },
+        SeatSync { member: "bo".into(), dup_streak: 2, ..SeatSync::default() },
+    ];
+    let mut rows = seat_rows(&seats, 0, "ana", 0, 0, &HashMap::new());
+    assert_eq!((rows[0].dropped, rows[1].dropped), (false, true));
+    mark_fetching(&mut rows, &[InboundHeld { member: "bo".into(), ..InboundHeld::default() }]);
+    assert_eq!((rows[0].fetching, rows[1].fetching), (false, true));
+}
+
 #[test]
 fn mixed_builds_need_two_known_versions_or_an_unknown_beside_a_known_one() {
     use crate::surfaces::builds_mixed;

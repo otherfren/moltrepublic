@@ -401,6 +401,8 @@ export struct SeatRow {
     fork: bool, // on another branch
     note: string, // the warning line under the row ("" = none)
     note-tip: string,
+    dropped: bool, // this node drops its messages as already seen
+    fetching: bool, // a resync of it is under way
 }
 
 // One surface, with live counts and its log + pending proposals.
@@ -1502,6 +1504,10 @@ export global Strings {
     in property <string> os-other-branch;
     in property <string> os-dropped;
     in property <string> os-dropped-tip;
+    in property <string> os-resync;
+    in property <string> os-resync-ask-pre;
+    in property <string> os-resync-ask-post;
+    in property <string> os-fetching;
     in property <string> os-col-files;
     in property <string> oa-col-surface;
     in property <string> oa-pending;

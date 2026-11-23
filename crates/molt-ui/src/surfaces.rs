@@ -281,6 +281,17 @@ pub(crate) struct SeatRowData {
     /// The row's warning line ("" = none) and its tooltip.
     pub(crate) note: String,
     pub(crate) note_tip: String,
+    /// This node drops its messages as already seen.
+    pub(crate) dropped: bool,
+    /// A resync of it is under way: this node holds its inbound stream.
+    pub(crate) fetching: bool,
+}
+
+/// Mark the seats whose inbound stream this node holds.
+pub(crate) fn mark_fetching(rows: &mut [SeatRowData], held: &[molt_core::InboundHeld]) {
+    for r in rows {
+        r.fetching = held.iter().any(|h| h.member == r.member);
+    }
 }
 
 /// The seat table's rows: numbers as text, "-" where nothing is known.
@@ -331,6 +342,8 @@ pub(crate) fn seat_rows(
                 fork: other_at.is_some() || s.diverged,
                 note: notes.join(" · "),
                 note_tip: if s.dup_streak > 0 { lex.os_dropped_tip.to_string() } else { String::new() },
+                dropped: s.dup_streak > 0,
+                fetching: false,
             }
         })
         .collect()
@@ -1063,7 +1076,7 @@ pub(crate) async fn gather_surfaces(
                 builds_mixed: false,
                 relay_refusals: s.relay_refusals,
             },
-            (s.seats, s.persistent_files),
+            (s.seats, s.persistent_files, s.inbound_held),
         ),
         _ => return None,
     };
@@ -1285,6 +1298,7 @@ pub(crate) async fn gather_surfaces(
     let local_heads: HashMap<u64, String> =
         chain_rows.iter().filter(|b| !b.hash.is_empty()).map(|b| (b.height, b.hash.clone())).collect();
     org_stats.seats = seat_rows(&seat_src.0, seat_src.1, &member, lang, unix_now(), &local_heads);
+    mark_fetching(&mut org_stats.seats, &seat_src.2);
     org_stats.builds_mixed = builds_mixed(&seat_src.0);
     let uploads_total = uploads.len();
     let (unread, first_seen, known, org_view, list_pages, mut uploads, mut persistent) = {

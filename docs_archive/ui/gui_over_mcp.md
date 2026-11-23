@@ -90,7 +90,7 @@ What a test needs to assert, not a widget tree:
   included as `patch:3 group=memory collapsed` - grouping is a view
   preference (`set_discussion_group`) and hides nothing from the walk;
 - the Status seat table (`seats`), one line per row:
-  `ana build=0.1.2 chain=5·aaaaaa fork note=other branch at 5`;
+  `ana build=0.1.2 chain=5·aaaaaa fork fetching note=other branch at 5`;
 - pending decisions: count and quorum text;
 - the vault pane: `vault_rows`, the deposit and grant rows its models hold;
 - the wizards: which step/phase, which fields are armed;

@@ -399,6 +399,9 @@ pub(crate) fn build_ui_snapshot(ui: &AppWindow) -> molt_core::UiSnapshot {
             if s.fork {
                 line.push_str(" fork");
             }
+            if s.fetching {
+                line.push_str(" fetching");
+            }
             if !s.note.is_empty() {
                 line.push_str(&format!(" note={}", s.note));
             }
@@ -1750,6 +1753,8 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             fork: s.fork,
             note: s.note.as_str().into(),
             note_tip: s.note_tip.as_str().into(),
+            dropped: s.dropped,
+            fetching: s.fetching,
         })
         .collect();
     crate::models::sync_rows(&ui.get_org_seats(), seats, |m| ui.set_org_seats(m));
