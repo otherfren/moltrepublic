@@ -2060,6 +2060,10 @@ pub struct AcceptedWindow {
     /// restore known (and every window an older build wrote).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub restore: String,
+    /// Receiver-local: the newest envelope stamp accepted from the sender
+    /// (0 = unknown).
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub stamp: u64,
 }
 
 /// [`AcceptedWindow::restore`] after a re-key merge reset whose `Restored`

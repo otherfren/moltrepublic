@@ -766,9 +766,11 @@ the new device's acked floor past frames nobody applied.
   it falsely acked below stays lost. The mesh path refuses such a sheet
   without the rewind.
 - **Visibility on the receiver.** A dropped duplicate counts when its stamp
-  is newer than every envelope accepted from that sender this session and
-  its seq is above the last counted one; a resend round re-offers accepted
-  frames, whose stamps are never newer. At 32: `dup_streak from= first_seq=
+  is newer than every envelope accepted from that sender
+  (`AcceptedWindow.stamp`, receiver-local, persisted; 0 = unknown, nothing
+  counts) and its seq is above the last counted one; a resend round or a
+  re-read after a restart re-offers accepted frames, whose stamps are never
+  newer. At 32: `dup_streak from= first_seq=
   last_seq= count=` WARN, once per episode; 32 consecutive fresh accepts or
   a reset end it (`dup_streak_cleared`, INFO). `status.seats[].dup_streak`
   carries the count while the episode stands. The per-frame drop line stays

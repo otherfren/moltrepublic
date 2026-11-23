@@ -197,3 +197,21 @@ fn a_resend_round_of_accepted_frames_is_no_episode() {
     assert_eq!(streak(&walter), 0);
     assert_eq!(bodies(&walter, "old"), 40);
 }
+
+/// Frames re-read after a restart (a ratchet persisted late) are accepted
+/// ones: the reference stamp is persisted with the window, so they are no
+/// episode either.
+#[test]
+fn frames_re_read_after_a_restart_are_no_episode() {
+    let (mut walter, _block) = bystander();
+    let persisted = walter.delivery.accepted.clone();
+    walter.delivery = crate::DeliveryState::default();
+    walter.delivery.accepted = persisted;
+    let logs = logged_during(|| {
+        for seq in 1..=40u64 {
+            deliver_at(&mut walter, seq, 1_751_000_000 + seq, chat(100 + u8::try_from(seq).expect("small"), "old"));
+        }
+    });
+    assert!(!logs.contains("dup_streak"), "{logs}");
+    assert_eq!(streak(&walter), 0);
+}

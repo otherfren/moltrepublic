@@ -60,11 +60,9 @@ const LISTED_TRIES: u8 = 3;
 const DUP_EPISODE_MIN: u32 = 32;
 
 /// One sender's run of frames dropped as already seen although authored
-/// after everything accepted from it this session.
+/// after everything accepted from it.
 #[derive(Debug, Default)]
 pub(crate) struct DupEpisode {
-    /// Newest stamp accepted from the sender this session.
-    fresh_ts: u64,
     first_seq: u64,
     last_seq: u64,
     count: u32,
@@ -326,11 +324,12 @@ impl State {
 
     /// The fault signature of a window that predates the sender's restore:
     /// dropped frames authored after everything accepted from it, at rising
-    /// seqs. A resend round re-offers frames this node accepted, so their
-    /// stamps are never newer.
+    /// seqs. A resend round or a re-read after a restart re-offers frames
+    /// this node accepted, so their stamps are never newer.
     pub(super) fn note_dup(&mut self, from: &MemberId, seq: u64, ts: u64) {
+        let stamp = self.delivery.accepted.get(from).map_or(0, |w| w.stamp);
         let e = self.delivery.dups.entry(from.clone()).or_default();
-        if ts <= e.fresh_ts || (e.count > 0 && seq <= e.last_seq) {
+        if stamp == 0 || ts <= stamp || (e.count > 0 && seq <= e.last_seq) {
             return;
         }
         if e.count == 0 {
@@ -346,17 +345,16 @@ impl State {
     }
 
     pub(super) fn note_fresh(&mut self, from: &MemberId, ts: u64) {
-        let Some(e) = self.delivery.dups.get_mut(from) else {
-            self.delivery.dups.insert(from.clone(), DupEpisode { fresh_ts: ts, ..Default::default() });
-            return;
-        };
-        e.fresh_ts = e.fresh_ts.max(ts);
+        if let Some(w) = self.delivery.accepted.get_mut(from) {
+            w.stamp = w.stamp.max(ts);
+        }
+        let Some(e) = self.delivery.dups.get_mut(from) else { return };
         e.clean = e.clean.saturating_add(1);
-        if e.clean >= DUP_EPISODE_MIN && e.count > 0 {
+        if e.clean >= DUP_EPISODE_MIN {
             if e.warned {
                 tracing::info!(%from, count = e.count, "dup_streak_cleared");
             }
-            *e = DupEpisode { fresh_ts: e.fresh_ts, ..Default::default() };
+            self.delivery.dups.remove(from);
         }
     }
 
