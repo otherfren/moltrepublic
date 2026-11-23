@@ -310,20 +310,84 @@ impl State {
             return;
         }
         let held: Vec<u64> = self
-            .chain
+            .standing_unsigned()
+            .into_iter()
+            .filter(|id| self.proposal_change(*id).is_some_and(|c| is_relay_change(&c)) && self.sign_blocker(*id).is_none())
+            .collect();
+        for id in held {
+            self.chain_sign_and_gossip_approval(id);
+        }
+    }
+
+    /// WP2: open cards this seat approved whose own signature does not
+    /// stand at head+1. The stance is `own_approvals`, never `pending_sigs`:
+    /// a card displaced by a tip swap lost its signatures with its block.
+    fn standing_unsigned(&self) -> Vec<u64> {
+        self.chain
             .own_approvals
             .iter()
             .copied()
             .filter(|id| {
                 self.proposals.get(id).is_some_and(|p| p.state == ProposalState::Proposed)
-                    && self.proposal_change(*id).is_some_and(|c| is_relay_change(&c))
                     && !self.own_signature_stands(*id)
-                    && self.sign_blocker(*id).is_none()
             })
+            .collect()
+    }
+
+    /// WP2: sign every standing approval at the current head+1, once per
+    /// (card, height) - a signed one stands. Held relay decisions wait for
+    /// [`Self::sign_held_approvals`]; inside a block batch nothing signs.
+    pub(super) fn resign_standing_approvals(&mut self) {
+        if self.chain.head.is_none() || self.chain.resign_hold > 0 {
+            return;
+        }
+        let due: Vec<u64> = self
+            .standing_unsigned()
+            .into_iter()
+            .filter(|id| self.sign_blocker(*id).as_deref() != Some(RELAYS_WAIT))
             .collect();
-        for id in held {
+        for id in due {
             self.chain_sign_and_gossip_approval(id);
         }
+    }
+
+    /// WP2: a peer may have dropped this seat's standing signatures while
+    /// the two chains differed: re-send each one that stands, once per
+    /// (card, head+1), and sign the rest.
+    pub(super) fn resend_standing_approvals(&mut self) {
+        let Some(target) = self.chain.head.as_ref().map(|h| h.height + 1) else {
+            return;
+        };
+        if self.chain.resign_hold > 0 {
+            return;
+        }
+        let open: BTreeSet<u64> = self
+            .chain
+            .own_approvals
+            .iter()
+            .copied()
+            .filter(|id| self.proposals.get(id).is_some_and(|p| p.state == ProposalState::Proposed))
+            .collect();
+        self.chain.resent_at.retain(|id, _| open.contains(id));
+        let standing: Vec<u64> = open
+            .into_iter()
+            .filter(|id| self.own_signature_stands(*id) && self.chain.resent_at.get(id) != Some(&target))
+            .collect();
+        for id in standing {
+            self.chain.resent_at.insert(id, target);
+            self.reserve_signatures(id);
+        }
+        self.resign_standing_approvals();
+    }
+
+    /// WP2: apply a batch of blocks; the standing approvals re-sign once,
+    /// at the batch's final head.
+    pub(super) fn in_block_batch<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.chain.resign_hold += 1;
+        let out = f(self);
+        self.chain.resign_hold -= 1;
+        self.resign_standing_approvals();
+        out
     }
 
     /// C5: [`APPROVAL_HELD`] while this seat's decision on `id` waits for
@@ -1326,22 +1390,16 @@ impl State {
             self.emit(Event::CheckpointStale { id: ProposalId(id) });
         }
         for id in stale {
-            // the LOCAL decision register, never the wire-collected set: a
-            // peer can put junk under this node's name into `pending_sigs`,
-            // and re-signing from there was a threshold bypass (2026-08-25)
-            let mine = self.chain.own_approvals.contains(&id);
-            self.chain.pending_sigs.remove(&id);
             // WP4b: a checkpoint's change is CUT-bound (upto == height - 1,
             // enforced by the verifier) — after the head moved, re-signing
             // the old cut could only seal an invalid block. Drop it; the
             // proposer re-proposes at the new head (doc §B.2).
-
-            // only re-sign for proposals still pending that this node approved
-            if mine && matches!(self.proposals.get(&id), Some(p) if p.state == ProposalState::Proposed)
-            {
-                self.chain_sign_and_gossip_approval(id);
-            }
+            self.chain.pending_sigs.remove(&id);
         }
+        // the LOCAL decision register, never the wire-collected set: a peer
+        // can put junk under this node's name into `pending_sigs`, and
+        // re-signing from there was a threshold bypass (2026-08-25)
+        self.resign_standing_approvals();
         self.sweep_consented_restores();
         self.judge_parked_approvals();
         self.lock_on_head_moved();
