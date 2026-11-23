@@ -41,6 +41,13 @@ pub(crate) const LOCK_NEEDS_FEWER: &str = "Strict Order Mode needs fewer approva
 /// The enabling vote waits while a restore is open (item 7).
 pub(crate) const LOCK_RESTORE_PENDING: &str = "Strict Order Mode waits for a pending restore";
 
+/// F3: no honest ballot comes near this round - rounds start near 1 per
+/// slot and grow by one per attempt above the highest seen (2^40 attempts
+/// at the 10 s minimum backoff are some 350 000 years). A peer frame
+/// above it is refused, so `+ 1` on a seen round never overflows and no
+/// peer pins a slot at `u64::MAX`.
+pub(crate) const ROUND_MAX: u64 = 1 << 40;
+
 /// A forced value withheld for want of evidence (item 3): log reason.
 const LOCK_NEEDS_APPROVAL: &str = "needs approval";
 
@@ -631,6 +638,10 @@ impl State {
         if !self.lock_cap_on() || !self.lock_enabled() || !self.lock_rostered(member) || member == self.member() {
             return;
         }
+        // F4: only head+1 is contended; a far height would poison the map
+        if !self.lock_at_next(height) {
+            return;
+        }
         if self.chain.lock.free_seen.entry(height).or_default().insert(member.to_string()) {
             self.lock_try_release(height);
         }
@@ -949,7 +960,7 @@ impl State {
                 continue;
             }
             if let Some((upto, _, _)) = CutKind::of(&change) {
-                if upto + 1 != slot.height || promised.is_some_and(|p| p.len() < q.n) {
+                if upto.checked_add(1) != Some(slot.height) || promised.is_some_and(|p| p.len() < q.n) {
                     continue;
                 }
             }
@@ -1008,7 +1019,7 @@ impl State {
             }
             c => {
                 if let Some((upto, hash, kind)) = CutKind::of(c) {
-                    if upto + 1 != height {
+                    if upto.checked_add(1) != Some(height) {
                         return Some("stale cut".into());
                     }
                     if self.own_cut_hash(upto, kind).ok().as_deref() != Some(hash) {
@@ -1046,6 +1057,11 @@ impl State {
                 }
             }
         }
+    }
+
+    /// F4: `height` is head+1, the only height lock state is kept for.
+    fn lock_at_next(&self, height: u64) -> bool {
+        self.chain.head.as_ref().and_then(|h| h.height.checked_add(1)) == Some(height)
     }
 
     /// `member` holds lock state at `height` (it sent a lock frame there).
@@ -1108,7 +1124,13 @@ impl State {
         }
         let now = self.lock_now();
         let seen = self.chain.lock.seen.get(&slot).map_or(0, |b| b.round);
-        let round = self.chain.lock.acceptor.next_round(&slot).max(seen + 1).max(self.chain.lock.amnesia_round + 1);
+        let round = self
+            .chain
+            .lock
+            .acceptor
+            .next_round(&slot)
+            .max(seen.saturating_add(1))
+            .max(self.chain.lock.amnesia_round.saturating_add(1));
         let ballot = Ballot { round, leader: me.clone() };
         let Some((Reply::Promise { accepted, .. }, _)) = self.lock_step(|a| a.prepare(&slot, &ballot), None) else {
             return;
@@ -1271,6 +1293,9 @@ impl State {
         if self.identity_sk.is_none() {
             return Some("no signing key".into());
         }
+        if self.lock_consumed(change) {
+            return Some("already applied".into());
+        }
         match change {
             ChainChange::Applied { proposal_id, surface, payload } => {
                 if *proposal_id != id || super::is_base_entry_op(payload) {
@@ -1299,11 +1324,21 @@ impl State {
             }
         }
         if let Some((upto, hash, kind)) = CutKind::of(change) {
-            if upto + 1 != height || self.own_cut_hash(upto, kind).ok().as_deref() != Some(hash) {
+            if upto.checked_add(1) != Some(height) || self.own_cut_hash(upto, kind).ok().as_deref() != Some(hash) {
                 return Some("cut mismatch".into());
             }
         }
         None
+    }
+
+    /// F2: an `Applied` change whose proposal id this chain already
+    /// applied (the walk's double-apply guard): never accepted, never a
+    /// reported value - every seal of it would fail and pin the height.
+    fn lock_consumed(&self, change: &ChainChange) -> bool {
+        match change {
+            ChainChange::Applied { proposal_id, .. } => self.chain.walk.as_ref().is_some_and(|w| w.seen.contains(proposal_id)),
+            _ => false,
+        }
     }
 
     /// **Phase 2b, the second door**: accept `value` at `ballot` only for a
@@ -1362,6 +1397,8 @@ impl State {
         let own = restored_member(&change) == Some(self.member().as_str());
         let withheld = if own {
             Some("own restore".to_string())
+        } else if self.lock_consumed(&change) {
+            Some("already applied".to_string())
         } else if kept {
             None
         } else if forced_path {
@@ -1529,6 +1566,9 @@ impl State {
         if !self.lock_listens() || !self.lock_rostered(from) || from == self.member() {
             return;
         }
+        if round > ROUND_MAX || !self.lock_at_next(height) {
+            return;
+        }
         // A-F1: a restore's subject never leads, known to it or not
         if self.lock_restore_subjects().contains(from) {
             tracing::debug!(%from, height, "lock=refused reason=restore_subject");
@@ -1597,6 +1637,9 @@ impl State {
         if !self.lock_listens() || !self.lock_rostered(from) {
             return;
         }
+        if round > ROUND_MAX || accepted.as_ref().is_some_and(|a| a.round > ROUND_MAX) || !self.lock_at_next(height) {
+            return;
+        }
         let slot = Slot { height, base };
         let ballot = Ballot { round, leader };
         if accepted.is_some() {
@@ -1612,9 +1655,17 @@ impl State {
         // a reported value's `need` is the change's, never the sender's
         // word: a promise naming need 1 would force its value at every
         // ballot (item 3's liveness residual)
+        // F5: the holder's signature counts as evidence only where it
+        // verifies over exactly the reported change
+        let mut sig_ok = false;
         let accepted = accepted.and_then(|mut a| {
             let full = a.change.clone().or_else(|| self.proposal_change(a.id)).or_else(|| self.lock_resolve(height, &a.digest).map(|(_, c)| c));
             match full {
+                // F2: a value the chain already applied is no value here
+                Some(c) if self.lock_consumed(&c) => {
+                    tracing::warn!(%from, height, "lock=bad_report reason=applied");
+                    return None;
+                }
                 Some(c) => {
                     // structural, no gate: a value another seat accepted
                     // stays a value here even where its consent aged out
@@ -1629,6 +1680,11 @@ impl State {
                         return None;
                     }
                     a.need = u64::try_from(need).unwrap_or(u64::MAX);
+                    let bytes = approval_bytes(&self.republic_id(), height, &c);
+                    sig_ok = !a.sig.is_empty()
+                        && self.chain.head.as_ref().is_some_and(|h| {
+                            h.identities.iter().any(|i| i.member == from && molt_storage::identity_verify(&i.identity_pk, &bytes, &a.sig))
+                        });
                 }
                 None => {
                     let floor = self.lock_quorum().map_or(1, |q| q.m.min(q.restore_need()));
@@ -1642,7 +1698,7 @@ impl State {
             return;
         }
         let acc = accepted.map(|a| {
-            if !a.sig.is_empty() && from != me {
+            if sig_ok && from != me {
                 let held = run.evidence.entry(a.digest.clone()).or_default();
                 if !held.iter().any(|e| e.member == from) {
                     held.push(LockEvidence { member: from.to_string(), sig: a.sig });
@@ -1679,6 +1735,9 @@ impl State {
         evidence: Vec<LockEvidence>,
     ) {
         if !self.lock_listens() || !self.lock_rostered(from) || from == self.member() {
+            return;
+        }
+        if round > ROUND_MAX || !self.lock_at_next(height) {
             return;
         }
         if self.lock_restore_subjects().contains(from) {
@@ -1755,9 +1814,12 @@ impl State {
     /// distinct seats (`lock::evidence_holds`; the sender may be one).
     fn lock_forced_vouched(&self, height: u64, sender: &str, id: u64, change: &ChainChange, evidence: &[LockEvidence]) -> bool {
         let me = self.member();
-        let approved = self.chain.own_approvals.contains(&id)
+        // F1: an approval is of the change this seat's own record holds
+        // under the id - never of whatever a frame carries under it
+        let approved = (self.chain.own_approvals.contains(&id)
             || self.chain.lock.approved_forced.contains(&id)
-            || self.chain.lock.intents.get(&id).is_some_and(|v| v.contains(&me));
+            || self.chain.lock.intents.get(&id).is_some_and(|v| v.contains(&me)))
+            && self.proposal_change(id).as_ref() == Some(change);
         if approved {
             return true;
         }
@@ -1795,7 +1857,10 @@ impl State {
         let change = carried.cloned().or_else(|| self.proposal_change(id));
         if let (Some(change), Some(sk)) = (change, self.identity_sk.as_ref()) {
             let holds = self.chain.lock.acceptor.holds(slot, value);
-            if holds || self.lock_forced_vouched(slot.height, &ballot.leader, id, &change, &out) {
+            // F1: only what this seat would accept itself, every check run
+            let vouched = self.lock_forced_vouched(slot.height, &ballot.leader, id, &change, &out)
+                && self.lock_forced_invalid(id, &change, slot.height).is_none();
+            if holds || vouched {
                 let sig = molt_storage::identity_sign(sk, &approval_bytes(&self.republic_id(), slot.height, &change));
                 out.insert(0, LockEvidence { member: me, sig });
             }
@@ -1817,6 +1882,9 @@ impl State {
         sig: &str,
     ) {
         if !self.lock_listens() || !self.lock_rostered(from) || from == self.member() {
+            return;
+        }
+        if round > ROUND_MAX || !self.lock_at_next(height) {
             return;
         }
         let slot = Slot { height, base };
@@ -1857,6 +1925,9 @@ impl State {
             return;
         }
         self.note_peer_claim(from, head, Some(seq), super::PeerClaim::Head);
+        if round > ROUND_MAX || promised.as_ref().is_some_and(|p| p.round > ROUND_MAX) || !self.lock_at_next(height) {
+            return;
+        }
         let slot = Slot { height, base };
         match promised {
             Some(p) => {
@@ -1921,6 +1992,11 @@ impl State {
             lock.needs_approval = None;
         }
         lock.approved_forced.clear();
+        // F2: an applied card's approval approves nothing any more
+        let chain = &mut self.chain;
+        if let Some(w) = chain.walk.as_ref() {
+            chain.own_approvals.retain(|id| !w.seen.contains(id));
+        }
         // a completion card whose height decided without it goes
         let stale: Vec<u64> = self
             .proposals
@@ -2059,13 +2135,9 @@ impl State {
         }
         let lock = &self.chain.lock;
         let head = self.chain.head.as_ref().map_or(0, |h| h.height);
-        let seen = lock
-            .acceptor
-            .highest()
-            .max(lock.seen.keys().map(|s| s.height).max().unwrap_or(0))
-            .max(lock.locked_seen.keys().copied().max().unwrap_or(0))
-            .max(lock.accepted_seen.keys().copied().max().unwrap_or(0));
-        let touched = amnesia_touched(head, seen);
+        // F4: from this seat's own state only - peer-supplied heights
+        // could pin the asker passive for good
+        let touched = amnesia_touched(head, lock.acceptor.highest().min(head.saturating_add(1)));
         let round = lock.rounds_by.get(from).copied().unwrap_or(0);
         self.lock_send(WorkspaceEvent::LockAmnesiaReply { to: from.to_string(), nonce, touched, round });
     }
@@ -2074,10 +2146,13 @@ impl State {
     /// up to the highest height they report and leads above the highest
     /// round they saw from it.
     pub(crate) fn lock_on_amnesia_reply(&mut self, from: &str, to: &str, nonce: u64, touched: u64, round: u64) {
+        if !self.lock_listens() {
+            return;
+        }
         // an answer comes only from a seat that holds its own state
         self.chain.lock.amnesiac_others.remove(from);
         let me = self.member();
-        if to != me || from == me || !self.lock_rostered(from) || self.chain.lock.amnesia != Some(None) {
+        if to != me || from == me || !self.lock_rostered(from) || self.chain.lock.amnesia != Some(None) || round > ROUND_MAX {
             return;
         }
         let need = self.lock_amnesia_need();
@@ -2323,7 +2398,7 @@ impl State {
                 // B-F1: the file forgot slots the chain on disk still needs;
                 // what it kept above them still holds
                 tracing::warn!(floor = file.floor, head, "lock=amnesia reason=ahead_of_chain");
-                self.chain.lock.amnesia = Some(Some(file.floor + 1));
+                self.chain.lock.amnesia = Some(Some(file.floor.saturating_add(1)));
                 self.chain.lock.acceptor = file.acceptor;
                 self.chain.lock.values = file.values;
                 self.chain.lock.floor = file.floor;

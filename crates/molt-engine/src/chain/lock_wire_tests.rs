@@ -2276,3 +2276,155 @@ fn the_amnesia_arithmetic() {
     assert_eq!(amnesia_floor(&[(3, 7)], 2), None);
     assert_eq!(amnesia_floor(&[(3, 7), (2, 9)], 2), Some((3, 9)));
 }
+
+/// Every signature `st` sent that verifies under `member`'s key over
+/// `change` at `height` (in lock frames: acceptances and evidence).
+fn sigs_over(st: &crate::State, b: &Builder, member: &str, height: u64, change: &ChainChange) -> usize {
+    let bytes = approval_bytes(&b.republic_id, height, change);
+    let pk = b.pk(member);
+    st.chain
+        .lock
+        .outbox
+        .iter()
+        .flat_map(|e| match &e.body {
+            WorkspaceEvent::LockAccepted { sig, .. } => vec![sig.clone()],
+            WorkspaceEvent::LockAccept { evidence, .. } => evidence.iter().filter(|e| e.member == member).map(|e| e.sig.clone()).collect(),
+            _ => Vec::new(),
+        })
+        .filter(|sig| molt_storage::identity_verify(&pk, &bytes, sig))
+        .count()
+}
+
+/// Review 6, F1 (CRITICAL): mara approved card x with payload P; dora
+/// promises a P' under the same id at a high round, walter is away, so P'
+/// is forced. mara's approval is of P - she signs nothing over P'
+/// (before: her evidence signature let dora seal P' with m signatures).
+#[test]
+fn a_leader_signs_nothing_for_a_change_it_did_not_approve() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    hear(&mut mara, T, &["dora", "mara"]);
+    let x = note(&mut mara, "x");
+    let ChainChange::Applied { surface, .. } = mara.proposal_change(x).expect("x") else { panic!("applied") };
+    let evil = ChainChange::Applied { proposal_id: x, surface, payload: json!({ "op": "add_note", "title": "evil" }) };
+    mara.chain.lock.outbox.clear();
+    mara.lock_start(0);
+    let (base, round) = {
+        let run = mara.chain.lock.run.as_ref().expect("mara leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    let digest = change_digest(&b.republic_id, 1, &evil);
+    let lie = molt_core::chain::LockAcceptedValue {
+        round: round - 1,
+        leader: "dora".into(),
+        digest,
+        need: 2,
+        id: x,
+        change: Some(evil.clone()),
+        sig: identity_sign(b.key("dora"), &approval_bytes(&b.republic_id, 1, &evil)),
+    };
+    mara.lock_on_promise("dora", 1, base, round, "mara".into(), Some(lie));
+    mara.presence.clock_override = Some(T + 60);
+    hear(&mut mara, T + 60, &["dora", "mara"]);
+    mara.lock_tick();
+    assert_eq!(sigs_over(&mara, &b, "mara", 1, &evil), 0, "mara signed P': {:?}", sent_kinds(&mara));
+}
+
+/// Review 6, F2: a card the chain applied is never accepted again, not
+/// even forced with two real signatures behind it, and a promise naming
+/// it forces nothing; the approval of an applied card is cleared.
+#[test]
+fn an_applied_card_is_never_accepted_again() {
+    let mut b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    let x = note(&mut mara, "x");
+    let change = mara.proposal_change(x).expect("x");
+    let block = b.commit_card(&mara, x, &["dora", "walter"]);
+    mara.receive_block_from("dora", block);
+    assert_eq!(mara.chain.head.as_ref().map(|h| h.height), Some(1));
+    assert!(!mara.chain.own_approvals.contains(&x), "the approval went with the card");
+    let slot = mara.lock_slot().expect("slot");
+    let v = mara.lock_value(2, &change).expect("value");
+    let ev = |m: &str| molt_core::chain::LockEvidence { member: m.into(), sig: identity_sign(b.key(m), &approval_bytes(&b.republic_id, 2, &change)) };
+    mara.chain.lock.outbox.clear();
+    wire(
+        &mut mara,
+        "dora",
+        1,
+        WorkspaceEvent::LockAccept { height: 2, base: slot.base.clone(), round: 1 << 30, digest: v.digest.clone(), need: 2, id: ProposalId(x), change: Some(change.clone()), forced: true, evidence: vec![ev("dora"), ev("walter")] },
+    );
+    assert!(!sent_kinds(&mara).contains(&"accepted"), "a replayed applied card: {:?}", sent_kinds(&mara));
+    mara.chain.lock.run = None;
+    mara.lock_start(0);
+    let (base, round) = {
+        let run = mara.chain.lock.run.as_ref().expect("mara leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    let held = molt_core::chain::LockAcceptedValue { round: round - 1, leader: "dora".into(), digest: v.digest, need: 2, id: x, change: Some(change), sig: String::new() };
+    mara.lock_on_promise("dora", 2, base, round, "mara".into(), Some(held));
+    assert_eq!(mara.chain.lock.run.as_ref().expect("run").leader.forced(), None, "an applied card forces nothing");
+}
+
+/// Review 6, F3: a peer round at u64::MAX neither aborts this seat (the
+/// release build panics on overflow and aborts) nor pins its slot; an
+/// amnesia answer at u64::MAX counts for nothing.
+#[test]
+fn a_huge_round_neither_aborts_nor_pins() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    let slot = mara.lock_slot().expect("slot");
+    wire(&mut mara, "dora", 1, WorkspaceEvent::LockPrepare { height: 1, base: slot.base.clone(), round: u64::MAX });
+    assert!(sent_kinds(&mara).is_empty(), "no promise to u64::MAX: {:?}", sent_kinds(&mara));
+    mara.chain.lock.run = None;
+    mara.lock_start(0);
+    let round = mara.chain.lock.run.as_ref().map_or(0, |r| r.leader.ballot.round);
+    assert!(round < 1 << 40, "round {round}");
+    let mut walter = seat("walter", &b);
+    walter.load_chain_lock(Ok(None), true);
+    walter.lock_tick();
+    let nonce = amnesia_ask_of(&walter);
+    wire(&mut walter, "dora", 1, WorkspaceEvent::LockAmnesiaReply { to: "walter".into(), nonce, touched: 1, round: u64::MAX });
+    wire(&mut walter, "mara", 1, WorkspaceEvent::LockAmnesiaReply { to: "walter".into(), nonce, touched: 1, round: 2 });
+    assert_eq!(walter.chain.lock.amnesia, Some(None), "the u64::MAX answer does not count");
+}
+
+/// Review 6, F4: a frame for a far height poisons nothing - no lock map
+/// takes it, and an answer to an amnesiac seat reports this seat's own
+/// state (head + 1), not a peer's height.
+#[test]
+fn a_far_height_poisons_nothing() {
+    let b = Builder::new(&SEATS, 2);
+    let mut walter = seat("walter", &b);
+    let far = 1_000_000_000_000;
+    wire(&mut walter, "dora", 1, WorkspaceEvent::LockPrepare { height: far, base: "ab".repeat(32), round: 3 });
+    wire(&mut walter, "dora", 2, WorkspaceEvent::LockNack { height: far, base: "ab".repeat(32), round: 3, leader: "walter".into(), promised: None, head: 0 });
+    assert!(walter.chain.lock.seen.keys().all(|s| s.height != far), "seen");
+    assert!(!walter.chain.lock.locked_seen.contains_key(&far) && !walter.chain.lock.free_seen.contains_key(&far));
+    walter.chain.lock.outbox.clear();
+    wire(&mut walter, "mara", 1, WorkspaceEvent::LockAmnesiaAsk { nonce: 5 });
+    let touched = walter.chain.lock.outbox.iter().find_map(|e| match e.body {
+        WorkspaceEvent::LockAmnesiaReply { touched, .. } => Some(touched),
+        _ => None,
+    });
+    assert_eq!(touched, Some(1), "head + 1, not the peer's height");
+}
+
+/// Review 6, F5: a promise's junk signature is no evidence - the leader
+/// verifies before it keeps one, so junk never displaces a genuine one.
+#[test]
+fn a_junk_promise_signature_is_no_evidence() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    let w = note(&mut mara, "w");
+    let change = mara.proposal_change(w).expect("w");
+    let v = mara.lock_value(1, &change).expect("value");
+    mara.lock_start(0);
+    let (base, round) = {
+        let run = mara.chain.lock.run.as_ref().expect("mara leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    let held = molt_core::chain::LockAcceptedValue { round: round - 1, leader: "dora".into(), digest: v.digest.clone(), need: 2, id: w, change: Some(change), sig: "ff".repeat(64) };
+    mara.lock_on_promise("dora", 1, base, round, "mara".into(), Some(held));
+    let kept = mara.chain.lock.run.as_ref().expect("run").evidence.get(&v.digest).map_or(0, Vec::len);
+    assert_eq!(kept, 0, "junk kept as evidence");
+}

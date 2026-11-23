@@ -34,7 +34,8 @@ pub(crate) struct Ballot {
 
 /// The decided thing: the digest of the change's approval bytes at the
 /// slot's height (attestation variants are one value), and how many LIVE
-/// acceptances seal it (m; n for a cut; m - 1 for a consented restore).
+/// acceptances seal it (m; n for a cut; `Quorum::restore_need` for a
+/// consented restore).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(crate) struct Value {
     pub digest: String,

@@ -259,9 +259,9 @@ promises.
 
 **Amnesia.** A chain without a lock file (import, restore from an
 export, a deleted file) means the seat may have promised before. It
-answers no lock frame and gives no free signature at heights <= floor,
-floor = max(own head at open, highest height a peer reported after the
-first catch-up answer) + 1. Blocks it receives still apply.
+answers no lock frame and gives no free signature at heights <= floor;
+the floor comes from the answers of max(m, n - m + 1) other seats (R-c,
+§14 "Amnesia, the rule as built"). Blocks it receives still apply.
 
 ## 7. Wire
 
@@ -513,8 +513,8 @@ Red first, invented fixtures.
    rest waits for F-X1.
 3. **A live old device of a restored seat** can break §4.2. Default:
    rely on B2/B3, plus the leader's promise exclusion.
-4. **Amnesia floor** uses peer-reported heights. Default as §6; if no
-   peer answers, the seat stays passive (blocks still apply).
+4. **Amnesia floor**: superseded by R-c (§14); if too few seats answer,
+   the seat stays passive (blocks still apply).
 5. **Grace and retry**: `SEALER_GRACE_SECS` (60) for takeover, 15 s
    retransmit. Default: these, re-set from measured latency like B6.
 6. **Learner sealing** adds variants. Default: only after the leader's
@@ -611,10 +611,9 @@ Where the wiring differs from §1-§13, and why.
   detached and comes back only through the recovery ritual. Residual: two live
   copies of one workspace (a copied directory run twice) - B2/B3's
   territory, like a live old device.
-- **The amnesia floor** is fixed by the first peer height this seat hears
-  after the open (a block, catch-up samples, a cut proposal, a `Nack`'s
-  head), not only a catch-up answer; past the floor the file is written
-  and the seat is ordinary again.
+- **The amnesia floor** (superseded: the first peer height heard forked,
+  explorer R-a) now comes from R-c's answers (§14); past the floor the
+  file is written and the seat is ordinary again.
 - **The lock file** is `{acceptor, values}`: `values` names the proposal id
   (and the change of a membership change or cut) behind each accepted
   digest, so a promise after a restart still tells the next leader what
@@ -784,7 +783,9 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   acceptor's own approval; a forced one needs two distinct real
   acceptances, at least one by a good seat, which (earlier in time) rests
   on a good seat's approval; a good leader signs only what it accepts.
-  So B cannot get a change no good seat approved accepted. What B still
+  So B cannot get a change no good seat approved accepted. (Review 6:
+  this missed that a good leader vouched by card id, not by change - F1,
+  fixed below; the rule itself is an open decision, wiring plan §12.) What B still
   can do: (a) replay acceptances good seats really gave - force a value
   good seats once accepted at that height (approved, possibly withdrawn
   since) at a higher ballot without a phase 1; Paxos is not
@@ -943,6 +944,55 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   `only_a_seat_with_its_own_state_answers_an_ask`; modelled:
   `an_amnesiac_seat_waits_for_the_others_and_never_forks`. m = n is not
   offered.
+- **Review 6 (a7c12a17), fixes F1-F5.**
+  F1: an approval is of the change this seat's own record holds under
+  the id. `lock_forced_vouched` counts an own approval, an exit approve
+  or an intent only where `proposal_change(id)` equals the carried
+  change, and a leader adds its evidence signature only where it holds
+  the value or would itself accept it with every check run
+  (`lock_forced_invalid` included) - before, a deviating promiser's P'
+  under an approved id got the leader's signature and a sealable block
+  (`a_leader_signs_nothing_for_a_change_it_did_not_approve`). F2: a
+  change whose proposal id the chain already applied is refused on every
+  acceptance path and dropped from promise reports; an applied card's
+  approval is cleared (`an_applied_card_is_never_accepted_again`). F3:
+  `ROUND_MAX` = 2^40 - a peer round above it is refused in every lock
+  frame and amnesia answer, and own rounds add with saturation: honest
+  rounds start near 1 per slot and grow by one per attempt above the
+  highest seen, so 2^40 is out of reach (`a_huge_round_neither_aborts_nor_pins`).
+  F4: lock state is kept for head + 1 only - a frame for another height
+  touches no map - and an amnesia answer reports this seat's own state
+  (`a_far_height_poisons_nothing`). F5: a promise's signature is evidence
+  only where it verifies over exactly the reported change
+  (`a_junk_promise_signature_is_no_evidence`).
+
+  Every position signature this build produces, and where the signed
+  change comes from:
+
+  | site | change signed | why it is this seat's own |
+  |---|---|---|
+  | `governance::chain_sign_and_gossip_approval` (free mode) | `proposal_change(id)` | its own card record, registered through `receive_proposed` / the membership register; `sign_blocker`, vault and wallet checks run |
+  | `lock_acceptor_accept`, not forced | `proposal_change(id)` | its own record, `lock_value` equal to the value, `lock_withheld` (own intent, open, gates) |
+  | `lock_acceptor_accept`, kept | the value this acceptor already holds | validated in full at its first acceptance |
+  | `lock_acceptor_accept`, forced | the carried change | `lock_consumed`, then own approval of exactly that change (F1) or two real acceptances by distinct seats, then `lock_forced_invalid` in full |
+  | `lock_on_prepare` (a promise's `sig`) | the change this acceptor stored when it accepted, else its own record | only a value this acceptor holds |
+  | `lock_forced_evidence` (the leader's own) | the carried change or its own record | only where it holds the value, or `lock_forced_vouched` AND `lock_forced_invalid` pass (F1) |
+
+  Other signatures are not position signatures: the founding roster
+  table (sign-what-you-see, recomputed), the restore consent (bytes the
+  seat builds itself), a vault deposit (its own deposit).
+
+  Peer-supplied numbers in `lock.rs`/`lock_wire.rs`: rounds (every lock
+  frame, a promise's reported round, a Nack's promised round, an amnesia
+  answer) - bounded by `ROUND_MAX`; heights - only head + 1 is processed;
+  a cut's `upto` - `checked_add`; `need` - `try_from` into usize, compared,
+  never added; amnesia `touched` - compared and kept as a floor (a lying
+  answer can hold the asker passive: open, §12). Own-only arithmetic
+  (head + 1 of a verified chain, the clock plus own intervals, attempt
+  counters, the file's own floor - saturating) is not peer-reachable. In
+  the dark build every lock handler returns at `lock_listens()` before it
+  reads a field (`lock_on_amnesia_reply` now as well); `note_peer_claim`
+  in `lock_on_nack` runs after that check.
 - **Item 2, an import's lock state is unknown.** Every import sets the
   workspace pref `lock_unknown` (whatever the chain runs: the mode may
   come on after the export, and the device the export came from may have
@@ -1025,11 +1075,11 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   detected: the seat may re-promise a slot whose acceptance it lost. An
   operator who restores such a backup must DELETE `chain_lock.state`
   (never restore it): with the marker set and the file gone the seat is
-  amnesiac - passive up to the first peer height it hears - which is the
-  safe state. The product's own paths cannot produce the case: an export
+  amnesiac - passive up to the floor R-c's answers fix (§14) - which is
+  the safe state. The product's own paths cannot produce the case: an export
   (file or S3 backup) never carries the lock file, and an import sets the
   marker where the imported chain runs the lock, so such a restored
   workspace opens amnesiac
-  (`a_restored_workspace_is_amnesiac_only_where_its_chain_runs_the_lock`). The floor
-  stays the FIRST peer report: peers report with every block, so a
-  highest-report floor would move with the live chain and never be passed.
+  (`a_restored_workspace_is_amnesiac_only_where_its_chain_runs_the_lock`;
+  since item 2 every import is amnesiac once the mode runs). The earlier
+  "first peer report" floor is superseded by R-c.

@@ -223,12 +223,11 @@ each: lock 68, 54, 29 s; B6 39, 35, 36 s.
 
   | | Today | With Strict Order Mode |
   |---|---|---|
-  | Two conflicting decisions at once | rare, heals by itself | cannot happen |
+  | Two conflicting decisions at once | rare, heals by itself | cannot happen among members running unmodified software |
   | Network traffic | a lot | about a quarter |
   | A member loses their device | one other member can bring it back | all remaining members must be online (here: 2 of 2) |
   | Members that may be missing | n-m | min(m-1, n-m) |
   | Republics where every member must approve | works | not offered |
-  | A misbehaving member | can block decisions only together with absent members | can stall a decision only while m-1 other members are unreachable; it continues once they are back |
   | Taking a proposal back | usually works | only until it was called up |
   | Switching it off | - | not possible |
   | Using an older version of the app | works | no longer possible |
@@ -262,3 +261,39 @@ each: lock 68, 54, 29 s; B6 39, 35, 36 s.
 - A decision on two simultaneous founding wallet inits.
 - A Tor traffic measurement.
 - A field acceptance.
+
+### Sixth review (a7c12a17): open design decisions
+
+Findings, not decisions; F1-F5 are fixed (design §14, "Review 6").
+
+- (a) The forced-value rule has had four versions (own intent / any
+  promiser / one signer / two signers); the fourth still let a leader
+  sign a made-up change (F1). Candidate simplification: a seat signs only
+  a change whose DIGEST it approved, forced or not; a seat that did not
+  approve it never completes it automatically - staged wait, then the
+  operator reads the card and approves. No evidence frames at all. Price:
+  the operator prompt whenever the approvers of a possibly-chosen value
+  are gone.
+- (b) #4: every import is amnesiac; in 2-of-3 two overlapping imports, or
+  one import while another seat is lost and not yet restored, wait for
+  ever, and the status `restore this seat with a new link` names an exit
+  that cannot be decided in exactly that state (a restore needs m
+  acceptors and n - m + 1 promisers among non-amnesiac non-subjects).
+  `two_amnesiac_seats_of_three_say_restore` checks only the string.
+- (c) #7: a device restored by the recovery ritual is NOT amnesiac,
+  although the old device may have promised or accepted at r + 1 before
+  the re-key reached everyone (the review's n = 4, m = 2 schedule). The
+  cheap close (a ritual-restored device amnesiac like an import) deepens
+  (b).
+- (d) #6: completion cards can be flooded, read as proposed "by Y" from
+  the unauthenticated id stripe with no `relayed_by`, and pre-empt Y's
+  next ids.
+- (e) #9, #10 (open as the review states them). Also: an amnesia answer's
+  `touched` is taken as reported - one lying answer can hold the asker
+  passive.
+- (f) §11's row about a misbehaving member is not proven while F1-F4 were
+  open and the forced-value rule is undecided: removed until proven.
+  "Two conflicting decisions cannot happen" holds among members running
+  unmodified software.
+- Note for the explorer's author: the header of `chain/lock_explore_tests.rs`
+  names functions that no longer exist (not edited here).
