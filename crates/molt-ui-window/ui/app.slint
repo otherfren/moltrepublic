@@ -1661,6 +1661,13 @@ export component AppWindow inherits Window {
     callback quit();
     // body + quoted message id ("" = plain message)
     callback send-chat(string, string);
+    // the compose row's send: the own message is shown, wherever the reader was
+    public function send-draft() {
+        root.chat-stick = true;
+        root.send-chat(root.mv-draft, root.mv-quote-id);
+        root.mv-draft = "";
+        root.mv-quote-id = "";
+    }
     callback propose(string, string);
     // an Organization change (charter / image / …): op, display title, and
     // the drafted value — Rust turns it into the same Command::Propose the
@@ -1806,6 +1813,13 @@ export component AppWindow inherits Window {
     // scrolled into view — the one fact the empty-chat bug class is
     // invisible without (rows can be IN the model and out of sight)
     in-out property <bool> chat-log-in-view: false;
+    // the chat log follows new messages only while the reader is at its
+    // bottom; rows the log held when they last were (the chip counts past it)
+    in-out property <bool> chat-stick: true;
+    in-out property <int> chat-seen-rows: 0;
+    changed selected-channel => {
+        root.chat-stick = true;
+    }
     in property <string> selected-view: "today";
     // sidebar mode: expanded (labels) or collapsed to an icon rail. Toggled
     // by clicking the vertical divider on the sidebar's right edge. Off the
@@ -6028,19 +6042,31 @@ export component AppWindow inherits Window {
                                         height: 100%;
                                         viewport-width: self.width;
                                         viewport-height: chlist.preferred-height + 8px;
-                                        // Pinned to the newest message. The binding
-                                        // alone dies on the first manual drag, so
-                                        // every content growth re-pins imperatively:
-                                        // a new message (own or incoming) always
-                                        // scrolls the box to the bottom.
+                                        // Follows the newest message only while the
+                                        // reader is at the bottom (issue #8). The
+                                        // binding dies on the first manual drag, so
+                                        // growth re-pins imperatively - and only then:
+                                        // scrolled up, the rows are top-aligned and
+                                        // new ones land below, so an untouched
+                                        // viewport-y keeps what the reader sees.
                                         viewport-y: min(0px, self.height - self.viewport-height);
+                                        init => {
+                                            root.chat-stick = true;
+                                        }
                                         changed viewport-y => {
                                             root.chat-log-in-view = self.height > 0
                                                 && self.viewport-y <= 0px
                                                 && self.viewport-y >= self.height - self.viewport-height - 8px;
+                                            root.chat-stick = self.viewport-y <= self.height - self.viewport-height + 12px * Theme.ui-scale;
+                                            if (root.chat-stick) {
+                                                root.chat-seen-rows = s.log.length;
+                                            }
                                         }
                                         changed viewport-height => {
-                                            self.viewport-y = min(0px, self.height - self.viewport-height);
+                                            if (root.chat-stick) {
+                                                self.viewport-y = min(0px, self.height - self.viewport-height);
+                                                root.chat-seen-rows = s.log.length;
+                                            }
                                         }
                                         // …and on the BOX's height too, which is
                                         // what made a freshly opened workspace
@@ -6055,7 +6081,9 @@ export component AppWindow inherits Window {
                                         // with its height already known, which is
                                         // why it looked like the data was missing.
                                         changed height => {
-                                            self.viewport-y = min(0px, self.height - self.viewport-height);
+                                            if (root.chat-stick) {
+                                                self.viewport-y = min(0px, self.height - self.viewport-height);
+                                            }
                                         }
                                         chlist := VerticalLayout {
                                             // indented message cards with a small
@@ -6153,6 +6181,35 @@ export component AppWindow inherits Window {
                                         view-h: chfl.height;
                                         content-h: chfl.viewport-height;
                                         scroll-y: chfl.viewport-y;
+                                    }
+                                    // scrolled up while messages arrived: how many,
+                                    // and the way back to them
+                                    if !root.chat-stick && s.log.length > root.chat-seen-rows: Rectangle {
+                                        width: ch-new-l.preferred-width + 24px * Theme.ui-scale;
+                                        height: 24px * Theme.ui-scale;
+                                        x: (parent.width - self.width) / 2;
+                                        y: parent.height - self.height - 8px;
+                                        border-radius: self.height / 2;
+                                        background: Theme.accent;
+                                        accessible-role: button;
+                                        accessible-label: ch-new-l.text;
+                                        accessible-action-default => {
+                                            chfl.viewport-y = min(0px, chfl.height - chfl.viewport-height);
+                                        }
+                                        ch-new-l := Text {
+                                            text: "\{s.log.length - root.chat-seen-rows} \{Strings.ch-new}";
+                                            color: Theme.bg;
+                                            font-size: Theme.fs-cap;
+                                            font-weight: 700;
+                                            x: (parent.width - self.width) / 2;
+                                            y: (parent.height - self.height) / 2;
+                                        }
+                                        TouchArea {
+                                            mouse-cursor: MouseCursor.pointer;
+                                            clicked => {
+                                                chfl.viewport-y = min(0px, chfl.height - chfl.viewport-height);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -6336,9 +6393,7 @@ export component AppWindow inherits Window {
                                             // Shift+Enter) fall through to the
                                             // TextInput, which inserts the break
                                             if (event.text == Key.Return && !event.modifiers.alt && !event.modifiers.shift) {
-                                                root.send-chat(root.mv-draft, root.mv-quote-id);
-                                                root.mv-draft = "";
-                                                root.mv-quote-id = "";
+                                                root.send-draft();
                                                 // keep typing: the focus stays here
                                                 self.focus();
                                                 return accept;
@@ -6455,9 +6510,7 @@ export component AppWindow inherits Window {
                                         label: Strings.mv-send;
                                         primary: true;
                                         clicked => {
-                                            root.send-chat(root.mv-draft, root.mv-quote-id);
-                                            root.mv-draft = "";
-                                            root.mv-quote-id = "";
+                                            root.send-draft();
                                             // keep typing: focus returns to the box
                                             chat-in.focus();
                                         }

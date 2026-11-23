@@ -1546,6 +1546,7 @@ lexicon! {
     mv_deleted_by: "deleted by", "gelöscht durch";
     ch_discussions: "Discussions", "Diskussionen";
     ch_group: "General", "Allgemein";
+    ch_new: "new", "neu";
     ch_grp_wiki: "Wiki patches", "Wiki-Patches";
     ch_new_topic: "New topic", "Neues Thema";
     ch_topic_ph: "Topic name…", "Themenname…";

@@ -14,6 +14,8 @@
 #[cfg(feature = "live-preview")]
 mod agent_tab;
 mod chat;
+#[cfg(feature = "live-preview")]
+mod chat_scroll;
 mod discussion;
 mod discussion_groups;
 mod files;
