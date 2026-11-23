@@ -629,6 +629,7 @@ impl State {
                 })
                 .collect(),
             own_approvals: self.chain.own_approvals.iter().copied().collect(),
+            heal_loops: self.chain.heal_loops.clone(),
             retired_proposals: self.retired.iter().copied().collect(),
             anchor_first_seats: {
                 let mut v: Vec<(String, String)> = self.recovery.anchor_first_seats.iter().cloned().collect();
@@ -786,6 +787,7 @@ impl State {
         // the own decision register vouches for it), every other one waits
         // for `reverify_all_pending` after the chain adoption
         self.chain.own_approvals.extend(dump.own_approvals.iter().copied());
+        self.restore_heal_loops(&dump.heal_loops);
         self.recovery.anchor_first_seats.extend(dump.anchor_first_seats.iter().cloned());
         self.recovery.seal_first_seats.extend(dump.seal_first_seats.iter().cloned());
         for (m, a, n) in &dump.anchor_repushes {
@@ -961,6 +963,12 @@ impl State {
         self.chain.fork_decisions = 0;
         self.chain.last_fork = None;
         self.chain.resent_at.clear();
+        self.chain.refusals.clear();
+        self.chain.heal_loops.clear();
+        self.chain.peer_on_branch.clear();
+        self.chain.pending_from.clear();
+        self.chain.log_gate.clear();
+        self.chain.round_marks.clear();
         self.chain.heal_since = 0;
         self.chain.peer_heights.clear();
         self.chain.peer_claim_seq.clear();

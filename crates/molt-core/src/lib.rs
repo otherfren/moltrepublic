@@ -3651,6 +3651,9 @@ pub struct EngineStateDump {
     /// `Approved` frames, so a snapshot must carry it for the same reason.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub own_approvals: Vec<u64>,
+    /// G3: the catch-up rounds that repeat without progress.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub heal_loops: Vec<HealLoop>,
     /// Decided cards that did not apply and aged out with their
     /// discussion: a late re-serve of one must not reopen the vote.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -8740,6 +8743,66 @@ pub struct ChainSync {
     /// A6: the head `ahead_peer` last reported (0 = level).
     #[serde(default)]
     pub ahead_height: u64,
+    /// H1: the last blocks this node refused, newest last.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<BlockRefusal>,
+    /// G3: a heal that makes no progress (none = healthy).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heal_stuck: Option<HealStuck>,
+}
+
+/// One delivered block this node refused ([`ChainSync::refused`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockRefusal {
+    /// The block's height.
+    pub height: u64,
+    /// The block's link hash (12 hex).
+    pub hash: String,
+    /// The wire sender ("" = unknown).
+    pub from: MemberId,
+    /// A stable code for the rule it broke (`threshold`, `double_apply`, ...).
+    pub rule: String,
+    /// When (unix seconds).
+    pub at: u64,
+}
+
+/// A heal that does not progress ([`ChainSync::heal_stuck`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealStuck {
+    /// The peer the heal is stuck with ("" = unknown).
+    pub peer: MemberId,
+    /// Since when (unix seconds).
+    pub since: u64,
+    /// The height it is stuck at.
+    pub height: u64,
+    /// The last refusal's rule code ("" = not known here).
+    #[serde(default)]
+    pub rule: String,
+}
+
+/// G3: one repeating catch-up round with a peer that moves nothing - as
+/// the server (the same request again) or the asker (the same refused
+/// block again). Persisted, so a restart re-derives instead of clearing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealLoop {
+    /// The peer.
+    pub peer: MemberId,
+    /// This node asks (it refuses the peer's blocks) rather than serves.
+    pub asker: bool,
+    /// The height the round repeats at.
+    pub height: u64,
+    /// What repeats: the request's top sample, or the refused block's hash.
+    pub key: String,
+    /// How many rounds in a row.
+    pub rounds: u32,
+    /// When the first round was seen (unix seconds).
+    pub since: u64,
+    /// The refusal's rule code ("" on the server side).
+    #[serde(default)]
+    pub rule: String,
+    /// Already announced (wake, chat line, notice).
+    #[serde(default)]
+    pub loud: bool,
 }
 
 /// One fork decision ([`ChainSync::last_fork`]).
