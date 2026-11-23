@@ -310,8 +310,8 @@ impl State {
             self.chain.anchors.iter().filter(|(m, _)| **m != me).map(|(m, a)| (m.clone(), a.clone())).collect();
         anchors.sort();
         for (member, anchor) in anchors {
-            let restore = self.delivery.accepted.get(&member).map(|w| w.restore.as_str());
-            if restore != Some(anchor.as_str()) && restore != Some(molt_core::RESTORE_REKEYED) {
+            let Some(restore) = self.delivery.accepted.get(&member).map(|w| w.restore.as_str()) else { continue };
+            if restore != anchor && restore != molt_core::RESTORE_REKEYED {
                 self.forget_incarnation(&member, &anchor, "open");
             }
         }
