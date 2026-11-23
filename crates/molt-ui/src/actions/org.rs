@@ -14,7 +14,31 @@ use crate::labels::default_op;
 use crate::app::Ctx;
 use crate::{AppWindow, Strings};
 
+/// Show what the engine answered a resync: its refusal, or nothing (the
+/// row says `fetching history` once the stream is held).
+pub(crate) fn resync_outcome(ui: &AppWindow, outcome: Result<molt_core::Reply, molt_core::MoltError>) {
+    if let Err(e) = outcome {
+        ui.invoke_show_toast_error(error_toast(ui, &e));
+    }
+}
+
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
+    {
+        let cx = ctx.clone();
+        ui.on_resync_seat(move |member| {
+            let (w, weak) = (cx.wallet.clone(), cx.weak.clone());
+            let member = member.to_string();
+            cx.rt.spawn(async move {
+                let outcome = w.execute(Command::ResyncSeat { member }).await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        resync_outcome(&ui, outcome);
+                    }
+                });
+            });
+        });
+    }
+
     // The Members/Uploads tables' sort/filter. View-local presentation like
     // the Open/backup lists — but these mirrored rows are rebuilt from the
     // engine on every push, so the state lives in ChatUiState (toggle in

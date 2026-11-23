@@ -93,17 +93,17 @@ fn a_seat_on_another_branch_or_dropped_says_so_under_its_row() {
     let (ui, _shown) = status_window();
     let fork = SeatRow { hash: "cccccc".into(), fork: true, note: "other branch at 5".into(), ..seat("bo", "0.1.2") };
     let dup = SeatRow {
-        note: "its messages are dropped here as already seen".into(),
-        note_tip: "This node missed its restore; restart this node on 0.1.2 or newer.".into(),
+        note: "many repeats from this seat - fetch its history again if messages are missing".into(),
+        note_tip: "Likely a restore this node missed".into(),
         ..seat("ed", "?")
     };
     ui.set_org_seats(ModelRc::new(VecModel::from(vec![seat("ana", "0.1.2"), fork, dup])));
     let hash = shown_text(&ui, "cccccc").expect("the reported head's hash");
     let note = shown_text(&ui, "other branch at 5").expect("the branch note");
     assert!(note.1 > hash.1, "under the row");
-    let dropped = shown_text(&ui, "its messages are dropped here as already seen").expect("the dup note");
+    let dropped = shown_text(&ui, "many repeats from this seat - fetch its history again if messages are missing").expect("the dup note");
     hover(&ui, dropped);
-    assert!(ui.global::<HintTip>().get_label().contains("restart this node"));
+    assert!(ui.global::<HintTip>().get_label().contains("restore this node missed"));
     let rows = Handle::find_by_element_id(&ui, "AppWindow::os-seat").filter(|e| e.size().width > 0.0).count();
     assert_eq!(rows, 3, "one row per seat");
 }
@@ -157,4 +157,98 @@ fn a_busy_relay_says_so_in_the_pool() {
     assert!(shown_text(&ui, "connects automatically").is_some(), "the quiet relay looks as before");
     apply_relay_busy(&ui, &[]);
     assert!(shown_text(&ui, "busy 3x in the last hour").is_none(), "a quiet hour clears it");
+}
+
+const RESYNC: &str = "Fetch history again";
+
+fn visible(ui: &AppWindow, label: &str) -> Vec<Rect> {
+    Handle::find_by_accessible_label(ui, label).map(|e| rect(&e)).filter(|r| r.2 > 0.0).collect()
+}
+
+/// Every other seat offers the resync in its row's menu; the own seat
+/// does not; a seat dropped as already seen has it beside its fault line.
+#[test]
+fn every_other_seat_offers_to_fetch_its_history_again() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = status_window();
+    let dropped = SeatRow {
+        dropped: true,
+        note: "many repeats from this seat - fetch its history again if messages are missing".into(),
+        ..seat("ed", "?")
+    };
+    ui.set_org_seats(ModelRc::new(VecModel::from(vec![
+        SeatRow { me: true, ..seat("ana", "0.1.2") },
+        seat("bo", "0.1.2"),
+        dropped,
+    ])));
+    let inline = visible(&ui, RESYNC);
+    assert_eq!(inline.len(), 1, "one button, on the dropped seat's fault line");
+    let note = visible(&ui, "many repeats from this seat - fetch its history again if messages are missing")[0];
+    assert!((inline[0].1 + inline[0].3 / 2.0 - (note.1 + note.3 / 2.0)).abs() < note.3, "beside the fault line");
+
+    let menus: Vec<_> = Handle::find_by_element_id(&ui, "AppWindow::os-seat-menu").collect();
+    assert_eq!(menus.len(), 3, "one menu area per row");
+    right_click(&ui, &menus[0], 0.5);
+    assert_eq!(visible(&ui, RESYNC).len(), 1, "the own seat offers nothing");
+    right_click(&ui, &menus[1], 0.5);
+    assert!(Handle::find_by_accessible_label(&ui, RESYNC).count() > 1, "bo's menu offers it");
+}
+
+/// Confirming sends `ResyncSeat` for that seat; the engine's "running"
+/// answer to a second one is what the toast says.
+#[test]
+fn a_confirmed_resync_reaches_the_engine_and_a_second_says_running() {
+    let o = super::discussion::Opened::new(|root| drop(workspace_on_disk(root, 2, &["walter", "mara"], "test")));
+    o.ui.window().set_size(slint::PhysicalSize::new(1200, 900));
+    o.ui.set_screen(AppScreen::Main);
+    apply_strings(&o.ui, 0);
+    let cx = Ctx {
+        rt: o.rt.handle().clone(),
+        wallet: o.w.clone(),
+        weak: o.ui.as_weak(),
+        last_settings: o.last.clone(),
+        chat_ui: o.chat_ui.clone(),
+    };
+    crate::actions::org::wire(&o.ui, &cx);
+    let _shown = show_headless(&o.ui);
+    o.ui.set_os_resync_member("mara".into());
+    assert_eq!(
+        visible(&o.ui, "Re-fetch mara's retained history? Their live messages wait until it is through.").len(),
+        1,
+        "the one-line confirm"
+    );
+    // the dialog's title says it too; the button sits below it
+    let confirm = Handle::find_by_accessible_label(&o.ui, RESYNC)
+        .filter(|e| e.size().width > 0.0)
+        .max_by(|a, b| a.absolute_position().y.total_cmp(&b.absolute_position().y))
+        .expect("the confirm button");
+    click(&o.ui, &confirm);
+    assert_eq!(o.ui.get_os_resync_member(), "", "the confirm closes");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let second = loop {
+        match o.rt.block_on(o.w.execute(Command::ResyncSeat { member: "mara".to_string() })) {
+            Err(e) => break e,
+            Ok(_) => {
+                assert!(std::time::Instant::now() < deadline, "the first resync never landed");
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+    };
+    crate::actions::org::resync_outcome(&o.ui, Err(second));
+    assert!(o.ui.get_toast_text().contains("resync of mara running"), "{}", o.ui.get_toast_text());
+}
+
+#[test]
+fn a_seat_whose_history_is_fetched_says_so_instead_of_offering_it() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = status_window();
+    let fetching = SeatRow {
+        dropped: true,
+        fetching: true,
+        note: "many repeats from this seat - fetch its history again if messages are missing".into(),
+        ..seat("ed", "?")
+    };
+    ui.set_org_seats(ModelRc::new(VecModel::from(vec![SeatRow { me: true, ..seat("ana", "0.1.2") }, fetching])));
+    assert_eq!(visible(&ui, "fetching history").len(), 1);
+    assert!(visible(&ui, RESYNC).is_empty(), "no second request while one runs");
 }

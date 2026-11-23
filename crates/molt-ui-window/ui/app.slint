@@ -1634,6 +1634,9 @@ export component AppWindow inherits Window {
     in property <[SeatRow]> org-seats;
     // the seats' known builds differ, or an unknown sits beside a known one
     in property <bool> org-builds-mixed;
+    // the seat a resync waits to be confirmed for ("" = no dialog)
+    in-out property <string> os-resync-member;
+    callback resync-seat(string);
     // whether the open workspace is a chain-governed republic — recovery
     // exists exactly there, so the Members table offers the per-member
     // "recovery link" action only then (never keyed on the member's
@@ -1867,6 +1870,7 @@ export component AppWindow inherits Window {
         || root.org-name-modal-open
         || root.org-retention-modal-open
         || root.org-relays-modal-open
+        || root.os-resync-member != ""
         || root.org-features-modal-open
         || root.decrypt-modal-open
         || root.charter-view-open
@@ -2981,6 +2985,8 @@ export component AppWindow inherits Window {
             root.org-retention-modal-open = false;
         } else if (root.org-relays-modal-open) {
             root.org-relays-modal-open = false;
+        } else if (root.os-resync-member != "") {
+            root.os-resync-member = "";
         } else if (root.org-features-modal-open) {
             root.org-features-modal-open = false;
         } else if (root.decrypt-modal-open) {
@@ -6889,6 +6895,18 @@ export component AppWindow inherits Window {
                                         }
                                         for seat in root.org-seats: VerticalLayout {
                                             spacing: 2px;
+                                            // right-click: re-fetch this seat's history
+                                            // (never the own seat)
+                                            os-seat-menu := ContextMenuArea {
+                                                enabled: !seat.me;
+                                                Menu {
+                                                    MenuItem {
+                                                        title: Strings.os-resync;
+                                                        activated => {
+                                                            root.os-resync-member = seat.member;
+                                                        }
+                                                    }
+                                                }
                                             os-seat := HorizontalLayout {
                                                 spacing: 8px;
                                                 os-c-member := HorizontalLayout {
@@ -6980,14 +6998,16 @@ export component AppWindow inherits Window {
                                                     vertical-alignment: center;
                                                 }
                                             }
-                                            if seat.note != "": HorizontalLayout {
+                                            }
+                                            if seat.note != "" || seat.fetching: HorizontalLayout {
                                                 padding-left: 14px;
+                                                spacing: 8px;
                                                 Rectangle {
                                                     horizontal-stretch: 1;
                                                     height: os-note.preferred-height;
                                                     os-note := Text {
                                                         width: 100%;
-                                                        text: "⚠ " + seat.note;
+                                                        text: seat.note != "" ? "⚠ " + seat.note : "";
                                                         accessible-label: seat.note;
                                                         color: seat.fork ? Theme.bad : Theme.warn;
                                                         font-size: Theme.fs-cap;
@@ -7005,6 +7025,21 @@ export component AppWindow inherits Window {
                                                             }
                                                         }
                                                     }
+                                                }
+                                                // the remedy beside the fault it is for
+                                                if seat.dropped && !seat.fetching && !seat.me: AppButton {
+                                                    label: Strings.os-resync;
+                                                    height: 22px * Theme.ui-scale;
+                                                    pad: 8px * Theme.ui-scale;
+                                                    clicked => {
+                                                        root.os-resync-member = seat.member;
+                                                    }
+                                                }
+                                                if seat.fetching: Text {
+                                                    text: Strings.os-fetching;
+                                                    color: Theme.faint;
+                                                    font-size: Theme.fs-cap;
+                                                    vertical-alignment: center;
                                                 }
                                             }
                                         }
@@ -11731,6 +11766,19 @@ export component AppWindow inherits Window {
     // R6: the pool edit — a gated proposal like the retention next to it.
     // The draft is a ROW TABLE (delete per row, add below); the rows and
     // the space-joined payload string are kept in step Rust-side.
+    // one line: a resync costs traffic and holds the seat's live messages
+    if root.os-resync-member != "": ConfirmModal {
+        title: Strings.os-resync;
+        body: Strings.os-resync-ask-pre + root.os-resync-member + Strings.os-resync-ask-post;
+        confirm-label: Strings.os-resync;
+        dismissed => {
+            root.os-resync-member = "";
+        }
+        confirmed => {
+            root.resync-seat(root.os-resync-member);
+            root.os-resync-member = "";
+        }
+    }
     if root.org-relays-modal-open: ConfirmModal {
         dialog-width: 560px;
         child-focus: true;
