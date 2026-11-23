@@ -11,13 +11,14 @@
 //! | card gossip (`receive_proposed`, membership register)     | `Msg::Card`, lossy; an `Accept`/`Promise` naming a restore teaches it too |
 //! | intents (unsigned `Approved`), counted by the leader      | `Msg::Intent`, lossy; per seat, a dead seat's intent stays counted |
 //! | `lock_choose`: voices >= need, gates, R5 stale rotation   | `free_pick` (voices from every seat not known as subject; no rotation: ballots restart instead) |
-//! | `lock_restore_subjects` (registered or held, per seat)    | `subjects_of(i)` from the seat's own card knowledge |
+//! | `lock_restore_subjects` (open cards; held: acceptor, `run.ids`, `lock.known`) | `subjects_of(i)`: open cards, the acceptor's value, the run's reported values, values seen in frames |
 //! | a known subject's promise is dropped (`lock_on_promise`)   | `on_promise` |
 //! | T1 excusal per restore digest (`lock_excuse_subjects`)    | `on_promise` |
 //! | S3: a forced value waits one interval while heard < n      | `waiting`, released on the next tick |
 //! | `forced` flag on `LockAccept`                             | `Msg::Accept { forced }` |
+//! | a seat never accepts its own restore, any path (`lock_acceptor_accept`) | `accepts`: `Kind::Restore(i)` |
 //! | acceptor: kept (S1), approver rule (T1), gates             | `accepts` |
-//! | restore gates: settle, seat-still-active, own restore      | `accepts` (settle = known for `SETTLE` steps) |
+//! | restore gates: settle, seat-still-active (THIS seat's hearing within its window), own restore | `accepts` (settle = known for `SETTLE` steps; `active_here(i, z)`: z heard by i within `ACTIVE_WINDOW` steps, per seat) |
 //! | a subject's acceptance of a membership value not counted  | `on_accepted` |
 //! | seal: a chosen value seals, no gate (M3)                  | `seal` |
 //! | a sealed restore evicts the old device at later heights   | not modelled: heights are independent here, the old device stays (worst case); the rejoiner is not modelled |
@@ -53,6 +54,11 @@
 use super::*;
 
 const SETTLE: usize = 6;
+/// The seat-still-active window, in steps: a seat heard here within it
+/// is running somewhere (the wire's `restore_gate`).
+const ACTIVE_WINDOW: usize = 30;
+/// One retry interval, in steps: the wait before the exit prompt shows.
+const RETRY_STEPS: usize = 20;
 
 struct Rng(u64);
 
@@ -139,6 +145,12 @@ struct Seat {
     knows: BTreeMap<String, View>,
     mine: BTreeSet<String>,
     intents: BTreeMap<String, BTreeSet<usize>>,
+    /// The step each other seat was last heard here (the wire's
+    /// `frame_heard`, per seat: two seats may disagree).
+    heard: BTreeMap<usize, usize>,
+    /// (height, digest) of the values seen in `Accept` frames and
+    /// acceptances (the wire's `lock.known`).
+    seen_values: BTreeSet<(u64, String)>,
     /// R5/T2: cards whose free ballot went stale, per height, oldest first.
     stale: BTreeMap<u64, Vec<String>>,
     /// The highest height this seat touched (lock state held or seen).
@@ -205,6 +217,9 @@ pub(super) struct WConfig {
     pub amnesia: u64,
     /// An amnesia also loses the seat's newest decided heights.
     pub tail_loss: bool,
+    /// An amnesia is an import of an export taken before the mode came on:
+    /// every decided height and all lock state are gone (item 2).
+    pub import: bool,
     /// Seat 0 is bad: it sends forced Accepts at high ballots without a
     /// phase 1 - for a value it made up (no card, claiming another seat's
     /// acceptance) or replaying a real acceptance of another value - and
@@ -237,15 +252,18 @@ struct Sim {
     seats: Vec<Seat>,
     life: Vec<Life>,
     cards: BTreeMap<String, Card>,
-    net: Vec<(usize, Msg)>,
+    net: Vec<(usize, usize, Msg)>,
     /// Log events lost in the chaos phase: the delivery guarantee
     /// (at-least-once) brings them later; lock frames are not retried.
-    deferred: Vec<(usize, Msg)>,
+    deferred: Vec<(usize, usize, Msg)>,
     ghost: BTreeMap<u64, BTreeMap<(Ballot, Value), BTreeSet<usize>>>,
     learned_twice: usize,
     /// Values seat 0 made up (cfg.bad).
     made_up: BTreeSet<String>,
     unapproved: usize,
+    /// Withheld forced values: first refusal step (the wait names a seat).
+    waits: BTreeMap<(usize, u64, String), usize>,
+    /// Those still unvouched one retry interval later (the prompt shows).
     prompts: BTreeSet<(usize, u64, String)>,
     step: usize,
     serial: u64,
@@ -277,6 +295,7 @@ impl Sim {
             learned_twice: 0,
             made_up: BTreeSet::new(),
             unapproved: 0,
+            waits: BTreeMap::new(),
             prompts: BTreeSet::new(),
             step: 0,
             serial: 0,
@@ -335,15 +354,21 @@ impl Sim {
             .knows
             .iter()
             .filter_map(|(d, view)| match self.cards.get(d)?.kind {
-                Kind::Restore(z) if !restored.contains(&z) && !view.withdrawn && (strict || !self.acting(z)) => Some(z),
+                // in its own view a seat is always a subject
+                Kind::Restore(z) if !restored.contains(&z) && !view.withdrawn && (strict || z == i || !self.active_here(i, z)) => Some(z),
                 _ => None,
             })
             .collect();
-        for h in 1..=self.cfg.heights {
-            if let Some((_, v)) = self.seats[i].acceptor.accepted(&Self::slot(h)) {
-                if let Some(Kind::Restore(z)) = self.cards.get(&v.digest).map(|c| c.kind) {
-                    out.insert(z);
-                }
+        let seat = &self.seats[i];
+        let open = |h: u64| !seat.decided.contains_key(&h);
+        let held = (1..=self.cfg.heights)
+            .filter(|h| open(*h))
+            .filter_map(|h| seat.acceptor.accepted(&Self::slot(h)).map(|(_, v)| v.digest.clone()))
+            .chain(seat.runs.iter().filter(|(h, _)| open(**h)).flat_map(|(_, r)| r.holders.keys().cloned()))
+            .chain(seat.seen_values.iter().filter(|(h, _)| open(*h)).map(|(_, d)| d.clone()));
+        for d in held {
+            if let Some(Kind::Restore(z)) = self.cards.get(&d).map(|c| c.kind) {
+                out.insert(z);
             }
         }
         out
@@ -374,7 +399,9 @@ impl Sim {
         seat.seen_round.clear();
         seat.rounds_by.clear();
         seat.touched = 0;
-        if self.cfg.tail_loss {
+        if self.cfg.import {
+            seat.decided.clear();
+        } else if self.cfg.tail_loss {
             if let Some(h) = seat.decided.keys().max().copied() {
                 seat.decided.remove(&h);
             }
@@ -387,6 +414,11 @@ impl Sim {
         }
     }
 
+    /// `restore_gate` on seat `i`: `z` heard here within the window.
+    fn active_here(&self, i: usize, z: usize) -> bool {
+        self.seats[i].heard.get(&z).is_some_and(|t| self.step < t + ACTIVE_WINDOW)
+    }
+
     fn may_lead(&self, i: usize) -> bool {
         self.acting(i) && !(self.fix.h2 && self.subjects_of(i).contains(&i))
     }
@@ -397,7 +429,7 @@ impl Sim {
         }
         for to in 0..self.cfg.n {
             if to != from {
-                self.net.push((to, msg.clone()));
+                self.net.push((to, from, msg.clone()));
             }
         }
     }
@@ -441,9 +473,13 @@ impl Sim {
         (1..=self.cfg.away).contains(&i) && self.step < self.cfg.back_at
     }
 
-    fn deliver(&mut self, i: usize, msg: Msg) {
+    fn deliver(&mut self, i: usize, from: usize, msg: Msg) {
         if !self.acting(i) || self.away(i) {
             return;
+        }
+        if from != i {
+            let step = self.step;
+            self.seats[i].heard.insert(from, step);
         }
         match &msg {
             Msg::Prepare { slot, ballot } | Msg::Accept { slot, ballot, .. } => {
@@ -465,7 +501,7 @@ impl Sim {
                 }
                 let touched = self.seats[i].touched.max(self.seats[i].decided.keys().max().copied().unwrap_or(0) + 1);
                 let round = self.seats[i].rounds_by.get(from).copied().unwrap_or(0);
-                self.net.push((*from, Msg::AmnesiaReply { from: i, nonce: *nonce, touched, round }));
+                self.net.push((*from, i, Msg::AmnesiaReply { from: i, nonce: *nonce, touched, round }));
                 return;
             }
             Msg::AmnesiaReply { from, nonce, touched, round } => {
@@ -523,6 +559,7 @@ impl Sim {
             Msg::Accept { slot, ballot, value, forced, evidence } => {
                 // a membership change rides the frame: the seat learns it
                 self.learn(i, &value.digest);
+                self.seats[i].seen_values.insert((slot.height, value.digest.clone()));
                 if self.seats[i].decided.contains_key(&slot.height) {
                     return;
                 }
@@ -532,10 +569,16 @@ impl Sim {
                     // complete it"; the human answers the prompt
                     let known = self.cards.contains_key(&value.digest) && !self.made_up.contains(&value.digest);
                     let prompted = forced && self.fix.evidence && known && !self.seats[i].mine.contains(&value.digest);
-                    if prompted && !(self.cfg.bad && i == 0) {
-                        self.prompts.insert((i, slot.height, value.digest.clone()));
+                    // first a wait; the prompt (and a human's approve) only
+                    // once a retry interval passed without a second signer
+                    let key = (i, slot.height, value.digest.clone());
+                    let step = self.step;
+                    let since = *self.waits.entry(key.clone()).or_insert(step);
+                    let shown = prompted && step >= since + RETRY_STEPS;
+                    if shown && !(self.cfg.bad && i == 0) {
+                        self.prompts.insert(key);
                     }
-                    if prompted && self.rng.chance(self.cfg.approve) {
+                    if shown && self.rng.chance(self.cfg.approve) {
                         self.cast_intent(i, &value.digest);
                     }
                     return;
@@ -586,7 +629,7 @@ impl Sim {
             return false;
         }
         if let Kind::Restore(z) = card.kind {
-            if self.acting(z) || self.step < view.known_at + SETTLE {
+            if self.active_here(i, z) || self.step < view.known_at + SETTLE {
                 return false;
             }
         }
@@ -646,14 +689,17 @@ impl Sim {
         self.seats[i].runs.insert(h, run);
         self.seats[i].seen_round.insert(h, round);
         let msg = Msg::Prepare { slot: s, ballot };
-        self.deliver(i, msg.clone());
+        self.deliver(i, i, msg.clone());
         self.send_all(i, &msg);
     }
 
     fn on_reply(&mut self, i: usize, from: usize, reply: Reply) {
         match reply {
             Reply::Promise { slot, ballot, accepted } => self.on_promise(i, from, &slot, &ballot, accepted),
-            Reply::Accepted { slot, ballot, value } => self.on_accepted(i, from, &slot, &ballot, &value),
+            Reply::Accepted { slot, ballot, value } => {
+                self.seats[i].seen_values.insert((slot.height, value.digest.clone()));
+                self.on_accepted(i, from, &slot, &ballot, &value);
+            }
             Reply::Nack { slot, promised: Some(p), .. } => {
                 let seen = self.seats[i].seen_round.entry(slot.height).or_default();
                 *seen = (*seen).max(p.round);
@@ -719,7 +765,7 @@ impl Sim {
         // the leader forwards another holder's acceptance, never its own
         run.evidence = if run.forced { run.holders.get(&value.digest).map(|h| h.iter().copied().collect()).unwrap_or_default() } else { Vec::new() };
         let msg = Msg::Accept { slot: run.leader.slot.clone(), ballot: run.leader.ballot.clone(), value, forced: run.forced, evidence: run.evidence.clone() };
-        self.deliver(i, msg.clone());
+        self.deliver(i, i, msg.clone());
         self.send_all(i, &msg);
     }
 
@@ -744,7 +790,7 @@ impl Sim {
             }
             if let Kind::Restore(z) = card.kind {
                 // the restore gate (seat still active) and the settle
-                if self.acting(z) || self.step < view.known_at + SETTLE {
+                if self.active_here(i, z) || self.step < view.known_at + SETTLE {
                     return None;
                 }
             }
@@ -774,7 +820,7 @@ impl Sim {
     fn seal(&mut self, i: usize, s: Sealable) {
         let h = Self::slot_height(&s);
         if let Some(Kind::Restore(z)) = self.cards.get(&s.value.digest).map(|c| c.kind) {
-            if !self.fix.m3 && self.acting(z) {
+            if !self.fix.m3 && self.active_here(i, z) {
                 self.seats[i].held.insert(h, s);
                 return;
             }
@@ -882,11 +928,11 @@ impl Sim {
             }
         } else if !self.net.is_empty() {
             let k = self.rng.below(self.net.len());
-            let (to, msg) = self.net.swap_remove(k);
+            let (to, from, msg) = self.net.swap_remove(k);
             if !self.rng.chance(self.drop) {
-                self.deliver(to, msg);
+                self.deliver(to, from, msg);
             } else if matches!(msg, Msg::Card { .. } | Msg::Intent { .. } | Msg::Withdraw { .. }) {
-                self.deferred.push((to, msg));
+                self.deferred.push((to, from, msg));
             }
         }
     }
@@ -933,8 +979,8 @@ impl Sim {
     fn drain(&mut self) {
         while !self.net.is_empty() {
             let k = self.rng.below(self.net.len());
-            let (to, msg) = self.net.swap_remove(k);
-            self.deliver(to, msg);
+            let (to, from, msg) = self.net.swap_remove(k);
+            self.deliver(to, from, msg);
         }
     }
 
@@ -1028,6 +1074,7 @@ pub(super) fn base(n: usize, m: usize) -> WConfig {
         drop: 15,
         amnesia: 0,
         tail_loss: false,
+        import: false,
         bad: false,
         away: 0,
         back_at: 0,
@@ -1105,6 +1152,9 @@ fn amnesia_configs() -> Vec<(&'static str, WConfig)> {
         ("3-of-4", WConfig { amnesia: 8, ..base(4, 3) }),
         ("2-of-3, tail lost", WConfig { amnesia: 8, tail_loss: true, ..base(3, 2) }),
         ("3-of-5, tail lost", WConfig { amnesia: 8, tail_loss: true, ..base(5, 3) }),
+        ("2-of-3, imported from before the mode", WConfig { amnesia: 8, import: true, ..base(3, 2) }),
+        ("3-of-5, imported from before the mode", WConfig { amnesia: 8, import: true, ..base(5, 3) }),
+        ("2-of-5, imported from before the mode", WConfig { amnesia: 8, import: true, ..base(5, 2) }),
     ]
 }
 
@@ -1196,7 +1246,7 @@ fn a_liar_stalls_only_while_m_minus_one_seats_are_away() {
 fn how_often_the_exit_prompt_appears() {
     let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true };
     for (name, cfg) in configs() {
-        for drop in [15, 45] {
+        for drop in [1, 5, 15, 45] {
             let (mut runs, mut prompts) = (0, 0);
             for seed in 0..SIM_SEEDS / 4 {
                 let p = run(WConfig { drop, ..cfg }, fix, seed).prompts;
@@ -1206,4 +1256,39 @@ fn how_often_the_exit_prompt_appears() {
             eprintln!("{name} drop {drop}: {runs} of {} runs prompt, {prompts} prompts", SIM_SEEDS / 4);
         }
     }
+}
+
+/// Why the mode is not offered where m = n: a seat lost after the others
+/// accepted a value, before its own acceptance, pins that height for good:
+/// the value is forced (2 holders + the lost seat >= 3) and needs the lost
+/// seat, which may have sealed it on its own device, so no restore may
+/// take the height. No restore in flight, no misbehaving seat.
+#[test]
+fn where_m_equals_n_a_seat_lost_mid_height_halts() {
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true };
+    for (name, cfg) in [("3-of-3", base(3, 3)), ("2-of-2", base(2, 2))] {
+        let cfg = WConfig { dies: 1, die_at: 150, ..cfg };
+        let halted = (0..SIM_SEEDS / 4).filter(|seed| run(cfg, fix, *seed).undecided > 0).count();
+        eprintln!("{name}, a seat dies mid-run: {halted} of {} runs halt", SIM_SEEDS / 4);
+        assert!(halted > 0, "{name}: never halted");
+    }
+}
+
+/// Item 2: a seat imported from an export taken before the mode came on
+/// holds no lock state and none of the heights decided since - opened as
+/// a fresh acceptor (the control: what an import did before item 2) it
+/// forks; amnesiac under the rule it does not.
+#[test]
+fn an_import_from_before_the_mode_is_amnesiac() {
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: true, evidence: true, evidence_two: true };
+    let control = Fixes { amnesia_rule: false, ..fix };
+    let mut control_forks = 0;
+    for (name, cfg) in amnesia_configs().into_iter().filter(|(_, c)| c.import) {
+        for seed in 0..SIM_SEEDS {
+            assert_eq!(run(cfg, fix, seed).forks, 0, "{name}: fork at seed {seed}");
+            control_forks += run(cfg, control, seed).forks;
+        }
+    }
+    assert!(control_forks > 0, "an import opened fresh never forked");
+    eprintln!("imports opened fresh: {control_forks} forks");
 }

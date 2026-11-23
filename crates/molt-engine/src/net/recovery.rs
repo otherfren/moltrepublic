@@ -27,6 +27,8 @@ const WAIT_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Links kept in memory to show again (D2).
 const LINKS_KEPT: usize = 16;
+/// Requests whose declared capabilities are kept for their seal (item 7).
+const REJOINER_CAPS_MAX: usize = 64;
 
 /// B4: the answer to a Want/Ready for an attempt this coordinator does
 /// not hold (it restarted, or the link was re-minted).
@@ -161,6 +163,13 @@ impl State {
                 self.refuse_recover_request(&member, &sender_npub, why, &attempt);
             }
             return Ok(Reply::Ack);
+        }
+        // item 7: what the device runs decides at the seal whether it is
+        // welcomed (the mode may be enabled while the card is open)
+        self.recovery.rejoiner_caps.retain(|(a, _)| *a != attempt);
+        self.recovery.rejoiner_caps.push_back((attempt.clone(), caps));
+        while self.recovery.rejoiner_caps.len() > REJOINER_CAPS_MAX {
+            self.recovery.rejoiner_caps.pop_front();
         }
         // B4: the anchor first, the seal only on the rejoiner's Ready
         if anchor_first
@@ -404,6 +413,33 @@ impl State {
     /// the rejoiner (WP6) - answered only behind the ticket + PoP gates, so
     /// an unknown ticket stays a silent drop; the ticket is NOT spent (the
     /// same link with the right phrase still works).
+    /// Item 7: a restore sealed under Strict Order Mode for a device
+    /// without it: the device is not welcomed (it would sign freely beside
+    /// the lock). Both sides are told; the seat needs a new link once the
+    /// device runs a newer build. `true` = withheld.
+    pub(crate) fn restore_unwelcomed(&mut self, member: &str, pending: &crate::chain::PendingRecovery) -> bool {
+        if !self.lock_enabled() {
+            return false;
+        }
+        let attempt = molt_net::invite::recover_attempt_id(&pending.key_package);
+        let caps = self.recovery.rejoiner_caps.iter().find(|(a, _)| *a == attempt).map(|(_, c)| c.clone());
+        if caps.is_some_and(|c| c.iter().any(|c| c == molt_core::chain::CHAIN_LOCK_CAP)) {
+            return false;
+        }
+        tracing::warn!(%member, reason = crate::chain::LOCK_CHAIN_UNSUPPORTED, "restore=unwelcomed");
+        self.recovery.rejoiner_caps.retain(|(a, _)| *a != attempt);
+        self.recovery.tickets.remove(&pending.ticket);
+        self.recovery.spent_tickets.insert(pending.ticket.clone());
+        let npub = match &pending.card {
+            molt_core::ChainChange::Membership { nostr_pk: Some(npk), .. } => npk.clone(),
+            _ => String::new(),
+        };
+        self.refuse_recover_request(member, &npub, crate::chain::LOCK_CHAIN_UNSUPPORTED.to_string(), &attempt);
+        self.session.notice = format!("restore-unwelcomed:{member}");
+        self.emit_session(SessionScope::Full);
+        true
+    }
+
     fn refuse_recover_request(&mut self, member: &str, sender_npub: &str, e: String, attempt: &str) {
         self.session.notice = format!("recover-refused:{member}:{e}");
         self.emit_session(SessionScope::Full);

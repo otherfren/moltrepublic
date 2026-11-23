@@ -35,10 +35,16 @@ pub(crate) const LOCK_NOT_AVAILABLE: &str = "Strict Order Mode is not available 
 /// Strict Order Mode needs at least two approvals per decision (A-F4).
 pub(crate) const LOCK_NEEDS_TWO: &str = "Strict Order Mode needs at least 2 approvals per decision";
 
-/// Why this build signs nothing on a chain that runs the lock.
+/// Not offered where m = n: a seat lost mid-height would pin it for good.
+pub(crate) const LOCK_NEEDS_FEWER: &str = "Strict Order Mode needs fewer approvals per decision than members";
+
+/// The enabling vote waits while a restore is open (item 7).
+pub(crate) const LOCK_RESTORE_PENDING: &str = "Strict Order Mode waits for a pending restore";
+
 /// A forced value withheld for want of evidence (item 3): log reason.
 const LOCK_NEEDS_APPROVAL: &str = "needs approval";
 
+/// Why this build signs nothing on a chain that runs the lock.
 pub(crate) const LOCK_CHAIN_UNSUPPORTED: &str = "this republic uses Strict Order Mode - needs a newer build";
 
 /// A leader re-sends its open phase this often (§7).
@@ -66,6 +72,11 @@ pub(crate) struct LockSeams {
     pub(crate) stop_after_own_accept: AtomicBool,
     /// Lock activity of this seat has stopped (a killed leader).
     pub(crate) stopped: AtomicBool,
+    /// The enabling vote ignores an open restore card (item 7's race,
+    /// staged in one step).
+    pub(crate) ignore_open_restore: AtomicBool,
+    /// Free-mode restore seals wait (a slow sealer, staged).
+    pub(crate) hold_restore_seals: AtomicBool,
 }
 
 /// What a seat initiates at a height (§8).
@@ -92,6 +103,16 @@ struct LockFile {
 
 /// Intents kept for cards not yet seen (R8); the oldest ids go first.
 const LOCK_EARLY_INTENTS_MAX: usize = 1024;
+
+/// Item 3's exit, staged: `since` the first refusal of the forced value
+/// `id` at `height`, `waiting` for the seats whose acceptance would vouch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NeedsApproval {
+    pub(crate) height: u64,
+    pub(crate) id: u64,
+    pub(crate) since: u64,
+    pub(crate) waiting: Vec<String>,
+}
 
 /// A withheld acceptance to retry: slot, ballot, value, id, the carried
 /// change, and `Some(evidence)` where the value was forced.
@@ -169,9 +190,10 @@ pub(crate) struct LockRuntime {
     /// intent not yet cast): retried on the tick, not only on the
     /// leader's next resend - the leader's own acceptance has no resend.
     retry_accept: Option<RetryAccept>,
-    /// A forced value withheld for want of evidence: (height, id). The
-    /// status asks for an approve, which completes it (item 3's exit).
-    pub(crate) needs_approval: Option<(u64, u64)>,
+    /// A forced value withheld for want of evidence. The status first
+    /// names the seats whose acceptance would complete it; after one
+    /// retry interval it asks for an approve (item 3's exit).
+    pub(crate) needs_approval: Option<NeedsApproval>,
     /// Ids approved through that exit.
     approved_forced: BTreeSet<u64>,
     /// Seats seen with lock state at a height (a promise, an acceptance,
@@ -273,7 +295,7 @@ fn need_u64(v: &Value) -> u64 {
 }
 
 impl State {
-    fn lock_seam(&self, flag: &AtomicBool) -> bool {
+    pub(crate) fn lock_seam(&self, flag: &AtomicBool) -> bool {
         flag.load(SeqCst)
     }
 
@@ -483,6 +505,20 @@ impl State {
         // A-F4: with m = 1 phase 1 would need every seat
         if self.lock_quorum().is_some_and(|q| q.m < 2) {
             return Some(LOCK_NEEDS_TWO.to_string());
+        }
+        // m = n: a seat lost between the others' acceptance and its own
+        // pins the height for good (it may have sealed alone), and amnesia
+        // has no safe return there
+        if self.lock_quorum().is_some_and(|q| q.m >= q.n) {
+            return Some(LOCK_NEEDS_FEWER.to_string());
+        }
+        // item 7: a restore in flight may welcome a device without the mode
+        let restoring = self.chain.proposal_changes.iter().any(|(id, c)| {
+            matches!(c, ChainChange::Membership { op: MembershipOp::Restored, .. })
+                && self.proposals.get(id).map_or(true, |p| p.state == ProposalState::Proposed && !p.withdrawn)
+        });
+        if restoring && !self.lock_seam(&self.lock_seams.ignore_open_restore) {
+            return Some(LOCK_RESTORE_PENDING.to_string());
         }
         #[cfg(test)]
         if let Some(all) = self.chain.lock.caps_override {
@@ -1304,14 +1340,29 @@ impl State {
         self.chain.lock.known.insert((slot.height, value.digest.clone()), (id, change.clone()));
         // F1: a restore settles before this seat accepts it, so a withdrawal
         // right behind the card wins here too
-        let withheld = if kept {
+        // a seat never accepts its own restore, on any path (the count and
+        // the seal would filter it, but no filter stands in for a refusal)
+        let own = restored_member(&change) == Some(self.member().as_str());
+        let withheld = if own {
+            Some("own restore".to_string())
+        } else if kept {
             None
         } else if forced_path {
             if self.lock_forced_vouched(slot.height, &ballot.leader, id, &change, &evidence) {
                 self.lock_forced_invalid(id, &change, slot.height)
             } else {
                 // the exit: the status asks this seat's human to approve
-                self.chain.lock.needs_approval = Some((slot.height, id));
+                let me = self.member();
+                let subjects = self.lock_restore_subjects();
+                let waiting: Vec<String> = self
+                    .roster()
+                    .into_iter()
+                    .filter(|m| *m != me && !subjects.contains(m) && !evidence.iter().any(|e| e.member == *m))
+                    .collect();
+                let now = self.lock_now();
+                let same = self.chain.lock.needs_approval.as_ref().filter(|n| n.height == slot.height && n.id == id);
+                let since = same.map_or(now, |n| n.since);
+                self.chain.lock.needs_approval = Some(NeedsApproval { height: slot.height, id, since, waiting });
                 Some(LOCK_NEEDS_APPROVAL.to_string())
             }
         } else if matches!(change, ChainChange::Membership { op: MembershipOp::Restored, .. })
@@ -1336,7 +1387,7 @@ impl State {
         if self.chain.lock.retry_accept.as_ref().is_some_and(|r| r.0 == *slot) {
             self.chain.lock.retry_accept = None;
         }
-        if self.chain.lock.needs_approval == Some((slot.height, id)) {
+        if self.chain.lock.needs_approval.as_ref().is_some_and(|n| n.height == slot.height && n.id == id) {
             self.chain.lock.needs_approval = None;
         }
         // the file keeps the whole change: a withdrawal may remove the card
@@ -1621,10 +1672,17 @@ impl State {
         self.lock_acceptor_accept(&slot, &ballot, &value, id, change, forced.then_some(evidence));
     }
 
+    /// The id the status asks a human to approve: a withheld forced value
+    /// still unvouched one retry interval after its first refusal.
+    pub(crate) fn lock_prompt(&self) -> Option<u64> {
+        let n = self.chain.lock.needs_approval.as_ref()?;
+        (self.lock_now() >= n.since + self.lock_retransmit()).then_some(n.id)
+    }
+
     /// Item 3's exit: an approve of the withdrawn card the status names.
     /// `false` for any other card (the caller judges it as before).
     pub(crate) fn lock_approve_forced(&mut self, id: u64) -> bool {
-        let named = self.chain.lock.needs_approval.is_some_and(|(_, i)| i == id);
+        let named = self.lock_prompt().is_some_and(|i| i == id);
         if !named || !self.proposals.get(&id).is_some_and(|p| p.withdrawn) {
             return false;
         }
@@ -1803,7 +1861,7 @@ impl State {
         // C-MED-3: a card stale at one height stays behind the others at
         // the next (a never-sealable card no longer costs every height)
         lock.passive.retain(|h| *h > head);
-        if lock.needs_approval.is_some_and(|(h, _)| h <= head) {
+        if lock.needs_approval.as_ref().is_some_and(|n| n.height <= head) {
             lock.needs_approval = None;
         }
         lock.approved_forced.clear();
@@ -2031,8 +2089,16 @@ impl State {
         run.resends = run.resends.saturating_add(1);
         let (slot, ballot) = (run.leader.slot.clone(), run.leader.ballot.clone());
         let forced = run.forced;
-        let evidence = run.sent_evidence.clone();
-        let body = match (run.leader.proposed().cloned(), run.value.clone()) {
+        let (proposed, value) = (run.leader.proposed().cloned(), run.value.clone());
+        // an acceptance heard since the first send may vouch now
+        let evidence = match (&proposed, &value) {
+            (Some(v), Some((id, change))) if forced => self.lock_forced_evidence(&slot, &ballot, v, *id, change.as_ref()),
+            _ => Vec::new(),
+        };
+        if let Some(run) = self.chain.lock.run.as_mut() {
+            run.sent_evidence = evidence.clone();
+        }
+        let body = match (proposed, value) {
             (Some(v), Some((id, change))) => WorkspaceEvent::LockAccept {
                 height: slot.height,
                 base: slot.base.clone(),
@@ -2188,8 +2254,12 @@ impl State {
         }
         let wait = if self.lock_amnesiac_at(next) {
             "amnesia".to_string()
-        } else if let Some((_, id)) = self.chain.lock.needs_approval {
-            format!("decision {id} may already be made - approve to complete it")
+        } else if let Some(n) = &self.chain.lock.needs_approval {
+            if self.lock_prompt().is_some() {
+                format!("decision {} may already be made - approve to complete it", n.id)
+            } else {
+                format!("decision {}: waiting for {}", n.id, n.waiting.join(", "))
+            }
         } else if let Some(run) = &self.chain.lock.run {
             let q = run.leader.ballot.clone();
             match run.leader.proposed() {

@@ -123,6 +123,10 @@ fn strict_order_de(t: &str) -> &str {
         "Strict Order Mode needs at least 2 approvals per decision" => {
             "Strenge Reihenfolge braucht mindestens 2 Zustimmungen pro Entscheidung"
         }
+        "Strict Order Mode needs fewer approvals per decision than members" => {
+            "Strenge Reihenfolge braucht weniger Zustimmungen pro Entscheidung als Mitglieder"
+        }
+        "Strict Order Mode waits for a pending restore" => "Strenge Reihenfolge wartet auf eine laufende Wiederherstellung",
         "this republic uses Strict Order Mode - needs a newer build" => {
             "diese Republik nutzt die Strenge Reihenfolge - braucht einen neueren Build"
         }

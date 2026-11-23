@@ -1884,12 +1884,44 @@ fn forced_at_walter(evidence: impl FnOnce(&Builder, &ChainChange) -> Vec<molt_co
 fn a_forced_value_without_evidence_waits_for_an_approve() {
     let (mut walter, w) = forced_at_walter(|b, c| vec![evidence_of(b, "dora", c)]);
     assert!(!sent_kinds(&walter).contains(&"accepted"), "no evidence, no approval: withheld");
+    // first a wait naming the seat whose acceptance would complete it
+    let (_, _, wait) = walter.lock_status();
+    assert_eq!(wait, format!("decision {w}: waiting for mara"));
+    assert!(walter.cmd_approve(ProposalId(w), None).is_err(), "no exit before the prompt");
+    // one retry interval later, still unvouched: the prompt
+    let later = walter.lock_now() + walter.lock_retransmit();
+    walter.presence.clock_override = Some(later);
+    walter.lock_tick();
     let (_, _, wait) = walter.lock_status();
     assert_eq!(wait, format!("decision {w} may already be made - approve to complete it"));
     walter.cmd_approve(ProposalId(w), None).expect("the exit approve");
     assert!(sent_kinds(&walter).contains(&"accepted"), "approved: accepted {:?}", sent_kinds(&walter));
     let (_, _, wait) = walter.lock_status();
     assert!(!wait.contains("approve to complete"), "{wait}");
+}
+
+/// Item 3: the seat named in the wait vouches once it is heard - the
+/// leader's resend carries its acceptance, and the wait ends by itself
+/// without a prompt.
+#[test]
+fn the_wait_ends_by_itself_when_the_named_seat_is_heard() {
+    let (mut walter, w) = forced_at_walter(|b, c| vec![evidence_of(b, "dora", c)]);
+    assert!(walter.chain.lock.needs_approval.is_some());
+    let b = Builder::new(&SEATS, 2);
+    let mut x = seat("dora", &b);
+    let id = note(&mut x, "w");
+    let change = x.proposal_change(id).expect("w");
+    let slot = walter.lock_slot().expect("slot");
+    let v = walter.lock_value(1, &change).expect("value");
+    walter.chain.lock.outbox.clear();
+    wire(
+        &mut walter,
+        "dora",
+        3,
+        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 5, digest: v.digest, need: 2, id: ProposalId(w), change: None, forced: true, evidence: vec![evidence_of(&b, "dora", &change), evidence_of(&b, "mara", &change)] },
+    );
+    assert!(sent_kinds(&walter).contains(&"accepted"), "vouched: accepted");
+    assert!(walter.chain.lock.needs_approval.is_none(), "the wait is over");
 }
 
 /// Item 3: evidence counts only as real acceptances of exactly this value
@@ -2006,4 +2038,76 @@ fn a_forced_accept_with_evidence_fits_the_transport() {
     });
     eprintln!("ceiling {ceiling} B, largest payload {lo} B: forced accept {accept} B, promise {promise} B");
     assert!(accept <= ceiling && promise <= ceiling, "accept {accept}, promise {promise}, ceiling {ceiling}");
+}
+
+/// Item 3's size edge: a card that fits a block but not its lock frames,
+/// registered just before the mode turned on, is refused at the lock
+/// stage with its size named - never chosen, never signed - and its
+/// proposer can still withdraw it.
+#[test]
+fn a_card_too_large_for_the_lock_frames_is_refused_and_withdrawable() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = genesis_seat("mara", &b, b.blocks.clone());
+    let roster = mara.roster();
+    let payload = |len: usize| json!({ "op": "add_note", "title": "t".repeat(len) });
+    let (mut lo, mut hi) = (0usize, crate::proposals::transport_plaintext_ceiling());
+    while lo + 1 < hi {
+        let mid = (lo + hi) / 2;
+        if crate::proposals::payload_fits(Surface::Memory, &payload(mid), &roster) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    assert!(!crate::proposals::payload_fits_mode(Surface::Memory, &payload(lo), &roster, true), "the edge exists");
+    let id = propose(&mut mara, Surface::Memory, payload(lo));
+    mara.chain.lock.enabled_override = Some(true);
+    mara.lock_force(true);
+    hear(&mut mara, T, &SEATS);
+    let why = mara.sign_blocker(id).expect("refused at the lock stage");
+    assert!(why.contains("KiB over what this republic's relays carry"), "{why}");
+    let slot = mara.lock_slot().expect("slot");
+    assert!(mara.lock_choose(&slot, None).is_none(), "never chosen");
+    mara.cmd_withdraw(ProposalId(id), None).expect("withdrawable");
+}
+
+/// Item 3: a seat that approved the card itself is never asked - it
+/// accepts the forced value on its own intent, withdrawn card or not.
+#[test]
+fn a_seat_that_approved_the_card_is_never_prompted() {
+    let b = Builder::new(&SEATS, 2);
+    let mut walter = seat("walter", &b);
+    let mut x = seat("dora", &b);
+    let w = note(&mut x, "w");
+    let change = x.proposal_change(w).expect("w");
+    let ChainChange::Applied { payload, .. } = change.clone() else { panic!("applied") };
+    assert!(walter.receive_proposed(w, Surface::Memory, payload, "dora"));
+    walter.cmd_approve(ProposalId(w), None).expect("walter approves");
+    wire(&mut walter, "dora", 1, WorkspaceEvent::Withdrawn { id: ProposalId(w), by: "dora".into() });
+    let slot = walter.lock_slot().expect("slot");
+    let v = walter.lock_value(1, &change).expect("value");
+    walter.chain.lock.outbox.clear();
+    wire(
+        &mut walter,
+        "dora",
+        2,
+        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 5, digest: v.digest, need: 2, id: ProposalId(w), change: None, forced: true, evidence: vec![evidence_of(&b, "dora", &change)] },
+    );
+    assert!(sent_kinds(&walter).contains(&"accepted"), "accepted on its own intent: {:?}", sent_kinds(&walter));
+    assert!(walter.chain.lock.needs_approval.is_none(), "never asked");
+}
+
+/// Not offered where m = n (a seat lost mid-height pins it for good):
+/// refused at propose and at approve.
+#[test]
+fn the_mode_is_not_offered_where_every_seat_must_approve() {
+    use molt_core::chain::CHAIN_LOCK_FEATURE;
+    let b = Builder::new(&SEATS, 3);
+    let mut mara = genesis_seat("mara", &b, b.blocks.clone());
+    mara.lock_force(true);
+    mara.chain.lock.caps_override = Some(true);
+    let enable = json!({ "op": "set_features", "value": format!("{CHAIN_LOCK_FEATURE} memory") });
+    let err = mara.cmd_propose(Surface::Organization, enable).expect_err("refused");
+    assert!(err.to_string().contains(LOCK_NEEDS_FEWER), "{err}");
+    assert_eq!(mara.lock_not_capable().as_deref(), Some(LOCK_NEEDS_FEWER));
 }

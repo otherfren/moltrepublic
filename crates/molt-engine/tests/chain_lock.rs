@@ -714,3 +714,115 @@ async fn a_rejoiner_on_a_build_without_the_mode_is_refused() {
     assert!(s.notice.contains("needs a newer build"), "{:?}", s.notice);
     let _ = walter;
 }
+
+/// Mint a recovery link for `member` on `w`.
+async fn mint_link(w: &WalletHandle, member: &str) -> String {
+    w.execute(Command::RecoverInviteStart { member: member.to_string() }).await.expect("mint");
+    let s = wait_for(w, "the recovery link", |s| s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")).await;
+    s.notice.strip_prefix("recovery-link:").unwrap_or_else(|| panic!("mint: {:?}", s.notice)).to_string()
+}
+
+/// Approve every open `set_features` vote (not the restore card).
+async fn approve_features(w: &WalletHandle) {
+    let Reply::Proposals { proposals, .. } = w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list") else {
+        panic!("list_proposals answers Reply::Proposals");
+    };
+    let features = |p: &molt_core::ProposalView| p.payload.get("op").and_then(serde_json::Value::as_str) == Some("set_features");
+    for p in proposals.into_iter().filter(|p| features(p) && p.state == ProposalState::Proposed && !p.approved_by_me) {
+        let _ = w.execute(Command::Approve { proposal: p.id, note: None }).await;
+    }
+}
+
+/// Item 7, the schedule: dora's restore card opens from a build without
+/// the mode while the mode is off; the enabling vote seals while the card
+/// waits (the race, staged: the guard that holds the vote while a restore
+/// is open is skipped); the card then seals under the mode. The
+/// coordinator does not welcome that device and both sides are told. The
+/// updated device's retry of the SAME link is outdated (its anchor is in
+/// the chain); a new link brings it back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_device_without_the_mode_is_not_welcomed_and_comes_back_on_a_new_link() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let ([mara, walter, dora], dora_phrase) = found_trio_as(tmp.path(), &url, false).await;
+    every_seat_announced(&[&mara, &walter, &dora]).await;
+    for w in [&mara, &walter] {
+        w.__lock_timing(5, 3);
+        w.__lock_ignore_open_restore();
+        w.__seat_active_secs(0);
+        w.__hold_restore_seals(true);
+    }
+    drop(dora);
+    let link = mint_link(&mara, "dora").await;
+    let old = engine(&tmp.path().join("dora-device"));
+    old.__lock_cap_off(true);
+    adopt_relay(&old, &url).await;
+    old.execute(Command::RecoverStart { link: link.clone(), phrase: dora_phrase.clone(), relays: Vec::new() })
+        .await
+        .expect("recover start");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let Reply::Proposals { proposals, .. } = mara.execute(Command::LIST_ALL_PROPOSALS).await.expect("list") else {
+            panic!("proposals");
+        };
+        if proposals.iter().any(|p| p.state == ProposalState::Proposed && p.payload.get("op").and_then(serde_json::Value::as_str) == Some("restore_member")) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the restore card never opened");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // the enabling vote seals while the card waits
+    let enable = serde_json::json!({ "op": "set_features", "value": "chain-lock memory" });
+    mara.execute(Command::Propose { surface: molt_core::Surface::Organization, payload: enable }).await.expect("the vote");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    while !status(&mara).await.chain_sync.lock_active {
+        approve_features(&walter).await;
+        assert!(tokio::time::Instant::now() < deadline, "the enabling vote never sealed");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(chain(&mara).await.iter().all(|(h, pid, _)| *h == 0 || *pid != 0), "the restore is still open");
+    // the held seal lets go: the card seals under the mode
+    for w in [&mara, &walter] {
+        w.__hold_restore_seals(false);
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(240);
+    let s = loop {
+        approve_open(&walter).await;
+        let s = read_session(&mara).await;
+        if s.notice == "restore-unwelcomed:dora" {
+            break s;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no unwelcomed report: {:?}", s.notice);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert_eq!(s.notice, "restore-unwelcomed:dora");
+    let s = wait_for(&old, "the refusal", |s| s.notice.starts_with("recover-failed:") || s.notice.starts_with("recovered:")).await;
+    assert!(s.notice.contains("needs a newer build"), "{:?}", s.notice);
+    // the device updates and retries the same link: outdated
+    drop(old);
+    let updated = engine(&tmp.path().join("dora-device"));
+    adopt_relay(&updated, &url).await;
+    updated.execute(Command::RecoverStart { link, phrase: dora_phrase.clone(), relays: Vec::new() }).await.expect("retry");
+    let s = wait_for(&updated, "the retry's answer", |s| s.notice.starts_with("recover-failed:") || s.notice.starts_with("recovered:")).await;
+    assert!(s.notice.contains("link outdated"), "{:?}", s.notice);
+    drop(updated);
+    // a new link brings it back
+    let link = mint_link(&mara, "dora").await;
+    let updated = engine(&tmp.path().join("dora-device"));
+    adopt_relay(&updated, &url).await;
+    updated.execute(Command::RecoverStart { link, phrase: dora_phrase, relays: Vec::new() }).await.expect("new link");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    loop {
+        approve_open(&walter).await;
+        let s = read_session(&updated).await;
+        if s.screen == molt_core::Screen::Main && !s.workspaces.is_empty() {
+            break;
+        }
+        assert!(!s.notice.starts_with("recover-failed:"), "{:?}", s.notice);
+        assert!(tokio::time::Instant::now() < deadline, "the updated device never came back: {:?}", s.notice);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    lock_on(&[&updated], true).await;
+    assert_eq!(status(&mara).await.chain_sync.fork_decisions, 0);
+}

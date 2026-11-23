@@ -597,6 +597,10 @@ impl State {
         let ChainChange::Membership { op: MembershipOp::Restored, member, .. } = change else {
             return false;
         };
+        if self.lock_seam(&self.lock_seams.hold_restore_seals) {
+            self.chain.seal_held.insert(id);
+            return true;
+        }
         let Some(why) = self.restore_gate(member) else {
             self.recovery.held_seals.remove(&id);
             if settle && self.restore_settling(id) {

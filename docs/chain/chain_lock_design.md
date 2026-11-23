@@ -801,23 +801,38 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   and 3-of-5 stall together). Modelled: `a_liar_stalls_only_while_m_minus_one_seats_are_away`
   (2-of-3, 2-of-5, 3-of-5, 4-of-7 with m - 1 away and back decide; 2-of-5
   with one away for good stalls in 150 of 150 runs).
-  Liveness exit: a value only the leader (or one seat) holds has no
-  evidence. A seat withholds it (`lock=withheld reason=needs approval`),
-  its status reads `decision <id> may already be made - approve to
-  complete it`, and an `approve` of that card is accepted although the
-  card is withdrawn; every other approve of a withdrawn card stays
-  refused (`AlreadyTerminal`). MCP `approve` works; the board shows the
-  card as withdrawn and the window has no control for it yet (required,
-  wiring plan §12). How often honest runs reach it (the simulation, 150
-  runs per shape, 15 % / 45 % frame loss): 2-of-3 in 22-53 runs (a seat
-  dying or coming back raises it); 3-of-5 and larger at most 1 run; n-of-n
-  never. Expect operators of 2-of-3 republics to see it.
+  Liveness exit, staged: a value only one seat holds has no evidence. A
+  seat withholds it (`lock=withheld reason=needs approval`); its status
+  first reads `decision <id>: waiting for <seats>` (the seats whose
+  acceptance would vouch for it), the leader's resends recompute the
+  evidence, and the wait ends by itself once one of them is heard. Only
+  after one retry interval (the leader's retransmit step, no new clock)
+  without that does it read `decision <id> may already be made - approve
+  to complete it`, and then an `approve` of that card is accepted
+  although the card is withdrawn; before that, and for every other
+  withdrawn card, approve stays refused (`AlreadyTerminal`). A seat that
+  approved the card itself is never asked: it accepts on its own intent
+  (`a_seat_that_approved_the_card_is_never_prompted`). MCP `approve`
+  works; the board shows the card as withdrawn and the window has no
+  control for it yet (required before the mode is offered, wiring plan
+  §12). How often honest runs show the prompt (the simulation, 150 runs
+  per shape, the prompt after 20 steps of waiting): 2-of-3 in 21-29 runs
+  at 1-15 % frame loss, 31-43 where a seat dies or comes back - it does
+  not fall with less loss: it arises where the forced value's card was
+  not approved by this seat (the model approves 85 % of cards), so it
+  tracks how often members leave cards unapproved, not the network;
+  3-of-5 and larger at most 3 runs; n-of-n is not offered. Expect
+  operators of 2-of-3 republics to see it.
   Size: under the mode the propose and wire gates also bound the largest
   lock frame (`proposals::lock_frame_plaintext_len`: a forced Accept with
   the change and two evidence signatures, a promise with the change and
   one); with two seats these outgrow the block by about 180 B, so the
   largest payload is 96 575 B instead of 96 754 B under a 97 508 B
-  ceiling (`a_forced_accept_with_evidence_fits_the_transport`). Additive
+  ceiling (`a_forced_accept_with_evidence_fits_the_transport`). A card
+  registered just before the mode turned on and within that margin is
+  refused at the lock stage - `the proposal is 1 KiB over what this
+  republic's relays carry` at approve, never chosen - and stays
+  withdrawable (`a_card_too_large_for_the_lock_frames_is_refused_and_withdrawable`). Additive
   wire: `LockAccept.evidence` and `LockAcceptedValue.sig` are skipped
   when empty (the old byte pins hold), filled pins are added, and an
   older reader ignores them.
@@ -841,6 +856,52 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   needs a newer build`, told to the rejoiner;
   `a_rejoiner_on_a_build_without_the_mode_is_refused`). The release rule
   covers only a seat that was already there when the mode came on.
+  Why it holds without a signed capability (item 7): every seat of a
+  republic in the mode keeps workspace version 4, so no seat goes back to
+  a build without it; the enabling vote needs every seat capable; a seat
+  without it can only enter by a restore, and every coordinator is a
+  capable seat. But not only at the request: schedule (2-of-3 A, B, Z,
+  the mode off) - Z rejoins from a build without it; A proposes R(Z)
+  (correctly, the mode is off); the enabling vote seals while R(Z) still
+  waits; R(Z) then seals under the mode, and A's re-key would welcome a
+  device that signs freely. So the coordinator keeps each request's
+  declared capabilities and, at the seal, withholds the re-key and
+  Welcome where the chain runs the mode and the device lacks it
+  (`restore=unwelcomed`; the coordinator shows `<member> re-admitted on
+  the chain, device not welcomed: needs a newer build`, the rejoiner
+  `this republic uses Strict Order Mode - needs a newer build`). The
+  seat stays restored on the chain with no device in the group. The
+  updated device's retry of the same link is answered `link outdated`
+  (its anchor is in the chain, review R2); a new link restores it again
+  and welcomes it. The identity key is phrase-derived and unchanged by a
+  restore: an old device keeps its MLS leaf and its signatures verify
+  until a re-key removes the leaf. Second guard: the enabling vote is
+  refused at propose and approve while a restore card is open (`Strict
+  Order Mode waits for a pending restore`) - not load-bearing, the vote
+  may be signed before the card appears. Pinned:
+  `a_device_without_the_mode_is_not_welcomed_and_comes_back_on_a_new_link`
+  (relays, the schedule end to end with the race staged by a seam, then
+  the same link and a new one), `a_restore_under_the_mode_does_not_welcome_a_device_without_it`,
+  `an_open_restore_holds_the_enabling_vote`.
+- **Not offered where m = n.** Every value needs every seat there. A
+  seat lost between the others' acceptance of a value and its own pins
+  that height for good: the value is forced (n - 1 holders + the lost
+  seat >= n) and needs the lost seat, which may have sealed it alone on
+  its own device, so no restore may take the height. Free signing has no
+  such halt (an unsealed value stays open; the restore seals with n - 1
+  signatures and the consent). With amnesia's lack of a safe return
+  there, the enabling vote is refused at propose and approve (`Strict
+  Order Mode needs fewer approvals per decision than members`,
+  `the_mode_is_not_offered_where_every_seat_must_approve`). Modelled:
+  `where_m_equals_n_a_seat_lost_mid_height_halts` (a seat dies mid-run:
+  3-of-3 halts in 126, 2-of-2 in 63 of 150 runs; the same shape with
+  m < n decides). No safe escape: superseding the pinned value by a
+  restore that all n - 1 survivors accept is what free signing does, and
+  forks when the lost device returns with the value sealed.
+- **A seat never accepts its own restore, on any path** (explorer 3):
+  `lock_acceptor_accept` refuses it before the forced and the kept paths
+  - the count and the seal filtered it before, but no filter stands in
+  for a refusal (`a_seat_never_accepts_its_own_restore_even_forced`).
 - **Amnesia (decided rule, modelled in `lock_sim`, not built).** A seat
   that lost its lock state asks the others; only seats that hold their
   own state answer - an amnesiac seat does not answer at all and says so

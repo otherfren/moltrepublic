@@ -260,6 +260,17 @@ impl State {
         if let Some(why) = self.lock_enable_blocker(&change) {
             return Some(why);
         }
+        // item 3: a card registered before the mode turned on may be too
+        // large for its lock frames - it stays open and withdrawable
+        if let ChainChange::Applied { surface, payload, .. } = &change {
+            if self.lock_enabled() {
+                let framed = crate::proposals::lock_frame_plaintext_len(*surface, payload, &self.roster());
+                let ceiling = crate::proposals::transport_plaintext_ceiling();
+                if framed > ceiling {
+                    return Some(format!("the proposal is {} KiB over what this republic's relays carry", (framed - ceiling).div_ceil(1024)));
+                }
+            }
+        }
         if self.chain_unsettled() {
             if CutKind::of(&change).is_some() {
                 return Some(CUT_WAIT.to_string());
@@ -1156,7 +1167,13 @@ impl State {
                 // pattern (the committer also cleans by id upstream).
                 self.settle_membership_records(&block.change);
                 self.recovery.mesh_extension_at.remove(member);
-                if self.coordinates_restore(member, &block.change) {
+                // item 7: a device without Strict Order Mode is not welcomed
+                // into a republic that runs it
+                let unwelcomed = self.coordinates_restore(member, &block.change)
+                    && self.recovery.pending.get(member).cloned().is_some_and(|p| self.restore_unwelcomed(member, &p));
+                if unwelcomed {
+                    self.recovery.pending.remove(member);
+                } else if self.coordinates_restore(member, &block.change) {
                     // the completed checklist, BEFORE the re-key consumes the
                     // pending entry: the live per-approval frames stop at the
                     // seal (`push_recover_progress` reports only while the
