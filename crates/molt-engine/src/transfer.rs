@@ -147,8 +147,6 @@ impl DestSpec {
     }
 }
 
-/// The final path a resolved destination writes to: the exact file when the
-/// caller named one (overwrite), otherwise the first free collision variant.
 /// Where a fetch lands: the resolved destination with its directory
 /// created, and the `.part` path the bytes go into before the rename.
 #[derive(Clone)]
@@ -208,12 +206,43 @@ fn sweep_stale_spills(dir: &Path) {
 /// directory or the default location dodges collisions instead. A failed
 /// rename removes the `.part`.
 fn finish_landing(landing: &Landing) -> Result<PathBuf, String> {
-    let final_path = final_path(&landing.resolved);
-    std::fs::rename(&landing.part, &final_path).map_err(|e| {
+    let placed = if landing.resolved.exact {
+        let path = landing.resolved.dir.join(&landing.resolved.name);
+        std::fs::rename(&landing.part, &path).map(|()| path)
+    } else {
+        place_no_clobber(&landing.part, &landing.resolved.dir, &landing.resolved.name)
+    };
+    placed.map_err(|e| {
         let _ = std::fs::remove_file(&landing.part);
         format!("moving into place: {e}")
-    })?;
-    Ok(final_path)
+    })
+}
+
+/// Move `part` to the first free collision variant of `dir/name`. The
+/// name is claimed atomically (a hard link, else an exclusive create the
+/// rename then replaces), so two landings never pick the same free name.
+fn place_no_clobber(part: &Path, dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    use std::io::ErrorKind::AlreadyExists;
+    for candidate in collision_variants(dir, name) {
+        match std::fs::hard_link(part, &candidate) {
+            Ok(()) => {
+                let _ = std::fs::remove_file(part);
+                return Ok(candidate);
+            }
+            Err(e) if e.kind() == AlreadyExists => continue,
+            Err(_) => {}
+        }
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(_) => {
+                return std::fs::rename(part, &candidate).map(|()| candidate.clone()).inspect_err(|_| {
+                    let _ = std::fs::remove_file(&candidate);
+                });
+            }
+            Err(e) if e.kind() == AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!("u32 collision counter exhausted")
 }
 
 /// The last half of a landing that hashes what ACTUALLY landed: cut to
@@ -256,14 +285,6 @@ fn verify_and_finish(
     finish_landing(landing)
 }
 
-fn final_path(resolved: &ResolvedDest) -> PathBuf {
-    if resolved.exact {
-        resolved.dir.join(&resolved.name)
-    } else {
-        resolve_collision(&resolved.dir, &resolved.name)
-    }
-}
-
 /// A share's file name is peer input — keep only the last path component
 /// so a hostile name ("../../.bashrc") cannot escape the destination.
 fn sanitize_file_name(name: &str) -> String {
@@ -280,26 +301,16 @@ fn sanitize_file_name(name: &str) -> String {
     }
 }
 
-/// First free variant of `dir/name`: `name.ext`, `name (1).ext`, …
-fn resolve_collision(dir: &Path, name: &str) -> PathBuf {
-    let candidate = dir.join(name);
-    if !candidate.exists() {
-        return candidate;
-    }
+/// The names a collision dodge tries, in order: `name.ext`, `name (1).ext`, …
+fn collision_variants<'a>(dir: &'a Path, name: &'a str) -> impl Iterator<Item = PathBuf> + 'a {
     let (stem, ext) = match name.rsplit_once('.') {
-        Some((s, e)) if !s.is_empty() => (s.to_string(), Some(e.to_string())),
-        _ => (name.to_string(), None),
+        Some((s, e)) if !s.is_empty() => (s, Some(e)),
+        _ => (name, None),
     };
-    for n in 1u32.. {
-        let next = match &ext {
-            Some(e) => dir.join(format!("{stem} ({n}).{e}")),
-            None => dir.join(format!("{stem} ({n})")),
-        };
-        if !next.exists() {
-            return next;
-        }
-    }
-    unreachable!("u32 collision counter exhausted")
+    std::iter::once(dir.join(name)).chain((1u32..).map(move |n| match ext {
+        Some(e) => dir.join(format!("{stem} ({n}).{e}")),
+        None => dir.join(format!("{stem} ({n})")),
+    }))
 }
 
 /// Parse a [`ReplyHandover`] into a send address + wrap key.
@@ -1870,6 +1881,43 @@ pub(crate) fn spawn_mirror_assembly(
 mod tests {
     use super::*;
     use molt_net::{LoopbackHub, LoopbackTransport};
+
+    /// Downloads finishing together under one name each keep their own
+    /// file: the collision dodge never lets one rename clobber another.
+    #[test]
+    fn concurrent_landings_under_one_name_never_clobber() {
+        const N: usize = 16;
+        for round in 0..20 {
+            let dir = tempfile::tempdir().expect("dir");
+            let dest = DestSpec {
+                explicit: Some(dir.path().display().to_string()),
+                default_dir: String::new(),
+            };
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(N));
+            let landed: Vec<PathBuf> = (0..N)
+                .map(|i| {
+                    let landing =
+                        prepare_landing(&dest, "charter.pdf", &format!("{round}-{i}")).expect("landing");
+                    std::fs::write(&landing.part, format!("copy {i}")).expect("part");
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        finish_landing(&landing).expect("lands")
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|t| t.join().expect("thread"))
+                .collect();
+            let mut bodies: Vec<String> = landed
+                .iter()
+                .map(|p| std::fs::read_to_string(p).expect("landed file"))
+                .collect();
+            bodies.sort_unstable();
+            bodies.dedup();
+            assert_eq!(bodies.len(), N, "round {round}: a landing overwrote another");
+        }
+    }
 
     /// The files export writes every complete share once, collision-dodged,
     /// and counts a copy that misses its checksum as failed, not written.

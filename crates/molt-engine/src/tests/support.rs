@@ -160,6 +160,32 @@ pub(super) async fn await_file(path: &std::path::Path, content: &[u8]) {
     }
 }
 
+/// The download's completion as the engine reports it (the file on disk
+/// lands a moment earlier); its landed path.
+pub(super) async fn await_download_done(
+    events: &mut tokio::sync::broadcast::Receiver<Event>,
+    id: molt_core::MessageId,
+) -> String {
+    let done = async {
+        loop {
+            match events.recv().await {
+                Ok(Event::FileTransfer { id: got, phase: molt_core::TransferPhase::Done { path } }) if got == id => {
+                    return path;
+                }
+                Ok(Event::FileTransfer { id: got, phase: molt_core::TransferPhase::Failed { reason } }) if got == id => {
+                    panic!("download failed: {reason}");
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(e) => panic!("event stream ended: {e}"),
+            }
+        }
+    };
+    // only catches a hung test
+    tokio::time::timeout(std::time::Duration::from_secs(180), done)
+        .await
+        .expect("the download never finished")
+}
+
 /// Poll the session until the in-flight export settles (~Argon2-bounded).
 pub(super) async fn await_export(w: &WalletHandle) -> molt_core::ExportState {
     for _ in 0..600 {

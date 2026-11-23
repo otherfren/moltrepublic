@@ -134,19 +134,18 @@ fn file_share_lifecycle_download_until_removed() {
         // name collision resolves as "name (1).ext", never overwrites
         let dest = tmp.path().join("dl");
         std::fs::create_dir_all(&dest).expect("dest");
-        w.execute(Command::DownloadFile {
-            id: share_id,
-            dest: Some(dest.display().to_string()),
-        })
-        .await
-        .expect("download works while available");
+        let download = || Command::DownloadFile { id: share_id, dest: Some(dest.display().to_string()) };
+        let mut events = w.subscribe();
+        // one download per share at a time: a request while one runs is
+        // refused out loud, never dropped
+        let (first, again) = tokio::join!(w.execute(download()), w.execute(download()));
+        first.expect("download works while available");
+        assert!(matches!(again, Err(MoltError::BadPayload(m)) if m.contains("already downloading")));
+        let landed = await_download_done(&mut events, share_id).await;
+        assert_eq!(landed, dest.join("charter.pdf").display().to_string());
         await_file(&dest.join("charter.pdf"), content).await;
-        w.execute(Command::DownloadFile {
-            id: share_id,
-            dest: Some(dest.display().to_string()),
-        })
-        .await
-        .expect("second download");
+        w.execute(download()).await.expect("second download");
+        await_download_done(&mut events, share_id).await;
         await_file(&dest.join("charter (1).pdf"), content).await;
 
         // … the sharer removes it locally → permanently unavailable
