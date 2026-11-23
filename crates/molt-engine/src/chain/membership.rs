@@ -1529,7 +1529,7 @@ impl State {
         // (`cmd_net_recover_announced`), which a Nostr republic has no
         // equivalent of. It does have a stronger one: this re-key runs only
         // behind a threshold-committed `Restored` block for exactly this seat.
-        self.reset_peer_accept_window(&member.to_string());
+        self.reset_after_rekey(member);
         // the rejoiner's trust root, over the same 445 channel it just
         // joined - unless it verified the anchor before the seal (B4)
         if !anchor_first {

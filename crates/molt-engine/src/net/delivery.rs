@@ -55,6 +55,24 @@ const SESSION_MAX: usize = 65_536;
 /// Re-publications of a listed seq that never landed before it is given up.
 const LISTED_TRIES: u8 = 3;
 
+/// Dropped frames newer than anything accepted that make one episode, and
+/// consecutive fresh accepts that end it.
+const DUP_EPISODE_MIN: u32 = 32;
+
+/// One sender's run of frames dropped as already seen although authored
+/// after everything accepted from it this session.
+#[derive(Debug, Default)]
+pub(crate) struct DupEpisode {
+    /// Newest stamp accepted from the sender this session.
+    fresh_ts: u64,
+    first_seq: u64,
+    last_seq: u64,
+    count: u32,
+    warned: bool,
+    /// Fresh accepts since the last counted drop.
+    clean: u32,
+}
+
 /// One missing seq of a sender's stream.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Gap {
@@ -244,6 +262,102 @@ impl State {
         // held successors chain into the OLD incarnation's seq space; the
         // new incarnation resends its own history anyway (G7)
         self.delivery.inbound.remove(member);
+        self.delivery.dups.remove(member);
+    }
+
+    /// [`Self::reset_peer_accept_window`], leaving an empty window keyed
+    /// `restore` so the same restore never resets it again (§11).
+    fn forget_incarnation(&mut self, member: &str, restore: &str, via: &str) {
+        let member = member.to_string();
+        let high = self.delivery.accepted.get(&member).map_or(0, |w| w.high);
+        self.reset_peer_accept_window(&member);
+        let window = molt_core::AcceptedWindow { restore: restore.to_string(), ..Default::default() };
+        self.delivery.accepted.insert(member.clone(), window);
+        self.delivery.accepted_dirty = true;
+        tracing::info!(%member, high, via, "accept_window_reset");
+    }
+
+    /// A re-key commit merged that re-admitted `member`. Always safe: before
+    /// the merge no frame of the new device can be decrypted here, so the
+    /// window holds the old incarnation only.
+    pub(crate) fn reset_after_rekey(&mut self, member: &str) {
+        self.forget_incarnation(member, molt_core::RESTORE_REKEYED, "rekey");
+    }
+
+    /// A `Restored` block for `member` installing `anchor` is applied: reset
+    /// unless this window already counts under that restore. A window reset
+    /// by the re-key merge is adopted, not reset: the new device may have
+    /// delivered into it since.
+    pub(crate) fn reset_for_restore(&mut self, member: &str, anchor: &str) {
+        if anchor.is_empty() || member == self.member() || self.drop_seam.keeps_window_on_block() {
+            return;
+        }
+        match self.delivery.accepted.get_mut(member) {
+            Some(w) if w.restore == anchor => {}
+            Some(w) if w.restore == molt_core::RESTORE_REKEYED => {
+                w.restore = anchor.to_string();
+                self.delivery.accepted_dirty = true;
+            }
+            _ => self.forget_incarnation(member, anchor, "block"),
+        }
+    }
+
+    /// At open: every restored seat whose window does not count under the
+    /// chain's latest restore of it is reset once - the state a lost reset
+    /// left behind, and every window an older build wrote for a restored
+    /// seat. A merge-reset window waits for its block.
+    pub(crate) fn reconcile_restore_windows(&mut self) {
+        let me = self.member();
+        let mut anchors: Vec<(MemberId, String)> =
+            self.chain.anchors.iter().filter(|(m, _)| **m != me).map(|(m, a)| (m.clone(), a.clone())).collect();
+        anchors.sort();
+        for (member, anchor) in anchors {
+            let restore = self.delivery.accepted.get(&member).map(|w| w.restore.as_str());
+            if restore != Some(anchor.as_str()) && restore != Some(molt_core::RESTORE_REKEYED) {
+                self.forget_incarnation(&member, &anchor, "open");
+            }
+        }
+    }
+
+    /// `member`'s current drop episode size once it warned, else 0.
+    pub(crate) fn dup_streak(&self, member: &str) -> u32 {
+        self.delivery.dups.get(member).filter(|e| e.warned).map_or(0, |e| e.count)
+    }
+
+    /// The fault signature of a window that predates the sender's restore:
+    /// dropped frames authored after everything accepted from it, at rising
+    /// seqs. A resend round re-offers frames this node accepted, so their
+    /// stamps are never newer.
+    pub(super) fn note_dup(&mut self, from: &MemberId, seq: u64, ts: u64) {
+        let e = self.delivery.dups.entry(from.clone()).or_default();
+        if ts <= e.fresh_ts || (e.count > 0 && seq <= e.last_seq) {
+            return;
+        }
+        if e.count == 0 {
+            e.first_seq = seq;
+        }
+        e.count = e.count.saturating_add(1);
+        e.last_seq = seq;
+        e.clean = 0;
+        if e.count == DUP_EPISODE_MIN && !e.warned {
+            e.warned = true;
+            tracing::warn!(%from, first_seq = e.first_seq, last_seq = seq, count = e.count, "dup_streak");
+        }
+    }
+
+    pub(super) fn note_fresh(&mut self, from: &MemberId, ts: u64) {
+        let Some(e) = self.delivery.dups.get_mut(from) else {
+            self.delivery.dups.insert(from.clone(), DupEpisode { fresh_ts: ts, ..Default::default() });
+            return;
+        };
+        e.fresh_ts = e.fresh_ts.max(ts);
+        e.clean = e.clean.saturating_add(1);
+        if e.clean >= DUP_EPISODE_MIN && e.count > 0 {
+            if e.warned {
+                tracing::info!(%from, count = e.count, "dup_streak_cleared");
+            }
+            *e = DupEpisode { fresh_ts: e.fresh_ts, ..Default::default() };
+        }
     }
 
     /// Mark `seq` from `from` as engine-accepted (delivery guarantee §4.2 —
@@ -251,6 +365,11 @@ impl State {
     /// held it: the envelope is a duplicate/resend and the caller drops it
     /// (G2). Freshness dirties the window for the debounced persist.
     pub(crate) fn accept_envelope(&mut self, from: &MemberId, seq: u64) -> bool {
+        // a window born now counts under the sender's latest restore
+        if !self.delivery.accepted.contains_key(from) {
+            let restore = self.chain.anchors.get(from).cloned().unwrap_or_default();
+            self.delivery.accepted.insert(from.clone(), molt_core::AcceptedWindow { restore, ..Default::default() });
+        }
         let fresh = self.delivery.accepted.entry(from.clone()).or_default().accept(seq);
         if fresh {
             self.delivery.accepted_dirty = true;

@@ -5378,6 +5378,7 @@ mod tests {
                 acked_floor: 5,
                 ack_seen: true,
                 resend_epoch: 1,
+                ..Default::default()
             },
         );
         ws.write_transport_state(&ts).expect("transport state");

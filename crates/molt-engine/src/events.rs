@@ -845,6 +845,7 @@ impl State {
         self.delivery.ack_due.clear();
         self.delivery.last_own_ackable = 0;
         self.delivery.inbound.clear();
+        self.delivery.dups.clear();
         // send-failure presence pins belong to the OLD workspace's mesh —
         // dropping them stops a same-named member showing offline in the next
         self.delivery.unreachable.clear();
