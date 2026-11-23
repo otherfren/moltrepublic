@@ -76,6 +76,11 @@ pub(crate) struct DropSeam {
     pub(crate) refuse_saves: std::sync::atomic::AtomicBool,
     /// The head beacon goes out on the next beat.
     pub(crate) beacon_now: std::sync::atomic::AtomicBool,
+    /// The ratchet persist debounce in seconds plus one (0 = the constant).
+    pub(crate) mls_debounce: std::sync::atomic::AtomicU64,
+    /// A re-key stops the group runtime before its commit is logged and
+    /// publishes nothing: the node as killed right after the persist.
+    pub(crate) park_rekey: std::sync::atomic::AtomicBool,
 }
 
 impl DropSeam {
@@ -85,6 +90,17 @@ impl DropSeam {
 
     pub(crate) fn take_regress(&self) -> Option<(MemberId, u64)> {
         self.regress.lock().ok().and_then(|mut r| r.take())
+    }
+
+    pub(crate) fn parks_rekey(&self) -> bool {
+        self.park_rekey.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn mls_persist_secs(&self, default: u64) -> u64 {
+        match self.mls_debounce.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => default,
+            v => v - 1,
+        }
     }
 
     pub(crate) fn refuses_window_saves(&self) -> bool {
@@ -870,6 +886,9 @@ impl State {
     /// Restart the group runtime on the current dialable set, or park its
     /// ratchet while there is none.
     fn rebuild_group_net(&mut self) {
+        if self.drop_seam.parks_rekey() && self.group_net.is_none() {
+            return;
+        }
         let mls = match self.group_net.take() {
             // the drop latches the stop; the old outbox ends at its next poll
             Some(old) => old.mls.clone(),
