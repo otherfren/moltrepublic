@@ -1244,6 +1244,8 @@ pub(crate) struct ChainProjection {
     /// last counted round.
     pub(crate) requests_sent: u64,
     pub(crate) round_marks: BTreeMap<(MemberId, bool), u64>,
+    /// H1: per peer, the seq of the newest `ChainRequest` acted on.
+    pub(crate) request_seq: BTreeMap<MemberId, u64>,
     /// B7: the sealing lock (`chain/lock_wire.rs`).
     pub(crate) lock: chain::LockRuntime,
 }

@@ -237,3 +237,79 @@ fn an_identical_log_line_is_throttled_per_minute() {
     hear(&mut walter, T + 60);
     assert_eq!(walter.log_gate("served:petra", "from=2 blocks=1"), Some(1), "a minute later");
 }
+
+fn reported_head(st: &crate::State, member: &str) -> Option<u64> {
+    let mut seats = st.seat_syncs(&std::collections::HashSet::new());
+    st.fill_seat_reports(&mut seats);
+    seats.into_iter().find(|s| s.member == member).and_then(|s| s.head_height)
+}
+
+fn committed_sent(st: &crate::State) -> usize {
+    st.chain.lock.outbox.iter().filter(|e| matches!(e.body, WorkspaceEvent::Committed(_))).count()
+}
+
+/// Review H1/L3: a re-delivered run of a peer's old beacons is history -
+/// no heal round, no serve, no divergence clear, no seat head move.
+#[test]
+fn a_re_delivered_run_of_old_beacons_is_history() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit(note(1, "x1"), &["petra", "walter"]);
+    b.commit(note(2, "x2"), &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    hear(&mut walter, T);
+    wire(&mut walter, "petra", 20, head_report(&b, 2));
+    assert_eq!(reported_head(&walter, "petra"), Some(2));
+    walter.chain.diverged.insert(
+        "petra".to_string(),
+        molt_core::ChainDivergence { peer: "petra".to_string(), since_height: 2, seen_ts: T },
+    );
+    let served = committed_sent(&walter);
+    for seq in [10u64, 11, 12] {
+        hear(&mut walter, T + 100 * seq);
+        wire(&mut walter, "petra", seq, head_report(&b, 1));
+    }
+    assert!(walter.chain_sync().heal_stuck.is_none(), "no rounds");
+    assert_eq!(committed_sent(&walter), served, "nothing served");
+    assert!(walter.chain.diverged.contains_key("petra"), "no clear");
+    assert_eq!(reported_head(&walter, "petra"), Some(2), "the seat head stays");
+}
+
+/// walter on `g, x1, x2, x3`; petra's fork block `y2` on the shared `x1`
+/// loses the fork rule.
+fn walter_and_a_fork_above_a_shared_prefix() -> (crate::State, Builder, ChainBlock) {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit(note(1, "x1"), &["petra", "walter"]);
+    let x2 = b.seal(2, note(2, "x2"), &["petra", "walter"]);
+    let y2 = (0..64)
+        .map(|i| b.seal(2, note(9, &format!("fork {i}")), &["petra", "walter"]))
+        .find(|y| block_hash(&b.republic_id, y) > block_hash(&b.republic_id, &x2))
+        .expect("a losing block");
+    b.push(x2);
+    b.commit(note(3, "x3"), &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    hear(&mut walter, T);
+    (walter, b, y2)
+}
+
+/// Review R4: a newer duplicate of a SHARED block proves nothing about a
+/// fork above it - the late fork block still marks its sender.
+#[test]
+fn a_shared_prefix_duplicate_does_not_excuse_a_later_fork_block() {
+    let (mut walter, b, y2) = walter_and_a_fork_above_a_shared_prefix();
+    wire(&mut walter, "petra", 11, WorkspaceEvent::Committed(b.blocks[1].clone()));
+    wire(&mut walter, "petra", 10, WorkspaceEvent::Committed(y2));
+    assert!(walter.chain.diverged.contains_key("petra"), "the fork block marks petra");
+}
+
+/// Review R4, the clearing twin: a duplicate below the fork height does
+/// not clear the mark; one at it does.
+#[test]
+fn only_a_duplicate_at_the_fork_height_clears_a_divergence() {
+    let (mut walter, b, y2) = walter_and_a_fork_above_a_shared_prefix();
+    wire(&mut walter, "petra", 10, WorkspaceEvent::Committed(y2));
+    assert!(walter.chain.diverged.contains_key("petra"));
+    wire(&mut walter, "petra", 11, WorkspaceEvent::Committed(b.blocks[1].clone()));
+    assert!(walter.chain.diverged.contains_key("petra"), "a shared block proves nothing");
+    wire(&mut walter, "petra", 12, WorkspaceEvent::Committed(b.blocks[2].clone()));
+    assert!(walter.chain.diverged.is_empty(), "our block at the fork height does");
+}

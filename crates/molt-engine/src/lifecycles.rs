@@ -240,7 +240,7 @@ impl State {
         self.next_seq = 2;
         // adopt the chain + the runtime signing key (reset cleared them above).
         // A pruned recovery re-anchors on its blob BEFORE adopting — without
-        // it, verify_own would run the genesis rules against a suffix and
+        // it, walk_own would run the genesis rules against a suffix and
         // wipe the chain (review finding: the session was chainless until
         // the next reopen)
         if !chain.is_empty() {

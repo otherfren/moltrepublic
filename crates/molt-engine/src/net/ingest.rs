@@ -646,10 +646,20 @@ impl State {
             WorkspaceEvent::VoteRefused { id, voter, head, .. }
                 if self.is_chain_governed() && voter == self.member() =>
             {
+                // a replayed refusal must not raise a stale notice (L5)
+                let fresh = self.chain.peer_claim_seq.get(&from).map_or(true, |last| envelope.seq > *last);
                 self.note_peer_claim(&from, head, Some(envelope.seq), crate::chain::PeerClaim::Head);
-                let _ = self.cmd_net_vote_refused(id, &from, head);
+                if fresh {
+                    let _ = self.cmd_net_vote_refused(id, &from, head);
+                }
             }
             WorkspaceEvent::ChainRequest { from_height, known } if self.is_chain_governed() => {
+                // a re-delivered old request is history: no round, no serve,
+                // no clear, no seat head (review H1)
+                if !self.fresh_chain_request(&from, envelope.seq) {
+                    tracing::debug!(%from, seq = envelope.seq, "chain_catchup=stale");
+                    return Ok(Reply::Ack);
+                }
                 tracing::info!(%from, from_height, known = known.len(), "chain_catchup=received");
                 // A5: the requester's own samples say where it stands
                 if let Some(top) = known.iter().max_by_key(|h| h.height) {

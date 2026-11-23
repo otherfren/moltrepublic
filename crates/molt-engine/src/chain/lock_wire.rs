@@ -1953,6 +1953,10 @@ impl State {
     /// it decided, leave amnesia once past the floor, and let the default
     /// leader open the next slot at once (§5).
     pub(crate) fn lock_on_head_moved(&mut self) {
+        // dark: nothing here holds state a dark build keeps (review R1)
+        if !self.lock_listens() {
+            return;
+        }
         let Some(head) = self.chain.head.as_ref().map(|h| h.height) else { return };
         // B-F1/D-F1: never forget a slot that can still be contended - one
         // above the chain on disk, or inside the reorg window above the
@@ -1993,9 +1997,11 @@ impl State {
         }
         lock.approved_forced.clear();
         // F2: an applied card's approval approves nothing any more
-        let chain = &mut self.chain;
-        if let Some(w) = chain.walk.as_ref() {
-            chain.own_approvals.retain(|id| !w.seen.contains(id));
+        if self.lock_enabled() {
+            let chain = &mut self.chain;
+            if let Some(w) = chain.walk.as_ref() {
+                chain.own_approvals.retain(|id| !w.seen.contains(id));
+            }
         }
         // a completion card whose height decided without it goes
         let stale: Vec<u64> = self

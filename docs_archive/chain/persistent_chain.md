@@ -197,7 +197,8 @@ state; a signature is only its expression at one head+1.
 
 - The stance register is `own_approvals` (persisted). A decline or a
   withdraw removes the card from it; nothing else does while the card is
-  open. A card displaced by a tip swap or a re-base re-enters it when the
+  open, and with Strict Order Mode dark an applied card is not pruned
+  from it either (the wallet's consent reads it after the init applied). A card displaced by a tip swap or a re-base re-enters it when the
   displaced block carries this seat's signature or the card's stashed
   voters name it.
 - Whenever the head+1 a seat would sign at changes - append, tip swap,
@@ -216,14 +217,24 @@ state; a signature is only its expression at one head+1.
   per standing card per heal.
 - `approve` on a card this seat already approved re-sends its signature
   and answers the same vote; it never counts twice.
+- An automatic re-sign passes every `sign_blocker` gate and the vault and
+  wallet checks of the signing path; it skips `approve`'s operator gates.
+  The lagging-vote refusal is feedback for a human (a re-sign at a stale
+  head is dropped by the peers and signed again when the head moves); the
+  feature, vault-enable and files checks judged the decision when it was
+  made, and a re-sign repeats that decision, it does not make a new one.
+- A tip swap stores the walk it verified with (`chain.walk`): a kept
+  stale walk still lists the displaced card as consumed.
 
 ### 7.2 Divergence is judged by the peer's latest report (v0.1.2)
 
 - A peer is marked diverged by a block of another branch only when no
   NEWER frame of that peer (by its log seq) showed it on this branch: a
   catch-up request whose top sample this node holds, a block it delivered
-  that extended this chain, or a duplicate of a block held here - and only
-  while this node still holds the block that frame named. A late first
+  that extended this chain, or a duplicate of a block held here - only
+  when that frame named a height at or above the block's (a shared block
+  below the fork proves nothing), and only while this node still holds
+  it. Likewise a duplicate clears a mark only at or above its fork height. A late first
   delivery of a block from a branch the peer has since left is dropped
   (`fork=stale_block`, debug): it is neither marked nor stashed.
 - A refused delivered block is logged as `refused a chain block height=
@@ -239,10 +250,13 @@ state; a signature is only its expression at one head+1.
   asker, the same refused (or unlinkable) block from the same peer. Three
   rounds in a row set `status.chain_sync.heal_stuck` (peer, since, height,
   rule) and announce it once through the `chain_heal_stuck` path (warning,
-  wake, chat line, notice). A head move of the asker, or a request at or
+  wake, chat line, notice) - so it is not purely diagnostic: one wake and
+  one chat line per stuck round. A head move of the asker, or a request at or
   beyond the server's head, ends the round. The rounds are part of the
   snapshot; after a restart one more round re-flags with the original
-  `since`. A divergence that went loud (`chain_heal_stuck` after 900 s)
+  `since`. Only the newest `ChainRequest` of a sender (by seq, per
+  incarnation) counts, serves, clears a divergence or sets the seat's
+  reported head; a re-delivered older one is history. A divergence that went loud (`chain_heal_stuck` after 900 s)
   reads there too.
 - `fork=unlinked` logs at info with both hashes and proposal ids; the
   `chain_catchup=requested` / `served` lines carry the first and last hash
