@@ -2604,6 +2604,7 @@ fn hear(st: &mut crate::State, now: u64, seats: &[&str]) {
         s3: false,
         size_kib: 0,
         last_backup_min: molt_core::WorkspaceInfo::NEVER,
+        backup_checked_min: molt_core::WorkspaceInfo::NEVER,
         backup_copies: 0,
         backup_error: String::new(),
         has_seed: false,

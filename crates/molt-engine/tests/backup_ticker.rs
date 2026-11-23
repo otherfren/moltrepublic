@@ -1041,3 +1041,243 @@ async fn a_replace_restore_lifts_the_hold_of_the_copy_it_replaces() {
     poll_session(&w, "uploaded", |sv| entry(sv, &id).last_backup_min != WorkspaceInfo::NEVER).await;
     assert_eq!(puts(), 1);
 }
+
+/// An in-process bucket: PUT stores the key, DELETE drops it, a listing
+/// names what the addressed bucket holds; `down` answers 503 to anything.
+#[derive(Clone, Default)]
+struct FakeBucket {
+    keys: Arc<Mutex<std::collections::BTreeMap<String, Vec<String>>>>,
+    down: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl FakeBucket {
+    fn router(&self) -> Router {
+        let b = self.clone();
+        Arc::new(move |method, path| {
+            if b.down.load(Ordering::SeqCst) {
+                return (503, String::new(), 0);
+            }
+            let path = path.trim_start_matches('/');
+            let (bucket, rest) = path.split_once(['/', '?']).unwrap_or((path, ""));
+            let key = rest.split('?').next().unwrap_or_default().to_string();
+            let mut keys = b.keys.lock().expect("bucket");
+            let held = keys.entry(bucket.to_string()).or_default();
+            match method {
+                "PUT" => {
+                    held.push(key);
+                    (200, String::new(), 0)
+                }
+                "DELETE" => {
+                    held.retain(|k| *k != key);
+                    (204, String::new(), 0)
+                }
+                _ => (200, listing_of(held), 0),
+            }
+        })
+    }
+
+    fn held(&self, bucket: &str) -> Vec<String> {
+        self.keys.lock().expect("bucket").get(bucket).cloned().unwrap_or_default()
+    }
+}
+
+fn count(log: &Arc<Mutex<Vec<Req>>>, method: &str) -> usize {
+    log.lock().expect("log").iter().filter(|r| r.method == method).count()
+}
+
+/// Wait until the request log holds `n` requests of `method`, then a beat
+/// for the reply to land on the actor.
+async fn wait_for(log: &Arc<Mutex<Vec<Req>>>, method: &str, n: usize) {
+    for _ in 0..300 {
+        if count(log, method) >= n {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!("{n} {method} requests did not arrive: {:?}", log.lock().expect("log"));
+}
+
+/// One backup interval passes, and the ticker decides.
+async fn next_interval(w: &molt_engine::WalletHandle) {
+    w.__backup_clock_ahead(86_400);
+    w.execute(Command::BackupTick).await.expect("tick");
+}
+
+type Harness = (molt_engine::WalletHandle, String, FakeBucket, Arc<Mutex<Vec<Req>>>);
+
+/// Found, enable, and run the first upload against a fake bucket.
+async fn first_backup(tmp: &std::path::Path) -> Harness {
+    let bucket = FakeBucket::default();
+    let (endpoint, log) = stub_server(bucket.router()).await;
+    let (w, id, _root) = founded_engine(tmp, &endpoint, 5).await;
+    w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+        .await
+        .expect("enable");
+    w.execute(Command::BackupTick).await.expect("tick");
+    poll_session(&w, "first upload", |sv| entry(sv, &id).last_backup_min != WorkspaceInfo::NEVER).await;
+    wait_for(&log, "PUT", 1).await;
+    assert_eq!(count(&log, "PUT"), 1);
+    (w, id, bucket, log)
+}
+
+/// Issue #7: an idle workspace is uploaded once, not once per interval;
+/// each later interval only checks the bucket still holds the copy.
+#[tokio::test]
+async fn an_idle_workspace_uploads_once_over_three_intervals() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (w, id, bucket, log) = first_backup(tmp.path()).await;
+    let listed = count(&log, "GET");
+    for i in 1..=3 {
+        next_interval(&w).await;
+        wait_for(&log, "GET", listed + i).await;
+    }
+    assert_eq!(count(&log, "PUT"), 1, "{:?}", log.lock().expect("log"));
+    assert_eq!(count(&log, "GET"), listed + 3, "one existence listing per interval, no retention pass");
+    assert_eq!(bucket.held("molt-bucket").len(), 1);
+    let e = entry(&session(&w).await, &id);
+    assert_eq!(e.backup_checked_min, 0, "checked just now");
+    assert!(e.backup_error.is_empty());
+}
+
+/// Retention and the byte quota run only after an upload: a skipped
+/// interval deletes nothing, even with a copy beyond keep-copies listed.
+#[tokio::test]
+async fn retention_does_not_run_on_a_skipped_interval() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (w, id, bucket, log) = first_backup(tmp.path()).await;
+    let mut settings = session(&w).await.settings;
+    settings.s3_keep_copies = 1;
+    settings.s3_max_bytes = 1;
+    w.execute(Command::SaveSettings { settings }).await.expect("keep one");
+    bucket
+        .keys
+        .lock()
+        .expect("bucket")
+        .entry("molt-bucket".to_string())
+        .or_default()
+        .insert(0, molt_core::backup_key(&id, 1));
+    let listed = count(&log, "GET");
+    next_interval(&w).await;
+    wait_for(&log, "GET", listed + 1).await;
+    assert_eq!(count(&log, "PUT"), 1);
+    assert_eq!(count(&log, "DELETE"), 0, "{:?}", log.lock().expect("log"));
+}
+
+/// A content change is uploaded at the next interval, and the interval
+/// after it is idle again.
+#[tokio::test]
+async fn a_chat_message_is_uploaded_at_the_next_interval() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (w, _id, _bucket, log) = first_backup(tmp.path()).await;
+    w.execute(Command::Chat {
+        body: "one".to_string(),
+        quote: None,
+        channel: molt_core::ChannelRef::default(),
+    })
+    .await
+    .expect("chat");
+    next_interval(&w).await;
+    wait_for(&log, "PUT", 2).await;
+    let listed = count(&log, "GET");
+    next_interval(&w).await;
+    wait_for(&log, "GET", listed + 1).await;
+    assert_eq!(count(&log, "PUT"), 2, "idle again after the change");
+}
+
+/// Another bucket holds none of our copies: the next interval uploads there.
+#[tokio::test]
+async fn a_changed_bucket_uploads_again() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (w, _id, bucket, log) = first_backup(tmp.path()).await;
+    let mut settings = session(&w).await.settings;
+    settings.s3_bucket = "other-bucket".to_string();
+    w.execute(Command::SaveSettings { settings }).await.expect("save");
+    next_interval(&w).await;
+    wait_for(&log, "PUT", 2).await;
+    assert_eq!(bucket.held("other-bucket").len(), 1);
+}
+
+/// The local mark is trusted only while the bucket lists its object.
+#[tokio::test]
+async fn a_copy_deleted_from_the_bucket_is_uploaded_again() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (w, _id, bucket, log) = first_backup(tmp.path()).await;
+    bucket.keys.lock().expect("bucket").clear();
+    next_interval(&w).await;
+    wait_for(&log, "PUT", 2).await;
+    assert_eq!(bucket.held("molt-bucket").len(), 1);
+}
+
+/// A check that cannot reach the bucket is a failure, surfaced and tried
+/// again at the next tick - never a silent skip.
+#[tokio::test]
+async fn a_failed_check_is_reported_and_retried() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (w, id, bucket, log) = first_backup(tmp.path()).await;
+    bucket.down.store(true, Ordering::SeqCst);
+    next_interval(&w).await;
+    poll_session(&w, "honest failure", |sv| entry(sv, &id).backup_error.contains("503")).await;
+    bucket.down.store(false, Ordering::SeqCst);
+    let listed = count(&log, "GET");
+    w.execute(Command::BackupTick).await.expect("tick");
+    wait_for(&log, "GET", listed + 1).await;
+    assert!(entry(&session(&w).await, &id).backup_error.is_empty(), "the check passed");
+    assert_eq!(count(&log, "PUT"), 1);
+}
+
+/// "Backup now" uploads whether or not anything changed.
+#[tokio::test]
+async fn backup_now_uploads_unchanged_content() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (w, id, _bucket, log) = first_backup(tmp.path()).await;
+    w.execute(Command::BackupNow { id }).await.expect("backup now");
+    wait_for(&log, "PUT", 2).await;
+}
+
+/// The mark lives in the workspace's prefs: a restarted node does not
+/// upload an unchanged workspace again.
+#[tokio::test]
+async fn the_mark_survives_a_restart() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let bucket = FakeBucket::default();
+    let (endpoint, log) = stub_server(bucket.router()).await;
+    let (w, id, root) = founded_engine(tmp.path(), &endpoint, 5).await;
+    w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+        .await
+        .expect("enable");
+    w.execute(Command::CloseWorkspace).await.expect("close");
+    w.execute(Command::BackupTick).await.expect("tick");
+    wait_for(&log, "PUT", 1).await;
+    let settings = session(&w).await.settings;
+    drop(w);
+
+    let w = molt_engine::spawn_with_storage(
+        GroupConfig::demo(),
+        SessionView {
+            workspaces: molt_storage::scan_workspaces(&root)
+                .iter()
+                .map(molt_storage::ScanEntry::info)
+                .collect(),
+            settings,
+            ..SessionView::default()
+        },
+    );
+    let listed = count(&log, "GET");
+    next_interval(&w).await;
+    wait_for(&log, "GET", listed + 1).await;
+    assert_eq!(count(&log, "PUT"), 1, "{:?}", log.lock().expect("log"));
+}
+
+/// A mark names its target: another account on the same bucket uploads
+/// again even though the object is listed.
+#[tokio::test]
+async fn a_changed_access_key_uploads_again() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (w, _id, _bucket, log) = first_backup(tmp.path()).await;
+    let mut settings = session(&w).await.settings;
+    settings.s3_access_key = "AKIAOTHER".to_string();
+    w.execute(Command::SaveSettings { settings }).await.expect("save");
+    next_interval(&w).await;
+    wait_for(&log, "PUT", 2).await;
+}

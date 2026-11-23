@@ -3338,6 +3338,7 @@ impl ScanEntry {
             s3: self.prefs.s3_backup,
             size_kib: u32::try_from(self.size_kib).unwrap_or(u32::MAX),
             last_backup_min,
+            backup_checked_min: molt_core::WorkspaceInfo::NEVER,
             // bucket-side facts appear only from a real listing/attempt
             backup_copies: 0,
             backup_error: String::new(),

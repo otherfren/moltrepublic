@@ -190,6 +190,7 @@ pub struct WalletHandle {
     vault_seams: std::sync::Arc<net::vault_payload::VaultSeams>,
     wallet_seams: std::sync::Arc<wallet_run::WalletSeams>,
     seat_active: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    backup_skew: std::sync::Arc<std::sync::atomic::AtomicU64>,
     drop_seam: std::sync::Arc<net::DropSeam>,
     seal_first: std::sync::Arc<std::sync::atomic::AtomicBool>,
     lock_seams: std::sync::Arc<chain::LockSeams>,
@@ -322,6 +323,13 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __seat_active_secs(&self, secs: u64) {
         self.seat_active.store(secs, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: the backup ticker's clock runs `secs` further ahead, so
+    /// a test passes intervals without waiting. No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __backup_clock_ahead(&self, secs: u64) {
+        self.backup_skew.fetch_add(secs, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (B4): this coordinator ignores `anchor_first` and seals
@@ -687,6 +695,7 @@ fn spawn_actor(
     let farewells = state.farewells.clone();
     let wallet_seams = state.wallet_seams.clone();
     let seat_active = state.seat_active.clone();
+    let backup_skew = state.backup_skew.clone();
     let drop_seam = state.drop_seam.clone();
     let seal_first = state.seal_first.clone();
     let lock_seams = state.lock_seams.clone();
@@ -724,6 +733,7 @@ fn spawn_actor(
         vault_seams,
         wallet_seams,
         seat_active,
+        backup_skew,
         drop_seam,
         seal_first,
         lock_seams,
@@ -1665,6 +1675,11 @@ pub(crate) struct State {
     /// could not be persisted (read-only dir) does not trigger a full-blob
     /// re-upload every minute forever (review finding).
     pub(crate) backup_last_done: std::collections::HashMap<WorkspaceId, u64>,
+    /// When the backup ticker last found the bucket copy current
+    /// (backup-clock seconds). Runtime-only.
+    pub(crate) backup_last_checked: std::collections::HashMap<WorkspaceId, u64>,
+    /// Test seam: seconds the backup ticker's clock runs ahead.
+    pub(crate) backup_skew: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Workspaces whose last backup failed in a way a retry cannot heal (a
     /// damaged purse keys file): the ticker waits out the hold. Runtime-only.
     pub(crate) backup_hold: std::collections::HashMap<WorkspaceId, crate::backup::BackupHold>,
@@ -1983,6 +1998,8 @@ impl State {
             tor_test_gen: 0,
             backup_inflight: std::collections::HashSet::new(),
             backup_last_done: std::collections::HashMap::new(),
+            backup_last_checked: std::collections::HashMap::new(),
+            backup_skew: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             backup_hold: std::collections::HashMap::new(),
             purse: wallet::PurseRt::default(),
             backup_listing: None,
@@ -2575,7 +2592,13 @@ impl State {
                 bytes,
                 prune_error,
                 quota_error,
-            } => self.cmd_net_backup_done(id, ts, object, bytes, prune_error, quota_error),
+                fingerprint,
+                target,
+                unchanged,
+            } => self.cmd_net_backup_done(
+                id,
+                backup::Upload { ts, object, bytes, prune_error, quota_error, fingerprint, target, unchanged },
+            ),
             Command::NetBackupFailed { id, error, hold } => self.cmd_net_backup_failed(id, error, hold),
 
             // lifecycles.rs

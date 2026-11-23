@@ -582,6 +582,58 @@ Pruning runs in the same off-actor task as the upload (never on the actor).
 * Failure honesty end to end: no fake success anywhere; a failing bucket
   shows a red state and an aging "last backup" — exactly what is true.
 
+### 6.4a Unchanged content is not uploaded again (issue #7, 2026-11-23)
+
+An idle republic used to re-upload its whole blob and re-prune every
+interval. Now every confirmed upload leaves a **mark** in `prefs.toml`
+(`backup_mark`: content fingerprint, target fingerprint, object key), and a
+due interval uploads only when the content or the target differs.
+
+**The content fingerprint** (`molt_storage::export::export_backup`) is a
+SHA-256 (`molt-backup-fingerprint-v1`, length-prefixed per entry) over
+exactly the entries the blob carries, plus the export version and whether
+the seed rides along. Excluded, because they move without new content:
+
+| Left out | Why |
+|---|---|
+| `prefs.last_backup`, `prefs.backup_mark` | the backup's own bookkeeping - would dirty every upload |
+| `prefs.last_seen` | presence memory, moves with every sighting |
+| `wallet_scan.state` | the scanner's progress, a cache a rescan rebuilds; it still travels with the next real upload |
+
+A snapshot counts by its decrypted plaintext: a clean close rewrites the
+same state under a fresh nonce. Every other encrypted file (`chain.state`,
+bases, keys records) counts by its bytes, so a rewrite counts as a change
+even when its content did not move - conservative, at worst one extra
+upload. `transport.state` and the other §3.2 exclusions are not in the blob
+and so not in the fingerprint.
+
+**The target fingerprint** hashes endpoint (scheme, host, port, base path),
+region, bucket and access key - not the secret, a rotated key reaches the
+same objects. A mark for another target is ignored: the next interval
+uploads.
+
+**Trust.** A due interval with a matching mark first lists
+`molt/<id>/`: only when the marked object is still listed does the export
+run in fingerprint mode; a deleted or expired copy is uploaded again. A
+failed listing is a `NetBackupFailed` (verbatim reason, retried at the next
+tick), never a silent skip. An unchanged check reports
+`NetBackupDone { unchanged: true }`: no stamp move, no retention, no quota
+pass; it clears `backup_error` and resets `WorkspaceInfo::backup_checked_min`
+(minutes since this node last confirmed the bucket copy is current, `null`
+on MCP until the first check after a start). `last_backup_min` keeps
+meaning the age of the copy. "Backup now" always uploads. An import drops
+the mark with `last_backup` (§4): a restored copy was never uploaded from
+this device.
+
+**Memory.** The task builds the whole blob in memory (`put_object` signs
+the body's SHA-256), capped at `RESTORE_MAX_BYTES` = 512 MiB; the export
+additionally holds the eagerly-read files (newest snapshot, bases, vault
+payloads, wallet records) and one lazily-read file at a time. Peak is
+roughly blob + eager files, up to ~1 GiB at the cap. Streaming
+(`UNSIGNED-PAYLOAD` or aws-chunked signing) or multipart (required by S3
+only above 5 GiB per PUT) is a follow-up; with this change it is paid only
+on a real change, not every interval.
+
 ### 6.5 Orphan listing (story 8) and the backup table
 
 `Command::BackupList` (a **tool** — a human/agent refreshes the table)

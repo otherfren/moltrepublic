@@ -310,7 +310,7 @@ pub fn export_dir(
     export_dir_chunked(root, ws_dir, key, EXPORT_CHUNK_BYTES, out)
 }
 
-/// The auto-backup export (`backup_restore_design.md` §6.5): workspace key
+/// The auto-backup export (`backup_restore_design.md` §6.4a): workspace key
 /// mode, cut files from `pin` when the writer runs. `Ok(None)` - nothing
 /// written - when the content fingerprint equals `unless`, the last
 /// confirmed upload's.
@@ -595,7 +595,7 @@ fn export_dir_impl(
 }
 
 /// What a backup holds, minus what changes without new content
-/// (`backup_restore_design.md` §6.5): the backup stamps and the presence
+/// (`backup_restore_design.md` §6.4a): the backup stamps and the presence
 /// memory in `prefs.toml`, and the purse scanner's progress (a cache a
 /// rescan rebuilds). A snapshot counts by its plaintext - a rewrite of the
 /// same state carries a fresh nonce.
@@ -1291,6 +1291,10 @@ mod tests {
             backup(&root, &dir, Some(fp)).is_some()
         };
         assert!(changed(&|| fs::write(dir.join("logo.png"), b"another logo").expect("logo")), "logo");
+        let fp = backup(&root, &dir, None).expect("again");
+        let (ws, _) = crate::open_workspace(&dir).expect("open");
+        ws.write_chain(None, &[]).expect("chain.state");
+        assert!(backup(&root, &dir, Some(fp)).is_some(), "a chain write (a new block) counts");
     }
 
     /// A snapshot rewritten with the same state (a clean close) carries a
