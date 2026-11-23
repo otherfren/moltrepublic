@@ -2,7 +2,9 @@
 
 **Status: BUILT, dark, POSTPONED (user decision 2026-11-23): not
 available in release builds; the open design decisions are in §12;
-the switch is `CHAIN_LOCK_AVAILABLE` (design, "The switch").** Design:
+the switch is `CHAIN_LOCK_AVAILABLE` (design, "The switch"). The chosen
+direction for v0.1.3 is `docs/chain/chain_rescue_plan.md` (m members
+vote which branch to keep).** Design:
 `docs/chain/chain_lock_design.md` (§8 activation, §14 "As built"). With
 the switch on the lock runs where the chain enabled it: after a
 `set_features` vote naming `chain-lock` (from the height after that
