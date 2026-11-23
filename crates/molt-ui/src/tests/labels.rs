@@ -114,6 +114,13 @@ fn size_and_backup_labels() {
     assert_eq!(backup_when_label(1, 0), "gerade eben");
     assert_eq!(backup_when_label(1, 30), "vor 30 Min.");
     assert_eq!(backup_when_label(1, 129_600), "vor 90 Tagen");
+    // a copy confirmed current since it was made says so, with the check's age
+    let never = molt_core::WorkspaceInfo::NEVER;
+    assert_eq!(backup_state_label(0, 180, 5), "up to date \u{00b7} 5 min ago");
+    assert_eq!(backup_state_label(1, 180, 5), "aktuell \u{00b7} vor 5 Min.");
+    assert_eq!(backup_state_label(0, 30, 30), "30 min ago");
+    assert_eq!(backup_state_label(0, 30, never), "30 min ago");
+    assert_eq!(backup_state_label(0, never, 5), "never");
 }
 
 /// Guard: every nav sub-view of every surface has a real icon — the

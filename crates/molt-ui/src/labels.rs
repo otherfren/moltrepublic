@@ -107,6 +107,17 @@ pub(crate) fn backup_when_label(lang: i32, minutes: u32) -> String {
     }
 }
 
+/// The backup cell of a local workspace: an unchanged copy the bucket
+/// still holds reads as current, with the age of that check.
+pub(crate) fn backup_state_label(lang: i32, last: u32, checked: u32) -> String {
+    let never = molt_core::WorkspaceInfo::NEVER;
+    if last == never || checked == never || checked >= last {
+        return backup_when_label(lang, last);
+    }
+    let word = if lang == 1 { "aktuell" } else { "up to date" };
+    format!("{word} \u{00b7} {}", ago_label(lang, checked))
+}
+
 /// The bucket-side label of an orphan/unknown backup row: a foreign key
 /// shows its raw object key; a real orphan is known only by its
 /// workspace-id pseudonym (backup objects carry no display names —

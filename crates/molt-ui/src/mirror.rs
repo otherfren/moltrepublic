@@ -20,7 +20,7 @@ use crate::i18n::{
 };
 use crate::images::{image_from_bytes, logo_needs_reload, AVATARS, LOGO_KEY};
 use crate::labels::{
-    backup_when_label, charter_columns, file_size_label, chain_diverged_copy, genesis_undelivered_copy, vote_refused_copy, from_screen,
+    backup_state_label, backup_when_label, charter_columns, file_size_label, chain_diverged_copy, genesis_undelivered_copy, vote_refused_copy, from_screen,
     never_seen_label, orphan_remote_label, seat_state_label, seen_label, short_hex_id, size_label,
     strings_founder, sync_status_label, theme_index, unix_now, view_icon, view_label,
 };
@@ -68,7 +68,7 @@ fn workspace_item(lang: i32, now: u64, w: &molt_core::WorkspaceInfo) -> Workspac
         state: i32::from(w.state),
         last_sync_min: w.last_sync_min as i32,
         s3: w.s3,
-        backup: backup_when_label(lang, w.last_backup_min).into(),
+        backup: backup_state_label(lang, w.last_backup_min, w.backup_checked_min).into(),
         encrypted: w.encrypted,
         has_seed: w.has_seed,
         net: w.net.as_str().into(),
@@ -110,7 +110,7 @@ pub(crate) fn backup_rows(sv: &SessionView) -> Vec<BackupRow> {
             has_local: true,
             auto: w.s3,
             size: size_label(w.size_kib).into(),
-            last: backup_when_label(lang, w.last_backup_min).into(),
+            last: backup_state_label(lang, w.last_backup_min, w.backup_checked_min).into(),
             size_kib: i32::try_from(w.size_kib).unwrap_or(i32::MAX),
             last_min: last_key(w.last_backup_min),
         })
