@@ -326,34 +326,80 @@ async fn an_unusable_relay_is_never_confirmed() {
     assert!(s.notice.contains("kind 445"), "the one reason travels: {:?}", s.notice);
 }
 
-/// A TCP forwarder in front of the relay that counts every dial it accepts.
+/// A TCP forwarder in front of the relay that counts the connections which
+/// carry a client frame (a REQ or an EVENT past the WebSocket upgrade): a
+/// dial already in flight at a withdrawal may still connect, but sends
+/// nothing.
 struct CountingProxy {
     url: String,
-    dials: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    used: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     forwards: std::sync::Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
 impl CountingProxy {
     async fn run(target: &str) -> Self {
-        use std::sync::atomic::Ordering;
         let target = target.trim_start_matches("ws://").trim_end_matches('/').to_string();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
         let port = listener.local_addr().expect("addr").port();
-        let dials = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let used = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let forwards = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let (d, fw) = (dials.clone(), forwards.clone());
+        let (u, fw) = (used.clone(), forwards.clone());
         tokio::spawn(async move {
-            while let Ok((mut inbound, _)) = listener.accept().await {
-                d.fetch_add(1, Ordering::SeqCst);
-                let target = target.clone();
+            while let Ok((inbound, _)) = listener.accept().await {
+                let (target, u) = (target.clone(), u.clone());
                 fw.lock().await.push(tokio::spawn(async move {
-                    if let Ok(mut outbound) = tokio::net::TcpStream::connect(&target).await {
-                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    if let Ok(outbound) = tokio::net::TcpStream::connect(&target).await {
+                        Self::forward(inbound, outbound, u).await;
                     }
                 }));
             }
         });
-        Self { url: format!("ws://127.0.0.1:{port}"), dials, forwards }
+        Self { url: format!("ws://127.0.0.1:{port}"), used, forwards }
+    }
+
+    async fn forward(
+        inbound: tokio::net::TcpStream,
+        outbound: tokio::net::TcpStream,
+        used: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut ir, mut iw) = inbound.into_split();
+        let (mut or, mut ow) = outbound.into_split();
+        let up = async move {
+            let mut head = Vec::new();
+            let mut upgraded = false;
+            let mut counted = false;
+            let mut buf = [0u8; 16384];
+            loop {
+                let n = match ir.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                let frame = if upgraded {
+                    true
+                } else {
+                    head.extend_from_slice(&buf[..n]);
+                    match head.windows(4).position(|w| w == b"\r\n\r\n") {
+                        Some(end) => {
+                            upgraded = true;
+                            head.len() > end + 4
+                        }
+                        None => false,
+                    }
+                };
+                if frame && !counted {
+                    counted = true;
+                    used.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                if ow.write_all(&buf[..n]).await.is_err() {
+                    break;
+                }
+            }
+        };
+        tokio::select! {
+            () = up => {}
+            _ = tokio::io::copy(&mut or, &mut iw) => {}
+        }
     }
 
     /// Drop every live connection and zero the counter.
@@ -361,11 +407,11 @@ impl CountingProxy {
         for f in self.forwards.lock().await.drain(..) {
             f.abort();
         }
-        self.dials.store(0, std::sync::atomic::Ordering::SeqCst);
+        self.used.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 
-    fn dials(&self) -> usize {
-        self.dials.load(std::sync::atomic::Ordering::SeqCst)
+    fn used(&self) -> usize {
+        self.used.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -378,6 +424,8 @@ async fn a_withdrawn_relay_is_not_redialed_by_the_running_republic() {
     let proxy = CountingProxy::run(&relay.url().await.to_string()).await;
     let tmp = tempfile::tempdir().expect("tmp");
     let (a, b) = found_two_of_two(tmp.path(), &proxy.url).await;
+    // b withdraws first: a plain close drains b's outbox onto the relay
+    b.execute(Command::RelayClearnetSession { unlock: false }).await.expect("switch off b");
     b.execute(Command::CloseWorkspace).await.expect("close b");
 
     let say = |body: &'static str| {
@@ -397,11 +445,11 @@ async fn a_withdrawn_relay_is_not_redialed_by_the_running_republic() {
     proxy.cut().await;
     say("after off").await;
     tokio::time::sleep(Duration::from_secs(6)).await;
-    assert_eq!(proxy.dials(), 0, "switched off, yet the relay was redialed");
+    assert_eq!(proxy.used(), 0, "switched off, yet the relay was used");
 
     a.execute(Command::RelayClearnetSession { unlock: true }).await.expect("switch on");
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
-    while proxy.dials() == 0 {
+    while proxy.used() == 0 {
         assert!(tokio::time::Instant::now() < deadline, "switched on, the runtime never came back");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -413,7 +461,7 @@ async fn a_withdrawn_relay_is_not_redialed_by_the_running_republic() {
     proxy.cut().await;
     say("after revoke").await;
     tokio::time::sleep(Duration::from_secs(6)).await;
-    assert_eq!(proxy.dials(), 0, "revoked, yet the relay was redialed");
+    assert_eq!(proxy.used(), 0, "revoked, yet the relay was used");
 
     a.execute(Command::CloseWorkspace).await.expect("close a");
 }

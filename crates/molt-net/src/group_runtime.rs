@@ -252,6 +252,8 @@ pub struct GroupHandle {
     ack: Option<tokio::task::JoinHandle<()>>,
     poke: Option<tokio::task::JoinHandle<()>>,
     gap: Option<tokio::task::JoinHandle<()>>,
+    /// Closed on drop: its clones outlive the tasks (`relay_pool.md` §3 rule 3).
+    channel: GroupChannel,
 }
 
 impl GroupHandle {
@@ -358,6 +360,7 @@ impl GroupHandle {
 impl Drop for GroupHandle {
     fn drop(&mut self) {
         let _ = self.stop.send(true);
+        self.channel.close();
         if let Some(inbox) = self.inbox.take() {
             inbox.abort();
         }
@@ -523,7 +526,7 @@ where
         stop_rx.clone(),
     ));
     let inbox = tokio::spawn(inbox_loop(
-        channel,
+        channel.clone(),
         mls,
         log2,
         store2,
@@ -545,6 +548,7 @@ where
         ack: Some(ack),
         poke: Some(poke),
         gap: Some(gap),
+        channel,
     }
 }
 
@@ -2916,6 +2920,45 @@ mod tests {
             "the stop was sent before the loops first polled and was lost — \
              the outbox never exits"
         );
+    }
+
+    /// **A dropped runtime's channel dials nothing more.** The engine drops
+    /// the handle when a relay is withdrawn; a clone of its channel (a
+    /// publish in flight, the file trickle) must not reach the relay after.
+    #[tokio::test]
+    async fn a_dropped_runtime_closes_its_publish_channel() {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("ws://{}", listener.local_addr().expect("addr"));
+        let accepts = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = accepts.clone();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                drop(sock);
+            }
+        });
+        let mls = MlsMember::new(&SigningKey::from_bytes(&[9u8; 32]), "walter").expect("mls");
+        let channel = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], [7u8; 32]);
+        let kept = channel.clone();
+        let (_wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, _health) = watch::channel(GroupHealth::default());
+        let handle = spawn_group(
+            channel,
+            MlsChannel::from_shared(std::sync::Arc::new(std::sync::Mutex::new(mls))),
+            cfg(),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            NullSink,
+            wake_rx,
+            health_tx,
+        );
+        drop(handle);
+        assert!(kept.publish_frame(&[0u8; 32], b"frame").await.is_err());
+        assert_eq!(accepts.load(Ordering::SeqCst), 0, "the dropped runtime's channel dialed the relay");
     }
 
     /// **A fresh incarnation's claim sheet is EVIDENCE, even at floor 0.**

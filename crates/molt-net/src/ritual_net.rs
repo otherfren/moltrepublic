@@ -486,6 +486,11 @@ impl GroupChannel {
         Self { dialer, relays, rotation_seed, pool, group_expiry_secs: None, file_expires_at: None }
     }
 
+    /// Stop every clone's publishes (`PublishPool::close`).
+    pub fn close(&self) {
+        self.pool.close();
+    }
+
     /// The channel of the RUNNING group: every 445 frame asks the relays to
     /// drop it [`GROUP_EVENT_EXPIRY_SECS`] after its stamp. Uniform across
     /// all frames, so the tag tells a relay nothing about any one of them.
