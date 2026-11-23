@@ -371,6 +371,13 @@ impl WalletHandle {
         self.drop_seam.skip_rekey_reset.store(skip, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: the head beacon (a `ChainRequest`) goes out on the next
+    /// beat. No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __beacon_now(&self) {
+        self.drop_seam.beacon_now.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam: every window save is refused, as by a full writer queue.
     /// No `Command` reaches it.
     #[doc(hidden)]

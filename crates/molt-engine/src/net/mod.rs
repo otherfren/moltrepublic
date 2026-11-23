@@ -74,6 +74,8 @@ pub(crate) struct DropSeam {
     pub(crate) regress: Mutex<Option<(MemberId, u64)>>,
     /// Window saves are refused, as by a full writer queue.
     pub(crate) refuse_saves: std::sync::atomic::AtomicBool,
+    /// The head beacon goes out on the next beat.
+    pub(crate) beacon_now: std::sync::atomic::AtomicBool,
 }
 
 impl DropSeam {

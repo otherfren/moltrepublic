@@ -285,7 +285,7 @@ impl State {
         let high = self.delivery.accepted.get(&member).map_or(0, |w| w.high);
         // a resync of a window an older build wrote may face another
         // incarnation than it describes: forget that one's gates too
-        let legacy = self.delivery.accepted.get(&member).is_none_or(|w| w.proof == molt_core::RestoreProof::Unknown);
+        let legacy = self.delivery.accepted.get(&member).map_or(true, |w| w.proof == molt_core::RestoreProof::Unknown);
         if proof == molt_core::RestoreProof::Merge || legacy {
             self.reset_peer_accept_window(&member);
         } else {
@@ -1158,6 +1158,9 @@ impl State {
         // A2.2: held seals land once their round has passed
         self.drain_held_seals();
         self.lock_tick();
+        if self.drop_seam.beacon_now.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            self.chain.beacon_at = 1;
+        }
         self.chain_heal_tick();
         self.sign_held_approvals();
         self.wake_tick();
