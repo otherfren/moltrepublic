@@ -1111,12 +1111,14 @@ pub(crate) struct ChainProjection {
     /// divergence detector), keyed by wire sender. Ephemeral; an entry
     /// clears when a block from that peer extends the chain again.
     pub(crate) diverged: BTreeMap<MemberId, molt_core::ChainDivergence>,
-    /// A5: the highest height each peer has CLAIMED - from its blocks
-    /// (accepted or refused), its catch-up samples and its cut proposals.
-    /// Ephemeral; it is the only thing that can tell a partitioned seat
-    /// that the republic ran on without it (`diverged` reports the other
-    /// failure: contradiction, not distance).
+    /// A5: the height each peer CLAIMS - its last head report, raised by
+    /// any block it holds since (`chain::sync::PeerClaim`). Ephemeral; it
+    /// is the only thing that can tell a partitioned seat that the republic
+    /// ran on without it (`diverged` reports the other failure:
+    /// contradiction, not distance).
     pub(crate) peer_heights: BTreeMap<MemberId, u64>,
+    /// A5: the sender log seq of the newest frame counted in `peer_heights`.
+    pub(crate) peer_claim_seq: BTreeMap<MemberId, u64>,
     /// A5: the highest height at which each seat's signature VERIFIED here,
     /// sealed or not - an m-of-n block keeps only the signatures it held at
     /// the seal, so the block alone would call every late voter silent.

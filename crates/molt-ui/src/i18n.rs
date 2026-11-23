@@ -158,8 +158,8 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
             id.0
         ),
         E::AlreadyDeclined(id) => format!("Vorschlag #{} trägt die Ablehnung dieses Mitglieds bereits", id.0),
-        E::ChainLagging { peers_ahead } => {
-            format!("Die anderen sind {peers_ahead} Block/Blöcke voraus - diese Stimme zählt nicht")
+        E::ChainLagging { peers_ahead, peer } => {
+            format!("{peer} ist {peers_ahead} Block/Blöcke voraus - diese Stimme zählt nicht")
         }
         E::Settings(t) => format!("Einstellungen: {t}"),
         E::UnknownWorkspace(w) => format!("Unbekannter Workspace `{w}`"),

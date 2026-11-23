@@ -235,6 +235,7 @@ impl State {
         // keyed by name must not swallow the rejoiner's request because the
         // lost device asked within the last thirty seconds
         self.chain.served_at.remove(member);
+        self.forget_peer_claim(member);
         if self.delivery.accepted.remove(member).is_some() {
             self.delivery.accepted_dirty = true;
         }

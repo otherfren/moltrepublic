@@ -8683,6 +8683,12 @@ pub struct ChainSync {
     /// founding; 0 = the chain has not enabled the lock).
     #[serde(default)]
     pub lock_since: u64,
+    /// A6: the furthest peer ahead of this node on its branch ("" = level).
+    #[serde(default)]
+    pub ahead_peer: MemberId,
+    /// A6: the head `ahead_peer` last reported (0 = level).
+    #[serde(default)]
+    pub ahead_height: u64,
 }
 
 /// One fork decision ([`ChainSync::last_fork`]).
@@ -8705,7 +8711,8 @@ pub struct ForkDecision {
 /// How far this node trails its peers, and who has gone quiet (A5).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChainLag {
-    /// Highest height any peer claimed, minus this node's head. 0 = level.
+    /// The furthest claim of a roster peer on this branch, minus this
+    /// node's head. 0 = level.
     pub peers_ahead: u64,
     /// Roster seats this node has not heard from lately.
     pub silent: Vec<SilentMember>,
@@ -9162,10 +9169,12 @@ pub enum MoltError {
     /// ahead, so the signature would be dropped as stale by everyone else -
     /// which is exactly how a partitioned seat spent round 3 approving into
     /// the void.
-    #[error("the peers are {peers_ahead} block(s) ahead - this vote would not count")]
+    #[error("behind {peer} by {peers_ahead} block(s) - this vote would not count")]
     ChainLagging {
         /// How far ahead the peers are.
         peers_ahead: u64,
+        /// The furthest peer ahead.
+        peer: MemberId,
     },
     /// This seat holds as many open proposals as a peer takes from one
     /// proposer: a further one would be dropped by every receiver.
