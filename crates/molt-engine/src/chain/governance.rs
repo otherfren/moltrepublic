@@ -247,6 +247,10 @@ impl State {
         if self.chain.head.is_none() {
             return Some("no chain yet".to_string());
         }
+        // G: a chain that runs the lock is beyond this build: no signature
+        if self.lock_chain_unsupported() {
+            return Some(crate::chain::LOCK_CHAIN_UNSUPPORTED.to_string());
+        }
         let Some(change) = self.proposal_change(id) else {
             return Some("change unknown here".to_string());
         };
@@ -580,6 +584,10 @@ impl State {
         let Some(head) = self.chain.head.clone() else {
             return;
         };
+        // a chain that runs the lock is extended by the lock only
+        if self.lock_chain_unsupported() {
+            return;
+        }
         // already committed?
         if matches!(self.proposals.get(&id), Some(p) if p.state != ProposalState::Proposed) {
             return;
@@ -985,20 +993,30 @@ impl State {
     /// synchronous — `persist_chain_blocking` waits on the writer's ack — so
     /// a catch-up draining N blocks used to sit through N blocking
     /// whole-chain writes inside one uninterruptible actor turn. Losing a
-    /// batch to a crash costs a re-fetch and nothing else: any survivor
-    /// re-serves the blocks on the next catch-up.
+    /// batch to a crash costs a re-fetch: any survivor re-serves the blocks
+    /// on the next catch-up - and, under the lock, the slots above the
+    /// chain on disk stay in the lock file (`durable_head`, B-F1).
     pub(super) fn persist_chain_now(&mut self) -> bool {
         if let Some(base) = self.chain.pool_adopt_base.take() {
             self.adopt_ratified_relays(&base);
         }
         #[cfg(test)]
         CHAIN_PERSISTS.with(|c| c.set(c.get() + 1));
+        #[cfg(test)]
+        if self.chain.lock.fail_chain_writes {
+            return false;
+        }
         let Some(active) = &self.active else {
+            self.chain.lock.durable_head = self.chain.head.as_ref().map_or(0, |h| h.height);
             return true;
         };
         let durable = active
             .handle
             .persist_chain_blocking(self.chain.checkpoint_blob.clone(), self.chain.blocks.clone());
+        if durable {
+            // B-F1: the lock may now forget what this chain covers
+            self.chain.lock.durable_head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        }
         if !durable {
             // The writer also raises its `failed` flag, which the next
             // `record` turns into the operator's "storage-failed" notice.
@@ -1252,10 +1270,13 @@ impl State {
     /// that still stands, only its position moved — so re-express it (the human
     /// is not asked again). Proposals this node did not approve are just cleared.
     pub(super) fn rebase_pending_approvals(&mut self) {
-        let Some(head) = self.chain.head.as_ref() else {
+        let Some(at) = self.chain.head.as_ref().map(|h| h.height) else {
             return;
         };
-        let target = head.height + 1;
+        let target = at + 1;
+        // T5: an own free signature at head+1 is marked before the re-sign
+        // below can start a ballot (and a durable promise) there
+        self.lock_mark_after_move(at);
         let stale: Vec<u64> = self
             .chain.pending_sigs
             .iter()
@@ -1266,7 +1287,7 @@ impl State {
         // (a proposer without self-cosign, a bailed sign): a cut below the
         // new head can never seal (upto == height-1 is enforced) and must
         // not linger as bookkeeping a late Approved could resurrect
-        let head_height = head.height;
+        let head_height = at;
         let swept: Vec<u64> = self
             .chain.proposal_changes
             .iter()

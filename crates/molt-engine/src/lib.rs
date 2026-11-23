@@ -370,6 +370,13 @@ impl WalletHandle {
         self.drop_seam.dropped.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Test seam (G): the chain lock on for this engine although the build
+    /// ships it dark (`true`), or the build default (`false`).
+    #[doc(hidden)]
+    pub fn __lock_available(&self, on: bool) {
+        self.lock_seams.cap.store(u8::from(on), std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam (B7): `true` = this seat behaves like an older build (no
     /// lock capability, every lock frame ignored); `false` = it runs the
     /// lock whatever the build default.
@@ -400,6 +407,13 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __lock_stop_after_accept(&self) {
         self.lock_seams.stop_after_accept.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (B7): as [`Self::__lock_stop_after_accept`], after the
+    /// leader's own acceptance went out.
+    #[doc(hidden)]
+    pub fn __lock_stop_after_own_accept(&self) {
+        self.lock_seams.stop_after_own_accept.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (B7): this seat's lock stopped (the seam above fired).
@@ -1107,12 +1121,14 @@ pub(crate) struct ChainProjection {
     /// divergence detector), keyed by wire sender. Ephemeral; an entry
     /// clears when a block from that peer extends the chain again.
     pub(crate) diverged: BTreeMap<MemberId, molt_core::ChainDivergence>,
-    /// A5: the highest height each peer has CLAIMED - from its blocks
-    /// (accepted or refused), its catch-up samples and its cut proposals.
-    /// Ephemeral; it is the only thing that can tell a partitioned seat
-    /// that the republic ran on without it (`diverged` reports the other
-    /// failure: contradiction, not distance).
+    /// A5: the height each peer CLAIMS - its last head report, raised by
+    /// any block it holds since (`chain::sync::PeerClaim`). Ephemeral; it
+    /// is the only thing that can tell a partitioned seat that the republic
+    /// ran on without it (`diverged` reports the other failure:
+    /// contradiction, not distance).
     pub(crate) peer_heights: BTreeMap<MemberId, u64>,
+    /// A5: the sender log seq of the newest frame counted in `peer_heights`.
+    pub(crate) peer_claim_seq: BTreeMap<MemberId, u64>,
     /// A5: the highest height at which each seat's signature VERIFIED here,
     /// sealed or not - an m-of-n block keeps only the signatures it held at
     /// the seal, so the block alone would call every late voter silent.
@@ -2691,6 +2707,7 @@ impl State {
                 sender_npub,
                 anchor_first,
                 started,
+                caps,
                 generation,
             } => self.cmd_net_recover_requested(
                 member,
@@ -2703,7 +2720,7 @@ impl State {
                 consent,
                 reply,
                 sender_npub,
-                (anchor_first, started),
+                (anchor_first, started, caps),
                 generation,
             ),
             Command::NetRecoverReady { member, ticket, attempt, sender, generation } => {

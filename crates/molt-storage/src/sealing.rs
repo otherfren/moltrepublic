@@ -371,8 +371,9 @@ fn verify_phrase_key(ws_dir: &Path, id: &[u8; 32], key: &[u8; 32]) -> Result<(),
 ///   exists to hard-stop. Over-describing only costs an old binary a
 ///   polite refusal.
 fn chain_version_floor(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> u32 {
-    // the lock ran here: an older binary would ignore its promises
-    if ws_dir.join(crate::CHAIN_LOCK_FILE).exists() {
+    // the lock ran here: an older binary would ignore its promises; the
+    // marker without the file (amnesia) as well (B-F6)
+    if ws_dir.join(crate::CHAIN_LOCK_FILE).exists() || crate::read_prefs(ws_dir).chain_lock {
         return molt_core::STORAGE_VERSION_LOCK;
     }
     // a log under per-segment keys is PRUNED-class too: a pre-WP4a binary
@@ -614,6 +615,35 @@ mod tests {
             read_manifest(&dir).expect("manifest").version,
             molt_core::STORAGE_VERSION_PRUNED
         );
+    }
+
+    /// B-F6: a lock marker without the file (an amnesiac seat) keeps the
+    /// lock version through a seal round trip - an older build must not
+    /// open it.
+    #[test]
+    fn a_lock_marker_keeps_the_lock_version_through_sealing() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let (dir, phrase, _id) = make_ws(&root);
+        let mut prefs = crate::read_prefs(&dir);
+        prefs.chain_lock = true;
+        crate::write_prefs(&dir, &prefs).expect("prefs");
+        seal_at_rest(&dir, &phrase).expect("seal");
+        unseal_at_rest(&root, &dir, &phrase).expect("unseal");
+        assert_eq!(read_manifest(&dir).expect("manifest").version, molt_core::STORAGE_VERSION_LOCK);
+    }
+
+    /// B-F3: a lock file whose version raise never reached the disk is
+    /// healed at the next open.
+    #[test]
+    fn a_lock_file_raises_the_version_at_open() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("workspaces");
+        let (dir, _phrase, _id) = make_ws(&root);
+        std::fs::write(dir.join(crate::CHAIN_LOCK_FILE), b"held").expect("plant");
+        assert!(read_manifest(&dir).expect("manifest").version < molt_core::STORAGE_VERSION_LOCK);
+        let _ = open_workspace(&dir).expect("open");
+        assert_eq!(read_manifest(&dir).expect("manifest").version, molt_core::STORAGE_VERSION_LOCK);
     }
 
     #[test]

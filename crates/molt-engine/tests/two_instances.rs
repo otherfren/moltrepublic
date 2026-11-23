@@ -205,7 +205,7 @@ async fn founding_ritual_completes_across_two_instances() {
     assert_eq!(agenda, "hold the line", "the ratified charter is in the genesis");
     assert_eq!(
         features.as_deref(),
-        Some(["chain-lock".to_string(), "memory".to_string(), "wallet".to_string()].as_slice()),
+        Some(["memory".to_string(), "wallet".to_string()].as_slice()),
         "the ratified feature selection is in the genesis, canonicalized"
     );
     assert_eq!(identities.len(), 2, "founder + member-b");
@@ -388,7 +388,7 @@ async fn founding_gates_on_the_joiners_charter_ratification() {
     assert_eq!(name, "Pact");
     assert_eq!(agenda, "the pact: tend the commons, share the harvest");
     // every founding of this build ratifies the lock (B7)
-    assert_eq!(features.as_deref(), Some(["chain-lock".to_string(), "memory".to_string()].as_slice()));
+    assert_eq!(features.as_deref(), Some(["memory".to_string()].as_slice()));
 
     // the gate holds: with B not yet confirmed, the founding has not sealed
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2356,6 +2356,7 @@ async fn recovery_flows_over_a_coordinator_minted_link() {
         version: String::new(),
         consent: String::new(),
         started: 0,
+        caps: Vec::new(),
     });
     let payload = serde_json::to_vec(&request).expect("encode recover request");
     supervisor::send_framed(
@@ -2906,6 +2907,7 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
         anchor_first: false,
         version: String::new(),
         started: 0,
+        caps: Vec::new(),
     });
     supervisor::send_framed(
         &material1.transport,
@@ -4581,6 +4583,7 @@ async fn a_mesh_rebuild_does_not_kill_an_outstanding_recovery() {
         version: String::new(),
         consent: String::new(),
         started: 0,
+        caps: Vec::new(),
     });
     let payload = serde_json::to_vec(&request).expect("encode recover request");
     supervisor::send_framed(

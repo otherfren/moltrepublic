@@ -77,6 +77,7 @@ async fn adopt_relay(w: &WalletHandle, url: &str) {
 async fn found_two_of_two_as(root: &std::path::Path, url: &str, pre_lock: bool) -> (WalletHandle, WalletHandle) {
     let a = engine(&root.join("founder"));
     a.__found_pre_lock(pre_lock);
+    a.__lock_available(!pre_lock);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
         name: "Chess Club".to_string(),
@@ -96,6 +97,7 @@ async fn found_two_of_two_as(root: &std::path::Path, url: &str, pre_lock: bool) 
     let link = s.create.seats[0].link.clone();
 
     let b = engine(&root.join("joiner"));
+    b.__lock_available(!pre_lock);
     adopt_relay(&b, url).await;
     b.execute(Command::JoinStart {
         invite: link,

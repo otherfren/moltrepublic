@@ -960,6 +960,7 @@ impl State {
         self.chain.last_fork = None;
         self.chain.heal_since = 0;
         self.chain.peer_heights.clear();
+        self.chain.peer_claim_seq.clear();
         self.chain.applied_at.clear();
         self.chain.feedback_emitted_at = 0;
         self.session.catchup = molt_core::CatchUp::default();

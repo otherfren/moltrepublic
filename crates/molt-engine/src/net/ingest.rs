@@ -637,21 +637,21 @@ impl State {
                 // node names the same moment for the same height
                 let at = self.chain.block_ts.entry(block.height).or_insert(envelope.ts);
                 *at = (*at).min(envelope.ts);
-                self.receive_block_from(&from, block);
+                self.receive_block_at(&from, Some(envelope.seq), block);
             }
             // A6: a peer dropped a vote of OURS - only that (a frame naming
             // another member's vote is that member's business, never ours)
             WorkspaceEvent::VoteRefused { id, voter, head, .. }
                 if self.is_chain_governed() && voter == self.member() =>
             {
-                self.note_peer_height(&from, head);
+                self.note_peer_claim(&from, head, Some(envelope.seq), crate::chain::PeerClaim::Head);
                 let _ = self.cmd_net_vote_refused(id, &from, head);
             }
             WorkspaceEvent::ChainRequest { from_height, known } if self.is_chain_governed() => {
                 tracing::info!(%from, from_height, known = known.len(), "chain_catchup=received");
                 // A5: the requester's own samples say where it stands
                 if let Some(top) = known.iter().max_by_key(|h| h.height) {
-                    self.note_peer_height(&from, top.height);
+                    self.note_peer_claim(&from, top.height, Some(envelope.seq), crate::chain::PeerClaim::Head);
                     // its head is a block we hold: the requester is on our branch
                     if self.holds_block(top.height, &top.hash) {
                         self.clear_divergence(&from);
@@ -743,7 +743,7 @@ impl State {
             WorkspaceEvent::CheckpointProposed { id, upto, state_hash, folded }
                 if self.is_chain_governed() =>
             {
-                self.note_peer_height(&from, upto);
+                self.note_peer_claim(&from, upto, Some(envelope.seq), crate::chain::PeerClaim::Holds);
                 self.receive_checkpoint_proposal(id.0, upto, &state_hash, folded);
             }
             // WP4b: a pruned peer served its blob ahead of the anchor —
@@ -774,7 +774,7 @@ impl State {
                 self.lock_on_accepted(&from, height, base, round, leader, &digest, &sig);
             }
             WorkspaceEvent::LockNack { height, base, round, leader, promised, head } => {
-                self.lock_on_nack(&from, height, base, round, leader, promised, head);
+                self.lock_on_nack(&from, height, base, round, leader, promised, (head, envelope.seq));
             }
             // dynamic mesh membership ❸: a relayed mesh announce — authenticate
             // the ANNOUNCER by MLS decryption (the event author is only the

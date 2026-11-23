@@ -480,6 +480,10 @@ pub struct RecoverRequest {
     /// the rejoiner's key, so a relay cannot change it.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub started: u64,
+    /// The rejoiner build's capabilities (not proof-bound). Empty from an
+    /// older rejoiner.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caps: Vec<String>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -787,6 +791,7 @@ mod tests {
             anchor_first,
             version: version.into(),
             started: 0,
+            caps: Vec::new(),
         }
     }
 
@@ -1051,6 +1056,7 @@ mod tests {
             anchor_first: false,
             version: String::new(),
             started: 0,
+            caps: Vec::new(),
         });
         let json = serde_json::to_string(&msg).expect("serialize");
         assert!(json.contains("\"kind\":\"recover\""), "tagged as recover: {json}");

@@ -92,7 +92,13 @@ async fn found_trio(root: &std::path::Path, url: &str) -> ([WalletHandle; 3], St
 
 /// [`found_trio`]; `pre_lock` founds a republic as before the lock existed.
 async fn found_trio_as(root: &std::path::Path, url: &str, pre_lock: bool) -> ([WalletHandle; 3], String) {
+    found_trio_with(root, url, pre_lock, true).await
+}
+
+/// `available = false`: the build default, the lock dark (G).
+async fn found_trio_with(root: &std::path::Path, url: &str, pre_lock: bool, available: bool) -> ([WalletHandle; 3], String) {
     let a = engine(&root.join("mara"));
+    a.__lock_available(available);
     a.__found_pre_lock(pre_lock);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
@@ -113,6 +119,7 @@ async fn found_trio_as(root: &std::path::Path, url: &str, pre_lock: bool) -> ([W
     let mut joiners = Vec::new();
     for (name, link) in ["walter", "dora"].iter().zip(links) {
         let w = engine(&root.join(name));
+        w.__lock_available(available);
         adopt_relay(&w, url).await;
         w.execute(Command::JoinStart { invite: link, member: (*name).to_string(), relays: Vec::new() })
             .await
@@ -602,14 +609,14 @@ async fn a_chosen_restore_seals_after_its_withdrawal_and_is_reported() {
     let ([mara, walter, dora], dora_phrase) = found_trio(tmp.path(), &url).await;
     lock_on(&[&mara, &walter, &dora], true).await;
     every_seat_announced(&[&mara, &walter, &dora]).await;
-    // dora lost: mara (first in the line) leads and stops right after her
-    // Accept leaves, before accepting herself; walter coordinates
+    // dora lost: mara (first in the line) leads, accepts and stops;
+    // walter coordinates
     for w in [&mara, &walter] {
         w.__seat_active_secs(0);
         w.__lock_timing(15, 3);
     }
     drop(dora);
-    mara.__lock_stop_after_accept();
+    mara.__lock_stop_after_own_accept();
     let epoch = status(&walter).await.mls_epoch;
     walter.execute(Command::RecoverInviteStart { member: "dora".to_string() }).await.expect("mint");
     let s = wait_for(&walter, "the recovery link", |s| {
@@ -625,9 +632,9 @@ async fn a_chosen_restore_seals_after_its_withdrawal_and_is_reported() {
         assert!(tokio::time::Instant::now() < deadline, "mara never led the restore");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    // walter accepts once his settle passed: chosen (the restore's need
-    // is one survivor); his seal waits a grace (15 s) as a learner, and
-    // the withdrawal lands inside it
+    // walter accepts once his settle passed: chosen (both survivors, H2);
+    // his seal waits a grace (15 s) as a learner, and the withdrawal
+    // lands inside it
     tokio::time::sleep(Duration::from_secs(7)).await;
     rejoiner.execute(Command::RecoverCancel).await.expect("cancel");
     drop(rejoiner);
@@ -645,4 +652,64 @@ async fn a_chosen_restore_seals_after_its_withdrawal_and_is_reported() {
     assert_eq!(status(&walter).await.mls_epoch, epoch, "no re-key for the dead run");
     let forks = burst(&[&mara, &walter], &["mara", "walter"], "after", 1, 2, 180).await;
     assert_eq!(forks, 0);
+}
+
+/// G: the lock ships dark. A founding with this build ratifies the
+/// features v0.1.0 does, the enabling vote is refused with the reason, and
+/// a long run writes nothing lock-related - no file, no version 4, no
+/// marker - so v0.1.0 still opens every workspace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_lock_is_dark_in_this_build() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let ([mara, walter, dora], _) = found_trio_with(tmp.path(), &url, false, false).await;
+    for w in [&mara, &walter, &dora] {
+        assert_eq!(status(w).await.features, vec!["memory".to_string()], "the v0.1.0 charter");
+        assert!(!status(w).await.chain_sync.lock_active);
+    }
+    let names = ["mara", "walter", "dora"];
+    burst(&[&mara, &walter, &dora], &names, "dark", 2, 6, 240).await;
+    let enable = serde_json::json!({ "op": "set_features", "value": "chain-lock memory" });
+    let err = mara
+        .execute(Command::Propose { surface: molt_core::Surface::Organization, payload: enable })
+        .await
+        .expect_err("refused");
+    assert!(err.to_string().contains("Strict Order Mode is not available in this build"), "{err}");
+    for (w, name) in [&mara, &walter, &dora].into_iter().zip(names) {
+        let ws = read_session(w).await.active_workspace.clone();
+        let dir = molt_storage::find_workspace_dir(&tmp.path().join(name), &ws).expect("workspace dir");
+        assert!(!dir.join(molt_storage::CHAIN_LOCK_FILE).exists(), "{name}: no lock file");
+        let version = molt_storage::read_manifest(&dir).expect("manifest").version;
+        assert!(version < molt_core::STORAGE_VERSION_LOCK, "{name}: manifest {version}");
+        assert!(!molt_storage::read_prefs(&dir).chain_lock, "{name}: no lock marker");
+    }
+}
+
+/// A-F2: no seat enters a republic in Strict Order Mode on a build
+/// without it - the coordinator refuses the restore with the reason, the
+/// rejoiner is told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejoiner_on_a_build_without_the_mode_is_refused() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let ([mara, walter, dora], dora_phrase) = found_trio(tmp.path(), &url).await;
+    lock_on(&[&mara, &walter, &dora], true).await;
+    every_seat_announced(&[&mara, &walter, &dora]).await;
+    mara.__seat_active_secs(0);
+    drop(dora);
+    mara.execute(Command::RecoverInviteStart { member: "dora".to_string() }).await.expect("mint");
+    let s = wait_for(&mara, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s.notice.strip_prefix("recovery-link:").unwrap_or_else(|| panic!("mint: {:?}", s.notice)).to_string();
+    let rejoiner = engine(&tmp.path().join("dora-old"));
+    rejoiner.__lock_cap_off(true);
+    adopt_relay(&rejoiner, &url).await;
+    rejoiner.execute(Command::RecoverStart { link, phrase: dora_phrase, relays: Vec::new() }).await.expect("recover start");
+    let s = wait_for(&rejoiner, "the refusal", |s| s.notice.starts_with("recover-failed:") || s.notice.starts_with("recovered:")).await;
+    assert!(s.notice.contains("needs a newer build"), "{:?}", s.notice);
+    let _ = walter;
 }

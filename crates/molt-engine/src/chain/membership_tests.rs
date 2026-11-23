@@ -1316,7 +1316,7 @@ fn a_planted_restore_card_does_not_block_a_recovery() {
                 consent_for(&b, "dora", ""),
                 String::new(),
                 String::new(),
-                (false, 0),
+                (false, 0, vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]),
                 None,
             )
             .expect("ack");
@@ -1699,7 +1699,7 @@ fn a_ticketed_request_on_a_fork_is_refused_and_keeps_its_ticket() {
             String::new(),
             String::new(),
             String::new(),
-            (false, 0),
+            (false, 0, vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]),
             None,
         )
         .expect("ack");
@@ -1758,7 +1758,7 @@ fn a_link_less_request_is_refused_and_never_proposed() {
                 consent.clone(),
                 String::new(),
                 String::new(),
-                (false, 0),
+                (false, 0, vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]),
                 None,
             )
             .expect("ack");
@@ -1816,6 +1816,25 @@ fn a_node_that_is_behind_holds_its_restore_approval() {
     walter.chain.peer_heights.clear();
     walter.retry_held_restore_approvals();
     assert!(signed(&walter), "level: signed");
+}
+
+/// F2 with a claim that went stale: once the peer reports a head level
+/// with this node, the held restore approval goes through.
+#[test]
+fn a_restore_held_on_a_claim_the_peer_since_lowered_is_signed() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 3);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let far = vec![molt_core::HeightHash { height: 40, hash: "ee".repeat(32) }];
+    wire(&mut walter, "petra", 10, WorkspaceEvent::ChainRequest { from_height: 41, known: far });
+    register_v2(&mut walter, &b, 7, &"dd".repeat(32), 0);
+    let signed = |w: &crate::State| w.chain.pending_sigs.get(&7).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
+    assert!(!signed(&walter), "behind: held");
+    let level = walter.known_heads();
+    wire(&mut walter, "petra", 11, WorkspaceEvent::ChainRequest { from_height: 1, known: level });
+    walter.retry_held_restore_approvals();
+    assert!(signed(&walter), "the peer's newer head is level: signed");
 }
 
 /// The `MembershipProposed` frame of a v2 card for dora, as petra (the
@@ -2279,6 +2298,7 @@ fn under_the_lock_a_restore_is_accepted_only_after_its_settle() {
     let fresh = || {
         let mut walter = chain_signer("walter", &b, b.blocks.clone());
         walter.chain.lock.enabled_override = Some(true);
+        walter.lock_force(true);
         on_nostr(&mut walter, 10_000);
         walter
     };
@@ -2319,6 +2339,7 @@ fn a_chosen_restore_seals_after_its_withdrawal() {
     let settle = super::membership::RESTORE_SETTLE_SECS;
     let mut walter = chain_signer("walter", &b, b.blocks.clone());
     walter.chain.lock.enabled_override = Some(true);
+    walter.lock_force(true);
     on_nostr(&mut walter, 10_000);
     wire(&mut walter, "petra", 1, frame);
     walter.presence.clock_override = Some(10_000 + settle + 1);
@@ -2342,9 +2363,14 @@ fn a_chosen_restore_seals_after_its_withdrawal() {
     );
     assert!(
         walter.chain.lock.outbox.iter().any(|e| matches!(e.body, WorkspaceEvent::LockAccepted { .. })),
-        "walter accepted: the value is chosen"
+        "walter accepted"
     );
-    wire(&mut walter, "petra", 3, WorkspaceEvent::Withdrawn { id: ProposalId(id), by: "petra".to_string() });
+    // the leader's own acceptance: both survivors, the value is chosen
+    let base = walter.lock_slot().expect("slot").base;
+    let sig = molt_storage::identity_sign(b.key("petra"), &molt_core::chain::approval_bytes(&b.republic_id, 1, &change));
+    let digest = walter.lock_value(1, &change).expect("value").digest;
+    wire(&mut walter, "petra", 3, WorkspaceEvent::LockAccepted { height: 1, base, round: 20, leader: "petra".into(), digest, sig });
+    wire(&mut walter, "petra", 4, WorkspaceEvent::Withdrawn { id: ProposalId(id), by: "petra".to_string() });
     let grace = walter.lock_grace();
     for t in [grace + 1, grace + settle + 2, 2 * grace + 2 * settle + 3] {
         walter.presence.clock_override = Some(10_000 + settle + 1 + t);

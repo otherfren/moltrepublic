@@ -1035,12 +1035,13 @@ impl State {
     /// rather than answer like a success - round 3's partitioned seat cast
     /// eleven approvals into that void.
     fn refuse_a_lagging_vote(&self) -> Result<(), MoltError> {
-        let peers_ahead = self.chain_lag().peers_ahead;
-        if peers_ahead > 0 {
-            tracing::warn!(peers_ahead, "vote=refused_lagging");
-            return Err(MoltError::ChainLagging { peers_ahead });
-        }
-        Ok(())
+        let Some((peer, peer_head)) = self.furthest_peer_ahead() else {
+            return Ok(());
+        };
+        let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        let peers_ahead = peer_head.saturating_sub(head);
+        tracing::warn!(%peer, peer_head, head, peers_ahead, "vote=refused_lagging");
+        Err(MoltError::ChainLagging { peers_ahead, peer })
     }
 
     pub(crate) fn cmd_approve(

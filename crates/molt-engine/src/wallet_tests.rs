@@ -414,3 +414,20 @@ fn a_founding_seat_consents_to_every_init_card_before_one_applies() {
     card_from(&mut c, "a", 3, init(2990, "mainnet"));
     assert!(!c.wallet_founding_consents(3), "nothing after one applied");
 }
+
+/// T6: an init this seat first sees as its applied block (its card never
+/// arrived) is the founding's init too - the consent covers it.
+#[test]
+fn an_init_first_seen_applied_is_the_foundings() {
+    let mut b = Builder::new_with_features(&ABC, 2, &["memory", "wallet"], false);
+    let mut c = genesis_seat("c", &b, b.blocks.clone());
+    with_daemon(&mut c, 3000);
+    c.session.settings.wallet_network = "mainnet".to_string();
+    c.wallet_arm_founding(Some(&["memory".to_string(), "wallet".to_string()]));
+    card_from(&mut c, "a", 1, init(2990, "mainnet"));
+    assert!(c.wallet_founding_consents(1));
+    commit_wallet(&mut b, 2, init(2990, "mainnet"));
+    c.receive_block_from("a", b.blocks[1].clone());
+    c.wallet_founding_claim();
+    assert!(c.wallet_founding_consents(2), "the applied init, never seen as a card");
+}

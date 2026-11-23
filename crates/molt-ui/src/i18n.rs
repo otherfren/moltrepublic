@@ -116,6 +116,20 @@ pub(crate) fn localize_vault_refusal(lang: i32, r: &molt_core::vault::VaultRefus
 /// free-text tails carried through untouched. The match deliberately has
 /// NO wildcard — a new variant fails compilation here until it gets a
 /// German arm (the plan's coverage rule, in compiler form).
+/// The two refusals of the dark Strict Order Mode (the chain lock).
+fn strict_order_de(t: &str) -> &str {
+    match t {
+        "Strict Order Mode is not available in this build" => "Strenge Reihenfolge ist in diesem Build nicht verfügbar",
+        "Strict Order Mode needs at least 2 approvals per decision" => {
+            "Strenge Reihenfolge braucht mindestens 2 Zustimmungen pro Entscheidung"
+        }
+        "this republic uses Strict Order Mode - needs a newer build" => {
+            "diese Republik nutzt die Strenge Reihenfolge - braucht einen neueren Build"
+        }
+        other => other,
+    }
+}
+
 pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
     use molt_core::MoltError as E;
     if lang != 1 {
@@ -127,7 +141,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
     match e {
         E::UnknownProposal(id) => format!("Unbekannter Vorschlag #{}", id.0),
         E::NotGated(sf) => format!("{} ist ungated - nichts vorzuschlagen", sf.as_str()),
-        E::BadPayload(t) => format!("Ungültige Payload: {t}"),
+        E::BadPayload(t) => format!("Ungültige Payload: {}", strict_order_de(t)),
         E::IndexBuilding { done, total } => {
             format!("Der Wiki-Index wird gebaut ({done} von {total} Dokumenten)")
         }
@@ -147,8 +161,8 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
             id.0
         ),
         E::AlreadyDeclined(id) => format!("Vorschlag #{} trägt die Ablehnung dieses Mitglieds bereits", id.0),
-        E::ChainLagging { peers_ahead } => {
-            format!("Die anderen sind {peers_ahead} Block/Blöcke voraus - diese Stimme zählt nicht")
+        E::ChainLagging { peers_ahead, peer } => {
+            format!("{peer} ist {peers_ahead} Block/Blöcke voraus - diese Stimme zählt nicht")
         }
         E::Settings(t) => format!("Einstellungen: {t}"),
         E::UnknownWorkspace(w) => format!("Unbekannter Workspace `{w}`"),
@@ -158,7 +172,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::UnknownView(sf, v) => format!("Surface {sf:?} hat keine Ansicht `{v}`"),
         E::UnknownMessage(id) => format!("Unbekannte Chat-Nachricht {id}"),
         E::UnknownThread(n) => format!("Unbekannter Thread `{n}`"),
-        E::CannotSign(why) => format!("Stimme nicht signiert: {why}"),
+        E::CannotSign(why) => format!("Stimme nicht signiert: {}", strict_order_de(why)),
         E::ThreadClosed(n) => format!("Thread `{n}` ist geschlossen"),
         E::NoFile(id) => format!("Nachricht {id} trägt keine geteilte Datei"),
         E::FileUnavailable(id) => format!("Die geteilte Datei an {id} ist nicht mehr verfügbar"),
