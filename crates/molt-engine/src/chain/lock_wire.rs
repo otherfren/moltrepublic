@@ -451,6 +451,10 @@ impl State {
     /// The first seat that keeps the lock off, and why (R9): this seat's
     /// own build, a seat announced without the lock, or one never heard.
     pub(crate) fn lock_not_capable(&self) -> Option<String> {
+        // D2: a build without the mode says so first, whatever the republic
+        if !self.lock_cap_on() {
+            return Some(LOCK_NOT_AVAILABLE.to_string());
+        }
         // A-F4: with m = 1 phase 1 would need every seat
         if self.lock_quorum().is_some_and(|q| q.m < 2) {
             return Some(LOCK_NEEDS_TWO.to_string());
@@ -460,9 +464,6 @@ impl State {
             return (!all).then(|| LOCK_NOT_EVERYWHERE.to_string());
         }
         let me = self.member();
-        if !self.lock_cap_on() {
-            return Some(LOCK_NOT_AVAILABLE.to_string());
-        }
         let cap = molt_core::chain::CHAIN_LOCK_CAP;
         let known = self.active.as_ref().map(|a| &a.prefs.seat_caps);
         let Some(head) = self.chain.head.as_ref() else {

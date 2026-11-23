@@ -371,10 +371,23 @@ fn verify_phrase_key(ws_dir: &Path, id: &[u8; 32], key: &[u8; 32]) -> Result<(),
 ///   exists to hard-stop. Over-describing only costs an old binary a
 ///   polite refusal.
 fn chain_version_floor(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> u32 {
-    // the lock ran here: an older binary would ignore its promises; the
-    // marker without the file (amnesia) as well (B-F6)
-    if ws_dir.join(crate::CHAIN_LOCK_FILE).exists() || crate::read_prefs(ws_dir).chain_lock {
+    // the lock ran here: an older binary would ignore its promises
+    if ws_dir.join(crate::CHAIN_LOCK_FILE).exists() {
         return molt_core::STORAGE_VERSION_LOCK;
+    }
+    // the marker without the file (amnesia, B-F6) - only where the chain
+    // runs the mode: v0.1.1 set it on EVERY import, and a stale one would
+    // wall a plain workspace off from v0.1.0 (D1)
+    if crate::read_prefs(ws_dir).chain_lock {
+        let runs = crate::read_chain_at(ws_dir, key, id).is_ok_and(|(c, b)| crate::chain_runs_lock(c.as_ref(), &b));
+        if runs {
+            return molt_core::STORAGE_VERSION_LOCK;
+        }
+        let mut prefs = crate::read_prefs(ws_dir);
+        prefs.chain_lock = false;
+        if let Err(e) = crate::write_prefs(ws_dir, &prefs) {
+            tracing::warn!(error = %e, "stale lock marker not cleared");
+        }
     }
     // a log under per-segment keys is PRUNED-class too: a pre-WP4a binary
     // cannot replay it (it would report corruption instead of "newer")
@@ -617,20 +630,39 @@ mod tests {
         );
     }
 
-    /// B-F6: a lock marker without the file (an amnesiac seat) keeps the
-    /// lock version through a seal round trip - an older build must not
-    /// open it.
+    /// B-F6/D1: a lock marker without the file keeps version 4 through a
+    /// seal round trip only where the chain runs Strict Order Mode; on a
+    /// plain chain (v0.1.1 marked EVERY import) it is cleared, so v0.1.0
+    /// still opens the workspace.
     #[test]
-    fn a_lock_marker_keeps_the_lock_version_through_sealing() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let root = tmp.path().join("workspaces");
-        let (dir, phrase, _id) = make_ws(&root);
-        let mut prefs = crate::read_prefs(&dir);
-        prefs.chain_lock = true;
-        crate::write_prefs(&dir, &prefs).expect("prefs");
-        seal_at_rest(&dir, &phrase).expect("seal");
-        unseal_at_rest(&root, &dir, &phrase).expect("unseal");
-        assert_eq!(read_manifest(&dir).expect("manifest").version, molt_core::STORAGE_VERSION_LOCK);
+    fn a_lock_marker_keeps_version_four_only_where_the_chain_runs_the_mode() {
+        for runs in [false, true] {
+            let tmp = tempfile::tempdir().expect("tmp");
+            let root = tmp.path().join("workspaces");
+            let (dir, phrase, _id) = make_ws(&root);
+            if runs {
+                let (ws, _) = open_workspace(&dir).expect("open");
+                let block = molt_core::ChainBlock {
+                    height: 1,
+                    prev: String::new(),
+                    change: molt_core::ChainChange::Applied {
+                        proposal_id: 1,
+                        surface: molt_core::Surface::Organization,
+                        payload: serde_json::json!({ "op": "set_features", "value": "chain-lock memory" }),
+                    },
+                    sigs: Vec::new(),
+                };
+                ws.write_chain(None, &[block]).expect("chain");
+            }
+            let mut prefs = crate::read_prefs(&dir);
+            prefs.chain_lock = true;
+            crate::write_prefs(&dir, &prefs).expect("prefs");
+            seal_at_rest(&dir, &phrase).expect("seal");
+            unseal_at_rest(&root, &dir, &phrase).expect("unseal");
+            let version = read_manifest(&dir).expect("manifest").version;
+            assert_eq!(version == molt_core::STORAGE_VERSION_LOCK, runs, "runs={runs}: version {version}");
+            assert_eq!(crate::read_prefs(&dir).chain_lock, runs, "runs={runs}: the marker");
+        }
     }
 
     /// B-F3: a lock file whose version raise never reached the disk is

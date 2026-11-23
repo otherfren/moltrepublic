@@ -2405,3 +2405,24 @@ fn a_reordered_older_declaration_keeps_the_newer_capabilities() {
     decl(&mut petra, &[], 0);
     assert_eq!(known(&petra), Some(Vec::new()), "a repeated downgrade is taken");
 }
+
+/// D3: a restored seat's new device stamps its declarations with its own
+/// clock; the new incarnation resets the order, so a clock behind the old
+/// device's does not get its capabilities ignored.
+#[test]
+fn a_new_incarnation_resets_the_declaration_order() {
+    let cap = molt_core::chain::CHAIN_LOCK_CAP;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&ROSTER, 2);
+    let (mut petra, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
+    let decl = |st: &mut crate::State, caps: &[&str], at: u64| {
+        st.cmd_net_mirror_decl(&"walter".to_string(), false, 0, 0, caps.iter().map(|c| (*c).to_string()).collect(), at)
+            .expect("declaration");
+    };
+    decl(&mut petra, &[], 200);
+    petra.reset_peer_accept_window(&"walter".to_string());
+    decl(&mut petra, &[cap], 50);
+    let known = petra.active.as_ref().expect("active").prefs.seat_caps.get("walter").cloned();
+    assert_eq!(known, Some(vec![cap.to_string()]), "the new device's first declaration counts");
+}

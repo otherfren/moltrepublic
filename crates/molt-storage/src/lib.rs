@@ -2606,6 +2606,28 @@ pub(crate) fn decode_chain_state(
 /// Read the `chain.state` of a workspace directory: absent → `Ok((None,
 /// []))`; present but unreadable → a typed error (the L7 policy, see
 /// [`OpenedWorkspace::read_chain`]).
+/// The chain carries Strict Order Mode's key ([`molt_core::chain::CHAIN_LOCK_FEATURE`]):
+/// in the genesis, a checkpoint's state or a `set_features` block.
+/// Conservative (a cut's state is searched whole); a false yes only sets a
+/// marker the first open clears.
+pub(crate) fn chain_runs_lock(checkpoint: Option<&molt_core::CheckpointState>, blocks: &[molt_core::ChainBlock]) -> bool {
+    let key = molt_core::chain::CHAIN_LOCK_FEATURE;
+    if checkpoint.is_some_and(|c| serde_json::to_string(c).is_ok_and(|s| s.contains(key))) {
+        return true;
+    }
+    blocks.iter().any(|b| match &b.change {
+        molt_core::ChainChange::Genesis { features: Some(f), .. } => f.iter().any(|k| k == key),
+        molt_core::ChainChange::Applied { surface: molt_core::Surface::Organization, payload, .. } => {
+            payload.get("op").and_then(serde_json::Value::as_str) == Some("set_features")
+                && payload
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|v| v.split_whitespace().any(|k| k == key))
+        }
+        _ => false,
+    })
+}
+
 pub(crate) fn read_chain_at(
     dir: &Path,
     ws_key: &[u8; 32],

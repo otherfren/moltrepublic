@@ -724,6 +724,7 @@ fn enabling_the_lock_waits_until_every_seat_runs_it() {
     use molt_core::chain::CHAIN_LOCK_FEATURE;
     let b = Builder::new(&SEATS, 2);
     let mut mara = genesis_seat("mara", &b, b.blocks.clone());
+    mara.lock_force(true);
     mara.chain.lock.caps_override = Some(false);
     let enable = json!({ "op": "set_features", "value": format!("{CHAIN_LOCK_FEATURE} memory") });
     let err = mara.cmd_propose(Surface::Organization, enable.clone()).expect_err("refused");
@@ -731,6 +732,7 @@ fn enabling_the_lock_waits_until_every_seat_runs_it() {
     mara.chain.lock.caps_override = Some(true);
     let id = propose(&mut mara, Surface::Organization, enable);
     let mut walter = genesis_seat("walter", &b, b.blocks.clone());
+    walter.lock_force(true);
     walter.chain.lock.caps_override = Some(false);
     let change = mara.proposal_change(id).expect("change");
     let ChainChange::Applied { payload, .. } = change else { panic!("an org change") };
@@ -1720,4 +1722,15 @@ fn the_lock_clock_is_monotonic_and_follows_the_test_clock() {
     assert!(c >= a);
     mara.presence.clock_override = Some(5);
     assert_eq!(mara.lock_now(), 5);
+}
+
+/// D2: a dark build names itself first, also in an m = 1 republic.
+#[test]
+fn a_dark_build_says_not_available_before_anything_else() {
+    use molt_core::chain::CHAIN_LOCK_FEATURE;
+    let b = Builder::new(&SEATS, 1);
+    let mut mara = genesis_seat("mara", &b, b.blocks.clone());
+    let enable = json!({ "op": "set_features", "value": format!("{CHAIN_LOCK_FEATURE} memory") });
+    let err = mara.cmd_propose(Surface::Organization, enable).expect_err("refused");
+    assert!(err.to_string().contains(LOCK_NOT_AVAILABLE), "{err}");
 }
