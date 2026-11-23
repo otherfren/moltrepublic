@@ -36,7 +36,7 @@ pub(crate) use decision_line::DecisionLines;
 mod delivery;
 #[cfg(test)]
 pub(crate) use delivery::{GAP_FALLBACK_SECS, GAP_PASS_GRACE_SECS};
-pub(crate) use delivery::SenderHold;
+pub(crate) use delivery::{DupEpisode, SenderHold};
 use delivery::ACK_DEBOUNCE_SECS;
 mod demo_mesh;
 pub(crate) mod files;
@@ -64,9 +64,21 @@ pub(crate) struct DropSeam {
     chat: Mutex<Option<String>>,
     /// The restore settle in seconds plus one (`0` = the constant).
     pub(crate) restore_settle: std::sync::atomic::AtomicU64,
+    /// A merged re-key commit / an applied `Restored` block forgets
+    /// nothing, as a reset lost to a kill before the window save.
+    pub(crate) skip_rekey_reset: std::sync::atomic::AtomicBool,
+    pub(crate) skip_block_reset: std::sync::atomic::AtomicBool,
 }
 
 impl DropSeam {
+    pub(crate) fn keeps_window_on_rekey(&self) -> bool {
+        self.skip_rekey_reset.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn keeps_window_on_block(&self) -> bool {
+        self.skip_block_reset.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Whether this is the armed chat body's first arrival (then lost).
     pub(crate) fn drops_chat(&self, body: &WorkspaceEvent) -> bool {
         let WorkspaceEvent::Chat(msg) = body else { return false };
@@ -1099,3 +1111,5 @@ mod ingest_tests;
 mod presence_tests;
 #[cfg(test)]
 mod recovery_tests;
+#[cfg(test)]
+mod restore_reset_tests;

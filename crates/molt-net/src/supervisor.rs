@@ -1935,7 +1935,14 @@ where
                     // the tail is short in steady state (the floor tracks the
                     // head), and the first-ever ack's full read happens once
                     let envs = log.read_from(old_floor + 1).await;
-                    let floor = advance_acked_floor(&me, &envs, &win, old_floor);
+                    // an ack above our own log is a previous incarnation's
+                    let own_high = envs.last().map_or(old_floor, |e| e.seq.max(old_floor));
+                    let floor = if win.high > own_high {
+                        tracing::debug!(peer = %peer.member, window_high = win.high, own_high, "ack_ahead");
+                        old_floor
+                    } else {
+                        advance_acked_floor(&me, &envs, &win, old_floor)
+                    };
                     record_acked(&state, &store, &peer.member, floor).await;
                     // memory bound (§4.5): ciphertexts every acking peer has
                     // confirmed can never be needed again
@@ -2265,6 +2272,7 @@ mod tests {
                 acked_floor: 6,
                 ack_seen: true,
                 resend_epoch: 1,
+                ..Default::default()
             },
         );
         ts.outbound.insert(
@@ -2279,6 +2287,7 @@ mod tests {
                 acked_floor: 6,
                 ack_seen: true,
                 resend_epoch: 2,
+                ..Default::default()
             },
         );
         rewind_unacked(&mut ts);

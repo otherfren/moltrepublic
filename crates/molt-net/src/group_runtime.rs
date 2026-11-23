@@ -735,6 +735,11 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
         .get(from)
         .map_or(0, |c| c.acked_floor);
     let envs = log.read_from(old.saturating_add(1)).await;
+    let own_high = envs.last().map_or(old, |e| e.seq.max(old));
+    if window.high > own_high {
+        refuse_ack_ahead(store, from, window.high, own_high).await;
+        return;
+    }
     let floor = crate::supervisor::advance_acked_floor(me, &envs, window, old);
     tracing::debug!(
         me = %me,
@@ -761,6 +766,10 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
             }
             state.group = Some(group);
             let cursor = state.outbound.entry(from.clone()).or_default();
+            if cursor.ack_ahead {
+                cursor.ack_ahead = false;
+                changed = true;
+            }
             // only ever forward: another sheet may have moved it meanwhile
             if floor > cursor.acked_floor {
                 cursor.acked_floor = floor;
@@ -777,6 +786,34 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
             changed
         })
         .await;
+}
+
+/// A sheet acking seqs above our own log describes a previous incarnation
+/// of this seat (the peer missed its restore): nothing it claims is proven,
+/// so the peer is owed everything again and the outbox re-offers it.
+async fn refuse_ack_ahead<S: StateStore>(store: &S, from: &MemberId, window_high: u64, own_high: u64) {
+    let mut first = false;
+    store
+        .update(|state| {
+            let cursor = state.outbound.entry(from.clone()).or_default();
+            first = !cursor.ack_ahead;
+            let changed = first || cursor.acked_floor != 0 || !cursor.ack_seen;
+            cursor.ack_ahead = true;
+            cursor.acked_floor = 0;
+            cursor.ack_seen = true;
+            if changed {
+                let mut group = state.group.unwrap_or_default();
+                group.heal_evidence |= group.log_seq > 0;
+                state.group = Some(group);
+            }
+            changed
+        })
+        .await;
+    if first {
+        tracing::warn!(%from, window_high, own_high, "ack_ahead");
+    } else {
+        tracing::debug!(%from, window_high, own_high, "ack_ahead");
+    }
 }
 
 /// Publish claim sheets as they are handed over.
@@ -2973,6 +3010,76 @@ mod tests {
             state.outbound.get("petra").is_none_or(|c| !c.ack_seen),
             "silence about us is not evidence about us"
         );
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// A restored seat: a sheet acking seqs above its own log describes its
+    /// previous incarnation. It proves nothing: the floor falls back to the
+    /// start, so the outbox re-offers everything, with one WARN per episode.
+    #[tokio::test]
+    async fn a_sheet_acking_above_the_own_log_is_refused_and_rewinds_the_peer() {
+        let buf = LogBuf::default();
+        let subscriber = tracing_subscriber::fmt().with_writer(buf.clone()).with_ansi(false).without_time().finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let log = crate::MemLog::default();
+        let store = crate::MemStateStore::default();
+        for seq in 1..=10u64 {
+            log.push(walter_event(seq));
+        }
+        // an older build already believed the stale sheet
+        store
+            .update(|st| {
+                st.outbound.insert("petra".into(), OutboundCursor { acked_floor: 10, ack_seen: true, ..Default::default() });
+                true
+            })
+            .await;
+        let stale = |high: u64| {
+            let mut w = molt_core::AcceptedWindow::default();
+            assert!(w.accept(high));
+            crate::group_ack::GroupAck::new("petra".to_string(), std::collections::BTreeMap::from([("walter".to_string(), w)]))
+        };
+        let (me, from) = ("walter".to_string(), "petra".to_string());
+        apply_group_ack(&log, &store, &me, &from, &stale(6_000)).await;
+        apply_group_ack(&log, &store, &me, &from, &stale(6_001)).await;
+        let cursor = <crate::MemStateStore as StateStore>::load(&store).await.outbound["petra"];
+        assert_eq!((cursor.acked_floor, cursor.ack_seen), (0, true), "the tail is owed again");
+        let logged = String::from_utf8_lossy(&buf.0.lock().expect("log buffer")).to_string();
+        assert_eq!(logged.matches("ack_ahead").count(), 1, "one WARN per episode: {logged}");
+        assert!(logged.contains("window_high=6000 own_high=10"), "{logged}");
+
+        // counter: a sheet within the own log advances the floor and ends
+        // the episode
+        let mut w = molt_core::AcceptedWindow::default();
+        for seq in 1..=4u64 {
+            assert!(w.accept(seq));
+        }
+        let ack = crate::group_ack::GroupAck::new("petra".to_string(), std::collections::BTreeMap::from([("walter".to_string(), w)]));
+        apply_group_ack(&log, &store, &me, &from, &ack).await;
+        let cursor = <crate::MemStateStore as StateStore>::load(&store).await.outbound["petra"];
+        assert_eq!(cursor.acked_floor, 4);
+        assert!(!cursor.ack_ahead);
+        apply_group_ack(&log, &store, &me, &from, &stale(6_000)).await;
+        let logged = String::from_utf8_lossy(&buf.0.lock().expect("log buffer")).to_string();
+        assert_eq!(logged.matches("ack_ahead").count(), 2, "a new episode warns again");
     }
 
     /// With nobody acking, the floor is unknown and the cursor does not move.

@@ -127,8 +127,10 @@ impl State {
         self.delivery.ack_due.entry(from.clone()).or_insert(due);
         if !fresh {
             tracing::debug!(%from, seq = envelope.seq, "dropping an already-accepted envelope (duplicate/resend)");
+            self.note_dup(&from, envelope.seq, envelope.ts);
             return Ok(Reply::Ack);
         }
+        self.note_fresh(&from, envelope.ts);
         match envelope.body {
             WorkspaceEvent::Chat(mut msg) => {
                 msg.from = from.clone(); // defense in depth: the link decides

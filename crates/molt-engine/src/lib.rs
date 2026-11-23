@@ -363,6 +363,16 @@ impl WalletHandle {
         self.drop_seam.restore_settle.store(v, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: a merged re-key commit (`rekey`) and an applied
+    /// `Restored` block (`block`) forget no window, as a reset lost to a
+    /// kill before the window save. No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __skip_restore_reset(&self, rekey: bool, block: bool) {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.drop_seam.skip_rekey_reset.store(rekey, SeqCst);
+        self.drop_seam.skip_block_reset.store(block, SeqCst);
+    }
+
     /// Test seam: how many inbound envelopes the drop seam swallowed. A
     /// read only; no `Command` reaches it.
     #[doc(hidden)]
@@ -838,6 +848,9 @@ pub(crate) struct DeliveryState {
     /// envelopes waiting behind them (`net/delivery.rs`). Runtime-only,
     /// workspace scope.
     pub(crate) inbound: std::collections::HashMap<MemberId, net::SenderHold>,
+    /// Per sender: frames dropped as already seen that are newer than
+    /// anything accepted from it (`net/delivery.rs`). Runtime-only.
+    pub(crate) dups: std::collections::HashMap<MemberId, net::DupEpisode>,
     /// Test override of `HOLD_BYTES_MAX` (`None` = the constant).
     pub(crate) hold_bytes_cap: Option<usize>,
     /// Since when no stored replay is coming in (gap wants wait for it).

@@ -2019,6 +2019,10 @@ pub struct OutboundCursor {
     /// receiver's completed-id ring can never swallow a resend unread.
     #[serde(default)]
     pub resend_epoch: u32,
+    /// The peer's last sheet acked seqs above our own log: it describes a
+    /// previous incarnation of this seat, so nothing it claims is proven.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ack_ahead: bool,
 }
 
 /// The receive-side accept window (delivery guarantee,
@@ -2051,7 +2055,21 @@ pub struct AcceptedWindow {
     /// so the frontier can climb through them after a restart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<(u64, u64)>,
+    /// Receiver-local: the transport anchor of the sender's `Restored`
+    /// block this window counts under, or [`RESTORE_REKEYED`]. Empty = no
+    /// restore known (and every window an older build wrote).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub restore: String,
+    /// Receiver-local: the newest envelope stamp accepted from the sender
+    /// (0 = unknown).
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub stamp: u64,
 }
+
+/// [`AcceptedWindow::restore`] after a re-key merge reset whose `Restored`
+/// block was not matched yet: that block adopts the window instead of
+/// resetting it.
+pub const RESTORE_REKEYED: &str = "rekeyed";
 
 impl AcceptedWindow {
     /// The window as a peer may see it: the receiver-local fields stripped.
@@ -8619,6 +8637,11 @@ pub struct SeatSync {
     pub signed: Option<u64>,
     /// Persistent shares this seat holds whole.
     pub files: u32,
+    /// Envelopes of this seat this node drops as already seen although
+    /// they are newer than anything it accepted from it (its window
+    /// predates the seat's restore); 0 = none.
+    #[serde(default, skip_serializing_if = "u32_is_zero")]
+    pub dup_streak: u32,
 }
 
 /// Whether an own envelope stays out of the delivery guarantee and the G7

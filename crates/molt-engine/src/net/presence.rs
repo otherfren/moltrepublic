@@ -199,9 +199,8 @@ impl State {
         member: MemberId,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
-        if self.net_generation_current(generation) {
-            tracing::info!(%member, "re-key commit merged - forgetting the seat's old accept window");
-            self.reset_peer_accept_window(&member);
+        if self.net_generation_current(generation) && !self.drop_seam.keeps_window_on_rekey() {
+            self.reset_after_rekey(&member);
         }
         Ok(Reply::Ack)
     }
