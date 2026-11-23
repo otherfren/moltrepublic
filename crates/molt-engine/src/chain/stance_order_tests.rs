@@ -1,0 +1,94 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+//! A member's stance re-delivered after a reset or rewind never overrides
+//! a newer stance of the same member.
+
+use super::test_support::{chain_peer, Builder};
+use molt_core::{ProposalId, ProposalState, Surface, WorkspaceEvent};
+use serde_json::json;
+
+const T: u64 = 1_751_000_000;
+
+/// Walter in a 2-of-3 (veto room 1) holding petra's open card 7.
+fn seat() -> crate::State {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    walter.identity_sk = Some(b.key("walter").clone());
+    walter.receive_proposed(7, Surface::Memory, json!({ "op": "add_note", "id": 7 }), "petra");
+    walter
+}
+
+fn from(st: &mut crate::State, who: &str, seq: u64, ts: u64, body: WorkspaceEvent) {
+    let env = molt_core::EventEnvelope { prev_seq: 0, seq, ts, by: who.to_string(), body };
+    st.cmd_net_delivered(who.to_string(), env, None).expect("a wire delivery acks");
+}
+
+fn decline(by: &str) -> WorkspaceEvent {
+    WorkspaceEvent::Declined { id: ProposalId(7), by: by.to_string(), hash: String::new() }
+}
+
+fn approve(by: &str) -> WorkspaceEvent {
+    WorkspaceEvent::Approved { id: ProposalId(7), by: by.to_string(), height: 1, sig: String::new() }
+}
+
+fn card(st: &crate::State) -> &molt_core::ProposalRecord {
+    st.proposals.get(&7).expect("card 7")
+}
+
+/// Dora declined, then approved; petra declines. Dora's old decline,
+/// delivered again, must not join petra's into a rejection.
+#[test]
+fn a_re_delivered_old_decline_does_not_reject_an_open_card() {
+    let mut walter = seat();
+    from(&mut walter, "dora", 10, T + 10, decline("dora"));
+    from(&mut walter, "dora", 11, T + 11, approve("dora"));
+    from(&mut walter, "petra", 20, T + 20, decline("petra"));
+    assert_eq!(card(&walter).state, ProposalState::Proposed);
+    walter.reset_peer_accept_window(&"dora".to_string());
+    from(&mut walter, "dora", 10, T + 10, decline("dora"));
+    assert_eq!(card(&walter).state, ProposalState::Proposed, "a stale decline rejected the card");
+    assert_eq!(card(&walter).decliners, vec!["petra".to_string()]);
+}
+
+/// A re-delivered old approval does not clear a newer decline.
+#[test]
+fn a_re_delivered_old_approval_keeps_a_newer_decline() {
+    let mut walter = seat();
+    from(&mut walter, "dora", 11, T + 11, approve("dora"));
+    from(&mut walter, "dora", 12, T + 12, decline("dora"));
+    assert_eq!(card(&walter).decliners, vec!["dora".to_string()]);
+    walter.reset_peer_accept_window(&"dora".to_string());
+    from(&mut walter, "dora", 11, T + 11, approve("dora"));
+    assert_eq!(card(&walter).decliners, vec!["dora".to_string()], "a stale approval cleared the decline");
+}
+
+/// The newest stance still wins when it is the one arriving.
+#[test]
+fn a_newer_stance_still_overrides() {
+    let mut walter = seat();
+    from(&mut walter, "dora", 12, T + 12, decline("dora"));
+    from(&mut walter, "dora", 13, T + 13, approve("dora"));
+    assert!(card(&walter).decliners.is_empty());
+}
+
+/// A re-delivered withdrawal leaves the withdrawn card as it is.
+#[test]
+fn a_re_delivered_withdrawal_changes_nothing() {
+    let mut walter = seat();
+    let withdraw = || WorkspaceEvent::Withdrawn { id: ProposalId(7), by: "petra".to_string() };
+    from(&mut walter, "petra", 30, T + 30, withdraw());
+    let after = card(&walter).clone();
+    walter.reset_peer_accept_window(&"petra".to_string());
+    from(&mut walter, "petra", 30, T + 30, withdraw());
+    assert_eq!(*card(&walter), after);
+}
+
+/// The card records the newest stance stamp per member (snapshot data; the
+/// replay rebuilds it from the kept events).
+#[test]
+fn the_newest_stance_stamp_is_recorded_on_the_card() {
+    let mut walter = seat();
+    from(&mut walter, "dora", 10, T + 10, decline("dora"));
+    from(&mut walter, "dora", 11, T + 11, approve("dora"));
+    assert_eq!(card(&walter).stances.get("dora"), Some(&(T + 11)));
+}

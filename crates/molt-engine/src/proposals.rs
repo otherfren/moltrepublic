@@ -1520,6 +1520,23 @@ impl State {
             || member_parked >= PARKED_DECLINES_PER_MEMBER_MAX
     }
 
+    /// Whether `by`'s stance on card `id` stamped `ts` is newer than the
+    /// last one applied from it, recording it if so. A re-delivered older
+    /// stance (after a reset or a rewind) would otherwise be judged against
+    /// the other seats' CURRENT stances. Stamps, not seqs: the own log keeps
+    /// the wire stamp, so the replay rebuilds the same marks.
+    pub(crate) fn newer_stance(&mut self, id: u64, by: &str, ts: u64) -> bool {
+        if by == self.member() {
+            return true;
+        }
+        let Some(p) = self.proposals.get_mut(&id) else { return true };
+        if p.stances.get(by).is_some_and(|t| ts <= *t) {
+            return false;
+        }
+        p.stances.insert(by.to_string(), ts);
+        true
+    }
+
     pub(crate) fn register_decline(
         &mut self,
         id: u64,
@@ -1528,6 +1545,10 @@ impl State {
         hash: &str,
     ) -> DeclineOutcome {
         if self.retired.contains(&id) {
+            return DeclineOutcome::Known;
+        }
+        if !self.newer_stance(id, by, ts) {
+            tracing::debug!(%id, %by, ts, "dropping an older decline than the stance applied");
             return DeclineOutcome::Known;
         }
         let is_own = by == self.member();

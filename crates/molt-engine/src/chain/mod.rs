@@ -56,6 +56,8 @@ mod projection_tests;
 #[cfg(test)]
 mod sync_tests;
 #[cfg(test)]
+mod stance_order_tests;
+#[cfg(test)]
 mod stance_tests;
 #[cfg(test)]
 mod heal_diag_tests;

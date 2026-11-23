@@ -383,6 +383,10 @@ impl State {
                         }
                     }
                 }
+                // the live arm's stance mark, rebuilt from the kept stamp
+                if env.by == *by {
+                    let _ = self.newer_stance(id.0, by, env.ts);
+                }
                 // D2 replay twin of the live clears: the newest stance wins
                 // — an own log that recorded decline-then-approve must
                 // reconstruct the approve as the standing one

@@ -725,17 +725,29 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
     from: &MemberId,
     ack: &crate::group_ack::GroupAck,
 ) {
+    apply_group_ack_at(log, store, me, from, ack, wall_secs()).await;
+}
+
+async fn apply_group_ack_at<L: OutboxLog, S: StateStore>(
+    log: &L,
+    store: &S,
+    me: &MemberId,
+    from: &MemberId,
+    ack: &crate::group_ack::GroupAck,
+    now: u64,
+) {
     let Some(window) = ack.window_for(me) else {
         return; // silence, not a claim of zero
     };
     let held = store.load().await.outbound.get(from).copied().unwrap_or_default();
     let old = held.acked_floor;
-    let envs = log.read_from(old.saturating_add(1)).await;
-    let own_high = envs.last().map_or(old, |e| e.seq.max(old));
-    if window.high > own_high {
-        refuse_ack_ahead(store, from, window.high, own_high).await;
+    // only the tail from the claimed high is read: nothing there means the
+    // claim is beyond our log
+    if window.high > old && log.read_from(window.high).await.is_empty() {
+        refuse_ack_ahead(log, store, from, ack, window.high, now).await;
         return;
     }
+    let envs = log.read_from(old.saturating_add(1)).await;
     // only a sheet written after the one that set the floor can contradict it
     let regressing = ack.at > held.ack_at
         && (window.high < held.ack_high || (held.ack_high == 0 && window.high < old));
@@ -770,6 +782,7 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
             let cursor = state.outbound.entry(from.clone()).or_default();
             if cursor.ack_ahead {
                 cursor.ack_ahead = false;
+                cursor.ahead_since = 0;
                 changed = true;
             }
             // only ever forward: another sheet may have moved it meanwhile
@@ -809,7 +822,7 @@ async fn rewind_regressed<L: OutboxLog, S: StateStore>(
     old: u64,
 ) -> bool {
     // below the window the sheet reads every seq as accepted
-    let base = window.high.saturating_sub(molt_core::ACCEPT_WINDOW_BITS);
+    let base = window.high.saturating_sub(molt_core::ACCEPT_WINDOW_BITS + 1);
     let envs = log.read_range(base.saturating_add(1), old).await;
     let Some(first) = envs.first().map(|e| e.seq) else { return false };
     let start = base.max(first.saturating_sub(1));
@@ -848,32 +861,56 @@ async fn rewind_regressed<L: OutboxLog, S: StateStore>(
     true
 }
 
-/// A sheet acking seqs above our own log describes a previous incarnation
-/// of this seat (the peer missed its restore): nothing it claims is proven,
-/// so the peer is owed everything again and the outbox re-offers it.
-async fn refuse_ack_ahead<S: StateStore>(store: &S, from: &MemberId, window_high: u64, own_high: u64) {
-    let mut first = false;
-    store
-        .update(|state| {
-            let cursor = state.outbound.entry(from.clone()).or_default();
-            first = !cursor.ack_ahead;
-            let changed = first || cursor.acked_floor != 0 || !cursor.ack_seen;
-            cursor.ack_ahead = true;
-            cursor.acked_floor = 0;
-            cursor.ack_seen = true;
-            if changed {
+/// A sheet acking seqs above our own log: either the peer holds a previous
+/// incarnation's window of this seat (it missed the restore), or this log
+/// is behind what the peer really has (an older export imported). The
+/// floor falls to 0 once so the stall rounds re-offer everything; if the
+/// peer is still ahead after a full backoff, re-offering is futile either
+/// way - the floor goes to the own head and the episode stops costing.
+async fn refuse_ack_ahead<L: OutboxLog, S: StateStore>(
+    log: &L,
+    store: &S,
+    from: &MemberId,
+    ack: &crate::group_ack::GroupAck,
+    window_high: u64,
+    now: u64,
+) {
+    let held = store.load().await.outbound.get(from).copied().unwrap_or_default();
+    if !held.ack_ahead {
+        let own_high = log.read_from(held.acked_floor.saturating_add(1)).await.last().map_or(held.acked_floor, |e| e.seq);
+        store
+            .update(|state| {
+                let cursor = state.outbound.entry(from.clone()).or_default();
+                cursor.ack_ahead = true;
+                cursor.ahead_since = now.max(1);
+                cursor.acked_floor = 0;
+                cursor.ack_seen = true;
                 let mut group = state.group.unwrap_or_default();
                 group.heal_evidence |= group.log_seq > 0;
                 state.group = Some(group);
-            }
-            changed
+                true
+            })
+            .await;
+        tracing::warn!(%from, window_high, own_high, "ack_ahead");
+        return;
+    }
+    let futile = held.ahead_since > 0 && now.saturating_sub(held.ahead_since) >= RESEND_MAX_BACKOFF_SECS;
+    if !futile {
+        tracing::debug!(%from, window_high, "ack_ahead");
+        return;
+    }
+    let own_high = log.read_from(held.acked_floor.saturating_add(1)).await.last().map_or(held.acked_floor, |e| e.seq);
+    store
+        .update(|state| {
+            let cursor = state.outbound.entry(from.clone()).or_default();
+            cursor.ahead_since = 0;
+            cursor.acked_floor = cursor.acked_floor.max(own_high);
+            cursor.ack_high = own_high;
+            cursor.ack_at = cursor.ack_at.max(ack.at);
+            true
         })
         .await;
-    if first {
-        tracing::warn!(%from, window_high, own_high, "ack_ahead");
-    } else {
-        tracing::debug!(%from, window_high, own_high, "ack_ahead");
-    }
+    tracing::info!(%from, window_high, own_high, "ack_ahead_stopped");
 }
 
 /// Publish claim sheets as they are handed over.
@@ -3203,6 +3240,67 @@ mod tests {
         apply_group_ack(&log, &store, &me, &from, &sheet_at(4_000, 1..=2)).await;
         let logged = String::from_utf8_lossy(&buf.0.lock().expect("log buffer")).to_string();
         assert_eq!(logged.matches("WARN").count(), 2, "{logged}");
+    }
+
+    /// A log that records where each read started.
+    #[derive(Clone, Default)]
+    struct CountingLog(crate::MemLog, std::sync::Arc<std::sync::Mutex<Vec<u64>>>);
+
+    impl OutboxLog for CountingLog {
+        async fn read_from(&self, from_seq: u64) -> Vec<molt_core::EventEnvelope> {
+            self.1.lock().expect("reads").push(from_seq);
+            self.0.read_from(from_seq).await
+        }
+    }
+
+    /// While a peer stays ahead, its sheets read only the log's tail from
+    /// the claimed high - never the whole log every few seconds - and after
+    /// a full backoff the episode stops re-offering: the floor goes to the
+    /// own head (what the peer provably has once this log reaches it).
+    #[tokio::test]
+    async fn an_ack_ahead_episode_reads_the_tail_only_and_stops_after_a_backoff() {
+        let log = CountingLog::default();
+        let store = crate::MemStateStore::default();
+        for seq in 1..=10u64 {
+            log.0.push(walter_event(seq));
+        }
+        let (me, from) = ("walter".to_string(), "petra".to_string());
+        let t0 = 1_700_000_000;
+        apply_group_ack_at(&log, &store, &me, &from, &sheet_at(1, 6_000..=6_000), t0).await;
+        assert_eq!(petra_cursor(&store).await.acked_floor, 0, "the tail is re-offered once");
+        log.1.lock().expect("reads").clear();
+        for i in 1..20u64 {
+            apply_group_ack_at(&log, &store, &me, &from, &sheet_at(1 + i, 6_000..=6_000), t0 + i).await;
+        }
+        let reads = log.1.lock().expect("reads").clone();
+        assert!(reads.iter().all(|r| *r == 6_000), "a stale sheet read more than the tail: {reads:?}");
+        apply_group_ack_at(&log, &store, &me, &from, &sheet_at(100, 6_000..=6_000), t0 + RESEND_MAX_BACKOFF_SECS).await;
+        let cursor = petra_cursor(&store).await;
+        assert_eq!((cursor.acked_floor, cursor.ahead_since), (10, 0), "a futile episode stops re-offering");
+        assert!(cursor.ack_ahead, "the sheets stay refused");
+    }
+
+    /// The seq at `high - 1024` is still an explicit bit of the window; only
+    /// below it does the sheet read every seq as accepted.
+    #[tokio::test]
+    async fn a_rewind_reads_the_last_explicit_bit_as_unacked() {
+        let log = crate::MemLog::default();
+        let store = crate::MemStateStore::default();
+        for seq in 1..=1_100u64 {
+            log.push(walter_event(seq));
+        }
+        store
+            .update(|st| {
+                st.outbound.insert(
+                    "petra".into(),
+                    OutboundCursor { acked_floor: 1_100, ack_seen: true, ack_high: 1_101, ack_at: 1, ..Default::default() },
+                );
+                true
+            })
+            .await;
+        apply_group_ack(&log, &store, &"walter".to_string(), &"petra".to_string(), &sheet_at(2, 1_100..=1_100)).await;
+        let edge = 1_100 - molt_core::ACCEPT_WINDOW_BITS;
+        assert_eq!(petra_cursor(&store).await.acked_floor, edge - 1, "seq {edge} is an explicit, unset bit");
     }
 
     /// A late older sheet, or one from a build that stamps nothing, proves

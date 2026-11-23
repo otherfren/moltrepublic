@@ -1,32 +1,62 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! A restored seat's inbound state is forgotten once per restore, on every
-//! seat (`delivery_guarantee.md` §4.9).
+//! A restored seat's inbound state is forgotten once per restore, on
+//! evidence or proof, never blindly (`delivery_guarantee.md` §11).
 
 use crate::chain::test_support::{chain_peer, wire, Builder};
-use molt_core::{AcceptedWindow, ChainBlock, MessageId, WorkspaceEvent, RESTORE_REKEYED};
+use molt_core::{AcceptedWindow, ChainBlock, MessageId, RestoreProof, WorkspaceEvent};
 
 const SEATS: [&str; 3] = ["petra", "walter", "dora"];
+const T: u64 = 1_751_000_000;
 
 fn anchor() -> String {
     "ab".repeat(32)
 }
 
-fn chat(id: u8, body: &str) -> WorkspaceEvent {
-    WorkspaceEvent::Chat(molt_core::ChatMessage::text(MessageId([id; 16]), "dora", body, 1_751_000_000))
+fn anchor2() -> String {
+    "cd".repeat(32)
 }
 
-/// Walter, a bystander, holding dora's OLD incarnation window (seqs
-/// 1..=40), and the `Restored` block for dora not yet applied.
+fn chat(id: u8, body: &str) -> WorkspaceEvent {
+    WorkspaceEvent::Chat(molt_core::ChatMessage::text(MessageId([id; 16]), "dora", body, T))
+}
+
+fn small(seq: u64) -> u8 {
+    u8::try_from(seq).expect("small")
+}
+
+/// One envelope of dora's, stamped `ts`.
+fn dora_at(st: &mut crate::State, seq: u64, ts: u64, body: WorkspaceEvent) {
+    let env = molt_core::EventEnvelope { prev_seq: 0, seq, ts, by: "dora".to_string(), body };
+    st.cmd_net_delivered("dora".to_string(), env, None).expect("a wire delivery acks");
+}
+
+/// A block from petra (her wire seq `seq`), its envelope stamped `ts`.
+fn block_at(st: &mut crate::State, seq: u64, ts: u64, block: ChainBlock) {
+    let env =
+        molt_core::EventEnvelope { prev_seq: 0, seq, ts, by: "petra".to_string(), body: WorkspaceEvent::Committed(block) };
+    st.cmd_net_delivered("petra".to_string(), env, None).expect("a wire delivery acks");
+}
+
+/// Walter, a bystander, holding dora's OLD incarnation window (seqs 1..=40
+/// stamped T+1..T+40); dora's restore (sealed at T+100) not yet applied.
 fn bystander() -> (crate::State, ChainBlock) {
+    let (walter, first, _) = bystander_twice();
+    (walter, first)
+}
+
+/// [`bystander`] plus a second restore of dora, sealed after the first.
+fn bystander_twice() -> (crate::State, ChainBlock, ChainBlock) {
     let mut b = Builder::new(&SEATS, 2);
     let mut walter = chain_peer("walter", &b, b.blocks.clone());
     for seq in 1..=40u64 {
-        wire(&mut walter, "dora", seq, chat(100 + u8::try_from(seq).expect("small"), "old"));
+        wire(&mut walter, "dora", seq, chat(100 + small(seq), "old"));
     }
     b.commit_restored("dora", &anchor(), &["petra", "walter"]);
-    let block = b.blocks.last().expect("the restore").clone();
-    (walter, block)
+    let first = b.blocks.last().expect("restore one").clone();
+    b.commit_restored("dora", &anchor2(), &["petra", "walter"]);
+    let second = b.blocks.last().expect("restore two").clone();
+    (walter, first, second)
 }
 
 fn bodies(st: &crate::State, body: &str) -> usize {
@@ -37,102 +67,180 @@ fn window(st: &crate::State) -> AcceptedWindow {
     st.delivery.accepted.get("dora").cloned().unwrap_or_default()
 }
 
-/// The field shape: a bystander whose live re-key reset was lost still
-/// forgets the old incarnation when the `Restored` block is applied.
+/// The field shape: a bystander that missed the live re-key reset. The
+/// block only keys its window; the first dropped frame stamped after the
+/// restore and after everything the window accepted proves the fault: the
+/// window resets on it, and that frame lands.
 #[test]
-fn applying_the_restored_block_resets_the_seats_window_on_a_bystander() {
+fn a_bystander_that_missed_the_merge_resets_on_the_first_newer_duplicate() {
     let (mut walter, block) = bystander();
-    wire(&mut walter, "petra", 1, WorkspaceEvent::Committed(block));
+    block_at(&mut walter, 1, T + 100, block);
     assert_eq!(walter.chain.anchors.get("dora"), Some(&anchor()), "the block applied");
-    wire(&mut walter, "dora", 5, chat(1, "comeback"));
-    assert_eq!(bodies(&walter, "comeback"), 1, "the new incarnation's seq 5 is not a duplicate");
-    assert_eq!(window(&walter).restore, anchor(), "the reset is keyed to the restore");
+    assert!(window(&walter).is_accepted(40), "the block alone resets nothing");
+    dora_at(&mut walter, 5, T + 205, chat(1, "comeback"));
+    assert_eq!(bodies(&walter, "comeback"), 1, "the evidence frame lands");
+    let w = window(&walter);
+    assert_eq!((w.restore.as_str(), w.proof), (anchor().as_str(), RestoreProof::Evidence));
+    assert!(w.is_accepted(5) && !w.is_accepted(40));
 }
 
 /// Merge first, block second: the block must not throw away what the new
-/// device delivered after the merge.
+/// device delivered after the merge, and a resend of it is no evidence.
 #[test]
 fn a_block_after_the_rekey_merge_does_not_reset_again() {
     let (mut walter, block) = bystander();
     walter.cmd_net_peer_rekeyed("dora".to_string(), None).expect("ack");
-    assert_eq!(window(&walter).restore, RESTORE_REKEYED);
+    assert_eq!(window(&walter).proof, RestoreProof::MergePending);
     for seq in 1..=3u64 {
-        wire(&mut walter, "dora", seq, chat(u8::try_from(seq).expect("small"), "new"));
+        dora_at(&mut walter, seq, T + 200 + seq, chat(small(seq), "new"));
     }
-    wire(&mut walter, "petra", 1, WorkspaceEvent::Committed(block));
+    block_at(&mut walter, 1, T + 100, block);
     let w = window(&walter);
     assert!(w.is_accepted(3), "the block reset the window a second time: {w:?}");
-    assert_eq!(w.restore, anchor(), "the block adopts the merged window");
-    // a resend of seq 2 is a duplicate, not a second apply
-    wire(&mut walter, "dora", 2, chat(9, "new again"));
+    assert_eq!((w.restore.as_str(), w.proof), (anchor().as_str(), RestoreProof::Merge));
+    dora_at(&mut walter, 2, T + 202, chat(9, "new again"));
     assert_eq!(bodies(&walter, "new again"), 0);
     assert_eq!(bodies(&walter, "new"), 3);
+    assert!(window(&walter).is_accepted(3), "a resend is no evidence");
 }
 
 /// Block first, merge second, then the same restore found again (a
-/// re-application, the reconcile at open): one reset for the block, the
-/// merge's own, none after.
+/// re-application, the open): nothing after the merge's reset.
 #[test]
 fn a_restore_seen_again_after_new_traffic_resets_nothing() {
     let (mut walter, block) = bystander();
-    wire(&mut walter, "petra", 1, WorkspaceEvent::Committed(block));
+    block_at(&mut walter, 1, T + 100, block);
     walter.cmd_net_peer_rekeyed("dora".to_string(), None).expect("ack");
+    assert_eq!(window(&walter).proof, RestoreProof::Merge);
     for seq in 1..=3u64 {
-        wire(&mut walter, "dora", seq, chat(u8::try_from(seq).expect("small"), "new"));
+        dora_at(&mut walter, seq, T + 200 + seq, chat(small(seq), "new"));
     }
     walter.reset_for_restore("dora", &anchor());
-    assert!(window(&walter).is_accepted(3), "a re-applied block reset the window");
-    assert_eq!(window(&walter).restore, anchor());
     walter.reconcile_restore_windows();
     walter.reset_for_restore("dora", &anchor());
-    assert!(window(&walter).is_accepted(3), "a replay at open reset the window");
+    assert!(window(&walter).is_accepted(3), "a replay reset the window");
 }
 
-/// The window a v0.1.1 build persisted for a restored seat carries no key:
-/// the open resets it once, and only once.
+/// Two restores of one seat, both block first: the second block resets the
+/// first device's stream - a merge marker never outlives its restore - and
+/// the reset is written at once, not on the save debounce.
 #[test]
-fn an_unkeyed_window_of_a_restored_seat_is_reset_once_at_open() {
+fn a_second_restore_resets_the_first_devices_stream() {
+    let (mut walter, first, second) = bystander_twice();
+    block_at(&mut walter, 1, T + 100, first);
+    walter.cmd_net_peer_rekeyed("dora".to_string(), None).expect("ack");
+    for seq in 1..=3u64 {
+        dora_at(&mut walter, seq, T + 200 + seq, chat(small(seq), "device one"));
+    }
+    let saves = walter.delivery.reset_saves;
+    block_at(&mut walter, 2, T + 300, second);
+    let w = window(&walter);
+    assert_eq!((w.restore.as_str(), w.proof), (anchor2().as_str(), RestoreProof::Block));
+    assert!(!w.is_accepted(3), "device one's marks survived the second restore");
+    assert_eq!(walter.delivery.reset_saves, saves + 1, "the reset went to the writer at once");
+}
+
+/// The same, the second merge first: the block adopts the merged window.
+#[test]
+fn a_second_restore_merged_first_is_adopted() {
+    let (mut walter, first, second) = bystander_twice();
+    block_at(&mut walter, 1, T + 100, first);
+    walter.cmd_net_peer_rekeyed("dora".to_string(), None).expect("ack");
+    walter.cmd_net_peer_rekeyed("dora".to_string(), None).expect("ack");
+    assert_eq!(window(&walter).proof, RestoreProof::MergePending);
+    dora_at(&mut walter, 1, T + 400, chat(1, "device two"));
+    block_at(&mut walter, 2, T + 300, second);
+    let w = window(&walter);
+    assert_eq!((w.restore.as_str(), w.proof), (anchor2().as_str(), RestoreProof::Merge));
+    assert!(w.is_accepted(1));
+}
+
+/// A healthy window a v0.1.1 build wrote (no key, no stamp) is keyed at open,
+/// not reset; frames re-read after the restart are no evidence.
+#[test]
+fn a_healthy_unkeyed_window_is_keyed_at_open_not_reset() {
     let (mut walter, block) = bystander();
-    wire(&mut walter, "petra", 1, WorkspaceEvent::Committed(block));
-    let old: AcceptedWindow = serde_json::from_str(r#"{"high":40,"frontier":40}"#).expect("a v0.1.1 window");
-    assert!(old.restore.is_empty());
-    walter.delivery.accepted.insert("dora".to_string(), old);
+    block_at(&mut walter, 1, T + 100, block);
+    let mut healthy = AcceptedWindow::default();
+    for seq in 1..=40u64 {
+        assert!(healthy.accept(seq));
+    }
+    walter.delivery.accepted.insert("dora".to_string(), healthy);
     walter.delivery.inbound.clear();
+    walter.delivery.dups.clear();
+    walter.presence.clock_override = Some(T + 1_000);
+    walter.delivery.opened_at = T + 1_000;
     walter.reconcile_restore_windows();
     assert_eq!(window(&walter).restore, anchor());
-    assert!(walter.delivery.accepted_dirty, "the reset reaches the next save");
-    wire(&mut walter, "dora", 5, chat(1, "comeback"));
-    assert_eq!(bodies(&walter, "comeback"), 1);
-    walter.reconcile_restore_windows();
-    assert!(window(&walter).is_accepted(5), "a second open reset again");
+    assert!(window(&walter).is_accepted(40), "a healthy window was reset at open");
+    dora_at(&mut walter, 30, T + 990, chat(130, "re-read"));
+    dora_at(&mut walter, 31, T + 1_000 + crate::net::ingest::WIRE_STAMP_SKEW_SECS, chat(131, "re-read"));
+    assert!(window(&walter).is_accepted(40), "a re-read frame counted as evidence");
 }
 
-/// A seat never restored keeps its window at open, and a window created
-/// for a restored seat carries the key from the start.
+/// The same window shape holding the OLD incarnation: with no stamp known
+/// the open time plus the skew bound is the reference, and the first frame
+/// past it resets the window and lands.
 #[test]
-fn the_open_leaves_unrestored_seats_and_fresh_windows_alone() {
+fn an_unkeyed_stale_window_resets_on_a_frame_past_the_open_bound() {
     let (mut walter, block) = bystander();
-    wire(&mut walter, "petra", 1, WorkspaceEvent::Committed(block));
-    wire(&mut walter, "petra", 2, chat(7, "petra"));
-    walter.delivery.accepted.remove("dora");
-    wire(&mut walter, "dora", 1, chat(1, "first"));
-    assert_eq!(window(&walter).restore, anchor(), "a fresh window counts under the current restore");
+    block_at(&mut walter, 1, T + 100, block);
+    let mut stale = window(&walter);
+    stale.stamp = 0;
+    stale.restore.clear();
+    stale.proof = RestoreProof::Unknown;
+    walter.delivery.accepted.insert("dora".to_string(), stale);
+    walter.delivery.inbound.clear();
+    walter.presence.clock_override = Some(T + 1_000);
+    walter.delivery.opened_at = T + 1_000;
     walter.reconcile_restore_windows();
-    assert!(window(&walter).is_accepted(1));
-    assert!(walter.delivery.accepted["petra"].is_accepted(2), "petra was never restored");
+    let past = T + 1_001 + crate::net::ingest::WIRE_STAMP_SKEW_SECS;
+    dora_at(&mut walter, 5, past, chat(1, "proof"));
+    assert_eq!(bodies(&walter, "proof"), 1);
+    assert_eq!(window(&walter).proof, RestoreProof::Evidence);
 }
 
-/// After a restore reset the new incarnation is owed from its first seq: a
-/// later envelope is ordered behind its missing predecessors instead of
-/// becoming a baseline the sheet would ack everything below.
+/// A restored device catching up hears another restored seat before its
+/// catch-up applies that seat's older `Restored` block: the block adopts
+/// the first-contact window, it does not replay the seat.
+#[test]
+fn a_first_contact_before_the_catch_up_block_is_not_reset() {
+    let mut b = Builder::new(&SEATS, 2);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    b.commit_restored("dora", &anchor(), &["petra", "walter"]);
+    let block = b.blocks.last().expect("the restore").clone();
+    for seq in 1..=3u64 {
+        dora_at(&mut walter, seq, T + 200 + seq, chat(small(seq), "new"));
+    }
+    assert_eq!(window(&walter).proof, RestoreProof::Pending);
+    block_at(&mut walter, 1, T + 100, block);
+    let w = window(&walter);
+    assert!(w.is_accepted(3), "the catch-up block replayed the seat: {w:?}");
+    assert_eq!((w.restore.as_str(), w.proof), (anchor().as_str(), RestoreProof::Adopted));
+}
+
+/// A seat never restored keeps its window at open.
+#[test]
+fn the_open_leaves_unrestored_seats_alone() {
+    let (mut walter, block) = bystander();
+    block_at(&mut walter, 1, T + 100, block);
+    wire(&mut walter, "petra", 2, chat(7, "petra"));
+    walter.reconcile_restore_windows();
+    assert!(walter.delivery.accepted["petra"].is_accepted(2), "petra was never restored");
+    assert_eq!(walter.delivery.accepted["petra"].restore, "");
+}
+
+/// After a reset the new incarnation is owed from its first seq: a later
+/// envelope is ordered behind its missing predecessors instead of becoming
+/// a baseline the sheet would ack everything below.
 #[test]
 fn a_reset_window_orders_the_new_incarnation_from_its_start() {
-    let (mut walter, block) = bystander();
-    wire(&mut walter, "petra", 1, WorkspaceEvent::Committed(block));
+    let (mut walter, _block) = bystander();
+    walter.cmd_net_peer_rekeyed("dora".to_string(), None).expect("ack");
     let env = |seq: u64, prev: u64, id: u8, body: &str| molt_core::EventEnvelope {
         prev_seq: prev,
         seq,
-        ts: 1_751_000_100 + seq,
+        ts: T + 100 + seq,
         by: "dora".to_string(),
         body: chat(id, body),
     };
@@ -141,8 +249,28 @@ fn a_reset_window_orders_the_new_incarnation_from_its_start() {
     assert!(!window(&walter).is_accepted(50), "not acked before what it follows");
     walter.cmd_net_delivered("dora".to_string(), env(40, 0, 1, "first"), None).expect("ack");
     assert_eq!((bodies(&walter, "first"), bodies(&walter, "later")), (1, 1));
-    let order: Vec<&str> = walter.chat.iter().filter(|m| m.body == "first" || m.body == "later").map(|m| m.body.as_str()).collect();
+    let order: Vec<&str> =
+        walter.chat.iter().filter(|m| m.body == "first" || m.body == "later").map(|m| m.body.as_str()).collect();
     assert_eq!(order, ["first", "later"]);
+}
+
+/// A sender that answers no gap want (v0.1.0) cannot fill a reset window
+/// from its start: past the fallback the frontier goes to just below what
+/// is held - loudly - instead of holding its stream for ever.
+#[test]
+fn a_reset_window_of_a_silent_sender_falls_back_to_a_baseline() {
+    let (mut walter, _block) = bystander();
+    let fallback = crate::net::delivery::GAP_FALLBACK_SECS;
+    walter.presence.clock_override = Some(T + 1_000);
+    walter.cmd_net_peer_rekeyed("dora".to_string(), None).expect("ack");
+    let env = molt_core::EventEnvelope { prev_seq: 2_990, seq: 3_000, ts: T + 1_000, by: "dora".to_string(), body: chat(1, "far") };
+    walter.cmd_net_delivered("dora".to_string(), env, None).expect("ack");
+    assert_eq!(bodies(&walter, "far"), 0, "held above the cap");
+    walter.inbound_gap_tick(T + 1_000 + fallback - 1);
+    assert_eq!(bodies(&walter, "far"), 0);
+    walter.presence.clock_override = Some(T + 1_000 + fallback);
+    walter.inbound_gap_tick(T + 1_000 + fallback);
+    assert_eq!(bodies(&walter, "far"), 1, "the stream is released past the fallback");
 }
 
 fn deliver_at(st: &mut crate::State, seq: u64, ts: u64, body: WorkspaceEvent) {
@@ -237,4 +365,22 @@ fn frames_re_read_after_a_restart_are_no_episode() {
     });
     assert!(!logs.contains("dup_streak"), "{logs}");
     assert_eq!(streak(&walter), 0);
+}
+
+/// An unchanged sheet is not republished although its stamp moved.
+#[test]
+fn an_unchanged_sheet_is_the_same_sheet() {
+    let mut w = AcceptedWindow::default();
+    assert!(w.accept(3));
+    let claims = std::collections::BTreeMap::from([("dora".to_string(), w)]);
+    let mut last = molt_net::group_ack::GroupAck::new("walter".to_string(), claims.clone());
+    last.at = 1;
+    let mut next = molt_net::group_ack::GroupAck::new("walter".to_string(), claims);
+    next.at = 2;
+    assert!(crate::net::delivery::same_sheet(Some(&last), &next));
+    let mut moved = next.clone();
+    if let Some(w) = moved.claims.get_mut("dora") {
+        assert!(w.accept(4));
+    }
+    assert!(!crate::net::delivery::same_sheet(Some(&last), &moved));
 }

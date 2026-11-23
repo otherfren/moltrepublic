@@ -127,10 +127,12 @@ impl State {
         self.delivery.ack_due.entry(from.clone()).or_insert(due);
         if !fresh {
             tracing::debug!(%from, seq = envelope.seq, "dropping an already-accepted envelope (duplicate/resend)");
-            self.note_dup(&from, envelope.seq, envelope.ts);
+            if self.note_dup(&from, envelope.seq, envelope.ts) {
+                return self.cmd_net_delivered(from, envelope, None);
+            }
             return Ok(Reply::Ack);
         }
-        self.note_fresh(&from, envelope.ts);
+        self.note_fresh(&from, envelope.seq, envelope.ts);
         match envelope.body {
             WorkspaceEvent::Chat(mut msg) => {
                 msg.from = from.clone(); // defense in depth: the link decides
@@ -497,6 +499,10 @@ impl State {
                 }
             }
             WorkspaceEvent::Approved { id, by, height, sig } if self.is_chain_governed() => {
+                if by == from && !self.newer_stance(id.0, &by, envelope.ts) {
+                    tracing::debug!(%from, id = id.0, "dropping an older approval than the stance applied");
+                    return Ok(Reply::Ack);
+                }
                 // D2: a LINK-AUTHENTICATED approve clears the member's
                 // standing decline (newest stance wins). Gated on by ==
                 // from — receive_approval never verifies the signature, so
