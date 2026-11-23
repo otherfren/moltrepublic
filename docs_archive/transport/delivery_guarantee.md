@@ -722,3 +722,67 @@ Pins: `net::delivery_tests` (`a_newest_first_replay_past_the_window_loses_nothin
 `crates/molt-engine/tests/nostr_inbound_gap.rs`,
 `crates/molt-engine/tests/nostr_long_replay.rs`,
 `crates/molt-engine/tests/nostr_slow_replay.rs`.
+
+## 11. A restored seat's new incarnation (v0.1.2)
+
+A restored seat's new device counts its log seqs from the start. Every
+other seat forgets the old incarnation's inbound state - window, frontier,
+links, held frames, ack deadline, catch-up debounce, height claim - once per
+restore, and never twice: a second reset would discard what the new device
+delivered since. A missed reset never healed: the stale window drops the new
+device's frames as duplicates (everything 1024 below its old `high` reads as
+accepted), every duplicate re-arms the ack, and the sheet's old `high` moved
+the new device's acked floor past frames nobody applied.
+
+- **Key.** `AcceptedWindow.restore`, receiver-local, stripped from sheets,
+  persisted with the window it keys: the transport anchor of the `Restored`
+  block the window counts under, `rekeyed`, or empty (no restore known;
+  every window an older build wrote). A window born for a restored seat
+  takes the seat's latest anchor.
+- **The re-key merge** (`cmd_net_peer_rekeyed`, and the coordinator's own
+  commit in `coordinator_rekey_nostr`) always resets and keys `rekeyed`.
+  Safe in either order with the block: before the merge no frame of the new
+  device decrypts here, so the window holds the old incarnation only.
+- **The block is the authority.** `settle_block`'s `Restored` arm, on every
+  seat (live append, catch-up, re-application): reset unless the window is
+  keyed to the block's anchor; a `rekeyed` window adopts the anchor without
+  a reset. The restored seat keeps no window for itself.
+- **At open** (`reconcile_restore_windows`): every seat with a working
+  anchor (`chain.anchors`, seeded from a checkpoint) whose window is keyed
+  neither to it nor `rekeyed` is reset once. This heals the windows v0.1.0
+  and v0.1.1 left; a healthy unkeyed window costs one re-delivery of that
+  seat's unacked tail, absorbed by the kind-level dedups (chat by
+  `MessageId`, its verbs by target id, `Proposed` by id, `Approved` and
+  `Declined` per signer, `Committed` by height). Its acked floor never moves
+  back, so nothing already acked is re-sent.
+- **Ack-ahead guard** (`apply_group_ack`). A sheet whose `high` for us is
+  above our own log's highest seq describes a previous incarnation of this
+  seat: the floor does not move; the peer's floor falls to 0 with
+  `ack_seen`, so the stall rounds re-offer the log with fresh encryptions;
+  `ack_ahead from= window_high= own_high=` WARN once per episode
+  (`OutboundCursor.ack_ahead`, persisted; a sheet within the log ends it).
+  It catches only seqs above the new device's head; once that head passes
+  the old `high` the stale window lets new frames through anyway, and what
+  it falsely acked below stays lost. The mesh path refuses such a sheet
+  without the rewind.
+- **Visibility on the receiver.** A dropped duplicate counts when its stamp
+  is newer than every envelope accepted from that sender this session and
+  its seq is above the last counted one; a resend round re-offers accepted
+  frames, whose stamps are never newer. At 32: `dup_streak from= first_seq=
+  last_seq= count=` WARN, once per episode; 32 consecutive fresh accepts or
+  a reset end it (`dup_streak_cleared`, INFO). `status.seats[].dup_streak`
+  carries the count while the episode stands. The per-frame drop line stays
+  at DEBUG. Every reset logs `accept_window_reset member= high= via=rekey|block|open`.
+- **Mixed versions.** A v0.1.0/v0.1.1 peer that missed the reset keeps its
+  stale window until it runs this build (its next open heals it). Until
+  then the restored seat refuses its sheets and re-offers its tail on the
+  stall ladder; the peer keeps dropping it, so after 8 rounds the restored
+  seat's operator sees `sends to a member keep failing` with reason `not
+  acknowledging deliveries - still resending` and the peer pinned
+  unreachable.
+
+Pins: `net::restore_reset_tests`,
+`group_runtime::tests::a_sheet_acking_above_the_own_log_is_refused_and_rewinds_the_peer`,
+`crates/molt-engine/tests/nostr_recovery.rs`
+(`a_bystander_that_missed_the_live_reset_hears_the_restored_seat`,
+`a_window_missed_before_this_build_heals_at_the_next_open`).

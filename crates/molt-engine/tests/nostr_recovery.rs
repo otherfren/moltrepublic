@@ -2765,3 +2765,160 @@ async fn a_link_less_request_without_a_seat_proof_gets_no_answer() {
         }
     }
 }
+
+/// Petra burns a long span of seqs, then is restored onto a new device while
+/// vera stays online and loses her live re-key reset (`rekey`) and the
+/// block's (`block`), as a kill before the window save does. Returns walter,
+/// vera, the new device and vera's workspace id once vera holds the block.
+async fn restore_with_vera_missing_the_reset(
+    root: &std::path::Path,
+    url: &str,
+    rekey: bool,
+    block: bool,
+) -> (WalletHandle, WalletHandle, WalletHandle, String) {
+    let (a, b, v, petra_phrase) = found_three_as(root, url, 2, true).await;
+    const SPAN: usize = 120;
+    for i in 0..SPAN {
+        b.execute(Command::Chat {
+            body: format!("old {i}"),
+            quote: None,
+            channel: molt_core::ChannelRef::default(),
+        })
+        .await
+        .expect("petra sends");
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while read_chat_bodies(&v).await.iter().filter(|m| m.starts_with("old ")).count() < SPAN {
+        assert!(tokio::time::Instant::now() < deadline, "the old span never reached vera");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    v.__skip_restore_reset(rekey, block);
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let c = engine(&root.join("rejoiner"));
+    adopt_relay(&c, url).await;
+    c.execute(Command::RecoverStart { link, phrase: petra_phrase, relays: Vec::new() })
+        .await
+        .expect("recover start");
+    let s = wait_for_secs(&c, "the recovery to open", 150, |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()) || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "recovery: {:?}", s.notice);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while chain_len(&v).await < chain_len(&a).await {
+        assert!(tokio::time::Instant::now() < deadline, "vera never applied the restore");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let vera_ws = read_session(&v).await.workspaces[0].id.clone();
+    (a, v, c, vera_ws)
+}
+
+/// A relay that keeps every event and limits no publisher.
+async fn roomy_relay() -> (nostr_relay_builder::LocalRelay, String) {
+    use nostr_relay_builder::builder::{RateLimit, RelayBuilder};
+    use nostr_relay_builder::prelude::{MemoryDatabase, MemoryDatabaseOptions};
+    let db = std::sync::Arc::new(MemoryDatabase::with_opts(MemoryDatabaseOptions { events: true, max_events: None }));
+    let limit = RateLimit { max_reqs: 500, notes_per_minute: 1_000_000 };
+    let relay = nostr_relay_builder::LocalRelay::new(RelayBuilder::default().database(db).rate_limit(limit));
+    relay.run().await.expect("relay runs");
+    let url = relay.url().await.to_string();
+    (relay, url)
+}
+
+async fn send_batch(w: &WalletHandle, prefix: &str, n: usize) {
+    for i in 0..n {
+        w.execute(Command::Chat {
+            body: format!("{prefix} {i}"),
+            quote: None,
+            channel: molt_core::ChannelRef::default(),
+        })
+        .await
+        .expect("send");
+    }
+}
+
+/// Whether `w` shows every message of the batch exactly once within `secs`.
+async fn sees_batch_once(w: &WalletHandle, prefix: &str, n: usize, secs: u64) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let seen = read_chat_bodies(w).await;
+        let count = |i: usize| seen.iter().filter(|m| **m == format!("{prefix} {i}")).count();
+        if (0..n).all(|i| count(i) == 1) {
+            return true;
+        }
+        assert!((0..n).all(|i| count(i) <= 1), "a message applied twice");
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// **WP1 field shape.** A bystander whose live re-key reset was lost (a
+/// kill between the ratchet persist and the window save) still forgets the
+/// restored seat's old incarnation: the `Restored` block is the authority.
+/// The new device's chat reaches it and its vote seals a proposal of the
+/// new device. Counter: with the block reset lost too, nothing arrives
+/// (`a_window_missed_before_this_build_heals_at_the_next_open`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_bystander_that_missed_the_live_reset_hears_the_restored_seat() {
+    let (_relay, url) = roomy_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (_a, v, c, _) = restore_with_vera_missing_the_reset(tmp.path(), &url, true, false).await;
+    send_batch(&c, "comeback", 10).await;
+    assert!(sees_batch_once(&v, "comeback", 10, 60).await, "vera drops the restored seat's chat as seen");
+    c.execute(Command::Propose {
+        surface: molt_core::Surface::Organization,
+        payload: serde_json::json!({"op": "set_name", "value": "Rook Club"}),
+    })
+    .await
+    .expect("propose");
+    approve_value(&v, "Rook Club").await;
+    wait_for_secs(&c, "vera's vote to seal the new device's proposal", 60, |s| {
+        s.workspaces.iter().any(|w| w.name == "Rook Club")
+    })
+    .await;
+}
+
+/// **WP1, the state v0.1.0/v0.1.1 left in the field.** Both resets lost:
+/// vera drops the restored seat's frames as already seen and acks them; the
+/// new device refuses the ack (it names seqs above its own log) and keeps
+/// them owed. Vera's next open resets the unkeyed window, and the owed tail
+/// arrives, each message once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_window_missed_before_this_build_heals_at_the_next_open() {
+    let (_relay, url) = roomy_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (_a, v, c, vera_ws) = restore_with_vera_missing_the_reset(tmp.path(), &url, true, true).await;
+    send_batch(&c, "stale", 40).await;
+    assert!(!sees_batch_once(&v, "stale", 40, 10).await, "the lost reset is the red state");
+    let c_ws = read_session(&c).await.workspaces[0].id.clone();
+    let c_dir = molt_storage::find_workspace_dir(&tmp.path().join("rejoiner"), &c_ws).expect("the new device's dir");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let ts = molt_storage::peek_transport_state(&c_dir).unwrap_or_default();
+        if ts.outbound.get("vera").is_some_and(|cur| cur.ack_ahead && cur.acked_floor == 0) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the new device believed vera's stale ack: {:?}",
+            ts.outbound.get("vera")
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let seats = status_of(&v).await.seats;
+        if seats.iter().any(|s| s.member == "petra" && s.dup_streak > 0) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "vera's status never named the seat it drops: {seats:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    v.__skip_restore_reset(false, false);
+    v.execute(Command::CloseWorkspace).await.expect("vera closes");
+    v.execute(Command::OpenWorkspace { id: vera_ws }).await.expect("vera reopens");
+    assert!(sees_batch_once(&v, "stale", 40, 120).await, "the owed tail never reached vera after the heal");
+}

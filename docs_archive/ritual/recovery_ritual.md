@@ -313,6 +313,16 @@ survivor — with an empty mesh; re-meshing is the separate *dynamic mesh
 membership* feature (the mesh-based `ChainRequest{from: 0}` path from
 `persistent_chain.md` stays available once meshed).
 
+**❾ Every seat forgets the old incarnation.** `R`'s log seqs restart, so
+each other seat resets its inbound state for `R` once per restore: at the
+re-key merge, and authoritatively when it applies the `Restored` block -
+coordinator, bystander, a seat catching up, a seat reopening. The reset is
+keyed to the block's transport anchor and persisted with the window, so a
+replay or the merge arriving after the block never resets twice; a seat
+whose window predates the restore resets at its next open. `R` refuses an
+ack that names seqs above its own log and re-offers its tail instead
+(`delivery_guarantee.md` §11).
+
 ---
 
 ## 5. What the ritual guarantees
