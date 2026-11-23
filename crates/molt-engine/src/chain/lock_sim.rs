@@ -49,7 +49,7 @@
 //! | `evidence`            | `lock_acceptor_accept` -> `lock_forced_vouched` | `a_forced_value_without_evidence_waits_for_an_approve` |
 //! | `evidence_two`        | `lock::evidence_holds(.., two = true)` | `forced_evidence_needs_two_real_acceptances` |
 //! | reported need is the change's | `lock_on_promise` | `a_promise_cannot_lie_about_need_or_digest` |
-//! | `amnesia_rule`        | NOT BUILT (wiring plan, open items) | none |
+//! | `amnesia_rule` (R-c)  | `lock_on_amnesia_ask` / `lock_on_amnesia_reply`, `lock::amnesia_*` | `amnesia_waits_for_enough_answers` |
 
 use super::*;
 
