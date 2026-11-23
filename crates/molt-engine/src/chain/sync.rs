@@ -138,11 +138,17 @@ impl State {
                 self.try_reorg(from);
                 return;
             }
-            if self.apply_next_block(block) {
+            // the buffered suffix drains behind it — ONE write for the
+            // whole batch, at the end
+            let applied = self.in_block_batch(|st| {
+                let ok = st.apply_next_block(block);
+                if ok {
+                    st.drain_buffered_blocks();
+                }
+                ok
+            });
+            if applied {
                 self.clear_divergence(from);
-                // the buffered suffix drains behind it — ONE write for the
-                // whole batch, at the end
-                self.drain_buffered_blocks();
                 self.persist_chain_now();
             }
         } else if block.height <= head.height {
@@ -650,6 +656,7 @@ impl State {
             self.chain.fork_candidates.clear();
             // B3: hand the peer our branch instead of waiting for it to ask
             self.serve_branch_to(from, f);
+            self.resend_standing_approvals();
             return;
         }
         let mut candidate: Vec<ChainBlock> =
@@ -689,7 +696,7 @@ impl State {
                 if kept.contains(proposal_id) {
                     continue;
                 }
-                self.return_displaced_card(*proposal_id);
+                self.return_displaced_card(*proposal_id, b);
             }
         }
         self.vault_displaced(&dropped, &kept);
@@ -697,30 +704,19 @@ impl State {
         // of every open card onto the new head); the park is judged after
         // the clear below, or what it releases is cleared with the rest
         let parked = std::mem::take(&mut self.chain.parked_approvals);
-        for b in &suffix {
-            self.after_block_applied(b);
-        }
         // every signature collected on the old branch is position-bound to
         // heights that no longer exist here; this node's own decisions
         // re-sign at the new heights, on a healed chain (B5)
-        self.chain.pending_sigs.clear();
-        self.chain.parked_approvals.extend(parked);
-        self.chain.fork_candidates.clear();
-        self.chain.diverged.clear();
-        let mine: Vec<u64> = self
-            .chain
-            .own_approvals
-            .iter()
-            .copied()
-            .filter(|id| {
-                self.proposals
-                    .get(id)
-                    .is_some_and(|p| p.state == ProposalState::Proposed)
-            })
-            .collect();
-        for id in mine {
-            self.chain_sign_and_gossip_approval(id);
-        }
+        self.in_block_batch(|st| {
+            for b in &suffix {
+                st.after_block_applied(b);
+            }
+            st.chain.pending_sigs.clear();
+            st.chain.parked_approvals.extend(parked);
+            st.chain.fork_candidates.clear();
+            st.chain.diverged.clear();
+            st.chain.resent_at.clear();
+        });
         self.judge_parked_approvals();
         self.persist_chain_now();
         self.emit_session(crate::SessionScope::Full);
@@ -760,9 +756,11 @@ impl State {
         self.note_fork(from, f, "relinked", mine, theirs, ids);
         let fresh: Vec<ChainBlock> = candidate.iter().filter(|b| b.height > old_head).cloned().collect();
         self.adopt_chain(candidate);
-        for b in &fresh {
-            self.after_block_applied(b);
-        }
+        self.in_block_batch(|st| {
+            for b in &fresh {
+                st.after_block_applied(b);
+            }
+        });
         self.clear_divergence(from);
         self.persist_chain_now();
         if !fresh.is_empty() {
@@ -877,12 +875,22 @@ impl State {
     /// re-gossips forever and blocks auto-checkpoints. Drop it —
     /// the holder returns to "never heard of it", and the WP2
     /// re-serve restores the real card while the vote is open.
-    fn return_displaced_card(&mut self, proposal_id: u64) {
+    ///
+    /// WP2: the seal consumed this seat's signature and the head move
+    /// pruned its stance; the displaced block or the stashed voters prove
+    /// it, so the approval stands again and re-signs at the new head.
+    fn return_displaced_card(&mut self, proposal_id: u64, displaced: &ChainBlock) {
+        let me = self.member();
         let materialized = self.proposals.get(&proposal_id).is_some_and(|p| p.by.is_empty());
         if materialized {
             self.proposals.remove(&proposal_id);
         } else if let Some(p) = self.proposals.get_mut(&proposal_id) {
             p.state = ProposalState::Proposed;
+            let approved = (displaced.sigs.iter().any(|a| a.member == me) || p.voted.contains(&me))
+                && !p.decliners.contains(&me);
+            if approved {
+                self.chain.own_approvals.insert(proposal_id);
+            }
         }
     }
 
@@ -937,6 +945,12 @@ impl State {
             self.try_reorg(from);
             return;
         }
+        if is_tip && incoming > current && signed {
+            // ours keeps the tip: the sender swaps onto it and needs the
+            // standing votes it dropped while its block stood
+            self.resend_standing_approvals();
+            return;
+        }
         if is_tip && incoming < current && !signed {
             tracing::warn!(height = block.height, "tie-break contender without a valid threshold - dropped");
             return;
@@ -951,10 +965,10 @@ impl State {
                 self.chain.head = Some(head);
                 self.chain.head_moved_at = self.presence_now();
                 self.apply_chain_to_state();
-                if let Some(ChainChange::Applied { proposal_id, .. }) =
-                    displaced.as_ref().map(|b| &b.change)
+                if let Some((ChainChange::Applied { proposal_id, .. }, b)) =
+                    displaced.as_ref().map(|b| (&b.change, b))
                 {
-                    self.return_displaced_card(*proposal_id);
+                    self.return_displaced_card(*proposal_id, b);
                     // the displaced block was folded: the stamps above its
                     // height belong to the fold that just changed
                     self.forget_wiki_stamps();
@@ -1215,7 +1229,9 @@ impl State {
             if let Some(h) = self.chain.peer_heights.get_mut(from) {
                 *h = (*h).min(head);
             }
+            self.chain.resent_at.clear();
             self.sign_held_approvals();
+            self.resend_standing_approvals();
             self.emit_session(crate::SessionScope::Full);
         }
     }

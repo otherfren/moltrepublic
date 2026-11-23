@@ -1212,6 +1212,12 @@ pub(crate) struct ChainProjection {
     pub(crate) fork_decisions: u64,
     /// The latest fork decision (S1 diagnostics).
     pub(crate) last_fork: Option<molt_core::ForkDecision>,
+    /// WP2: the head+1 at which each own standing signature was last
+    /// re-sent after a fork; a heal clears it (a new audience).
+    pub(crate) resent_at: BTreeMap<u64, u64>,
+    /// WP2: > 0 while a batch of blocks is applied; the re-sign runs once
+    /// at the batch's final head.
+    pub(crate) resign_hold: u32,
     /// B7: the sealing lock (`chain/lock_wire.rs`).
     pub(crate) lock: chain::LockRuntime,
 }

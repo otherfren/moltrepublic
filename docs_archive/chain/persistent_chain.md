@@ -190,6 +190,33 @@ its members must **re-sign** over the new height. There is never a lasting fork
 and never a choice between rival histories — only a transient difference in how
 far each member has advanced along the same line.
 
+### 7.1 A stance outlives its signature (v0.1.2)
+
+A seat's **stance** on an open card - approved or declined - is durable
+state; a signature is only its expression at one head+1.
+
+- The stance register is `own_approvals` (persisted). A decline or a
+  withdraw removes the card from it; nothing else does while the card is
+  open. A card displaced by a tip swap or a re-base re-enters it when the
+  displaced block carries this seat's signature or the card's stashed
+  voters name it.
+- Whenever the head+1 a seat would sign at changes - append, tip swap,
+  re-base, relink - the seat signs every standing approval whose own
+  signature does not stand at the new head+1. A signed one stands, so
+  this happens once per (card, height). A batch of blocks applied in one
+  turn (a catch-up drain, a re-base, a relink) signs once, at its final
+  head.
+- When a divergence ends (a peer is back on this branch) or a losing tip
+  contender shows a peer still has to swap onto ours, the seat also
+  **re-sends** each standing signature once per (card, head+1); a heal
+  with another peer re-sends again. The side that kept its branch thus
+  re-expresses votes the other side dropped while the two chains differed.
+- Cost: one head move costs one `Approved` frame per standing open card
+  without a signature at the new head+1; a fork adds at most one re-send
+  per standing card per heal.
+- `approve` on a card this seat already approved re-sends its signature
+  and answers the same vote; it never counts twice.
+
 ## 8. Threshold and recovery fall out of the chain
 
 - **Real threshold, no FROST.** A gated change is authorized iff its block

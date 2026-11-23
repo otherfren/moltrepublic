@@ -961,6 +961,7 @@ impl State {
         self.chain.catchup_since = 0;
         self.chain.fork_decisions = 0;
         self.chain.last_fork = None;
+        self.chain.resent_at.clear();
         self.chain.heal_since = 0;
         self.chain.peer_heights.clear();
         self.chain.peer_claim_seq.clear();
