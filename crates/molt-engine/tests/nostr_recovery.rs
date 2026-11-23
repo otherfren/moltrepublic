@@ -2919,3 +2919,46 @@ async fn a_seat_that_kept_its_old_window_hears_the_restored_seat_after_a_resync(
     })
     .await;
 }
+
+/// **The coordinator killed right after its own re-key.** No peer ever
+/// sends a seat its own commit back, so a ratchet that missed the merged
+/// epoch on disk would leave the coordinator an epoch behind for good. The
+/// debounced persist is stretched to an hour here; the coordinator is
+/// hard-killed the moment the rejoiner is in, reopened from its directory,
+/// and must be at the group's epoch and read the restored seat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_coordinator_killed_right_after_its_rekey_reopens_at_the_new_epoch() {
+    let (_relay, url) = roomy_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, v, petra_phrase) = found_three_as(tmp.path(), &url, 2, true).await;
+    a.__ratchet_debounce_secs(Some(3_600));
+    let a_ws = read_session(&a).await.workspaces[0].id.clone();
+    drop(b);
+    let link = mint_for_petra(&a).await;
+    let c = engine(&tmp.path().join("rejoiner"));
+    adopt_relay(&c, &url).await;
+    c.execute(Command::RecoverStart { link, phrase: petra_phrase, relays: Vec::new() })
+        .await
+        .expect("recover start");
+    let s = wait_for_secs(&c, "the recovery to open", 150, |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()) || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "recovery: {:?}", s.notice);
+    let root_a = tmp.path().join("founder");
+    common::hard_kill(a, &root_a, &a_ws).await;
+    let a2 = engine(&root_a);
+    adopt_relay(&a2, &url).await;
+    a2.execute(Command::OpenWorkspace { id: a_ws }).await.expect("the coordinator reopens");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let (mine, theirs) = (status_of(&a2).await.mls_epoch, status_of(&v).await.mls_epoch);
+        if mine == theirs && mine > 0 {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the coordinator reopened at epoch {mine}, the group is at {theirs}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    send_batch(&c, "after the kill", 3).await;
+    assert!(sees_batch_once(&a2, "after the kill", 3, 60).await, "the reopened coordinator cannot read the restored seat");
+}

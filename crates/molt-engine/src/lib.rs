@@ -379,6 +379,14 @@ impl WalletHandle {
         self.drop_seam.skip_rekey_reset.store(skip, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: the live ratchet persist debounce in seconds (`None` = the
+    /// constant). No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __ratchet_debounce_secs(&self, secs: Option<u64>) {
+        let v = secs.map_or(0, |s| s.saturating_add(1));
+        self.drop_seam.mls_debounce.store(v, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam: the head beacon (a `ChainRequest`) goes out on the next
     /// beat. No `Command` reaches it.
     #[doc(hidden)]

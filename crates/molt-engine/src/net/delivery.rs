@@ -364,6 +364,21 @@ impl State {
         g.snapshot().ok()
     }
 
+    /// Persist the live group ratchet now, through the same gate as the
+    /// debounced persist (re-keys drained, their resets queued first). For a
+    /// commit this seat made itself: no peer ever sends it back, so a ratchet
+    /// that misses it on disk stays an epoch behind for good.
+    pub(crate) fn persist_ratchet_now(&mut self) -> bool {
+        let Some(mls) = self.group_mls() else { return false };
+        let snap = self.ratchet_snapshot(&mls);
+        let (Some(snap), Some(active)) = (snap, self.active.as_ref()) else { return false };
+        if !active.handle.merge_mls_async(snap) {
+            return false;
+        }
+        self.delivery.mls_persisted_at = self.presence_now();
+        true
+    }
+
     /// A re-key commit merged that re-admitted `member`: THE reset of a
     /// restore. The group runtime hands the merge over the same ordered
     /// sink as the frames, and no past epoch is kept, so every frame of
@@ -530,7 +545,9 @@ impl State {
     /// reopen's rewind-resend re-encrypts a step or two past what the peers
     /// consumed instead of replaying a whole session into replay rejection.
     pub(crate) fn persist_mls_if_due(&mut self, now: u64) {
-        if now.saturating_sub(self.delivery.mls_persisted_at) < MLS_PERSIST_SECS || !self.ratchet_may_persist() {
+        if now.saturating_sub(self.delivery.mls_persisted_at) < self.drop_seam.mls_persist_secs(MLS_PERSIST_SECS)
+            || !self.ratchet_may_persist()
+        {
             return;
         }
         // A Nostr workspace has no `NetRuntime`, but it very much has a live

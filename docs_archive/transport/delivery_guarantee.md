@@ -761,6 +761,23 @@ trusted: every later restore of that seat reaches it as a merge.
   save: that window is legacy (2). The test transport's `NetRuntime` path
   snapshots its ratchet without consulting the re-key list (test
   transport only).
+- **The committer persists before it publishes.** No peer sends a seat its
+  own commit back, so a committer whose merged epoch missed the disk stays
+  an epoch behind for good (every frame `past epoch` or opaque). The
+  coordinator therefore logs the commit, persists the ratchet through the
+  gate above (no debounce) and flushes the writer before the delivery task
+  starts. A kill after that leaves it at most AHEAD of the group: the
+  outbox publishes own log entries from its persisted cursor, so the
+  logged commit goes out at the reopen. Not re-sent: the Welcome - the
+  rejoiner restores again with a new link. Founding's `add_members` is
+  written whole at the seal (the ritual's first disk write). Pin:
+  `a_coordinator_killed_right_after_its_rekey_reopens_at_the_new_epoch`.
+- **v0.1.3 note.** (a) A durable pending re-key (commit + Welcome, re-sent
+  at the reopen until the Welcome landed) would close the Welcome gap.
+  (b) A seat behind its own commit is detectable at the open (the last own
+  `MlsCommit` was made at an epoch >= the ratchet's); today it shows only
+  as `N new messages unreadable` - the frames' epoch sits inside the outer
+  layer, so the inbound side cannot tell "newer epoch" from opaque.
 - Pins: `mls::tests::the_evicted_leaf_cannot_speak_after_the_rekey` and
   the exporter-ring test (an old-epoch frame is refused after the merge),
   `mls::tests::a_merged_rekey_stays_listed_until_taken`,
@@ -909,6 +926,7 @@ a_rewind_below_the_compacted_log_counts_what_is_gone,
 a_rewind_reads_the_last_explicit_bit_as_unacked}`,
 `group_ack::tests::the_stamp_is_additive_both_ways`,
 `crates/molt-engine/tests/nostr_recovery.rs`
-(`a_seat_that_kept_its_old_window_hears_the_restored_seat_after_a_resync`),
+(`a_seat_that_kept_its_old_window_hears_the_restored_seat_after_a_resync`,
+`a_coordinator_killed_right_after_its_rekey_reopens_at_the_new_epoch`),
 `crates/molt-engine/tests/nostr_delivery_guarantee.rs`
 (`a_receiver_whose_window_regressed_gets_the_tail_again_and_applies_it_once`).

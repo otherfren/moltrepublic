@@ -76,6 +76,8 @@ pub(crate) struct DropSeam {
     pub(crate) refuse_saves: std::sync::atomic::AtomicBool,
     /// The head beacon goes out on the next beat.
     pub(crate) beacon_now: std::sync::atomic::AtomicBool,
+    /// The ratchet persist debounce in seconds plus one (0 = the constant).
+    pub(crate) mls_debounce: std::sync::atomic::AtomicU64,
 }
 
 impl DropSeam {
@@ -85,6 +87,13 @@ impl DropSeam {
 
     pub(crate) fn take_regress(&self) -> Option<(MemberId, u64)> {
         self.regress.lock().ok().and_then(|mut r| r.take())
+    }
+
+    pub(crate) fn mls_persist_secs(&self, default: u64) -> u64 {
+        match self.mls_debounce.load(std::sync::atomic::Ordering::SeqCst) {
+            0 => default,
+            v => v - 1,
+        }
     }
 
     pub(crate) fn refuses_window_saves(&self) -> bool {
