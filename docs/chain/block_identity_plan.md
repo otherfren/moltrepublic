@@ -85,6 +85,43 @@ interchangeable.
 | branch choice | `BranchChosen.tip_hash` (`chain_rescue_plan.md` §1) names a decision, not an attestation. Under v1 the choosers would have to agree on one variant |
 | checkpoint | layout unchanged (`checkpoint-v10`); a cut at or above H is v2-linked. [INFERRED] The effective feature set in the blob says whether everything from its anchor up is v2, since H ≤ the cut's height when the enabling block is at or below `upto`. To verify while building S1 |
 
+## 3a. Every identity comparison (issue #10 comment, caveat 2)
+
+All of these must use the height-versioned identity (`block_hash` made
+version-aware), never struct equality and never `block_link_bytes`
+directly. Lines are as of master (`git grep block_hash\(|block_link_bytes\(|== &block`).
+
+| site | today | after |
+|---|---|---|
+| `verify.rs:97` `block_hash` | v1 link hash | v1 below H, v2 from H: the single source |
+| `verify.rs:260, 446, 504, 631, 1319` | genesis head, `prev` check, step head, `describes`, suffix anchor head | via `block_hash` |
+| `governance.rs:771`, `lock_wire.rs:400, 1544` (dark) | a sealed block's `prev` = head hash | unchanged (head hash is the identity) |
+| `sync.rs:169` | `block.prev != head.hash` | unchanged |
+| `sync.rs:986` `existing == &block` | struct equality (signatures included) | IDENTITY equality; a different attestation is a duplicate (clears the divergence like today) |
+| `sync.rs:998-999` | `content_hash(block_link_bytes(..))` directly | `block_hash` |
+| `sync.rs:1010`, `:674`, `:710` | `shared_prev`, candidate links, suffix contiguity | via `block_hash` |
+| `sync.rs:720`, `:686-688` | first-difference comparison, `fork=unlinked` hashes | via `block_hash` |
+| `sync.rs:734-736` `same_decisions`, `:1019` | change equality | unchanged; unreachable for v2 variants |
+| `sync.rs:817` | relink rewrites `prev` | pre-H only |
+| `sync.rs:293, 317, 326, 641` | `known_heads`, `dense_known_heads`, `holds_block`, `serve_from_for` | via `block_hash`; `ChainRequest.known` samples become comparable |
+| `sync.rs:182, 873-874, 989, 1247` | log hashes, served range, `note_refused` | via `block_hash` |
+| `sync.rs:1334, 1341` | `note_on_branch`, heal-round key | via `block_hash` |
+| `net/seat_report.rs:71, 78` | `seats[].head_hash` | the identity |
+| `projection.rs:666` | `read_chain` row hash | the identity |
+| `recovery.rs:1594, 1641` | test chains built with v1 links | test fixtures: build by version |
+| `examples/chain_forensics.rs` | offline hashes | by version |
+
+No cache or dedup is keyed by a block hash: `pending_blocks` and
+`fork_candidates` are keyed by height, the accept window by seq, the
+seen ring by ciphertext.
+
+**Two attestations for one identity.** Keep the first one verified
+here and never replace it. The block identity, checkpoints and the
+state do not depend on it. What differs per seat is the signer list
+`read_chain` shows and the bytes of an export, as today across variants.
+Replacing it by "the lowest-named set" would buy byte-identical exports
+at the price of a rewrite path in a verified chain; not worth it.
+
 ## 4. Activation
 
 Every seat must switch at the same height, or they compute different
