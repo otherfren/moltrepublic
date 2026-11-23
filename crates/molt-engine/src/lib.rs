@@ -1699,8 +1699,8 @@ pub(crate) struct State {
     /// re-upload every minute forever (review finding).
     pub(crate) backup_last_done: std::collections::HashMap<WorkspaceId, u64>,
     /// When the backup ticker last found the bucket copy current
-    /// (backup-clock seconds). Runtime-only.
-    pub(crate) backup_last_checked: std::collections::HashMap<WorkspaceId, u64>,
+    /// (backup-clock seconds), and at which target. Runtime-only.
+    pub(crate) backup_last_checked: std::collections::HashMap<WorkspaceId, (u64, String)>,
     /// Test seam: seconds the backup ticker's clock runs ahead.
     pub(crate) backup_skew: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Workspaces whose last backup failed in a way a retry cannot heal (a

@@ -30,6 +30,8 @@ const SEALED_SKIP: &str = "sealed at rest - backup skipped until decrypted";
 /// The status of a backup row whose endpoint is http:// to a clearnet host
 /// and not yet acknowledged.
 const PLAINTEXT_UNCONFIRMED: &str = "http:// to a clearnet host: not confirmed";
+/// The status of an upload whose stamp and mark could not be written.
+const STAMP_NOT_PERSISTED: &str = "backup uploaded but the stamp could not persist";
 /// The first wait after a failure a retry cannot heal; it doubles per repeat.
 const BACKUP_HOLD_FIRST_SECS: u64 = 3_600;
 /// The longest wait between two such attempts.
@@ -137,7 +139,7 @@ impl State {
             // stamp that could not be persisted does not re-upload every tick
             let last = self
                 .effective_last_backup(&id, &dir)
-                .max(self.backup_last_checked.get(&id).copied());
+                .max(self.backup_last_checked.get(&id).map(|(t, _)| *t));
             if last.is_some_and(|t| now.saturating_sub(t) < interval_secs) {
                 continue; // not due yet
             }
@@ -196,10 +198,49 @@ impl State {
         mark.filter(|m| m.target == target)
     }
 
+    /// Forget every check that no longer describes this node's backup: the
+    /// switch is off (globally or for the workspace) or the target moved.
+    /// Returns whether any label moved.
+    pub(crate) fn prune_backup_checks(&mut self) -> bool {
+        let target = self
+            .session
+            .settings
+            .s3_backup
+            .then(|| self.saved_s3_config().ok().map(|c| backup_target(&c)))
+            .flatten();
+        let stale: Vec<WorkspaceId> = self
+            .backup_last_checked
+            .iter()
+            .filter(|(id, (_, t))| {
+                target.as_deref() != Some(t.as_str())
+                    || !self.session.workspaces.iter().any(|w| w.id == **id && w.s3)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut changed = false;
+        for id in stale {
+            changed |= self.forget_backup_check(&id);
+        }
+        changed
+    }
+
+    /// Drop one workspace's last good check: `backup_checked_min` reads NEVER.
+    fn forget_backup_check(&mut self, id: &str) -> bool {
+        self.backup_last_checked.remove(id);
+        match self.session.workspaces.iter_mut().find(|w| w.id == id) {
+            Some(ws) if ws.backup_checked_min != molt_core::WorkspaceInfo::NEVER => {
+                ws.backup_checked_min = molt_core::WorkspaceInfo::NEVER;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Refresh every entry's `last_backup_min` from its effective stamp,
     /// and `backup_checked_min` from the last check, so both ages keep
     /// advancing between uploads. Returns whether any label moved.
     fn reage_backup_labels(&mut self) -> bool {
+        let mut changed = self.prune_backup_checks();
         let now = now_secs();
         let clock = self.backup_clock();
         let root = self.workspace_root();
@@ -210,9 +251,8 @@ impl State {
             .map(|w| w.id.clone())
             .collect();
         let age = |from: u64, ts: u64| u32::try_from(from.saturating_sub(ts) / 60).unwrap_or(u32::MAX - 1);
-        let mut changed = false;
         for id in ids {
-            let checked = self.backup_last_checked.get(&id).map(|t| age(clock, *t));
+            let checked = self.backup_last_checked.get(&id).map(|(t, _)| age(clock, *t));
             let last = molt_storage::find_workspace_dir(&root, &id)
                 .and_then(|dir| self.effective_last_backup(&id, &dir))
                 .map(|ts| age(now, ts));
@@ -429,7 +469,7 @@ impl State {
             // its object: a copy deleted there must be uploaded again
             let unless = match &mark {
                 None => None,
-                Some(m) => match object_listed(&client, &id, &m.object).await {
+                Some(m) => match object_listed(&client, &id, m).await {
                     Ok(true) => hex::decode(&m.fingerprint).ok().and_then(|f| <[u8; 32]>::try_from(f).ok()),
                     Ok(false) => None,
                     Err(error) => {
@@ -503,7 +543,7 @@ impl State {
                                     bytes,
                                     prune_error,
                                     quota_error,
-                                    fingerprint: hex::encode(outcome.fingerprint),
+                                    fingerprint: outcome.fingerprint.map(hex::encode).unwrap_or_default(),
                                     target,
                                     unchanged: false,
                                 }
@@ -538,12 +578,16 @@ impl State {
         self.backup_inflight.remove(&id);
         self.backup_hold.remove(&id);
         let clock = self.backup_clock();
-        self.backup_last_checked.insert(id.clone(), clock);
+        self.backup_last_checked.insert(id.clone(), (clock, target.clone()));
         if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
             ws.backup_checked_min = 0;
+            // a check disproves the failures of an attempt, not a stamp
+            // that still did not persist
+            if unchanged && !ws.backup_error.starts_with(STAMP_NOT_PERSISTED) {
+                ws.backup_error = String::new();
+            }
         }
         if unchanged {
-            self.set_backup_error(&id, "");
             tracing::info!(id, object, "backup unchanged");
             self.emit_session(SessionScope::Full);
             return Ok(Reply::Ack);
@@ -560,7 +604,7 @@ impl State {
             ws.last_backup_min = minutes;
             ws.backup_error = String::new();
         }
-        let mark = molt_core::BackupMark { fingerprint, target, object: object.clone() };
+        let mark = molt_core::BackupMark { fingerprint, target, object: object.clone(), size: Some(bytes) };
         self.stamp_backup_time(&id, ts, mark);
         tracing::info!(id, object, bytes, "backup uploaded");
         // one notice slot, so the count retention wins when both spoke —
@@ -585,6 +629,7 @@ impl State {
         hold: bool,
     ) -> Result<Reply, MoltError> {
         self.backup_inflight.remove(&id);
+        self.forget_backup_check(&id);
         tracing::warn!(id, error = %error, hold, "backup failed");
         self.set_backup_error(&id, &error);
         let repeat = if hold {
@@ -642,7 +687,7 @@ impl State {
             // keeps the due-check from re-uploading, and the user sees why
             // the on-disk age will look stale after a restart
             tracing::warn!(error = %e, "persisting the backup stamp failed");
-            self.set_backup_error(id, &format!("backup uploaded but the stamp could not persist: {e}"));
+            self.set_backup_error(id, &format!("{STAMP_NOT_PERSISTED}: {e}"));
             self.note_backup(format!("backup-stamp-not-persisted:{e}"));
         }
     }
@@ -689,14 +734,19 @@ fn backup_target(c: &molt_net::s3::S3Config) -> String {
     hex::encode(h.finalize())
 }
 
-/// Whether the bucket still lists `object` under this workspace's prefix.
-async fn object_listed(client: &molt_net::s3::S3Client, id: &WorkspaceId, object: &str) -> Result<bool, String> {
+/// Whether the bucket still lists the marked object under this
+/// workspace's prefix, at the marked size.
+async fn object_listed(
+    client: &molt_net::s3::S3Client,
+    id: &WorkspaceId,
+    mark: &molt_core::BackupMark,
+) -> Result<bool, String> {
     let prefix = format!("{}{id}/", molt_core::BACKUP_OBJECT_PREFIX);
     let listed = client
         .list_objects(&prefix)
         .await
         .map_err(|e| format!("s3: list {prefix}: {e}"))?;
-    Ok(listed.iter().any(|o| o.key == object))
+    Ok(listed.iter().any(|o| o.key == mark.object && mark.size.map_or(true, |s| s == o.size)))
 }
 
 /// Prune this workspace's bucket copies beyond `keep` (design §6.3): list
@@ -1011,6 +1061,33 @@ mod tests {
         st.session.settings.s3_plaintext_confirmed = "http://s3.example.org:9000".to_string();
         st.cmd_backup_tick().expect("tick");
         assert_eq!(error(&st), "workspace directory missing", "acknowledged: the tick goes on");
+    }
+
+    /// Review A2: an unchanged check clears the failures it disproves, not
+    /// a stamp that still did not persist.
+    #[test]
+    fn an_unchanged_check_keeps_what_it_does_not_disprove() {
+        let mut st = crate::tests::support::plain_state();
+        let mut ws = molt_core::WorkspaceInfo::demo_set().remove(0);
+        let id = ws.id.clone();
+        let stamp = format!("{}: read-only", super::STAMP_NOT_PERSISTED);
+        ws.backup_error = stamp.clone();
+        st.session.workspaces = vec![ws];
+        let unchanged = || super::Upload {
+            ts: 1,
+            object: "o".to_string(),
+            bytes: 0,
+            prune_error: String::new(),
+            quota_error: String::new(),
+            fingerprint: String::new(),
+            target: String::new(),
+            unchanged: true,
+        };
+        st.cmd_net_backup_done(id.clone(), unchanged()).expect("ack");
+        assert_eq!(st.session.workspaces[0].backup_error, stamp);
+        st.session.workspaces[0].backup_error = "s3: timeout".to_string();
+        st.cmd_net_backup_done(id, unchanged()).expect("ack");
+        assert!(st.session.workspaces[0].backup_error.is_empty());
     }
 
     /// C4: the quota never counts or prunes another node's backups.

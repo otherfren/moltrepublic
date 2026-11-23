@@ -142,8 +142,9 @@ pub struct ExportOutcome {
     pub skipped: Vec<String>,
     /// Unix seconds the export was taken (also authenticated in the meta).
     pub created: u64,
-    /// The content fingerprint of what was written ([`export_backup`]).
-    pub fingerprint: [u8; 32],
+    /// The content fingerprint of what was written; only [`export_backup`]
+    /// takes one.
+    pub fingerprint: Option<[u8; 32]>,
 }
 
 /// The plaintext header (kept minimal on purpose: the workspace-id pseudonym
@@ -321,7 +322,8 @@ pub fn export_backup(
     unless: Option<&[u8; 32]>,
     out: &mut dyn Write,
 ) -> Result<Option<ExportOutcome>, StorageError> {
-    export_dir_impl(root, ws_dir, &ExportKey::Workspace, EXPORT_CHUNK_BYTES, pin, unless, out)
+    let mark = unless.map_or(Fingerprinting::Take, Fingerprinting::Unless);
+    export_dir_impl(root, ws_dir, &ExportKey::Workspace, EXPORT_CHUNK_BYTES, pin, mark, out)
 }
 
 /// [`export_dir`] of a workspace whose writer runs: the cut's files come
@@ -334,7 +336,7 @@ pub fn export_dir_pinned(
     pin: crate::ExportPin,
     out: &mut dyn Write,
 ) -> Result<ExportOutcome, StorageError> {
-    export_dir_impl(root, ws_dir, key, EXPORT_CHUNK_BYTES, Some(pin), None, out)
+    export_dir_impl(root, ws_dir, key, EXPORT_CHUNK_BYTES, Some(pin), Fingerprinting::Off, out)
         .map(|o| o.expect("no fingerprint to match"))
 }
 
@@ -347,7 +349,7 @@ pub(crate) fn export_dir_chunked(
     chunk_bytes: u32,
     out: &mut dyn Write,
 ) -> Result<ExportOutcome, StorageError> {
-    export_dir_impl(root, ws_dir, key, chunk_bytes, None, None, out)
+    export_dir_impl(root, ws_dir, key, chunk_bytes, None, Fingerprinting::Off, out)
         .map(|o| o.expect("no fingerprint to match"))
 }
 
@@ -357,7 +359,7 @@ fn export_dir_impl(
     key: &ExportKey,
     chunk_bytes: u32,
     pin: Option<crate::ExportPin>,
-    unless: Option<&[u8; 32]>,
+    mark: Fingerprinting<'_>,
     out: &mut dyn Write,
 ) -> Result<Option<ExportOutcome>, StorageError> {
     if chunk_bytes == 0 {
@@ -479,7 +481,7 @@ fn export_dir_impl(
     files.sort_by(|a, b| a.0.cmp(&b.0));
     skipped.sort();
 
-    if let Some(last) = unless {
+    if let Fingerprinting::Unless(last) = mark {
         let mut fp = Fingerprint::new(seed.is_some());
         for (rel, src) in &files {
             match src {
@@ -569,7 +571,7 @@ fn export_dir_impl(
         .map_err(|_| StorageError::Corrupt("export meta too large".to_string()))?;
     w.write(&meta_len.to_le_bytes())?;
     w.write(&meta_bytes)?;
-    let mut fp = Fingerprint::new(seed.is_some());
+    let mut fp = (!matches!(mark, Fingerprinting::Off)).then(|| Fingerprint::new(seed.is_some()));
     for (rel, src) in &files {
         let owned;
         let data: &[u8] = match src {
@@ -587,11 +589,24 @@ fn export_dir_impl(
         w.write(rel.as_bytes())?;
         w.write(&u64::try_from(data.len()).unwrap_or(0).to_le_bytes())?;
         w.write(data)?;
-        fp.entry(rel, data, &ws_key, &id);
+        if let Some(fp) = fp.as_mut() {
+            fp.entry(rel, data, &ws_key, &id);
+        }
     }
     written += w.finish()?;
 
-    Ok(Some(ExportOutcome { bytes: written, skipped, created, fingerprint: fp.finish() }))
+    Ok(Some(ExportOutcome { bytes: written, skipped, created, fingerprint: fp.map(Fingerprint::finish) }))
+}
+
+/// Whether an export fingerprints its content, and against what.
+#[derive(Clone, Copy)]
+enum Fingerprinting<'a> {
+    /// A manual export: none.
+    Off,
+    /// Take one.
+    Take,
+    /// Write nothing when the content matches this one.
+    Unless(&'a [u8; 32]),
 }
 
 /// What a backup holds, minus what changes without new content
@@ -619,7 +634,7 @@ impl Fingerprint {
             "prefs.toml" => stable_prefs(data),
             _ => snapshot_plaintext(rel, data, ws_key, id),
         };
-        let data = normalized.as_deref().unwrap_or(data);
+        let data = normalized.as_ref().map_or(data, |n| n.as_slice());
         self.0.update(u64::try_from(rel.len()).unwrap_or(u64::MAX).to_le_bytes());
         self.0.update(rel.as_bytes());
         self.0.update(u64::try_from(data.len()).unwrap_or(u64::MAX).to_le_bytes());
@@ -634,20 +649,22 @@ impl Fingerprint {
 
 /// `prefs.toml` without the fields that move on their own; `None` = hash
 /// the bytes as they are.
-fn stable_prefs(data: &[u8]) -> Option<Vec<u8>> {
+fn stable_prefs(data: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
     let mut prefs: crate::WorkspacePrefs = toml::from_str(std::str::from_utf8(data).ok()?).ok()?;
     prefs.last_backup = None;
     prefs.backup_mark = None;
     prefs.last_seen.clear();
-    toml::to_string(&prefs).ok().map(String::into_bytes)
+    toml::to_string(&prefs).ok().map(|t| Zeroizing::new(t.into_bytes()))
 }
 
 /// A snapshot entry's plaintext; `None` for any other entry, or one that
 /// does not decrypt (then its bytes count).
-fn snapshot_plaintext(rel: &str, data: &[u8], ws_key: &[u8; 32], id: &[u8; 32]) -> Option<Vec<u8>> {
+fn snapshot_plaintext(rel: &str, data: &[u8], ws_key: &[u8; 32], id: &[u8; 32]) -> Option<Zeroizing<Vec<u8>>> {
     let at_seq: u64 = rel.strip_prefix("snapshots/")?.strip_suffix(".msnap")?.parse().ok()?;
     let frame = crate::single_frame(data)?;
-    crate::decrypt_frame(ws_key, id, crate::SNAPSHOT_SEGMENT, at_seq, frame.nonce, frame.ciphertext).ok()
+    crate::decrypt_frame(ws_key, id, crate::SNAPSHOT_SEGMENT, at_seq, frame.nonce, frame.ciphertext)
+        .ok()
+        .map(Zeroizing::new)
 }
 
 /// Enforce the passphrase policy (design §3.4): at least
@@ -1216,6 +1233,17 @@ mod tests {
         (root, dir, seed)
     }
 
+    /// Review A4: only the backup export decrypts snapshots for a
+    /// fingerprint; a manual export takes none.
+    #[test]
+    fn a_manual_export_takes_no_fingerprint() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir, _seed) = make_ws(tmp.path());
+        let mut blob = Vec::new();
+        let outcome = export_dir(&root, &dir, &ExportKey::passphrase(PASS), &mut blob).expect("export");
+        assert_eq!(outcome.fingerprint, None);
+    }
+
     /// The local drafts and fired wakes never travel, and are no surprise.
     #[test]
     fn local_drafts_stay_home_silently() {
@@ -1241,7 +1269,7 @@ mod tests {
         let mut blob = Vec::new();
         let outcome = export_backup(root, dir, None, unless.as_ref(), &mut blob).expect("export");
         assert_eq!(outcome.is_none(), blob.is_empty(), "a skip writes nothing");
-        outcome.map(|o| o.fingerprint)
+        outcome.map(|o| o.fingerprint.expect("a backup takes a fingerprint"))
     }
 
     /// Issue #7: an unchanged workspace is recognised as such - also when

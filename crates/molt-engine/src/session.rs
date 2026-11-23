@@ -531,6 +531,7 @@ impl State {
         self.invalidate_backup_listing_on_target_change(&settings);
         self.invalidate_tor_test_on_anonymity_change(&settings);
         self.session.settings = settings;
+        self.prune_backup_checks();
         self.mark_restart_required();
         if self.store.is_some() {
             self.session.notice = String::new();
@@ -592,6 +593,7 @@ impl State {
         // the plaintext S3 acknowledgement too: a save neither grants nor drops it
         settings.s3_plaintext_confirmed = self.session.settings.s3_plaintext_confirmed.clone();
         self.session.settings = settings;
+        self.prune_backup_checks();
         self.mark_restart_required();
         if self.store.is_some() {
             // The reply must not wait for the disk; the write outcome comes
@@ -635,6 +637,7 @@ impl State {
         let pool_moved = self.session.settings.relays != settings.relays
             || was_clearnet != self.clearnet_session;
         self.session.settings = settings;
+        self.prune_backup_checks();
         self.session.language = language;
         self.session.theme = theme;
         self.dialable_relays_changed(&dialable);
@@ -2525,6 +2528,7 @@ impl State {
         // ONLY on NetBackupDone. A stale failure note from the previous
         // toggle state no longer describes anything.
         ws.backup_error = String::new();
+        self.prune_backup_checks();
         if self.persist {
             self.persist_backup_pref(&id, enabled);
         }

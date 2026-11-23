@@ -613,15 +613,28 @@ same objects. A mark for another target is ignored: the next interval
 uploads.
 
 **Trust.** A due interval with a matching mark first lists
-`molt/<id>/`: only when the marked object is still listed does the export
-run in fingerprint mode; a deleted or expired copy is uploaded again. A
-failed listing is a `NetBackupFailed` (verbatim reason, retried at the next
-tick), never a silent skip. An unchanged check reports
-`NetBackupDone { unchanged: true }`: no stamp move, no retention, no quota
-pass; it clears `backup_error` and resets `WorkspaceInfo::backup_checked_min`
-(minutes since this node last confirmed the bucket copy is current, `null`
-on MCP until the first check after a start). `last_backup_min` keeps
-meaning the age of the copy. "Backup now" always uploads. An import drops
+`molt/<id>/`: only when the marked object is still listed, at the marked
+size (`backup_mark.size`; a mark written before the size existed skips that
+comparison until its next upload), does the export run in fingerprint mode;
+a deleted, expired or truncated copy is uploaded again. A failed listing is
+a `NetBackupFailed` (verbatim reason, retried at the next tick), never a
+silent skip. An unchanged check reports `NetBackupDone { unchanged: true }`:
+no stamp move, no retention, no quota pass, the session notice untouched; it
+clears an attempt's failure in `backup_error` (the check disproves it) but
+keeps "stamp could not persist", and resets
+`WorkspaceInfo::backup_checked_min` (minutes since this node last confirmed
+the bucket copy is current). The check is forgotten - the field reads
+NEVER, `null` on MCP - on any failed listing, export or upload, when the
+switch goes off (globally or for the workspace) and when the target
+changes; it is runtime-only, so a start begins at NEVER. `last_backup_min`
+keeps meaning the age of the copy.
+
+**Retention.** Pruning and the byte quota run only after an upload, as
+before, so `s3_keep_copies` now counts copies of *different* states: an
+unchanged state is held once, not `keep` times, and the older copies of
+earlier states stay until later changes push them out. An idle republic
+therefore keeps its last `keep` distinct states indefinitely instead of
+`keep` identical copies of its newest one. "Backup now" always uploads. An import drops
 the mark with `last_backup` (§4): a restored copy was never uploaded from
 this device.
 
