@@ -758,7 +758,9 @@ trusted: every later restore of that seat reaches it as a merge.
   epoch-hold retry calls the hook. An import or a restore from an export
   carries no `transport.state` (no window, no ratchet). The one path left
   is an older build that persisted the merged ratchet and lost the window
-  save: that window is legacy (2).
+  save: that window is legacy (2). The test transport's `NetRuntime` path
+  snapshots its ratchet without consulting the re-key list (test
+  transport only).
 - Pins: `mls::tests::the_evicted_leaf_cannot_speak_after_the_rekey` and
   the exporter-ring test (an old-epoch frame is refused after the merge),
   `mls::tests::a_merged_rekey_stays_listed_until_taken`,
@@ -806,13 +808,21 @@ state: below what is held, else at the highest seq accepted, else the next
 frame is the baseline (`inbound_gap_lost via=operator count=`; `count` in
 log positions).
 
-**Re-delivered history never acts.** The highest seq accepted or held
-from a sender in its current incarnation this session - never a dropped
-duplicate, never a stored window's `high` - is the source of "newest": a
-`ChainRequest` (round, serve, divergence clear, claim, seat head) and a
-`VoteRefused` (notice) act only for a frame at that seq; an older one is
+**A re-delivered frame acts only if it is the newest known from that
+seat.** The highest seq accepted or held from a sender this session -
+never a dropped duplicate - is the source of "newest"; before any arrival
+it is the stored window's `high`, except for a legacy window (it may
+describe another device). A `ChainRequest` (round, serve, divergence
+clear, claim, seat head) and a `VoteRefused` (notice) act only for a frame
+at that seq; an older one - a gap-filler after a restart included - is
 applied to state as history. A merge reset starts it anew, an operator
-resync of a legacy window too; one of a `current` window keeps it. A
+resync of a legacy window too; one of a `current` window keeps it. After
+a legacy `resync_seat` the seat's re-fetched history arrives ascending
+with nothing seen yet, so its old catch-up requests each act once as they
+pass: about one per 5 minutes of that device's history, serving at most
+once per 30 s, ending with the first frame at its top - a one-off cost of
+the operator action (next release: keep `served_at` on an operator resync
+and bind `clear_divergence` there to `peer_on_branch`). A
 `Committed` block's divergence mark keeps its rule - excused only by a
 newer frame that showed the sender on this branch (`peer_on_branch`) -
 which an operator resync keeps too.

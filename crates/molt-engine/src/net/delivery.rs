@@ -377,7 +377,15 @@ impl State {
     /// incarnation this session - never a dropped duplicate, never a stored
     /// window's high (it may describe another device).
     pub(crate) fn seen_high(&self, from: &str) -> u64 {
-        self.delivery.seen_high.get(from).copied().unwrap_or(0)
+        // after a restart: the stored high of a window that is this device's
+        let stored = || {
+            self.delivery
+                .accepted
+                .get(from)
+                .filter(|w| w.proof != molt_core::RestoreProof::Unknown)
+                .map_or(0, |w| w.high)
+        };
+        self.delivery.seen_high.get(from).copied().unwrap_or_else(stored)
     }
 
     /// Whether frame `seq` of `from` is the newest seen from it: only such
@@ -414,20 +422,26 @@ impl State {
             // the new start: below what is held, else what was accepted;
             // nothing at all - the next frame is the baseline
             let hold = self.delivery.inbound.get(&member);
-            let to = hold.and_then(|h| h.held.keys().next().map(|s| s - 1)).or_else(|| hold.map(|_| self.seen_high(&member)));
+            let to = hold.and_then(|h| h.held.keys().next().map(|s| s - 1)).or_else(|| {
+                hold.map(|h| {
+                    let listed = h.listing.as_ref().map_or(0, |l| l.through);
+                    let missing = h.missing.keys().next_back().copied().unwrap_or(0);
+                    self.seen_high(&member).max(listed).max(missing)
+                })
+            });
             let frontier = hold.map_or(0, |h| h.frontier);
             tracing::warn!(%member, count = to.unwrap_or(0).saturating_sub(frontier), first = frontier + 1, via = "operator", "inbound_gap_lost");
             if let Some(hold) = self.delivery.inbound.get_mut(&member) {
                 hold.from_start = false;
             }
-            match to {
-                Some(to) => self.give_up_through(&member, to, "operator"),
-                None => {
-                    if let Some(w) = self.delivery.accepted.get_mut(&member) {
-                        w.proof = molt_core::RestoreProof::Current;
-                    }
-                    self.save_accepted_now();
-                }
+            if let Some(to) = to {
+                self.give_up_through(&member, to, "operator");
+            }
+            // still nothing accepted: no longer owed from the start, the next
+            // frame is the baseline
+            if let Some(w) = self.delivery.accepted.get_mut(&member).filter(|w| w.high == 0) {
+                w.proof = molt_core::RestoreProof::Current;
+                self.save_accepted_now();
             }
             self.emit_session(crate::SessionScope::Full);
             return Ok(Reply::Ack);
@@ -1041,6 +1055,14 @@ impl State {
             }
         }
         self.apply_ready(from, "listed");
+    }
+
+    /// A hold whose only content is a missing seq (a D7-refused first frame).
+    #[cfg(test)]
+    pub(crate) fn note_missing_for_test(&mut self, member: &str, seq: u64) {
+        let now = self.presence_now();
+        let hold = self.delivery.inbound.entry(member.to_string()).or_insert_with(|| SenderHold::new(0, Vec::new()));
+        hold.note_missing(seq, now);
     }
 
     #[cfg(test)]
