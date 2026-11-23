@@ -40,8 +40,8 @@ impl State {
         self.seat_reports.builds.insert(from.clone(), build.to_string());
     }
 
-    /// The head a peer's own catch-up request names. Inbound frames of one
-    /// sender arrive in its seq order, so the latest wins.
+    /// The head a peer's own catch-up request names; only the newest
+    /// request reaches here (`fresh_chain_request`).
     pub(crate) fn note_seat_head(&mut self, from: &MemberId, top: &molt_core::HeightHash) {
         if *from == self.member() {
             return;

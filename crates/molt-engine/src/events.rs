@@ -971,6 +971,7 @@ impl State {
         self.chain.pending_from.clear();
         self.chain.log_gate.clear();
         self.chain.round_marks.clear();
+        self.chain.request_seq.clear();
         self.chain.heal_since = 0;
         self.chain.peer_heights.clear();
         self.chain.peer_claim_seq.clear();

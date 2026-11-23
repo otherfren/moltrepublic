@@ -167,7 +167,7 @@ impl State {
         };
         if block.height == head.height + 1 {
             if block.prev != head.hash {
-                if self.left_that_branch(from, seq) {
+                if self.left_that_branch(from, seq, block.height) {
                     tracing::debug!(%from, height = block.height, "fork=stale_block");
                     return;
                 }
@@ -988,7 +988,10 @@ impl State {
             // holds our history at this height
             let hash = block_hash(&self.republic_id(), &block);
             self.note_on_branch(from, seq, block.height, hash);
-            self.clear_divergence(from);
+            // a shared block below the fork height proves nothing (review R4)
+            if self.chain.diverged.get(from).map_or(true, |d| block.height >= d.since_height) {
+                self.clear_divergence(from);
+            }
             return;
         }
         let rid = self.republic_id();
@@ -1022,7 +1025,7 @@ impl State {
             return;
         }
         if !shared_prev || !is_tip {
-            if self.left_that_branch(from, seq) {
+            if self.left_that_branch(from, seq, block.height) {
                 tracing::debug!(%from, height = block.height, "fork=stale_block");
                 return;
             }
@@ -1049,8 +1052,10 @@ impl State {
             // the incoming block wins the tip; swap it in and re-verify
             let displaced = self.chain.blocks.pop();
             self.chain.blocks.push(block.clone());
-            if let Ok(head) = self.verify_own(&self.chain.blocks) {
-                self.chain.head = Some(head);
+            // the walk too: a kept stale walk still holds the displaced id
+            if let Ok(walk) = self.walk_own(&self.chain.blocks) {
+                self.chain.head = Some(walk.head.clone());
+                self.chain.walk = Some(walk);
                 self.chain.head_moved_at = self.presence_now();
                 self.apply_chain_to_state();
                 if let Some((ChainChange::Applied { proposal_id, .. }, b)) =
@@ -1155,6 +1160,7 @@ impl State {
         self.chain.peer_heights.remove(member);
         self.chain.peer_claim_seq.remove(member);
         self.chain.peer_on_branch.remove(member);
+        self.chain.request_seq.remove(member);
         self.chain.heal_loops.retain(|l| l.peer != member);
         // D3: a new device's declarations carry its own clock
         self.files.caps_at.remove(member);
@@ -1345,14 +1351,25 @@ impl State {
         self.chain.peer_on_branch.insert(from.to_string(), (seq, height, hash));
     }
 
-    /// F1: a newer frame of `from` than this one showed it on our branch,
-    /// and we still hold what it named - the block is from a branch `from`
-    /// has left, not a divergence.
-    fn left_that_branch(&self, from: &str, seq: Option<u64>) -> bool {
+    /// F1: a newer frame of `from` than this one showed it on our branch
+    /// at or above `block_height`, and we still hold what it named - the
+    /// block is from a branch `from` has left, not a divergence. Evidence
+    /// below it is a shared prefix and proves nothing (review R4).
+    fn left_that_branch(&self, from: &str, seq: Option<u64>, block_height: u64) -> bool {
         let (Some(seq), Some((at, height, hash))) = (seq, self.chain.peer_on_branch.get(from)) else {
             return false;
         };
-        seq < *at && self.holds_block(*height, hash)
+        seq < *at && *height >= block_height && self.holds_block(*height, hash)
+    }
+
+    /// H1: whether frame `seq` is the newest `ChainRequest` of `from` in
+    /// its current incarnation; a re-delivered older one is history.
+    pub(crate) fn fresh_chain_request(&mut self, from: &str, seq: u64) -> bool {
+        if self.chain.request_seq.get(from).is_some_and(|last| seq <= *last) {
+            return false;
+        }
+        self.chain.request_seq.insert(from.to_string(), seq);
+        true
     }
 
     /// A4: whether a line under `key` goes out now - `Some(folded)` with

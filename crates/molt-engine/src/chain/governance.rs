@@ -1494,12 +1494,8 @@ impl State {
     /// WP4b stage 4: verify a candidate chain in THIS holder's context —
     /// a full holder verifies from the genesis, a pruned holder from its
     /// checkpoint blob (`verify_suffix_chain`). The one entry every
-    /// adopt/append/probe path routes through.
-    pub(crate) fn verify_own(&self, blocks: &[ChainBlock]) -> Result<ChainHead, String> {
-        Ok(self.walk_own(blocks)?.head)
-    }
-
-    /// [`State::verify_own`], keeping the walk.
+    /// adopt/append/probe path routes through; a caller that moves the
+    /// head stores the walk it got (`chain.walk`).
     pub(crate) fn walk_own(&self, blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
         match &self.chain.checkpoint_blob {
             None => walk_chain(blocks),
