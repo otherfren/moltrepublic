@@ -845,6 +845,8 @@ pub(crate) fn apply_session(
             ui.invoke_show_toast_error(vote_refused_copy(lang, rest).into());
         } else if let Some(member) = sv.notice.strip_prefix("restore-sealed-after-withdrawal:") {
             ui.invoke_show_toast_error(crate::labels::restore_sealed_after_withdrawal_copy(lang, member).into());
+        } else if let Some(member) = sv.notice.strip_prefix("restore-unwelcomed:") {
+            ui.invoke_show_toast_error(crate::labels::restore_unwelcomed_copy(lang, member).into());
         } else if sv.notice.starts_with("sealed-after-withdrawal:") {
             ui.invoke_show_toast_error(crate::labels::sealed_after_withdrawal_copy(lang).into());
         } else if let Some(member) = sv.notice.strip_prefix("restore-abandoned:") {

@@ -404,6 +404,20 @@ pub struct LockAcceptedValue {
     /// The change itself for a membership change or a cut.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change: Option<ChainChange>,
+    /// The holder's own position signature over the change at the slot's
+    /// height: evidence a leader forwards on a forced Accept.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sig: String,
+}
+
+/// A seat's acceptance of a forced value, carried by the leader: `sig` is
+/// `member`'s position signature over exactly that change at that height.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockEvidence {
+    /// The seat that accepted the value.
+    pub member: String,
+    /// Its position signature.
+    pub sig: String,
 }
 
 /// What a v2 restore consent anchors to: the chain height its signer saw

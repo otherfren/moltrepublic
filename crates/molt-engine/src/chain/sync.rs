@@ -1035,7 +1035,6 @@ impl State {
         if from.is_empty() || from == self.member() {
             return;
         }
-        self.lock_note_peer_height(height);
         if let Some(seq) = seq {
             if self.chain.peer_claim_seq.get(from).is_some_and(|last| seq <= *last) {
                 return;

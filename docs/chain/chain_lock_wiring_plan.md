@@ -227,6 +227,8 @@ each: lock 68, 54, 29 s; B6 39, 35, 36 s.
   | Network traffic | a lot | about a quarter |
   | A member loses their device | one other member can bring it back | all remaining members must be online (here: 2 of 2) |
   | Members that may be missing | n-m | min(m-1, n-m) |
+  | Republics where every member must approve | works | not offered |
+  | A misbehaving member | can block decisions only together with absent members | can stall a decision only while m-1 other members are unreachable; it continues once they are back |
   | Taking a proposal back | usually works | only until it was called up |
   | Switching it off | - | not possible |
   | Using an older version of the app | works | no longer possible |
@@ -244,13 +246,16 @@ each: lock 68, 54, 29 s; B6 39, 35, 36 s.
   `status.chain_sync` and the refusal texts carry the same facts; no step
   only the window can do.
 - Preconditions at propose and approve: every seat capable; m >= 2 (a
-  legacy m = 1 chain must not enable it).
+  legacy m = 1 chain must not enable it); m < n (where every member must
+  approve, a member lost mid-decision would stop the republic for good);
+  no restore open.
 
 ## 12. Not built, required before the mode leaves the dark
 
-- The amnesia rule (design §14; modelled in `lock_sim.rs` as
-  `amnesia_rule`), with "lock state unknown" after every import.
 - The answer frame for a withheld acceptance (so a leader learns why).
+- An approve control in the window for a withdrawn card the status names
+  (item 3's exit). REQUIRED before the mode is offered: MCP `approve`
+  resolves it today, and a state only MCP can resolve breaks co-equality.
 - Status texts for every state where nothing is ready.
 - The activation modal and its MCP data (§11).
 - The rejoiner's new device and lineages in the simulation.

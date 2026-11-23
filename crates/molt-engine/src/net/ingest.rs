@@ -301,7 +301,7 @@ impl State {
                 // budget could never become a publishable block; recording it
                 // would only let this node approve a change that then wedges
                 // the sealer's outbox
-                if !crate::proposals::payload_fits(surface, &payload, &self.roster()) {
+                if !crate::proposals::payload_fits_mode(surface, &payload, &self.roster(), self.lock_enabled()) {
                     tracing::warn!(from = %from, surface = ?surface, "dropping a proposal too large to publish");
                     self.note_dropped_proposal(&from, "too-large");
                     return Ok(Reply::Ack);
@@ -767,14 +767,18 @@ impl State {
             WorkspaceEvent::LockPromise { height, base, round, leader, accepted } => {
                 self.lock_on_promise(&from, height, base, round, leader, accepted);
             }
-            WorkspaceEvent::LockAccept { height, base, round, digest, need, id, change, forced } => {
-                self.lock_on_accept(&from, height, base, round, digest, need, id.0, change, forced);
+            WorkspaceEvent::LockAccept { height, base, round, digest, need, id, change, forced, evidence } => {
+                self.lock_on_accept(&from, height, base, round, digest, need, id.0, change, forced, evidence);
             }
             WorkspaceEvent::LockAccepted { height, base, round, leader, digest, sig } => {
                 self.lock_on_accepted(&from, height, base, round, leader, &digest, &sig);
             }
             WorkspaceEvent::LockNack { height, base, round, leader, promised, head } => {
                 self.lock_on_nack(&from, height, base, round, leader, promised, (head, envelope.seq));
+            }
+            WorkspaceEvent::LockAmnesiaAsk { nonce } => self.lock_on_amnesia_ask(&from, nonce),
+            WorkspaceEvent::LockAmnesiaReply { to, nonce, touched, round } => {
+                self.lock_on_amnesia_reply(&from, &to, nonce, touched, round);
             }
             // dynamic mesh membership ❸: a relayed mesh announce — authenticate
             // the ANNOUNCER by MLS decryption (the event author is only the

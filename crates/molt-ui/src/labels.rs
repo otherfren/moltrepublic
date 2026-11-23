@@ -205,6 +205,16 @@ pub(crate) fn restore_sealed_after_withdrawal_copy(lang: i32, member: &str) -> S
     }
 }
 
+/// Item 7: `member`'s restore sealed under Strict Order Mode, its device
+/// runs a build without it and was not let in.
+pub(crate) fn restore_unwelcomed_copy(lang: i32, member: &str) -> String {
+    if lang == 1 {
+        format!("{member} in der Kette wieder aufgenommen, Gerät nicht aufgenommen: braucht eine neuere Version")
+    } else {
+        format!("{member} re-admitted on the chain, device not welcomed: needs a newer build")
+    }
+}
+
 /// F2: `member`'s restore sealed and re-keyed, then its rejoiner gave up.
 pub(crate) fn restore_abandoned_copy(lang: i32, member: &str) -> String {
     if lang == 1 {

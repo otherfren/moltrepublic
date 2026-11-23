@@ -2292,6 +2292,7 @@ fn under_the_lock_a_restore_is_accepted_only_after_its_settle() {
                 id: ProposalId(id),
                 change: Some(change.clone()),
                 forced: false,
+                evidence: Vec::new(),
             },
         );
     };
@@ -2359,6 +2360,7 @@ fn a_chosen_restore_seals_after_its_withdrawal() {
             id: ProposalId(id),
             change: Some(change.clone()),
             forced: false,
+            evidence: Vec::new(),
         },
     );
     assert!(
@@ -2462,6 +2464,7 @@ fn a_chosen_restore_seals_while_the_old_device_is_heard() {
             id: ProposalId(id),
             change: Some(change.clone()),
             forced: false,
+            evidence: Vec::new(),
         },
     );
     assert!(walter.chain.lock.outbox.iter().any(|e| matches!(e.body, WorkspaceEvent::LockAccepted { .. })), "walter accepted");
@@ -2477,4 +2480,116 @@ fn a_chosen_restore_seals_while_the_old_device_is_heard() {
         walter.cmd_net_delivery_tick().expect("tick");
     }
     assert_eq!(walter.chain.head.as_ref().map(|h| h.height), Some(1), "the chosen restore sealed");
+}
+
+/// Item 7: a restore that seals while the mode runs does not welcome a
+/// device whose build lacks it (it would sign freely beside the lock):
+/// the coordinator keeps the re-key back, tells the rejoiner and says so;
+/// a device that runs the mode is re-keyed as ever.
+#[test]
+fn a_restore_under_the_mode_does_not_welcome_a_device_without_it() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    for capable in [false, true] {
+        let b = Builder::new(&["petra", "walter", "dora"], 2);
+        let (_, change) = dora_card_frame(&b, 8);
+        let mut coord = chain_signer("petra", &b, b.blocks.clone());
+        coord.chain.lock.enabled_override = Some(true);
+        coord.lock_force(true);
+        coord.recovery.pending.insert(
+            "dora".to_string(),
+            PendingRecovery { key_package: "beef".to_string(), reply: String::new(), card: change.clone(), ticket: "t".to_string() },
+        );
+        let caps = if capable { vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()] } else { Vec::new() };
+        coord.recovery.rejoiner_caps.push_back((molt_net::invite::recover_attempt_id("beef"), caps));
+        let block = b.seal(1, change, &["petra", "walter"]);
+        coord.receive_block(block);
+        assert_eq!(coord.chain.head.as_ref().map(|h| h.height), Some(1), "capable={capable}: the restore sealed");
+        assert!(!coord.recovery.pending.contains_key("dora"));
+        assert_eq!(coord.session.notice == "restore-unwelcomed:dora", !capable, "capable={capable}: {}", coord.session.notice);
+    }
+}
+
+/// Item 7: the enabling vote waits while a restore card is open - the
+/// card's device may run a build without the mode.
+#[test]
+fn an_open_restore_holds_the_enabling_vote() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let (frame, _) = dora_card_frame(&b, 8);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    walter.lock_force(true);
+    walter.chain.lock.caps_override = Some(true);
+    assert_eq!(walter.lock_not_capable(), None);
+    on_nostr(&mut walter, 10_000);
+    wire(&mut walter, "petra", 1, frame);
+    assert!(walter.chain.proposal_changes.contains_key(&8), "the card is open");
+    assert_eq!(walter.lock_not_capable().as_deref(), Some(super::lock_wire::LOCK_RESTORE_PENDING));
+}
+
+/// Explorer (3): a seat's old device never accepts its own restore, also
+/// when it arrives forced with two real acceptances behind it.
+#[test]
+fn a_seat_never_accepts_its_own_restore_even_forced() {
+    use molt_core::{ProposalId, WorkspaceEvent};
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let (_, change) = dora_card_frame(&b, 8);
+    let mut dora = chain_signer("dora", &b, b.blocks.clone());
+    dora.chain.lock.enabled_override = Some(true);
+    dora.lock_force(true);
+    on_nostr(&mut dora, 10_000);
+    let slot = dora.lock_slot().expect("slot");
+    let value = dora.lock_value(1, &change).expect("value");
+    let ev = |m: &str| molt_core::chain::LockEvidence {
+        member: m.into(),
+        sig: molt_storage::identity_sign(b.key(m), &molt_core::chain::approval_bytes(&b.republic_id, 1, &change)),
+    };
+    dora.chain.lock.outbox.clear();
+    wire(
+        &mut dora,
+        "petra",
+        1,
+        WorkspaceEvent::LockAccept {
+            height: 1,
+            base: slot.base,
+            round: 9,
+            digest: value.digest,
+            need: 2,
+            id: ProposalId(8),
+            change: Some(change.clone()),
+            forced: true,
+            evidence: vec![ev("petra"), ev("walter")],
+        },
+    );
+    assert!(
+        !dora.chain.lock.outbox.iter().any(|e| matches!(e.body, WorkspaceEvent::LockAccepted { .. })),
+        "dora accepted her own restore"
+    );
+}
+
+/// Item 2: an imported seat's lock state is unknown. While its chain runs
+/// no Strict Order Mode nothing changes; the moment the chain turns it on
+/// the seat is amnesiac, and once answered and past the floor the unknown
+/// is cleared.
+#[test]
+fn an_import_turns_amnesiac_when_the_mode_comes_on() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&ROSTER, 2);
+    let (mut petra, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
+    petra.lock_force(true);
+    petra.active.as_mut().expect("active").prefs.lock_unknown = true;
+    petra.chain.lock.enabled_override = Some(false);
+    petra.lock_on_head_moved();
+    assert_eq!(petra.chain.lock.amnesia, None, "no mode, nothing to forget");
+    petra.chain.lock.enabled_override = Some(true);
+    petra.lock_on_head_moved();
+    assert_eq!(petra.chain.lock.amnesia, Some(None), "the mode is on: amnesiac");
+    petra.chain.lock.amnesia = Some(Some(0));
+    petra.lock_on_head_moved();
+    assert_eq!(petra.chain.lock.amnesia, None);
+    assert!(!petra.active.as_ref().expect("active").prefs.lock_unknown, "known from here on");
 }

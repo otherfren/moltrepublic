@@ -501,7 +501,9 @@ impl State {
             | WorkspaceEvent::LockPromise { .. }
             | WorkspaceEvent::LockAccept { .. }
             | WorkspaceEvent::LockAccepted { .. }
-            | WorkspaceEvent::LockNack { .. } => {
+            | WorkspaceEvent::LockNack { .. }
+            | WorkspaceEvent::LockAmnesiaAsk { .. }
+            | WorkspaceEvent::LockAmnesiaReply { .. } => {
                 // chain transport/coordination frames (a catch-up request, a
                 // raw MLS re-key commit, a relayed mesh announce, a file
                 // fetch request) ride the log only to reach

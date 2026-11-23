@@ -385,6 +385,20 @@ impl WalletHandle {
         self.lock_seams.cap.store(if off { 2 } else { 1 }, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam (item 7): free-mode restore seals wait while `on` - a
+    /// slow sealer, so a card stays open across the enabling vote.
+    #[doc(hidden)]
+    pub fn __hold_restore_seals(&self, on: bool) {
+        self.lock_seams.hold_restore_seals.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam (item 7): the enabling vote ignores an open restore card -
+    /// the race where it sealed before the card appeared, in one step.
+    #[doc(hidden)]
+    pub fn __lock_ignore_open_restore(&self) {
+        self.lock_seams.ignore_open_restore.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam (B7): this seat's next founding ratifies the lock in its
     /// charter. A real founding starts without it; a `set_features` vote
     /// enables it (wiring plan §11).
@@ -1226,6 +1240,10 @@ pub(crate) struct RecoveryState {
     /// receives it): the fresh KeyPackage + reply queue, kept until the Restored
     /// block commits and the coordinator re-keys the group + sends the Welcome.
     pub(crate) pending: HashMap<String, chain::PendingRecovery>,
+    /// The capabilities each verified request declared, by attempt: the
+    /// seal of its restore welcomes the device only where it runs the
+    /// mode the chain runs (item 7). Bounded, oldest first out.
+    pub(crate) rejoiner_caps: std::collections::VecDeque<(String, Vec<String>)>,
     /// B4: anchor-first attempts between the served anchor and
     /// `RecoverReady`, by ticket. Memory only: a restart forgets them and
     /// the rejoiner's next frame is answered `link outdated`.
@@ -1861,6 +1879,7 @@ impl State {
                 held_approvals: std::collections::BTreeSet::new(),
                 held_seals: std::collections::BTreeSet::new(),
                 pending: HashMap::new(),
+                rejoiner_caps: std::collections::VecDeque::new(),
                 anchor_first: HashMap::new(),
                 spent_tickets: std::collections::HashSet::new(),
                 anchor_first_seats: std::collections::HashSet::new(),

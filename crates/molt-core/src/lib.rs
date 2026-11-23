@@ -1944,6 +1944,11 @@ pub struct WorkspacePrefs {
     /// missing, means the seat may have promised and forgot (§6 amnesia).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub chain_lock: bool,
+    /// Item 2: an import's lock state is unknown - the device it came from
+    /// may have promised after the export. Amnesiac once the chain runs
+    /// Strict Order Mode, until the others' answers clear it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lock_unknown: bool,
 }
 
 impl Default for WorkspacePrefs {
@@ -1963,6 +1968,7 @@ impl Default for WorkspacePrefs {
             seat_caps: std::collections::BTreeMap::new(),
             mirror_dir: String::new(),
             chain_lock: false,
+            lock_unknown: false,
         }
     }
 }
@@ -3357,6 +3363,10 @@ pub enum WorkspaceEvent {
         /// stood for the card accepts it although it was withdrawn since.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         forced: bool,
+        /// A forced value's evidence: real acceptances of it, by two
+        /// distinct seats where it counts.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evidence: Vec<chain::LockEvidence>,
     },
     /// Phase 2b: the sender accepted `digest` at the ballot; `sig` is its
     /// ordinary position signature over the change's approval bytes.
@@ -3390,6 +3400,26 @@ pub enum WorkspaceEvent {
         promised: Option<chain::LockBallot>,
         /// The sender's head height.
         head: u64,
+    },
+    /// An amnesiac seat asks what it may have touched (§6, the corrected
+    /// rule); `nonce` names the ask, so a reply to an older one never
+    /// counts.
+    LockAmnesiaAsk {
+        /// This ask.
+        nonce: u64,
+    },
+    /// A seat holding its own lock state answers `to`'s ask: the highest
+    /// height it holds or saw lock state at (or its head + 1), and the
+    /// highest round it saw from `to`.
+    LockAmnesiaReply {
+        /// The asking seat.
+        to: MemberId,
+        /// The ask answered.
+        nonce: u64,
+        /// The highest height `to` may have touched, as seen here.
+        touched: u64,
+        /// The highest round seen here from `to`.
+        round: u64,
     },
 }
 
@@ -3493,6 +3523,11 @@ pub struct ProposalRecord {
     /// card counts against this relayer's relay budget, not `by`'s cap.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub relayed_by: MemberId,
+    /// Strict Order Mode: a withdrawn card this seat never had, registered
+    /// from a forced value it is asked to complete - its content readable
+    /// before an approve (item 3). Gone once the height decides.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_completion: bool,
 }
 
 impl ProposalRecord {
@@ -3515,6 +3550,7 @@ impl ProposalRecord {
             withdrawn: false,
             wiki_rev: None,
             relayed_by: MemberId::new(),
+            pending_completion: false,
         }
     }
 
@@ -7508,6 +7544,9 @@ pub struct ProposalView {
     /// [`ProposalRecord::withdrawn`]) — labelled "pulled back".
     #[serde(default)]
     pub withdrawn: bool,
+    /// See [`ProposalRecord::pending_completion`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pending_completion: bool,
     /// Threshold is reached here and the seal waits out its pacing round
     /// (C1, G14) — "approvals 2 of 2, state proposed" read as a
     /// contradiction. Reader-relative like `approved_by_me`: another node
@@ -8598,6 +8637,8 @@ pub fn unowed_on_the_wire(body: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::LockAccept { .. }
             | WorkspaceEvent::LockAccepted { .. }
             | WorkspaceEvent::LockNack { .. }
+            | WorkspaceEvent::LockAmnesiaAsk { .. }
+            | WorkspaceEvent::LockAmnesiaReply { .. }
     )
 }
 
@@ -10091,9 +10132,28 @@ mod tests {
                         need: 2,
                         id: 7,
                         change: None,
+                        sig: String::new(),
                     }),
                 },
                 r#"{"type":"lock_promise","height":5,"base":"b","round":2,"leader":"dora","accepted":{"round":1,"leader":"mara","digest":"d","need":2,"id":7}}"#,
+            ),
+            (
+                WorkspaceEvent::LockPromise {
+                    height: 5,
+                    base: "b".into(),
+                    round: 2,
+                    leader: "dora".into(),
+                    accepted: Some(chain::LockAcceptedValue {
+                        round: 1,
+                        leader: "mara".into(),
+                        digest: "d".into(),
+                        need: 2,
+                        id: 7,
+                        change: None,
+                        sig: "s".into(),
+                    }),
+                },
+                r#"{"type":"lock_promise","height":5,"base":"b","round":2,"leader":"dora","accepted":{"round":1,"leader":"mara","digest":"d","need":2,"id":7,"sig":"s"}}"#,
             ),
             (
                 WorkspaceEvent::LockAccept {
@@ -10105,6 +10165,7 @@ mod tests {
                     id: ProposalId(9),
                     change: Some(cut),
                     forced: false,
+                    evidence: Vec::new(),
                 },
                 r#"{"type":"lock_accept","height":5,"base":"b","round":2,"digest":"d","need":3,"id":9,"change":{"kind":"checkpoint","upto":4,"state_hash":"abababababababababababababababababababababababababababababababab"}}"#,
             ),
@@ -10118,8 +10179,23 @@ mod tests {
                     id: ProposalId(9),
                     change: None,
                     forced: true,
+                    evidence: Vec::new(),
                 },
                 r#"{"type":"lock_accept","height":5,"base":"b","round":2,"digest":"d","need":2,"id":9,"forced":true}"#,
+            ),
+            (
+                WorkspaceEvent::LockAccept {
+                    height: 5,
+                    base: "b".into(),
+                    round: 2,
+                    digest: "d".into(),
+                    need: 2,
+                    id: ProposalId(9),
+                    change: None,
+                    forced: true,
+                    evidence: vec![chain::LockEvidence { member: "mara".into(), sig: "s".into() }],
+                },
+                r#"{"type":"lock_accept","height":5,"base":"b","round":2,"digest":"d","need":2,"id":9,"forced":true,"evidence":[{"member":"mara","sig":"s"}]}"#,
             ),
             (
                 WorkspaceEvent::LockAccepted {
@@ -10142,6 +10218,11 @@ mod tests {
                     head: 4,
                 },
                 r#"{"type":"lock_nack","height":5,"base":"b","round":2,"leader":"dora","promised":{"round":3,"leader":"mara"},"head":4}"#,
+            ),
+            (WorkspaceEvent::LockAmnesiaAsk { nonce: 7 }, r#"{"type":"lock_amnesia_ask","nonce":7}"#),
+            (
+                WorkspaceEvent::LockAmnesiaReply { to: "mara".into(), nonce: 7, touched: 6, round: 3 },
+                r#"{"type":"lock_amnesia_reply","to":"mara","nonce":7,"touched":6,"round":3}"#,
             ),
         ]
     }
