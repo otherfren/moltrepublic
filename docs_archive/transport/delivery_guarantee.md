@@ -768,10 +768,17 @@ trusted: every later restore of that seat reaches it as a merge.
   gate above (no debounce) and flushes the writer before the delivery task
   starts. A kill after that leaves it at most AHEAD of the group: the
   outbox publishes own log entries from its persisted cursor, so the
-  logged commit goes out at the reopen. Not re-sent: the Welcome - the
-  rejoiner restores again with a new link. Founding's `add_members` is
-  written whole at the seal (the ritual's first disk write). Pin:
-  `a_coordinator_killed_right_after_its_rekey_reopens_at_the_new_epoch`.
+  logged commit goes out at the reopen, sealed under the exporter of the
+  epoch it was made at (the ring is part of the MLS snapshot). The late
+  merge resets the bystanders' window for the seat; what they sent at the
+  old epoch meanwhile reaches the coordinator by re-send. The `Restored`
+  block is applied in the same handler, before the re-key, and rides the
+  same outbox ahead of it. Not re-sent: the Welcome - the reopened
+  coordinator answers the device `link outdated`, and a restore by a new
+  link re-keys on top. Founding's `add_members` is written whole at the
+  seal (the ritual's first disk write). Pins:
+  `a_coordinator_killed_right_after_its_rekey_reopens_at_the_new_epoch`,
+  `a_coordinator_killed_before_its_rekey_went_out_publishes_it_at_the_reopen`.
 - **v0.1.3 note.** (a) A durable pending re-key (commit + Welcome, re-sent
   at the reopen until the Welcome landed) would close the Welcome gap.
   (b) A seat behind its own commit is detectable at the open (the last own
@@ -927,6 +934,7 @@ a_rewind_reads_the_last_explicit_bit_as_unacked}`,
 `group_ack::tests::the_stamp_is_additive_both_ways`,
 `crates/molt-engine/tests/nostr_recovery.rs`
 (`a_seat_that_kept_its_old_window_hears_the_restored_seat_after_a_resync`,
-`a_coordinator_killed_right_after_its_rekey_reopens_at_the_new_epoch`),
+`a_coordinator_killed_right_after_its_rekey_reopens_at_the_new_epoch`,
+`a_coordinator_killed_before_its_rekey_went_out_publishes_it_at_the_reopen`),
 `crates/molt-engine/tests/nostr_delivery_guarantee.rs`
 (`a_receiver_whose_window_regressed_gets_the_tail_again_and_applies_it_once`).

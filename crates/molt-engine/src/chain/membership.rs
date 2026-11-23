@@ -1514,6 +1514,14 @@ impl State {
             },
         );
         let anchor_first = self.recovery.anchor_first_seats.contains(&(member.to_string(), to.clone()));
+        let parked = self.drop_seam.parks_rekey();
+        if parked {
+            if let Some(group) = self.group_net.take() {
+                // the outbox drains what it already read, then stops
+                tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(group.handle.shutdown()));
+                self.group_mls_parked = Some(mls.clone());
+            }
+        }
         // no peer sends a seat its own commit back: the logged commit and the
         // merged epoch are on disk BEFORE anything is published. A kill
         // after that leaves this seat at most an epoch ahead, and the outbox
@@ -1523,15 +1531,17 @@ impl State {
         if !queued || !self.active.as_ref().is_some_and(|a| a.handle.flush_blocking()) {
             tracing::warn!(%member, "rekey_persist=unconfirmed");
         }
-        crate::nostr_ritual::spawn_rekey_delivery(
-            channel,
-            net,
-            to,
-            rekey,
-            payload,
-            member.to_string(),
-            self.cmd_tx.clone(),
-        );
+        if !parked {
+            crate::nostr_ritual::spawn_rekey_delivery(
+                channel,
+                net,
+                to,
+                rekey,
+                payload,
+                member.to_string(),
+                self.cmd_tx.clone(),
+            );
+        }
         // the rejoiner's trust root, over the same 445 channel it just
         // joined - unless it verified the anchor before the seal (B4)
         if !anchor_first {

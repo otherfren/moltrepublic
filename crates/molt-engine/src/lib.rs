@@ -387,6 +387,14 @@ impl WalletHandle {
         self.drop_seam.mls_debounce.store(v, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: the next re-key this coordinator makes is logged and
+    /// persisted but never published (its group runtime stops first). Needs
+    /// a multi-thread runtime. No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __park_rekey_publish(&self, on: bool) {
+        self.drop_seam.park_rekey.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam: the head beacon (a `ChainRequest`) goes out on the next
     /// beat. No `Command` reaches it.
     #[doc(hidden)]
