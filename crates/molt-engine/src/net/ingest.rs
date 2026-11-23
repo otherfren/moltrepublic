@@ -776,6 +776,10 @@ impl State {
             WorkspaceEvent::LockNack { height, base, round, leader, promised, head } => {
                 self.lock_on_nack(&from, height, base, round, leader, promised, (head, envelope.seq));
             }
+            WorkspaceEvent::LockAmnesiaAsk { nonce } => self.lock_on_amnesia_ask(&from, nonce),
+            WorkspaceEvent::LockAmnesiaReply { to, nonce, touched, round } => {
+                self.lock_on_amnesia_reply(&from, &to, nonce, touched, round);
+            }
             // dynamic mesh membership ❸: a relayed mesh announce — authenticate
             // the ANNOUNCER by MLS decryption (the event author is only the
             // relay) and extend this node's own mesh toward it. A nonce'd

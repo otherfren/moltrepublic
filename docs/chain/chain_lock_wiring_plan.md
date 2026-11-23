@@ -252,8 +252,6 @@ each: lock 68, 54, 29 s; B6 39, 35, 36 s.
 
 ## 12. Not built, required before the mode leaves the dark
 
-- The amnesia rule (design §14; modelled in `lock_sim.rs` as
-  `amnesia_rule`), with "lock state unknown" after every import.
 - The answer frame for a withheld acceptance (so a leader learns why).
 - An approve control in the window for a withdrawn card the status names
   (item 3's exit). REQUIRED before the mode is offered: MCP `approve`

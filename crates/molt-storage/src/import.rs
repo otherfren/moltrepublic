@@ -541,6 +541,12 @@ impl ImportStaging {
             prefs.chain_lock = true;
             changed = true;
         }
+        // item 2: whatever the chain runs now - the mode may come on after
+        // the export, and this device's lock state is unknown either way
+        if !prefs.lock_unknown {
+            prefs.lock_unknown = true;
+            changed = true;
+        }
         if changed {
             crate::write_prefs(&self.dir, &prefs)?;
         }
@@ -813,6 +819,7 @@ mod tests {
             let dir = staging.commit(&dest_root, false, None).expect("commit");
             assert!(!dir.join(crate::CHAIN_LOCK_FILE).exists(), "the lock file never travels");
             assert_eq!(crate::read_prefs(&dir).chain_lock, locked, "the marker where the chain runs the lock");
+            assert!(crate::read_prefs(&dir).lock_unknown, "item 2: every import's lock state is unknown");
         }
     }
 

@@ -803,26 +803,39 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   with one away for good stalls in 150 of 150 runs).
   Liveness exit, staged: a value only one seat holds has no evidence. A
   seat withholds it (`lock=withheld reason=needs approval`); its status
-  first reads `decision <id>: waiting for <seats>` (the seats whose
-  acceptance would vouch for it), the leader's resends recompute the
-  evidence, and the wait ends by itself once one of them is heard. Only
-  after one retry interval (the leader's retransmit step, no new clock)
-  without that does it read `decision <id> may already be made - approve
-  to complete it`, and then an `approve` of that card is accepted
-  although the card is withdrawn; before that, and for every other
-  withdrawn card, approve stays refused (`AlreadyTerminal`). A seat that
-  approved the card itself is never asked: it accepts on its own intent
-  (`a_seat_that_approved_the_card_is_never_prompted`). MCP `approve`
-  works; the board shows the card as withdrawn and the window has no
-  control for it yet (required before the mode is offered, wiring plan
-  §12). How often honest runs show the prompt (the simulation, 150 runs
-  per shape, the prompt after 20 steps of waiting): 2-of-3 in 21-29 runs
-  at 1-15 % frame loss, 31-43 where a seat dies or comes back - it does
-  not fall with less loss: it arises where the forced value's card was
-  not approved by this seat (the model approves 85 % of cards), so it
-  tracks how often members leave cards unapproved, not the network;
-  3-of-5 and larger at most 3 runs; n-of-n is not offered. Expect
-  operators of 2-of-3 republics to see it.
+  reads `decision <id>: waiting for <seats>` (the seats whose acceptance
+  would vouch for it), the leader's resends recompute the evidence, and
+  the wait ends by itself once one of them is heard. The approve is
+  offered - `decision <id> may already be made - approve to complete it`
+  - only after one retry interval (the leader's retransmit step) AND
+  while every seat it waits for, other than the leader that sent it, is
+  silent here beyond the still-active window (a seat heard recently will
+  most likely answer; the sender's evidence already says what it vouches
+  for - waiting on it deadlocked the model) AND the value is not already
+  being sealed here; until then the status keeps the wait.
+  Then an `approve` of that card is accepted although the card is
+  withdrawn; before that, and for every other withdrawn card, approve
+  stays refused (`AlreadyTerminal`). A seat that approved the card itself
+  is never asked: it accepts on its own intent
+  (`a_seat_that_approved_the_card_is_never_prompted`). A seat that never
+  had the card registers the carried change as a withdrawn card marked
+  `pending_completion` (proposer from the id's stripe, content readable;
+  never open, never a free pick, gone once its height decides), so the
+  operator reads what it completes
+  (`a_forced_value_without_its_card_is_completed_by_an_approve`,
+  `a_pending_completion_card_never_opens_and_goes_with_its_height`). MCP
+  `approve` works; the window has no control for it yet (required before
+  the mode is offered, wiring plan §12). How often, in the simulation
+  (150 runs per shape, 1 % and 5 % frame loss): (i) a seat reaches the
+  wait - 2-of-3 in 22, where a seat comes back 33-40; (ii) the approve is
+  offered - 7-8 in 2-of-3 without a failure, 7-13 where a seat comes
+  back; (iii) the height cannot decide without it (no human answers) - 0
+  without a failure; where a seat in 2-of-3 dies for good 31-40, and
+  there the offer appears in the same runs ((ii) = (iii)): the H1 shape,
+  the exit by design. Without the silent-seats rule (ii) was 13-23. The
+  remaining 5 % are offers a later approve of the card at the leader
+  (its resend then vouches) makes unnecessary - not predictable here.
+  3-of-5 and larger: (ii) 0.
   Size: under the mode the propose and wire gates also bound the largest
   lock frame (`proposals::lock_frame_plaintext_len`: a forced Accept with
   the change and two evidence signatures, a promise with the change and
@@ -902,18 +915,44 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   `lock_acceptor_accept` refuses it before the forced and the kept paths
   - the count and the seal filtered it before, but no filter stands in
   for a refusal (`a_seat_never_accepts_its_own_restore_even_forced`).
-- **Amnesia (decided rule, modelled in `lock_sim`, not built).** A seat
-  that lost its lock state asks the others; only seats that hold their
-  own state answer - an amnesiac seat does not answer at all and says so
-  (`amnesia - 1 of 2 seats answered`). With answers from max(m, n - m +
-  1) other seats it is passive up to the highest height they report it
-  may have touched, and leads above the highest round they saw from it
-  (`an_amnesiac_seat_waits_for_the_others_and_never_forks`; the control
-  forks). Two amnesiac seats at once can both wait for ever (2-of-3:
-  each needs both others): the exit is the recovery ritual for one of
-  them (status `amnesia - restore this seat with a new link`). Where
-  m = n no answer set proves anything: the recovery ritual is the only
-  exit, and a seat restored from a file backup is undetectable there.
+- **Amnesia, the rule as built (R-c).** A seat that lost its lock state
+  (no file where one was kept, an unreadable or unwritten one, a file
+  ahead of the chain, an import) asks the others (`LockAmnesiaAsk`, a
+  fresh nonce per open, re-sent each retry interval); only seats that
+  hold their own state answer (`LockAmnesiaReply`: `touched` = max(head +
+  1, the highest height with any lock state there) and the highest round
+  seen from the asker) - an amnesiac seat answers nothing. With answers
+  from max(m, n - m + 1) distinct OTHER seats to this ask, it is passive
+  up to the highest `touched` and its own ballots start above the
+  highest round reported (load-bearing: an acceptor cannot refuse a
+  reused ballot it only promised;
+  `an_amnesiac_seat_leads_above_the_rounds_reported`). The arithmetic is
+  pure (`lock::amnesia_need`, `amnesia_touched`, `amnesia_floor`), shared
+  with the simulation and the explorer. Status: `amnesia - waiting for
+  <k> of <need> seats to answer`; where too many other seats ask too (are
+  amnesiac themselves) for an answer set to form, `amnesia - restore this
+  seat with a new link` - two amnesiac seats of three halt the slot under
+  every rule until one is replaced by the recovery ritual
+  (`two_amnesiac_seats_of_three_say_restore`). Replaced: the old floor
+  (1 + max(own head, the FIRST peer height heard)) forks - a peer one
+  block behind answers first (explorer R-a). Answers from n - m + 1 and
+  a floor from heads fork where n < 2m - 1 (explorer R-b, 4 seats m = 3:
+  the forgotten promise is known only to the n - m others of that
+  phase-1 set; `the_amnesia_control_r_b_forks_where_r_c_holds`). Pinned:
+  `amnesia_waits_for_enough_answers`,
+  `only_a_seat_with_its_own_state_answers_an_ask`; modelled:
+  `an_amnesiac_seat_waits_for_the_others_and_never_forks`. m = n is not
+  offered.
+- **Item 2, an import's lock state is unknown.** Every import sets the
+  workspace pref `lock_unknown` (whatever the chain runs: the mode may
+  come on after the export, and the device the export came from may have
+  promised since). A seat with it is amnesiac from the first locked
+  height it reaches - at the open where the chain already runs the mode,
+  or at the head move that turns it on (a catch-up included) - and the
+  pref clears once the floor is passed. It raises no workspace version.
+  Pinned: `an_import_turns_amnesiac_when_the_mode_comes_on`, the storage
+  import test; modelled: `an_import_from_before_the_mode_is_amnesiac`
+  (237 forks over 1 800 runs opened fresh, 0 under the rule).
 - **Operability (C-MED-3, C-MED-6, B-F3, B-F6, B-F7, D-F3).** A card whose
   ballot went stale stays behind the other ready cards across heights
   until it is retired (a never-sealable card no longer costs a timeout

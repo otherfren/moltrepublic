@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::governance::{FALLBACK_ASK_SECS, SEALER_GRACE_SECS};
-use super::lock::{evidence_holds, Acceptor, Ballot, Leader, Quorum, Reply, Sealable, Slot, Step, Subjects, Tally, Value, SLOT_KEEP};
+use super::lock::{amnesia_floor, amnesia_need, amnesia_touched, evidence_holds, Acceptor, Ballot, Leader, Quorum, Reply, Sealable, Slot, Step, Subjects, Tally, Value, SLOT_KEEP};
 use molt_core::chain::LockEvidence;
 use super::*;
 
@@ -112,7 +112,13 @@ pub(crate) struct NeedsApproval {
     pub(crate) id: u64,
     pub(crate) since: u64,
     pub(crate) waiting: Vec<String>,
+    /// The leader that sent it: its evidence already says what it vouches
+    /// for, so a wait on it alone never holds the offer back.
+    pub(crate) sender: String,
 }
+
+/// Answers to an amnesiac seat's ask, by seat: (touched, round).
+type AmnesiaAnswers = BTreeMap<String, (u64, u64)>;
 
 /// A withheld acceptance to retry: slot, ballot, value, id, the carried
 /// change, and `Some(evidence)` where the value was forced.
@@ -194,6 +200,15 @@ pub(crate) struct LockRuntime {
     /// names the seats whose acceptance would complete it; after one
     /// retry interval it asks for an approve (item 3's exit).
     pub(crate) needs_approval: Option<NeedsApproval>,
+    /// An amnesiac seat's open ask: (nonce, sent at, answers by seat as
+    /// (touched, round)).
+    amnesia_ask: Option<(u64, u64, AmnesiaAnswers)>,
+    /// This seat leads above this round (the highest its answers saw).
+    pub(crate) amnesia_round: u64,
+    /// The highest round seen from each leader (what this seat answers).
+    rounds_by: BTreeMap<String, u64>,
+    /// Other seats seen asking (amnesiac themselves: they answer nothing).
+    amnesiac_others: BTreeSet<String>,
     /// Ids approved through that exit.
     approved_forced: BTreeSet<u64>,
     /// Seats seen with lock state at a height (a promise, an acceptance,
@@ -1049,6 +1064,8 @@ impl State {
         if self.chain.lock.seen.get(slot).map_or(true, |b| ballot > b) {
             self.chain.lock.seen.insert(slot.clone(), ballot.clone());
         }
+        let r = self.chain.lock.rounds_by.entry(ballot.leader.clone()).or_default();
+        *r = (*r).max(ballot.round);
         let me = self.member();
         if ballot.leader == me {
             return;
@@ -1091,7 +1108,7 @@ impl State {
         }
         let now = self.lock_now();
         let seen = self.chain.lock.seen.get(&slot).map_or(0, |b| b.round);
-        let round = self.chain.lock.acceptor.next_round(&slot).max(seen + 1);
+        let round = self.chain.lock.acceptor.next_round(&slot).max(seen + 1).max(self.chain.lock.amnesia_round + 1);
         let ballot = Ballot { round, leader: me.clone() };
         let Some((Reply::Promise { accepted, .. }, _)) = self.lock_step(|a| a.prepare(&slot, &ballot), None) else {
             return;
@@ -1365,7 +1382,8 @@ impl State {
                 let now = self.lock_now();
                 let same = self.chain.lock.needs_approval.as_ref().filter(|n| n.height == slot.height && n.id == id);
                 let since = same.map_or(now, |n| n.since);
-                self.chain.lock.needs_approval = Some(NeedsApproval { height: slot.height, id, since, waiting });
+                let sender = ballot.leader.clone();
+                self.chain.lock.needs_approval = Some(NeedsApproval { height: slot.height, id, since, waiting, sender });
                 Some(LOCK_NEEDS_APPROVAL.to_string())
             }
         } else if matches!(change, ChainChange::Membership { op: MembershipOp::Restored, .. })
@@ -1694,10 +1712,27 @@ impl State {
     }
 
     /// The id the status asks a human to approve: a withheld forced value
-    /// still unvouched one retry interval after its first refusal.
+    /// still unvouched one retry interval after its first refusal, while
+    /// every seat that could still vouch for it is silent here (a seat
+    /// heard within the still-active window will most likely answer - the
+    /// offer would be noise) and the value is not already being sealed.
     pub(crate) fn lock_prompt(&self) -> Option<u64> {
         let n = self.chain.lock.needs_approval.as_ref()?;
-        (self.lock_now() >= n.since + self.lock_retransmit()).then_some(n.id)
+        let due = self.lock_now() >= n.since + self.lock_retransmit();
+        let sealing = self.chain.lock.learned.as_ref().is_some_and(|l| l.slot.height == n.height);
+        let silent = n.waiting.iter().filter(|m| **m != n.sender).all(|m| !self.lock_seat_heard(m));
+        (due && silent && !sealing).then_some(n.id)
+    }
+
+    /// `member` was heard here within the still-active window (the
+    /// restore gate's reading).
+    fn lock_seat_heard(&self, member: &str) -> bool {
+        let window = match self.seat_active.load(SeqCst) {
+            u64::MAX => super::sync::SILENT_AFTER_SECS,
+            secs => secs,
+        };
+        let seen = self.restore_heard_at(member);
+        seen != molt_core::MemberInfo::NEVER && self.presence_now().saturating_sub(seen) < window
     }
 
     /// Item 3's exit: an approve of the withdrawn card the status names.
@@ -1932,11 +1967,10 @@ impl State {
         }
         if let Some(Some(floor)) = self.chain.lock.amnesia {
             if head >= floor {
-                self.chain.lock.amnesia = None;
-                tracing::info!(head, floor, "lock=amnesia_over");
-                self.persist_lock();
+                self.lock_amnesia_over(head, floor);
             }
         }
+        self.lock_unknown_means_amnesia();
         self.lock_drive();
     }
 
@@ -1980,14 +2014,111 @@ impl State {
         }
     }
 
-    /// §6: a peer reported `height`; the first report after an open
-    /// without the lock file fixes the amnesia floor.
-    pub(crate) fn lock_note_peer_height(&mut self, height: u64) {
-        if self.chain.lock.amnesia == Some(None) {
-            let head = self.chain.head.as_ref().map_or(0, |h| h.height);
-            let floor = head.max(height) + 1;
-            self.chain.lock.amnesia = Some(Some(floor));
-            tracing::warn!(floor, "lock=amnesia_floor");
+    /// §6, the corrected rule: an amnesiac seat asks; a single peer's
+    /// height is no floor (it may not know what this seat touched).
+    fn lock_amnesia_ask(&mut self) {
+        if self.chain.lock.amnesia != Some(None) || !self.lock_enabled() {
+            return;
+        }
+        let now = self.lock_now();
+        let retransmit = self.lock_retransmit();
+        let nonce = match &mut self.chain.lock.amnesia_ask {
+            Some((_, sent, _)) if now < *sent + retransmit => return,
+            Some((nonce, sent, _)) => {
+                *sent = now;
+                *nonce
+            }
+            None => {
+                let mut b = [0u8; 8];
+                if getrandom::getrandom(&mut b).is_err() {
+                    return;
+                }
+                let nonce = u64::from_le_bytes(b);
+                self.chain.lock.amnesia_ask = Some((nonce, now, BTreeMap::new()));
+                nonce
+            }
+        };
+        self.lock_send(WorkspaceEvent::LockAmnesiaAsk { nonce });
+    }
+
+    /// The answers an amnesiac seat needs: max(m, n - m + 1) other seats.
+    fn lock_amnesia_need(&self) -> usize {
+        self.lock_quorum().map_or(usize::MAX, amnesia_need)
+    }
+
+    /// Answer an amnesiac seat - only from this seat's own lock state; an
+    /// amnesiac seat answers nothing.
+    pub(crate) fn lock_on_amnesia_ask(&mut self, from: &str, nonce: u64) {
+        if !self.lock_listens() || from == self.member() || !self.lock_rostered(from) {
+            return;
+        }
+        self.chain.lock.amnesiac_others.insert(from.to_string());
+        if self.chain.lock.amnesia.is_some() {
+            tracing::debug!(%from, "lock=amnesia_unanswered reason=amnesiac");
+            return;
+        }
+        let lock = &self.chain.lock;
+        let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        let seen = lock
+            .acceptor
+            .highest()
+            .max(lock.seen.keys().map(|s| s.height).max().unwrap_or(0))
+            .max(lock.locked_seen.keys().copied().max().unwrap_or(0))
+            .max(lock.accepted_seen.keys().copied().max().unwrap_or(0));
+        let touched = amnesia_touched(head, seen);
+        let round = lock.rounds_by.get(from).copied().unwrap_or(0);
+        self.lock_send(WorkspaceEvent::LockAmnesiaReply { to: from.to_string(), nonce, touched, round });
+    }
+
+    /// Count an answer; with max(m, n - m + 1) of them the seat is passive
+    /// up to the highest height they report and leads above the highest
+    /// round they saw from it.
+    pub(crate) fn lock_on_amnesia_reply(&mut self, from: &str, to: &str, nonce: u64, touched: u64, round: u64) {
+        // an answer comes only from a seat that holds its own state
+        self.chain.lock.amnesiac_others.remove(from);
+        let me = self.member();
+        if to != me || from == me || !self.lock_rostered(from) || self.chain.lock.amnesia != Some(None) {
+            return;
+        }
+        let need = self.lock_amnesia_need();
+        let Some((asked, _, answers)) = self.chain.lock.amnesia_ask.as_mut() else { return };
+        if *asked != nonce {
+            return;
+        }
+        answers.insert(from.to_string(), (touched, round));
+        let all: Vec<(u64, u64)> = answers.values().copied().collect();
+        let Some((floor, rounds)) = amnesia_floor(&all, need) else { return };
+        self.chain.lock.amnesia_ask = None;
+        self.chain.lock.amnesia = Some(Some(floor));
+        self.chain.lock.amnesia_round = self.chain.lock.amnesia_round.max(rounds);
+        tracing::warn!(floor, round = rounds, answers = need, "lock=amnesia_floor");
+        let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        if head >= floor {
+            self.lock_amnesia_over(head, floor);
+        }
+    }
+
+    /// Past the floor: an ordinary seat again; an import's unknown state is
+    /// known from here on.
+    fn lock_amnesia_over(&mut self, head: u64, floor: u64) {
+        self.chain.lock.amnesia = None;
+        tracing::info!(head, floor, "lock=amnesia_over");
+        self.persist_lock();
+        if let Some(a) = self.active.as_mut() {
+            if a.prefs.lock_unknown {
+                a.prefs.lock_unknown = false;
+                a.handle.set_prefs(a.prefs.clone());
+            }
+        }
+    }
+
+    /// Item 2: an imported seat whose chain runs the mode (from the open,
+    /// or first from a block caught up) is amnesiac until answered.
+    fn lock_unknown_means_amnesia(&mut self) {
+        let unknown = self.active.as_ref().is_some_and(|a| a.prefs.lock_unknown);
+        if unknown && self.chain.lock.amnesia.is_none() && self.lock_cap_on() && self.lock_enabled() {
+            tracing::warn!("lock=amnesia reason=import");
+            self.chain.lock.amnesia = Some(None);
         }
     }
 
@@ -2003,6 +2134,7 @@ impl State {
         if !self.lock_listens() {
             return;
         }
+        self.lock_amnesia_ask();
         let Some(slot) = self.lock_slot() else { return };
         self.lock_try_release(slot.height);
         if self.lock_mode(slot.height) != LockMode::Lock || self.lock_amnesiac_at(slot.height) {
@@ -2215,7 +2347,9 @@ impl State {
             }
             Err(_) => {}
         }
-        if !on {
+        self.chain.lock.amnesia_ask = None;
+        self.lock_unknown_means_amnesia();
+        if !on || self.chain.lock.amnesia.is_some() {
             return;
         }
         // own replayed signatures were free ones (a build without the lock
@@ -2290,7 +2424,17 @@ impl State {
             let wait = if self.lock_chain_unsupported() { LOCK_CHAIN_UNSUPPORTED.to_string() } else { String::new() };
             return (false, ballot, wait);
         }
-        let wait = if self.lock_amnesiac_at(next) {
+        let wait = if self.chain.lock.amnesia == Some(None) {
+            let have = self.chain.lock.amnesia_ask.as_ref().map_or(0, |(_, _, a)| a.len());
+            let need = self.lock_amnesia_need();
+            let n = self.lock_quorum().map_or(0, |q| q.n);
+            // too many others amnesiac too: no answer set can ever form
+            if n.saturating_sub(1 + self.chain.lock.amnesiac_others.len()) < need {
+                "amnesia - restore this seat with a new link".to_string()
+            } else {
+                format!("amnesia - waiting for {} of {need} seats to answer", need.saturating_sub(have))
+            }
+        } else if self.lock_amnesiac_at(next) {
             "amnesia".to_string()
         } else if let Some(n) = &self.chain.lock.needs_approval {
             if self.lock_prompt().is_some() {

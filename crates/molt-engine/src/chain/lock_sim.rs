@@ -192,6 +192,9 @@ pub(super) struct Fixes {
     /// one bad seat at least one of them is good. Off: one seat other than
     /// the sender - which a bad promiser defeats through a good leader.
     pub evidence_two: bool,
+    /// The exit offer shows only where the value is not chosen without
+    /// this seat (the wire: a learner holding `need` acceptances seals).
+    pub offer_only_if_needed: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -230,6 +233,8 @@ pub(super) struct WConfig {
     /// until step `back_at`.
     pub away: usize,
     pub back_at: usize,
+    /// No human answers the exit prompt (measures where it is needed).
+    pub no_exit: bool,
 }
 
 #[derive(Debug, Default)]
@@ -243,6 +248,8 @@ pub(super) struct WOutcome {
     /// Forced values a good seat withheld for want of evidence, its human
     /// asked to approve (item 3's exit), distinct by (seat, height, value).
     pub prompts: usize,
+    /// Forced values a good seat waited on (the first stage).
+    pub waits: usize,
 }
 
 struct Sim {
@@ -499,19 +506,20 @@ impl Sim {
                 if self.seats[i].amnesia.is_some() {
                     return;
                 }
-                let touched = self.seats[i].touched.max(self.seats[i].decided.keys().max().copied().unwrap_or(0) + 1);
+                let head = self.seats[i].decided.keys().max().copied().unwrap_or(0);
+                let touched = amnesia_touched(head, self.seats[i].touched);
                 let round = self.seats[i].rounds_by.get(from).copied().unwrap_or(0);
                 self.net.push((*from, i, Msg::AmnesiaReply { from: i, nonce: *nonce, touched, round }));
                 return;
             }
             Msg::AmnesiaReply { from, nonce, touched, round } => {
-                let need = self.cfg.m.max(self.cfg.n - self.cfg.m + 1);
+                let q = self.quorum();
+                let need = amnesia_need(q);
                 if let Some(a) = self.seats[i].amnesia.as_mut().filter(|a| a.nonce == *nonce && *from != i) {
                     a.replies.insert(*from, (*touched, *round));
-                    if a.floor.is_none() && a.replies.len() >= need {
-                        let floor = a.replies.values().map(|(t, _)| *t).max().unwrap_or(0);
-                        let rounds = a.replies.values().map(|(_, r)| *r).max().unwrap_or(0);
-                        a.floor = Some((floor, rounds));
+                    if a.floor.is_none() {
+                        let all: Vec<(u64, u64)> = a.replies.values().copied().collect();
+                        a.floor = amnesia_floor(&all, need);
                     }
                 }
                 return;
@@ -573,12 +581,26 @@ impl Sim {
                     // once a retry interval passed without a second signer
                     let key = (i, slot.height, value.digest.clone());
                     let step = self.step;
-                    let since = *self.waits.entry(key.clone()).or_insert(step);
-                    let shown = prompted && step >= since + RETRY_STEPS;
-                    if shown && !(self.cfg.bad && i == 0) {
+                    let honest = !(self.cfg.bad && i == 0);
+                    let since = if prompted && honest { *self.waits.entry(key.clone()).or_insert(step) } else { step };
+                    // no offer where the value is chosen without this seat
+                    // ...and only once every seat that could still vouch is
+                    // silent here beyond the still-active window
+                    let subjects = self.subjects_of(i);
+                    let vouchers_silent = (0..self.cfg.n)
+                        // the sender already said what it vouches for
+                        .filter(|z| *z != i && *z != leader && !evidence.contains(z) && !subjects.contains(z))
+                        .all(|z| !self.active_here(i, z));
+                    // (the wire also drops it while this seat already holds
+                    // `need` acceptances and seals - a local fact; the
+                    // model's global "chosen" would wait on a seal nobody
+                    // can make)
+                    let needed = vouchers_silent;
+                    let shown = prompted && step >= since + RETRY_STEPS && (!self.fix.offer_only_if_needed || needed);
+                    if shown && honest {
                         self.prompts.insert(key);
                     }
-                    if shown && self.rng.chance(self.cfg.approve) {
+                    if shown && !self.cfg.no_exit && self.rng.chance(self.cfg.approve) {
                         self.cast_intent(i, &value.digest);
                     }
                     return;
@@ -1035,7 +1057,7 @@ impl Sim {
     }
 
     fn outcome(&self) -> WOutcome {
-        let mut out = WOutcome { learned_twice: self.learned_twice, unapproved: self.unapproved, prompts: self.prompts.len(), ..WOutcome::default() };
+        let mut out = WOutcome { learned_twice: self.learned_twice, unapproved: self.unapproved, prompts: self.prompts.len(), waits: self.waits.len(), ..WOutcome::default() };
         for by in self.ghost.values() {
             let chosen: BTreeSet<&Value> = by.iter().filter(|((_, v), who)| who.len() >= v.need).map(|((_, v), _)| v).collect();
             out.forks += usize::from(chosen.len() > 1);
@@ -1056,6 +1078,7 @@ pub(super) fn run(cfg: WConfig, fix: Fixes, seed: u64) -> WOutcome {
     out.decided = after.decided;
     out.unapproved = after.unapproved;
     out.prompts = after.prompts;
+    out.waits = after.waits;
     out
 }
 
@@ -1078,6 +1101,7 @@ pub(super) fn base(n: usize, m: usize) -> WConfig {
         bad: false,
         away: 0,
         back_at: 0,
+        no_exit: false,
     }
 }
 
@@ -1131,7 +1155,7 @@ fn the_wire_rules_before_the_fourth_review_fork_and_halt() {
 /// two lost, n-of-n.
 #[test]
 fn with_the_fixes_no_fork_and_every_height_decides() {
-    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true };
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true, offer_only_if_needed: true };
     for (name, cfg) in configs() {
         for drop in [15, 45] {
             for seed in 0..SIM_SEEDS {
@@ -1168,7 +1192,7 @@ fn amnesia_configs() -> Vec<(&'static str, WConfig)> {
 /// recovery ritual is the only exit.
 #[test]
 fn an_amnesiac_seat_waits_for_the_others_and_never_forks() {
-    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: true, evidence: true, evidence_two: true };
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: true, evidence: true, evidence_two: true, offer_only_if_needed: true };
     let control = Fixes { amnesia_rule: false, ..fix };
     let mut control_forks = 0;
     for (name, cfg) in amnesia_configs() {
@@ -1191,7 +1215,7 @@ fn an_amnesiac_seat_waits_for_the_others_and_never_forks() {
 /// hold. Replaying a real acceptance stays possible (the residual).
 #[test]
 fn a_made_up_forced_value_finds_no_good_acceptor() {
-    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true };
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true, offer_only_if_needed: true };
     let control = Fixes { evidence: false, evidence_two: false, ..fix };
     let one = Fixes { evidence_two: false, ..fix };
     let (mut control_unapproved, mut one_unapproved) = (0, 0);
@@ -1214,7 +1238,7 @@ fn a_made_up_forced_value_finds_no_good_acceptor() {
 /// (their old devices), the liar keeps lying.
 #[test]
 fn a_liar_stalls_only_while_m_minus_one_seats_are_away() {
-    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true };
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true, offer_only_if_needed: true };
     for (name, cfg) in [
         ("2-of-3, one away, back", WConfig { away: 1, back_at: 400, ..base(3, 2) }),
         ("2-of-5, one away, back", WConfig { away: 1, back_at: 400, ..base(5, 2) }),
@@ -1239,21 +1263,27 @@ fn a_liar_stalls_only_while_m_minus_one_seats_are_away() {
     eprintln!("2-of-5, liar and one seat away for good: {stalled} of {} runs stall", SIM_SEEDS / 4);
 }
 
-/// Item 3's exit in honest runs: how often a good seat's human is asked
-/// to approve a forced value only one other seat holds. Printed per shape
-/// for the release notes; no seat misbehaves here.
+/// Item 3's exit in honest runs, per shape at 1 % and 5 % frame loss:
+/// (i) runs where a seat reaches the wait, (ii) runs where the approve is
+/// offered, (iii) runs that cannot decide without it (no human answers:
+/// a height stays open). Printed for the release notes; the offer shows
+/// only where the value is not chosen without the seat.
 #[test]
 fn how_often_the_exit_prompt_appears() {
-    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true };
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true, offer_only_if_needed: true };
+    let runs = SIM_SEEDS / 4;
     for (name, cfg) in configs() {
-        for drop in [1, 5, 15, 45] {
-            let (mut runs, mut prompts) = (0, 0);
-            for seed in 0..SIM_SEEDS / 4 {
-                let p = run(WConfig { drop, ..cfg }, fix, seed).prompts;
-                runs += usize::from(p > 0);
-                prompts += p;
+        for drop in [1, 5] {
+            let cfg = WConfig { drop, ..cfg };
+            let (mut waited, mut offered, mut needed, mut noisy) = (0, 0, 0, 0);
+            for seed in 0..runs {
+                let out = run(cfg, fix, seed);
+                waited += usize::from(out.waits > 0);
+                offered += usize::from(out.prompts > 0);
+                noisy += usize::from(run(cfg, Fixes { offer_only_if_needed: false, ..fix }, seed).prompts > 0);
+                needed += usize::from(run(WConfig { no_exit: true, ..cfg }, fix, seed).undecided > 0);
             }
-            eprintln!("{name} drop {drop}: {runs} of {} runs prompt, {prompts} prompts", SIM_SEEDS / 4);
+            eprintln!("{name} drop {drop}: (i) {waited} (ii) {offered} [without the needed-only rule {noisy}] (iii) {needed} of {runs} runs");
         }
     }
 }
@@ -1265,7 +1295,7 @@ fn how_often_the_exit_prompt_appears() {
 /// take the height. No restore in flight, no misbehaving seat.
 #[test]
 fn where_m_equals_n_a_seat_lost_mid_height_halts() {
-    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true };
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true, offer_only_if_needed: true };
     for (name, cfg) in [("3-of-3", base(3, 3)), ("2-of-2", base(2, 2))] {
         let cfg = WConfig { dies: 1, die_at: 150, ..cfg };
         let halted = (0..SIM_SEEDS / 4).filter(|seed| run(cfg, fix, *seed).undecided > 0).count();
@@ -1280,7 +1310,7 @@ fn where_m_equals_n_a_seat_lost_mid_height_halts() {
 /// forks; amnesiac under the rule it does not.
 #[test]
 fn an_import_from_before_the_mode_is_amnesiac() {
-    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: true, evidence: true, evidence_two: true };
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: true, evidence: true, evidence_two: true, offer_only_if_needed: true };
     let control = Fixes { amnesia_rule: false, ..fix };
     let mut control_forks = 0;
     for (name, cfg) in amnesia_configs().into_iter().filter(|(_, c)| c.import) {
@@ -1291,4 +1321,53 @@ fn an_import_from_before_the_mode_is_amnesiac() {
     }
     assert!(control_forks > 0, "an import opened fresh never forked");
     eprintln!("imports opened fresh: {control_forks} forks");
+}
+
+/// The explorer's R-b control, its 4-seat schedule on the real acceptor:
+/// R-b (answers from n - m + 1 others, floor from their heads) lets B take
+/// part at s with a blank acceptor though it promised 2:A there - Y is
+/// chosen by {B, C, D} beside X by {A, C, D}. R-c (max(m, n - m + 1)
+/// answers, floor from every height with lock state) waits for A, whose
+/// answer reports s: B stays passive and Y is never chosen.
+#[test]
+fn the_amnesia_control_r_b_forks_where_r_c_holds() {
+    let q = Quorum { n: 4, m: 3 };
+    let s_h: u64 = 3;
+    let slot = Slot { height: s_h, base: "l".into() };
+    let (x, y) = (Value { digest: "x".into(), need: 3 }, Value { digest: "y".into(), need: 3 });
+    let b2a = Ballot { round: 2, leader: "a".into() };
+    let b1c = Ballot { round: 1, leader: "c".into() };
+    // heads: A at s - 1 with lock state at s, C and D at s - 2
+    let answers_rb = [(s_h - 2 + 1, 0), (s_h - 2 + 1, 0)]; // C, D: head + 1
+    let answers_rc = [(amnesia_touched(s_h - 2, 0), 0), (amnesia_touched(s_h - 2, 0), 0), (amnesia_touched(s_h - 1, s_h), 2)];
+    for (name, floor, forks) in [
+        ("R-b", amnesia_floor(&answers_rb, q.n - q.m + 1).map(|(f, _)| f), true),
+        ("R-c, C and D only", amnesia_floor(&answers_rc[..2], amnesia_need(q)).map(|(f, _)| f), false),
+        ("R-c", amnesia_floor(&answers_rc, amnesia_need(q)).map(|(f, _)| f), false),
+    ] {
+        // B takes part at s only with a floor below s
+        let b_active = floor.is_some_and(|f| f < s_h);
+        let (mut a, mut b, mut c, mut d) = (Acceptor::default(), Acceptor::default(), Acceptor::default(), Acceptor::default());
+        let mut chosen: BTreeMap<(Ballot, Value), usize> = BTreeMap::new();
+        let mut accepted = |st: Step| {
+            if let Reply::Accepted { ballot, value, .. } = st.reply {
+                *chosen.entry((ballot, value)).or_default() += 1;
+            }
+        };
+        a.prepare(&slot, &b2a);
+        b.prepare(&slot, &b2a);
+        b = Acceptor::default(); // B loses its lock state and its tail
+        accepted(a.accept(&slot, &b2a, &x));
+        c.prepare(&slot, &b1c);
+        if b_active {
+            b.prepare(&slot, &b1c);
+            accepted(b.accept(&slot, &b1c, &y));
+        }
+        accepted(c.accept(&slot, &b1c, &y));
+        accepted(c.accept(&slot, &b2a, &x));
+        accepted(d.accept(&slot, &b1c, &y));
+        accepted(d.accept(&slot, &b2a, &x));
+        let values: BTreeSet<&Value> = chosen.iter().filter(|(_, n)| **n >= q.m).map(|((_, v), _)| v).collect();
+        assert_eq!(values.len() > 1, forks, "{name}: floor {floor:?}, chosen {values:?}");
+    }
 }

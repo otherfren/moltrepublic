@@ -1944,6 +1944,11 @@ pub struct WorkspacePrefs {
     /// missing, means the seat may have promised and forgot (§6 amnesia).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub chain_lock: bool,
+    /// Item 2: an import's lock state is unknown - the device it came from
+    /// may have promised after the export. Amnesiac once the chain runs
+    /// Strict Order Mode, until the others' answers clear it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lock_unknown: bool,
 }
 
 impl Default for WorkspacePrefs {
@@ -1963,6 +1968,7 @@ impl Default for WorkspacePrefs {
             seat_caps: std::collections::BTreeMap::new(),
             mirror_dir: String::new(),
             chain_lock: false,
+            lock_unknown: false,
         }
     }
 }
@@ -3394,6 +3400,26 @@ pub enum WorkspaceEvent {
         promised: Option<chain::LockBallot>,
         /// The sender's head height.
         head: u64,
+    },
+    /// An amnesiac seat asks what it may have touched (§6, the corrected
+    /// rule); `nonce` names the ask, so a reply to an older one never
+    /// counts.
+    LockAmnesiaAsk {
+        /// This ask.
+        nonce: u64,
+    },
+    /// A seat holding its own lock state answers `to`'s ask: the highest
+    /// height it holds or saw lock state at (or its head + 1), and the
+    /// highest round it saw from `to`.
+    LockAmnesiaReply {
+        /// The asking seat.
+        to: MemberId,
+        /// The ask answered.
+        nonce: u64,
+        /// The highest height `to` may have touched, as seen here.
+        touched: u64,
+        /// The highest round seen here from `to`.
+        round: u64,
     },
 }
 
@@ -8611,6 +8637,8 @@ pub fn unowed_on_the_wire(body: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::LockAccept { .. }
             | WorkspaceEvent::LockAccepted { .. }
             | WorkspaceEvent::LockNack { .. }
+            | WorkspaceEvent::LockAmnesiaAsk { .. }
+            | WorkspaceEvent::LockAmnesiaReply { .. }
     )
 }
 
@@ -10190,6 +10218,11 @@ mod tests {
                     head: 4,
                 },
                 r#"{"type":"lock_nack","height":5,"base":"b","round":2,"leader":"dora","promised":{"round":3,"leader":"mara"},"head":4}"#,
+            ),
+            (WorkspaceEvent::LockAmnesiaAsk { nonce: 7 }, r#"{"type":"lock_amnesia_ask","nonce":7}"#),
+            (
+                WorkspaceEvent::LockAmnesiaReply { to: "mara".into(), nonce: 7, touched: 6, round: 3 },
+                r#"{"type":"lock_amnesia_reply","to":"mara","nonce":7,"touched":6,"round":3}"#,
             ),
         ]
     }

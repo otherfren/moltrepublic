@@ -263,6 +263,11 @@ impl Acceptor {
     }
 
     /// The digests of every value accepted at an open slot.
+    /// The highest height this acceptor holds state at (0 = none).
+    pub(crate) fn highest(&self) -> u64 {
+        self.slots.keys().next_back().copied().unwrap_or(0)
+    }
+
     /// The digests accepted above `height` (the open slots).
     pub(crate) fn accepted_digests_above(&self, height: u64) -> BTreeSet<String> {
         self.slots
@@ -404,6 +409,31 @@ impl Subjects {
     pub(crate) fn seats(&self) -> BTreeSet<String> {
         self.0.values().cloned().collect()
     }
+}
+
+/// §6, the amnesia rule (R-c): the answers an amnesiac seat needs, from
+/// OTHER seats that hold their own lock state - max(m, n - m + 1). With
+/// n - m + 1 alone a forgotten promise, known only to the n - m other
+/// members of that phase-1 set, is missed where n < 2m - 1.
+pub(crate) fn amnesia_need(q: Quorum) -> usize {
+    q.m.max(q.n.saturating_sub(q.m) + 1)
+}
+
+/// What an answering seat reports the asker may have touched: its head
+/// + 1, or the highest height it holds or saw lock state at.
+pub(crate) fn amnesia_touched(head: u64, highest_lock_height: u64) -> u64 {
+    (head + 1).max(highest_lock_height)
+}
+
+/// With `need` answers (touched, round): the floor the asker stays
+/// passive up to, and the round its own ballots start above (load-bearing:
+/// an acceptor cannot refuse a reused ballot it only promised).
+pub(crate) fn amnesia_floor(answers: &[(u64, u64)], need: usize) -> Option<(u64, u64)> {
+    (answers.len() >= need).then(|| {
+        let floor = answers.iter().map(|(t, _)| *t).max().unwrap_or(0);
+        let round = answers.iter().map(|(_, r)| *r).max().unwrap_or(0);
+        (floor, round)
+    })
 }
 
 /// Item 3, the evidence rule: a forced value is accepted on the strength

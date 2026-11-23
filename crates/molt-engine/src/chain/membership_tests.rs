@@ -2569,3 +2569,27 @@ fn a_seat_never_accepts_its_own_restore_even_forced() {
         "dora accepted her own restore"
     );
 }
+
+/// Item 2: an imported seat's lock state is unknown. While its chain runs
+/// no Strict Order Mode nothing changes; the moment the chain turns it on
+/// the seat is amnesiac, and once answered and past the floor the unknown
+/// is cleared.
+#[test]
+fn an_import_turns_amnesiac_when_the_mode_comes_on() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&ROSTER, 2);
+    let (mut petra, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
+    petra.lock_force(true);
+    petra.active.as_mut().expect("active").prefs.lock_unknown = true;
+    petra.chain.lock.enabled_override = Some(false);
+    petra.lock_on_head_moved();
+    assert_eq!(petra.chain.lock.amnesia, None, "no mode, nothing to forget");
+    petra.chain.lock.enabled_override = Some(true);
+    petra.lock_on_head_moved();
+    assert_eq!(petra.chain.lock.amnesia, Some(None), "the mode is on: amnesiac");
+    petra.chain.lock.amnesia = Some(Some(0));
+    petra.lock_on_head_moved();
+    assert_eq!(petra.chain.lock.amnesia, None);
+    assert!(!petra.active.as_ref().expect("active").prefs.lock_unknown, "known from here on");
+}

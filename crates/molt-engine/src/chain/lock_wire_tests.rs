@@ -285,29 +285,74 @@ fn a_restarted_seat_keeps_its_promise() {
     assert_eq!(sent_kinds(&again), vec!["nack", "nack"], "the lower ballot is refused twice");
 }
 
-/// §6: a chain without its lock file answers nothing and signs nothing
-/// up to max(own head, the first peer report) + 1; past the floor it is
-/// an ordinary seat again.
+fn amnesia_ask_of(st: &crate::State) -> u64 {
+    st.chain
+        .lock
+        .outbox
+        .iter()
+        .find_map(|e| match e.body {
+            WorkspaceEvent::LockAmnesiaAsk { nonce } => Some(nonce),
+            _ => None,
+        })
+        .expect("an ask")
+}
+
+/// §6, the corrected rule: an amnesiac seat answers nothing and signs
+/// nothing; it asks, and only answers from max(m, n - m + 1) OTHER seats
+/// (2 in 2-of-3) fix its floor - the highest height they report it may
+/// have touched - and the round it leads above. One answer, a repeat or
+/// an answer to another ask do not count.
 #[test]
-fn amnesia_answers_nothing_up_to_the_floor() {
+fn amnesia_waits_for_enough_answers() {
     let mut b = Builder::new(&SEATS, 2);
     let mut mara = seat("mara", &b);
     mara.load_chain_lock(Ok(None), true);
-    mara.chain.lock.enabled_override = Some(true);
+    assert_eq!(mara.chain.lock.amnesia, Some(None));
     let slot = mara.lock_slot().expect("slot");
     wire(&mut mara, "dora", 1, WorkspaceEvent::LockPrepare { height: 1, base: slot.base, round: 1 });
-    assert!(!mara.lock_sign_freely(1), "no free signature up to the floor");
+    assert!(!mara.lock_sign_freely(1), "no free signature while amnesiac");
     assert!(sent_kinds(&mara).is_empty(), "nothing answered: {:?}", sent_kinds(&mara));
-    assert_eq!(own_sigs(&mara), 0);
-    // a peer reports height 1: floor = 2
-    b.commit_applied(70, &["dora", "walter"]);
-    mara.receive_block_from("dora", b.blocks[1].clone());
-    assert_eq!(mara.chain.lock.amnesia, Some(Some(2)));
-    assert!(mara.lock_amnesiac_at(2) && !mara.lock_amnesiac_at(3));
-    b.commit_applied(71, &["dora", "walter"]);
-    mara.receive_block_from("dora", b.blocks[2].clone());
+    mara.lock_tick();
+    let nonce = amnesia_ask_of(&mara);
+    let reply = |touched, round, nonce| WorkspaceEvent::LockAmnesiaReply { to: "mara".into(), nonce, touched, round };
+    wire(&mut mara, "dora", 2, reply(3, 7, nonce));
+    wire(&mut mara, "dora", 3, reply(3, 7, nonce));
+    wire(&mut mara, "walter", 1, reply(9, 9, nonce + 1));
+    assert_eq!(mara.chain.lock.amnesia, Some(None), "one seat answered");
+    assert_eq!(mara.lock_status().2, "amnesia - waiting for 1 of 2 seats to answer");
+    wire(&mut mara, "walter", 2, reply(2, 9, nonce));
+    assert_eq!(mara.chain.lock.amnesia, Some(Some(3)), "the highest reported height");
+    assert_eq!(mara.chain.lock.amnesia_round, 9);
+    assert!(mara.lock_amnesiac_at(3) && !mara.lock_amnesiac_at(4));
+    for id in [70, 71, 72] {
+        b.commit_applied(id, &["dora", "walter"]);
+    }
+    for h in 1..=3 {
+        mara.receive_block_from("dora", b.blocks[h].clone());
+    }
     assert_eq!(mara.chain.lock.amnesia, None, "past the floor");
     assert!(mara.chain.lock.disk.is_some(), "the file exists again");
+}
+
+/// §6: an amnesiac seat answers no ask; a seat with its own state answers
+/// with what it saw of the asker.
+#[test]
+fn only_a_seat_with_its_own_state_answers_an_ask() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    dora.load_chain_lock(Ok(None), true);
+    dora.chain.lock.outbox.clear();
+    wire(&mut dora, "mara", 1, WorkspaceEvent::LockAmnesiaAsk { nonce: 5 });
+    assert!(dora.chain.lock.outbox.is_empty(), "an amnesiac seat answers nothing");
+    let mut walter = seat("walter", &b);
+    let slot = walter.lock_slot().expect("slot");
+    wire(&mut walter, "mara", 1, WorkspaceEvent::LockPrepare { height: 1, base: slot.base, round: 4 });
+    walter.chain.lock.outbox.clear();
+    wire(&mut walter, "mara", 2, WorkspaceEvent::LockAmnesiaAsk { nonce: 5 });
+    let answered = walter.chain.lock.outbox.iter().any(|e| {
+        matches!(&e.body, WorkspaceEvent::LockAmnesiaReply { to, nonce: 5, touched, round: 4 } if to == "mara" && *touched >= 1)
+    });
+    assert!(answered, "{:?}", sent_kinds(&walter));
 }
 
 /// §3.1: the slot base is one function of the changes - a pruned holder
@@ -1888,10 +1933,14 @@ fn a_forced_value_without_evidence_waits_for_an_approve() {
     let (_, _, wait) = walter.lock_status();
     assert_eq!(wait, format!("decision {w}: waiting for mara"));
     assert!(walter.cmd_approve(ProposalId(w), None).is_err(), "no exit before the prompt");
-    // one retry interval later, still unvouched: the prompt
+    // one retry interval later, mara still heard: still a wait
     let later = walter.lock_now() + walter.lock_retransmit();
     walter.presence.clock_override = Some(later);
     walter.lock_tick();
+    let (_, _, wait) = walter.lock_status();
+    assert_eq!(wait, format!("decision {w}: waiting for mara"), "a seat heard will most likely answer");
+    // mara silent beyond the window: the prompt
+    walter.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
     let (_, _, wait) = walter.lock_status();
     assert_eq!(wait, format!("decision {w} may already be made - approve to complete it"));
     walter.cmd_approve(ProposalId(w), None).expect("the exit approve");
@@ -2149,6 +2198,7 @@ fn a_forced_value_without_its_card_is_completed_by_an_approve() {
     assert!(mara.cmd_approve(ProposalId(x), None).is_err(), "not before the prompt");
     let later = mara.lock_now() + mara.lock_retransmit();
     mara.presence.clock_override = Some(later);
+    mara.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
     mara.lock_tick();
     let (_, _, wait) = mara.lock_status();
     assert_eq!(wait, format!("decision {x} may already be made - approve to complete it"));
@@ -2178,4 +2228,51 @@ fn a_pending_completion_card_never_opens_and_goes_with_its_height() {
     assert_eq!(mara.chain.head.as_ref().map(|h| h.height), Some(1));
     assert!(!mara.proposals.contains_key(&x), "gone with its height");
     assert!(mara.chain.lock.needs_approval.is_none());
+}
+
+/// §6: the asker's own ballots start above the highest round the answers
+/// report - an acceptor that only PROMISED a ballot cannot refuse it
+/// reused with another value (load-bearing, the explorer's R-c note).
+#[test]
+fn an_amnesiac_seat_leads_above_the_rounds_reported() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    mara.load_chain_lock(Ok(None), true);
+    mara.lock_tick();
+    let nonce = amnesia_ask_of(&mara);
+    for (from, round) in [("dora", 7), ("walter", 12)] {
+        wire(&mut mara, from, 1, WorkspaceEvent::LockAmnesiaReply { to: "mara".into(), nonce, touched: 1, round });
+    }
+    assert_eq!(mara.chain.lock.amnesia, Some(Some(1)));
+    mara.chain.lock.amnesia = None;
+    let id = note(&mut mara, "x");
+    mara.lock_note_intent(id, "dora");
+    mara.chain.lock.run = None;
+    mara.lock_start(0);
+    let round = mara.chain.lock.run.as_ref().expect("mara leads").leader.ballot.round;
+    assert!(round > 12, "round {round}");
+}
+
+/// §6: two of three seats amnesiac: no answer set can form - the status
+/// says what to do.
+#[test]
+fn two_amnesiac_seats_of_three_say_restore() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    mara.load_chain_lock(Ok(None), true);
+    assert_eq!(mara.lock_status().2, "amnesia - waiting for 2 of 2 seats to answer");
+    wire(&mut mara, "dora", 1, WorkspaceEvent::LockAmnesiaAsk { nonce: 3 });
+    assert_eq!(mara.lock_status().2, "amnesia - restore this seat with a new link");
+}
+
+#[test]
+fn the_amnesia_arithmetic() {
+    use super::lock::{amnesia_floor, amnesia_need, amnesia_touched};
+    for (n, m, need) in [(3, 2, 2), (4, 3, 3), (5, 2, 4), (5, 3, 3), (7, 4, 4)] {
+        assert_eq!(amnesia_need(Quorum { n, m }), need, "{m}-of-{n}");
+    }
+    assert_eq!(amnesia_touched(4, 0), 5);
+    assert_eq!(amnesia_touched(4, 9), 9);
+    assert_eq!(amnesia_floor(&[(3, 7)], 2), None);
+    assert_eq!(amnesia_floor(&[(3, 7), (2, 9)], 2), Some((3, 9)));
 }

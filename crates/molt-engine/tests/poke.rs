@@ -156,6 +156,8 @@ two" }),
                     | WorkspaceEvent::LockAccept { .. }
                     | WorkspaceEvent::LockAccepted { .. }
                     | WorkspaceEvent::LockNack { .. }
+                    | WorkspaceEvent::LockAmnesiaAsk { .. }
+                    | WorkspaceEvent::LockAmnesiaReply { .. }
             )
         })
         .collect();
