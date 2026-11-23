@@ -3,10 +3,10 @@
 **Status: BUILT, dark: not available in release builds, under review;
 the switch is `CHAIN_LOCK_AVAILABLE` (design, "The switch").** Design:
 `docs/chain/chain_lock_design.md` (§8 activation, §14 "As built"). With
-the switch on the lock runs where the chain enabled it: every republic
-founded with the lock on (from height 1), an older republic after a
+the switch on the lock runs where the chain enabled it: after a
 `set_features` vote naming `chain-lock` (from the height after that
-block). Activation by capability is gone.
+block). A founding starts without it (§11); only a test seam
+(`__found_locked`) founds locked from height 1. Activation by capability is gone.
 
 ## 1. What the lock is for
 
@@ -152,7 +152,8 @@ height 1 with no race.
 
 ## 9. Suite with the lock on by default (chain activation, 2026-11-22)
 
-Every founding runs under the lock now. First full `molt-engine` run:
+(Superseded by §11: a founding starts without the lock.) Every founding
+ran under the lock then. First full `molt-engine` run:
 1 348 passed, 12 failed; each traced:
 
 | test | cause | resolution |
@@ -203,12 +204,13 @@ enabling-vote test went from 118 s to 32 s; the restore settle step has
 `vault_late_enable` `enable_then_cut_then_recover_and_read`, three runs
 each: lock 68, 54, 29 s; B6 39, 35, 36 s.
 
-## 11. Activation by the members (decided 2026-11-22, not built)
+## 11. Activation by the members (decided 2026-11-22; the founding part built, the UI and MCP part not)
 
 - Enabled EXPLICITLY in the UI under Organization (where the feature set
   lives), never silently. A republic founded on a build with the lock
   starts WITHOUT it unless the members choose it. This REPLACES "every
-  founding of this build adds `chain-lock`". Open, to confirm when the
+  founding of this build adds `chain-lock`" (built: `founding.rs` adds
+  the key only through the test seam `__found_locked`). Open, to confirm when the
   UI is built: the same choice in the founding wizard's feature step,
   default off.
 - Name: everything a human reads says "Strict Order Mode" (DE "Strenge
@@ -243,3 +245,15 @@ each: lock 68, 54, 29 s; B6 39, 35, 36 s.
   only the window can do.
 - Preconditions at propose and approve: every seat capable; m >= 2 (a
   legacy m = 1 chain must not enable it).
+
+## 12. Not built, required before the mode leaves the dark
+
+- The amnesia rule (design §14; modelled in `lock_sim.rs` as
+  `amnesia_rule`), with "lock state unknown" after every import.
+- The answer frame for a withheld acceptance (so a leader learns why).
+- Status texts for every state where nothing is ready.
+- The activation modal and its MCP data (§11).
+- The rejoiner's new device and lineages in the simulation.
+- A decision on two simultaneous founding wallet inits.
+- A Tor traffic measurement.
+- A field acceptance.

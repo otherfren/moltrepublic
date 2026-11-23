@@ -724,6 +724,7 @@ fn enabling_the_lock_waits_until_every_seat_runs_it() {
     use molt_core::chain::CHAIN_LOCK_FEATURE;
     let b = Builder::new(&SEATS, 2);
     let mut mara = genesis_seat("mara", &b, b.blocks.clone());
+    mara.lock_force(true);
     mara.chain.lock.caps_override = Some(false);
     let enable = json!({ "op": "set_features", "value": format!("{CHAIN_LOCK_FEATURE} memory") });
     let err = mara.cmd_propose(Surface::Organization, enable.clone()).expect_err("refused");
@@ -731,6 +732,7 @@ fn enabling_the_lock_waits_until_every_seat_runs_it() {
     mara.chain.lock.caps_override = Some(true);
     let id = propose(&mut mara, Surface::Organization, enable);
     let mut walter = genesis_seat("walter", &b, b.blocks.clone());
+    walter.lock_force(true);
     walter.chain.lock.caps_override = Some(false);
     let change = mara.proposal_change(id).expect("change");
     let ChainChange::Applied { payload, .. } = change else { panic!("an org change") };
@@ -1547,16 +1549,20 @@ fn a_slot_below_the_head_is_kept_for_a_reorg_back() {
 }
 
 /// B-F1 at open: a lock file settled past the chain on disk (whatever
-/// the cause) means the seat may have forgotten something: amnesia.
+/// the cause) forgot the heights up to its floor: amnesia there, and what
+/// it kept above still holds (item 5).
 #[test]
 fn a_lock_file_ahead_of_the_chain_means_amnesia() {
     let b = Builder::new(&SEATS, 2);
-    let mara = seat("mara", &b);
-    let mut file: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&LockFile::default()).expect("json")).expect("value");
-    file["floor"] = serde_json::json!(5);
-    let mut mara = mara;
+    let mut mara = seat("mara", &b);
+    let mut acceptor = Acceptor::default();
+    let slot = Slot { height: 7, base: "ab".repeat(32) };
+    let ballot = Ballot { round: 3, leader: "walter".into() };
+    acceptor.prepare(&slot, &ballot);
+    let file = LockFile { acceptor, values: BTreeMap::new(), floor: 5 };
     mara.load_chain_lock(Ok(Some(serde_json::to_vec(&file).expect("bytes"))), true);
-    assert_eq!(mara.chain.lock.amnesia, Some(None), "settled past the chain: amnesia");
+    assert_eq!(mara.chain.lock.amnesia, Some(Some(6)), "amnesiac up to the floor and one above");
+    assert!(mara.chain.lock.acceptor.next_round(&slot) > 3, "the promise at 7 is kept");
 }
 
 /// H2: a consented restore needs m acceptances where m < n - phase 1's
@@ -1720,4 +1726,120 @@ fn the_lock_clock_is_monotonic_and_follows_the_test_clock() {
     assert!(c >= a);
     mara.presence.clock_override = Some(5);
     assert_eq!(mara.lock_now(), 5);
+}
+
+/// D2: a dark build names itself first, also in an m = 1 republic.
+#[test]
+fn a_dark_build_says_not_available_before_anything_else() {
+    use molt_core::chain::CHAIN_LOCK_FEATURE;
+    let b = Builder::new(&SEATS, 1);
+    let mut mara = genesis_seat("mara", &b, b.blocks.clone());
+    let enable = json!({ "op": "set_features", "value": format!("{CHAIN_LOCK_FEATURE} memory") });
+    let err = mara.cmd_propose(Surface::Organization, enable).expect_err("refused");
+    assert!(err.to_string().contains(LOCK_NOT_AVAILABLE), "{err}");
+}
+
+/// Item 4: below the head the file keeps a digest's id, not its change -
+/// 256 kept heights of whole changes made a file of megabytes, rewritten
+/// whole on every step.
+#[test]
+fn a_sealed_slot_keeps_its_digest_not_its_change() {
+    let mut b = Builder::new(&SEATS, 2);
+    let (mut dora, _slot, value) = accepted_then_sealed(&mut b, false);
+    let kept = dora.chain.lock.values.get(&value.digest).cloned();
+    assert!(matches!(kept, Some((id, None)) if id > 0), "the id, no change: {kept:?}");
+    assert!(dora.persist_lock());
+    let disk = dora.chain.lock.disk.clone().expect("written");
+    assert!(!String::from_utf8_lossy(&disk).contains("\"x\""), "no payload on disk");
+}
+
+/// Item 6: under the lock a restore carries the seat's consent - a
+/// consent-less card would be re-accepted by its holder and refused by a
+/// seat that saw it withdrawn (2-of-3 halt). Neither the coordinator
+/// mints one nor a receiver registers one.
+#[test]
+fn a_consentless_restore_does_not_exist_under_the_lock() {
+    let b = Builder::new(&SEATS, 2);
+    let mut x = seat("dora", &b);
+    x.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
+    let rid = b.republic_id.clone();
+    let kp_hex = kp_hex_for(&b, "walter");
+    let proof = crate::make_seat_proof(b.key("walter"), "ticket", &kp_hex, &rid, "", &[]);
+    let err = x
+        .verify_and_propose_restore("walter", &b.pk("walter"), &kp_hex, "ticket", &proof, "", &[], "", "")
+        .expect_err("refused");
+    assert!(err.contains("consent"), "{err}");
+    x.receive_membership_proposal(9, MembershipOp::Restored, "walter", &b.pk("walter"), None, Vec::new(), None);
+    assert!(!x.chain.proposal_changes.contains_key(&9), "not registered");
+}
+
+/// Item 7: free signatures that reach m at a locked height do not seal
+/// through `try_commit` - only the lock seals there.
+#[test]
+fn a_locked_height_is_not_sealed_from_free_signatures() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let id = note(&mut dora, "x");
+    let change = dora.proposal_change(id).expect("change");
+    for m in ["mara", "walter"] {
+        let sig = molt_storage::identity_sign(b.key(m), &approval_bytes(&b.republic_id, 1, &change));
+        dora.collect_sig(id, 1, m, &sig, true);
+    }
+    dora.try_commit(id);
+    assert_eq!(dora.chain.head.as_ref().map(|h| h.height), Some(0), "no free seal at a locked height");
+}
+
+/// Item 8: a forced Applied value this seat knows only from the frame is
+/// retried with the change it carried after a withheld first try.
+#[test]
+fn a_withheld_forced_value_is_retried_with_its_carried_change() {
+    let b = Builder::new(&SEATS, 2);
+    let mut walter = seat("walter", &b);
+    let mut x = seat("dora", &b);
+    let id = note(&mut x, "w");
+    let change = x.proposal_change(id).expect("w");
+    let slot = walter.lock_slot().expect("slot");
+    let value = walter.lock_value(1, &change).expect("value");
+    let sk = walter.identity_sk.take();
+    walter.chain.lock.outbox.clear();
+    wire(
+        &mut walter,
+        "dora",
+        1,
+        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 5, digest: value.digest, need: 2, id: ProposalId(id), change: Some(change), forced: true },
+    );
+    assert!(!sent_kinds(&walter).contains(&"accepted"), "withheld without a key");
+    walter.identity_sk = sk;
+    walter.lock_tick();
+    assert!(sent_kinds(&walter).contains(&"accepted"), "retried with the carried change: {:?}", sent_kinds(&walter));
+}
+
+/// Item 9: a restore's own seat never counts toward its tally - also
+/// while the seat-still-active gate keeps it out of the subjects; the
+/// seal strips it the same way, so a tally never promises a seal the
+/// seal cannot make.
+#[test]
+fn a_restored_seats_acceptance_never_counts_for_its_restore() {
+    let b = Builder::new(&SEATS, 2);
+    let mut x = seat("dora", &b);
+    x.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
+    let rid = b.republic_id.clone();
+    let kp_hex = kp_hex_for(&b, "walter");
+    let proof = crate::make_seat_proof(b.key("walter"), "ticket", &kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(&b, "walter", "", &[], 0, &"cc".repeat(32));
+    let id = x
+        .verify_and_propose_restore("walter", &b.pk("walter"), &kp_hex, "ticket", &proof, "", &[], &consent, "")
+        .expect("proposed");
+    let change = x.chain.proposal_changes.get(&id).cloned().expect("the restore");
+    x.seat_active.store(u64::MAX, std::sync::atomic::Ordering::SeqCst);
+    let now = x.presence_now();
+    x.recovery.frame_heard.insert("walter".into(), now);
+    assert!(x.lock_subjects().seats().is_empty(), "the gate keeps walter out of the subjects");
+    let slot = x.lock_slot().expect("slot");
+    let ballot = Ballot { round: 5, leader: "mara".into() };
+    let digest = x.lock_value(1, &change).expect("value").digest;
+    let sig = identity_sign(b.key("walter"), &approval_bytes(&b.republic_id, 1, &change));
+    x.lock_count_accepted("walter", &slot, &ballot, &sig, id, change);
+    let counted = x.chain.lock.sigs.get(&(slot, ballot, digest)).is_some_and(|s| s.contains_key("walter"));
+    assert!(!counted, "walter is no voice for his own restore");
 }

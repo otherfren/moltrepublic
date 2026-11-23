@@ -2396,12 +2396,12 @@ mod ritual_ops {
                 tracing::warn!(seat, "founding join rejected: handle charset");
                 return self.refuse_join(idx, format!("{e} - refused, the ticket stays usable"));
             }
-            // B7: this founding runs the chain lock from height 1; an older
-            // build would sign it freely. Told on both sides, the ticket
-            // stays usable after an update.
+            // B7: a founding that runs the chain lock from height 1 (test
+            // seam only); an older build would sign it freely. Told on both
+            // sides, the ticket stays usable after an update.
             let lock = molt_core::chain::CHAIN_LOCK_CAP;
             if self.lock_cap_on()
-                && !self.lock_seams.found_pre_lock.load(std::sync::atomic::Ordering::SeqCst)
+                && self.lock_seams.found_locked.load(std::sync::atomic::Ordering::SeqCst)
                 && !caps.iter().any(|c| c == lock)
             {
                 tracing::warn!(seat, %member, "founding join rejected: no chain lock");
@@ -2705,10 +2705,10 @@ mod ritual_ops {
             // the feature selection: the ONE shared rule — known optional
             // keys, sorted + deduped, so every member verifies and signs the
             // identical v5 table
-            // B7: every founding of this build ratifies the lock - part of
-            // the charter, not a choice
+            // §11: a founding starts without the lock; the members enable it
+            // by vote (the seam founds locked for tests)
             let mut features = features;
-            if self.lock_cap_on() && !self.lock_seams.found_pre_lock.load(std::sync::atomic::Ordering::SeqCst) {
+            if self.lock_cap_on() && self.lock_seams.found_locked.load(std::sync::atomic::Ordering::SeqCst) {
                 features.push(molt_core::chain::CHAIN_LOCK_FEATURE.to_string());
             }
             let features =
@@ -4148,6 +4148,7 @@ mod tests {
         let _guard = rt.enter();
         let mut st = crate::tests::plain_state();
         st.lock_force(true);
+        st.lock_seams.found_locked.store(true, std::sync::atomic::Ordering::SeqCst);
         let (founder_sk, founder_pk) = molt_storage::derive_identity_key(&[9u8; 32], "f");
         let hub = LoopbackHub::calm();
         st.net_ritual = Some(RitualRuntime {

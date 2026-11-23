@@ -385,12 +385,12 @@ impl WalletHandle {
         self.lock_seams.cap.store(if off { 2 } else { 1 }, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Test seam (B7): this seat's next founding leaves the lock out of the
-    /// charter - a republic as founded before the lock existed (B6 until a
-    /// `set_features` vote enables it).
+    /// Test seam (B7): this seat's next founding ratifies the lock in its
+    /// charter. A real founding starts without it; a `set_features` vote
+    /// enables it (wiring plan §11).
     #[doc(hidden)]
-    pub fn __found_pre_lock(&self, on: bool) {
-        self.lock_seams.found_pre_lock.store(on, std::sync::atomic::Ordering::SeqCst);
+    pub fn __found_locked(&self, on: bool) {
+        self.lock_seams.found_locked.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam: the fallback grace of both sealing lines (B6's sealer

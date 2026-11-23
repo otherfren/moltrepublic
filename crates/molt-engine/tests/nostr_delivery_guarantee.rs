@@ -76,7 +76,7 @@ async fn adopt_relay(w: &WalletHandle, url: &str) {
 /// lock frames on the wire).
 async fn found_two_of_two_as(root: &std::path::Path, url: &str, pre_lock: bool) -> (WalletHandle, WalletHandle) {
     let a = engine(&root.join("founder"));
-    a.__found_pre_lock(pre_lock);
+    a.__found_locked(!pre_lock);
     a.__lock_available(!pre_lock);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {

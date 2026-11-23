@@ -3843,7 +3843,9 @@ mod tests {
             }
         };
         let first: Vec<u64> = std::iter::once(1).chain(3..=100).collect();
-        let (seqs, _) = wait(99, 0).await;
+        // a stored replay arrives newest first: the first pass has no order
+        let (mut seqs, _) = wait(99, 0).await;
+        seqs.sort_unstable();
         assert_eq!(seqs, first, "the first pass");
 
         // seq 1 again, 2 is not walter's, 999 is past the cursor
