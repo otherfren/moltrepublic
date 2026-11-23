@@ -283,14 +283,14 @@ pub(crate) struct SeatRowData {
     pub(crate) note_tip: String,
     /// A hint: many repeats from it (`SeatSync::dup_streak`).
     pub(crate) dropped: bool,
-    /// A resync of it is under way: this node holds its inbound stream.
+    /// A resync of it is under way: its history is owed from the start.
     pub(crate) fetching: bool,
 }
 
-/// Mark the seats whose inbound stream this node holds.
+/// Mark the seats whose history this node waits for from the start.
 pub(crate) fn mark_fetching(rows: &mut [SeatRowData], held: &[molt_core::InboundHeld]) {
     for r in rows {
-        r.fetching = held.iter().any(|h| h.member == r.member);
+        r.fetching = held.iter().any(|h| h.member == r.member && h.from_start);
     }
 }
 

@@ -1636,7 +1636,9 @@ export component AppWindow inherits Window {
     in property <bool> org-builds-mixed;
     // the seat a resync waits to be confirmed for ("" = no dialog)
     in-out property <string> os-resync-member;
-    callback resync-seat(string);
+    // the dialog gives up the wait instead of starting a fetch
+    in-out property <bool> os-resync-give-up;
+    callback resync-seat(string, bool); // seat, give up the wait
     // whether the open workspace is a chain-governed republic — recovery
     // exists exactly there, so the Members table offers the per-member
     // "recovery link" action only then (never keyed on the member's
@@ -6901,8 +6903,9 @@ export component AppWindow inherits Window {
                                                 enabled: !seat.me;
                                                 Menu {
                                                     MenuItem {
-                                                        title: Strings.os-resync;
+                                                        title: seat.fetching ? Strings.os-give-up : Strings.os-resync;
                                                         activated => {
+                                                            root.os-resync-give-up = seat.fetching;
                                                             root.os-resync-member = seat.member;
                                                         }
                                                     }
@@ -7032,6 +7035,7 @@ export component AppWindow inherits Window {
                                                     height: 22px * Theme.ui-scale;
                                                     pad: 8px * Theme.ui-scale;
                                                     clicked => {
+                                                        root.os-resync-give-up = false;
                                                         root.os-resync-member = seat.member;
                                                     }
                                                 }
@@ -7040,6 +7044,15 @@ export component AppWindow inherits Window {
                                                     color: Theme.faint;
                                                     font-size: Theme.fs-cap;
                                                     vertical-alignment: center;
+                                                }
+                                                if seat.fetching && !seat.me: AppButton {
+                                                    label: Strings.os-give-up;
+                                                    height: 22px * Theme.ui-scale;
+                                                    pad: 8px * Theme.ui-scale;
+                                                    clicked => {
+                                                        root.os-resync-give-up = true;
+                                                        root.os-resync-member = seat.member;
+                                                    }
                                                 }
                                             }
                                         }
@@ -11768,14 +11781,16 @@ export component AppWindow inherits Window {
     // the space-joined payload string are kept in step Rust-side.
     // one line: a resync costs traffic and holds the seat's live messages
     if root.os-resync-member != "": ConfirmModal {
-        title: Strings.os-resync;
-        body: Strings.os-resync-ask-pre + root.os-resync-member + Strings.os-resync-ask-post;
-        confirm-label: Strings.os-resync;
+        title: root.os-resync-give-up ? Strings.os-give-up : Strings.os-resync;
+        body: root.os-resync-give-up
+            ? Strings.os-give-up-ask-pre + root.os-resync-member + Strings.os-give-up-ask-post
+            : Strings.os-resync-ask-pre + root.os-resync-member + Strings.os-resync-ask-post;
+        confirm-label: root.os-resync-give-up ? Strings.os-give-up : Strings.os-resync;
         dismissed => {
             root.os-resync-member = "";
         }
         confirmed => {
-            root.resync-seat(root.os-resync-member);
+            root.resync-seat(root.os-resync-member, root.os-resync-give-up);
             root.os-resync-member = "";
         }
     }
