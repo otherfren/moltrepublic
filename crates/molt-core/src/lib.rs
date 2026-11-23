@@ -8541,6 +8541,11 @@ pub struct StatusView {
     /// The group relays this node cannot dial, and why.
     #[serde(default)]
     pub missing_relays: Vec<crate::relay::InviteRelayVerdict>,
+    /// Group relays that refused something since this node started
+    /// (`relay_pool.md` §5.2). A refusal is an answer: none of these is
+    /// unreachable on its account.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub relay_refusals: Vec<RelayRefusals>,
     /// Whether the open workspace is a chain-governed republic. Recovery
     /// (link mint + rejoin) exists only here — a frontend offers the
     /// per-member "recovery link" action exactly when this is true (demo
@@ -8602,6 +8607,24 @@ pub struct StatusView {
     /// is refused until one of them leaves the vote.
     #[serde(default)]
     pub open_proposals_max: usize,
+}
+
+/// One relay's refusals ([`StatusView::relay_refusals`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayRefusals {
+    /// The relay URL (normalized).
+    pub url: String,
+    /// Transient refusals (busy, rate-limited, other `error:`) in the last hour.
+    #[serde(default)]
+    pub busy: u32,
+    /// Shape of the latest refusal: `busy`, `rate_limited`, `error`,
+    /// `invalid`, `blocked`, `pow`, `restricted`, `unsupported`,
+    /// `auth_required` or `unprefixed`.
+    #[serde(default)]
+    pub last_refusal: String,
+    /// When it came (unix seconds).
+    #[serde(default)]
+    pub last_refusal_at: u64,
 }
 
 /// One seat's standing as this node sees it (the Organization overview).

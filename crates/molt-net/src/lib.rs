@@ -56,6 +56,7 @@ pub mod mirror_gossip;
 pub mod mls;
 pub mod monero_rpc;
 pub mod nostr;
+pub mod relay_refusal;
 pub mod relay_runtime;
 pub mod relay_ws;
 pub mod ritual_net;
@@ -132,6 +133,17 @@ pub enum NetError {
     /// outbox backs off and retries until acked).
     #[error("unreachable: {0}")]
     Unreachable(String),
+    /// A live relay answered `OK false` (`relay_refusal::classify`): an
+    /// answer, never a sign the relay is gone.
+    #[error("relay refused: {reason}")]
+    Refused {
+        /// The relay's reason, made log-safe.
+        reason: String,
+        /// The refusal's shape ([`relay_refusal::Refusal::shape`]).
+        shape: &'static str,
+        /// Asking again later may land it.
+        transient: bool,
+    },
     /// The addressed queue does not exist (deleted, rotated away, or never
     /// created on this server).
     #[error("unknown queue")]

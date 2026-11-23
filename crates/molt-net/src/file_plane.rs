@@ -707,6 +707,7 @@ const PUBLISH_PIECE_PATIENCE: Duration = Duration::from_secs(120);
 pub(crate) fn transient_publish_error(e: &NetError) -> bool {
     match e {
         NetError::Framing(_) | NetError::Crypto(_) => false,
+        NetError::Refused { transient, .. } => *transient,
         NetError::Unreachable(text) => {
             let text = text.to_ascii_lowercase();
             !["no dialable relay", "auth-required", "requires auth", "blocked", "restricted", "invalid"]
@@ -1379,6 +1380,9 @@ mod tests {
         assert!(!transient_publish_error(&u("relay refused: invalid: bad sig")));
         assert!(!transient_publish_error(&NetError::Framing("x".into())));
         assert!(!transient_publish_error(&NetError::Crypto("x".into())));
+        let refused = |transient| NetError::Refused { reason: "x".into(), shape: "busy", transient };
+        assert!(transient_publish_error(&refused(true)));
+        assert!(!transient_publish_error(&refused(false)));
     }
 
     /// The id is deterministic (a re-publish dedups) and share-distinct.

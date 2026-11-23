@@ -284,6 +284,40 @@ bound for dial + OK on the publish path: an onion relay whose dial took 12 s
 was cut off on every attempt and never received a publish, while the
 subscription to it (20 s then) connected fine (live node, 2026-11-13).
 
+### 5.2 Relay refusals (v0.1.2)
+
+A relay that answers `OK false` is live; only a broken connection or a
+missing OK is an outage (the publish breaker, the subscription backoff).
+`molt_net::relay_refusal::classify` reads NIP-01's machine-readable prefix
+with `nostr::message::MachineReadablePrefix::parse` (nostr 0.44.6) and
+sorts the refusal:
+
+| prefix | class | on this relay |
+|---|---|---|
+| `duplicate:` | landed | counts as published |
+| `rate-limited:`, `error:` (any text), no prefix | transient | asked again |
+| `invalid:`, `blocked:`, `pow:`, `restricted:`, `unsupported:`, `auth-required:` | permanent | not asked again for this event |
+
+`error:` texts naming a storage or load hiccup ("database is locked",
+"busy", "try again", ...) get the shape `busy`; any other `error:` text is
+shape `error` and still transient. A transient refusal is asked again on the
+same socket on the breaker's schedule (1 s doubling) while the next attempt
+starts within one publish deadline (`publish_timeout_secs`) of the first
+send, so a relay that always errors costs one deadline per event and never
+spins; it does not trip the breaker, so the next event goes to it at once.
+This holds after another relay already took the event (its attempt runs on
+past `PUBLISH_GRACE`): relays do not federate, and a peer reading only the
+busy relay needs it. A subscription `CLOSED` reason is counted the same
+way; the session ends and redials on its backoff as before. NOTICE frames
+are not counted (they name no event).
+
+Every refusal is tallied per relay (`busy` = transient refusals in the last
+hour, the last shape and its time), shown as `status.relay_refusals`; the
+first refusal of a shape per relay per hour is logged at WARN
+(`relay= shape= retries= reason=`), every repeat at DEBUG. Field shape
+behind it: one relay answered `error: database is locked` to a few publishes
+a day, and each read as `unreachable` in the log.
+
 ## 6. What the user sees
 
 - Settings → Nostr relays is a dedicated tab with the relay-pool editor: add, remove, reorder (the
@@ -330,3 +364,5 @@ subscription to it (20 s then) connected fine (live node, 2026-11-13).
 - `RelayConfirm` on a clearnet URL without `accept_clearnet` is refused
 - `ws://` clearnet and malformed URLs are refused at ingest
 - priority order survives the config round-trip
+- a busy `error:` refusal is asked again and lands, `invalid:` is not, a dead
+  connection still reads unreachable (`crates/molt-net/tests/relay_refusal.rs`)
