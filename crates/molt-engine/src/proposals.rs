@@ -4329,7 +4329,8 @@ impl State {
     /// order is canonical. Deleted (tombstoned) messages still count for
     /// their channel — they are rows in the log. Messages past the chat
     /// retention window are filtered ([`State::chat_visible`]) so the
-    /// sidebar counts agree with what the read exposes.
+    /// sidebar counts agree with what the read exposes. Every open vote
+    /// without a message yet follows, by id, with count 0.
     fn chat_channels(&self) -> Vec<ChannelInfo> {
         let mut infos = vec![ChannelInfo {
             channel: ChannelRef::Group,
@@ -4351,6 +4352,21 @@ impl State {
                 infos[at].unread += 1;
             }
         }
+        // an open vote has its discussion before anyone posts in it
+        let mut silent: Vec<u64> = self
+            .proposals
+            .iter()
+            .filter(|(id, p)| {
+                p.state == ProposalState::Proposed
+                    && !pos.contains_key(&ChannelRef::Patch { id: ProposalId(**id) })
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        silent.sort_unstable();
+        infos.extend(silent.into_iter().map(|id| ChannelInfo {
+            channel: ChannelRef::Patch { id: ProposalId(id) },
+            ..ChannelInfo::default()
+        }));
         // annotate each patch channel with its vote's lifecycle state, so
         // every frontend renders the decision from the same data. The
         // channel stays WRITABLE either way (2026-09-06); an unknown

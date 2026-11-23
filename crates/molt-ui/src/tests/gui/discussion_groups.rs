@@ -270,3 +270,120 @@ fn a_group_header_is_one_row_high_and_a_click_toggles_it() {
     o.await_groups_open(&["memory"]);
     assert_eq!(nav(&o.ui).len(), 6, "topic, header, four members");
 }
+
+impl Opened {
+    /// File a wiki-patch vote nobody posts on; its channel key.
+    fn propose_silent(&self, n: u64) -> String {
+        match self.rt.block_on(self.w.execute(Command::Propose { surface: Surface::Memory, payload: wiki_patch(n) })) {
+            Ok(Reply::Proposed { id, .. }) => format!("patch:{}", id.0),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    /// The open votes' discussions as MCP `read_state` lists them.
+    fn read_state_open(&self) -> Vec<String> {
+        let snap = match self.rt.block_on(self.w.execute(Command::ReadState {
+            surface: Surface::Chat,
+            channel: None,
+            view: None,
+        })) {
+            Ok(Reply::State(snap)) => snap,
+            other => panic!("unexpected: {other:?}"),
+        };
+        let mut keys: Vec<String> = snap
+            .channels
+            .iter()
+            .filter(|i| i.state == Some(molt_core::ProposalState::Proposed))
+            .map(|i| crate::channels::channel_key(&i.channel))
+            .collect();
+        keys.sort();
+        keys
+    }
+}
+
+/// The snapshot's discussion keys, sorted.
+fn walk_keys(ui: &AppWindow) -> Vec<String> {
+    let mut keys: Vec<String> = build_ui_snapshot(ui)
+        .discussions
+        .iter()
+        .map(|d| d.split_whitespace().next().unwrap_or_default().to_string())
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// An open vote nobody posted on has its row, adds nothing to the Chat
+/// badge, and leaves with its vote.
+#[test]
+fn an_open_vote_nobody_posted_on_has_a_row_until_it_is_decided() {
+    let o = Opened::new(republic);
+    let key = o.propose_silent(1);
+    o.on_chat();
+    assert_eq!(nav(&o.ui), std::slice::from_ref(&key));
+    assert_eq!(surface_tab(&o.ui, "chat").expect("chat tab").unread_count, 0, "an empty row counts nothing");
+    assert_eq!(walk_keys(&o.ui), std::slice::from_ref(&key), "the walk sees it");
+    let Some(ChannelRef::Patch { id }) = parse_channel_key(&key) else { panic!("a vote") };
+    o.run(Command::Withdraw { proposal: id, note: None });
+    o.mirror();
+    assert!(nav(&o.ui).is_empty(), "gone with its vote");
+}
+
+/// Four silent wiki patches fold like any four; the window and MCP
+/// `read_state` list the same open discussions.
+#[test]
+fn silent_wiki_patches_fold_and_the_window_lists_what_read_state_lists() {
+    let o = Opened::new(republic);
+    for n in 1..=4 {
+        o.propose_silent(n);
+    }
+    o.on_chat();
+    assert_eq!(nav(&o.ui), ["-Wiki patches (4)"]);
+    assert_eq!(walk_keys(&o.ui), o.read_state_open());
+    assert_eq!(o.read_state_open().len(), 4);
+}
+
+/// `n` silent wiki patches mara filed, on disk (past one proposer's cap).
+fn republic_with_silent_patches(n: u64) -> impl FnOnce(&std::path::Path) {
+    move |root| {
+        let (mut ws, now) = workspace_on_disk(root, 2, &["walter", "mara"], "test the groups");
+        for (seq, id) in (2u64..).zip(1..=n) {
+            let body = molt_core::WorkspaceEvent::Proposed { id: ProposalId(id), surface: Surface::Memory, payload: wiki_patch(id) };
+            ws.append(&molt_core::EventEnvelope { prev_seq: seq - 1, seq, ts: now, by: "mara".to_string(), body })
+                .expect("append");
+        }
+        ws.sync().expect("sync");
+    }
+}
+
+/// Sixty silent patches are one header row; expanded, all sixty list.
+#[test]
+fn sixty_silent_patches_are_one_header_row() {
+    let o = Opened::new(republic_with_silent_patches(60));
+    o.on_chat();
+    assert_eq!(nav(&o.ui), ["-Wiki patches (60)"]);
+    o.run(Command::SetDiscussionGroup { kind: "memory".to_string(), open: true });
+    o.mirror();
+    assert_eq!(nav(&o.ui).len(), 61);
+}
+
+/// 200 open cards refresh by patching the row model in place: the model
+/// survives, the selected row stays listed, the expanded group stays open.
+#[test]
+fn a_refresh_with_200_open_cards_keeps_the_model_and_its_state() {
+    let o = Opened::new(republic_with_silent_patches(200));
+    o.run(Command::SelectSurface { surface: Surface::Chat });
+    o.run(Command::SetDiscussionGroup { kind: "memory".to_string(), open: true });
+    o.chat_ui.lock().expect("ui state").select(ChannelRef::Patch { id: ProposalId(7) });
+    o.mirror();
+    let model = o.ui.get_chat_channels();
+    assert_eq!(model.row_count(), 201);
+    o.run(Command::Chat { body: "news".to_string(), quote: None, channel: ChannelRef::Patch { id: ProposalId(9) } });
+    let started = std::time::Instant::now();
+    o.mirror();
+    let took = started.elapsed();
+    eprintln!("refresh with 200 open cards: {took:?}");
+    assert!(o.ui.get_chat_channels() == model, "patched in place, never swapped");
+    assert_eq!(nav(&o.ui)[0], "+Wiki patches (200)");
+    assert_eq!(o.ui.get_selected_channel(), "patch:7");
+    assert!(o.ui.get_selected_channel_listed());
+}

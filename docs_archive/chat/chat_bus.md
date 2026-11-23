@@ -227,7 +227,9 @@ Test-first throughout (failing test → implementation), per house rules.
   window = filter; per-channel unread counts (purely local UI state);
   governance system lines interleaved in patch channels (Q7). Validation:
   clean `cargo build -p molt-ui` + engine-level tests (no GUI on
-  `DISPLAY=:0`). Four or more open votes of one kind (the
+  `DISPLAY=:0`). Every open vote is listed from the moment this node
+  knows it, also before anyone posts (count 0, after the channels with
+  messages, by id) - a local read, nothing crosses the wire. Four or more open votes of one kind (the
   proposal's surface) list under one collapsible `<Kind> (N)` header -
   a node-local view preference (`config.ui-state.toml` beside the config), never a
   filter on what the engine enumerates.

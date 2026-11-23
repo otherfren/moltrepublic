@@ -188,6 +188,41 @@ async fn channel_enumeration_annotates_the_vote_state() {
     );
 }
 
+/// An open vote has its discussion channel before anyone posts in it,
+/// count 0, after the channels with messages and by id; it leaves the
+/// enumeration with its vote. The window and MCP read this one list.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_open_vote_is_listed_before_anyone_posts_and_leaves_when_decided() {
+    let w = spawn_solo();
+    let talked = propose(&w, "talked").await;
+    let silent = propose(&w, "silent").await;
+    let declined = propose(&w, "declined").await;
+    let withdrawn = propose(&w, "withdrawn").await;
+    chat(&w, "talk", patch(talked)).await.expect("chat");
+    let snap = read_chat(&w).await;
+    let listed: Vec<(ChannelRef, usize)> = snap.channels.iter().map(|i| (i.channel.clone(), i.count)).collect();
+    assert_eq!(
+        listed,
+        [
+            (ChannelRef::Group, 0),
+            (patch(talked), 1),
+            (patch(silent), 0),
+            (patch(declined), 0),
+            (patch(withdrawn), 0)
+        ]
+    );
+    assert!(snap.channels.iter().all(|i| i.unread == 0), "nobody posted: nothing unread");
+    w.execute(Command::Decline { proposal: declined, note: None }).await.expect("decline");
+    w.execute(Command::Withdraw { proposal: withdrawn, note: None }).await.expect("withdraw");
+    // a decided vote stays listed only by the messages in its channel
+    for i in read_chat(&w).await.channels {
+        assert!(
+            i.count > 0 || i.channel == ChannelRef::Group || i.state == Some(ProposalState::Proposed),
+            "{i:?}"
+        );
+    }
+}
+
 async fn await_founding(w: &WalletHandle) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
