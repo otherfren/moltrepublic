@@ -780,8 +780,7 @@ since the restore (below).
     behind only delays the evidence. A seat whose window predates the
     restore but which already accepts the new device's frames above the
     old `high` sees no newer duplicate any more: frames it dropped below
-    stay lost (known limit; the incarnation marker of a later release
-    closes it).
+    stay lost until the operator resyncs that seat (below).
 - **A reset window owes the new incarnation from its start**: an empty
   window whose proof is a reset is history at seq 0 - the frontier starts
   at 0, a later envelope waits behind its missing predecessors and is
@@ -789,6 +788,15 @@ since the restore (below).
   no want (v0.1.0) cannot fill it: after 60 s holding (the §10 fallback)
   the frontier goes to just below the lowest held seq, loudly
   (`inbound_gap_lost via=baseline`).
+- **Operator resync** (`resync_seat { member }`, a seat tool): the same
+  reset on demand (`proof` `operator`, `accept_window_reset via=operator`)
+  for the window the evidence rule cannot see. Refused for the own seat and
+  a non-seat; while nothing has been accepted since, or a gap is still
+  owed, a second call answers `resync of <seat> running`. Progress shows
+  in `status.inbound_held`. Not refused by build: every seat that reports
+  one (v0.1.2 and later) answers gap wants, and "none reported" includes
+  v0.1.1, which does; on a v0.1.0 sender it is useless but harmless (the
+  baseline after 60 s; re-delivered frames dedup per kind).
 - **Cost of one reset**, for a new device whose log since the restore holds
   L positions with E own envelopes, by the restored seat's build:
 

@@ -281,7 +281,7 @@ impl State {
         let window = molt_core::AcceptedWindow { restore: restore.to_string(), proof, ..Default::default() };
         self.delivery.accepted.insert(member.clone(), window);
         self.save_accepted_now();
-        tracing::info!(%member, high, via = ?proof, "accept_window_reset");
+        tracing::info!(%member, high, via = proof.label(), "accept_window_reset");
     }
 
     fn save_accepted_now(&mut self) {
@@ -376,7 +376,11 @@ impl State {
         }
         let anchor = self.chain.anchors.get(from)?;
         let w = self.delivery.accepted.get(from)?;
-        if w.restore == *anchor && matches!(w.proof, molt_core::RestoreProof::Block | molt_core::RestoreProof::Merge | molt_core::RestoreProof::Evidence) {
+        let proven = matches!(
+            w.proof,
+            molt_core::RestoreProof::Block | molt_core::RestoreProof::Merge | molt_core::RestoreProof::Evidence | molt_core::RestoreProof::Operator
+        );
+        if w.restore == *anchor && proven {
             return None;
         }
         let newer = if w.stamp > 0 {
@@ -387,6 +391,41 @@ impl State {
             return None;
         };
         (newer && ts > self.restore_sealed_at(from)).then(|| anchor.clone())
+    }
+
+    /// The operator resets `member`'s inbound state, as the evidence rule
+    /// does; the gap asks and the sender's rewind then re-deliver its
+    /// retained history. A second call while that runs changes nothing.
+    pub(crate) fn cmd_resync_seat(&mut self, member: MemberId) -> Result<Reply, MoltError> {
+        if self.active.is_none() && self.replica.is_none() {
+            return Err(MoltError::Engine("no open republic".to_string()));
+        }
+        if member == self.member() {
+            return Err(MoltError::Engine("cannot resync the own seat".to_string()));
+        }
+        if !self.roster().contains(&member) {
+            return Err(MoltError::Engine(format!("{member} is not a seat")));
+        }
+        if self.resync_running(&member) {
+            return Err(MoltError::Engine(format!("resync of {member} running")));
+        }
+        let anchor = self.chain.anchors.get(&member).cloned().unwrap_or_default();
+        self.forget_incarnation(&member, &anchor, molt_core::RestoreProof::Operator);
+        self.emit_session(crate::SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
+    /// An operator resync still filling: nothing accepted yet, or a gap
+    /// still asked for.
+    fn resync_running(&self, member: &str) -> bool {
+        let Some(w) = self.delivery.accepted.get(member) else { return false };
+        w.proof == molt_core::RestoreProof::Operator
+            && (w.high == 0
+                || self
+                    .delivery
+                    .inbound
+                    .get(member)
+                    .is_some_and(|h| !h.held.is_empty() || !h.missing.is_empty() || h.listing.is_some()))
     }
 
     /// `member`'s current drop episode size once it warned, else 0.

@@ -2744,6 +2744,7 @@ impl State {
                 })
             }
             Command::RecoverInviteStart { member } => self.cmd_recover_invite_start(member),
+            Command::ResyncSeat { member } => self.cmd_resync_seat(member),
             Command::RecoverStart { link, phrase, relays } => {
                 self.cmd_recover_start(link, phrase, relays)
             }

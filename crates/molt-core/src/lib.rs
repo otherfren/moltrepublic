@@ -2128,6 +2128,8 @@ pub enum RestoreProof {
     /// Reset on a dropped frame newer than the restore and than anything
     /// the window accepted.
     Evidence,
+    /// Reset by the operator (`Command::ResyncSeat`).
+    Operator,
 }
 
 impl RestoreProof {
@@ -2138,7 +2140,25 @@ impl RestoreProof {
     /// Whether a reset made this window postdate a restore.
     #[must_use]
     pub fn is_reset(self) -> bool {
-        matches!(self, RestoreProof::Block | RestoreProof::Merge | RestoreProof::MergePending | RestoreProof::Evidence)
+        matches!(
+            self,
+            RestoreProof::Block | RestoreProof::Merge | RestoreProof::MergePending | RestoreProof::Evidence | RestoreProof::Operator
+        )
+    }
+
+    /// The log label of a reset.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            RestoreProof::Unknown => "unknown",
+            RestoreProof::Pending => "pending",
+            RestoreProof::Adopted => "adopted",
+            RestoreProof::Block => "block",
+            RestoreProof::Merge => "merge",
+            RestoreProof::MergePending => "merge_pending",
+            RestoreProof::Evidence => "evidence",
+            RestoreProof::Operator => "operator",
+        }
     }
 }
 
@@ -5874,6 +5894,14 @@ pub enum Command {
         /// Ritual incarnation (stale ritual commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
+    },
+    /// **Resync one seat** (`delivery_guarantee.md` §11): forget what this
+    /// node holds as accepted from `member`, so its retained history is
+    /// delivered again - for a window that predates the seat's restore and
+    /// no longer meets a newer duplicate. A human decision: a tool.
+    ResyncSeat {
+        /// The seat whose inbound state is reset (a roster member, not self).
+        member: MemberId,
     },
     /// A surviving coordinator **mints a recovery link** for a member who lost
     /// its device (`recovery_ritual.md` §3): a human decision (an existing seat,

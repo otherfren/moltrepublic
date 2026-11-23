@@ -367,6 +367,30 @@ fn frames_re_read_after_a_restart_are_no_episode() {
     assert_eq!(streak(&walter), 0);
 }
 
+/// The operator resync: a stale window that the new device has already
+/// overtaken sees no newer duplicate, so only the operator can reset it. It
+/// is refused for the own seat and a non-seat, and a second call while the
+/// history is still owed changes nothing.
+#[test]
+fn an_operator_resync_resets_one_seat_once() {
+    let (mut walter, block) = bystander();
+    block_at(&mut walter, 1, T + 100, block);
+    dora_at(&mut walter, 41, T + 300, chat(1, "past the old high"));
+    assert_eq!(bodies(&walter, "past the old high"), 1);
+    assert!(walter.cmd_resync_seat("walter".to_string()).is_err(), "the own seat");
+    assert!(walter.cmd_resync_seat("zoe".to_string()).is_err(), "a non-seat");
+    walter.cmd_resync_seat("dora".to_string()).expect("resync");
+    let w = window(&walter);
+    assert_eq!((w.proof, w.high), (RestoreProof::Operator, 0));
+    let again = walter.cmd_resync_seat("dora".to_string()).expect_err("running");
+    assert!(again.to_string().ends_with("resync of dora running"), "{again}");
+    // the history arrives again, ordered from its start; what was applied
+    // stays applied once
+    dora_at(&mut walter, 1, T + 201, chat(2, "since the restore"));
+    dora_at(&mut walter, 41, T + 300, chat(1, "past the old high"));
+    assert_eq!((bodies(&walter, "since the restore"), bodies(&walter, "past the old high")), (1, 1));
+}
+
 /// An unchanged sheet is not republished although its stamp moved.
 #[test]
 fn an_unchanged_sheet_is_the_same_sheet() {
