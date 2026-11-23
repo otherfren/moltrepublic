@@ -521,6 +521,8 @@ impl ImportStaging {
         // fresh first backup of the imported content.
         let mut prefs = crate::read_prefs(&self.dir);
         let mut changed = prefs.last_backup.take().is_some();
+        // a mark claims an upload of THIS content from THIS device
+        changed |= prefs.backup_mark.take().is_some();
         // the sharer's ABSOLUTE local paths: meaningless on another device
         // (a same-named path there may hold something else) and a layout
         // leak the blob should not carry on (review 2026-08-25 S6)
@@ -771,6 +773,27 @@ mod tests {
             .into_iter()
             .map(|e| e.manifest.workspace.id.clone())
             .collect()
+    }
+
+    /// A restored copy has never been uploaded from this device: the
+    /// source's backup mark must not let its first backup be skipped.
+    #[test]
+    fn an_import_forgets_the_sources_backup_mark() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (src_root, src_dir, _seed, _id) = make_ws(tmp.path());
+        let mut prefs = crate::read_prefs(&src_dir);
+        prefs.backup_mark = Some(molt_core::BackupMark {
+            fingerprint: "aa".repeat(32),
+            target: "bb".repeat(32),
+            object: "molt/x/1.molt.enc".to_string(),
+        });
+        crate::write_prefs(&src_dir, &prefs).expect("prefs");
+        let blob = blob_of(&src_root, &src_dir, &ExportKey::passphrase(PASS));
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = import_stage(&dest_root, &blob, PASS).expect("stage");
+        let dir = staging.commit(&dest_root, false, None).expect("commit");
+        assert_eq!(crate::read_prefs(&dir).backup_mark, None);
     }
 
     /// Stage + commit round-trips a passphrase blob into a FRESH root: the

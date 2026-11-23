@@ -142,6 +142,8 @@ pub struct ExportOutcome {
     pub skipped: Vec<String>,
     /// Unix seconds the export was taken (also authenticated in the meta).
     pub created: u64,
+    /// The content fingerprint of what was written ([`export_backup`]).
+    pub fingerprint: [u8; 32],
 }
 
 /// The plaintext header (kept minimal on purpose: the workspace-id pseudonym
@@ -308,6 +310,20 @@ pub fn export_dir(
     export_dir_chunked(root, ws_dir, key, EXPORT_CHUNK_BYTES, out)
 }
 
+/// The auto-backup export (`backup_restore_design.md` §6.5): workspace key
+/// mode, cut files from `pin` when the writer runs. `Ok(None)` - nothing
+/// written - when the content fingerprint equals `unless`, the last
+/// confirmed upload's.
+pub fn export_backup(
+    root: &Path,
+    ws_dir: &Path,
+    pin: Option<crate::ExportPin>,
+    unless: Option<&[u8; 32]>,
+    out: &mut dyn Write,
+) -> Result<Option<ExportOutcome>, StorageError> {
+    export_dir_impl(root, ws_dir, &ExportKey::Workspace, EXPORT_CHUNK_BYTES, pin, unless, out)
+}
+
 /// [`export_dir`] of a workspace whose writer runs: the cut's files come
 /// from `pin` ([`crate::StorageHandle::pin_for_export`]), so a cut landing
 /// mid-export cannot split the chain from its bases.
@@ -318,7 +334,8 @@ pub fn export_dir_pinned(
     pin: crate::ExportPin,
     out: &mut dyn Write,
 ) -> Result<ExportOutcome, StorageError> {
-    export_dir_impl(root, ws_dir, key, EXPORT_CHUNK_BYTES, Some(pin), out)
+    export_dir_impl(root, ws_dir, key, EXPORT_CHUNK_BYTES, Some(pin), None, out)
+        .map(|o| o.expect("no fingerprint to match"))
 }
 
 /// [`export_dir`] with an explicit chunk size (tests exercise the chunking
@@ -330,7 +347,8 @@ pub(crate) fn export_dir_chunked(
     chunk_bytes: u32,
     out: &mut dyn Write,
 ) -> Result<ExportOutcome, StorageError> {
-    export_dir_impl(root, ws_dir, key, chunk_bytes, None, out)
+    export_dir_impl(root, ws_dir, key, chunk_bytes, None, None, out)
+        .map(|o| o.expect("no fingerprint to match"))
 }
 
 fn export_dir_impl(
@@ -339,8 +357,9 @@ fn export_dir_impl(
     key: &ExportKey,
     chunk_bytes: u32,
     pin: Option<crate::ExportPin>,
+    unless: Option<&[u8; 32]>,
     out: &mut dyn Write,
-) -> Result<ExportOutcome, StorageError> {
+) -> Result<Option<ExportOutcome>, StorageError> {
     if chunk_bytes == 0 {
         return Err(StorageError::BadFile("export chunk size must be > 0".to_string()));
     }
@@ -460,6 +479,21 @@ fn export_dir_impl(
     files.sort_by(|a, b| a.0.cmp(&b.0));
     skipped.sort();
 
+    if let Some(last) = unless {
+        let mut fp = Fingerprint::new(seed.is_some());
+        for (rel, src) in &files {
+            match src {
+                ExportSource::File(path) => {
+                    fp.entry(rel, &crate::read_capped(path, 512 * 1024 * 1024, "import blob")?, &ws_key, &id);
+                }
+                ExportSource::Bytes(bytes) => fp.entry(rel, bytes, &ws_key, &id),
+            }
+        }
+        if fp.finish() == *last {
+            return Ok(None);
+        }
+    }
+
     let kdf = match key {
         ExportKey::Passphrase(_) => {
             let salt: [u8; 32] = crate::os_random()?;
@@ -535,6 +569,7 @@ fn export_dir_impl(
         .map_err(|_| StorageError::Corrupt("export meta too large".to_string()))?;
     w.write(&meta_len.to_le_bytes())?;
     w.write(&meta_bytes)?;
+    let mut fp = Fingerprint::new(seed.is_some());
     for (rel, src) in &files {
         let owned;
         let data: &[u8] = match src {
@@ -552,10 +587,67 @@ fn export_dir_impl(
         w.write(rel.as_bytes())?;
         w.write(&u64::try_from(data.len()).unwrap_or(0).to_le_bytes())?;
         w.write(data)?;
+        fp.entry(rel, data, &ws_key, &id);
     }
     written += w.finish()?;
 
-    Ok(ExportOutcome { bytes: written, skipped, created })
+    Ok(Some(ExportOutcome { bytes: written, skipped, created, fingerprint: fp.finish() }))
+}
+
+/// What a backup holds, minus what changes without new content
+/// (`backup_restore_design.md` §6.5): the backup stamps and the presence
+/// memory in `prefs.toml`, and the purse scanner's progress (a cache a
+/// rescan rebuilds). A snapshot counts by its plaintext - a rewrite of the
+/// same state carries a fresh nonce.
+struct Fingerprint(sha2::Sha256);
+
+impl Fingerprint {
+    fn new(seed: bool) -> Self {
+        use sha2::Digest as _;
+        let mut h = sha2::Sha256::new_with_prefix(b"molt-backup-fingerprint-v1\0");
+        h.update(EXPORT_VERSION.to_le_bytes());
+        h.update([u8::from(seed)]);
+        Fingerprint(h)
+    }
+
+    fn entry(&mut self, rel: &str, data: &[u8], ws_key: &[u8; 32], id: &[u8; 32]) {
+        use sha2::Digest as _;
+        if rel == crate::WALLET_SCAN_FILE {
+            return;
+        }
+        let normalized = match rel {
+            "prefs.toml" => stable_prefs(data),
+            _ => snapshot_plaintext(rel, data, ws_key, id),
+        };
+        let data = normalized.as_deref().unwrap_or(data);
+        self.0.update(u64::try_from(rel.len()).unwrap_or(u64::MAX).to_le_bytes());
+        self.0.update(rel.as_bytes());
+        self.0.update(u64::try_from(data.len()).unwrap_or(u64::MAX).to_le_bytes());
+        self.0.update(data);
+    }
+
+    fn finish(self) -> [u8; 32] {
+        use sha2::Digest as _;
+        self.0.finalize().into()
+    }
+}
+
+/// `prefs.toml` without the fields that move on their own; `None` = hash
+/// the bytes as they are.
+fn stable_prefs(data: &[u8]) -> Option<Vec<u8>> {
+    let mut prefs: crate::WorkspacePrefs = toml::from_str(std::str::from_utf8(data).ok()?).ok()?;
+    prefs.last_backup = None;
+    prefs.backup_mark = None;
+    prefs.last_seen.clear();
+    toml::to_string(&prefs).ok().map(String::into_bytes)
+}
+
+/// A snapshot entry's plaintext; `None` for any other entry, or one that
+/// does not decrypt (then its bytes count).
+fn snapshot_plaintext(rel: &str, data: &[u8], ws_key: &[u8; 32], id: &[u8; 32]) -> Option<Vec<u8>> {
+    let at_seq: u64 = rel.strip_prefix("snapshots/")?.strip_suffix(".msnap")?.parse().ok()?;
+    let frame = crate::single_frame(data)?;
+    crate::decrypt_frame(ws_key, id, crate::SNAPSHOT_SEGMENT, at_seq, frame.nonce, frame.ciphertext).ok()
 }
 
 /// Enforce the passphrase policy (design §3.4): at least
@@ -1141,6 +1233,92 @@ mod tests {
         for f in ["wiki_draft.json", "kanban_draft.json", "kanban_wakes.json", crate::CHAIN_LOCK_FILE] {
             assert!(entry(&a, f).is_none(), "{f} travelled");
         }
+    }
+
+    /// A backup export of `dir` skipping when its content matches `unless`;
+    /// the fingerprint, or `None` when skipped.
+    fn backup(root: &Path, dir: &Path, unless: Option<[u8; 32]>) -> Option<[u8; 32]> {
+        let mut blob = Vec::new();
+        let outcome = export_backup(root, dir, None, unless.as_ref(), &mut blob).expect("export");
+        assert_eq!(outcome.is_none(), blob.is_empty(), "a skip writes nothing");
+        outcome.map(|o| o.fingerprint)
+    }
+
+    /// Issue #7: an unchanged workspace is recognised as such - also when
+    /// only the bookkeeping that moves on its own changed.
+    #[test]
+    fn an_unchanged_workspace_matches_its_fingerprint() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir, _seed) = make_ws(tmp.path());
+        let (ws, _) = crate::open_workspace(&dir).expect("open");
+        ws.write_wallet_scan(b"scanned to 1").expect("scan");
+        let fp = backup(&root, &dir, None).expect("first");
+        assert_eq!(backup(&root, &dir, Some(fp)), None, "nothing changed");
+        assert_eq!(backup(&root, &dir, None), Some(fp), "deterministic");
+
+        let mut prefs = crate::read_prefs(&dir);
+        prefs.last_backup = Some(7);
+        prefs.last_seen.insert("bob".to_string(), 9);
+        prefs.backup_mark = Some(molt_core::BackupMark::default());
+        crate::write_prefs(&dir, &prefs).expect("prefs");
+        ws.write_wallet_scan(b"scanned to 2").expect("scan");
+        assert_eq!(backup(&root, &dir, Some(fp)), None, "stamps, presence and scan progress are no content");
+    }
+
+    /// Issue #7 counter-side: every content change makes the next backup run.
+    #[test]
+    fn every_content_change_breaks_the_fingerprint() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir, _seed) = make_ws(tmp.path());
+        let fp = backup(&root, &dir, None).expect("first");
+        let changed = |f: &dyn Fn()| {
+            f();
+            backup(&root, &dir, Some(fp)).is_some()
+        };
+        let seg = crate::list_sorted(&dir.join("log"), ".mlog").pop().expect("a segment").1;
+        let log = fs::read(&seg).expect("segment");
+        assert!(changed(&|| fs::write(&seg, [log.as_slice(), b"x"].concat()).expect("append")), "log");
+        fs::write(&seg, &log).expect("restore");
+        assert!(!changed(&|| {}), "back to the fingerprint");
+        assert!(changed(&|| {
+            let mut prefs = crate::read_prefs(&dir);
+            prefs.read_cursors.insert("general".to_string(), "ab".to_string());
+            crate::write_prefs(&dir, &prefs).expect("prefs");
+        }), "a pref that travels");
+        let fp = backup(&root, &dir, None).expect("again");
+        let changed = |f: &dyn Fn()| {
+            f();
+            backup(&root, &dir, Some(fp)).is_some()
+        };
+        assert!(changed(&|| fs::write(dir.join("logo.png"), b"another logo").expect("logo")), "logo");
+    }
+
+    /// A snapshot rewritten with the same state (a clean close) carries a
+    /// fresh nonce, not new content.
+    #[test]
+    fn a_rewritten_snapshot_of_the_same_state_is_no_change() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (root, dir, _seed) = make_ws(tmp.path());
+        for f in ["000005.msnap", "000009.msnap"] {
+            fs::remove_file(dir.join("snapshots").join(f)).expect("fixture snapshot");
+        }
+        let (mut ws, _) = crate::open_workspace(&dir).expect("open");
+        let snap = molt_core::WorkspaceSnapshot {
+            version: 1,
+            at_seq: 1,
+            state: molt_core::EngineStateDump::default(),
+            chain_height: None,
+        };
+        ws.write_snapshot(&snap).expect("snapshot");
+        let fp = backup(&root, &dir, None).expect("first");
+        let path = dir.join("snapshots").join(format!("{:012}.msnap", 1));
+        let before = fs::read(&path).expect("snapshot bytes");
+        ws.write_snapshot(&snap).expect("rewrite");
+        assert_ne!(fs::read(&path).expect("snapshot bytes"), before, "a fresh nonce");
+        assert_eq!(backup(&root, &dir, Some(fp)), None);
+        let other = molt_core::WorkspaceSnapshot { chain_height: Some(3), ..snap };
+        ws.write_snapshot(&other).expect("new state");
+        assert!(backup(&root, &dir, Some(fp)).is_some(), "a different state");
     }
 
     fn entry<'a>(a: &'a ExportArchive, path: &str) -> Option<&'a ExportEntry> {

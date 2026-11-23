@@ -1894,6 +1894,10 @@ pub struct WorkspacePrefs {
     /// Unix seconds of the last completed backup; `None` = never.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_backup: Option<u64>,
+    /// What the last confirmed upload held and where it went: an unchanged
+    /// workspace skips the next one. This node's bookkeeping, dropped on import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_mark: Option<BackupMark>,
     /// Legacy marker: this republic was founded by the pre-network
     /// in-process simulation (its other members never existed as real
     /// nodes). **Inert in production** — no engine spawns fake peers, and
@@ -1969,6 +1973,17 @@ pub struct WorkspacePrefs {
     pub lock_unknown: bool,
 }
 
+/// The record of a confirmed backup upload (`backup_restore_design.md` §6.5).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupMark {
+    /// Content fingerprint of the uploaded export, hex.
+    pub fingerprint: String,
+    /// Fingerprint of the bucket target it went to, hex.
+    pub target: String,
+    /// The uploaded object's key.
+    pub object: String,
+}
+
 impl Default for WorkspacePrefs {
     fn default() -> Self {
         WorkspacePrefs {
@@ -1976,6 +1991,7 @@ impl Default for WorkspacePrefs {
             version: STORAGE_VERSION,
             s3_backup: false,
             last_backup: None,
+            backup_mark: None,
             simulated_members: false,
             shared_files: std::collections::BTreeMap::new(),
             shared_file_mtimes: std::collections::BTreeMap::new(),
