@@ -252,7 +252,7 @@ pub struct GroupHandle {
     ack: Option<tokio::task::JoinHandle<()>>,
     poke: Option<tokio::task::JoinHandle<()>>,
     gap: Option<tokio::task::JoinHandle<()>>,
-    /// Closed on drop: its clones outlive the tasks (`relay_pool.md` §3 rule 3).
+    /// Its clones outlive the tasks; [`Self::withdraw`] closes them all.
     channel: GroupChannel,
 }
 
@@ -338,6 +338,12 @@ impl GroupHandle {
         })
     }
 
+    /// Close the channel for every clone: the relays were withdrawn
+    /// (`relay_pool.md` §3 rule 3). A plain drop drains instead.
+    pub fn withdraw(&self) {
+        self.channel.close();
+    }
+
     /// The verdict last handed over.
     #[must_use]
     pub fn reach(&self) -> OutboxReach {
@@ -360,7 +366,6 @@ impl GroupHandle {
 impl Drop for GroupHandle {
     fn drop(&mut self) {
         let _ = self.stop.send(true);
-        self.channel.close();
         if let Some(inbox) = self.inbox.take() {
             inbox.abort();
         }
@@ -2922,11 +2927,8 @@ mod tests {
         );
     }
 
-    /// **A dropped runtime's channel dials nothing more.** The engine drops
-    /// the handle when a relay is withdrawn; a clone of its channel (a
-    /// publish in flight, the file trickle) must not reach the relay after.
-    #[tokio::test]
-    async fn a_dropped_runtime_closes_its_publish_channel() {
+    /// The relay accepts a runtime's channel sees after its handle is gone.
+    async fn accepts_after_drop(withdraw: bool) -> usize {
         use crate::mls::MlsMember;
         use ed25519_dalek::SigningKey;
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2956,9 +2958,28 @@ mod tests {
             wake_rx,
             health_tx,
         );
+        if withdraw {
+            handle.withdraw();
+        }
         drop(handle);
-        assert!(kept.publish_frame(&[0u8; 32], b"frame").await.is_err());
-        assert_eq!(accepts.load(Ordering::SeqCst), 0, "the dropped runtime's channel dialed the relay");
+        // the stub relay hangs up, so the publish fails either way
+        let _ = kept.publish_frame(&[0u8; 32], b"frame").await;
+        accepts.load(Ordering::SeqCst)
+    }
+
+    /// **A withdrawn runtime's channel dials nothing more.** A clone of its
+    /// channel (a publish in flight, the file trickle) outlives the handle.
+    #[tokio::test]
+    async fn a_withdrawn_runtime_closes_its_publish_channel() {
+        assert_eq!(accepts_after_drop(true).await, 0, "the withdrawn runtime's channel dialed the relay");
+    }
+
+    /// **A runtime dropped without a withdrawal drains.** A clean close or
+    /// an added relay drops the handle too; the frame between seal and
+    /// relay OK still goes out.
+    #[tokio::test]
+    async fn a_dropped_runtime_still_publishes_its_in_flight_frame() {
+        assert_eq!(accepts_after_drop(false).await, 1, "a plain drop closed the channel");
     }
 
     /// **A fresh incarnation's claim sheet is EVIDENCE, even at floor 0.**

@@ -477,7 +477,7 @@ fn the_beat_and_a_rebuild_drain_a_listed_rekey() {
         let mls = std::sync::Arc::new(std::sync::Mutex::new(petra_mls));
         petra.group_mls_parked = Some(mls.clone());
         if via_rebuild {
-            petra.rebuild_group_net();
+            petra.rebuild_group_net(false);
         } else {
             petra.cmd_net_delivery_tick().expect("beat");
         }
