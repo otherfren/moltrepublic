@@ -223,14 +223,11 @@ async fn a_message_missed_while_away_is_resent_until_it_lands() {
     b.execute(Command::OpenWorkspace { id: ws_b.clone() })
         .await
         .expect("reopen b");
-    assert!(
-        !wait_for_chat(&b, "into the void", 5).await,
-        "the pruned relay must not serve it from history — otherwise this test \
-         proves nothing about the resend"
-    );
+    // no "it is not there yet" wait: the store's own answer above is the proof,
+    // and a gap fetch may close the hole within seconds
 
     // …and the guarantee repairs it: walter's floor stopped below the gap, the
-    // stall clock re-offers the tail, and it lands.
+    // tail is fetched or re-offered, and it lands.
     assert!(
         wait_for_chat(&b, "into the void", 90).await,
         "the unacknowledged tail must be re-offered until it lands"

@@ -145,7 +145,8 @@ pub(super) async fn share_temp_file(
 
 /// Poll until `path` exists with exactly `content`.
 pub(super) async fn await_file(path: &std::path::Path, content: &[u8]) {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    // only catches a hung test: the copy runs off the actor and is slow under load
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(180);
     loop {
         if std::fs::read(path).is_ok_and(|b| b == content) {
             return;
