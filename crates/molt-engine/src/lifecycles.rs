@@ -1841,6 +1841,7 @@ impl State {
                 generation,
                 readmitted: self.recovery.readmitted.clone(),
                 asked: self.recovery.asked.clone(),
+                lock: self.lock_cap_on(),
             },
             quit_rx,
             cmd_tx.downgrade(),

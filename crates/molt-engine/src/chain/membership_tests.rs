@@ -1316,7 +1316,7 @@ fn a_planted_restore_card_does_not_block_a_recovery() {
                 consent_for(&b, "dora", ""),
                 String::new(),
                 String::new(),
-                (false, 0),
+                (false, 0, vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]),
                 None,
             )
             .expect("ack");
@@ -1404,6 +1404,7 @@ fn announce(st: &mut crate::State, from: &str, caps: &[&str]) {
         0,
         0,
         caps.iter().map(|c| (*c).to_string()).collect(),
+        0,
     )
     .expect("declaration");
 }
@@ -1497,7 +1498,7 @@ fn capabilities_follow_a_declaration_with_a_lower_revision() {
     let b = Builder::new(&ROSTER, 2);
     let (mut petra, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
     let decl = |st: &mut crate::State, from: &str, rev: u64, caps: &[&str]| {
-        st.cmd_net_mirror_decl(&from.to_string(), true, 0, rev, caps.iter().map(|c| (*c).to_string()).collect())
+        st.cmd_net_mirror_decl(&from.to_string(), true, 0, rev, caps.iter().map(|c| (*c).to_string()).collect(), 0)
             .expect("declaration");
     };
     decl(&mut petra, "walter", 1_700_000_000, &[cap]);
@@ -1698,7 +1699,7 @@ fn a_ticketed_request_on_a_fork_is_refused_and_keeps_its_ticket() {
             String::new(),
             String::new(),
             String::new(),
-            (false, 0),
+            (false, 0, vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]),
             None,
         )
         .expect("ack");
@@ -1757,7 +1758,7 @@ fn a_link_less_request_is_refused_and_never_proposed() {
                 consent.clone(),
                 String::new(),
                 String::new(),
-                (false, 0),
+                (false, 0, vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]),
                 None,
             )
             .expect("ack");
@@ -2290,6 +2291,7 @@ fn under_the_lock_a_restore_is_accepted_only_after_its_settle() {
                 need: u64::try_from(value.need).expect("small"),
                 id: ProposalId(id),
                 change: Some(change.clone()),
+                forced: false,
             },
         );
     };
@@ -2356,17 +2358,50 @@ fn a_chosen_restore_seals_after_its_withdrawal() {
             need: u64::try_from(value.need).expect("small"),
             id: ProposalId(id),
             change: Some(change.clone()),
+            forced: false,
         },
     );
     assert!(
         walter.chain.lock.outbox.iter().any(|e| matches!(e.body, WorkspaceEvent::LockAccepted { .. })),
-        "walter accepted: the value is chosen"
+        "walter accepted"
     );
-    wire(&mut walter, "petra", 3, WorkspaceEvent::Withdrawn { id: ProposalId(id), by: "petra".to_string() });
+    // the leader's own acceptance: both survivors, the value is chosen
+    let base = walter.lock_slot().expect("slot").base;
+    let sig = molt_storage::identity_sign(b.key("petra"), &molt_core::chain::approval_bytes(&b.republic_id, 1, &change));
+    let digest = walter.lock_value(1, &change).expect("value").digest;
+    wire(&mut walter, "petra", 3, WorkspaceEvent::LockAccepted { height: 1, base, round: 20, leader: "petra".into(), digest, sig });
+    wire(&mut walter, "petra", 4, WorkspaceEvent::Withdrawn { id: ProposalId(id), by: "petra".to_string() });
     let grace = walter.lock_grace();
     for t in [grace + 1, grace + settle + 2, 2 * grace + 2 * settle + 3] {
         walter.presence.clock_override = Some(10_000 + settle + 1 + t);
         walter.cmd_net_delivery_tick().expect("tick");
     }
     assert_eq!(walter.chain.head.as_ref().map(|h| h.height), Some(1), "the chosen restore sealed");
+}
+
+/// Review T4: a reordered older declaration does not overwrite newer
+/// capabilities - stamped by the sender's clock, and an unstamped one
+/// (an older build's) after a stamped one only once a repeat period
+/// passed (a real downgrade repeats, a stale frame does not).
+#[test]
+fn a_reordered_older_declaration_keeps_the_newer_capabilities() {
+    let cap = molt_core::chain::CHAIN_LOCK_CAP;
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&ROSTER, 2);
+    let (mut petra, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "petra", &ROSTER);
+    petra.presence.clock_override = Some(1_000);
+    let decl = |st: &mut crate::State, caps: &[&str], at: u64| {
+        st.cmd_net_mirror_decl(&"walter".to_string(), false, 0, 0, caps.iter().map(|c| (*c).to_string()).collect(), at)
+            .expect("declaration");
+    };
+    let known = |st: &crate::State| st.active.as_ref().expect("active").prefs.seat_caps.get("walter").cloned();
+    decl(&mut petra, &[cap], 200);
+    decl(&mut petra, &[], 100);
+    assert_eq!(known(&petra), Some(vec![cap.to_string()]), "an older stamp does not win");
+    decl(&mut petra, &[], 0);
+    assert_eq!(known(&petra), Some(vec![cap.to_string()]), "an unstamped frame right after is stale");
+    petra.presence.clock_override = Some(1_000 + 6 * 3_600);
+    decl(&mut petra, &[], 0);
+    assert_eq!(known(&petra), Some(Vec::new()), "a repeated downgrade is taken");
 }

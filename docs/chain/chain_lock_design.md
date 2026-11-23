@@ -161,32 +161,44 @@ one ballot. Rules:
 ### 4.2 Consented restore
 
 The consent is a pre-signed statement of the returning seat Z (bound to
-a height window and Z's previous anchor, v2), not a live acceptor. It
-counts as Z's acceptance of the restore R at every ballot, so `need(R) =
-m - 1` live survivors. Safe iff Z's lost device never acts as an
-acceptor (it is gone by definition of a restore, and B2/B3 gate the
-restore of a live seat): then the acceptor universe is N \ {Z}, size n -
-1, and Q1 + (m - 1) = n > n - 1 still intersects - also for any value
-Z's old device accepted before it died (its acceptances are at heights
-up to its last head + 1; a quorum minus Z still meets P).
+a height window and Z's previous anchor, v2), not a live acceptor. Z's
+old device may come back at any time (a found laptop) and promise,
+accept, even lead without knowing it is being restored - the design does
+not rely on it being gone (fourth review, H2/A-F1).
 
+- **need(R) = m where m < n** (`Quorum::restore_need`): R's acceptors
+  come from N \ {Z}, and Q1 = n - m + 1 meets any m of them even when Z
+  promises. Cost: a restore needs max(n - m + 1, m) live survivors (2-of-3
+  and 3-of-5: unchanged in phase 1; 3-of-4: 2 -> 3; 4-of-5: 3 -> 4).
+  Pinned: `a_restore_needs_m_where_m_is_below_n`.
+- **m = n: need(R) = n - 1**, and the consent stands in for Z. Q1 = 1, so
+  a promise from Z alone would be a phase 1: every acceptor refuses
+  `LockPrepare`/`LockAccept` from a seat that is a restore's subject in
+  its view (`an_acceptor_refuses_a_restore_subjects_prepare`); R's n - 1
+  acceptors all know R, so a Z ballot reaches none of them.
+- **Who is a subject, for which value** (`lock_subjects`, a pure
+  `Subjects` in `lock.rs`): an OPEN consented restore card (a declined or
+  withdrawn one takes no live seat out, C-HIGH-1:
+  `a_declined_restore_card_makes_no_subject`; where m < n not one whose
+  seat is heard - it is alive), and every restore value the lock holds at
+  head + 1. A subject is never a promiser and never a leader (also not
+  in its own view: `a_restore_subject_never_leads`); its acceptance of
+  its own restore never counts; its intents and acceptances of every
+  other value count as any seat's.
+- Per value (T1): the subject is no unheard voice for its OWN restore
+  (it never accepts it) and an ordinary unheard voice for every other
+  value (`a_lost_seat_heard_for_every_value_forks_when_it_comes_back`).
+  With need(R) = m the excusal is no longer needed for safety; it stays
+  for liveness: in 2-of-3 a restore one survivor holds is otherwise
+  forced while Z is silent.
 - The consent rules stay as they are (`restore_consent_at` at the slot's
   height, single use, window). A consent invalid at the height means the
   change is not a value there; acceptors never accept it.
-- The block carries m - 1 survivor signatures plus the consent, as
-  today; with m survivors accepting, the m lowest-named survivors sign
-  and the consent still rides (`try_commit`'s rule).
-- Guard: a leader does not count a promise from a seat it knows is the
-  subject of a registered consented restore (fewer promisers is always
-  safe).
-- **Changed liveness, on purpose:** phase 1 needs n - m + 1 seats, so in
-  2-of-3 BOTH survivors must be reachable to restore the third (2-of-2:
-  the one survivor suffices). On one lineage this removes N1's shape (a
-  survivor restoring a seat alone); two survivors on two diverged
-  branches have two slots, which stays B3's `chain diverged` gate.
-- Cannot guarantee: if Z's old device is in fact alive and promises (the
-  N1 shape), P may miss R's acceptor and a different value can seal at
-  that slot. B3 is the defence; the lock degrades to R1 healing there.
+- The block carries the survivor signatures (m where m < n) plus the
+  consent; `verify_chain` accepts m - 1 or more beside it.
+- Simulation: `lock_sim.rs` (wire-faithful) found the 2-of-3 fork on the
+  old rule (seed 42) and decides every slot without a fork with these
+  rules.
 
 ## 5. Ballots and leaders
 
@@ -355,7 +367,11 @@ surfaces, the GUI among them).
 change, and again whenever a peer asks (`MirrorWho`) or a seat is
 restored or joins; a seat lacking a roster peer's declaration asks,
 backing off from 10 s to an hour. A declaration without a capability is
-kept as such (`declared without` differs from `unheard`). Without this
+kept as such (`declared without` differs from `unheard`). A
+declaration carries the sender's clock (`at`, additive): a reordered
+older one never overwrites newer capabilities; an unstamped one (an
+older build) after a stamped one counts only once a repeat period
+passed (T4). Without this
 a restored seat learned the others' capabilities only at their 6 h
 repeat and could not approve the enabling vote.
 
@@ -372,7 +388,11 @@ free mark (exclusivity), so it can never join a lock quorum.
 restored onto one): they sign freely and answer no lock frame.
 - Safety: exclusivity, as before. A lock decision needs n - m + 1
   promises from seats that never sign freely there, so at most m - 1
-  free signatures exist at that height.
+  free signatures exist at that height - for an ordinary value. A
+  consented restore seals freely with m - 1 survivor signatures plus the
+  consent, so a free restore can stand beside a lock decision (A-F2):
+  open, see §14 (a seat without the capability in a republic running the
+  lock).
 - Liveness: the lock decides while n - m + 1 capable seats promise and
   `need` of them approve. Where the free seats leave it no quorum, the
   release rule (§14) turns the height free and B6 decides.
@@ -581,8 +601,11 @@ Where the wiring differs from §1-§13, and why.
   ones) are marked free at their heights before anything else, so a
   build without the lock that ran in between leaves no gap. With the lock
   off nothing is written and nothing is passive. An import sets the
-  marker whatever the export carried, so a restored workspace opens
-  amnesiac where its chain runs the lock (S6 below); it also opens
+  marker where the imported chain runs the lock, whatever the export
+  carried, so such a restored workspace opens amnesiac (S6 below); an
+  open with the lock off and no file clears a marker (T3: "the marker"
+  means "the lock wrote here" - a pre-lock import marked anyway would
+  turn amnesiac at the enabling vote and halt an n-of-n republic). It also opens
   detached and comes back only through the recovery ritual. Residual: two live
   copies of one workspace (a copied directory run twice) - B2/B3's
   territory, like a live old device.
@@ -694,8 +717,7 @@ liveness and the downgrade boundary. Each fix has a red-first test.
 - **S3, a forced value waits for a fuller hearing for one retransmit
   interval** while seats are unheard (its holders keep a value nobody
   chose alive), then goes out anyway so the holders of a chosen value
-  complete it. A registered restore's subject counts as heard holding
-  nothing (§4.2).
+  complete it.
 - **S4/W4, one rule for phase 1.** A busy run (promises missing, a forced
   value waiting, a value out) re-sends at a doubling interval to 600 s
   (reset by a new promise) and goes stale after its backoff. An idle
@@ -711,6 +733,91 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   `sealed-after-withdrawal:<id>`. Once the card is retired the leader
   cannot resolve a `LockAccepted` for it, so only a seat holding the
   value seals it - slower, not a stall.
+- **H1, a forced value is completed by any promiser.** A lost seat
+  counts as a voice that may hold any ordinary value at the slot, so a
+  value fewer than `need` survivors hold can stay forced while the lost
+  seat is silent. In Paxos an acceptor never refuses a value a leader
+  was forced to propose: a seat accepts a `LockAccept { forced: true }`
+  whether or not it approved the card, also when the card was withdrawn
+  (an approval gates what a leader may FREELY pick, not what a seat must
+  complete). The leader carries the whole change on a forced Accept, and
+  a promise reports the whole change of the value it holds (C-MED-5), so
+  a seat that never saw the card can complete it. What such a seat
+  checks before signing (M4, `lock_forced_invalid`): the carried change
+  hashes to the forced digest; the checks an incoming card meets
+  (`receive_proposed`: no reserved op, the vault and wallet wire shapes,
+  the feature-set refusals, no other change under the id); a restore's
+  consent valid at the height; a cut of this height with this seat's
+  state hash; any other membership change only as registered here. The
+  withdrawal, the settle, the seat-still-active gate and the local
+  vault/wallet checks do not hold. **A withdrawal under the lock means
+  "do not choose this if it is not yet under way"**; a value that seals
+  anyway is reported (`sealed-after-withdrawal`, for a restore
+  `restore-sealed-after-withdrawal` with no re-key). Residual: a forced
+  cut whose hash no longer matches on every seat stays forced (C-LOW-7,
+  A-F6) - a cut with a lost seat halts. The local wallet/vault refusal
+  is lost on the forced path (L5); no divergence follows, the change is
+  the chain's. Pinned: `a_forced_withdrawn_value_completes_with_any_promiser`,
+  `lock_sim` (H1 halt on the old rule at seed 32).
+- **A-F2, the capability rule.** No seat enters a republic in Strict
+  Order Mode on a build without it: the rejoiner's request declares its
+  capabilities (`RecoverRequest.caps`, additive), and the coordinator
+  refuses one without the lock (`this republic uses Strict Order Mode -
+  needs a newer build`, told to the rejoiner;
+  `a_rejoiner_on_a_build_without_the_mode_is_refused`). The release rule
+  covers only a seat that was already there when the mode came on.
+- **Amnesia (decided rule, modelled in `lock_sim`, not built).** A seat
+  that lost its lock state asks the others; only seats that hold their
+  own state answer - an amnesiac seat does not answer at all and says so
+  (`amnesia - 1 of 2 seats answered`). With answers from max(m, n - m +
+  1) other seats it is passive up to the highest height they report it
+  may have touched, and leads above the highest round they saw from it
+  (`an_amnesiac_seat_waits_for_the_others_and_never_forks`; the control
+  forks). Two amnesiac seats at once can both wait for ever (2-of-3:
+  each needs both others): the exit is the recovery ritual for one of
+  them (status `amnesia - restore this seat with a new link`). Where
+  m = n no answer set proves anything: the recovery ritual is the only
+  exit, and a seat restored from a file backup is undetectable there.
+- **Operability (C-MED-3, C-MED-6, B-F3, B-F6, B-F7, D-F3).** A card whose
+  ballot went stale stays behind the other ready cards across heights
+  until it is retired (a never-sealable card no longer costs a timeout
+  at every height; `a_stale_card_stays_behind_at_the_next_height`). A
+  withholding acceptor logs its reason at INFO once per height and card;
+  the leader's status names the promisers whose acceptance is missing
+  (`acceptances 1/2 missing walter`). Not built: an answer frame that
+  carries the reason to the leader. The manifest version is raised in
+  memory only once it is on disk, and an open heals a lock file whose
+  raise never landed (`a_lock_file_raises_the_version_at_open`); the
+  marker alone keeps version 4 through a seal round trip
+  (`a_lock_marker_keeps_the_lock_version_through_sealing`). Lock
+  deadlines run on a monotonic clock. An unowed lock frame never takes
+  the link of the owed envelope that shares its `prev_seq` - it stalled
+  the sender's frontier (`an_unowed_lock_frame_never_takes_an_owed_link`).
+- **A-F3.** Lock state at a height on any lineage forbids a free
+  signature there, also on a lineage without the enabling block - the
+  signature is base-agnostic and would count free where the lock holds
+  (`lock_state_on_another_lineage_forbids_a_free_signature`).
+- **Fault tolerance (A-F4).** The lock decides while max(n - m + 1, m)
+  seats answer; it halts beyond min(m - 1, n - m) lost seats (B6: n -
+  m + 1, since a consented restore there needs m - 1 survivors). 2-of-3:
+  1 (2); 2-of-5: 1 (4); 3-of-5: 2 (3); 3-of-7: 2 (5); 4-of-7: 3 (4). The enabling vote is refused where m < 2
+  (`Strict Order Mode needs at least 2 approvals per decision`,
+  `the_mode_needs_two_approvals_per_decision`).
+- **B-F1/D-F1, a seat never forgets what it promised or accepted at a
+  slot that can still be contended.** A head move forgets slots only up
+  to `min(durable_head, max(last cut, head - SLOT_KEEP))`: never above
+  the chain on disk (the lock file is written before the chain in every
+  receive path, so a crash or a failing chain write would otherwise leave
+  a promise forgotten that the reopened chain still needs), and never
+  inside the reorg window (attestation variants let a seat leave a
+  lineage and come back below its old head). The lock file records the
+  floor it forgot up to; a file whose floor is above the chain on disk
+  opens amnesiac (`lock=amnesia reason=ahead_of_chain`). Finality: the
+  fork rule has no depth bound, so only a cut is final; `SLOT_KEEP` = 256
+  heights (about 40 KiB of lock file at one slot per height) is the
+  residual - a reorg deeper than that onto a lineage this seat held state
+  on. A learner's tally for a slot that is no longer head+1 gives way to
+  the current one.
 - **R8.** Intents that outrun their card survive a head move (up to
   1,024 unknown ids, oldest first out); a retired card's go.
 - **W2/R5.** The leader skips a card the chain-wide gates refuse now
@@ -718,8 +825,13 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   vault/wallet checks only stop its acceptance, since another seat may
   pass them. A card whose ballot went stale without reaching need (every
   acceptor withholding, e.g. a wallet daemon down) waits at that height
-  while another card is ready; when all went stale they rotate again. A
-  forced value is never skipped.
+  while another card is ready; when all went stale they take turns, the
+  one stale longest first (T2: a card blocked for good never takes every
+  ballot from one that went stale once). A
+  forced value is never skipped. Residual (L6): a free pick that a late
+  promise turned into a forced value is not marked stale when its
+  ballot lapses; it is the forced value then, and forced values are not
+  rotated.
 - **W5** voices before digests; **W6** marks unwritten at open mean
   amnesia; **W7** no amnesia where the lock is not enabled; **W8** the
   restore label counts intents; **W9** an `Accept` before its card is
@@ -737,7 +849,8 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   amnesiac - passive up to the first peer height it hears - which is the
   safe state. The product's own paths cannot produce the case: an export
   (file or S3 backup) never carries the lock file, and an import sets the
-  marker, so every restored workspace opens amnesiac where its chain runs
-  the lock (`a_restored_workspace_is_amnesiac_for_the_lock`). The floor
+  marker where the imported chain runs the lock, so such a restored
+  workspace opens amnesiac
+  (`a_restored_workspace_is_amnesiac_only_where_its_chain_runs_the_lock`). The floor
   stays the FIRST peer report: peers report with every block, so a
   highest-report floor would move with the live chain and never be passed.

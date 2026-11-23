@@ -767,8 +767,8 @@ impl State {
             WorkspaceEvent::LockPromise { height, base, round, leader, accepted } => {
                 self.lock_on_promise(&from, height, base, round, leader, accepted);
             }
-            WorkspaceEvent::LockAccept { height, base, round, digest, need, id, change } => {
-                self.lock_on_accept(&from, height, base, round, digest, need, id.0, change);
+            WorkspaceEvent::LockAccept { height, base, round, digest, need, id, change, forced } => {
+                self.lock_on_accept(&from, height, base, round, digest, need, id.0, change, forced);
             }
             WorkspaceEvent::LockAccepted { height, base, round, leader, digest, sig } => {
                 self.lock_on_accepted(&from, height, base, round, leader, &digest, &sig);

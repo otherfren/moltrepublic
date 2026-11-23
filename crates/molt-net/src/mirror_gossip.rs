@@ -94,6 +94,15 @@ pub struct MirrorDeclFrame {
     /// §7e); absent on an older build.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub caps: Vec<String>,
+    /// The sender's clock when it sent this declaration: orders its
+    /// capabilities (a reordered older one never overwrites a newer one).
+    /// Absent on an older build.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub at: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 impl MirrorDeclFrame {
@@ -251,7 +260,7 @@ mod tests {
     #[test]
     fn the_three_frames_round_trip_and_keep_to_their_tags() {
         let decl =
-            MirrorDeclFrame { v: MIRROR_V, by: "petra".into(), on: true, quota: 5, rev: 9, caps: Vec::new() };
+            MirrorDeclFrame { v: MIRROR_V, by: "petra".into(), on: true, quota: 5, rev: 9, caps: Vec::new(), at: 0 };
         let status = MirrorStatusFrame {
             v: MIRROR_V,
             by: "petra".into(),

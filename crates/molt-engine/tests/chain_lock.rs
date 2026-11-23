@@ -609,14 +609,14 @@ async fn a_chosen_restore_seals_after_its_withdrawal_and_is_reported() {
     let ([mara, walter, dora], dora_phrase) = found_trio(tmp.path(), &url).await;
     lock_on(&[&mara, &walter, &dora], true).await;
     every_seat_announced(&[&mara, &walter, &dora]).await;
-    // dora lost: mara (first in the line) leads and stops right after her
-    // Accept leaves, before accepting herself; walter coordinates
+    // dora lost: mara (first in the line) leads, accepts and stops;
+    // walter coordinates
     for w in [&mara, &walter] {
         w.__seat_active_secs(0);
         w.__lock_timing(15, 3);
     }
     drop(dora);
-    mara.__lock_stop_after_accept();
+    mara.__lock_stop_after_own_accept();
     let epoch = status(&walter).await.mls_epoch;
     walter.execute(Command::RecoverInviteStart { member: "dora".to_string() }).await.expect("mint");
     let s = wait_for(&walter, "the recovery link", |s| {
@@ -632,9 +632,9 @@ async fn a_chosen_restore_seals_after_its_withdrawal_and_is_reported() {
         assert!(tokio::time::Instant::now() < deadline, "mara never led the restore");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    // walter accepts once his settle passed: chosen (the restore's need
-    // is one survivor); his seal waits a grace (15 s) as a learner, and
-    // the withdrawal lands inside it
+    // walter accepts once his settle passed: chosen (both survivors, H2);
+    // his seal waits a grace (15 s) as a learner, and the withdrawal
+    // lands inside it
     tokio::time::sleep(Duration::from_secs(7)).await;
     rejoiner.execute(Command::RecoverCancel).await.expect("cancel");
     drop(rejoiner);
@@ -684,4 +684,32 @@ async fn the_lock_is_dark_in_this_build() {
         assert!(version < molt_core::STORAGE_VERSION_LOCK, "{name}: manifest {version}");
         assert!(!molt_storage::read_prefs(&dir).chain_lock, "{name}: no lock marker");
     }
+}
+
+/// A-F2: no seat enters a republic in Strict Order Mode on a build
+/// without it - the coordinator refuses the restore with the reason, the
+/// rejoiner is told.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rejoiner_on_a_build_without_the_mode_is_refused() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let ([mara, walter, dora], dora_phrase) = found_trio(tmp.path(), &url).await;
+    lock_on(&[&mara, &walter, &dora], true).await;
+    every_seat_announced(&[&mara, &walter, &dora]).await;
+    mara.__seat_active_secs(0);
+    drop(dora);
+    mara.execute(Command::RecoverInviteStart { member: "dora".to_string() }).await.expect("mint");
+    let s = wait_for(&mara, "the recovery link", |s| {
+        s.notice.starts_with("recovery-link:") || s.notice.starts_with("recovery-link-failed:")
+    })
+    .await;
+    let link = s.notice.strip_prefix("recovery-link:").unwrap_or_else(|| panic!("mint: {:?}", s.notice)).to_string();
+    let rejoiner = engine(&tmp.path().join("dora-old"));
+    rejoiner.__lock_cap_off(true);
+    adopt_relay(&rejoiner, &url).await;
+    rejoiner.execute(Command::RecoverStart { link, phrase: dora_phrase, relays: Vec::new() }).await.expect("recover start");
+    let s = wait_for(&rejoiner, "the refusal", |s| s.notice.starts_with("recover-failed:") || s.notice.starts_with("recovered:")).await;
+    assert!(s.notice.contains("needs a newer build"), "{:?}", s.notice);
+    let _ = walter;
 }

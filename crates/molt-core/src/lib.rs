@@ -3353,6 +3353,10 @@ pub enum WorkspaceEvent {
         /// The change itself for a membership change or a cut.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         change: Option<chain::ChainChange>,
+        /// Phase 1 forced the leader to this value: a seat whose intent
+        /// stood for the card accepts it although it was withdrawn since.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        forced: bool,
     },
     /// Phase 2b: the sender accepted `digest` at the ballot; `sig` is its
     /// ordinary position signature over the change's approval bytes.
@@ -5815,6 +5819,9 @@ pub enum Command {
         /// an earlier run on the same link never replaces a later one.
         #[serde(default)]
         started: u64,
+        /// The rejoiner build's capabilities. Empty from an older rejoiner.
+        #[serde(default)]
+        caps: Vec<String>,
         /// Ritual incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -6611,6 +6618,9 @@ pub enum Command {
         /// The capabilities the declarer's build announces.
         #[serde(default)]
         caps: Vec<String>,
+        /// The declarer's clock at sending; 0 from an older build.
+        #[serde(default)]
+        at: u64,
         /// Transport incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -10094,8 +10104,22 @@ mod tests {
                     need: 3,
                     id: ProposalId(9),
                     change: Some(cut),
+                    forced: false,
                 },
                 r#"{"type":"lock_accept","height":5,"base":"b","round":2,"digest":"d","need":3,"id":9,"change":{"kind":"checkpoint","upto":4,"state_hash":"abababababababababababababababababababababababababababababababab"}}"#,
+            ),
+            (
+                WorkspaceEvent::LockAccept {
+                    height: 5,
+                    base: "b".into(),
+                    round: 2,
+                    digest: "d".into(),
+                    need: 2,
+                    id: ProposalId(9),
+                    change: None,
+                    forced: true,
+                },
+                r#"{"type":"lock_accept","height":5,"base":"b","round":2,"digest":"d","need":2,"id":9,"forced":true}"#,
             ),
             (
                 WorkspaceEvent::LockAccepted {

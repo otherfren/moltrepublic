@@ -59,6 +59,19 @@ impl Quorum {
     /// the non-free seats cannot answer phase 1 (`free >= m`), or they are
     /// too few to accept m (`free >= n - m`, plus one when this seat's own
     /// acceptance still counts among them).
+    /// A consented restore's need (H2): m where m < n, so Q1 = n - m + 1
+    /// meets its acceptors even when the subject's old device promises;
+    /// m - 1 only for m = n, where the consent stands in for the one seat
+    /// every other value needs (there the acceptors refuse the subject's
+    /// frames instead).
+    pub(crate) fn restore_need(self) -> usize {
+        if self.m < self.n {
+            self.m
+        } else {
+            self.m.saturating_sub(1).max(1)
+        }
+    }
+
     pub(crate) fn lock_dead(self, free: usize, holds_acceptance: bool) -> bool {
         free > 0 && free >= self.m.min(self.n.saturating_sub(self.m) + usize::from(holds_acceptance))
     }
@@ -105,6 +118,11 @@ pub(crate) struct Acceptor {
 /// How far below the head a free mark is kept: a reorg may re-open a
 /// height, and a free signature stays valid on every branch.
 pub(crate) const FREE_MARK_KEEP: u64 = 4096;
+
+/// How far below the head a slot's promise and acceptance are kept
+/// (D-F1): a reorg may lead back onto a lineage, and the seat must still
+/// report what it accepted there. Below a cut nothing is contended.
+pub(crate) const SLOT_KEEP: u64 = 256;
 
 impl Acceptor {
     fn state(&self, slot: &Slot) -> Option<&SlotState> {
@@ -225,11 +243,12 @@ impl Acceptor {
         Some(self.free.insert(height))
     }
 
-    /// The head moved to `head`: drop decided slots and old free marks.
-    /// Returns whether anything changed.
-    pub(crate) fn settle(&mut self, head: u64) -> bool {
+    /// Forget slots at or below `floor` (final, or outside the reorg
+    /// window, and covered by the durable chain) and free marks older than
+    /// [`FREE_MARK_KEEP`] below `head`. Returns whether anything changed.
+    pub(crate) fn settle(&mut self, floor: u64, head: u64) -> bool {
         let before = (self.slots.len(), self.free.len());
-        self.slots.retain(|h, _| *h > head);
+        self.slots.retain(|h, _| *h > floor);
         let floor = head.saturating_sub(FREE_MARK_KEEP);
         self.free.retain(|h| *h > floor);
         before != (self.slots.len(), self.free.len())
@@ -278,12 +297,30 @@ pub(crate) struct Leader {
     /// Seats that answered "signed freely here": they hold no acceptance
     /// that can be part of a chosen value.
     free: BTreeSet<String>,
+    /// Per value digest, seats that can never be among its acceptors (a
+    /// restore's subject for that restore, §4.2) - excused from the
+    /// unheard count for that value only.
+    excused: BTreeMap<String, BTreeSet<String>>,
     proposed: Option<Value>,
 }
 
 impl Leader {
     pub(crate) fn new(slot: Slot, quorum: Quorum, ballot: Ballot) -> Self {
-        Self { slot, ballot, quorum, promises: BTreeMap::new(), free: BTreeSet::new(), proposed: None }
+        Self {
+            slot,
+            ballot,
+            quorum,
+            promises: BTreeMap::new(),
+            free: BTreeSet::new(),
+            excused: BTreeMap::new(),
+            proposed: None,
+        }
+    }
+
+    /// `seat` can never accept the value `digest` (T1: never a global
+    /// "heard" - the seat may be alive and accept other values).
+    pub(crate) fn excuse(&mut self, digest: &str, seat: &str) {
+        self.excused.entry(digest.to_string()).or_default().insert(seat.to_string());
     }
 
     /// A free `Nack` from `from`: heard, holding nothing that counts.
@@ -318,7 +355,10 @@ impl Leader {
     pub(crate) fn forced(&self) -> Option<Value> {
         let (_, top) = self.promises.values().flatten().max()?;
         let holding = self.promises.values().flatten().filter(|(_, v)| v == top).count();
-        let unheard = self.quorum.n.saturating_sub(self.promises.len() + self.free.len());
+        let excused = self.excused.get(&top.digest).map_or(0, |e| {
+            e.iter().filter(|s| !self.promises.contains_key(*s) && !self.free.contains(*s)).count()
+        });
+        let unheard = self.quorum.n.saturating_sub(self.promises.len() + self.free.len() + excused);
         (holding + unheard >= top.need).then(|| top.clone())
     }
 
@@ -335,6 +375,31 @@ impl Leader {
 
     pub(crate) fn proposed(&self) -> Option<&Value> {
         self.proposed.as_ref()
+    }
+}
+
+/// Who is the subject of which consented restore, as one seat sees it
+/// (H2, C-HIGH-1): value digest -> seat.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Subjects(BTreeMap<String, String>);
+
+impl Subjects {
+    pub(crate) fn insert(&mut self, digest: String, seat: String) {
+        self.0.insert(digest, seat);
+    }
+
+    /// Seats that are the subject of some restore here: never a promiser
+    /// and never a leader - acceptors refuse their `Prepare` and `Accept`
+    /// (A-F1: an old device back without knowing would lead with its own
+    /// promise alone where m = n).
+    pub(crate) fn seats(&self) -> BTreeSet<String> {
+        self.0.values().cloned().collect()
+    }
+
+    /// The subject of the restore `digest`, if it is one: its acceptance
+    /// of that value never counts.
+    pub(crate) fn of(&self, digest: &str) -> Option<&str> {
+        self.0.get(digest).map(String::as_str)
     }
 }
 
@@ -369,3 +434,7 @@ impl Tally {
 #[cfg(test)]
 #[path = "lock_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "lock_sim.rs"]
+mod sim;

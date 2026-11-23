@@ -939,6 +939,7 @@ impl State {
         self.files.mirror_who_answered = 0;
         self.files.mirror_who_asked = false;
         self.files.mirror_decl_due = false;
+        self.files.caps_at.clear();
         self.files.mirror_caps_ask_at = 0;
         self.files.mirror_caps_backoff = 0;
         for (_, fetch) in self.files.mirror_fetches.drain() {

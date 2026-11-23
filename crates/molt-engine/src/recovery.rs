@@ -594,6 +594,7 @@ pub async fn run_rejoin<T: Transport>(
         anchor_first: false,
         version: String::new(),
         started: 0,
+        caps: vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
     });
     let payload = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
     supervisor::send_framed(

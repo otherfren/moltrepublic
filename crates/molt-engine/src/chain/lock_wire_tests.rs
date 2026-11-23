@@ -280,7 +280,7 @@ fn a_restarted_seat_keeps_its_promise() {
         &mut again,
         "dora",
         2,
-        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 4, digest, need: 2, id: ProposalId(id), change: None },
+        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 4, digest, need: 2, id: ProposalId(id), change: None, forced: false },
     );
     assert_eq!(sent_kinds(&again), vec!["nack", "nack"], "the lower ballot is refused twice");
 }
@@ -476,8 +476,10 @@ fn a_consented_restore_needs_both_survivors_in_two_of_three() {
         for s in &mut net.seats {
             hear(s, T, &["dora", "mara"]);
         }
+        // walter's device is lost: nothing reaches it, nothing comes from it
+        net.down = vec![(2, 0), (2, 1), (0, 2), (1, 2)];
         if !both {
-            net.down = vec![(0, 1), (1, 0)];
+            net.down.extend([(0, 1), (1, 0)]);
         }
         let rid = b.republic_id.clone();
         let ticket = "ticket";
@@ -502,18 +504,14 @@ fn a_consented_restore_needs_both_survivors_in_two_of_three() {
             assert_eq!(dora.chain.head.as_ref().expect("head").height, 1, "sealed");
             let block = &dora.chain.blocks[1];
             assert!(matches!(&block.change, ChainChange::Membership { op: MembershipOp::Restored, .. }));
-            assert_eq!(block.sigs.len(), 1, "one survivor signature beside the consent");
+            assert_eq!(block.sigs.len(), 2, "both survivors beside the consent (H2: need m where m < n)");
             verify_chain(&dora.chain.blocks).expect("verifies");
             let _ = id;
         } else {
+            // the restore needs both survivors' voices (H2): mara alone has
+            // nothing ready and takes nothing over
             assert_eq!(net.heights(), vec![0, 0, 0], "one survivor alone does not seal");
-            let sync = net.seats[1].chain_sync();
-            // the run in flight waits for dora's promise, or it yielded to
-            // dora's ballot: either way the status names what is missing
-            assert!(
-                sync.lock_wait == "promises 1/2 missing dora" || sync.lock_wait == "leader dora",
-                "{sync:?}"
-            );
+            assert!(net.seats[1].chain.lock.run.is_none(), "no ballot without the voices");
         }
     }
 }
@@ -846,6 +844,7 @@ fn an_accepted_value_is_accepted_again_after_a_withdraw_or_decline() {
                     need: 2,
                     id: ProposalId(id),
                     change: None,
+                    forced: false,
                 },
             );
         };
@@ -1287,6 +1286,185 @@ fn the_enabling_refusal_names_the_seat_and_the_lock_stays_on() {
     assert!(dora.lock_enabled(), "still on");
 }
 
+/// Review T1: a withdrawn restore of z still held by the lock excuses z
+/// for THAT restore only. z's old device is back and accepted w (an
+/// ordinary change) with d and a; a leader hearing c, b (holding the
+/// restore) and a (holding w) must count z as a voice that may hold w:
+/// w is forced. Heard as free for every value, z let a second value in.
+#[test]
+fn a_restore_subject_is_excused_only_for_its_own_restore() {
+    const FIVE: [&str; 5] = ["a", "b", "c", "d", "z"];
+    let b = Builder::new(&FIVE, 3);
+    let mut x = genesis_seat("a", &b, b.blocks.clone());
+    x.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
+    let rid = b.republic_id.clone();
+    let kp_hex = kp_hex_for(&b, "z");
+    let proof = crate::make_seat_proof(b.key("z"), "ticket", &kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(&b, "z", "", &[], 0, &"cc".repeat(32));
+    let rid_restore = x
+        .verify_and_propose_restore("z", &b.pk("z"), &kp_hex, "ticket", &proof, "", &[], &consent, "")
+        .expect("proposed");
+    let restore = x.chain.proposal_changes.get(&rid_restore).cloned().expect("the restore");
+    let w_id = note(&mut x, "w");
+    let w = x.proposal_change(w_id).expect("w");
+
+    let mut c = genesis_seat("c", &b, b.blocks.clone());
+    c.chain.lock.enabled_override = Some(true);
+    c.lock_force(true);
+    hear(&mut c, T, &FIVE);
+    let r_value = c.lock_value(1, &restore).expect("restore value");
+    let w_value = c.lock_value(1, &w).expect("w value");
+    // the withdrawn restore is still known here (its LockAccept came by)
+    c.chain.lock.known.insert((1, r_value.digest.clone()), (rid_restore, restore.clone()));
+    assert!(c.lock_restore_subjects().contains("z"));
+    c.lock_start(0);
+    let (base, round) = {
+        let run = c.chain.lock.run.as_ref().expect("c leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    let held = |value: &Value, ballot: u64, leader: &str, id: u64, change: Option<ChainChange>| molt_core::chain::LockAcceptedValue {
+        round: ballot,
+        leader: leader.into(),
+        digest: value.digest.clone(),
+        need: u64::try_from(value.need).expect("small"),
+        id,
+        change,
+    };
+    let promises = [
+        ("b", held(&r_value, 1, "a", rid_restore, Some(restore.clone()))),
+        ("a", held(&w_value, 2, "d", w_id, None)),
+    ];
+    for (seq, (from, accepted)) in promises.into_iter().enumerate() {
+        let promise = WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round, leader: "c".into(), accepted: Some(accepted) };
+        wire(&mut c, from, u64::try_from(seq).expect("small") + 1, promise);
+    }
+    let run = c.chain.lock.run.as_ref().expect("still leading");
+    assert!(run.leader.ready(), "c, b and a promised");
+    assert_eq!(run.leader.forced(), Some(w_value), "z may hold w: w is forced");
+}
+
+/// Review T2: once every ready card went stale they take turns - the one
+/// stale longest first - so a card blocked for good does not take every
+/// later ballot from one that went stale only once.
+#[test]
+fn stale_cards_take_turns() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let first = note(&mut dora, "first");
+    let second = note(&mut dora, "second");
+    dora.lock_note_intent(first, "mara");
+    dora.lock_note_intent(second, "mara");
+    dora.chain.own_approvals.clear();
+    let mut now = T;
+    let mut seq = 0;
+    let mut proposed = Vec::new();
+    dora.lock_start(0);
+    for _ in 0..4 {
+        let (base, round) = {
+            let run = dora.chain.lock.run.as_ref().expect("dora leads");
+            (run.leader.slot.base.clone(), run.leader.ballot.round)
+        };
+        seq += 1;
+        wire(&mut dora, "mara", seq, WorkspaceEvent::LockPromise { height: 1, base, round, leader: "dora".into(), accepted: None });
+        proposed.push(dora.chain.lock.run.as_ref().and_then(|r| r.value.as_ref()).map(|(id, _)| *id));
+        let started = dora.chain.lock.run.as_ref().map(|r| r.leader.ballot.round);
+        while dora.chain.lock.run.as_ref().map(|r| r.leader.ballot.round) == started {
+            now += 10;
+            hear(&mut dora, now, &SEATS);
+            dora.lock_tick();
+        }
+    }
+    assert_eq!(proposed, vec![Some(first), Some(second), Some(first), Some(second)]);
+}
+
+/// H1: walter is lost; mara alone accepted dora's card w, then dora
+/// withdrew it. w is forced (walter may hold it). Any promiser accepts a
+/// forced value, so the height decides: w seals and its proposer is told
+/// - also a seat that never approved w completes it.
+#[test]
+fn a_forced_withdrawn_value_completes_with_any_promiser() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    hear(&mut dora, T, &["dora", "mara"]);
+    let w = note(&mut dora, "w");
+    dora.lock_note_intent(w, "mara");
+    let change = dora.proposal_change(w).expect("w");
+    let value = dora.lock_value(1, &change).expect("value");
+    dora.cmd_withdraw(ProposalId(w), None).expect("withdrawn");
+    dora.chain.lock.outbox.clear();
+    dora.lock_start(0);
+    let (base, round) = {
+        let run = dora.chain.lock.run.as_ref().expect("dora leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    let held = molt_core::chain::LockAcceptedValue {
+        round: 1,
+        leader: "walter".into(),
+        digest: value.digest.clone(),
+        need: u64::try_from(value.need).expect("small"),
+        id: w,
+        change: None,
+    };
+    wire(&mut dora, "mara", 1, WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round, leader: "dora".into(), accepted: Some(held) });
+    // S3: one interval for a fuller hearing, walter stays silent
+    dora.presence.clock_override = Some(T + 60);
+    hear(&mut dora, T + 60, &["dora", "mara"]);
+    dora.lock_tick();
+    let forced_out = dora.chain.lock.outbox.iter().any(|e| matches!(&e.body, WorkspaceEvent::LockAccept { forced: true, digest, .. } if *digest == value.digest));
+    assert!(forced_out, "w proposed as forced: {:?}", sent_kinds(&dora));
+    assert!(sent_kinds(&dora).contains(&"accepted"), "dora's intent stood: she accepts the withdrawn w");
+    let sig = identity_sign(b.key("mara"), &approval_bytes(&b.republic_id, 1, &change));
+    wire(&mut dora, "mara", 2, WorkspaceEvent::LockAccepted { height: 1, base: base.clone(), round, leader: "dora".into(), digest: value.digest.clone(), sig });
+    assert_eq!(dora.chain.head.as_ref().map(|h| h.height), Some(1), "the height decided");
+    assert_eq!(dora.session.notice, format!("sealed-after-withdrawal:{w}"));
+
+    // walter never approved w: a forced Accept is completed all the same
+    let mut walter = seat("walter", &b);
+    let mut x = seat("dora", &b);
+    let w2 = note(&mut x, "w");
+    let change2 = x.proposal_change(w2).expect("w");
+    let ChainChange::Applied { payload, .. } = change2.clone() else { panic!("applied") };
+    assert!(walter.receive_proposed(w2, Surface::Memory, payload, "dora"));
+    wire(&mut walter, "dora", 1, WorkspaceEvent::Withdrawn { id: ProposalId(w2), by: "dora".into() });
+    let slot = walter.lock_slot().expect("slot");
+    let v2 = walter.lock_value(1, &change2).expect("value");
+    walter.chain.lock.outbox.clear();
+    wire(
+        &mut walter,
+        "dora",
+        2,
+        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 5, digest: v2.digest, need: 2, id: ProposalId(w2), change: None, forced: true },
+    );
+    assert!(sent_kinds(&walter).contains(&"accepted"), "forced: accepted without an intent: {:?}", sent_kinds(&walter));
+}
+
+/// Review T3: a seat imported in pre-lock times carries the lock marker
+/// but no lock file. Opened while its chain runs no lock, the marker is
+/// cleared; after the enabling vote it reopens as a fresh acceptor, not
+/// amnesiac, and promises - an n-of-n republic is not halted.
+#[test]
+fn a_marker_the_chain_does_not_back_is_cleared_at_open() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&SEATS, 3);
+    let (mut mara, _tmp, _dir) = crate::tests::support::stored_chain_signer(&b, "mara", &SEATS);
+    mara.lock_force(true);
+    mara.active.as_mut().expect("active").prefs.chain_lock = true;
+    mara.chain.lock.enabled_override = Some(false);
+    mara.load_chain_lock(Ok(None), true);
+    assert!(!mara.active.as_ref().expect("active").prefs.chain_lock, "cleared: the lock never wrote here");
+    // the enabling vote sealed; the seat closed before its first lock write
+    mara.chain.lock.enabled_override = Some(true);
+    let marker = mara.active.as_ref().expect("active").prefs.chain_lock;
+    mara.load_chain_lock(Ok(None), marker);
+    assert_eq!(mara.chain.lock.amnesia, None, "a fresh acceptor, not amnesiac");
+    hear(&mut mara, T, &SEATS);
+    let base = mara.lock_slot().expect("slot").base;
+    mara.chain.lock.outbox.clear();
+    wire(&mut mara, "dora", 1, WorkspaceEvent::LockPrepare { height: 1, base, round: 1 });
+    assert!(sent_kinds(&mara).contains(&"promise"), "{:?}", sent_kinds(&mara));
+}
+
 /// The switch off (the release build): lock frames from a peer change
 /// nothing - no promise, no state, no file - and the enabling vote is
 /// refused at both doors with the reason.
@@ -1325,4 +1503,221 @@ fn a_dark_build_signs_nothing_on_a_locked_chain() {
     assert_eq!(own_sigs(&mara), 0, "no free signature beside the lock");
     assert!(sent_kinds(&mara).is_empty(), "no lock frame: {:?}", sent_kinds(&mara));
     assert_eq!(mara.lock_status().2, LOCK_CHAIN_UNSUPPORTED, "the status says why");
+}
+
+/// dora leads height 1 and accepts her card with mara's promise; the
+/// block for it then arrives. `(dora, slot, value)`.
+fn accepted_then_sealed(b: &mut Builder, fail_chain: bool) -> (crate::State, Slot, Value) {
+    let mut dora = seat("dora", b);
+    let id = note(&mut dora, "x");
+    dora.lock_note_intent(id, "mara");
+    dora.lock_start(0);
+    let (slot, round) = {
+        let run = dora.chain.lock.run.as_ref().expect("dora leads");
+        (run.leader.slot.clone(), run.leader.ballot.round)
+    };
+    wire(&mut dora, "mara", 1, WorkspaceEvent::LockPromise { height: 1, base: slot.base.clone(), round, leader: "dora".into(), accepted: None });
+    let value = dora.lock_value(1, &dora.proposal_change(id).expect("change")).expect("value");
+    assert!(dora.chain.lock.acceptor.holds(&slot, &value), "dora accepted x at 1");
+    dora.chain.lock.fail_chain_writes = fail_chain;
+    let block = b.commit_card(&dora, id, &["dora", "mara"]);
+    dora.receive_block_from("mara", block);
+    assert_eq!(dora.chain.head.as_ref().map(|h| h.height), Some(1));
+    (dora, slot, value)
+}
+
+/// B-F1: the lock never forgets a slot the DURABLE chain does not cover:
+/// the block at 1 did not reach the disk, so a crash would reopen at 0 -
+/// the acceptance at (1, L) must still be on record.
+#[test]
+fn a_slot_above_the_durable_chain_is_never_forgotten() {
+    let mut b = Builder::new(&SEATS, 2);
+    let (dora, slot, value) = accepted_then_sealed(&mut b, true);
+    assert!(dora.chain.lock.acceptor.holds(&slot, &value), "kept: the chain write failed");
+}
+
+/// D-F1: a slot below the head is kept for a window - a reorg may lead
+/// back onto this lineage, and the seat must still report what it
+/// accepted there.
+#[test]
+fn a_slot_below_the_head_is_kept_for_a_reorg_back() {
+    let mut b = Builder::new(&SEATS, 2);
+    let (dora, slot, value) = accepted_then_sealed(&mut b, false);
+    assert!(dora.chain.lock.acceptor.holds(&slot, &value), "kept inside the window");
+}
+
+/// B-F1 at open: a lock file settled past the chain on disk (whatever
+/// the cause) means the seat may have forgotten something: amnesia.
+#[test]
+fn a_lock_file_ahead_of_the_chain_means_amnesia() {
+    let b = Builder::new(&SEATS, 2);
+    let mara = seat("mara", &b);
+    let mut file: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&LockFile::default()).expect("json")).expect("value");
+    file["floor"] = serde_json::json!(5);
+    let mut mara = mara;
+    mara.load_chain_lock(Ok(Some(serde_json::to_vec(&file).expect("bytes"))), true);
+    assert_eq!(mara.chain.lock.amnesia, Some(None), "settled past the chain: amnesia");
+}
+
+/// H2: a consented restore needs m acceptances where m < n - phase 1's
+/// n - m + 1 then meets them even when the subject's old device promises
+/// (with m - 1 a revived device and one survivor sealed a second value).
+/// m - 1 only for m = n, where the consent stands in for the one seat
+/// every other value needs.
+#[test]
+fn a_restore_needs_m_where_m_is_below_n() {
+    for (n, m, need) in [(3, 2, 2), (5, 3, 3), (7, 4, 4), (3, 3, 2), (2, 2, 1)] {
+        assert_eq!(Quorum { n, m }.restore_need(), need, "{m}-of-{n}");
+    }
+    let b = Builder::new(&SEATS, 2);
+    let mut x = seat("dora", &b);
+    x.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
+    let rid = b.republic_id.clone();
+    let kp_hex = kp_hex_for(&b, "walter");
+    let proof = crate::make_seat_proof(b.key("walter"), "ticket", &kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(&b, "walter", "", &[], 0, &"cc".repeat(32));
+    let id = x
+        .verify_and_propose_restore("walter", &b.pk("walter"), &kp_hex, "ticket", &proof, "", &[], &consent, "")
+        .expect("proposed");
+    let change = x.chain.proposal_changes.get(&id).cloned().expect("the restore");
+    assert_eq!(x.lock_value(1, &change).expect("value").need, 2, "2-of-3: both survivors");
+}
+
+/// H2: a seat that is the subject of a restore in its own view never
+/// leads - its old device would count its own promise.
+#[test]
+fn a_restore_subject_never_leads() {
+    let b = Builder::new(&SEATS, 2);
+    let mut walter = seat("walter", &b);
+    let mut x = seat("dora", &b);
+    x.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
+    let rid = b.republic_id.clone();
+    let kp_hex = kp_hex_for(&b, "walter");
+    let proof = crate::make_seat_proof(b.key("walter"), "ticket", &kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(&b, "walter", "", &[], 0, &"cc".repeat(32));
+    let id = x
+        .verify_and_propose_restore("walter", &b.pk("walter"), &kp_hex, "ticket", &proof, "", &[], &consent, "")
+        .expect("proposed");
+    let change = x.chain.proposal_changes.get(&id).cloned().expect("the restore");
+    let value = walter.lock_value(1, &change).expect("value");
+    walter.chain.lock.known.insert((1, value.digest), (id, change));
+    assert!(walter.lock_restore_subjects().contains("walter"), "walter sees his own restore");
+    walter.lock_start(0);
+    assert!(walter.chain.lock.run.is_none(), "the subject does not lead");
+}
+
+/// A consented restore of `member` proposed on `x`: `(id, change)`.
+fn restore_card(b: &Builder, x: &mut crate::State, member: &str) -> (u64, ChainChange) {
+    x.seat_active.store(0, std::sync::atomic::Ordering::SeqCst);
+    let rid = b.republic_id.clone();
+    let kp_hex = kp_hex_for(b, member);
+    let proof = crate::make_seat_proof(b.key(member), "ticket", &kp_hex, &rid, "", &[]);
+    let consent = consent_v2_for(b, member, "", &[], 0, &"cc".repeat(32));
+    let id = x
+        .verify_and_propose_restore(member, &b.pk(member), &kp_hex, "ticket", &proof, "", &[], &consent, "")
+        .expect("proposed");
+    let change = x.chain.proposal_changes.get(&id).cloned().expect("the restore");
+    (id, change)
+}
+
+/// A-F1: an acceptor takes no `Prepare` from a seat that is a restore's
+/// subject here - in 3-of-3 its old device would lead on its own promise
+/// and seal a second value beside the restore.
+#[test]
+fn an_acceptor_refuses_a_restore_subjects_prepare() {
+    let b = Builder::new(&SEATS, 3);
+    let mut mara = seat("mara", &b);
+    let (_, _) = restore_card(&b, &mut mara, "walter");
+    assert!(mara.lock_restore_subjects().contains("walter"));
+    mara.chain.lock.outbox.clear();
+    let base = mara.lock_slot().expect("slot").base;
+    wire(&mut mara, "walter", 1, WorkspaceEvent::LockPrepare { height: 1, base, round: 5 });
+    assert!(!sent_kinds(&mara).contains(&"promise"), "no promise to the subject: {:?}", sent_kinds(&mara));
+    let slot = mara.lock_slot().expect("slot");
+    assert!(mara.chain.lock.acceptor.promised(&slot).is_none(), "no promise on record");
+}
+
+/// C-HIGH-1: a declined (or withdrawn) restore card no longer makes its
+/// seat a subject - the seat is alive and its promises count.
+#[test]
+fn a_declined_restore_card_makes_no_subject() {
+    let b = Builder::new(&SEATS, 3);
+    let mut mara = seat("mara", &b);
+    let (id, _) = restore_card(&b, &mut mara, "walter");
+    assert!(mara.lock_restore_subjects().contains("walter"), "an open card");
+    mara.proposals.get_mut(&id).expect("record").state = ProposalState::Rejected;
+    assert!(!mara.lock_restore_subjects().contains("walter"), "a declined card does not take a live seat out");
+}
+
+/// A-F3: lock state at a height - on any lineage - forbids a free
+/// signature there, also on a lineage without the enabling block: the
+/// signature is base-agnostic and would count free on the locked one.
+#[test]
+fn lock_state_on_another_lineage_forbids_a_free_signature() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    let other = Slot { height: 1, base: "another-lineage".to_string() };
+    let _ = mara.chain.lock.acceptor.prepare(&other, &Ballot { round: 1, leader: "dora".to_string() });
+    mara.chain.lock.enabled_override = Some(false);
+    assert!(!mara.lock_sign_freely(1), "a promise at 1 elsewhere: no free signature at 1");
+}
+
+/// A-F4: a legacy m = 1 chain does not enable Strict Order Mode - phase 1
+/// would need every seat.
+#[test]
+fn the_mode_needs_two_approvals_per_decision() {
+    use molt_core::chain::CHAIN_LOCK_FEATURE;
+    let b = Builder::new(&SEATS, 1);
+    let mut mara = seat("mara", &b);
+    mara.chain.lock.caps_override = Some(true);
+    let enable = json!({ "op": "set_features", "value": format!("{CHAIN_LOCK_FEATURE} memory") });
+    let err = mara.cmd_propose(Surface::Organization, enable).expect_err("refused");
+    assert!(err.to_string().contains(LOCK_NEEDS_TWO), "{err}");
+}
+
+/// C-MED-3: a card whose ballot went stale stays behind the other ready
+/// cards at the next height too - a never-sealable card no longer costs
+/// a timeout at every height.
+#[test]
+fn a_stale_card_stays_behind_at_the_next_height() {
+    let mut b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let first = note(&mut dora, "first");
+    let other = note(&mut dora, "other");
+    dora.lock_note_intent(first, "mara");
+    dora.lock_note_intent(other, "mara");
+    dora.chain.own_approvals.clear();
+    dora.lock_start(0);
+    let (base, round) = {
+        let run = dora.chain.lock.run.as_ref().expect("dora leads");
+        (run.leader.slot.base.clone(), run.leader.ballot.round)
+    };
+    wire(&mut dora, "mara", 1, WorkspaceEvent::LockPromise { height: 1, base, round, leader: "dora".into(), accepted: None });
+    assert_eq!(dora.chain.lock.run.as_ref().and_then(|r| r.value.as_ref()).map(|(id, _)| *id), Some(first));
+    let mut now = T;
+    while dora.chain.lock.run.as_ref().map(|r| r.leader.ballot.round) == Some(round) {
+        now += 10;
+        hear(&mut dora, now, &SEATS);
+        dora.lock_tick();
+    }
+    // height 1 is decided elsewhere with a third card
+    b.commit_applied(9, &["mara", "walter"]);
+    dora.receive_block_from("mara", b.blocks[1].clone());
+    assert_eq!(dora.chain.head.as_ref().map(|h| h.height), Some(1));
+    let slot = dora.lock_slot().expect("slot");
+    let chosen = dora.lock_choose(&slot, None).map(|(id, _, _)| id);
+    assert_eq!(chosen, Some(other), "the stale card waits behind the ready one");
+}
+
+/// B-F7: the lock's deadlines run on a monotonic clock (a wall-clock jump
+/// neither stalls nor fires them); the test clock still drives it.
+#[test]
+fn the_lock_clock_is_monotonic_and_follows_the_test_clock() {
+    let b = Builder::new(&SEATS, 2);
+    let mut mara = seat("mara", &b);
+    mara.presence.clock_override = None;
+    let (a, c) = (mara.lock_now(), mara.lock_now());
+    assert!(c >= a);
+    mara.presence.clock_override = Some(5);
+    assert_eq!(mara.lock_now(), 5);
 }
