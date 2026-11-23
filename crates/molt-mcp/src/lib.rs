@@ -2484,7 +2484,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "set_discussion_group",
             command: "set_discussion_group",
             scope: Scope::Seat,
-            description: "Show one kind of discussion group expanded or collapsed in this node's GUI nav (a view preference, persisted to config.toml). kind is a gated surface key; read_state lists every discussion regardless.",
+            description: "Show one kind of discussion group expanded or collapsed in this node's GUI nav (a view preference, kept beside config.toml in config.ui-state.toml). kind is a gated surface key; read_state lists every discussion regardless.",
             schema: || json!({
                 "type": "object",
                 "properties": {

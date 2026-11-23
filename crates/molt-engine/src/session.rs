@@ -612,11 +612,13 @@ impl State {
     /// which keeps the last good state and raises `config-conflict`.
     pub(crate) fn cmd_reload_settings(
         &mut self,
-        settings: SessionSettings,
+        mut settings: SessionSettings,
         language: String,
         theme: String,
     ) -> Result<Reply, MoltError> {
         validate_settings(&settings)?;
+        // not a config.toml key: the UI-state file is this node's alone
+        settings.discussion_groups_open.clone_from(&self.session.settings.discussion_groups_open);
         if self.session.settings == settings
             && self.session.language == language
             && self.session.theme == theme

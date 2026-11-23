@@ -5090,7 +5090,7 @@ pub enum Command {
         editor: u16,
     },
     /// Show one kind of discussion group expanded or collapsed in the GUI
-    /// nav (a local view preference, persisted to `config.toml`).
+    /// nav (a local view preference in the UI-state file beside `config.toml`).
     SetDiscussionGroup {
         /// A gated surface's key ([`discussion_group_kinds`]).
         kind: String,
@@ -7069,6 +7069,10 @@ pub struct UiSnapshot {
     /// included: `patch:3`, or `patch:3 group=memory open|collapsed`.
     #[serde(default)]
     pub discussions: Vec<String>,
+    /// The Status seat table, one line per row:
+    /// `ana build=0.1.2 chain=5·aaaaaa [fork] [note=...]`.
+    #[serde(default)]
+    pub seats: Vec<String>,
     /// Open decisions the window shows.
     #[serde(default)]
     pub pending_count: u32,

@@ -310,7 +310,11 @@ fn main() -> anyhow::Result<()> {
             font_app: config.ui.font_app,
             font_nav: config.ui.font_nav,
             font_editor: config.ui.font_editor,
-            discussion_groups_open: flat.discussion_groups_open.clone(),
+            // the UI-state file; a legacy config.toml key until the first write
+            discussion_groups_open: std::fs::read_to_string(molt_config::ui_state_path(&config_path))
+                .ok()
+                .and_then(|t| molt_config::parse_ui_state(&t))
+                .map_or_else(|| flat.discussion_groups_open.clone(), |u| u.discussion_groups_open),
             mcp_port: config.mcp.port,
             mcp_allow: config.mcp.allow.clone(),
             mcp_token: config.mcp.token.clone(),

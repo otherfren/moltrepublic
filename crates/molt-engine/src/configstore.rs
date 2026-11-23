@@ -108,6 +108,7 @@ pub(crate) fn spawn(
     engine_tx: mpsc::Sender<Envelope>,
 ) -> std::io::Result<ConfigStoreHandle> {
     sweep_stale_tmp(&path);
+    sweep_stale_tmp(&molt_config::ui_state_path(&path));
     let (lock_path, lock_file) = acquire_lock(&path)?;
     // The node just strictly parsed this file to boot; it is the known-good base.
     let last_good = std::fs::read_to_string(&path)?;
@@ -306,10 +307,25 @@ impl Store {
         let new_text = molt_config::update(&base, &settings).map_err(|_| {
             "config.toml on disk is invalid; fix it or run --repair-config".to_string()
         })?;
+        self.write_ui_state(&settings)?;
         atomic_write(&self.path, &new_text).map_err(|e| e.to_string())?;
         self.last_good = new_text;
         self.conflict = None;
         Ok(())
+    }
+
+    /// The view preferences go beside config.toml, before the write that
+    /// drops a legacy key from it.
+    fn write_ui_state(&self, settings: &Settings) -> Result<(), String> {
+        let path = molt_config::ui_state_path(&self.path);
+        let text = molt_config::render_ui_state(&molt_config::UiState {
+            discussion_groups_open: settings.discussion_groups_open.clone(),
+        });
+        match std::fs::read_to_string(&path) {
+            Ok(old) if old == text => Ok(()),
+            Err(_) if settings.discussion_groups_open.is_empty() => Ok(()),
+            _ => atomic_write(&path, &text).map_err(|e| e.to_string()),
+        }
     }
 
     /// One watcher pass: detect an external change, validate it, mirror it.
@@ -851,6 +867,47 @@ mod tests {
                 text.contains("renderer = \"software\""),
                 "a save reset the renderer:\n{text}"
             );
+        });
+    }
+
+    /// The groups live in the UI-state file: a toggle writes it, drops a
+    /// legacy `[ui]` key from config.toml (v0.1.1 would refuse it), and a
+    /// hand edit of config.toml does not reset them.
+    #[test]
+    fn discussion_groups_go_to_the_ui_state_file_and_leave_config_toml() {
+        rt().block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("config.toml");
+            let legacy = molt_config::render(&Settings::default())
+                .replace("[ui]\n", "[ui]\ndiscussion_groups_open = [\"memory\"]\n");
+            std::fs::write(&path, &legacy).expect("seed config");
+            assert!(molt_config::parse(&legacy).is_ok(), "the legacy key still parses here");
+            let boot = SessionView {
+                settings: SessionSettings {
+                    discussion_groups_open: vec!["memory".to_string()],
+                    ..SessionSettings::default()
+                },
+                ..SessionView::default()
+            };
+            let (wallet, store) = spawn_with_config(GroupConfig::demo(), boot, path.clone()).expect("spawn");
+            wallet
+                .execute(Command::SetDiscussionGroup { kind: "organization".to_string(), open: true })
+                .await
+                .expect("toggle");
+            let state = molt_config::ui_state_path(&path);
+            let text = wait_for_file(&state, |t| t.contains("organization")).await;
+            assert_eq!(
+                molt_config::parse_ui_state(&text).map(|u| u.discussion_groups_open),
+                Some(vec!["memory".to_string(), "organization".to_string()])
+            );
+            let config = wait_for_file(&path, |t| !t.contains("discussion_groups_open")).await;
+            assert!(molt_config::parse(&config).is_ok());
+
+            std::fs::write(&path, config.replace("lang = \"en\"", "lang = \"de\"")).expect("hand edit");
+            store.poll_now().await;
+            let sv = session(&wallet).await;
+            assert_eq!(sv.language, "de", "the edit landed");
+            assert_eq!(sv.settings.discussion_groups_open, ["memory", "organization"]);
         });
     }
 

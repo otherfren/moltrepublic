@@ -253,6 +253,9 @@ pub(crate) struct OrgStats {
     pub(crate) mirror_dir: String,
     /// The seat table (engine `StatusView.seats`), rendered.
     pub(crate) seats: Vec<SeatRowData>,
+    pub(crate) builds_mixed: bool,
+    /// Group relays that refused events (engine `StatusView.relay_refusals`).
+    pub(crate) relay_refusals: Vec<molt_core::RelayRefusals>,
 }
 
 /// One rendered row of the Organization → Status seat table.
@@ -268,32 +271,76 @@ pub(crate) struct SeatRowData {
     pub(crate) ahead: bool,
     pub(crate) signed: String,
     pub(crate) files: String,
+    /// The seat's build, "?" = unknown.
+    pub(crate) build: String,
+    /// 6 hex of the reported head, when it is at `height`.
+    pub(crate) hash: String,
+    /// On another branch: diverged, or its head differs from this node's
+    /// block at that height.
+    pub(crate) fork: bool,
+    /// The row's warning line ("" = none) and its tooltip.
+    pub(crate) note: String,
+    pub(crate) note_tip: String,
 }
 
 /// The seat table's rows: numbers as text, "-" where nothing is known.
+/// `local` = this node's block hash by height.
 pub(crate) fn seat_rows(
     seats: &[molt_core::SeatSync],
     persistent: u32,
     me: &str,
     lang: i32,
     now: u64,
+    local: &HashMap<u64, String>,
 ) -> Vec<SeatRowData> {
+    let lex = Lexicon::of(lang);
     let dash = |v: Option<u64>| v.map_or_else(|| "-".to_string(), |n| n.to_string());
     let head = seats.iter().find(|s| s.member == me).and_then(|s| s.height);
     seats
         .iter()
-        .map(|s| SeatRowData {
-            member: s.member.clone(),
-            me: s.member == me,
-            active: s.last_seen != molt_core::MemberInfo::NEVER
-                && now.saturating_sub(s.last_seen) <= molt_core::MemberInfo::ONLINE_SECS,
-            seen: seen_label(lang, now, s.last_seen, never_seen_label(lang)),
-            height: dash(s.height),
-            ahead: matches!((s.height, head), (Some(h), Some(own)) if h > own),
-            signed: dash(s.signed),
-            files: if persistent == 0 { "-".to_string() } else { format!("{} / {persistent}", s.files) },
+        .map(|s| {
+            let reported = s.head_height.zip(s.head_hash.as_deref());
+            let other_at = reported.and_then(|(h, hash)| {
+                let ours = local.get(&h).filter(|o| !o.is_empty())?;
+                (s.member != me && !ours.starts_with(hash)).then_some(h)
+            });
+            let mut notes = Vec::new();
+            match (other_at, s.diverged) {
+                (Some(h), _) => notes.push(format!("{} {h}", lex.os_other_branch_at)),
+                (None, true) => notes.push(lex.os_other_branch.to_string()),
+                _ => {}
+            }
+            if s.dup_streak > 0 {
+                notes.push(lex.os_dropped.to_string());
+            }
+            SeatRowData {
+                member: s.member.clone(),
+                me: s.member == me,
+                active: s.last_seen != molt_core::MemberInfo::NEVER
+                    && now.saturating_sub(s.last_seen) <= molt_core::MemberInfo::ONLINE_SECS,
+                seen: seen_label(lang, now, s.last_seen, never_seen_label(lang)),
+                height: dash(s.height),
+                ahead: matches!((s.height, head), (Some(h), Some(own)) if h > own),
+                signed: dash(s.signed),
+                files: if persistent == 0 { "-".to_string() } else { format!("{} / {persistent}", s.files) },
+                build: s.build.clone().unwrap_or_else(|| "?".to_string()),
+                hash: reported
+                    .filter(|(h, _)| Some(*h) == s.height)
+                    .map(|(_, hash)| hash.chars().take(6).collect())
+                    .unwrap_or_default(),
+                fork: other_at.is_some() || s.diverged,
+                note: notes.join(" · "),
+                note_tip: if s.dup_streak > 0 { lex.os_dropped_tip.to_string() } else { String::new() },
+            }
         })
         .collect()
+}
+
+/// The seats' builds differ: two known versions, or an unknown beside a
+/// known one.
+pub(crate) fn builds_mixed(seats: &[molt_core::SeatSync]) -> bool {
+    let known: std::collections::BTreeSet<&str> = seats.iter().filter_map(|s| s.build.as_deref()).collect();
+    known.len() > 1 || (!known.is_empty() && seats.iter().any(|s| s.build.is_none()))
 }
 
 /// One rendered row of the Organization → Members table.
@@ -1013,6 +1060,8 @@ pub(crate) async fn gather_surfaces(
                 mirror_dir: mirror.as_ref().map(|m| m.dir.clone()).unwrap_or_default(),
                 // rendered once the language is known, below
                 seats: Vec::new(),
+                builds_mixed: false,
+                relay_refusals: s.relay_refusals,
             },
             (s.seats, s.persistent_files),
         ),
@@ -1039,7 +1088,6 @@ pub(crate) async fn gather_surfaces(
         ),
         _ => (String::new(), 0, false, false, Vec::new()),
     };
-    org_stats.seats = seat_rows(&seat_src.0, seat_src.1, &member, lang, unix_now());
     // stamp this push BEFORE the surface reads: any selection change or
     // newer push from here on makes this pass stale, and a stale pass must
     // not land its bundle (concurrent pushes
@@ -1234,6 +1282,10 @@ pub(crate) async fn gather_surfaces(
         _ => Vec::new(),
     };
     let chain_len = chain_rows.len();
+    let local_heads: HashMap<u64, String> =
+        chain_rows.iter().filter(|b| !b.hash.is_empty()).map(|b| (b.height, b.hash.clone())).collect();
+    org_stats.seats = seat_rows(&seat_src.0, seat_src.1, &member, lang, unix_now(), &local_heads);
+    org_stats.builds_mixed = builds_mixed(&seat_src.0);
     let uploads_total = uploads.len();
     let (unread, first_seen, known, org_view, list_pages, mut uploads, mut persistent) = {
         // …and here for the same reason: this is the chat pane's own

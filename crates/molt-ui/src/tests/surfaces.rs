@@ -1043,7 +1043,7 @@ fn the_seat_table_reads_heights_files_and_presence() {
         seat("bo", now - 7_200, Some(305), None, 0),
         seat("cy", 0, None, None, 1),
     ];
-    let rows = seat_rows(&seats, 3, "ana", 0, now);
+    let rows = seat_rows(&seats, 3, "ana", 0, now, &HashMap::new());
     let row = |m: &str| rows.iter().find(|r| r.member == m).expect("a row").clone();
     assert_eq!(
         row("ana"),
@@ -1056,6 +1056,8 @@ fn the_seat_table_reads_heights_files_and_presence() {
             ahead: false,
             signed: "300".into(),
             files: "2 / 3".into(),
+            build: "?".into(),
+            ..SeatRowData::default()
         }
     );
     let bo = row("bo");
@@ -1063,5 +1065,65 @@ fn the_seat_table_reads_heights_files_and_presence() {
     assert_eq!((bo.signed.as_str(), bo.files.as_str()), ("-", "0 / 3"));
     let cy = row("cy");
     assert_eq!((cy.active, cy.height.as_str(), cy.files.as_str()), (false, "-", "1 / 3"));
-    assert_eq!(seat_rows(&seats, 0, "ana", 0, now)[0].files, "-", "no persistent file, nothing to count");
+    assert_eq!(seat_rows(&seats, 0, "ana", 0, now, &HashMap::new())[0].files, "-", "no persistent file, nothing to count");
+}
+
+/// Build, reported head and the two faults an operator must see: a head
+/// on another branch (only where this node has that height) and a seat
+/// whose messages this node drops as already seen.
+#[test]
+fn the_seat_table_shows_build_head_and_faults() {
+    use crate::surfaces::seat_rows;
+    use molt_core::SeatSync;
+    let now = 1_800_000_000;
+    let seat = |member: &str, height: u64, head: Option<(u64, &str)>| SeatSync {
+        member: member.into(),
+        last_seen: now,
+        height: Some(height),
+        build: Some("0.1.2".to_string()),
+        head_height: head.map(|h| h.0),
+        head_hash: head.map(|h| h.1.to_string()),
+        ..SeatSync::default()
+    };
+    let local = HashMap::from([(5u64, "aaaaaaaaaaaa77".to_string()), (4, "bbbbbbbbbbbb00".to_string())]);
+    let seats = vec![
+        seat("ana", 5, Some((5, "aaaaaaaaaaaa"))),
+        seat("bo", 5, Some((5, "cccccccccccc"))),
+        seat("cy", 6, Some((6, "dddddddddddd"))),
+        seat("di", 5, Some((4, "bbbbbbbbbbbb"))),
+        SeatSync { build: None, dup_streak: 3, ..seat("ed", 5, None) },
+        SeatSync { diverged: true, ..seat("fa", 5, None) },
+    ];
+    let rows = seat_rows(&seats, 0, "ana", 0, now, &local);
+    let row = |m: &str| rows.iter().find(|r| r.member == m).expect("a row").clone();
+    let ana = row("ana");
+    assert_eq!((ana.build.as_str(), ana.hash.as_str(), ana.fork, ana.note.as_str()), ("0.1.2", "aaaaaa", false, ""));
+    let bo = row("bo");
+    assert_eq!((bo.hash.as_str(), bo.fork, bo.note.as_str()), ("cccccc", true, "other branch at 5"));
+    let cy = row("cy");
+    assert_eq!((cy.hash.as_str(), cy.fork), ("dddddd", false), "a height this node lacks proves nothing");
+    let di = row("di");
+    assert_eq!((di.height.as_str(), di.hash.as_str(), di.fork), ("5", "", false), "the hash names its own height only");
+    let ed = row("ed");
+    assert_eq!((ed.build.as_str(), ed.hash.as_str()), ("?", ""));
+    assert_eq!(ed.note, "its messages are dropped here as already seen");
+    assert!(ed.note_tip.contains("restart this node on 0.1.2 or newer"), "{}", ed.note_tip);
+    let fa = row("fa");
+    assert_eq!((fa.fork, fa.note.as_str()), (true, "other branch"));
+    let de = seat_rows(&seats, 0, "ana", 1, now, &local);
+    assert_eq!(de[1].note, "anderer Zweig bei 5");
+    assert_eq!(de[4].note, "seine Nachrichten werden hier als schon gesehen verworfen");
+}
+
+#[test]
+fn mixed_builds_need_two_known_versions_or_an_unknown_beside_a_known_one() {
+    use crate::surfaces::builds_mixed;
+    use molt_core::SeatSync;
+    let with = |b: &[Option<&str>]| -> Vec<SeatSync> {
+        b.iter().map(|b| SeatSync { build: b.map(str::to_string), ..SeatSync::default() }).collect()
+    };
+    assert!(!builds_mixed(&with(&[Some("0.1.2"), Some("0.1.2")])));
+    assert!(builds_mixed(&with(&[Some("0.1.2"), Some("0.1.3")])));
+    assert!(builds_mixed(&with(&[Some("0.1.2"), None])));
+    assert!(!builds_mixed(&with(&[None, None])), "nothing known, nothing to compare");
 }

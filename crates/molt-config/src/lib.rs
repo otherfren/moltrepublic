@@ -553,7 +553,8 @@ pub struct UiConfig {
     /// Editor/document font size in px.
     #[serde(default = "default_font_editor")]
     pub font_editor: u16,
-    /// Discussion groups shown expanded, by kind.
+    /// LEGACY: a dev build wrote it here; read once, removed on the next
+    /// write. Its home is the UI-state file ([`ui_state_path`]).
     #[serde(default)]
     pub discussion_groups_open: Vec<String>,
     /// Which Slint renderer the GUI starts with.
@@ -702,6 +703,43 @@ impl std::fmt::Display for TokenError {
 impl std::error::Error for TokenError {}
 
 // ---------------------------------------------------------------------------
+// UI state: view preferences beside config.toml, parsed tolerantly.
+// ---------------------------------------------------------------------------
+
+/// View preferences of this node's window. A file of its own because
+/// `config.toml` is parsed strictly by every build: a key an older build
+/// does not know would stop it from starting after a downgrade.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct UiState {
+    /// Discussion groups shown expanded, by kind.
+    #[serde(default)]
+    pub discussion_groups_open: Vec<String>,
+}
+
+/// `<dir>/config.toml` -> `<dir>/config.ui-state.toml`.
+pub fn ui_state_path(config: &Path) -> PathBuf {
+    let stem = config.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    config.with_file_name(format!("{stem}.ui-state.toml"))
+}
+
+/// Parse a UI-state file; unknown keys and kinds are ignored, broken text
+/// is `None`.
+pub fn parse_ui_state(text: &str) -> Option<UiState> {
+    let raw: UiState = toml::from_str(text).ok()?;
+    Some(UiState {
+        discussion_groups_open: molt_core::discussion_group_kinds(raw.discussion_groups_open.iter().map(String::as_str)),
+    })
+}
+
+/// The UI-state file's text.
+pub fn render_ui_state(state: &UiState) -> String {
+    format!(
+        "# MoltRepublic window state, rewritten by the app.\ndiscussion_groups_open = {}\n",
+        toml_str_array(&state.discussion_groups_open)
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Flat settings: the single source of defaults, used to render and salvage.
 // ---------------------------------------------------------------------------
 
@@ -790,7 +828,8 @@ pub struct Settings {
     pub font_nav: u16,
     /// Editor/document font size in px.
     pub font_editor: u16,
-    /// Discussion groups shown expanded, by kind.
+    /// Discussion groups shown expanded, by kind. Never written to
+    /// `config.toml`: it lives in the UI-state file ([`ui_state_path`]).
     pub discussion_groups_open: Vec<String>,
     /// GUI renderer: `"auto" | "software" | "gl"`. File-owned - the session
     /// never carries it, so a runtime save keeps whatever the file says.
@@ -1107,8 +1146,6 @@ theme = {theme}
 font_app = {font_app}
 font_nav = {font_nav}
 font_editor = {font_editor}
-# Discussion groups shown expanded, by kind ("memory", "organization", ...).
-{groups_open_line}
 # GUI renderer: "auto" = Slint's default, "software" = CPU renderer with
 # partial repaint (no GPU), "gl" = OpenGL via femtovg. Applied at start;
 # SLINT_BACKEND overrides it.
@@ -1185,11 +1222,6 @@ renderer = {renderer}
         font_app = settings.font_app,
         font_nav = settings.font_nav,
         font_editor = settings.font_editor,
-        groups_open_line = off_default_line(
-            "discussion_groups_open",
-            &toml_str_array(&settings.discussion_groups_open),
-            "[]",
-        ),
         renderer = toml_str(&settings.renderer),
     )
 }
@@ -1705,19 +1737,8 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     set_int(ui, "font_app", i64::from(settings.font_app));
     set_int(ui, "font_nav", i64::from(settings.font_nav));
     set_int(ui, "font_editor", i64::from(settings.font_editor));
-    if settings.discussion_groups_open.is_empty() {
-        ui.remove("discussion_groups_open");
-    } else {
-        let current: Option<Vec<&str>> = ui
-            .get("discussion_groups_open")
-            .and_then(toml_edit::Item::as_array)
-            .map(|a| a.iter().filter_map(toml_edit::Value::as_str).collect());
-        let want: Vec<&str> = settings.discussion_groups_open.iter().map(String::as_str).collect();
-        if current.as_deref() != Some(&want[..]) {
-            let arr: toml_edit::Array = want.into_iter().collect();
-            set_item(ui, "discussion_groups_open", toml_edit::value(arr));
-        }
-    }
+    // lives in the UI-state file: v0.1.1 refuses an unknown [ui] key
+    ui.remove("discussion_groups_open");
     set_str(ui, "renderer", &settings.renderer);
 }
 
@@ -1930,22 +1951,89 @@ mod tests {
         assert_eq!(salvaged.font_editor, 15);
     }
 
-    /// `[ui] discussion_groups_open`: absent = none, written only when
-    /// set, unknown kinds dropped, and render/salvage round-trip it.
+    /// Every key v0.1.1 accepts, by table (`git show
+    /// v0.1.1:crates/molt-config/src/lib.rs`: the `deny_unknown_fields`
+    /// structs). A key outside it stops v0.1.1 from starting, and going
+    /// back to the previous release must keep working.
+    const V0_1_1_KEYS: &[&str] = &[
+        "node", "storage", "transport", "mcp", "ui", "files", "wallet",
+        "node.headless", "node.poke_enabled", "node.poke_wake_command", "node.wake_min_interval_secs",
+        "node.wake_on", "node.task_wake_lead_min", "node.wake_timeout_secs", "node.wake_chat_lines",
+        "node.log_file", "node.open_on_start",
+        "storage.workspace_dir", "storage.s3_backup", "storage.s3_endpoint", "storage.s3_access_key",
+        "storage.s3_secret_key", "storage.s3_bucket", "storage.s3_interval_min", "storage.s3_keep_copies",
+        "storage.s3_max_bytes", "storage.s3_plaintext_confirmed", "storage.media_s3_bucket",
+        "storage.media_s3_max_bytes", "storage.download_dir", "storage.file_cap_bytes",
+        "storage.sound_message", "storage.sound_vote", "storage.sound_poke", "storage.read_receipts",
+        "transport.anonymity", "transport.nostr", "transport.anonymity.network", "transport.anonymity.tor",
+        "transport.anonymity.tor.mode", "transport.anonymity.tor.port",
+        "transport.nostr.relay", "transport.nostr.clearnet_enabled", "transport.nostr.connect_timeout_secs",
+        "transport.nostr.publish_timeout_secs", "transport.nostr.relay.url", "transport.nostr.relay.confirmed",
+        "mcp.port", "mcp.allow", "mcp.token", "mcp.read_token",
+        "ui.lang", "ui.theme", "ui.font_app", "ui.font_nav", "ui.font_editor", "ui.renderer",
+        "files.mirror_publish_interval_secs", "files.mirror_daily_bytes",
+        "wallet.daemon_url", "wallet.daemon_confirmed", "wallet.daemon_login", "wallet.network",
+    ];
+
+    fn keys_outside_v0_1_1(text: &str) -> Vec<String> {
+        fn walk(prefix: &str, v: &toml::Value, out: &mut Vec<String>) {
+            match v {
+                toml::Value::Table(t) => {
+                    for (k, v) in t {
+                        let path = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                        if !V0_1_1_KEYS.contains(&path.as_str()) {
+                            out.push(path.clone());
+                        }
+                        walk(&path, v, out);
+                    }
+                }
+                toml::Value::Array(a) => a.iter().for_each(|v| walk(prefix, v, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk("", &text.parse::<toml::Value>().expect("toml"), &mut out);
+        out
+    }
+
+    /// What this build writes, a v0.1.1 node still reads: the template and
+    /// a runtime save carry no key outside v0.1.1's schema, whatever the
+    /// settings hold.
     #[test]
-    fn discussion_groups_open_round_trips() {
-        let old = "[ui]\nlang = \"de\"\n";
-        let s = Settings::from(&parse(old).expect("an older config parses"));
-        assert!(s.discussion_groups_open.is_empty());
-        let open = Settings { discussion_groups_open: vec!["memory".to_string()], ..s.clone() };
-        let saved = update(old, &open).expect("update");
-        let back = Settings::from(&parse(&saved).expect("parses"));
-        assert_eq!(back.discussion_groups_open, ["memory"]);
-        assert_eq!(salvage(&render(&open)).discussion_groups_open, ["memory"]);
-        let junk = "[ui]\ndiscussion_groups_open = [\"memory\", \"chat\", \"bogus\", \"memory\"]\n";
-        assert_eq!(Settings::from(&parse(junk).expect("parses")).discussion_groups_open, ["memory"]);
-        assert_eq!(update(&saved, &s).expect("update"), update(old, &s).expect("update"), "closed again, the key leaves");
-        assert!(render(&Settings::default()).contains("# discussion_groups_open = []"));
+    fn a_written_config_stays_readable_by_v0_1_1() {
+        let s = Settings { discussion_groups_open: vec!["memory".to_string()], ..non_default_settings() };
+        let rendered = render(&s);
+        assert_eq!(keys_outside_v0_1_1(&rendered), Vec::<String>::new());
+        let saved = update(&rendered, &s).expect("update");
+        assert_eq!(keys_outside_v0_1_1(&saved), Vec::<String>::new());
+    }
+
+    /// A config a dev build wrote with `[ui] discussion_groups_open` still
+    /// parses, hands its value over once, and the next write drops it.
+    #[test]
+    fn a_legacy_groups_key_is_read_once_and_dropped_on_the_next_write() {
+        let legacy = "[ui]\nlang = \"de\"\ndiscussion_groups_open = [\"memory\", \"chat\", \"bogus\"]\n";
+        let s = Settings::from(&parse(legacy).expect("still parses"));
+        assert_eq!(s.discussion_groups_open, ["memory"]);
+        assert_eq!(salvage(legacy).discussion_groups_open, ["memory"]);
+        let saved = update(legacy, &s).expect("update");
+        assert!(!saved.contains("discussion_groups_open"), "{saved}");
+        assert_eq!(keys_outside_v0_1_1(&saved), Vec::<String>::new());
+    }
+
+    /// The UI-state file sits beside the config, round-trips, and ignores
+    /// what it does not know.
+    #[test]
+    fn the_ui_state_file_round_trips_tolerantly() {
+        assert_eq!(
+            ui_state_path(Path::new("/etc/molt/node-a.toml")),
+            PathBuf::from("/etc/molt/node-a.ui-state.toml")
+        );
+        let state = UiState { discussion_groups_open: vec!["memory".to_string(), "organization".to_string()] };
+        assert_eq!(parse_ui_state(&render_ui_state(&state)), Some(state));
+        let future = "discussion_groups_open = [\"memory\", \"bogus\"]\nsplitter = 3\n[later]\nx = 1\n";
+        assert_eq!(parse_ui_state(future).map(|s| s.discussion_groups_open), Some(vec!["memory".to_string()]));
+        assert_eq!(parse_ui_state("not = = toml"), None);
     }
 
     /// §4 step 5 of `docs_archive/ui/wiki_pane_performance.md` (F1/F2): the renderer
@@ -2260,10 +2348,12 @@ mod tests {
         assert_eq!(
             Settings {
                 mcp_read_token: original.mcp_read_token.clone(),
+                discussion_groups_open: original.discussion_groups_open.clone(),
                 ..salvaged
             },
             original
         );
+        assert!(salvaged.discussion_groups_open.is_empty(), "the UI-state file holds them");
         // And the rendered text is accepted by the strict parser too.
         assert!(parse(&render(&original)).is_ok());
     }
@@ -2501,7 +2591,8 @@ mod tests {
         let original = non_default_settings();
         let updated = update(&render(&Settings::default()), &original).expect("update");
         let config = parse(&updated).expect("updated text stays strictly parseable");
-        assert_eq!(Settings::from(&config), original);
+        // the UI-state file holds the groups, never config.toml
+        assert_eq!(Settings::from(&config), Settings { discussion_groups_open: Vec::new(), ..original });
     }
 
     #[test]
