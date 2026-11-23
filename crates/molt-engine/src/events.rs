@@ -91,6 +91,13 @@ impl State {
     /// concept §2). A lagging or failing writer surfaces honestly in the
     /// session notice.
     pub(crate) fn record(&mut self, env: EventEnvelope) {
+        self.record_with(env, None);
+    }
+
+    /// [`Self::record`], appending `env` together with an MLS snapshot in
+    /// one writer step when `mls` is given; `true` when that pair is
+    /// durable (always `false` without a snapshot).
+    pub(crate) fn record_with(&mut self, env: EventEnvelope, mls: Option<Vec<u8>>) -> bool {
         #[cfg(test)]
         match &env.body {
             WorkspaceEvent::Committed(b) => {
@@ -129,17 +136,25 @@ impl State {
         // RECORD (traffic-coupled), because the presence tick is a 30 s beat
         // — a hard kill between ticks would otherwise regress the ratchet by
         // a whole burst. Early-outs on the debounce; cheap in the hot path.
-        self.persist_mls_if_due(self.presence_now());
+        if mls.is_none() {
+            self.persist_mls_if_due(self.presence_now());
+        }
         let Some(active) = &self.active else {
-            return;
+            return false;
         };
         let seq = env.seq;
         let wake_real = self.net.as_ref().is_some_and(|n| n.is_real());
         // keep a copy to wake the real mesh with after the append consumes `env`
         let wake_env = wake_real.then(|| env.clone());
-        if !active.handle.append(env) {
-            self.session.notice = "storage-lagging".to_string();
-        }
+        let durable = match mls {
+            Some(mls) => active.handle.append_with_mls_blocking(env, mls),
+            None => {
+                if !active.handle.append(env) {
+                    self.session.notice = "storage-lagging".to_string();
+                }
+                false
+            }
+        };
         if let (Some(net), Some(env)) = (&self.net, &wake_env) {
             net.wake_appended(env);
         }
@@ -153,6 +168,7 @@ impl State {
         } else if seq % SNAPSHOT_EVERY == 0 {
             self.snapshot_to_disk();
         }
+        durable
     }
 
     /// Write a snapshot now: for state the log cannot rebuild.

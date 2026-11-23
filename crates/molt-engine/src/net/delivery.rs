@@ -364,19 +364,22 @@ impl State {
         g.snapshot().ok()
     }
 
-    /// Persist the live group ratchet now, through the same gate as the
-    /// debounced persist (re-keys drained, their resets queued first). For a
-    /// commit this seat made itself: no peer ever sends it back, so a ratchet
-    /// that misses it on disk stays an epoch behind for good.
-    pub(crate) fn persist_ratchet_now(&mut self) -> bool {
-        let Some(mls) = self.group_mls() else { return false };
-        let snap = self.ratchet_snapshot(&mls);
-        let (Some(snap), Some(active)) = (snap, self.active.as_ref()) else { return false };
-        if !active.handle.merge_mls_async(snap) {
-            return false;
+    /// Log a commit this seat made with the ratchet that merged it, in one
+    /// writer step, through the gate of the debounced persist (re-keys
+    /// drained, their resets queued first). No peer sends a seat its own
+    /// commit back, so it never leaves before its epoch is on disk.
+    /// `false` = the pair is not durable; the commit is logged regardless.
+    pub(crate) fn record_own_commit(
+        &mut self,
+        env: EventEnvelope,
+        mls: &std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>,
+    ) -> bool {
+        let snap = self.ratchet_snapshot(mls);
+        let durable = self.record_with(env, snap);
+        if durable {
+            self.delivery.mls_persisted_at = self.presence_now();
         }
-        self.delivery.mls_persisted_at = self.presence_now();
-        true
+        durable
     }
 
     /// A re-key commit merged that re-admitted `member`: THE reset of a
