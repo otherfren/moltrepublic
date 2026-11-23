@@ -7055,6 +7055,10 @@ pub struct UiSnapshot {
     /// included: `patch:3`, or `patch:3 group=memory open|collapsed`.
     #[serde(default)]
     pub discussions: Vec<String>,
+    /// The Status seat table, one line per row:
+    /// `ana build=0.1.2 chain=5·aaaaaa [fork] [note=...]`.
+    #[serde(default)]
+    pub seats: Vec<String>,
     /// Open decisions the window shows.
     #[serde(default)]
     pub pending_count: u32,

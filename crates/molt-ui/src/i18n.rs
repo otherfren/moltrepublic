@@ -1066,6 +1066,13 @@ lexicon! {
     os_col_height_tip: "Highest block height the seat reported; a quiet seat may be further", "Höchste Blockhöhe, die der Sitz gemeldet hat; ein stiller Sitz kann weiter sein";
     os_col_signed: "Signed", "Signiert";
     os_col_files: "Files held", "Dateien gehalten";
+    os_col_build: "Build", "Build";
+    os_build_unknown_tip: "Older than 0.1.2 or not heard yet", "Älter als 0.1.2 oder noch nicht gehört";
+    os_builds_mixed: "Seats run different versions", "Sitze laufen mit unterschiedlichen Versionen";
+    os_other_branch_at: "other branch at", "anderer Zweig bei";
+    os_other_branch: "other branch", "anderer Zweig";
+    os_dropped: "its messages are dropped here as already seen", "seine Nachrichten werden hier als schon gesehen verworfen";
+    os_dropped_tip: "This node missed its restore; restart this node on 0.1.2 or newer.", "Dieser Knoten hat seine Wiederherstellung verpasst; starte diesen Knoten mit 0.1.2 oder neuer neu.";
     oa_col_surface: "Surface", "Bereich";
     oa_pending: "Pending", "Offen";
     oa_denied: "Denied", "Abgelehnt";
@@ -1460,6 +1467,8 @@ lexicon! {
     rp_st_unconfirmed: "not in use - confirm to enable", "nicht in Benutzung - zum Aktivieren bestätigen";
     rp_st_locked: "confirmed - but clearnet/local dialing is switched off", "bestätigt - aber Clearnet-/Lokal-Verbindungen sind ausgeschaltet";
     rp_st_active: "in use", "in Benutzung";
+    rp_st_busy: "busy", "ausgelastet";
+    rp_st_busy_hour: "in the last hour", "in der letzten Stunde";
     rp_confirm: "Confirm", "Bestätigen";
     rp_revoke: "Withdraw", "Zurückziehen";
     rp_revoke_tip: "Withdraw the confirmation - the relay stays in the list but is no longer used", "Bestätigung zurückziehen - das Relay bleibt in der Liste, wird aber nicht mehr benutzt";

@@ -105,6 +105,7 @@ export struct RelayItem {
     pos: int, // 1-based priority position (the list ORDER is the priority)
     first: bool, // at the top — the "higher priority" control is dead
     last: bool, // at the bottom — the "lower priority" control is dead
+    busy: int, // transient refusals in the last hour (StatusView.relay_refusals)
 }
 
 // One chat channel in the sidebar (chat bus): a VIEW over the one log,
@@ -395,6 +396,11 @@ export struct SeatRow {
     ahead: bool,
     signed: string,
     files: string,
+    build: string, // "?" = unknown
+    hash: string, // 6 hex of the reported head at `height` ("" = none)
+    fork: bool, // on another branch
+    note: string, // the warning line under the row ("" = none)
+    note-tip: string,
 }
 
 // One surface, with live counts and its log + pending proposals.
@@ -1489,6 +1495,13 @@ export global Strings {
     in property <string> os-col-height;
     in property <string> os-col-height-tip;
     in property <string> os-col-signed;
+    in property <string> os-col-build;
+    in property <string> os-build-unknown-tip;
+    in property <string> os-builds-mixed;
+    in property <string> os-other-branch-at;
+    in property <string> os-other-branch;
+    in property <string> os-dropped;
+    in property <string> os-dropped-tip;
     in property <string> os-col-files;
     in property <string> oa-col-surface;
     in property <string> oa-pending;
@@ -1867,6 +1880,8 @@ export global Strings {
     in property <string> rp-st-auto;
     in property <string> rp-st-unconfirmed;
     in property <string> rp-st-locked;
+    in property <string> rp-st-busy;
+    in property <string> rp-st-busy-hour;
     in property <string> rp-st-active;
     in property <string> rp-confirm;
     in property <string> rp-revoke;

@@ -388,9 +388,27 @@ pub(crate) fn build_ui_snapshot(ui: &AppWindow) -> molt_core::UiSnapshot {
             discussions.push(format!("{} group={} open", c.key, c.group));
         }
     }
+    let seats = ui
+        .get_org_seats()
+        .iter()
+        .map(|s| {
+            let mut line = format!("{} build={} chain={}", s.member, s.build, s.height);
+            if !s.hash.is_empty() {
+                line.push_str(&format!("·{}", s.hash));
+            }
+            if s.fork {
+                line.push_str(" fork");
+            }
+            if !s.note.is_empty() {
+                line.push_str(&format!(" note={}", s.note));
+            }
+            line
+        })
+        .collect();
     molt_core::UiSnapshot {
         screen: screen.to_string(),
         discussions,
+        seats,
         surface: ui.get_selected_surface().to_string(),
         view: ui.get_selected_view().to_string(),
         channel: ui.get_selected_channel().to_string(),
@@ -987,8 +1005,25 @@ pub(crate) fn relay_rows(relays: &[RelayStatus]) -> Vec<RelayItem> {
             pos: i32::try_from(i.saturating_add(1)).unwrap_or(i32::MAX),
             first: i == 0,
             last: i == last,
+            busy: 0,
         })
         .collect()
+}
+
+/// Patch each pool row's busy count in place from the group's refusals.
+pub(crate) fn apply_relay_busy(ui: &AppWindow, refusals: &[molt_core::RelayRefusals]) {
+    let rows = ui.get_relay_rows();
+    for i in 0..rows.row_count() {
+        let Some(mut r) = rows.row_data(i) else { continue };
+        let busy = refusals
+            .iter()
+            .find(|f| f.url == r.url.as_str())
+            .map_or(0, |f| i32::try_from(f.busy).unwrap_or(i32::MAX));
+        if r.busy != busy {
+            r.busy = busy;
+            rows.set_row_data(i, r);
+        }
+    }
 }
 
 /// Mirror the relay pool into Settings → Nostr relays: the rows, how many relays
@@ -996,7 +1031,13 @@ pub(crate) fn relay_rows(relays: &[RelayStatus]) -> Vec<RelayItem> {
 /// confirmed clearnet relay exists at all (only then is there anything for
 /// the session activation to unlock), and the session unlock itself.
 fn apply_relays(ui: &AppWindow, sv: &SessionView) {
-    sync_rows(&ui.get_relay_rows(), relay_rows(&sv.relays), |m| {
+    // the busy counts ride the surfaces push; a session push keeps them
+    let current = ui.get_relay_rows();
+    let mut rows = relay_rows(&sv.relays);
+    for r in &mut rows {
+        r.busy = current.iter().find(|c| c.url == r.url).map_or(0, |c| c.busy);
+    }
+    sync_rows(&current, rows, |m| {
         ui.set_relay_rows(m);
     });
     let dialable = sv.relays.iter().filter(|r| r.blocked.is_none()).count();
@@ -1704,9 +1745,16 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             ahead: s.ahead,
             signed: s.signed.as_str().into(),
             files: s.files.as_str().into(),
+            build: s.build.as_str().into(),
+            hash: s.hash.as_str().into(),
+            fork: s.fork,
+            note: s.note.as_str().into(),
+            note_tip: s.note_tip.as_str().into(),
         })
         .collect();
     crate::models::sync_rows(&ui.get_org_seats(), seats, |m| ui.set_org_seats(m));
+    ui.set_org_builds_mixed(b.org_stats.builds_mixed);
+    apply_relay_busy(ui, &b.org_stats.relay_refusals);
     // the R6 pencil's draft prefill: the same pool, space-joined
     ui.set_org_relays_joined(b.org_stats.relays.join(" ").into());
     // mirroring §3.6: the switch, the quota in GB, the usage line, the folder
