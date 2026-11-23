@@ -35,14 +35,25 @@
 //! | withdrawal | `proposals.rs` withdraw | proposer; own approval dropped, intent kept, registration gone |
 //! | amnesia floor | `lock_note_peer_height`, `lock_amnesiac_at` | rule A as built (first peer head); B, C candidate rules (options) |
 //!
+//! Wire versions: the table is the pinned 2c59a995; `v2` = 187d9f64 (need(R)
+//! = m for m<n, subjects from open restores plus held values and dropped
+//! where a heard subject's m<n, acceptors refuse a subject's Prepare/Accept,
+//! a subject never leads, voices keep subjects, any seat completes a forced
+//! value whose change rides the Accept, a value's own subject never
+//! counts); `v3` = 72a8ab79 + 02aeb19d (no restore gate at the seal, the
+//! restored member never counts, forced values need `lock::evidence_holds`
+//! with two signers, `lock_forced_vouched`/`lock_forced_evidence`).
 //! Heights: the slot is s; a seat's head is s-2 (behind: frames at s are
 //! only seen), s-1 (taking part) or s (sealed). Block s-1 always exists.
 //!
 //! NOT MODELLED: cuts (need n); more than one slot, reorgs, lineages;
 //! Committed blocks reaching others (a sealer stops, others go on - as if
 //! every block frame were lost); declines; persistence failures; the
-//! restore settle timer (any order allowed); B3's window (a revived
-//! subject is heard forever, pre-loss frames never); `chain_unsettled`;
+//! restore settle timer (any order allowed); B3's window only as "a dead
+//! old device may stop being heard" (pre-loss frames never count);
+//! `chain_unsettled`; a seat never accepting its own restore on the forced
+//! path (c0993a3e); the size gate; a leader recomputing `need` from a
+//! reported change (the model's claims always carry the true need);
 //! takeover/backoff timing (any order allowed); local vault/wallet gates;
 //! B6 free sealing is global (m free signatures anywhere seal, restore
 //! needs max(m-1,1) free); an old-build seat keeps no intents; with `lost`
@@ -54,15 +65,20 @@
 //! cards, withdrawals, intents, asks); retransmits are not explored before
 //! it (a duplicate is the `max_dups` fault). Without an older-build seat
 //! the free/locked/accepted-seen sets are not kept (nobody is free there).
-//! Liveness = some fault-free continuation seals (a fresh card `late` may
-//! appear in it), within `live_extra` more ballots per seat, asked only
-//! while max(n-m+1, m) seats are alive.
+//! Liveness: canonical fair continuations (every intent, every frame, each
+//! seat leading in turn) first; else the whole fault-free closure up to
+//! `live_budget` states - a halt the closure cannot settle is reported as
+//! a halt under the fair schedules, unproven. A fresh card `late` may
+//! appear; `live_extra` more ballots per seat; asked only while the
+//! survivors (a lost seat's old device excluded) reach max(n-m+1, min
+//! need); nothing chosen while a lost seat's old device runs is B3 by
+//! design, reported apart.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::hash::{Hash, Hasher};
 
-use super::lock::{Acceptor, Ballot, Leader, Quorum, Reply, Slot, Value};
+use super::lock::{evidence_holds, Acceptor, Ballot, Leader, Quorum, Reply, Slot, Value};
 
 const NAMES: [&str; 5] = ["a", "b", "c", "d", "e"];
 const H: u64 = 1;
@@ -192,6 +208,10 @@ struct Config {
     /// completes a forced value carried on the Accept; a value's own
     /// subject never counts.
     v2: bool,
+    /// The wire of 72a8ab79 + 02aeb19d on top of `v2`: a chosen value
+    /// seals (no restore gate at the seal), a restore's own subject never
+    /// counts for it, forced values need `evidence_holds` (two signers).
+    v3: bool,
     /// O2: signatures of OTHER seats a seat without its own intent needs
     /// on a forced value (0 = master: none).
     evidence: u8,
@@ -380,6 +400,8 @@ struct World {
 enum Act {
     Deliver(Msg),
     Dup(Msg),
+    /// A frame lost between live seats (scenario prefixes only).
+    Drop(Msg),
     Intent(u8, u8),
     Start(u8),
     Drive(u8),
@@ -563,6 +585,7 @@ impl Config {
         match a {
             Act::Deliver(m) => format!("deliver {}->{} {}", s(&m.from), s(&m.to), self.show_p(&m.p)),
             Act::Dup(m) => format!("DUP {}->{} {}", s(&m.from), s(&m.to), self.show_p(&m.p)),
+            Act::Drop(m) => format!("DROP {}->{} {}", s(&m.from), s(&m.to), self.show_p(&m.p)),
             Act::Intent(i, x) => format!("{} intent {}", s(i), c(x)),
             Act::Start(i) => format!("{} opens a ballot", s(i)),
             Act::Drive(i) => format!("{} tick: proposes (S3 timer over)", s(i)),
@@ -976,12 +999,13 @@ impl Config {
         // real signatures on that change: 1 = one seat other than the sender
         // (the first proposal), 2 = two distinct seats, the sender may be one
         let sender = usize::from(b.1);
-        let signers = match self.evidence {
-            1 => ones(ev & !bit(sender) & !bit(i)),
-            _ => ones(ev & !bit(i)),
-        };
-        let wanted = usize::from(self.evidence.min(1)) + usize::from(self.evidence >= 2);
-        if approver && !has(w.seats[i].intents[c], i) && signers < wanted {
+        let names: Vec<String> = (0..self.n).filter(|j| has(ev, *j)).map(name).collect();
+        let named: Vec<&str> = names.iter().map(String::as_str).collect();
+        let signed = w.signed[c];
+        let genuine = |m: &str| has(signed, NAMES.iter().position(|x| *x == m).unwrap_or(7));
+        let vouched = self.evidence == 0 || evidence_holds(&name(sender), &named, self.evidence >= 2, genuine);
+        let approved = has(w.seats[i].own, c) || has(w.seats[i].intents[c], i);
+        if approver && !approved && !vouched {
             w.seats[i].retry = Some((b, u(c), forced, ev));
             return;
         }
@@ -1013,7 +1037,9 @@ impl Config {
     }
 
     fn count(&self, w: &mut World, i: usize, from: usize, b: B, c: usize) {
-        let skip = if self.v2 {
+        let skip = if self.v3 {
+            self.cards[c].restore_of == Some(from)
+        } else if self.v2 {
             has(self.subject_cards(w, i), c) && self.cards[c].restore_of == Some(from)
         } else {
             self.is_restore(c) && has(self.subjects(w, i), from)
@@ -1036,7 +1062,7 @@ impl Config {
         if w.seats[i].sealed.is_some() {
             return;
         }
-        if let Some(z) = self.cards[c].restore_of {
+        if let (Some(z), false) = (self.cards[c].restore_of, self.v3) {
             if z == i || w.seats[i].heard_subject {
                 w.seats[i].learned = Some((b, u(c)));
                 return;
@@ -1317,6 +1343,7 @@ impl Config {
                 msg_take(&mut w, m);
                 self.deliver(&mut w, m);
             }
+            Act::Drop(m) => msg_take(&mut w, m),
             Act::Dup(m) => {
                 w.dups += 1;
                 if let Ok(k) = w.msgs.binary_search_by(|e| e.0.cmp(m)) {
@@ -1587,7 +1614,12 @@ impl Config {
                 continue;
             }
             for c in 0..self.cards.len() {
-                if has(s.withdrawn, c) && !has(s.intents[c], i) && s.retry.is_some_and(|r| usize::from(r.1) == c) {
+                // `lock_approve_forced` needs the withdrawn card's record here
+                if has(s.known, c)
+                    && has(s.withdrawn, c)
+                    && !has(s.intents[c], i)
+                    && s.retry.is_some_and(|r| usize::from(r.1) == c)
+                {
                     out.push(Act::OperatorApprove(u(i), u(c)));
                 }
             }
@@ -1913,9 +1945,11 @@ impl Config {
     fn after(&self, prefix: &[&str]) -> World {
         let mut w = self.init();
         for step in prefix {
+            let drops = w.msgs.iter().map(|(m, _)| Act::Drop(m.clone()));
             let act = self
                 .actions(&w, false)
                 .into_iter()
+                .chain(drops)
                 .find(|a| self.show(a) == *step)
                 .unwrap_or_else(|| panic!("step not enabled: {step}"));
             w = self.apply(&w, &act);
@@ -1965,32 +1999,30 @@ impl Config {
             // the first halts in BFS order carry the shortest trace; past a
             // few hundred the count is a lower bound and checking stops
             let halts_seen = r.halts + r.live_unknown + r.b3_holds;
-            if liveness && halts_seen < 200 && self.liveness_applies(&w) {
-                if !self.fair_seal(&mut memo, &w) {
-                    let resolvable = !self.operator_acts(&w).is_empty();
-                    let verdict = self.can_seal(&mut memo, &w);
-                    if verdict != Some(true) && resolvable {
-                        r.operator_resolvable += 1;
+            if liveness && halts_seen < 200 && self.liveness_applies(&w) && !self.fair_seal(&mut memo, &w) {
+                let resolvable = !self.operator_acts(&w).is_empty();
+                let verdict = self.can_seal(&mut memo, &w);
+                if verdict != Some(true) && resolvable {
+                    r.operator_resolvable += 1;
+                }
+                if verdict != Some(true) && self.b3_hold(&w) {
+                    r.b3_holds += 1;
+                    if r.b3_trace.is_none() {
+                        r.b3_trace = Some(trace(&parent, h));
                     }
-                    if verdict != Some(true) && self.b3_hold(&w) {
-                        r.b3_holds += 1;
-                        if r.b3_trace.is_none() {
-                            r.b3_trace = Some(trace(&parent, h));
+                }
+                match if self.b3_hold(&w) { Some(true) } else { verdict } {
+                    Some(true) => {}
+                    Some(false) => {
+                        r.halts += 1;
+                        if r.halt_trace.is_none() {
+                            r.halt_trace = Some(trace(&parent, h));
                         }
                     }
-                    match if self.b3_hold(&w) { Some(true) } else { verdict } {
-                        Some(true) => {}
-                        Some(false) => {
-                            r.halts += 1;
-                            if r.halt_trace.is_none() {
-                                r.halt_trace = Some(trace(&parent, h));
-                            }
-                        }
-                        None => {
-                            r.live_unknown += 1;
-                            if r.fair_halt_trace.is_none() {
-                                r.fair_halt_trace = Some(trace(&parent, h));
-                            }
+                    None => {
+                        r.live_unknown += 1;
+                        if r.fair_halt_trace.is_none() {
+                            r.fair_halt_trace = Some(trace(&parent, h));
                         }
                     }
                 }
@@ -2094,6 +2126,7 @@ fn base(n: usize, m: usize, cards: Vec<Card>) -> Config {
         live_budget: 200_000,
         fixes: Fixes::default(),
         v2: false,
+        v3: false,
         evidence: 0,
         byz: None,
         max_byz: 0,
@@ -2279,6 +2312,20 @@ fn bounds_from_env(cfg: &mut Config) {
     if let Some(v) = env_u("LOCK_V2") {
         cfg.v2 = v != 0;
     }
+    if let Some(v) = u8_of("LOCK_MAX_AMNESIA") {
+        cfg.max_amnesia = v;
+    }
+    if let Some(v) = env_u("LOCK_ALL_REPORT") {
+        cfg.all_report = v != 0;
+    }
+    if env_u("LOCK_NOLATE").is_some_and(|v| v != 0) {
+        cfg.cards.retain(|c| !c.late);
+    }
+    if env_u("LOCK_V3").is_some_and(|v| v != 0) {
+        cfg.v2 = true;
+        cfg.v3 = true;
+        cfg.evidence = 2;
+    }
     if let Some(v) = u8_of("LOCK_EVIDENCE") {
         cfg.evidence = v;
     }
@@ -2364,6 +2411,37 @@ fn a_revived_subject_forks_on_the_pinned_rules_and_not_on_master() {
     assert!(r.violations.is_empty(), "{}", summary(&cfg, &r));
 }
 
+/// O3: a seat that lost its lock state with no amnesia (an import) leads
+/// a fresh ballot with its own blank promise (m = n, Q1 = 1) and a second
+/// value is chosen beside the first.
+#[test]
+fn an_import_without_amnesia_forks() {
+    let (cfg, prefix) = scenario("amnesia_chosen_strict");
+    let mut cfg = Config { amnesia: Some(Rule::Import), max_states: 20_000, ..cfg };
+    cfg.v2 = true;
+    cfg.v3 = true;
+    cfg.evidence = 2;
+    let mut steps = prefix;
+    steps.extend(["deliver A->B Intent(Y)", "deliver C->B Intent(Y)", "B LOSES its lock state"]);
+    let r = cfg.explore_after(&steps, false);
+    assert!(r.violations.contains_key("lock-lock"), "{}", summary(&cfg, &r));
+}
+
+/// O2 with one deviating seat: master signs a change no honest seat
+/// approved (a bare forced Accept), the one-signer rule too (a made-up
+/// holding in a promise), two distinct signers hold within the bound.
+#[test]
+fn a_deviating_seat_gets_no_honest_signature_with_two_signers() {
+    for (evidence, broken) in [(0u8, true), (1, true), (2, false)] {
+        let mut cfg = shape("byz", 3, 2);
+        cfg.evidence = evidence;
+        cfg.v3 = evidence == 2;
+        cfg.max_states = 8_000;
+        let r = cfg.explore_after(&["A opens a ballot", "BYZANTINE C->A Promise(1:A, holds X@1:C)"], false);
+        assert_eq!(r.violations.contains_key("unapproved"), broken, "evidence {evidence}: {}", summary(&cfg, &r));
+    }
+}
+
 /// (L) A deviating seat that reports a made-up value keeps it forced
 /// exactly while `1 + unheard >= m`: the real `Leader::forced`.
 #[test]
@@ -2395,7 +2473,7 @@ fn explore_runner() {
         let mut cfg = shape(parts[0], n, m);
         cfg.fixes = fixes_of(parts.get(3).unwrap_or(&"0000"));
         bounds_from_env(&mut cfg);
-        let live = env_u("LOCK_LIVE").map_or(true, |v| v != 0);
+        let live = env_u("LOCK_LIVE") != Some(0);
         let t = std::time::Instant::now();
         let r = cfg.explore(live);
         eprintln!("[{item}] {:.1?}\n{}", t.elapsed(), summary(&cfg, &r));
@@ -2507,6 +2585,15 @@ fn explore_probe() {
     }
 }
 
+fn rule_from_env() -> Rule {
+    match std::env::var("LOCK_RULE").as_deref() {
+        Ok("a") => Rule::A,
+        Ok("b") => Rule::B,
+        Ok("c") => Rule::C,
+        _ => Rule::Import,
+    }
+}
+
 /// A scenario: a shape and a prefix that sets the situation up; the search
 /// is exhaustive from its end (faults included).
 fn scenario(name: &str) -> (Config, Vec<&'static str>) {
@@ -2542,6 +2629,7 @@ fn scenario(name: &str) -> (Config, Vec<&'static str>) {
             shape_withdraw(3, 2),
             vec![
                 "deliver B->C Card(X)",
+                "DROP B->A Card(X)",
                 "B intent X",
                 "C intent X",
                 "deliver C->B Intent(X)",
@@ -2565,8 +2653,51 @@ fn scenario(name: &str) -> (Config, Vec<&'static str>) {
                 "deliver A->B Accept(r1, R(C))",
             ],
         ),
-        // O3/amnesia: the scenario is the shape itself
-        "import" => (shape_amnesia(3, 2, Rule::Import), vec![]),
+        // amnesia after a choice: X chosen by A and C, then free (C may
+        // lose its state); the rule from `LOCK_RULE` (a, b, c, import)
+        "amnesia_chosen" => {
+            let mut cfg = shape_amnesia(3, 2, rule_from_env());
+            cfg.behind = 0;
+            let prefix = vec![
+                "deliver B->C Card(Y)",
+                "B intent Y",
+                "C intent Y",
+                "deliver C->B Intent(Y)",
+                "deliver A->C Card(X)",
+                "A intent X",
+                "C intent X",
+                "deliver C->A Intent(X)",
+                "A opens a ballot",
+                "deliver A->C Prepare(r1)",
+                "deliver C->A Promise(1:A)",
+                "deliver A->C Accept(r1, X)",
+            ];
+            (cfg, prefix)
+        }
+        // m = n: X chosen by all three, then free
+        "amnesia_chosen_strict" => {
+            let mut cfg = shape_amnesia(3, 3, rule_from_env());
+            cfg.behind = 0;
+            cfg.max_msgs = 24;
+            let prefix = vec![
+                "deliver B->A Card(Y)",
+                "deliver B->C Card(Y)",
+                "A intent Y",
+                "B intent Y",
+                "C intent Y",
+                "deliver A->B Card(X)",
+                "deliver A->C Card(X)",
+                "A intent X",
+                "B intent X",
+                "C intent X",
+                "deliver B->A Intent(X)",
+                "deliver C->A Intent(X)",
+                "A opens a ballot",
+                "deliver A->B Accept(r1, X)",
+                "deliver A->C Accept(r1, X)",
+            ];
+            (cfg, prefix)
+        }
         other => panic!("unknown scenario {other}"),
     }
 }
@@ -2577,12 +2708,18 @@ fn scenario(name: &str) -> (Config, Vec<&'static str>) {
 fn explore_scenario() {
     let names = std::env::var("LOCK_SCENARIO").unwrap_or_default();
     for name in names.split_whitespace() {
-        let (mut cfg, prefix) = scenario(name);
+        let (mut cfg, mut prefix) = scenario(name);
+        let extra = std::env::var("LOCK_PREFIX").unwrap_or_default();
+        let extra: Vec<&str> = extra.split('|').filter(|x| !x.is_empty()).collect();
+        if !extra.is_empty() {
+            // a whole prefix of its own, `show` strings joined by `|`
+            prefix = extra.into_iter().map(|x| &*Box::leak(x.to_string().into_boxed_str())).collect();
+        }
         if let Ok(f) = std::env::var("LOCK_FIXES") {
             cfg.fixes = fixes_of(&f);
         }
         bounds_from_env(&mut cfg);
-        let live = env_u("LOCK_LIVE").map_or(true, |v| v != 0);
+        let live = env_u("LOCK_LIVE") != Some(0);
         let t = std::time::Instant::now();
         let r = cfg.explore_after(&prefix, live);
         eprintln!("[scenario {name} v2={}] {:.1?}\n{}", cfg.v2, t.elapsed(), summary(&cfg, &r));
