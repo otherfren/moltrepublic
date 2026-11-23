@@ -510,6 +510,10 @@ pub struct SessionSettings {
     /// Editor/document font size in px.
     #[serde(default = "default_font_editor")]
     pub font_editor: u16,
+    /// Discussion groups this node shows expanded, by kind
+    /// ([`discussion_group_kinds`]); an absent kind starts collapsed.
+    #[serde(default)]
+    pub discussion_groups_open: Vec<String>,
     /// The Nostr relay pool, in priority order (position 0 is tried first).
     /// **Empty by default — nothing is pre-trusted.** Edited through the
     /// `Relay*` commands (never a free-form text field), because every entry
@@ -611,6 +615,19 @@ fn default_true() -> bool {
     true
 }
 
+/// The valid discussion-group kinds among `kinds` (a gated surface's
+/// key), sorted and deduplicated.
+pub fn discussion_group_kinds<'a>(kinds: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut v: Vec<String> = kinds
+        .into_iter()
+        .filter(|k| Surface::parse(k).is_some_and(Surface::is_gated))
+        .map(str::to_string)
+        .collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
 /// The display label for an anonymity-network setting — what
 /// [`WorkspaceInfo::net`] / [`CreateState::net`] and the create screen's
 /// read-only "Network" line show. The SINGLE normalization every surface
@@ -665,6 +682,7 @@ impl Default for SessionSettings {
             font_app: default_font_app(),
             font_nav: default_font_nav(),
             font_editor: default_font_editor(),
+            discussion_groups_open: Vec::new(),
             // no relay ships with the app: a fresh install connects nowhere
             relays: Vec::new(),
             clearnet_relays_enabled: false,
@@ -5057,6 +5075,14 @@ pub enum Command {
         /// Editor/document font size in px.
         editor: u16,
     },
+    /// Show one kind of discussion group expanded or collapsed in the GUI
+    /// nav (a local view preference, persisted to `config.toml`).
+    SetDiscussionGroup {
+        /// A gated surface's key ([`discussion_group_kinds`]).
+        kind: String,
+        /// Expanded.
+        open: bool,
+    },
     /// Turn this node's chat read receipts on or off (a local per-node
     /// preference, persisted to `config.toml` — never governance-gated, never
     /// on the wire). Symmetric: while off, the node sends no receipts of its
@@ -7025,6 +7051,10 @@ pub struct UiSnapshot {
     /// Nav rows the window offers, as `surface` keys in order.
     #[serde(default)]
     pub nav: Vec<String>,
+    /// The nav's discussions in order, a collapsed group's members
+    /// included: `patch:3`, or `patch:3 group=memory open|collapsed`.
+    #[serde(default)]
+    pub discussions: Vec<String>,
     /// Open decisions the window shows.
     #[serde(default)]
     pub pending_count: u32,

@@ -310,6 +310,7 @@ fn main() -> anyhow::Result<()> {
             font_app: config.ui.font_app,
             font_nav: config.ui.font_nav,
             font_editor: config.ui.font_editor,
+            discussion_groups_open: flat.discussion_groups_open.clone(),
             mcp_port: config.mcp.port,
             mcp_allow: config.mcp.allow.clone(),
             mcp_token: config.mcp.token.clone(),

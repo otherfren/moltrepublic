@@ -487,6 +487,55 @@ export component ViewRow inherits Rectangle {
     }
 }
 
+// A discussion group's header in the nav: chevron, "<kind> (N)", and the
+// members' summed unread while collapsed. A click toggles the group.
+export component GroupRow inherits Rectangle {
+    in property <string> label;
+    in property <bool> open;
+    in property <int> pending: 0;
+    callback toggled();
+    height: 30px * Theme.ui-scale;
+    border-radius: Theme.win95 ? 0px : 6px;
+    background: gta.has-hover ? Theme.panel-2 : transparent;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-expandable: true;
+    accessible-expanded: root.open;
+    accessible-action-default => {
+        root.toggled();
+    }
+    HorizontalLayout {
+        padding-left: 26px;
+        padding-right: 10px;
+        spacing: 8px;
+        Text {
+            width: 20px;
+            text: root.open ? "▾" : "▸";
+            color: Theme.faint;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.label;
+            color: Theme.dim;
+            font-size: 13px;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.pending > 0: PendingBadge {
+            count: root.pending;
+            y: (parent.height - self.height) / 2;
+        }
+    }
+    gta := TouchArea {
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
 // The emoji palette (borrowed from konkinwallet): a fixed 8-glyph row in a
 // PopupWindow, rendered in the colorful Twemoji font.
 export component EmojiGrid inherits Rectangle {

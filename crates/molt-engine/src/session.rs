@@ -116,6 +116,22 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// Show one discussion-group kind expanded or collapsed (a view pref).
+    pub(crate) fn cmd_set_discussion_group(&mut self, kind: &str, open: bool) -> Result<Reply, MoltError> {
+        if molt_core::discussion_group_kinds([kind]).is_empty() {
+            return Err(MoltError::Settings(format!("unknown discussion group kind={kind}")));
+        }
+        let groups = &mut self.session.settings.discussion_groups_open;
+        groups.retain(|k| k != kind);
+        if open {
+            groups.push(kind.to_string());
+        }
+        *groups = molt_core::discussion_group_kinds(groups.iter().map(String::as_str));
+        self.persist_settings(false);
+        self.emit_session(SessionScope::Full);
+        Ok(Reply::Ack)
+    }
+
     /// Flip this node's read-receipts preference (a hot local pref — no
     /// restart). Silent persist to `config.toml`, then re-emit the session so
     /// the GUI reflects the new state (and, symmetrically, hides/shows others'
@@ -567,6 +583,7 @@ impl State {
         settings.font_app = self.session.settings.font_app;
         settings.font_nav = self.session.settings.font_nav;
         settings.font_editor = self.session.settings.font_editor;
+        settings.discussion_groups_open = self.session.settings.discussion_groups_open.clone();
         // the purse's daemon has one door, `patch_settings`: a wholesale save
         // must not drop it or move its confirmation to another URL
         settings.wallet_daemon_url = self.session.settings.wallet_daemon_url.clone();
@@ -3232,6 +3249,28 @@ two" }),
         .expect("save");
         let s = settings(&w).await;
         assert_eq!((s.font_app, s.font_nav, s.font_editor), (16, 12, 15));
+    }
+
+    /// `set_discussion_group` keeps a sorted set of expanded kinds,
+    /// refuses a kind that is no gated surface, and a wholesale save
+    /// keeps it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn set_discussion_group_toggles_and_survives_a_wholesale_save() {
+        let w = node();
+        let set = |kind: &str, open: bool| Command::SetDiscussionGroup { kind: kind.to_string(), open };
+        w.execute(set("organization", true)).await.expect("open");
+        w.execute(set("memory", true)).await.expect("open");
+        w.execute(set("memory", true)).await.expect("idempotent");
+        assert_eq!(settings(&w).await.discussion_groups_open, ["memory", "organization"]);
+        w.execute(set("organization", false)).await.expect("close");
+        for bad in ["chat", "bogus"] {
+            let err = w.execute(set(bad, true)).await.expect_err("no such kind");
+            assert!(matches!(err, molt_core::MoltError::Settings(_)), "{err:?}");
+        }
+        w.execute(Command::SaveSettings { settings: molt_core::SessionSettings::default() })
+            .await
+            .expect("save");
+        assert_eq!(settings(&w).await.discussion_groups_open, ["memory"]);
     }
 
     /// A hand edit that switches clearnet off goes dark at once; one that

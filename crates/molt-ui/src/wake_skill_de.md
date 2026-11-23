@@ -233,7 +233,7 @@ DENY_TOOLS=(propose withdraw wiki_edit quests_propose propose_checkpoint poke
             share_file remove_file download_file cancel_download delete_chat
             set_mirror set_mirror_dir read_mirror read_chain read_uploads resolve_upload
             read_ui_state ui_action navigate select_surface select_view
-            set_language set_theme set_fonts set_read_receipts
+            set_language set_theme set_fonts set_read_receipts set_discussion_group
             relay_probe relay_add relay_remove relay_move relay_confirm relay_revoke
             relay_clearnet_session net_test_s3 net_test_tor net_reset_tor read_log net_list_backups
             test_wake clear_notice set_workspace_backup backup_now backup_fetch

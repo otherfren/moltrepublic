@@ -2486,6 +2486,7 @@ impl State {
             Command::SetTheme { theme } => self.cmd_set_theme(theme),
             Command::SetFonts { app, nav, editor } => self.cmd_set_fonts(app, nav, editor),
             Command::SetReadReceipts { enabled } => self.cmd_set_read_receipts(enabled),
+            Command::SetDiscussionGroup { kind, open } => self.cmd_set_discussion_group(&kind, open),
             Command::SaveSettings { settings } => self.cmd_save_settings(settings),
             Command::PatchSettings { patch } => self.cmd_patch_settings(patch),
             Command::ReloadSettings {

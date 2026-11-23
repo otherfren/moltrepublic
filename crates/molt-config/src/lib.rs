@@ -553,6 +553,9 @@ pub struct UiConfig {
     /// Editor/document font size in px.
     #[serde(default = "default_font_editor")]
     pub font_editor: u16,
+    /// Discussion groups shown expanded, by kind.
+    #[serde(default)]
+    pub discussion_groups_open: Vec<String>,
     /// Which Slint renderer the GUI starts with.
     #[serde(default)]
     pub renderer: Renderer,
@@ -593,6 +596,7 @@ impl Default for UiConfig {
             font_app: default_font_app(),
             font_nav: default_font_nav(),
             font_editor: default_font_editor(),
+            discussion_groups_open: Vec::new(),
             renderer: Renderer::default(),
         }
     }
@@ -786,6 +790,8 @@ pub struct Settings {
     pub font_nav: u16,
     /// Editor/document font size in px.
     pub font_editor: u16,
+    /// Discussion groups shown expanded, by kind.
+    pub discussion_groups_open: Vec<String>,
     /// GUI renderer: `"auto" | "software" | "gl"`. File-owned - the session
     /// never carries it, so a runtime save keeps whatever the file says.
     pub renderer: String,
@@ -856,6 +862,7 @@ impl Default for Settings {
             font_app: default_font_app(),
             font_nav: default_font_nav(),
             font_editor: default_font_editor(),
+            discussion_groups_open: Vec::new(),
             renderer: default_renderer(),
             relays: Vec::new(),
             clearnet_relays_enabled: false,
@@ -934,6 +941,7 @@ impl From<&Config> for Settings {
             font_app: c.ui.font_app,
             font_nav: c.ui.font_nav,
             font_editor: c.ui.font_editor,
+            discussion_groups_open: molt_core::discussion_group_kinds(c.ui.discussion_groups_open.iter().map(String::as_str)),
             renderer: c.ui.renderer.as_str().to_string(),
             wallet_daemon_confirmed: c.wallet.daemon_confirmed && !usable_daemon_url(&c.wallet.daemon_url).is_empty(),
             wallet_daemon_url: usable_daemon_url(&c.wallet.daemon_url),
@@ -1099,6 +1107,8 @@ theme = {theme}
 font_app = {font_app}
 font_nav = {font_nav}
 font_editor = {font_editor}
+# Discussion groups shown expanded, by kind ("memory", "organization", ...).
+{groups_open_line}
 # GUI renderer: "auto" = Slint's default, "software" = CPU renderer with
 # partial repaint (no GPU), "gl" = OpenGL via femtovg. Applied at start;
 # SLINT_BACKEND overrides it.
@@ -1175,6 +1185,11 @@ renderer = {renderer}
         font_app = settings.font_app,
         font_nav = settings.font_nav,
         font_editor = settings.font_editor,
+        groups_open_line = off_default_line(
+            "discussion_groups_open",
+            &toml_str_array(&settings.discussion_groups_open),
+            "[]",
+        ),
         renderer = toml_str(&settings.renderer),
     )
 }
@@ -1425,6 +1440,9 @@ pub fn salvage(text: &str) -> Settings {
         }
         if let Some(v) = ui.get("font_editor").and_then(toml::Value::as_integer) {
             s.font_editor = u16::try_from(v).unwrap_or_else(|_| default_font_editor());
+        }
+        if let Some(v) = ui.get("discussion_groups_open").and_then(toml::Value::as_array) {
+            s.discussion_groups_open = molt_core::discussion_group_kinds(v.iter().filter_map(toml::Value::as_str));
         }
         if let Some(r) = ui.get("renderer").and_then(toml::Value::as_str) {
             if matches!(r, "auto" | "software" | "gl") {
@@ -1687,6 +1705,19 @@ pub fn apply(settings: &Settings, doc: &mut toml_edit::DocumentMut) {
     set_int(ui, "font_app", i64::from(settings.font_app));
     set_int(ui, "font_nav", i64::from(settings.font_nav));
     set_int(ui, "font_editor", i64::from(settings.font_editor));
+    if settings.discussion_groups_open.is_empty() {
+        ui.remove("discussion_groups_open");
+    } else {
+        let current: Option<Vec<&str>> = ui
+            .get("discussion_groups_open")
+            .and_then(toml_edit::Item::as_array)
+            .map(|a| a.iter().filter_map(toml_edit::Value::as_str).collect());
+        let want: Vec<&str> = settings.discussion_groups_open.iter().map(String::as_str).collect();
+        if current.as_deref() != Some(&want[..]) {
+            let arr: toml_edit::Array = want.into_iter().collect();
+            set_item(ui, "discussion_groups_open", toml_edit::value(arr));
+        }
+    }
     set_str(ui, "renderer", &settings.renderer);
 }
 
@@ -1897,6 +1928,24 @@ mod tests {
         assert_eq!(salvaged.font_app, 16);
         assert_eq!(salvaged.font_nav, 12);
         assert_eq!(salvaged.font_editor, 15);
+    }
+
+    /// `[ui] discussion_groups_open`: absent = none, written only when
+    /// set, unknown kinds dropped, and render/salvage round-trip it.
+    #[test]
+    fn discussion_groups_open_round_trips() {
+        let old = "[ui]\nlang = \"de\"\n";
+        let s = Settings::from(&parse(old).expect("an older config parses"));
+        assert!(s.discussion_groups_open.is_empty());
+        let open = Settings { discussion_groups_open: vec!["memory".to_string()], ..s.clone() };
+        let saved = update(old, &open).expect("update");
+        let back = Settings::from(&parse(&saved).expect("parses"));
+        assert_eq!(back.discussion_groups_open, ["memory"]);
+        assert_eq!(salvage(&render(&open)).discussion_groups_open, ["memory"]);
+        let junk = "[ui]\ndiscussion_groups_open = [\"memory\", \"chat\", \"bogus\", \"memory\"]\n";
+        assert_eq!(Settings::from(&parse(junk).expect("parses")).discussion_groups_open, ["memory"]);
+        assert_eq!(update(&saved, &s).expect("update"), update(old, &s).expect("update"), "closed again, the key leaves");
+        assert!(render(&Settings::default()).contains("# discussion_groups_open = []"));
     }
 
     /// §4 step 5 of `docs_archive/ui/wiki_pane_performance.md` (F1/F2): the renderer
@@ -2284,6 +2333,7 @@ mod tests {
             font_app: 16,
             font_nav: 12,
             font_editor: 15,
+            discussion_groups_open: vec!["memory".to_string(), "organization".to_string()],
             // two relays in a deliberate order: the round-trip must preserve
             // BOTH the order (it is the dial priority) and each confirmation
             relays: vec![

@@ -86,6 +86,9 @@ What a test needs to assert, not a widget tree:
   the compose row is visible, **and whether the log is scrolled into view**
   (the empty-chat bug was invisible without that last one);
 - the nav: the rows it offers per surface, their badges;
+- the nav's discussions (`discussions`), a collapsed group's members
+  included as `patch:3 group=memory collapsed` - grouping is a view
+  preference (`set_discussion_group`) and hides nothing from the walk;
 - pending decisions: count and quorum text;
 - the vault pane: `vault_rows`, the deposit and grant rows its models hold;
 - the wizards: which step/phase, which fields are armed;

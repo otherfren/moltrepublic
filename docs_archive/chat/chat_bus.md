@@ -227,7 +227,10 @@ Test-first throughout (failing test → implementation), per house rules.
   window = filter; per-channel unread counts (purely local UI state);
   governance system lines interleaved in patch channels (Q7). Validation:
   clean `cargo build -p molt-ui` + engine-level tests (no GUI on
-  `DISPLAY=:0`).
+  `DISPLAY=:0`). Four or more open votes of one kind (the
+  proposal's surface) list under one collapsible `<Kind> (N)` header -
+  a node-local view preference (`[ui] discussion_groups_open`), never a
+  filter on what the engine enumerates.
 
 Non-goals (permanent): no per-channel queues or MLS groups; no persistence
 change (chat stays off-chain; the local encrypted log keeps working as today);

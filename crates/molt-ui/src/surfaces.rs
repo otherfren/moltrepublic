@@ -379,6 +379,7 @@ pub(crate) struct UploadRowData {
 /// One chat-channel sidebar row (plain, `Send` twin of the Slint
 /// `ChannelItem`). The group row's `label` stays empty — the UI substitutes
 /// the localized `Strings.ch-group`.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct ChannelRowData {
     pub(crate) key: String,
     pub(crate) label: String,
@@ -386,6 +387,15 @@ pub(crate) struct ChannelRowData {
     pub(crate) unread: i32,
     /// A topic's time left, short ("3 d"); "" for other rows.
     pub(crate) note: String,
+    /// A discussion's group kind (its proposal's surface); "" = a topic.
+    pub(crate) kind: String,
+    /// The group this row is listed in ("" = none), or a header's own kind.
+    pub(crate) group: String,
+    pub(crate) header: bool,
+    /// The group renders expanded.
+    pub(crate) open: bool,
+    /// A header's member keys, space-separated.
+    pub(crate) members: String,
 }
 
 /// UI-local chat-bus state shared between the Slint callbacks and the
@@ -1016,7 +1026,7 @@ pub(crate) async fn gather_surfaces(
     // never narrows the read: `ReadState { view: None }` IS the General
     // pane. The engine's `view` axis survives for the agent-facing "unread"
     // slice, which is deliberately not somewhere a human navigates.
-    let (active_ws, lang, chat_on_screen, mark_read_active) = match wallet.execute(Command::ReadSession).await {
+    let (active_ws, lang, chat_on_screen, mark_read_active, groups_open) = match wallet.execute(Command::ReadSession).await {
         Ok(Reply::Session(s)) => (
             s.active_workspace.clone(),
             i32::from(s.language == "de"),
@@ -1025,8 +1035,9 @@ pub(crate) async fn gather_surfaces(
             // this node's read receipts are enabled (off = reveal nothing, so
             // do not even issue the no-op'd command)
             s.surface == Surface::Chat && s.settings.read_receipts,
+            s.settings.discussion_groups_open.clone(),
         ),
-        _ => (String::new(), 0, false, false),
+        _ => (String::new(), 0, false, false, Vec::new()),
     };
     org_stats.seats = seat_rows(&seat_src.0, seat_src.1, &member, lang, unix_now());
     // stamp this push BEFORE the surface reads: any selection change or
@@ -1307,7 +1318,12 @@ pub(crate) async fn gather_surfaces(
     // its ✓/⊘ state line) after the proposal left the Proposed-only read
     let titles = known_titles(lang, &known);
     let now = crate::channels::now_secs();
-    let channels = derive_channels(lang, &infos, &known, &unread, now);
+    let channels = crate::channels::group_channels(
+        lang,
+        derive_channels(lang, &infos, &known, &unread, now),
+        &groups_open,
+        &channel_key(&selected),
+    );
     let (selected_thread_closed, selected_thread_ends) = infos
         .iter()
         .find(|i| i.channel == selected && matches!(i.channel, ChannelRef::Topic { .. }))

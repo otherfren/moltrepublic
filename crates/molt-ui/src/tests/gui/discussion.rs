@@ -45,25 +45,35 @@ fn workspace_with_a_discussed_vote(root: &std::path::Path) {
 }
 
 /// The stored workspace, opened with Organization on screen and mirrored.
-struct Opened {
-    rt: tokio::runtime::Runtime,
-    w: WalletHandle,
-    ui: AppWindow,
-    chat_ui: Arc<Mutex<ChatUiState>>,
-    last: Arc<Mutex<Option<SessionSettings>>>,
+pub(super) struct Opened {
+    pub(super) rt: tokio::runtime::Runtime,
+    pub(super) w: WalletHandle,
+    pub(super) ui: AppWindow,
+    pub(super) chat_ui: Arc<Mutex<ChatUiState>>,
+    pub(super) last: Arc<Mutex<Option<SessionSettings>>>,
     _tmp: tempfile::TempDir,
 }
 
 impl Opened {
-    fn new(prepare: impl FnOnce(&std::path::Path)) -> Self {
-        i_slint_backend_testing::init_no_event_loop();
+    pub(super) fn new(prepare: impl FnOnce(&std::path::Path)) -> Self {
+        Self::with_settings(prepare, molt_core::SessionSettings::default())
+    }
+
+    /// [`Opened::new`] on a node started with `settings`.
+    pub(super) fn with_settings(prepare: impl FnOnce(&std::path::Path), settings: SessionSettings) -> Self {
+        thread_local! {
+            static BACKEND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        if !BACKEND.with(|b| b.replace(true)) {
+            i_slint_backend_testing::init_no_event_loop();
+        }
         let tmp = tempfile::tempdir().expect("tmp");
         let root = tmp.path().to_path_buf();
         prepare(&root);
         let rt = rt();
         let (w, ui) = {
             let _guard = rt.enter();
-            (node_with_chat(&root).0, AppWindow::new().expect("headless window"))
+            (node_with_settings(&root, settings), AppWindow::new().expect("headless window"))
         };
         let me = Self {
             rt,
@@ -83,11 +93,11 @@ impl Opened {
         me
     }
 
-    fn run(&self, command: Command) {
+    pub(super) fn run(&self, command: Command) {
         self.rt.block_on(self.w.execute(command)).expect("the command runs");
     }
 
-    fn mirror(&self) {
+    pub(super) fn mirror(&self) {
         self.rt.block_on(mirror(&self.w, &self.ui, &self.last, &self.chat_ui));
     }
 

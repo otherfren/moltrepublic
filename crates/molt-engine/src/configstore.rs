@@ -440,6 +440,7 @@ pub(crate) fn file_settings(s: &SessionSettings, language: &str, theme: &str) ->
         font_app: s.font_app,
         font_nav: s.font_nav,
         font_editor: s.font_editor,
+        discussion_groups_open: s.discussion_groups_open.clone(),
         // File-owned: the session never carries it, so `write_inner` puts the
         // file's own value back before writing.
         renderer: molt_config::default_renderer(),
@@ -479,7 +480,7 @@ fn merge3(base: &Settings, ours: Settings, theirs: &Settings) -> Settings {
         sound_vote, sound_poke, poke_enabled, poke_wake_command, wake_min_interval_secs,
         wake_on, task_wake_lead_min, wake_timeout_secs, wake_chat_lines, log_file, read_receipts, anonymity, tor_mode, tor_port, mcp_port,
         mcp_allow, mcp_token, mcp_read_token, lang, theme, font_app, font_nav, font_editor,
-        renderer, relays, clearnet_relays_enabled, wallet_daemon_url, wallet_daemon_confirmed,
+        discussion_groups_open, renderer, relays, clearnet_relays_enabled, wallet_daemon_url, wallet_daemon_confirmed,
         wallet_daemon_login, wallet_network,
     )
 }
@@ -517,6 +518,7 @@ fn session_settings(s: &Settings) -> SessionSettings {
         font_app: s.font_app,
         font_nav: s.font_nav,
         font_editor: s.font_editor,
+        discussion_groups_open: s.discussion_groups_open.clone(),
         mcp_port: s.mcp_port,
         mcp_allow: s.mcp_allow.clone(),
         mcp_token: s.mcp_token.clone(),

@@ -27,7 +27,7 @@ import {
     ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
 } from "components.slint";
 import {
-    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, FeatureTable, SealedPanel, FoldedStep, ProposalCard, DecisionTable, Spinner, DiffViewer, OrgBanner, LogoBox
+    BusyModal, ChoiceCard, PendingBadge, SurfaceRow, ViewRow, GroupRow, EmojiGrid, ReactionPill, ChatRow, StatusPill, MemberPill, DetailGroup, RestoreWay, WayBranch, SeedPanel, SeedConfirmStep, RunView, RitualLog, WizardFrame, CharterView, FeatureTable, SealedPanel, FoldedStep, ProposalCard, DecisionTable, Spinner, DiffViewer, OrgBanner, LogoBox
 } from "parts.slint";
 // the four staged surfaces' badged DESIGN-MOCK panes (sample data lives
 // .slint-side only; the real governance views stay below in this file)
@@ -2027,6 +2027,8 @@ export component AppWindow inherits Window {
         ? "organization"
         : root.selected-surface;
     callback select-channel(string);
+    // a discussion group header: (kind, rendered expanded)
+    callback toggle-discussion-group(string, bool);
     // new-topic affordance: a MODAL that asks for the name and nothing else.
     // It used to be a reveal row beside the compose field, which put two
     // inputs and two buttons on screen at once and left the user guessing
@@ -3370,21 +3372,32 @@ export component AppWindow inherits Window {
                                                 font-weight: 700;
                                             }
                                         }
-                                        for c in root.chat-channels: ViewRow {
-                                            label: c.label;
-                                            icon: c.icon;
-                                            // …and a discussion row only while the log
-                                            // view shows it (Archive selected = only the
-                                            // Archive row is active)
-                                            selected: c.key == root.selected-channel
-                                                && root.selected-view == "today";
-                                            pending: c.unread;
-                                            quorum: c.note;
-                                            chosen => {
-                                                // channel switches keep the compose
-                                                // draft — only the filter changes
-                                                root.select-view("chat", "today");
-                                                root.select-channel(c.key);
+                                        for c in root.chat-channels: VerticalLayout {
+                                            if c.header: GroupRow {
+                                                label: c.label;
+                                                open: c.open;
+                                                pending: c.unread;
+                                                toggled => {
+                                                    root.toggle-discussion-group(c.group, c.open);
+                                                }
+                                            }
+                                            if !c.header: ViewRow {
+                                                label: c.label;
+                                                icon: c.icon;
+                                                indent: c.group != "" ? 14px : 0px;
+                                                // …and a discussion row only while the log
+                                                // view shows it (Archive selected = only the
+                                                // Archive row is active)
+                                                selected: c.key == root.selected-channel
+                                                    && root.selected-view == "today";
+                                                pending: c.unread;
+                                                quorum: c.note;
+                                                chosen => {
+                                                    // channel switches keep the compose
+                                                    // draft — only the filter changes
+                                                    root.select-view("chat", "today");
+                                                    root.select-channel(c.key);
+                                                }
                                             }
                                         }
                                     }
