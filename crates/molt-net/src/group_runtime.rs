@@ -746,7 +746,7 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
     }
     // an open episode ends only on a sheet below the stale high: one at or
     // above it may be that same stale window, now overtaken by this log
-    if held.ack_ahead && window.high >= held.ahead_high {
+    if held.ack_ahead && held.ahead_high != 0 && window.high >= held.ahead_high {
         tracing::debug!(%from, window_high = window.high, ahead_high = held.ahead_high, "ack_ahead_held");
         return;
     }
@@ -3311,6 +3311,26 @@ mod tests {
         apply_group_ack(&log, &store, &me, &from, &sheet_at(4, 1..=5)).await;
         let cursor = petra_cursor(&store).await;
         assert_eq!((cursor.ack_ahead, cursor.acked_floor), (false, 5), "a reset window's sheet ends it");
+    }
+
+    /// A cursor a development build wrote mid-episode carries no stale high:
+    /// a plausible sheet still ends that episode.
+    #[tokio::test]
+    async fn a_dev_cursor_without_a_stale_high_ends_on_a_plausible_sheet() {
+        let log = crate::MemLog::default();
+        let store = crate::MemStateStore::default();
+        for seq in 1..=10u64 {
+            log.push(walter_event(seq));
+        }
+        store
+            .update(|st| {
+                st.outbound.insert("petra".into(), OutboundCursor { ack_ahead: true, ack_seen: true, ..Default::default() });
+                true
+            })
+            .await;
+        apply_group_ack(&log, &store, &"walter".to_string(), &"petra".to_string(), &sheet_at(1, 1..=4)).await;
+        let cursor = petra_cursor(&store).await;
+        assert_eq!((cursor.ack_ahead, cursor.acked_floor), (false, 4));
     }
 
     /// The seq at `high - 1024` is still an explicit bit of the window; only

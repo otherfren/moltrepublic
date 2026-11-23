@@ -394,10 +394,8 @@ fn assert_disk_pair_moves_together(
     dir: &std::path::Path,
     mls: &std::sync::Arc<std::sync::Mutex<molt_net::MlsMember>>,
 ) {
-    let disk = |dir: &std::path::Path| {
-        for _ in 0..200 {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+    let disk = |st: &crate::State, dir: &std::path::Path| {
+        assert!(st.active.as_ref().expect("stored").handle.flush_blocking(), "the writer drained");
         molt_storage::peek_transport_state(dir).unwrap_or_default()
     };
     let persist = |st: &mut crate::State| {
@@ -409,13 +407,13 @@ fn assert_disk_pair_moves_together(
     };
     st.drop_seam.refuse_saves.store(true, std::sync::atomic::Ordering::SeqCst);
     persist(st);
-    let ts = disk(dir);
+    let ts = disk(st, dir);
     assert!(ts.mls.is_none(), "the merged ratchet reached the disk before the reset");
     assert_eq!(ts.accepted.get("dora").map(|w| w.high), Some(40), "both old");
     st.drop_seam.refuse_saves.store(false, std::sync::atomic::Ordering::SeqCst);
     st.save_accepted_if_due(st.presence_now());
     persist(st);
-    let ts = disk(dir);
+    let ts = disk(st, dir);
     assert!(ts.mls.is_some(), "the ratchet persists once the reset is queued");
     let w = ts.accepted.get("dora").cloned().unwrap_or_default();
     assert_eq!((w.proof, w.high), (RestoreProof::Merge, 0), "both new");
@@ -429,6 +427,7 @@ fn stored_bystander(member: &str) -> (crate::State, tempfile::TempDir, std::path
         wire(&mut st, "dora", seq, chat(100 + small(seq), "old"));
     }
     st.save_accepted_now();
+    assert!(st.active.as_ref().expect("stored").handle.flush_blocking(), "the old window is on disk");
     (st, tmp, dir)
 }
 
@@ -462,6 +461,95 @@ fn a_lost_rekey_report_is_drained_and_the_ratchet_persists_again() {
     petra.group_mls_parked = Some(mls.clone());
     assert_disk_pair_moves_together(&mut petra, &dir, &mls);
     assert!(!mls.lock().expect("mls").rekeys_pending(), "drained");
+}
+
+/// The list is drained without any report at all: by the delivery beat,
+/// and by a runtime rebuild (a relay-pool change aborting the inbox).
+#[test]
+fn the_beat_and_a_rebuild_drain_a_listed_rekey() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    for via_rebuild in [false, true] {
+        let (mut petra, _tmp, _dir) = stored_bystander("petra");
+        let (mut walter_mls, mut petra_mls, dora2) = mls_group();
+        let (commit, _w) = walter_mls.restore_member("dora", &dora2).expect("the re-key");
+        petra_mls.decrypt(&commit).expect("petra merges");
+        let mls = std::sync::Arc::new(std::sync::Mutex::new(petra_mls));
+        petra.group_mls_parked = Some(mls.clone());
+        if via_rebuild {
+            petra.rebuild_group_net();
+        } else {
+            petra.cmd_net_delivery_tick().expect("beat");
+        }
+        let w = window(&petra);
+        assert_eq!((w.proof, w.high), (RestoreProof::Merge, 0), "rebuild={via_rebuild}");
+        assert!(!mls.lock().expect("mls").rekeys_pending());
+    }
+}
+
+/// (follow-up 1) After a RESTART the runtime-only newest-seen is empty: a
+/// late gap-filler of a `current` window below its stored high must still
+/// count as history - no serve, no cleared mark, no head.
+#[test]
+fn after_a_restart_a_gap_filler_below_the_high_is_history() {
+    let mut b = Builder::new(&SEATS, 2);
+    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    let genesis = walter.chain.head.clone().expect("the genesis");
+    b.commit_restored("dora", &anchor(), &["petra", "walter"]);
+    block_at(&mut walter, 1, T + 100, b.blocks.last().expect("a block").clone());
+    for seq in (1..=40u64).filter(|s| *s != 25) {
+        dora_at(&mut walter, seq, T + seq, chat(small(seq), "x"));
+    }
+    // the restart: everything runtime-only is gone
+    walter.delivery.seen_high.clear();
+    walter.chain.request_seq.clear();
+    walter.chain.peer_claim_seq.clear();
+    walter.chain.served_at.clear();
+    walter.chain.diverged.insert(
+        "dora".to_string(),
+        molt_core::ChainDivergence { peer: "dora".to_string(), since_height: 0, seen_ts: T },
+    );
+    let known = vec![molt_core::HeightHash { height: genesis.height, hash: genesis.hash.clone() }];
+    dora_at(&mut walter, 25, T + 25, WorkspaceEvent::ChainRequest { from_height: genesis.height + 1, known });
+    assert!(window(&walter).is_accepted(25), "the gap filled");
+    assert!(!walter.chain.served_at.contains_key("dora"), "an old request served");
+    assert!(walter.chain.diverged.contains_key("dora"), "an old request cleared the mark");
+    let mut seats = walter.seat_syncs(&std::collections::HashSet::new());
+    walter.fill_seat_reports(&mut seats);
+    assert_eq!(seats.iter().find(|s| s.member == "dora").and_then(|s| s.head_height), None, "an old head");
+}
+
+/// (follow-up 1) A legacy window: a dropped duplicate never counts as seen -
+/// its old high would make a fresh request of the new device history.
+#[test]
+fn a_dropped_duplicate_never_counts_as_seen() {
+    let (mut walter, block) = bystander();
+    let genesis = walter.chain.head.clone().expect("the genesis");
+    block_at(&mut walter, 1, T + 100, block);
+    let mut stale = AcceptedWindow::default();
+    assert!(stale.accept(5_000));
+    walter.delivery.accepted.insert("dora".to_string(), stale);
+    walter.delivery.inbound.clear();
+    walter.delivery.seen_high.clear();
+    walter.chain.request_seq.clear();
+    dora_at(&mut walter, 5_000, T + 300, chat(1, "dup"));
+    assert_eq!(bodies(&walter, "dup"), 0, "dropped");
+    let known = vec![molt_core::HeightHash { height: genesis.height, hash: genesis.hash.clone() }];
+    dora_at(&mut walter, 4_500, T + 301, WorkspaceEvent::ChainRequest { from_height: genesis.height + 1, known });
+    assert!(walter.chain.served_at.contains_key("dora"), "the fresh request was taken for history");
+}
+
+/// (follow-up 2) `give_up` ends a wait held only by a missing seq - no frame
+/// held, nothing accepted yet.
+#[test]
+fn give_up_ends_a_wait_held_only_by_a_missing_seq() {
+    let (mut walter, _) = bystander();
+    walter.cmd_resync_seat("dora".to_string(), false).expect("resync");
+    walter.note_missing_for_test("dora", 7);
+    assert!(walter.cmd_resync_seat("dora".to_string(), false).is_err(), "running");
+    walter.cmd_resync_seat("dora".to_string(), true).expect("give up");
+    assert!(walter.cmd_resync_seat("dora".to_string(), true).is_err(), "the wait ended");
+    assert!(walter.inbound_held_view().iter().all(|r| r.member != "dora"));
 }
 
 /// An unchanged sheet is not republished although its stamp moved.
