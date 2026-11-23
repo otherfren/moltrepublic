@@ -1540,6 +1540,8 @@ pub struct PublishPool {
     /// The fresh dial's bound and the EVENT → OK bound, kept apart: one
     /// shared bound cut a slow onion dial off on every attempt.
     timeouts: RelayTimeouts,
+    /// Latched by [`Self::close`]; a publish task outlives its caller.
+    closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// One relay's kept connection plus its BREAKER: a relay that timed out is
@@ -1609,6 +1611,7 @@ impl PublishPool {
             ),
             size_budget: None,
             timeouts: RelayTimeouts::configured(),
+            closed: Arc::default(),
         }
     }
 
@@ -1619,20 +1622,34 @@ impl PublishPool {
         self
     }
 
+    /// Stop every clone from publishing: a publish already in flight dials
+    /// no fresh socket, and one that connects after sends nothing.
+    pub fn close(&self) {
+        self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Publish one signed event to EVERY relay concurrently over the kept
     /// connections — the same ≥1-OK semantics, grace and size gate as
     /// [`RelayRuntime::publish`].
     pub async fn publish(&self, event: &Event) -> Result<PublishReport, NetError> {
         publish_gate(self.conns.is_empty(), self.size_budget, event)?;
+        if self.is_closed() {
+            return Err(NetError::Unreachable("publish channel closed".into()));
+        }
         let timeouts = self.timeouts;
         let attempts = (0..self.conns.len())
             .map(|i| {
                 let conns = self.conns.clone();
                 let dialer = self.dialer.clone();
                 let event = event.clone();
+                let closed = self.closed.clone();
                 let task = tokio::spawn(async move {
                     let (url, slot) = &conns[i];
-                    Self::publish_pooled(&dialer, url, slot, &event, timeouts).await
+                    Self::publish_pooled(&dialer, url, slot, &event, timeouts, &closed).await
                 });
                 (self.conns[i].0.clone(), task)
             })
@@ -1651,6 +1668,7 @@ impl PublishPool {
         slot: &tokio::sync::Mutex<PoolSlot>,
         event: &Event,
         timeouts: RelayTimeouts,
+        closed: &std::sync::atomic::AtomicBool,
     ) -> Result<(), NetError> {
         let began = tokio::time::Instant::now();
         let mut retries: u32 = 0;
@@ -1662,7 +1680,7 @@ impl PublishPool {
                 }
                 tokio::time::sleep_until(until).await;
             }
-            let verdict = Self::publish_once(dialer, url, slot, event, timeouts).await;
+            let verdict = Self::publish_once(dialer, url, slot, event, timeouts, closed).await;
             let delay = {
                 let mut guard = slot.lock().await;
                 match &verdict {
@@ -1697,8 +1715,14 @@ impl PublishPool {
         slot: &tokio::sync::Mutex<PoolSlot>,
         event: &Event,
         timeouts: RelayTimeouts,
+        closed: &std::sync::atomic::AtomicBool,
     ) -> Result<(), NetError> {
+        let shut = || closed.load(std::sync::atomic::Ordering::SeqCst);
         let mut guard = slot.lock().await;
+        if shut() {
+            guard.ws = None;
+            return Err(NetError::Unreachable("publish channel closed".into()));
+        }
         if let Some(until) = guard.down_until {
             if tokio::time::Instant::now() < until {
                 return Err(NetError::Unreachable("backing off".into()));
@@ -1725,7 +1749,13 @@ impl PublishPool {
             }
         }
         let outcome = async {
+            if shut() {
+                return Err(NetError::Unreachable("publish channel closed".into()));
+            }
             let mut ws = connect_bounded(dialer, url, timeouts.connect).await?;
+            if shut() {
+                return Err(NetError::Unreachable("publish channel closed".into()));
+            }
             let verdict = send_and_await_ok(&mut ws, event, timeouts.publish)
                 .await
                 .map_err(RecvFail::into_error)?;
@@ -2140,6 +2170,65 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(3)).await;
         let second = pool.publish(&event("two")).await.expect("accepted");
         assert_eq!(second.accepted.len(), 2, "{second:?}");
+    }
+
+    /// **A closed pool dials nothing, not even for a publish in flight.**
+    /// The per-relay publish outlives the runtime that started it; its kept
+    /// socket breaking after the relay was withdrawn made it dial fresh
+    /// (`relay_pool.md` §3 rule 3).
+    #[tokio::test]
+    async fn a_closed_pool_does_not_redial_for_a_publish_in_flight() {
+        use futures_util::{SinkExt, StreamExt};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("ws://{}", listener.local_addr().expect("addr"));
+        let accepts = Arc::new(AtomicUsize::new(0));
+        let (in_flight, in_flight_rx) = tokio::sync::oneshot::channel::<()>();
+        let (break_tx, break_rx) = tokio::sync::oneshot::channel::<()>();
+        let counted = accepts.clone();
+        tokio::spawn(async move {
+            let ok_for = |msg: &tokio_tungstenite::tungstenite::Message| {
+                let v: serde_json::Value = serde_json::from_str(msg.to_text().expect("text")).expect("json");
+                let id = v[1]["id"].as_str().expect("event id").to_string();
+                tokio_tungstenite::tungstenite::Message::text(serde_json::json!(["OK", id, true, ""]).to_string())
+            };
+            let Ok((sock, _)) = listener.accept().await else { return };
+            counted.fetch_add(1, Ordering::SeqCst);
+            let mut ws = tokio_tungstenite::accept_async(sock).await.expect("ws");
+            let first = ws.next().await.expect("one").expect("frame");
+            ws.send(ok_for(&first)).await.expect("ok");
+            let _second = ws.next().await.expect("two").expect("frame");
+            let _ = in_flight.send(());
+            let _ = break_rx.await;
+            drop(ws);
+            while let Ok((sock, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                drop(sock);
+            }
+        });
+        let pool = super::PublishPool::new(crate::dial::Dialer::Direct, vec![url.clone()]).with_timeouts(
+            crate::timeouts::RelayTimeouts { connect: Duration::from_secs(5), publish: Duration::from_secs(5) },
+        );
+        let keys = nostr::Keys::generate();
+        let event = |n: &str| {
+            nostr::EventBuilder::new(nostr::Kind::Custom(crate::kinds::KIND_GROUP), n)
+                .sign_with_keys(&keys)
+                .expect("sign")
+        };
+        pool.publish(&event("one")).await.expect("accepted over a fresh socket");
+        let two = event("two");
+        let flying = {
+            let pool = pool.clone();
+            tokio::spawn(async move { pool.publish(&two).await })
+        };
+        in_flight_rx.await.expect("the second event reached the kept socket");
+        pool.close();
+        break_tx.send(()).expect("break the kept socket");
+        let outcome = flying.await.expect("publish task");
+        assert!(outcome.is_err(), "{outcome:?}");
+        assert_eq!(accepts.load(Ordering::SeqCst), 1, "the closed pool dialed the withdrawn relay again");
+        assert!(pool.publish(&event("three")).await.is_err());
+        assert_eq!(accepts.load(Ordering::SeqCst), 1, "a closed pool takes no new publish");
     }
 
     /// A failed subscribe names each relay, its route and its reason: a
