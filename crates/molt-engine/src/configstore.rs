@@ -122,6 +122,7 @@ pub(crate) fn spawn(
         engine_tx,
         rx,
         deferred: Vec::new(),
+        ui_state_failed: false,
     }));
     Ok(ConfigStoreHandle { tx })
 }
@@ -144,6 +145,8 @@ struct Store {
     rx: mpsc::Receiver<StoreRequest>,
     /// Non-persist requests drained while a write merged an external edit.
     deferred: Vec<StoreRequest>,
+    /// The UI-state file failed to write (warned once until it works again).
+    ui_state_failed: bool,
 }
 
 async fn store_task(mut store: Store) {
@@ -307,7 +310,7 @@ impl Store {
         let new_text = molt_config::update(&base, &settings).map_err(|_| {
             "config.toml on disk is invalid; fix it or run --repair-config".to_string()
         })?;
-        self.write_ui_state(&settings)?;
+        self.write_ui_state(&settings);
         atomic_write(&self.path, &new_text).map_err(|e| e.to_string())?;
         self.last_good = new_text;
         self.conflict = None;
@@ -315,16 +318,25 @@ impl Store {
     }
 
     /// The view preferences go beside config.toml, before the write that
-    /// drops a legacy key from it.
-    fn write_ui_state(&self, settings: &Settings) -> Result<(), String> {
+    /// drops a legacy key from it. A convenience: failing to write it only
+    /// costs their persistence, never the config save.
+    fn write_ui_state(&mut self, settings: &Settings) {
         let path = molt_config::ui_state_path(&self.path);
         let text = molt_config::render_ui_state(&molt_config::UiState {
             discussion_groups_open: settings.discussion_groups_open.clone(),
         });
-        match std::fs::read_to_string(&path) {
+        let written = match std::fs::read_to_string(&path) {
             Ok(old) if old == text => Ok(()),
-            Err(_) if settings.discussion_groups_open.is_empty() => Ok(()),
-            _ => atomic_write(&path, &text).map_err(|e| e.to_string()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && settings.discussion_groups_open.is_empty() => Ok(()),
+            _ => atomic_write(&path, &text),
+        };
+        match written {
+            Ok(()) => self.ui_state_failed = false,
+            Err(e) if !self.ui_state_failed => {
+                self.ui_state_failed = true;
+                tracing::warn!(ui_state = "not_saved", path = %path.display(), error = %e);
+            }
+            Err(_) => {}
         }
     }
 
@@ -908,6 +920,29 @@ mod tests {
             let sv = session(&wallet).await;
             assert_eq!(sv.language, "de", "the edit landed");
             assert_eq!(sv.settings.discussion_groups_open, ["memory", "organization"]);
+        });
+    }
+
+    /// The UI-state file is a convenience: when it cannot be written, the
+    /// config save still lands and the groups hold for the session.
+    #[test]
+    fn an_unwritable_ui_state_file_does_not_fail_the_config_save() {
+        rt().block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let (path, wallet, _store) = node(&dir);
+            std::fs::create_dir(molt_config::ui_state_path(&path)).expect("a directory where the file goes");
+            wallet
+                .execute(Command::SetDiscussionGroup { kind: "memory".to_string(), open: true })
+                .await
+                .expect("toggle");
+            wallet
+                .execute(Command::SetFonts { app: 16, nav: 13, editor: 14 })
+                .await
+                .expect("fonts");
+            wait_for_file(&path, |t| t.contains("font_app = 16")).await;
+            let sv = session(&wallet).await;
+            assert!(!sv.notice.starts_with("save-failed"), "{}", sv.notice);
+            assert_eq!(sv.settings.discussion_groups_open, ["memory"]);
         });
     }
 

@@ -401,7 +401,7 @@ export struct SeatRow {
     fork: bool, // on another branch
     note: string, // the warning line under the row ("" = none)
     note-tip: string,
-    dropped: bool, // this node drops its messages as already seen
+    dropped: bool, // a hint: many repeats from this seat (dup_streak)
     fetching: bool, // a resync of it is under way
 }
 

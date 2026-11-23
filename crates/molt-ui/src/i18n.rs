@@ -1071,12 +1071,12 @@ lexicon! {
     os_builds_mixed: "Seats run different versions", "Sitze laufen mit unterschiedlichen Versionen";
     os_other_branch_at: "other branch at", "anderer Zweig bei";
     os_other_branch: "other branch", "anderer Zweig";
-    os_dropped: "its messages are dropped here as already seen", "seine Nachrichten werden hier als schon gesehen verworfen";
+    os_dropped: "many repeats from this seat - fetch its history again if messages are missing", "viele Wiederholungen von diesem Sitz - Verlauf neu holen, wenn Nachrichten fehlen";
     os_resync: "Fetch history again", "Verlauf neu holen";
     os_resync_ask_pre: "Re-fetch ", "Den gespeicherten Verlauf von ";
     os_resync_ask_post: "'s retained history? Their live messages wait until it is through.", " neu holen? Seine Live-Nachrichten warten, bis er durch ist.";
     os_fetching: "fetching history", "Verlauf wird geholt";
-    os_dropped_tip: "This node missed its restore; restart this node on 0.1.2 or newer.", "Dieser Knoten hat seine Wiederherstellung verpasst; starte diesen Knoten mit 0.1.2 oder neuer neu.";
+    os_dropped_tip: "Likely a restore this node missed", "Vermutlich eine verpasste Wiederherstellung";
     oa_col_surface: "Surface", "Bereich";
     oa_pending: "Pending", "Offen";
     oa_denied: "Denied", "Abgelehnt";

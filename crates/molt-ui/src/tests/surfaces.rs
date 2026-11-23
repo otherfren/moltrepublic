@@ -1106,13 +1106,13 @@ fn the_seat_table_shows_build_head_and_faults() {
     assert_eq!((di.height.as_str(), di.hash.as_str(), di.fork), ("5", "", false), "the hash names its own height only");
     let ed = row("ed");
     assert_eq!((ed.build.as_str(), ed.hash.as_str()), ("?", ""));
-    assert_eq!(ed.note, "its messages are dropped here as already seen");
-    assert!(ed.note_tip.contains("restart this node on 0.1.2 or newer"), "{}", ed.note_tip);
+    assert_eq!(ed.note, "many repeats from this seat - fetch its history again if messages are missing");
+    assert!(ed.note_tip == "Likely a restore this node missed", "{}", ed.note_tip);
     let fa = row("fa");
     assert_eq!((fa.fork, fa.note.as_str()), (true, "other branch"));
     let de = seat_rows(&seats, 0, "ana", 1, now, &local);
     assert_eq!(de[1].note, "anderer Zweig bei 5");
-    assert_eq!(de[4].note, "seine Nachrichten werden hier als schon gesehen verworfen");
+    assert_eq!(de[4].note, "viele Wiederholungen von diesem Sitz - Verlauf neu holen, wenn Nachrichten fehlen");
 }
 
 /// A seat counts as fetching while this node holds its inbound stream.

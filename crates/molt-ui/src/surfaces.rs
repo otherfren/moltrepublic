@@ -281,7 +281,7 @@ pub(crate) struct SeatRowData {
     /// The row's warning line ("" = none) and its tooltip.
     pub(crate) note: String,
     pub(crate) note_tip: String,
-    /// This node drops its messages as already seen.
+    /// A hint: many repeats from it (`SeatSync::dup_streak`).
     pub(crate) dropped: bool,
     /// A resync of it is under way: this node holds its inbound stream.
     pub(crate) fetching: bool,
