@@ -6657,6 +6657,9 @@ pub enum Command {
         /// The declarer's clock at sending; 0 from an older build.
         #[serde(default)]
         at: u64,
+        /// The declarer's build; empty from a build older than v0.1.2.
+        #[serde(default)]
+        build: String,
         /// Transport incarnation (stale commands are dropped).
         #[serde(default)]
         generation: Option<u64>,
@@ -8642,6 +8645,21 @@ pub struct SeatSync {
     pub signed: Option<u64>,
     /// Persistent shares this seat holds whole.
     pub files: u32,
+    /// The seat's build as its latest declaration named it; absent =
+    /// unknown (older than v0.1.2, or not heard yet).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<String>,
+    /// The head the seat last reported (its catch-up request or beacon):
+    /// the block hash, 12 hex. The own seat: its head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_hash: Option<String>,
+    /// The height of that reported head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_height: Option<u64>,
+    /// This node and the seat refuse each other's blocks
+    /// ([`StatusView::chain_diverged`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub diverged: bool,
 }
 
 /// Whether an own envelope stays out of the delivery guarantee and the G7

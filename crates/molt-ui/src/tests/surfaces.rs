@@ -1036,6 +1036,7 @@ fn the_seat_table_reads_heights_files_and_presence() {
         height,
         signed,
         files,
+        ..Default::default()
     };
     let seats = vec![
         seat("ana", now, Some(303), Some(300), 2),

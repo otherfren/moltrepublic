@@ -253,6 +253,14 @@ version boundary, authenticated by the MLS credential like the poke, and
   declaration regardless of `rev`, filtered to the ones this build knows; the only
   one so far gates the restore consent v2
   (`docs_archive/ritual/recovery_auto_approval.md` §7e).
+  `build` (additive, v0.1.2) is the sender's crate version (no commit id:
+  the build embeds none), taken under the same `at` order as `caps`,
+  runtime only, shown as `status.seats[].build` (absent = older than
+  v0.1.2 or not heard yet). A restarted seat declares at open, and the one
+  `MirrorWho` at start makes every peer declare again, so no 6 h wait.
+  The frame is an MLS control frame inside the group: only members see a
+  build. Privacy decision (v0.1.2): the build, the reported head and the
+  divergence are shown; no OS family and no relay health travel.
 - `MirrorStatus { holds: [(id, held, of)] }` (`\x00molt-mstat-v1`) - what
   the seat holds; in M3 its own available v2 shares, whole (M4 adds the
   mirrored series). Sent when the list changed (at most once a minute)

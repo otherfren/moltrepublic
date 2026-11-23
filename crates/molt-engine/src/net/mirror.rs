@@ -154,9 +154,10 @@ impl State {
         }
     }
 
-    fn send_mirror_decl(&mut self, now: u64) {
+    /// This seat's declaration as it goes on the wire at `now`.
+    pub(crate) fn mirror_decl_frame(&self, now: u64) -> MirrorDeclFrame {
         let decl = self.own_decl();
-        let frame = MirrorDeclFrame {
+        MirrorDeclFrame {
             v: molt_net::mirror_gossip::MIRROR_V,
             by: self.member(),
             on: decl.on,
@@ -164,7 +165,12 @@ impl State {
             rev: decl.rev,
             caps: own_caps(self.lock_cap_on()),
             at: now,
-        };
+            build: crate::net::seat_report::BUILD.to_string(),
+        }
+    }
+
+    fn send_mirror_decl(&mut self, now: u64) {
+        let frame = self.mirror_decl_frame(now);
         if self.publish_mirror_frame(frame.to_frame()) {
             self.files.mirror_decl_due = false;
             self.chain.lock.announced = Some(self.lock_cap_on());
@@ -666,6 +672,7 @@ impl State {
     /// A member's declaration landed: last wins by revision; its
     /// capabilities follow every declaration (a recovered seat restarts
     /// its revision).
+    #[allow(clippy::too_many_arguments)] // the frame's fields, as the wire carries them
     pub(crate) fn cmd_net_mirror_decl(
         &mut self,
         from: &MemberId,
@@ -674,6 +681,7 @@ impl State {
         rev: u64,
         caps: Vec<String>,
         at: u64,
+        build: &str,
     ) -> Result<Reply, MoltError> {
         if *from == self.member() || !self.roster().contains(from) {
             return Ok(Reply::Ack);
@@ -685,6 +693,7 @@ impl State {
         }
         if self.caps_fresh(from, at) {
             self.remember_caps(from, caps);
+            self.note_seat_build(from, build);
         }
         Ok(Reply::Ack)
     }

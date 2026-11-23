@@ -46,6 +46,8 @@ mod ingest;
 mod presence;
 pub(crate) use presence::{pill_state, LockOut, UnreadableEpisode};
 mod recovery;
+mod seat_report;
+pub(crate) use seat_report::SeatReports;
 pub(crate) mod vault_base;
 pub(crate) mod vault_payload;
 pub(crate) use ingest::CHAIN_SERVE_DEBOUNCE_SECS;
@@ -228,6 +230,7 @@ impl EngineSink for CmdSink {
                 rev: decl.rev,
                 caps: decl.caps.clone(),
                 at: decl.at,
+                build: decl.build.clone(),
                 generation: self.generation,
             })
             .await;
@@ -1099,3 +1102,5 @@ mod ingest_tests;
 mod presence_tests;
 #[cfg(test)]
 mod recovery_tests;
+#[cfg(test)]
+mod seat_report_tests;

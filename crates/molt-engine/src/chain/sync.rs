@@ -1199,6 +1199,7 @@ impl State {
                     signed: if governed { self.last_signed(&member) } else { None },
                     files: u32::try_from(files).unwrap_or(u32::MAX),
                     member,
+                    ..Default::default()
                 }
             })
             .collect()
