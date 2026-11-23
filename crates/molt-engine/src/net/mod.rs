@@ -860,7 +860,7 @@ impl State {
         let live = self.group_net.is_some()
             || self.group_mls_parked.is_some()
             || self.recovery.seat_inbox.is_some();
-        self.rebuild_group_net();
+        self.rebuild_group_net(!before.iter().all(|r| after.contains(r)));
         if live {
             self.spawn_seat_inbox_if_nostr();
         }
@@ -885,13 +885,19 @@ impl State {
 
     /// Restart the group runtime on the current dialable set, or park its
     /// ratchet while there is none.
-    fn rebuild_group_net(&mut self) {
+    fn rebuild_group_net(&mut self, withdrawn: bool) {
         if self.drop_seam.parks_rekey() && self.group_net.is_none() {
             return;
         }
         let mls = match self.group_net.take() {
-            // the drop latches the stop; the old outbox ends at its next poll
-            Some(old) => old.mls.clone(),
+            // the drop latches the stop; the old outbox ends at its next
+            // poll and drains its in-flight publish unless a relay went away
+            Some(old) => {
+                if withdrawn {
+                    old.handle.withdraw();
+                }
+                old.mls.clone()
+            }
             None => match self.group_mls_parked.take() {
                 Some(mls) => mls,
                 None => return,
