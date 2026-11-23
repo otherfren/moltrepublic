@@ -1126,8 +1126,10 @@ fn a_held_seat_reads_as_fetching_and_a_dropped_one_as_dropped() {
     ];
     let mut rows = seat_rows(&seats, 0, "ana", 0, 0, &HashMap::new());
     assert_eq!((rows[0].dropped, rows[1].dropped), (false, true));
-    mark_fetching(&mut rows, &[InboundHeld { member: "bo".into(), ..InboundHeld::default() }]);
+    mark_fetching(&mut rows, &[InboundHeld { member: "bo".into(), from_start: true, ..InboundHeld::default() }]);
     assert_eq!((rows[0].fetching, rows[1].fetching), (false, true));
+    mark_fetching(&mut rows, &[InboundHeld { member: "bo".into(), ..InboundHeld::default() }]);
+    assert!(!rows[1].fetching, "an ordinary gap is no resync");
 }
 
 #[test]

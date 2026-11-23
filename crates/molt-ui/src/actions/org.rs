@@ -25,11 +25,11 @@ pub(crate) fn resync_outcome(ui: &AppWindow, outcome: Result<molt_core::Reply, m
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {
         let cx = ctx.clone();
-        ui.on_resync_seat(move |member| {
+        ui.on_resync_seat(move |member, give_up| {
             let (w, weak) = (cx.wallet.clone(), cx.weak.clone());
             let member = member.to_string();
             cx.rt.spawn(async move {
-                let outcome = w.execute(Command::ResyncSeat { member }).await;
+                let outcome = w.execute(Command::ResyncSeat { member, give_up }).await;
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(ui) = weak.upgrade() {
                         resync_outcome(&ui, outcome);

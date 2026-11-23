@@ -226,7 +226,7 @@ fn a_confirmed_resync_reaches_the_engine_and_a_second_says_running() {
     assert_eq!(o.ui.get_os_resync_member(), "", "the confirm closes");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let second = loop {
-        match o.rt.block_on(o.w.execute(Command::ResyncSeat { member: "mara".to_string() })) {
+        match o.rt.block_on(o.w.execute(Command::ResyncSeat { member: "mara".to_string(), give_up: false })) {
             Err(e) => break e,
             Ok(_) => {
                 assert!(std::time::Instant::now() < deadline, "the first resync never landed");
@@ -251,4 +251,64 @@ fn a_seat_whose_history_is_fetched_says_so_instead_of_offering_it() {
     ui.set_org_seats(ModelRc::new(VecModel::from(vec![SeatRow { me: true, ..seat("ana", "0.1.2") }, fetching])));
     assert_eq!(visible(&ui, "fetching history").len(), 1);
     assert!(visible(&ui, RESYNC).is_empty(), "no second request while one runs");
+}
+
+const GIVE_UP: &str = "Stop waiting";
+
+/// Stop waiting is offered only while a seat's history is fetched: beside
+/// the status text and in that row's menu, which offers it instead of the
+/// fetch.
+#[test]
+fn stop_waiting_is_offered_only_while_fetching() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = status_window();
+    ui.set_org_seats(ModelRc::new(VecModel::from(vec![
+        SeatRow { me: true, ..seat("ana", "0.1.2") },
+        seat("bo", "0.1.2"),
+        SeatRow { fetching: true, ..seat("ed", "0.1.2") },
+    ])));
+    let beside = visible(&ui, GIVE_UP);
+    assert_eq!(beside.len(), 1, "one button, beside the status text");
+    let status = visible(&ui, "fetching history")[0];
+    assert!((beside[0].1 + beside[0].3 / 2.0 - (status.1 + status.3 / 2.0)).abs() < status.3.max(beside[0].3));
+
+    let menus: Vec<_> = Handle::find_by_element_id(&ui, "AppWindow::os-seat-menu").collect();
+    right_click(&ui, &menus[1], 0.5);
+    assert_eq!(visible(&ui, GIVE_UP).len(), 1, "bo's menu does not offer it");
+    assert!(Handle::find_by_accessible_label(&ui, RESYNC).count() > 0, "bo's menu fetches");
+    press(&ui, slint::platform::Key::Escape);
+    assert_eq!(Handle::find_by_accessible_label(&ui, RESYNC).count(), 0, "bo's menu closed");
+    right_click(&ui, &menus[2], 0.5);
+    assert!(Handle::find_by_accessible_label(&ui, GIVE_UP).count() > 1, "ed's menu offers it");
+}
+
+/// The confirm states the price and hands `give_up: true` for that seat to
+/// the window's resync callback; once the engine stops listing the seat as
+/// fetching, the row is back to normal.
+#[test]
+fn a_confirmed_stop_waiting_gives_up_and_the_row_returns_to_normal() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = status_window();
+    let fetching = SeatRow { fetching: true, ..seat("ed", "0.1.2") };
+    ui.set_org_seats(ModelRc::new(VecModel::from(vec![SeatRow { me: true, ..seat("ana", "0.1.2") }, fetching])));
+    let sent = Rc::new(RefCell::new(Vec::new()));
+    let rec = sent.clone();
+    ui.on_resync_seat(move |member, give_up| rec.borrow_mut().push((member.to_string(), give_up)));
+    let button = Handle::find_by_accessible_label(&ui, GIVE_UP).find(|e| e.size().width > 0.0).expect("the button");
+    click(&ui, &button);
+    assert_eq!(
+        visible(&ui, "Stop waiting for ed's history? Messages not fetched yet stay missing.").len(),
+        1,
+        "the one-line confirm states the price"
+    );
+    let confirm = Handle::find_by_accessible_label(&ui, GIVE_UP)
+        .filter(|e| e.size().width > 0.0)
+        .max_by(|a, b| a.absolute_position().y.total_cmp(&b.absolute_position().y))
+        .expect("the confirm button");
+    click(&ui, &confirm);
+    assert_eq!(*sent.borrow(), [("ed".to_string(), true)]);
+    assert_eq!(ui.get_os_resync_member(), "", "the confirm closes");
+
+    ui.set_org_seats(ModelRc::new(VecModel::from(vec![SeatRow { me: true, ..seat("ana", "0.1.2") }, seat("ed", "0.1.2")])));
+    assert!(visible(&ui, "fetching history").is_empty() && visible(&ui, GIVE_UP).is_empty(), "back to normal");
 }

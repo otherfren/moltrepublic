@@ -1076,6 +1076,9 @@ lexicon! {
     os_resync_ask_pre: "Re-fetch ", "Den gespeicherten Verlauf von ";
     os_resync_ask_post: "'s retained history? Their live messages wait until it is through.", " neu holen? Seine Live-Nachrichten warten, bis er durch ist.";
     os_fetching: "fetching history", "Verlauf wird geholt";
+    os_give_up: "Stop waiting", "Nicht länger warten";
+    os_give_up_ask_pre: "Stop waiting for ", "Nicht länger auf den Verlauf von ";
+    os_give_up_ask_post: "'s history? Messages not fetched yet stay missing.", " warten? Noch nicht geholte Nachrichten bleiben verloren.";
     os_dropped_tip: "Likely a restore this node missed", "Vermutlich eine verpasste Wiederherstellung";
     oa_col_surface: "Surface", "Bereich";
     oa_pending: "Pending", "Offen";
