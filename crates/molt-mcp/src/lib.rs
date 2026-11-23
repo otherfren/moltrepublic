@@ -31,6 +31,7 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWr
 use tokio::net::TcpListener;
 
 mod http;
+mod log_throttle;
 mod quests;
 
 /// The protocol versions this server serves in SHAPE, both transports.
@@ -290,6 +291,8 @@ struct Acceptor {
     slots: std::sync::Arc<tokio::sync::Semaphore>,
     http_face: http::Http,
     conns: tokio::task::JoinSet<()>,
+    /// Connect and refusal lines: one per kind per minute, with a count.
+    throttle: std::sync::Arc<log_throttle::LogThrottle>,
 }
 
 impl Acceptor {
@@ -302,8 +305,10 @@ impl Acceptor {
         pre_auth: std::time::Duration,
     ) -> Acceptor {
         let loopback_only = !allow_all && allowlist.iter().all(|ip| ip.is_loopback());
-        let http_face = http::Http::new(handle.clone(), loopback_only);
+        let throttle = std::sync::Arc::new(log_throttle::LogThrottle::default());
+        let http_face = http::Http::new(handle.clone(), loopback_only, throttle.clone());
         Acceptor {
+            throttle,
             handle,
             listener,
             allow_all,
@@ -329,13 +334,18 @@ impl Acceptor {
             }
         };
         if !self.allow_all && !self.allowlist.contains(&peer.ip()) {
-            tracing::warn!(%peer, "MCP connection refused: peer IP not on the allowlist");
+            if let Some(d) = self.throttle.hit("refused_allowlist") {
+                tracing::warn!(%peer, count = d.count, window_s = d.window_s, "MCP connection refused: peer IP not on the allowlist");
+            }
             return; // sock dropped here -> connection closed
         }
         let Ok(permit) = self.slots.clone().try_acquire_owned() else {
-            tracing::warn!(%peer, max = MAX_CONNECTIONS, "MCP connection refused: too many open");
+            if let Some(d) = self.throttle.hit("refused_full") {
+                tracing::warn!(%peer, max = MAX_CONNECTIONS, count = d.count, window_s = d.window_s, "MCP connection refused: too many open");
+            }
             return;
         };
+        let throttle = self.throttle.clone();
         let h = self.handle.clone();
         let http_face = self.http_face.clone();
         let fallback = self.fallback.clone();
@@ -356,7 +366,11 @@ impl Acceptor {
                 return;
             };
             let is_http = matches!(peeked, Ok(1) if first[0].is_ascii_uppercase());
-            tracing::info!(%peer, via = if is_http { "http" } else { "line" }, "MCP client connected");
+            let via = if is_http { "http" } else { "line" };
+            tracing::debug!(%peer, via, "MCP client connected");
+            if let Some(d) = throttle.hit(via) {
+                tracing::info!(via, count = d.count, window_s = d.window_s, "mcp_clients");
+            }
             let outcome = if is_http {
                 http_face.serve(sock, creds, peer, deadline).await
             } else {
