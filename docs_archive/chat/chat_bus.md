@@ -229,7 +229,7 @@ Test-first throughout (failing test → implementation), per house rules.
   clean `cargo build -p molt-ui` + engine-level tests (no GUI on
   `DISPLAY=:0`). Four or more open votes of one kind (the
   proposal's surface) list under one collapsible `<Kind> (N)` header -
-  a node-local view preference (`[ui] discussion_groups_open`), never a
+  a node-local view preference (`config.ui-state.toml` beside the config), never a
   filter on what the engine enumerates.
 
 Non-goals (permanent): no per-channel queues or MLS groups; no persistence

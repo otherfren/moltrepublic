@@ -5090,7 +5090,7 @@ pub enum Command {
         editor: u16,
     },
     /// Show one kind of discussion group expanded or collapsed in the GUI
-    /// nav (a local view preference, persisted to `config.toml`).
+    /// nav (a local view preference in the UI-state file beside `config.toml`).
     SetDiscussionGroup {
         /// A gated surface's key ([`discussion_group_kinds`]).
         kind: String,
