@@ -254,6 +254,7 @@ field asks for it (Q2).
 | Q4 | may a wake agent vote on a branch choice? | no: `choose_branch` on the deny list, branch cards skipped by the wake prompt; approve needs the dropped-list digest, which also covers the irreversible rows (§4) |
 | Q5 | a founding with 2m ≤ n: refuse or warn? | refuse: a warning leaves a republic whose split no vote can repair; note that it also ends the vault for n ≤ 4 |
 | Q6 | retire Strict Order Mode formally? | not yet: keep it dark until this ships and the field shows whether forks still need prevention |
+| Q7 | no finality (issue #12): a late block with a lower hash displaces applied decisions down to the last cut, vault and treasury effects included. Delay irreversible effects (vault disclosure, treasury spend) until k blocks sit on top, or until the next cut? | decide after `block_identity_plan.md` ships and the fork counter shows how many real forks remain; if any: delay by depth, k a charter value, default 1; never a clock |
 
 Hardest unresolved point: the shared seat's single choice across a
 device restore during a split (§2, amnesia). The default refusal narrows
