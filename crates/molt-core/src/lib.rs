@@ -849,6 +849,11 @@ pub struct WorkspaceInfo {
     /// = never backed up. Prose is rendered UI-side.
     #[serde(default = "WorkspaceInfo::never")]
     pub last_backup_min: u32,
+    /// Minutes since this node last confirmed the bucket copy holds the
+    /// current content (an upload, or an unchanged check);
+    /// [`WorkspaceInfo::NEVER`] = not since this node started. Additive.
+    #[serde(default = "WorkspaceInfo::never")]
+    pub backup_checked_min: u32,
     /// Backup copies of this workspace the last REAL bucket listing saw
     /// (`Command::NetListBackups`); 0 until a listing ran, and reset to 0
     /// when a listing fails — the table never claims invented bucket
@@ -1004,6 +1009,7 @@ impl WorkspaceInfo {
                 s3,
                 size_kib,
                 last_backup_min,
+                backup_checked_min: WorkspaceInfo::NEVER,
                 backup_copies: 0,
                 backup_error: String::new(),
                 has_seed: !seed.is_empty(),
@@ -1894,6 +1900,10 @@ pub struct WorkspacePrefs {
     /// Unix seconds of the last completed backup; `None` = never.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_backup: Option<u64>,
+    /// What the last confirmed upload held and where it went: an unchanged
+    /// workspace skips the next one. This node's bookkeeping, dropped on import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_mark: Option<BackupMark>,
     /// Legacy marker: this republic was founded by the pre-network
     /// in-process simulation (its other members never existed as real
     /// nodes). **Inert in production** — no engine spawns fake peers, and
@@ -1969,6 +1979,17 @@ pub struct WorkspacePrefs {
     pub lock_unknown: bool,
 }
 
+/// The record of a confirmed backup upload (`backup_restore_design.md` §6.4a).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackupMark {
+    /// Content fingerprint of the uploaded export, hex.
+    pub fingerprint: String,
+    /// Fingerprint of the bucket target it went to, hex.
+    pub target: String,
+    /// The uploaded object's key.
+    pub object: String,
+}
+
 impl Default for WorkspacePrefs {
     fn default() -> Self {
         WorkspacePrefs {
@@ -1976,6 +1997,7 @@ impl Default for WorkspacePrefs {
             version: STORAGE_VERSION,
             s3_backup: false,
             last_backup: None,
+            backup_mark: None,
             simulated_members: false,
             shared_files: std::collections::BTreeMap::new(),
             shared_file_mtimes: std::collections::BTreeMap::new(),
@@ -6248,6 +6270,15 @@ pub enum Command {
         /// deleting a workspace's last copy, which is reported, never done.
         #[serde(default)]
         quota_error: String,
+        /// Content fingerprint of the upload, hex (`backup_restore_design.md` §6.4a).
+        #[serde(default)]
+        fingerprint: String,
+        /// Fingerprint of the bucket target, hex.
+        #[serde(default)]
+        target: String,
+        /// Nothing uploaded: the content matches `object`, still in the bucket.
+        #[serde(default)]
+        unchanged: bool,
     },
     /// The backup task failed (engine-internal); the stamp stays untouched
     /// and the real reason is surfaced verbatim — never a fake success.

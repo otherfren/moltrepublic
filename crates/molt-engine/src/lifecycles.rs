@@ -341,6 +341,7 @@ impl State {
             // honest: nothing has been uploaded yet — the stamp moves only
             // on a confirmed upload (NetBackupDone), never on enable
             last_backup_min: WorkspaceInfo::NEVER,
+            backup_checked_min: WorkspaceInfo::NEVER,
             backup_copies: 0,
             backup_error: String::new(),
             has_seed: !seed.is_empty(),
@@ -627,6 +628,7 @@ impl State {
         self.session.workspaces.retain(|w| w.id != ws_id);
         // the replaced copy's hold is not this one's
         self.backup_hold.remove(&ws_id);
+        self.backup_last_checked.remove(&ws_id);
         {
             self.session.workspaces.push(WorkspaceInfo {
                 id: ws_id.clone(),
@@ -650,6 +652,7 @@ impl State {
                             .unwrap_or(u32::MAX - 1)
                     })
                     .unwrap_or(WorkspaceInfo::NEVER),
+                backup_checked_min: WorkspaceInfo::NEVER,
                 backup_copies: 0,
                 backup_error: String::new(),
                 has_seed: !entry_seed.is_empty(),

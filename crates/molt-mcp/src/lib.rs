@@ -778,10 +778,12 @@ fn present(name: &str, args: &Value, mut value: Value) -> Result<Value, String> 
         "read_session" => {
             if let Some(list) = value.get_mut("workspaces").and_then(Value::as_array_mut) {
                 for w in list.iter_mut() {
-                    if w.get("last_backup_min").and_then(Value::as_u64)
-                        == Some(u64::from(molt_core::WorkspaceInfo::NEVER))
-                    {
-                        w["last_backup_min"] = Value::Null;
+                    for key in ["last_backup_min", "backup_checked_min"] {
+                        if w.get(key).and_then(Value::as_u64)
+                            == Some(u64::from(molt_core::WorkspaceInfo::NEVER))
+                        {
+                            w[key] = Value::Null;
+                        }
                     }
                 }
             }
@@ -4059,6 +4061,7 @@ pub(crate) mod tests {
         let shown = present("read_session", &json!({}), value).expect("presents");
         assert_eq!(shown["workspaces"][0]["last_backup_min"], Value::Null);
         assert_eq!(shown["workspaces"][1]["last_backup_min"], 30);
+        assert_eq!(shown["workspaces"][0]["backup_checked_min"], Value::Null, "not checked since start");
     }
 
     /// Field report v0.0.2 (write replies): a wrongly shaped edit names its

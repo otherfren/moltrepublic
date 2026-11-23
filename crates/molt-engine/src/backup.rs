@@ -107,7 +107,7 @@ impl State {
                 return Ok(Reply::Ack);
             }
         };
-        let now = now_secs();
+        let now = self.backup_clock();
         let root = self.workspace_root();
         for id in candidates {
             let sealed = self
@@ -135,13 +135,16 @@ impl State {
             // last completed backup: engine-held prefs for the open
             // workspace, plus the in-memory last-done as a fallback so a
             // stamp that could not be persisted does not re-upload every tick
-            let last_backup = self.effective_last_backup(&id, &dir);
-            if last_backup.is_some_and(|t| now.saturating_sub(t) < interval_secs) {
+            let last = self
+                .effective_last_backup(&id, &dir)
+                .max(self.backup_last_checked.get(&id).copied());
+            if last.is_some_and(|t| now.saturating_sub(t) < interval_secs) {
                 continue; // not due yet
             }
             match self.dialer_for() {
                 Ok(dialer) => {
-                    self.spawn_backup_task(id, dir, config.clone(), dialer);
+                    let mark = self.backup_mark(&id, &dir, &backup_target(&config));
+                    self.spawn_backup_task(id, dir, config.clone(), dialer, mark);
                 }
                 Err(e) => {
                     // fail-closed: a Tor misconfiguration never falls back
@@ -173,11 +176,32 @@ impl State {
         }
     }
 
-    /// Refresh every entry's `last_backup_min` from its effective stamp so
-    /// the "letztes Backup" age keeps advancing between uploads. Returns
-    /// whether any label moved.
+    /// The backup ticker's clock: [`now_secs`] plus the test seam's skew.
+    fn backup_clock(&self) -> u64 {
+        now_secs().saturating_add(self.backup_skew.load(std::sync::atomic::Ordering::SeqCst))
+    }
+
+    /// The last confirmed upload's mark, when it went to `target`: a mark
+    /// for another bucket or account claims nothing about this one.
+    fn backup_mark(
+        &self,
+        id: &str,
+        dir: &std::path::Path,
+        target: &str,
+    ) -> Option<molt_core::BackupMark> {
+        let mark = match &self.active {
+            Some(a) if a.id == id => a.prefs.backup_mark.clone(),
+            _ => molt_storage::read_prefs(dir).backup_mark,
+        };
+        mark.filter(|m| m.target == target)
+    }
+
+    /// Refresh every entry's `last_backup_min` from its effective stamp,
+    /// and `backup_checked_min` from the last check, so both ages keep
+    /// advancing between uploads. Returns whether any label moved.
     fn reage_backup_labels(&mut self) -> bool {
         let now = now_secs();
+        let clock = self.backup_clock();
         let root = self.workspace_root();
         let ids: Vec<WorkspaceId> = self
             .session
@@ -185,18 +209,20 @@ impl State {
             .iter()
             .map(|w| w.id.clone())
             .collect();
+        let age = |from: u64, ts: u64| u32::try_from(from.saturating_sub(ts) / 60).unwrap_or(u32::MAX - 1);
         let mut changed = false;
         for id in ids {
-            let Some(dir) = molt_storage::find_workspace_dir(&root, &id) else {
-                continue;
-            };
-            let Some(ts) = self.effective_last_backup(&id, &dir) else {
-                continue;
-            };
-            let minutes = u32::try_from(now.saturating_sub(ts) / 60).unwrap_or(u32::MAX - 1);
+            let checked = self.backup_last_checked.get(&id).map(|t| age(clock, *t));
+            let last = molt_storage::find_workspace_dir(&root, &id)
+                .and_then(|dir| self.effective_last_backup(&id, &dir))
+                .map(|ts| age(now, ts));
             if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
-                if ws.last_backup_min != minutes {
+                if let Some(minutes) = last.filter(|m| *m != ws.last_backup_min) {
                     ws.last_backup_min = minutes;
+                    changed = true;
+                }
+                if let Some(minutes) = checked.filter(|m| *m != ws.backup_checked_min) {
+                    ws.backup_checked_min = minutes;
                     changed = true;
                 }
             }
@@ -238,7 +264,8 @@ impl State {
             .map_err(|e| MoltError::Settings(e.to_string()))?;
         // an explicit attempt gets its own answer, not a held silence
         self.backup_hold.remove(&id);
-        self.spawn_backup_task(id, dir, config, dialer);
+        // an explicit request uploads, changed or not
+        self.spawn_backup_task(id, dir, config, dialer, None);
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
     }
@@ -354,13 +381,15 @@ impl State {
     /// (blocking — Argon2-free in workspace key mode, but file I/O) on the
     /// blocking pool, then PUT + retention over the network. Marks the
     /// workspace in flight; the result returns as the engine-internal
-    /// `NetBackupDone` / `NetBackupFailed`.
+    /// `NetBackupDone` / `NetBackupFailed`. With a `mark` whose object is
+    /// still listed, unchanged content uploads and prunes nothing.
     fn spawn_backup_task(
         &mut self,
         id: WorkspaceId,
         dir: std::path::PathBuf,
         config: molt_net::s3::S3Config,
         dialer: molt_net::dial::Dialer,
+        mark: Option<molt_core::BackupMark>,
     ) {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return; // actor shutting down — no task, no inflight mark
@@ -392,8 +421,23 @@ impl State {
             .map(|w| w.id.clone())
             .chain(std::iter::once(id.clone()))
             .collect();
+        let target = backup_target(&config);
         tokio::spawn(async move {
             let ts = now_secs();
+            let client = molt_net::s3::S3Client::new(config, dialer);
+            // the local mark is trusted only while the bucket still lists
+            // its object: a copy deleted there must be uploaded again
+            let unless = match &mark {
+                None => None,
+                Some(m) => match object_listed(&client, &id, &m.object).await {
+                    Ok(true) => hex::decode(&m.fingerprint).ok().and_then(|f| <[u8; 32]>::try_from(f).ok()),
+                    Ok(false) => None,
+                    Err(error) => {
+                        crate::send_internal(&cmd_tx, Command::NetBackupFailed { id, error, hold: false }).await;
+                        return;
+                    }
+                },
+            };
             let build_dir = dir.clone();
             let pin_ids = own_ids.clone();
             let build = tokio::task::spawn_blocking(move || {
@@ -406,16 +450,24 @@ impl State {
                     })
                     .collect();
                 let mut blob = Vec::new();
-                let key = molt_storage::export::ExportKey::Workspace;
-                match pin.and_then(await_export_pin) {
-                    Some(pin) => molt_storage::export::export_dir_pinned(&root, &build_dir, &key, pin, &mut blob),
-                    None => molt_storage::export::export_dir(&root, &build_dir, &key, &mut blob),
-                }
-                .map(|_outcome| (blob, pins))
+                let pin = pin.and_then(await_export_pin);
+                molt_storage::export::export_backup(&root, &build_dir, pin, unless.as_ref(), &mut blob)
+                    .map(|outcome| (outcome, blob, pins))
             })
             .await;
             let cmd = match build {
-                Ok(Ok((blob, pins))) => {
+                Ok(Ok((None, _, _))) => Command::NetBackupDone {
+                    id,
+                    ts,
+                    object: mark.as_ref().map(|m| m.object.clone()).unwrap_or_default(),
+                    bytes: 0,
+                    prune_error: String::new(),
+                    quota_error: String::new(),
+                    fingerprint: mark.map(|m| m.fingerprint).unwrap_or_default(),
+                    target,
+                    unchanged: true,
+                },
+                Ok(Ok((Some(outcome), blob, pins))) => {
                     let bytes = u64::try_from(blob.len()).unwrap_or(u64::MAX);
                     if bytes > crate::lifecycles::RESTORE_MAX_BYTES {
                         // enforce the restore path's own size cap here: a blob
@@ -432,7 +484,6 @@ impl State {
                         }
                     } else {
                         let object = molt_core::backup_key(&id, ts);
-                        let client = molt_net::s3::S3Client::new(config, dialer);
                         match client.put_object(&object, &blob).await {
                             Ok(()) => {
                                 // retention only AFTER the confirmed upload;
@@ -452,6 +503,9 @@ impl State {
                                     bytes,
                                     prune_error,
                                     quota_error,
+                                    fingerprint: hex::encode(outcome.fingerprint),
+                                    target,
+                                    unchanged: false,
                                 }
                             }
                             Err(e) => Command::NetBackupFailed {
@@ -478,17 +532,22 @@ impl State {
     }
 
     /// A confirmed upload (engine-internal): ONLY here does the stamp move.
-    pub(crate) fn cmd_net_backup_done(
-        &mut self,
-        id: WorkspaceId,
-        ts: u64,
-        object: String,
-        bytes: u64,
-        prune_error: String,
-        quota_error: String,
-    ) -> Result<Reply, MoltError> {
+    /// An unchanged check moves only `backup_checked_min`.
+    pub(crate) fn cmd_net_backup_done(&mut self, id: WorkspaceId, up: Upload) -> Result<Reply, MoltError> {
+        let Upload { ts, object, bytes, prune_error, quota_error, fingerprint, target, unchanged } = up;
         self.backup_inflight.remove(&id);
         self.backup_hold.remove(&id);
+        let clock = self.backup_clock();
+        self.backup_last_checked.insert(id.clone(), clock);
+        if let Some(ws) = self.session.workspaces.iter_mut().find(|w| w.id == id) {
+            ws.backup_checked_min = 0;
+        }
+        if unchanged {
+            self.set_backup_error(&id, "");
+            tracing::info!(id, object, "backup unchanged");
+            self.emit_session(SessionScope::Full);
+            return Ok(Reply::Ack);
+        }
         // the in-memory last-done is the authoritative fallback: it is set
         // even if the durable prefs stamp below cannot be written, so the
         // due-check never re-uploads on a loop
@@ -501,7 +560,8 @@ impl State {
             ws.last_backup_min = minutes;
             ws.backup_error = String::new();
         }
-        self.stamp_backup_time(&id, ts);
+        let mark = molt_core::BackupMark { fingerprint, target, object: object.clone() };
+        self.stamp_backup_time(&id, ts, mark);
         tracing::info!(id, object, bytes, "backup uploaded");
         // one notice slot, so the count retention wins when both spoke —
         // its failure is the older, more basic one
@@ -558,12 +618,13 @@ impl State {
         }
     }
 
-    /// Persist `prefs.last_backup` for one workspace — the same
-    /// writer-vs-direct discipline as `persist_backup_pref`.
-    fn stamp_backup_time(&mut self, id: &str, ts: u64) {
+    /// Persist `prefs.last_backup` and the upload's mark for one workspace
+    /// — the same writer-vs-direct discipline as `persist_backup_pref`.
+    fn stamp_backup_time(&mut self, id: &str, ts: u64, mark: molt_core::BackupMark) {
         if let Some(a) = &mut self.active {
             if a.id == id {
                 a.prefs.last_backup = Some(ts);
+                a.prefs.backup_mark = Some(mark);
                 a.handle.set_prefs(a.prefs.clone());
                 return;
             }
@@ -574,6 +635,7 @@ impl State {
         };
         let mut prefs = molt_storage::read_prefs(&dir);
         prefs.last_backup = Some(ts);
+        prefs.backup_mark = Some(mark);
         if let Err(e) = molt_storage::write_prefs(&dir, &prefs) {
             // surface it: the upload happened, but the durable stamp did not
             // land — the in-memory last-done (set in cmd_net_backup_done)
@@ -596,6 +658,45 @@ impl State {
         }
         false
     }
+}
+
+/// A confirmed upload or an unchanged check, as the backup task reports it
+/// ([`Command::NetBackupDone`]).
+pub(crate) struct Upload {
+    pub(crate) ts: u64,
+    pub(crate) object: String,
+    pub(crate) bytes: u64,
+    pub(crate) prune_error: String,
+    pub(crate) quota_error: String,
+    pub(crate) fingerprint: String,
+    pub(crate) target: String,
+    pub(crate) unchanged: bool,
+}
+
+/// Where a backup lands, as a hex fingerprint: endpoint, region, bucket and
+/// access key. The secret is left out - a rotated key reaches the same
+/// objects.
+fn backup_target(c: &molt_net::s3::S3Config) -> String {
+    use sha2::Digest as _;
+    let e = &c.endpoint;
+    let scheme = if matches!(e.scheme, molt_net::s3::S3Scheme::Https) { "https" } else { "http" };
+    let port = e.port.to_string();
+    let mut h = sha2::Sha256::new_with_prefix(b"molt-backup-target-v1\0");
+    for part in [scheme, e.host.as_str(), port.as_str(), e.base_path.as_str(), c.region.as_str(), c.bucket.as_str(), c.access_key.as_str()] {
+        h.update(u64::try_from(part.len()).unwrap_or(u64::MAX).to_le_bytes());
+        h.update(part.as_bytes());
+    }
+    hex::encode(h.finalize())
+}
+
+/// Whether the bucket still lists `object` under this workspace's prefix.
+async fn object_listed(client: &molt_net::s3::S3Client, id: &WorkspaceId, object: &str) -> Result<bool, String> {
+    let prefix = format!("{}{id}/", molt_core::BACKUP_OBJECT_PREFIX);
+    let listed = client
+        .list_objects(&prefix)
+        .await
+        .map_err(|e| format!("s3: list {prefix}: {e}"))?;
+    Ok(listed.iter().any(|o| o.key == object))
 }
 
 /// Prune this workspace's bucket copies beyond `keep` (design §6.3): list
@@ -869,8 +970,17 @@ mod tests {
         assert!(!st.backup_hold.contains_key(&id), "any other outcome lifts the hold");
 
         st.cmd_net_backup_failed(id.clone(), damaged, true).expect("ack");
-        st.cmd_net_backup_done(id.clone(), 1, "o".to_string(), 1, String::new(), String::new())
-            .expect("ack");
+        let up = super::Upload {
+            ts: 1,
+            object: "o".to_string(),
+            bytes: 1,
+            prune_error: String::new(),
+            quota_error: String::new(),
+            fingerprint: String::new(),
+            target: String::new(),
+            unchanged: false,
+        };
+        st.cmd_net_backup_done(id.clone(), up).expect("ack");
         assert!(!st.backup_hold.contains_key(&id), "an upload lifts the hold");
     }
 
