@@ -19,9 +19,9 @@
 //! | acceptor: kept (S1), approver rule (T1), gates             | `accepts` |
 //! | restore gates: settle, seat-still-active, own restore      | `accepts` (settle = known for `SETTLE` steps) |
 //! | a subject's acceptance of a membership value not counted  | `on_accepted` |
-//! | seal: `restore_seal_held` (seat still active)             | `seal`, retried on ticks |
+//! | seal: a chosen value seals, no gate (M3)                  | `seal` |
 //! | a sealed restore evicts the old device at later heights   | not modelled: heights are independent here, the old device stays (worst case); the rejoiner is not modelled |
-//! | need(R) = m - 1 (H2 fix: `Quorum::restore_need`)         | `restore_need` |
+//! | need(R) = m where m < n, n - 1 where m = n (`Quorum::restore_need`) | `restore_need` |
 //! | a seat that is a subject in its own view leads (H2 fix: never) | `may_lead` |
 //! | acceptors refuse a subject's Prepare/Accept (A-F1)       | `refuses_frame` |
 //! | subjects: open cards only (C-HIGH-1), held values, per value intents | `subjects_of`, `ready_cards` |
@@ -32,7 +32,20 @@
 //! | D-F1: a slot inside the reorg window is kept              | not modelled (no lineages here): `a_slot_below_the_head_is_kept_for_a_reorg_back` |
 //!
 //! Not modelled (covered elsewhere): free signers and the release rule
-//! (`lock_tests.rs` mixed runs), cuts, lineages/forks below, amnesia.
+//! (`lock_tests.rs` mixed runs), cuts, lineages/forks below.
+//!
+//! Every [`Fixes`] option against the wire: the function that carries it
+//! and the wire test that goes red without it (each checked by disabling
+//! the wire rule).
+//!
+//! | option | wire function | wire test red without it |
+//! |--------|---------------|--------------------------|
+//! | `h2` need(R)          | `Quorum::restore_need` | `a_restore_needs_m_where_m_is_below_n` |
+//! | `h2` never lead       | `lock_start` (own subject check) | `a_restore_subject_never_leads` |
+//! | `h2` refuse a subject | `lock_on_prepare`, `lock_on_accept` | `an_acceptor_refuses_a_restore_subjects_prepare` |
+//! | `h1`                  | `lock_acceptor_accept` -> `lock_forced_invalid` | `a_forced_withdrawn_value_completes_with_any_promiser` |
+//! | `m3`                  | `lock_seal` (no gate) | `a_chosen_restore_seals_while_the_old_device_is_heard` |
+//! | `amnesia_rule`        | NOT BUILT (wiring plan, open items) | none |
 
 use super::*;
 

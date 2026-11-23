@@ -759,6 +759,13 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   is lost on the forced path (L5); no divergence follows, the change is
   the chain's. Pinned: `a_forced_withdrawn_value_completes_with_any_promiser`,
   `lock_sim` (H1 halt on the old rule at seed 32).
+- **M3, a chosen value seals.** `lock_seal` holds nothing: the
+  seat-still-active gate decides only what a seat ACCEPTS, never the
+  seal of a value the lock already chose (a gate at the seal pinned the
+  height while the restored seat's old device ran). The coordinator's
+  re-key then removes the old device's leaf (`seat-evicted`, B2).
+  Pinned: `a_chosen_restore_seals_while_the_old_device_is_heard` (the
+  gate at its default).
 - **A-F2, the capability rule.** No seat enters a republic in Strict
   Order Mode on a build without it: the rejoiner's request declares its
   capabilities (`RecoverRequest.caps`, additive), and the coordinator

@@ -2426,3 +2426,55 @@ fn a_new_incarnation_resets_the_declaration_order() {
     let known = petra.active.as_ref().expect("active").prefs.seat_caps.get("walter").cloned();
     assert_eq!(known, Some(vec![cap.to_string()]), "the new device's first declaration counts");
 }
+
+/// M3: a restore the lock chose seals even while the restored seat's OLD
+/// device is heard again - the seal never gates (R1's principle). With
+/// the still-active gate at its default, it held every seal and pinned
+/// the height while the old device ran.
+#[test]
+fn a_chosen_restore_seals_while_the_old_device_is_heard() {
+    use molt_core::{ProposalId, WorkspaceEvent};
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let id = 8;
+    let (frame, change) = dora_card_frame(&b, id);
+    let settle = super::membership::RESTORE_SETTLE_SECS;
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    walter.chain.lock.enabled_override = Some(true);
+    walter.lock_force(true);
+    on_nostr(&mut walter, 10_000);
+    wire(&mut walter, "petra", 1, frame);
+    walter.presence.clock_override = Some(10_000 + settle + 1);
+    walter.cmd_net_delivery_tick().expect("tick");
+    let slot = walter.lock_slot().expect("slot");
+    let value = walter.lock_value(1, &change).expect("a value");
+    wire(
+        &mut walter,
+        "petra",
+        2,
+        WorkspaceEvent::LockAccept {
+            height: 1,
+            base: slot.base.clone(),
+            round: 20,
+            digest: value.digest.clone(),
+            need: u64::try_from(value.need).expect("small"),
+            id: ProposalId(id),
+            change: Some(change.clone()),
+            forced: false,
+        },
+    );
+    assert!(walter.chain.lock.outbox.iter().any(|e| matches!(e.body, WorkspaceEvent::LockAccepted { .. })), "walter accepted");
+    // the chosen value; then dora's old device speaks again
+    let now = 10_000 + settle + 2;
+    walter.recovery.frame_heard.insert("dora".to_string(), now);
+    let sig = molt_storage::identity_sign(b.key("petra"), &molt_core::chain::approval_bytes(&b.republic_id, 1, &change));
+    wire(&mut walter, "petra", 3, WorkspaceEvent::LockAccepted { height: 1, base: slot.base, round: 20, leader: "petra".into(), digest: value.digest, sig });
+    let grace = walter.lock_grace();
+    for t in [grace + 1, 2 * grace + 2] {
+        walter.presence.clock_override = Some(now + t);
+        walter.recovery.frame_heard.insert("dora".to_string(), now + t);
+        walter.cmd_net_delivery_tick().expect("tick");
+    }
+    assert_eq!(walter.chain.head.as_ref().map(|h| h.height), Some(1), "the chosen restore sealed");
+}
