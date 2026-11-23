@@ -1553,6 +1553,10 @@ struct PoolSlot {
     ws: Option<RelayWs>,
     down_until: Option<tokio::time::Instant>,
     failures: u32,
+    /// Transient refusals in a row, and when the next send may go: the
+    /// relay is live but busy, so this delays sends without the breaker.
+    busy: u32,
+    busy_until: Option<tokio::time::Instant>,
 }
 
 impl PoolSlot {
@@ -1637,8 +1641,10 @@ impl PublishPool {
     }
 
     /// [`Self::publish_once`], asked again while the relay answers with a
-    /// transient refusal ([`retry_refusal`]). The slot is free while it
-    /// waits: a busy relay must not hold every other frame behind this one.
+    /// transient refusal ([`retry_refusal`]). The backoff is the relay's,
+    /// shared across events (a landing resets it), so the next event waits
+    /// out the remainder instead of starting at 1 s. The slot is free while
+    /// anyone waits: a busy relay must not hold every other frame behind one.
     async fn publish_pooled(
         dialer: &Dialer,
         url: &str,
@@ -1649,11 +1655,34 @@ impl PublishPool {
         let began = tokio::time::Instant::now();
         let mut retries: u32 = 0;
         loop {
+            let busy_until = slot.lock().await.busy_until;
+            if let Some(until) = busy_until {
+                if until >= began + timeouts.publish {
+                    return Err(NetError::Refused { reason: "backing off".into(), shape: "busy", transient: true });
+                }
+                tokio::time::sleep_until(until).await;
+            }
             let verdict = Self::publish_once(dialer, url, slot, event, timeouts).await;
-            let Some(delay) = retry_refusal(url, &verdict, began, retries, timeouts.publish) else {
-                return verdict;
+            let delay = {
+                let mut guard = slot.lock().await;
+                match &verdict {
+                    Ok(()) => {
+                        guard.busy = 0;
+                        guard.busy_until = None;
+                        breaker_delay(1)
+                    }
+                    Err(NetError::Refused { transient: true, .. }) => {
+                        guard.busy = guard.busy.saturating_add(1);
+                        let delay = breaker_delay(guard.busy);
+                        guard.busy_until = Some(tokio::time::Instant::now() + delay);
+                        delay
+                    }
+                    _ => breaker_delay(1),
+                }
             };
-            tokio::time::sleep(delay).await;
+            if !retry_refusal(url, &verdict, began, delay, retries, timeouts.publish) {
+                return verdict;
+            }
             retries = retries.saturating_add(1);
         }
     }
@@ -1763,8 +1792,8 @@ async fn send_and_await_ok(
     }
 }
 
-/// A relay's verdict on one attempt: `Some(delay)` = a TRANSIENT refusal,
-/// ask again after `delay` (the breaker's schedule, [`breaker_delay`]) while
+/// A relay's verdict on one attempt: `true` = a TRANSIENT refusal, ask
+/// again after `delay` (the breaker's schedule, [`breaker_delay`]) while
 /// that stays within one `timeout` of the first send, so a relay that
 /// always errors costs one publish deadline per event. Every refusal is
 /// counted (`relay_refusal`); the first of a shape per relay per hour
@@ -1773,26 +1802,26 @@ fn retry_refusal(
     url: &str,
     verdict: &Result<(), NetError>,
     began: tokio::time::Instant,
+    delay: Duration,
     retries: u32,
     timeout: Duration,
-) -> Option<Duration> {
+) -> bool {
     use crate::relay_refusal::{record, Refusal, RefusalClass};
     let Err(NetError::Refused { reason, shape, transient }) = verdict else {
-        return None;
+        return false;
     };
     let class = if *transient { RefusalClass::Transient } else { RefusalClass::Permanent };
     let first = record(url, Refusal { class, shape });
-    let delay = breaker_delay(retries.saturating_add(1));
     if *transient && began.elapsed() + delay < timeout {
         tracing::debug!(relay = %url, shape, retry_in_ms = delay.as_millis(), reason = %reason, "relay refused - retrying");
-        return Some(delay);
+        return true;
     }
     if first {
         tracing::warn!(relay = %url, shape, retries, reason = %reason, "relay refused the event");
     } else {
         tracing::debug!(relay = %url, shape, retries, reason = %reason, "relay refused the event");
     }
-    None
+    false
 }
 
 /// A relay-supplied reason, made safe for a log line or an error shown to
@@ -1950,9 +1979,10 @@ async fn publish_one(
         let verdict = send_and_await_ok(&mut ws, event, timeouts.publish)
             .await
             .map_err(RecvFail::into_error)?;
-        let Some(delay) = retry_refusal(url, &verdict, began, retries, timeouts.publish) else {
+        let delay = breaker_delay(retries.saturating_add(1));
+        if !retry_refusal(url, &verdict, began, delay, retries, timeouts.publish) {
             break verdict;
-        };
+        }
         tokio::time::sleep(delay).await;
         retries = retries.saturating_add(1);
     };

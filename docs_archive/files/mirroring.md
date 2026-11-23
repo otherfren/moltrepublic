@@ -256,7 +256,7 @@ version boundary, authenticated by the MLS credential like the poke, and
   `build` (additive, v0.1.2) is the sender's crate version (no commit id:
   the build embeds none), taken under the same `at` order as `caps`,
   runtime only, shown as `status.seats[].build` (absent = older than
-  v0.1.2 or not heard yet). A restarted seat declares at open, and the one
+  v0.1.2, not heard yet, or not at most 32 chars of `[0-9A-Za-z.+-]`). A restarted seat declares at open, and the one
   `MirrorWho` at start makes every peer declare again, so no 6 h wait.
   The frame is an MLS control frame inside the group: only members see a
   build. Privacy decision (v0.1.2): the build, the reported head and the

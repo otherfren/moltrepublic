@@ -304,7 +304,11 @@ shape `error` and still transient. A transient refusal is asked again on the
 same socket on the breaker's schedule (1 s doubling) while the next attempt
 starts within one publish deadline (`publish_timeout_secs`) of the first
 send, so a relay that always errors costs one deadline per event and never
-spins; it does not trip the breaker, so the next event goes to it at once.
+spins. The backoff is the relay's, shared across events (the publish
+pool's slot keeps it; a landing resets it): the next event waits out the
+remainder instead of starting at 1 s, and one whose deadline the wait
+would pass fails as `busy` without a send. It never trips the breaker, and
+nobody holds the relay's slot while waiting.
 This holds after another relay already took the event (its attempt runs on
 past `PUBLISH_GRACE`): relays do not federate, and a peer reading only the
 busy relay needs it. A subscription `CLOSED` reason is counted the same

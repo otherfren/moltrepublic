@@ -97,3 +97,25 @@ fn a_reported_head_and_divergence_reach_the_seat_row() {
     assert!(dora.diverged);
     assert_eq!(dora.head_hash, None, "never reported");
 }
+
+/// A peer's self-description is shown only in a safe shape: a build of at
+/// most 32 chars of `[0-9A-Za-z.+-]`, a head hash of hex. Anything else
+/// reads unknown.
+#[test]
+fn a_malformed_build_or_head_hash_reads_unknown() {
+    let rt = rt();
+    let _guard = rt.enter();
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = chain_peer_3("walter", &b);
+    declare(&mut walter, "petra", 100, "0.1.2+abc-1");
+    declare(&mut walter, "dora", 100, "0.1.2\nWARN forged");
+    let seats = walter.status().seats;
+    assert_eq!(seat(&seats, "petra").build.as_deref(), Some("0.1.2+abc-1"));
+    assert_eq!(seat(&seats, "dora").build, None, "a control character");
+    declare(&mut walter, "dora", 200, &"9".repeat(33));
+    assert_eq!(seat(&walter.status().seats, "dora").build, None, "too long");
+    let bad = HeightHash { height: 3, hash: "zz<script>".into() };
+    wire(&mut walter, "petra", 1, WorkspaceEvent::ChainRequest { from_height: 4, known: vec![bad] });
+    let petra = walter.status().seats.into_iter().find(|s| s.member == "petra").expect("petra");
+    assert_eq!((petra.head_hash, petra.head_height), (None, None), "not hex");
+}

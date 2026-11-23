@@ -325,7 +325,21 @@ impl Acceptor {
     /// await before the spawn is the accept itself.
     async fn accept_one(&mut self) {
         while self.conns.try_join_next().is_some() {}
-        let (sock, peer) = match self.listener.accept().await {
+        // the accept wakes when a held log count is due, so a burst
+        // followed by silence is still counted
+        let accepted = match self.throttle.next_due() {
+            Some(due) => match tokio::time::timeout_at(due.into(), self.listener.accept()).await {
+                Ok(accepted) => accepted,
+                Err(_) => {
+                    for (key, d) in self.throttle.flush_due() {
+                        log_throttle::emit(key, d, None);
+                    }
+                    return;
+                }
+            },
+            None => self.listener.accept().await,
+        };
+        let (sock, peer) = match accepted {
             Ok(accepted) => accepted,
             Err(e) => {
                 tracing::warn!(error = %e, "MCP accept failed - retrying");
@@ -334,14 +348,14 @@ impl Acceptor {
             }
         };
         if !self.allow_all && !self.allowlist.contains(&peer.ip()) {
-            if let Some(d) = self.throttle.hit("refused_allowlist") {
-                tracing::warn!(%peer, count = d.count, window_s = d.window_s, "MCP connection refused: peer IP not on the allowlist");
+            if let Some(d) = self.throttle.hit("refused_allowlist", Some(peer.ip())) {
+                log_throttle::emit("refused_allowlist", d, Some(peer));
             }
             return; // sock dropped here -> connection closed
         }
         let Ok(permit) = self.slots.clone().try_acquire_owned() else {
-            if let Some(d) = self.throttle.hit("refused_full") {
-                tracing::warn!(%peer, max = MAX_CONNECTIONS, count = d.count, window_s = d.window_s, "MCP connection refused: too many open");
+            if let Some(d) = self.throttle.hit("refused_full", Some(peer.ip())) {
+                log_throttle::emit("refused_full", d, Some(peer));
             }
             return;
         };
@@ -368,8 +382,8 @@ impl Acceptor {
             let is_http = matches!(peeked, Ok(1) if first[0].is_ascii_uppercase());
             let via = if is_http { "http" } else { "line" };
             tracing::debug!(%peer, via, "MCP client connected");
-            if let Some(d) = throttle.hit(via) {
-                tracing::info!(via, count = d.count, window_s = d.window_s, "mcp_clients");
+            if let Some(d) = throttle.hit(via, None) {
+                log_throttle::emit(via, d, None);
             }
             let outcome = if is_http {
                 http_face.serve(sock, creds, peer, deadline).await
@@ -3350,6 +3364,23 @@ pub(crate) mod tests {
 
     fn far() -> tokio::time::Instant {
         tokio::time::Instant::now() + std::time::Duration::from_secs(3600)
+    }
+
+    /// With nobody connecting, the accept loop still wakes when a held log
+    /// count is due and flushes it.
+    #[tokio::test]
+    async fn an_idle_accept_loop_flushes_a_held_count() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let allow = vec!["127.0.0.1".parse().expect("ip")];
+        let mut a = Acceptor::new(wallet(), listener, false, allow, seat_only("t"), std::time::Duration::from_secs(10));
+        a.throttle = std::sync::Arc::new(log_throttle::LogThrottle::with_window(std::time::Duration::from_millis(100)));
+        let ip = "10.0.0.1".parse().ok();
+        assert!(a.throttle.hit("refused_bearer", ip).is_some(), "the first speaks");
+        assert!(a.throttle.hit("refused_bearer", ip).is_none(), "the second is held");
+        tokio::time::timeout(std::time::Duration::from_secs(5), a.accept_one())
+            .await
+            .expect("the idle accept returns for the flush");
+        assert_eq!(a.throttle.next_due(), None, "nothing held after the flush");
     }
 
     fn init_req(token: &str) -> Value {
