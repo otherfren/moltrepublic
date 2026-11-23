@@ -4,8 +4,8 @@
 (B7a pure state machine, B7b wiring, 2026-11-22). Review rounds three
 and four found a halt and a fork in 2-of-3 that are not fixed in the
 release tree. With the switch on the lock runs where the chain enabled
-it - every founding, or an older republic after a `set_features` vote
-(§8); deviations in §14; plan `docs/chain/chain_lock_wiring_plan.md`.**
+it, always by a `set_features` vote: a founding starts without it
+(wiring plan §11; tests found locked through a seam) (§8); deviations in §14; plan `docs/chain/chain_lock_wiring_plan.md`.**
 
 **The switch.** `CHAIN_LOCK_AVAILABLE = false` in `chain/lock_wire.rs`; a
 hidden engine seam (`__lock_available`) turns it on per engine, so the
@@ -51,8 +51,8 @@ Why no library fits, in one line each:
   value at a fresh ballot.
 - **The acceptance must be today's position signature** (`approval_bytes`,
   unchanged), because the block is what old builds verify.
-- **Quorums are m-of-n per value** (m; n for a cut; m - 1 live for a
-  consented restore), not majorities.
+- **Quorums are m-of-n per value** (m; n for a cut; for a consented
+  restore m where m < n, n - 1 where m = n), not majorities.
 - **The log already exists** (the chain, its sync, its verifier).
 
 So we build only the per-slot Flexible Paxos core (about 250 lines,
@@ -100,7 +100,7 @@ acceptances that seal it, a function of the change:
 |---|---|
 | `Applied`, `Membership{Joined}` | m |
 | cut (`Checkpoint*`) | n (A2: a cut seals n-of-n) |
-| `Membership{Restored}` with a consent valid at the height | max(m - 1, 1) |
+| `Membership{Restored}` with a consent valid at the height | m where m < n, n - 1 where m = n (`Quorum::restore_need`) |
 
 The wire carries the proposal id beside the digest so a seat finds the
 change; for a membership or cut change the full `ChainChange` rides too
@@ -551,11 +551,13 @@ Where the wiring differs from §1-§13, and why.
 
   Proof. A free seat never promises nor accepts at h afterwards, and an
   acceptance is never followed by a free signature unless released.
-  (T1) `|F| >= n - m + a`: a chosen value needs `need >= m` acceptors at
-  one ballot (a consented restore m - 1 among the seats other than its
-  subject Z, Z not in F), none in F, and r's own only if it holds one, so
-  at most `n - |F| - (1 - a) < m` (restore: `< m - 1`) - nothing can ever
-  be chosen. (T2) `|F| >= m`: order the releases in time. Before the
+  (T1) `|F| >= n - m + a`: a chosen value needs `need` acceptors at one
+  ballot, none in F, and r's own only if it holds one, so at most
+  `n - |F| - (1 - a) <= m - 1` acceptors exist. An ordinary value and a
+  consented restore where m < n need m; a consented restore where m = n
+  needs n - 1 among the seats other than its subject Z (Z not in F), of
+  which at most `n - 1 - |F| - (1 - a) <= n - 2` exist - nothing can
+  ever be chosen. (T2) `|F| >= m`: order the releases in time. Before the
   first one every free seat never had lock state, so every promise set
   lies in the `n - |F| < n - m + 1` non-free seats: no ballot ever
   completes phase 1, nothing is accepted, nothing chosen. Every later
@@ -819,9 +821,13 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   inside the reorg window (attestation variants let a seat leave a
   lineage and come back below its old head). The lock file records the
   floor it forgot up to; a file whose floor is above the chain on disk
-  opens amnesiac (`lock=amnesia reason=ahead_of_chain`). Finality: the
+  loads and is amnesiac up to floor + 1 (`lock=amnesia
+  reason=ahead_of_chain`). Finality: the
   fork rule has no depth bound, so only a cut is final; `SLOT_KEEP` = 256
-  heights (about 40 KiB of lock file at one slot per height) is the
+  heights (measured: about 96 KiB of lock file at one slot per height,
+  plus the open slot's whole change - below the head the file keeps a
+  digest's id, not its change, so the worst case is no longer 256
+  payloads of up to 70 KiB each) is the
   residual - a reorg deeper than that onto a lineage this seat held state
   on. A learner's tally for a slot that is no longer head+1 gives way to
   the current one.

@@ -49,9 +49,9 @@ pub(crate) struct LockSeams {
     /// test seam), 2 = an older build (no capability, every lock frame
     /// ignored, free signatures only).
     pub(crate) cap: std::sync::atomic::AtomicU8,
-    /// The next founding leaves the lock out of the charter (a republic
-    /// founded before the lock existed).
-    pub(crate) found_pre_lock: AtomicBool,
+    /// The next founding ratifies the lock in its charter (test only: a
+    /// founding starts without it, §11).
+    pub(crate) found_locked: AtomicBool,
     /// Takeover grace in seconds, 0 = [`SEALER_GRACE_SECS`].
     pub(crate) grace_secs: AtomicU64,
     /// Retransmit interval in seconds, 0 = [`LOCK_RETRANSMIT_SECS`].
@@ -71,9 +71,9 @@ pub(crate) enum LockMode {
     Free,
 }
 
-/// `chain_lock.state`: the acceptor, and the id (plus the change of a
-/// membership change or cut) behind each digest it accepted, so a promise
-/// after a restart still names what it holds.
+/// `chain_lock.state`: the acceptor, and the id behind each digest it
+/// accepted (plus the whole change at an open slot), so a promise after a
+/// restart still names what it holds.
 #[derive(Default, Serialize, Deserialize)]
 struct LockFile {
     #[serde(default)]
@@ -235,6 +235,14 @@ fn extend(l: [u8; 32], rid: &str, block: &ChainBlock) -> [u8; 32] {
 
 /// The change the wire carries beside the digest: membership changes and
 /// cuts only (§3.2).
+/// The seat a restore re-admits: never a voice for its own restore.
+fn restored_member(change: &ChainChange) -> Option<&str> {
+    match change {
+        ChainChange::Membership { op: MembershipOp::Restored, member, .. } => Some(member),
+        _ => None,
+    }
+}
+
 fn wire_change(change: &ChainChange) -> Option<ChainChange> {
     (matches!(change, ChainChange::Membership { .. }) || CutKind::of(change).is_some()).then(|| change.clone())
 }
@@ -1283,8 +1291,10 @@ impl State {
                 tracing::info!(height = slot.height, id, reason = %why, "lock=withheld");
                 self.chain.lock.withheld_logged = Some(key);
             }
-            self.chain.lock.retry_accept =
-                Some((slot.clone(), ballot.clone(), value.clone(), id, wire_change(&change), forced));
+            // item 8: the carried change too - a forced Applied value may
+            // be known here only from the frame
+            let carried = wire.or_else(|| wire_change(&change));
+            self.chain.lock.retry_accept = Some((slot.clone(), ballot.clone(), value.clone(), id, carried, forced));
             return;
         }
         if self.chain.lock.retry_accept.as_ref().is_some_and(|r| r.0 == *slot) {
@@ -1334,8 +1344,9 @@ impl State {
     /// the same-ballot tally, and the seal once it holds `need`.
     fn lock_count_accepted(&mut self, from: &str, slot: &Slot, ballot: &Ballot, sig: &str, id: u64, change: ChainChange) {
         let Some(value) = self.lock_value(slot.height, &change) else { return };
-        // a restore's subject never counts for its own restore
-        if self.lock_subjects().of(&value.digest) == Some(from) {
+        // a restore's subject never counts for its own restore - by the
+        // change, as `lock_seal` strips it (item 9)
+        if restored_member(&change) == Some(from) {
             return;
         }
         self.chain
@@ -1368,13 +1379,10 @@ impl State {
             return false;
         };
         let consented = matches!(change, ChainChange::Membership { op: MembershipOp::Restored, consent: Some(_), .. });
-        let subject = match &change {
-            ChainChange::Membership { op: MembershipOp::Restored, member, .. } => Some(member.clone()),
-            _ => None,
-        };
+        let subject = restored_member(&change);
         let mut sigs: Vec<RosterAttestation> = by
             .iter()
-            .filter(|(m, _)| subject.as_ref() != Some(*m))
+            .filter(|(m, _)| subject != Some(m.as_str()))
             .map(|(m, sig)| RosterAttestation { member: m.clone(), sig: sig.clone() })
             .collect();
         // a consented restore keeps up to m survivor voices beside the
@@ -1624,6 +1632,14 @@ impl State {
         lock.floor = lock.floor.max(floor);
         let held = lock.acceptor.accepted_digests();
         lock.values.retain(|d, _| held.contains(d));
+        // item 4: the whole change only for an open slot, digests below -
+        // the file is rewritten whole on every step
+        let open = lock.acceptor.accepted_digests_above(head);
+        for (d, (_, change)) in &mut lock.values {
+            if !open.contains(d) {
+                *change = None;
+            }
+        }
         lock.sigs.retain(|(s, _, _), _| s.height > head);
         lock.tallies.retain(|s, _| s.height > head);
         lock.seen.retain(|s, _| s.height > head);
@@ -1909,9 +1925,13 @@ impl State {
         }
         match parsed {
             Ok(Some(file)) if file.floor > head && on => {
-                // B-F1: the file forgot slots the chain on disk still needs
+                // B-F1: the file forgot slots the chain on disk still needs;
+                // what it kept above them still holds
                 tracing::warn!(floor = file.floor, head, "lock=amnesia reason=ahead_of_chain");
-                self.chain.lock.amnesia = Some(None);
+                self.chain.lock.amnesia = Some(Some(file.floor + 1));
+                self.chain.lock.acceptor = file.acceptor;
+                self.chain.lock.values = file.values;
+                self.chain.lock.floor = file.floor;
                 return;
             }
             Ok(Some(file)) => {

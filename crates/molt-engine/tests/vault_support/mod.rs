@@ -148,7 +148,7 @@ async fn found_n_with(
         w
     };
     let a = prepare(engine(&root.join(NAMES[0])), 0).await;
-    a.__found_pre_lock(pre_lock);
+    a.__found_locked(!pre_lock);
     a.execute(Command::CreateStart {
         name: "R".to_string(),
         member: NAMES[0].to_string(),

@@ -130,7 +130,7 @@ async fn wait_long(
 async fn found_trio(root: &std::path::Path, url: &str, lock: bool) -> [WalletHandle; 3] {
     let a = engine(&root.join("mara"));
     // B6 alone: a republic founded before the lock existed
-    a.__found_pre_lock(!lock);
+    a.__found_locked(lock);
     a.__lock_available(lock);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {

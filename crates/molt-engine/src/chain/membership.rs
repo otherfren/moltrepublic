@@ -439,6 +439,12 @@ impl State {
                     return Err(why);
                 }
             }
+            // item 6: every build that runs the lock sends a consent; a
+            // consent-less card there is refused by the seats that saw it
+            // withdrawn and re-accepted by its holder - a halt
+            None if *op == MembershipOp::Restored && self.lock_enabled() => {
+                return Err("a restore needs the seat's consent under Strict Order Mode");
+            }
             None => {
                 let held = self.chain.proposal_changes.iter().any(|(other, c)| {
                     *other != id
@@ -1084,6 +1090,9 @@ impl State {
         } else {
             Some(consent.to_string())
         };
+        if consent.is_none() && self.lock_enabled() {
+            return Err(format!("restore for {member} needs the seat's consent"));
+        }
         let change = ChainChange::Membership {
             op: MembershipOp::Restored,
             member: member.to_string(),
