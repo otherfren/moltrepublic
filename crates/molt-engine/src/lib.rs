@@ -373,6 +373,16 @@ impl WalletHandle {
         self.drop_seam.skip_block_reset.store(block, SeqCst);
     }
 
+    /// Test seam: on the next delivery beat, forget `member`'s accept marks
+    /// above `seq` and ack at once, as after a hard stop that saved the
+    /// window less recently than the ack went out. No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __regress_window(&self, member: &str, seq: u64) {
+        if let Ok(mut r) = self.drop_seam.regress.lock() {
+            *r = Some((member.to_string(), seq));
+        }
+    }
+
     /// Test seam: how many inbound envelopes the drop seam swallowed. A
     /// read only; no `Command` reaches it.
     #[doc(hidden)]
@@ -1218,6 +1228,24 @@ pub(crate) struct ChainProjection {
     /// WP2: > 0 while a batch of blocks is applied; the re-sign runs once
     /// at the batch's final head.
     pub(crate) resign_hold: u32,
+    /// H1: the last refused blocks (bounded), newest last.
+    pub(crate) refusals: std::collections::VecDeque<molt_core::BlockRefusal>,
+    /// G3: catch-up rounds repeating without progress, one per (peer, side).
+    pub(crate) heal_loops: Vec<molt_core::HealLoop>,
+    /// F1: per peer, the newest frame (seq, height, hash) that showed it on
+    /// this branch.
+    pub(crate) peer_on_branch: BTreeMap<MemberId, (u64, u64, String)>,
+    /// The sender of each buffered block, for its refusal line.
+    pub(crate) pending_from: BTreeMap<u64, MemberId>,
+    /// A4: per log key the last text, when it went out, and how many
+    /// identical lines were folded since.
+    pub(crate) log_gate: BTreeMap<String, (String, u64, u32)>,
+    /// G3: catch-up requests sent, and per (peer, side) the count at its
+    /// last counted round.
+    pub(crate) requests_sent: u64,
+    pub(crate) round_marks: BTreeMap<(MemberId, bool), u64>,
+    /// H1: per peer, the seq of the newest `ChainRequest` acted on.
+    pub(crate) request_seq: BTreeMap<MemberId, u64>,
     /// B7: the sealing lock (`chain/lock_wire.rs`).
     pub(crate) lock: chain::LockRuntime,
 }

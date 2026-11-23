@@ -324,3 +324,52 @@ fn a_catch_up_batch_re_signs_once_at_the_final_head() {
     let heights: Vec<u64> = (1..=4).filter(|h| net.approvals_sent(W, c, *h) > 0).collect();
     assert_eq!(heights, vec![1, 4], "signed at the proposal and at the final head only");
 }
+
+/// Review R1: the stance a tip swap restored survives the NEXT head move
+/// too - another card takes h+1, and the displaced card re-signs at h+2.
+#[test]
+fn a_displaced_card_re_signs_after_a_second_head_move() {
+    let (mut net, c1, c2) = forked(salt_where(true));
+    while net.tip(W) != net.tip(D) {
+        assert!(net.deliver_one(D, W), "dora's block is queued");
+    }
+    // walter's re-sign at 2 and dora's c2 vote at 2 stay queued
+    net.cut(D, W);
+    let c3 = note(&mut net.seats[D], "three");
+    net.deliver(D, P);
+    net.seats[P].cmd_approve(ProposalId(c3), None).expect("petra approves c3");
+    assert_eq!(net.state(P, c3), Some(ProposalState::Applied), "c3 took height 2");
+    net.down.remove(&(P, W));
+    net.deliver(P, W);
+    assert_eq!(net.seats[W].chain.head.as_ref().expect("head").height, 2);
+    assert_eq!(net.approvals_sent(W, c2, 3), 1, "walter's stance re-signs at 3");
+    net.heal();
+    assert_converged(&net, &[c1, c2, c3]);
+}
+
+/// Review R1, second path: an approval held unsigned (no signature in the
+/// block, none in the stashed voters) keeps its stance through the block
+/// that sealed it without this seat and the swap that displaced it.
+#[test]
+fn a_held_approval_survives_its_block_being_displaced() {
+    let b = Builder::new(&NAMES, 2);
+    let mut net = Net::new();
+    let c = note(&mut net.seats[P], "held");
+    assert!(net.deliver_one(P, W), "walter holds the card");
+    let walter = &mut net.seats[W];
+    walter.chain.own_approvals.insert(c);
+    let payload = walter.proposals.get(&c).expect("the card").payload.clone();
+    let sealed = b.seal(1, ChainChange::Applied { proposal_id: c, surface: Surface::Memory, payload }, &["dora", "petra"]);
+    let rid = b.republic_id.clone();
+    let rival = (0..64)
+        .map(|i| b.seal(1, ChainChange::Applied { proposal_id: 500 + i, surface: Surface::Memory, payload: json!({ "op": "add_note", "title": i }) }, &["dora", "petra"]))
+        .find(|r| block_hash(&rid, r) < block_hash(&rid, &sealed))
+        .expect("a smaller rival");
+    wire(walter, "dora", 900, WorkspaceEvent::Committed(sealed));
+    assert_eq!(walter.proposals.get(&c).map(|p| p.state), Some(ProposalState::Applied));
+    wire(walter, "dora", 901, WorkspaceEvent::Committed(rival));
+    assert_eq!(walter.proposals.get(&c).map(|p| p.state), Some(ProposalState::Proposed), "displaced");
+    assert!(walter.chain.own_approvals.contains(&c), "the stance stands");
+    net.flush();
+    assert_eq!(net.approvals_sent(W, c, 2), 1, "signed at the new head+1");
+}

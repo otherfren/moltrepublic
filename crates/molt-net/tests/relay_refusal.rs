@@ -117,6 +117,26 @@ async fn a_busy_relay_gets_the_event_after_another_took_it() {
     assert_eq!(busy.taken(), 1, "the busy relay took it on the retry");
 }
 
+/// Another frame waits only for the relay's shared backoff, never behind
+/// one event's whole retry chain (a held slot stalled every frame for up
+/// to a publish deadline behind one rate-limited event).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_busy_wait_holds_other_frames_only_for_the_backoff() {
+    let relay = Scripted::run(|n| if n == 0 { (false, "rate-limited: slow down") } else { (true, "") }).await;
+    let pool = pool(vec![relay.url.clone()], Duration::from_secs(10));
+    let first = {
+        let pool = pool.clone();
+        tokio::spawn(async move { pool.publish(&event()).await })
+    };
+    while relay.events() == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let began = tokio::time::Instant::now();
+    pool.publish(&event()).await.expect("the second frame lands");
+    assert!(began.elapsed() < Duration::from_millis(1_700), "waited {:?} behind the busy one", began.elapsed());
+    first.await.expect("task").expect("the first lands on its retry");
+}
+
 /// A verdict is final for this event: one EVENT, no retry, not unreachable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_invalid_refusal_is_not_retried() {
@@ -132,20 +152,33 @@ async fn an_invalid_refusal_is_not_retried() {
     assert_eq!((seen.busy, seen.last_shape), (0, "invalid"));
 }
 
-/// A relay that always errors costs one publish deadline, not a spin; its
-/// connection stays usable for the next event (no breaker).
+/// A relay that always errors costs one publish deadline, not a spin, and
+/// the backoff carries over: the next event waits out the remainder and
+/// is sent once, instead of starting again at 1 s.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_relay_that_always_errors_does_not_spin() {
     let relay = Scripted::run(|_| (false, "error: database is locked")).await;
-    let pool = pool(vec![relay.url.clone()], Duration::from_secs(4));
+    let pool = pool(vec![relay.url.clone()], Duration::from_secs(5));
     let began = tokio::time::Instant::now();
     let err = pool.publish(&event()).await.expect_err("never accepted");
     assert!(began.elapsed() < Duration::from_secs(8), "bounded by the deadline");
     let asked = relay.events();
-    assert!((2..=4).contains(&asked), "a few backed-off attempts, not a spin: {asked}");
+    assert_eq!(asked, 3, "sent at 0 s, 1 s, 3 s");
     assert!(err.to_string().contains("relay refused: error: database is locked"), "{err}");
     let _ = pool.publish(&event()).await;
-    assert!(relay.events() > asked, "the next event is asked at once - no breaker");
+    assert_eq!(relay.events(), asked + 1, "the next event waits out the shared backoff, then one send");
+}
+
+/// A landing resets the shared backoff: the next busy spell starts at 1 s
+/// again, not where the last one left off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_landing_resets_the_shared_backoff() {
+    let relay = Scripted::run(|n| if n % 2 == 0 { (false, "error: database is locked") } else { (true, "") }).await;
+    let pool = pool(vec![relay.url.clone()], Duration::from_secs(10));
+    pool.publish(&event()).await.expect("lands on the retry");
+    let began = tokio::time::Instant::now();
+    pool.publish(&event()).await.expect("lands on its retry");
+    assert!(began.elapsed() < Duration::from_millis(1_600), "a 1 s wait, not 2 s: {:?}", began.elapsed());
 }
 
 /// Connection-level failure is still unreachable, and counts no refusal.

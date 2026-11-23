@@ -1112,6 +1112,12 @@ impl State {
     /// state. Returns whether it was accepted. **Does not persist** — the
     /// caller does, once per batch ([`State::persist_chain_now`]).
     pub(super) fn append_committed_block(&mut self, block: ChainBlock) -> bool {
+        let me = self.member();
+        self.append_block_from(&me, block)
+    }
+
+    /// [`Self::append_committed_block`] for a block `from` delivered.
+    pub(super) fn append_block_from(&mut self, from: &str, block: ChainBlock) -> bool {
         // verify BEFORE appending — the block only ever touches `self.chain.blocks`
         // once it has passed, so there is nothing to roll back
         match self.extend_own(&block) {
@@ -1127,7 +1133,9 @@ impl State {
             Err(e) => {
                 // routine, not an internal fault: a stale re-serve during
                 // catch-up and a hostile peer both land here
-                tracing::warn!(height = block.height, error = %e, "refused a chain block");
+                let rule = super::refusal_rule(&e);
+                let hash = self.note_refused(from, &block, rule);
+                tracing::warn!(height = block.height, %hash, %from, rule, error = %e, "refused a chain block");
                 false
             }
         }
@@ -1486,12 +1494,8 @@ impl State {
     /// WP4b stage 4: verify a candidate chain in THIS holder's context —
     /// a full holder verifies from the genesis, a pruned holder from its
     /// checkpoint blob (`verify_suffix_chain`). The one entry every
-    /// adopt/append/probe path routes through.
-    pub(crate) fn verify_own(&self, blocks: &[ChainBlock]) -> Result<ChainHead, String> {
-        Ok(self.walk_own(blocks)?.head)
-    }
-
-    /// [`State::verify_own`], keeping the walk.
+    /// adopt/append/probe path routes through; a caller that moves the
+    /// head stores the walk it got (`chain.walk`).
     pub(crate) fn walk_own(&self, blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
         match &self.chain.checkpoint_blob {
             None => walk_chain(blocks),

@@ -227,7 +227,9 @@ count= window_s=` line per minute per protocol (`count` = connections
 since the previous line, `window_s` = seconds since it; the first after
 a quiet spell speaks at once), so a polling client no longer fills the
 log. The refusals (bad bearer, allowlist, too many open) stay WARN under
-the same rule, one line per minute per kind with its `count`.
+the same rule, one line per minute per kind with its `count` and
+`sources` (distinct addresses). What a window held is flushed when it
+closes, even if nothing follows: the accept loop wakes for it.
 
 If a client hangs or gets a connection reset with no JSON reply, check that
 `WARN ... peer IP not on the allowlist` line first — the allowlist drops the socket

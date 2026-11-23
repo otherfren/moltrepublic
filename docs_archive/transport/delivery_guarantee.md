@@ -752,9 +752,18 @@ the new device's acked floor past frames nobody applied.
   neither to it nor `rekeyed` is reset once. This heals the windows v0.1.0
   and v0.1.1 left; a healthy unkeyed window costs one re-delivery of that
   seat's unacked tail, absorbed by the kind-level dedups (chat by
-  `MessageId`, its verbs by target id, `Proposed` by id, `Approved` and
-  `Declined` per signer, `Committed` by height). Its acked floor never moves
-  back, so nothing already acked is re-sent.
+  `MessageId`; `ChatReacted` with an `op` as an idempotent set/unset,
+  `ChatDeleted`/`FileRemoved` as terminal flags, `ChatRead` by id; `Proposed`
+  by id, `Approved` and `Declined` per signer, `Committed` by height; the
+  file plane's `FileWanted`/`FileServed`/`FileRequested` are soft state that
+  a repeat only refreshes). A legacy reaction without `op` toggles and is
+  the one kind a repeat would flip; no current build sends one.
+- **A reset window owes the new incarnation from its start.** An empty
+  window keyed by a restore (`restore` non-empty, `high` 0) is history at
+  seq 0, not a first contact: the G7 frontier starts at 0, so a later
+  envelope waits behind its missing predecessors and is asked for, instead
+  of seeding a baseline that would ack everything below it. A first contact
+  (no window) keeps the baseline rule.
 - **Ack-ahead guard** (`apply_group_ack`). A sheet whose `high` for us is
   above our own log's highest seq describes a previous incarnation of this
   seat: the floor does not move; the peer's floor falls to 0 with
@@ -763,8 +772,31 @@ the new device's acked floor past frames nobody applied.
   (`OutboundCursor.ack_ahead`, persisted; a sheet within the log ends it).
   It catches only seqs above the new device's head; once that head passes
   the old `high` the stale window lets new frames through anyway, and what
-  it falsely acked below stays lost. The mesh path refuses such a sheet
-  without the rewind.
+  it falsely acked below stays lost - the regression rewind below brings
+  it back once the peer's window is reset. The mesh path refuses such a
+  sheet without the rewind.
+- **Regression rewind** (`apply_group_ack`). Every sheet carries its
+  writer's clock in milliseconds (`GroupAck.at`, additive; an older build
+  writes none and never triggers a rewind). The cursor keeps the `high` and
+  the stamp of the sheet that last moved the floor (`OutboundCursor.ack_high`,
+  `ack_at`). A sheet stamped LATER whose `high` is below that `high` (or,
+  with none recorded, below the floor) no longer holds what was acked: its
+  window reset or regressed across a hard stop. The floor falls to what the
+  sheet proves - recomputed over our log from `high - 1024` (below it the
+  sheet reads every seq as accepted) - and the stall rounds re-offer the
+  rest with fresh encryptions. A sheet stamped at or before `ack_at` (late,
+  reordered, re-read after a restart, or from the peer's previous device)
+  cannot rewind: any sheet written after the floor-setting one without a
+  regression reports at least its `high`. Never below the log: positions
+  compaction dropped are gone, counted once as `compacted=`. `ack_regressed
+  from= reported= floor= compacted=` WARN once per episode
+  (`OutboundCursor.regressed_from`, persisted; it ends when the floor is
+  back there). A rewind publishes nothing itself: the rounds it feeds stay
+  inside the hourly budget (12 rounds, plus one heal round the sheet's
+  evidence buys), so a peer that keeps regressing costs at most that. The
+  gap answers a reset receiver asks for are bounded separately (§10).
+  A receiver that lost a few marks without its `high` dropping is not
+  detected; its G7 gap asks recover those.
 - **Visibility on the receiver.** A dropped duplicate counts when its stamp
   is newer than every envelope accepted from that sender
   (`AcceptedWindow.stamp`, receiver-local, persisted; 0 = unknown, nothing
@@ -787,4 +819,11 @@ Pins: `net::restore_reset_tests`,
 `group_runtime::tests::a_sheet_acking_above_the_own_log_is_refused_and_rewinds_the_peer`,
 `crates/molt-engine/tests/nostr_recovery.rs`
 (`a_bystander_that_missed_the_live_reset_hears_the_restored_seat`,
-`a_window_missed_before_this_build_heals_at_the_next_open`).
+`a_window_missed_before_this_build_heals_at_the_next_open`,
+`a_tail_falsely_acked_past_the_old_high_mark_arrives_after_the_heal`),
+`group_runtime::tests::{a_newer_sheet_below_the_floor_rewinds_once_per_episode,
+a_late_older_or_unstamped_sheet_does_not_rewind,
+a_rewind_below_the_compacted_log_counts_what_is_gone}`,
+`group_ack::tests::the_stamp_is_additive_both_ways`,
+`crates/molt-engine/tests/nostr_delivery_guarantee.rs`
+(`a_receiver_whose_window_regressed_gets_the_tail_again_and_applies_it_once`).

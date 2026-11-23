@@ -728,16 +728,18 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
     let Some(window) = ack.window_for(me) else {
         return; // silence, not a claim of zero
     };
-    let old = store
-        .load()
-        .await
-        .outbound
-        .get(from)
-        .map_or(0, |c| c.acked_floor);
+    let held = store.load().await.outbound.get(from).copied().unwrap_or_default();
+    let old = held.acked_floor;
     let envs = log.read_from(old.saturating_add(1)).await;
     let own_high = envs.last().map_or(old, |e| e.seq.max(old));
     if window.high > own_high {
         refuse_ack_ahead(store, from, window.high, own_high).await;
+        return;
+    }
+    // only a sheet written after the one that set the floor can contradict it
+    let regressing = ack.at > held.ack_at
+        && (window.high < held.ack_high || (held.ack_high == 0 && window.high < old));
+    if regressing && rewind_regressed(log, store, me, from, ack.at, window, old).await {
         return;
     }
     let floor = crate::supervisor::advance_acked_floor(me, &envs, window, old);
@@ -774,6 +776,11 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
             if floor > cursor.acked_floor {
                 cursor.acked_floor = floor;
                 cursor.ack_seen = true;
+                cursor.ack_high = window.high;
+                cursor.ack_at = cursor.ack_at.max(ack.at);
+                if cursor.regressed_from != 0 && floor >= cursor.regressed_from {
+                    cursor.regressed_from = 0;
+                }
                 changed = true;
             } else if !cursor.ack_seen {
                 // no progress — but the peer is listening. Latch without
@@ -786,6 +793,59 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
             changed
         })
         .await;
+}
+
+/// A sheet written after the one that set the floor no longer holds what
+/// that one acked (the peer's window was reset, or regressed across a hard
+/// stop): the floor falls to what this sheet proves, never below the log,
+/// and the stall rounds re-offer the rest. `false` = no contradiction.
+async fn rewind_regressed<L: OutboxLog, S: StateStore>(
+    log: &L,
+    store: &S,
+    me: &MemberId,
+    from: &MemberId,
+    at: u64,
+    window: &molt_core::AcceptedWindow,
+    old: u64,
+) -> bool {
+    // below the window the sheet reads every seq as accepted
+    let base = window.high.saturating_sub(molt_core::ACCEPT_WINDOW_BITS);
+    let envs = log.read_range(base.saturating_add(1), old).await;
+    let Some(first) = envs.first().map(|e| e.seq) else { return false };
+    let start = base.max(first.saturating_sub(1));
+    let floor = crate::supervisor::advance_acked_floor(me, &envs, window, start);
+    if floor >= old {
+        return false;
+    }
+    // positions the peer lacks that compaction already dropped: gone
+    let within = (base + 1..first.min(window.high.saturating_add(1))).filter(|s| !window.is_accepted(*s)).count();
+    let compacted = u64::try_from(within)
+        .unwrap_or(u64::MAX)
+        .saturating_add(first.saturating_sub(1).saturating_sub(window.high.max(base)));
+    let mut first_episode = false;
+    store
+        .update(|state| {
+            let cursor = state.outbound.entry(from.clone()).or_default();
+            first_episode = cursor.regressed_from == 0;
+            if first_episode {
+                cursor.regressed_from = old;
+            }
+            cursor.acked_floor = floor;
+            cursor.ack_seen = true;
+            cursor.ack_high = window.high;
+            cursor.ack_at = at;
+            let mut group = state.group.unwrap_or_default();
+            group.heal_evidence |= floor < group.log_seq;
+            state.group = Some(group);
+            true
+        })
+        .await;
+    if first_episode {
+        tracing::warn!(%from, reported = window.high, floor = old, compacted, "ack_regressed");
+    } else {
+        tracing::debug!(%from, reported = window.high, floor = old, rewound = floor, "ack_regressed");
+    }
+    true
 }
 
 /// A sheet acking seqs above our own log describes a previous incarnation
@@ -3080,6 +3140,110 @@ mod tests {
         apply_group_ack(&log, &store, &me, &from, &stale(6_000)).await;
         let logged = String::from_utf8_lossy(&buf.0.lock().expect("log buffer")).to_string();
         assert_eq!(logged.matches("ack_ahead").count(), 2, "a new episode warns again");
+    }
+
+    fn sheet_at(at: u64, accepted: std::ops::RangeInclusive<u64>) -> crate::group_ack::GroupAck {
+        let mut w = molt_core::AcceptedWindow::default();
+        for seq in accepted {
+            assert!(w.accept(seq));
+        }
+        let mut ack =
+            crate::group_ack::GroupAck::new("petra".to_string(), std::collections::BTreeMap::from([("walter".to_string(), w)]));
+        ack.at = at;
+        ack
+    }
+
+    /// Walter's log 1..=10, all acked by petra's sheet stamped 1000.
+    async fn acked_through_ten() -> (crate::MemLog, crate::MemStateStore) {
+        let log = crate::MemLog::default();
+        let store = crate::MemStateStore::default();
+        for seq in 1..=10u64 {
+            log.push(walter_event(seq));
+        }
+        apply_group_ack(&log, &store, &"walter".to_string(), &"petra".to_string(), &sheet_at(1_000, 1..=10)).await;
+        (log, store)
+    }
+
+    async fn petra_cursor(store: &crate::MemStateStore) -> OutboundCursor {
+        <crate::MemStateStore as StateStore>::load(store).await.outbound["petra"]
+    }
+
+    /// A newer sheet that no longer holds what an earlier one acked (the
+    /// peer's window was reset, or regressed across a hard stop): the floor
+    /// falls back to what this sheet proves, so the stall rounds re-offer
+    /// the rest. One WARN per episode; the episode ends once the floor is
+    /// back. The resend budget is untouched.
+    #[tokio::test]
+    async fn a_newer_sheet_below_the_floor_rewinds_once_per_episode() {
+        let buf = LogBuf::default();
+        let subscriber = tracing_subscriber::fmt().with_writer(buf.clone()).with_ansi(false).without_time().finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let (log, store) = acked_through_ten().await;
+        assert_eq!(petra_cursor(&store).await.acked_floor, 10);
+        let budget = <crate::MemStateStore as StateStore>::load(&store).await.group.unwrap_or_default();
+        let (me, from) = ("walter".to_string(), "petra".to_string());
+        for i in 0..50u64 {
+            apply_group_ack(&log, &store, &me, &from, &sheet_at(2_000 + i, 1..=4)).await;
+        }
+        let cursor = petra_cursor(&store).await;
+        assert_eq!((cursor.acked_floor, cursor.ack_seen), (4, true), "seqs 5..=10 are owed again");
+        let logged = String::from_utf8_lossy(&buf.0.lock().expect("log buffer")).to_string();
+        assert_eq!(logged.matches("WARN").count(), 1, "one WARN per episode: {logged}");
+        assert!(logged.contains("ack_regressed") && logged.contains("reported=4 floor=10"), "{logged}");
+        let group = <crate::MemStateStore as StateStore>::load(&store).await.group.unwrap_or_default();
+        assert_eq!(
+            (group.resend_rounds, group.resend_window_start, group.heal_rounds),
+            (budget.resend_rounds, budget.resend_window_start, budget.heal_rounds),
+            "a rewind spends and refills no budget: the rounds stay at {RESEND_ROUNDS_PER_HOUR}/h plus one heal"
+        );
+        // the tail landed: the episode ends, a later regression warns again
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(3_000, 1..=10)).await;
+        let cursor = petra_cursor(&store).await;
+        assert_eq!((cursor.acked_floor, cursor.regressed_from), (10, 0));
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(4_000, 1..=2)).await;
+        let logged = String::from_utf8_lossy(&buf.0.lock().expect("log buffer")).to_string();
+        assert_eq!(logged.matches("WARN").count(), 2, "{logged}");
+    }
+
+    /// A late older sheet, or one from a build that stamps nothing, proves
+    /// nothing about now: the floor stays.
+    #[tokio::test]
+    async fn a_late_older_or_unstamped_sheet_does_not_rewind() {
+        let (log, store) = acked_through_ten().await;
+        let (me, from) = ("walter".to_string(), "petra".to_string());
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(999, 1..=4)).await;
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(1_000, 1..=4)).await;
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(0, 1..=4)).await;
+        assert_eq!(petra_cursor(&store).await.acked_floor, 10);
+    }
+
+    /// What compaction already dropped cannot be re-offered: the floor goes
+    /// no lower than the log reaches, and the gone positions are logged once.
+    #[tokio::test]
+    async fn a_rewind_below_the_compacted_log_counts_what_is_gone() {
+        let buf = LogBuf::default();
+        let subscriber = tracing_subscriber::fmt().with_writer(buf.clone()).with_ansi(false).without_time().finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let log = crate::MemLog::default();
+        let store = crate::MemStateStore::default();
+        for seq in 6..=10u64 {
+            log.push(walter_event(seq));
+        }
+        store
+            .update(|st| {
+                st.outbound.insert(
+                    "petra".into(),
+                    OutboundCursor { acked_floor: 10, ack_seen: true, ack_high: 10, ack_at: 1_000, ..Default::default() },
+                );
+                true
+            })
+            .await;
+        let (me, from) = ("walter".to_string(), "petra".to_string());
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(2_000, 1..=2)).await;
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(2_001, 1..=2)).await;
+        assert_eq!(petra_cursor(&store).await.acked_floor, 5, "nothing below the log to re-offer");
+        let logged = String::from_utf8_lossy(&buf.0.lock().expect("log buffer")).to_string();
+        assert_eq!(logged.matches("compacted=3").count(), 1, "{logged}");
     }
 
     /// With nobody acking, the floor is unknown and the cursor does not move.

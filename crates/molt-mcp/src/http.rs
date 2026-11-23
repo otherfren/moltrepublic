@@ -133,8 +133,8 @@ async fn gate(
         })
         .unwrap_or("");
     let Some(scope) = creds.scope_for(given) else {
-        if let Some(d) = throttle.hit("refused_bearer") {
-            tracing::warn!(%peer, count = d.count, window_s = d.window_s, "MCP HTTP refused: missing or invalid bearer token");
+        if let Some(d) = throttle.hit("refused_bearer", Some(peer.ip())) {
+            crate::log_throttle::emit("refused_bearer", d, Some(peer));
         }
         return empty(StatusCode::UNAUTHORIZED)
             .header(header::WWW_AUTHENTICATE, "Bearer realm=\"moltrepublic\"")
