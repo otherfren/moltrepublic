@@ -117,6 +117,26 @@ async fn a_busy_relay_gets_the_event_after_another_took_it() {
     assert_eq!(busy.taken(), 1, "the busy relay took it on the retry");
 }
 
+/// The wait before asking again does not hold the relay's slot: another
+/// frame goes out at once (a held slot stalled every frame for up to a
+/// publish deadline behind one rate-limited event).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_busy_wait_does_not_hold_other_frames() {
+    let relay = Scripted::run(|n| if n == 0 { (false, "rate-limited: slow down") } else { (true, "") }).await;
+    let pool = pool(vec![relay.url.clone()], Duration::from_secs(10));
+    let first = {
+        let pool = pool.clone();
+        tokio::spawn(async move { pool.publish(&event()).await })
+    };
+    while relay.events() == 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let began = tokio::time::Instant::now();
+    pool.publish(&event()).await.expect("the second frame lands");
+    assert!(began.elapsed() < Duration::from_millis(700), "waited {:?} behind the busy one", began.elapsed());
+    first.await.expect("task").expect("the first lands on its retry");
+}
+
 /// A verdict is final for this event: one EVENT, no retry, not unreachable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_invalid_refusal_is_not_retried() {
