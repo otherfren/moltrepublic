@@ -786,6 +786,7 @@ mod tests {
             fingerprint: "aa".repeat(32),
             target: "bb".repeat(32),
             object: "molt/x/1.molt.enc".to_string(),
+            size: Some(1),
         });
         crate::write_prefs(&src_dir, &prefs).expect("prefs");
         let blob = blob_of(&src_root, &src_dir, &ExportKey::passphrase(PASS));

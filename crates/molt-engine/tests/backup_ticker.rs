@@ -28,10 +28,17 @@ struct Req {
 /// `(status, body, delay_ms)` a route answers with.
 type RouteResp = (u16, String, u64);
 type Router = Arc<dyn Fn(&str, &str) -> RouteResp + Send + Sync>;
+/// A [`Router`] that also sees the request body.
+type BodyRouter = Arc<dyn Fn(&str, &str, &[u8]) -> RouteResp + Send + Sync>;
 
 /// A multi-request S3 stub: accepts connections forever, records every
 /// request (method, path, body), answers per the router.
 async fn stub_server(router: Router) -> (String, Arc<Mutex<Vec<Req>>>) {
+    stub_server_body(Arc::new(move |m, p, _b| router(m, p))).await
+}
+
+/// [`stub_server`] with a router that sees the body.
+async fn stub_server_body(router: BodyRouter) -> (String, Arc<Mutex<Vec<Req>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind stub");
     let addr = listener.local_addr().expect("stub addr");
     let log: Arc<Mutex<Vec<Req>>> = Arc::new(Mutex::new(Vec::new()));
@@ -81,7 +88,7 @@ async fn stub_server(router: Router) -> (String, Arc<Mutex<Vec<Req>>>) {
                     }
                     body.extend_from_slice(&chunk[..n]);
                 }
-                let (status, resp_body, delay_ms) = router(&method, &path);
+                let (status, resp_body, delay_ms) = router(&method, &path, &body);
                 log.lock().expect("log lock").push(Req { method, path, body });
                 if delay_ms > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -1042,18 +1049,21 @@ async fn a_replace_restore_lifts_the_hold_of_the_copy_it_replaces() {
     assert_eq!(puts(), 1);
 }
 
-/// An in-process bucket: PUT stores the key, DELETE drops it, a listing
-/// names what the addressed bucket holds; `down` answers 503 to anything.
+/// Per bucket, the held objects as `(key, size)`.
+type Held = std::collections::BTreeMap<String, Vec<(String, u64)>>;
+
+/// An in-process bucket: PUT stores the key and size, DELETE drops it, a
+/// listing names what the addressed bucket holds; `down` answers 503.
 #[derive(Clone, Default)]
 struct FakeBucket {
-    keys: Arc<Mutex<std::collections::BTreeMap<String, Vec<String>>>>,
+    keys: Arc<Mutex<Held>>,
     down: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FakeBucket {
-    fn router(&self) -> Router {
+    fn router(&self) -> BodyRouter {
         let b = self.clone();
-        Arc::new(move |method, path| {
+        Arc::new(move |method, path, body| {
             if b.down.load(Ordering::SeqCst) {
                 return (503, String::new(), 0);
             }
@@ -1064,19 +1074,20 @@ impl FakeBucket {
             let held = keys.entry(bucket.to_string()).or_default();
             match method {
                 "PUT" => {
-                    held.push(key);
+                    held.retain(|(k, _)| *k != key);
+                    held.push((key, u64::try_from(body.len()).expect("size")));
                     (200, String::new(), 0)
                 }
                 "DELETE" => {
-                    held.retain(|k| *k != key);
+                    held.retain(|(k, _)| *k != key);
                     (204, String::new(), 0)
                 }
-                _ => (200, listing_of(held), 0),
+                _ => (200, listing_of_sized(held), 0),
             }
         })
     }
 
-    fn held(&self, bucket: &str) -> Vec<String> {
+    fn held(&self, bucket: &str) -> Vec<(String, u64)> {
         self.keys.lock().expect("bucket").get(bucket).cloned().unwrap_or_default()
     }
 }
@@ -1109,7 +1120,7 @@ type Harness = (molt_engine::WalletHandle, String, FakeBucket, Arc<Mutex<Vec<Req
 /// Found, enable, and run the first upload against a fake bucket.
 async fn first_backup(tmp: &std::path::Path) -> Harness {
     let bucket = FakeBucket::default();
-    let (endpoint, log) = stub_server(bucket.router()).await;
+    let (endpoint, log) = stub_server_body(bucket.router()).await;
     let (w, id, _root) = founded_engine(tmp, &endpoint, 5).await;
     w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
         .await
@@ -1156,7 +1167,7 @@ async fn retention_does_not_run_on_a_skipped_interval() {
         .expect("bucket")
         .entry("molt-bucket".to_string())
         .or_default()
-        .insert(0, molt_core::backup_key(&id, 1));
+        .insert(0, (molt_core::backup_key(&id, 1), 9));
     let listed = count(&log, "GET");
     next_interval(&w).await;
     wait_for(&log, "GET", listed + 1).await;
@@ -1241,7 +1252,7 @@ async fn backup_now_uploads_unchanged_content() {
 async fn the_mark_survives_a_restart() {
     let tmp = tempfile::tempdir().expect("tmp");
     let bucket = FakeBucket::default();
-    let (endpoint, log) = stub_server(bucket.router()).await;
+    let (endpoint, log) = stub_server_body(bucket.router()).await;
     let (w, id, root) = founded_engine(tmp.path(), &endpoint, 5).await;
     w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
         .await
@@ -1278,6 +1289,121 @@ async fn a_changed_access_key_uploads_again() {
     let mut settings = session(&w).await.settings;
     settings.s3_access_key = "AKIAOTHER".to_string();
     w.execute(Command::SaveSettings { settings }).await.expect("save");
+    next_interval(&w).await;
+    wait_for(&log, "PUT", 2).await;
+}
+
+/// Review A1: a later failure takes "up to date" back - a failed listing.
+#[tokio::test]
+async fn a_failed_check_forgets_the_last_good_check() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (w, id, bucket, log) = first_backup(tmp.path()).await;
+    let listed = count(&log, "GET");
+    next_interval(&w).await;
+    wait_for(&log, "GET", listed + 1).await;
+    assert_eq!(entry(&session(&w).await, &id).backup_checked_min, 0);
+    bucket.down.store(true, Ordering::SeqCst);
+    next_interval(&w).await;
+    let sv = poll_session(&w, "honest failure", |sv| entry(sv, &id).backup_error.contains("503")).await;
+    assert_eq!(entry(&sv, &id).backup_checked_min, WorkspaceInfo::NEVER);
+}
+
+/// Review A1: changed content whose upload fails is not "up to date".
+#[tokio::test]
+async fn a_failed_upload_forgets_the_last_good_check() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let fail_puts = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let bucket = FakeBucket::default();
+    let inner = bucket.router();
+    let gate = fail_puts.clone();
+    let (endpoint, log) = stub_server_body(Arc::new(move |m, p, b| {
+        if m == "PUT" && gate.load(Ordering::SeqCst) {
+            return (503, String::new(), 0);
+        }
+        inner(m, p, b)
+    }))
+    .await;
+    let (w, id, _root) = founded_engine(tmp.path(), &endpoint, 5).await;
+    w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: true })
+        .await
+        .expect("enable");
+    w.execute(Command::BackupTick).await.expect("tick");
+    wait_for(&log, "PUT", 1).await;
+    let listed = count(&log, "GET");
+    next_interval(&w).await;
+    wait_for(&log, "GET", listed + 1).await;
+    assert_eq!(entry(&session(&w).await, &id).backup_checked_min, 0);
+    fail_puts.store(true, Ordering::SeqCst);
+    w.execute(Command::Chat {
+        body: "one".to_string(),
+        quote: None,
+        channel: molt_core::ChannelRef::default(),
+    })
+    .await
+    .expect("chat");
+    next_interval(&w).await;
+    let sv = poll_session(&w, "honest failure", |sv| entry(sv, &id).backup_error.contains("503")).await;
+    assert_eq!(entry(&sv, &id).backup_checked_min, WorkspaceInfo::NEVER);
+}
+
+/// Review A1: switching backup off, or pointing it elsewhere, takes
+/// "up to date" back at once.
+#[tokio::test]
+async fn switching_off_or_retargeting_forgets_the_last_good_check() {
+    for step in ["workspace", "global", "bucket"] {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (w, id, _bucket, log) = first_backup(tmp.path()).await;
+        assert_eq!(entry(&session(&w).await, &id).backup_checked_min, 0, "{step}");
+        let mut settings = session(&w).await.settings;
+        match step {
+            "workspace" => {
+                w.execute(Command::SetWorkspaceBackup { id: id.clone(), enabled: false })
+                    .await
+                    .expect("disable");
+            }
+            "global" => {
+                settings.s3_backup = false;
+                w.execute(Command::SaveSettings { settings }).await.expect("save");
+            }
+            _ => {
+                settings.s3_bucket = "other-bucket".to_string();
+                w.execute(Command::SaveSettings { settings }).await.expect("save");
+            }
+        }
+        assert_eq!(entry(&session(&w).await, &id).backup_checked_min, WorkspaceInfo::NEVER, "{step}");
+        drop(log);
+    }
+}
+
+/// Review A2: an unchanged check runs no quota pass, so a quota report
+/// from the last upload stays.
+#[tokio::test]
+async fn an_unchanged_check_keeps_the_quota_report() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (w, id, bucket, log) = first_backup(tmp.path()).await;
+    let mut settings = session(&w).await.settings;
+    settings.s3_max_bytes = 1;
+    w.execute(Command::SaveSettings { settings }).await.expect("quota");
+    w.execute(Command::ClearNotice).await.expect("clear");
+    w.execute(Command::BackupNow { id: id.clone() }).await.expect("backup now");
+    let sv = poll_session(&w, "quota report", |sv| sv.notice.starts_with("backup-quota:")).await;
+    let report = sv.notice.clone();
+    assert_eq!(bucket.held("molt-bucket").len(), 1, "the newest copy stays");
+    let listed = count(&log, "GET");
+    next_interval(&w).await;
+    wait_for(&log, "GET", listed + 1).await;
+    assert_eq!(count(&log, "PUT"), 2);
+    assert_eq!(session(&w).await.notice, report);
+}
+
+/// Review A3: a listed object of another size is not our copy.
+#[tokio::test]
+async fn a_listed_copy_of_another_size_is_uploaded_again() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (w, _id, bucket, log) = first_backup(tmp.path()).await;
+    for (_, size) in bucket.keys.lock().expect("bucket").values_mut().flatten() {
+        *size = 7;
+    }
     next_interval(&w).await;
     wait_for(&log, "PUT", 2).await;
 }

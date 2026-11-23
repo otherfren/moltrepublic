@@ -1988,6 +1988,9 @@ pub struct BackupMark {
     pub target: String,
     /// The uploaded object's key.
     pub object: String,
+    /// The uploaded object's size; a mark from before it skips the check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
 }
 
 impl Default for WorkspacePrefs {
