@@ -131,8 +131,12 @@ enum Rule {
     /// Passive until n-m+1 distinct other seats answered; floor = 1 + their max head.
     B,
     /// max(m, n-m+1) answers; floor = max `touched`; own ballots above the
-    /// highest round any answer saw from this seat.
+    /// highest round any answer saw from this seat; an amnesiac seat
+    /// answers no ask.
     C,
+    /// O3 as on master: an import opens with the lock state lost and no
+    /// amnesia at all.
+    Import,
 }
 
 #[derive(Clone, Debug)]
@@ -188,6 +192,14 @@ struct Config {
     /// completes a forced value carried on the Accept; a value's own
     /// subject never counts.
     v2: bool,
+    /// O2: signatures of OTHER seats a seat without its own intent needs
+    /// on a forced value (0 = master: none).
+    evidence: u8,
+    /// One Byzantine seat: sends any frame, signs anything, forges nothing.
+    byz: Option<usize>,
+    max_byz: u8,
+    /// The operator may approve a withdrawn card to complete it.
+    operator: bool,
 }
 
 /// What a seat tells an amnesiac one.
@@ -208,7 +220,8 @@ enum P {
     FreeSig(u8),
     Prepare(u8),
     Promise(B, Option<(B, u8)>),
-    Accept(u8, u8, bool),
+    /// round, card, forced, evidence (signers carried).
+    Accept(u8, u8, bool, u8),
     Accepted(B, u8),
     Nack(B, Option<B>),
     Ask,
@@ -264,7 +277,7 @@ struct Seat {
     learned: Option<(B, u8)>,
     stale: Vec<u8>,
     heard_subject: bool,
-    retry: Option<(B, u8, bool)>,
+    retry: Option<(B, u8, bool, u8)>,
     sealed: Option<u8>,
     ballots: u8,
     /// 0 = s-2, 1 = s-1, 2 = s.
@@ -356,6 +369,11 @@ struct World {
     dups: u8,
     amnesias: u8,
     announces: u8,
+    /// Every seat that ever signed each card (any ballot).
+    signed: [u8; 4],
+    /// Cards some honest seat cast an intent for.
+    honest_intent: u8,
+    byz_acts: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -377,6 +395,10 @@ enum Act {
     CatchUp(u8),
     Amnesia(u8, bool),
     Announce(u8),
+    /// The Byzantine seat sends one frame.
+    Byz(Msg),
+    /// An operator approves a withdrawn card its seat never approved.
+    OperatorApprove(u8, u8),
 }
 
 /// Two multiply-rotate lanes: a 128-bit state fingerprint.
@@ -555,6 +577,8 @@ impl Config {
                 format!("{} LOSES its lock state{}", s(i), if *tail { " and its chain tail" } else { "" })
             }
             Act::Announce(i) => format!("{} gossips its head", s(i)),
+            Act::Byz(m) => format!("BYZANTINE {}->{} {}", s(&m.from), s(&m.to), self.show_p(&m.p)),
+            Act::OperatorApprove(i, x) => format!("{}'s operator approves {}", s(i), c(x)),
         }
     }
 
@@ -571,7 +595,12 @@ impl Config {
                 Some((ab, x)) => format!("Promise({}, holds {}@{})", b(bb), c(x), b(ab)),
                 None => format!("Promise({})", b(bb)),
             },
-            P::Accept(r, x, f) => format!("Accept(r{r}, {}{})", c(x), if *f { ", forced" } else { "" }),
+            P::Accept(r, x, f, ev) => format!(
+                "Accept(r{r}, {}{}{})",
+                c(x),
+                if *f { ", forced" } else { "" },
+                if *ev != 0 { format!(", evidence {ev:#b}") } else { String::new() }
+            ),
             P::Accepted(bb, x) => format!("Accepted({}, {})", b(bb), c(x)),
             P::Nack(bb, p) => format!("Nack({}, {})", b(bb), p.as_ref().map_or("free".to_string(), b)),
             P::Ask => "Ask".to_string(),
@@ -704,7 +733,7 @@ impl Config {
 
     fn send(&self, w: &mut World, from: usize, p: P, lock: bool) {
         for to in 0..self.n {
-            if to == from || (lock && self.is_old(to)) || w.seats[to].sealed.is_some() {
+            if to == from || (lock && self.is_old(to)) || w.seats[to].sealed.is_some() || self.byz == Some(to) {
                 continue;
             }
             if !w.seats[to].alive && w.revivals >= self.max_revivals {
@@ -872,8 +901,12 @@ impl Config {
         run.value = Some(u(c));
         let b = run.ballot;
         let is_forced = forced.is_some();
-        self.send(w, i, P::Accept(b.0, u(c), is_forced), true);
-        self.acceptor_accept(w, i, b, c, is_forced);
+        let ev = match &w.seats[i].run {
+            Some(run) if is_forced => self.evidence_of(w, i, run, c),
+            _ => 0,
+        };
+        self.send(w, i, P::Accept(b.0, u(c), is_forced, ev), true);
+        self.acceptor_accept(w, i, b, c, is_forced, ev);
     }
 
     fn withheld(&self, w: &World, i: usize, c: usize) -> bool {
@@ -884,7 +917,33 @@ impl Config {
         self.cards[c].restore_of.is_some_and(|z| z == i || s.heard_subject)
     }
 
-    fn acceptor_accept(&self, w: &mut World, i: usize, b: B, c: usize, forced: bool) {
+    /// The signatures of other seats a leader holds on `c`: promisers that
+    /// reported holding it, and acceptances it counted.
+    fn evidence_of(&self, w: &World, i: usize, run: &Run, c: usize) -> u8 {
+        let mut ev = 0;
+        for call in &run.log {
+            if let LCall::Promise(j, Some((_, x))) = call {
+                if usize::from(*x) == c {
+                    ev |= bit(usize::from(*j));
+                }
+            }
+        }
+        for (_, x, who) in &w.seats[i].sigs {
+            if usize::from(*x) == c {
+                ev |= who;
+            }
+        }
+        let s = &w.seats[i];
+        let own = s.accepted.is_some_and(|(_, x)| usize::from(x) == c) || has(s.intents[c], i);
+        // the leader adds its own signature only where it would accept itself
+        if own || ones(ev & !bit(i)) >= 2 {
+            ev | bit(i)
+        } else {
+            ev & !bit(i)
+        }
+    }
+
+    fn acceptor_accept(&self, w: &mut World, i: usize, b: B, c: usize, forced: bool, ev: u8) {
         if !self.takes_part(w, i) {
             return;
         }
@@ -896,22 +955,35 @@ impl Config {
         let kept = s.accepted.is_some_and(|(_, x)| usize::from(x) == c);
         let approver = forced
             && !kept
-            && (self.fixes.f3 || (has(s.known, c) && has(s.withdrawn, c) && has(s.intents[c], i)));
+            && (self.fixes.f3 || self.v2 || (has(s.known, c) && has(s.withdrawn, c) && has(s.intents[c], i)));
         let resolvable = self.resolvable(w, i, c) || kept || (approver && (self.is_restore(c) || self.v2));
         if !resolvable {
-            w.seats[i].retry = Some((b, u(c), forced));
+            w.seats[i].retry = Some((b, u(c), forced, ev));
             return;
         }
         if self.is_restore(c) {
             w.seats[i].lock_known |= bit(c);
         }
         if !kept && !approver && self.withheld(w, i, c) {
-            w.seats[i].retry = Some((b, u(c), forced));
+            w.seats[i].retry = Some((b, u(c), forced, ev));
+            return;
+        }
+        // O2: without its own intent a seat completes a forced value only on
+        // real signatures on that change: 1 = one seat other than the sender
+        // (the first proposal), 2 = two distinct seats, the sender may be one
+        let sender = usize::from(b.1);
+        let signers = match self.evidence {
+            1 => ones(ev & !bit(sender) & !bit(i)),
+            _ => ones(ev & !bit(i)),
+        };
+        let wanted = usize::from(self.evidence.min(1)) + usize::from(self.evidence >= 2);
+        if approver && !has(w.seats[i].intents[c], i) && signers < wanted {
+            w.seats[i].retry = Some((b, u(c), forced, ev));
             return;
         }
         // the all-report gate binds a recovered seat on every path
         if self.all_report && w.seats[i].recovered && self.need(c) >= self.n && self.withheld_by_reports(w, i, c) {
-            w.seats[i].retry = Some((b, u(c), forced));
+            w.seats[i].retry = Some((b, u(c), forced, ev));
             return;
         }
         w.seats[i].retry = None;
@@ -919,6 +991,7 @@ impl Config {
         match self.with_acceptor(w, i, |a| a.accept(&slot(), &ballot(b), &v)).reply {
             Reply::Accepted { .. } => {
                 mask_add(&mut w.hist, b, u(c), i);
+                w.signed[c] |= bit(i);
                 w.seats[i].touched = self.amnesia.is_some();
                 self.reply(w, i, usize::from(b.1), P::Accepted(b, u(c)));
                 self.count(w, i, i, b, c);
@@ -1004,6 +1077,9 @@ impl Config {
             return;
         }
         w.seats[i].intents[c] |= bit(i);
+        if self.byz != Some(i) {
+            w.honest_intent |= bit(c);
+        }
         if self.locked_mode(w, i) {
             self.send(w, i, P::Intent(u(c)), false);
             self.try_propose(w, i);
@@ -1055,7 +1131,7 @@ impl Config {
                     all.iter().map(|r| r.touched).max().unwrap_or(0)
                 }
             }
-            None => return,
+            None | Some(Rule::Import) => return,
         };
         s.am = false;
         s.passive = floor >= 2;
@@ -1070,6 +1146,10 @@ impl Config {
         }
         match &m.p {
             P::Ask => {
+                // R-c: a seat that lost its own state has nothing to report
+                if self.amnesia == Some(Rule::C) && w.seats[i].am {
+                    return;
+                }
                 let r = self.report(w, i, j, true);
                 self.send_to(w, i, j, P::Report(r));
                 return;
@@ -1096,7 +1176,7 @@ impl Config {
             if !self.takes_part(w, i) {
                 match &m.p {
                     P::Prepare(r) => self.saw(w, i, (*r, u(j))),
-                    P::Accept(r, _, _) => self.saw(w, i, (*r, u(j))),
+                    P::Accept(r, ..) => self.saw(w, i, (*r, u(j))),
                     P::Promise(b, _) | P::Accepted(b, _) => self.saw(w, i, *b),
                     P::Nack(_, Some(pb)) => self.saw(w, i, *pb),
                     _ => {}
@@ -1155,11 +1235,11 @@ impl Config {
                 self.excuse(w, i);
                 self.try_propose(w, i);
             }
-            P::Accept(r, c, f) => {
+            P::Accept(r, c, f, ev) => {
                 let b = (*r, u(j));
                 self.note_seen(w, i, j, true);
                 self.saw(w, i, b);
-                self.acceptor_accept(w, i, b, usize::from(*c), *f);
+                self.acceptor_accept(w, i, b, usize::from(*c), *f, *ev);
             }
             P::Accepted(b, c) => {
                 let c = usize::from(*c);
@@ -1249,8 +1329,8 @@ impl Config {
             }
             Act::Retry(i) => {
                 let i = usize::from(*i);
-                if let Some((b, c, f)) = w.seats[i].retry.take() {
-                    self.acceptor_accept(&mut w, i, b, usize::from(c), f);
+                if let Some((b, c, f, ev)) = w.seats[i].retry.take() {
+                    self.acceptor_accept(&mut w, i, b, usize::from(c), f, ev);
                 }
             }
             Act::Release(i) => {
@@ -1329,11 +1409,34 @@ impl Config {
                     s.head = 0;
                     s.sealed = None;
                 }
-                s.am = true;
+                s.am = self.amnesia != Some(Rule::Import);
                 s.passive = false;
                 s.recovered = false;
                 s.round_floor = 0;
-                self.send(&mut w, i, P::Ask, false);
+                if self.amnesia != Some(Rule::Import) {
+                    self.send(&mut w, i, P::Ask, false);
+                }
+            }
+            Act::Byz(m) => {
+                w.byz_acts += 1;
+                let b = usize::from(m.from);
+                match &m.p {
+                    P::Accepted(bb, c) => {
+                        mask_add(&mut w.hist, *bb, *c, b);
+                        w.signed[usize::from(*c)] |= bit(b);
+                    }
+                    P::Promise(_, Some((_, c))) => w.signed[usize::from(*c)] |= bit(b),
+                    _ => {}
+                }
+                msg_add(&mut w, m.clone());
+            }
+            Act::OperatorApprove(i, c) => {
+                let (i, c) = (usize::from(*i), usize::from(*c));
+                w.seats[i].own |= bit(c);
+                w.seats[i].intents[c] |= bit(i);
+                w.honest_intent |= bit(c);
+                self.send(&mut w, i, P::Intent(u(c)), false);
+                self.try_propose(&mut w, i);
             }
             Act::Announce(i) => {
                 let i = usize::from(*i);
@@ -1351,7 +1454,7 @@ impl Config {
     fn actions(&self, w: &World, live: bool) -> Vec<Act> {
         let mut out = Vec::new();
         for (i, s) in w.seats.iter().enumerate() {
-            if !s.alive || s.sealed.is_some() {
+            if !s.alive || s.sealed.is_some() || self.byz == Some(i) {
                 continue;
             }
             let part = self.takes_part(w, i);
@@ -1380,7 +1483,7 @@ impl Config {
             out.push(Act::Deliver(m.clone()));
         }
         for (i, s) in w.seats.iter().enumerate() {
-            if !s.alive || s.sealed.is_some() {
+            if !s.alive || s.sealed.is_some() || self.byz == Some(i) {
                 continue;
             }
             if s.head == 0 {
@@ -1417,8 +1520,16 @@ impl Config {
         if live {
             self.resends(w, &mut out);
         }
+        if self.operator && live {
+            out.extend(self.operator_acts(w));
+        }
+        if let (Some(b), false) = (self.byz, live) {
+            if w.byz_acts < self.max_byz {
+                self.byz_acts(w, b, &mut out);
+            }
+        }
         for i in 0..self.n {
-            if self.may_start(w, i, live) {
+            if self.byz != Some(i) && self.may_start(w, i, live) {
                 out.push(Act::Start(u(i)));
             }
         }
@@ -1435,7 +1546,7 @@ impl Config {
             }
             for i in 0..self.n {
                 let s = &w.seats[i];
-                if s.alive && w.deaths < self.max_deaths && has(self.may_die, i) {
+                if s.alive && w.deaths < self.max_deaths && has(self.may_die, i) && self.byz != Some(i) {
                     out.push(Act::Die(u(i), false));
                     if self.drops && w.msgs.iter().any(|(m, _)| usize::from(m.from) == i) {
                         out.push(Act::Die(u(i), true));
@@ -1458,13 +1569,56 @@ impl Config {
         out
     }
 
+    /// A seat's operator may approve a card withdrawn there that its
+    /// seat holds no intent for, while a forced value waits on it.
+    fn operator_acts(&self, w: &World) -> Vec<Act> {
+        let mut out = Vec::new();
+        for (i, s) in w.seats.iter().enumerate() {
+            if !s.alive || s.sealed.is_some() || self.byz == Some(i) {
+                continue;
+            }
+            for c in 0..self.cards.len() {
+                if has(s.withdrawn, c) && !has(s.intents[c], i) && s.retry.is_some_and(|r| usize::from(r.1) == c) {
+                    out.push(Act::OperatorApprove(u(i), u(c)));
+                }
+            }
+        }
+        out
+    }
+
+    fn byz_acts(&self, w: &World, b: usize, out: &mut Vec<Act>) {
+        let msg = |to: usize, p: P| Act::Byz(Msg { to: u(to), from: u(b), inc: 0, p });
+        for t in (0..self.n).filter(|t| *t != b && w.seats[*t].alive && w.seats[*t].sealed.is_none()) {
+            for r in 1..=3u8 {
+                out.push(msg(t, P::Prepare(r)));
+                for c in 0..self.cards.len() {
+                    if self.cards[c].late {
+                        continue;
+                    }
+                    let evs = [0, w.signed[c] | bit(b)];
+                    for ev in evs.iter().take(if evs[1] == 0 { 1 } else { 2 }) {
+                        out.push(msg(t, P::Accept(r, u(c), true, *ev)));
+                    }
+                    out.push(msg(t, P::Accepted((r, u(b)), u(c))));
+                }
+            }
+            if let Some(run) = &w.seats[t].run {
+                out.push(msg(t, P::Promise(run.ballot, None)));
+                for c in (0..self.cards.len()).filter(|c| !self.cards[*c].late) {
+                    out.push(msg(t, P::Promise(run.ballot, Some(((1, u(b)), u(c))))));
+                    out.push(msg(t, P::Accepted(run.ballot, u(c))));
+                }
+            }
+        }
+    }
+
     /// Fault-free continuation only: the leader's retransmit (§7, S4),
     /// the re-serve of open cards, withdrawals and own intents, and the
     /// amnesiac's repeated ask.
     fn resends(&self, w: &World, out: &mut Vec<Act>) {
         let inflight = |m: &Msg| w.msgs.binary_search_by(|e| e.0.cmp(m)).is_ok();
         for (i, s) in w.seats.iter().enumerate() {
-            if !s.alive || s.sealed.is_some() {
+            if !s.alive || s.sealed.is_some() || self.byz == Some(i) {
                 continue;
             }
             let mut push = |to: usize, p: P| {
@@ -1476,7 +1630,11 @@ impl Config {
             if let Some(run) = s.run.as_ref().filter(|r| self.takes_part(w, i) && self.busy(r)) {
                 let l = self.leader(run);
                 let p = match (l.proposed(), run.value) {
-                    (Some(_), Some(c)) => Some(P::Accept(run.ballot.0, c, l.forced().is_some())),
+                    (Some(_), Some(c)) => {
+                        let forced = l.forced().is_some();
+                        let ev = if forced { self.evidence_of(w, i, run, usize::from(c)) } else { 0 };
+                        Some(P::Accept(run.ballot.0, c, forced, ev))
+                    }
                     (None, _) if !l.ready() => Some(P::Prepare(run.ballot.0)),
                     _ => None,
                 };
@@ -1532,6 +1690,9 @@ impl Config {
             dups: 0,
             amnesias: 0,
             announces: 0,
+            signed: [0; 4],
+            honest_intent: 0,
+            byz_acts: 0,
         };
         for card in &self.cards {
             if let (Some(z), true) = (card.restore_of, self.lost) {
@@ -1550,6 +1711,12 @@ impl Config {
 
     fn violation(&self, w: &World) -> Option<&'static str> {
         let lock = w.chosen | w.sealed_lock;
+        if self.byz.is_some() {
+            // with a Byzantine signer only the honest-approval property holds
+            let b = self.byz.map_or(0, bit);
+            let honest_signed = (0..self.cards.len()).filter(|c| w.signed[*c] & !b != 0).fold(0, |m, c| m | bit(c));
+            return (honest_signed & !w.honest_intent != 0).then_some("unapproved");
+        }
         if ones(lock) >= 2 {
             Some("lock-lock")
         } else if lock != 0 && w.sealed_free & !lock != 0 {
@@ -1566,9 +1733,25 @@ impl Config {
     }
 
     /// Liveness is asked only where enough seats live to decide anything.
+    /// Survivors: alive seats other than a lost seat being restored (its
+    /// old device, if back, is no survivor).
     fn liveness_applies(&self, w: &World) -> bool {
-        let alive = w.seats.iter().filter(|s| s.alive).count();
-        !Self::sealed_any(w) && alive >= self.q().promises().max(self.m)
+        let lost: u8 = (0..self.cards.len())
+            .filter(|c| has(w.born, *c))
+            .filter_map(|c| self.cards[c].restore_of)
+            .fold(0, |m, z| m | bit(z));
+        let survivors = (0..self.n).filter(|i| w.seats[*i].alive && !has(lost, *i) && self.byz != Some(*i)).count();
+        let need = (0..self.cards.len()).filter(|c| !self.cards[*c].late).map(|c| self.need(c)).min().unwrap_or(self.m);
+        !Self::sealed_any(w) && survivors >= self.q().promises().max(need)
+    }
+
+    /// A halt nothing chose while a lost seat's old device runs: B3 holds
+    /// its restore by design.
+    fn b3_hold(&self, w: &World) -> bool {
+        w.chosen == 0
+            && self.cards.iter().enumerate().any(|(c, k)| {
+                has(w.born, c) && k.restore_of.is_some_and(|z| w.seats[z].alive && w.seats[z].inc > 0)
+            })
     }
 }
 
@@ -1585,6 +1768,10 @@ struct Report {
     /// beyond `live_budget`: a halt under fair schedules, unproven.
     live_unknown: usize,
     fair_halt_trace: Option<Vec<String>>,
+    /// Halts (either kind) where an operator approval is enabled.
+    operator_resolvable: usize,
+    b3_holds: usize,
+    b3_trace: Option<Vec<String>>,
     /// Every trace up to this many steps was explored.
     depth: usize,
 }
@@ -1765,9 +1952,23 @@ impl Config {
                 e.0 += 1;
                 continue;
             }
-            if liveness && self.liveness_applies(&w) {
+            // the first halts in BFS order carry the shortest trace; past a
+            // few hundred the count is a lower bound and checking stops
+            let halts_seen = r.halts + r.live_unknown + r.b3_holds;
+            if liveness && halts_seen < 200 && self.liveness_applies(&w) {
                 if !self.fair_seal(&mut memo, &w) {
-                    match self.can_seal(&mut memo, &w) {
+                    let resolvable = !self.operator_acts(&w).is_empty();
+                    let verdict = self.can_seal(&mut memo, &w);
+                    if verdict != Some(true) && resolvable {
+                        r.operator_resolvable += 1;
+                    }
+                    if verdict != Some(true) && self.b3_hold(&w) {
+                        r.b3_holds += 1;
+                        if r.b3_trace.is_none() {
+                            r.b3_trace = Some(trace(&parent, h));
+                        }
+                    }
+                    match if self.b3_hold(&w) { Some(true) } else { verdict } {
                         Some(true) => {}
                         Some(false) => {
                             r.halts += 1;
@@ -1883,6 +2084,10 @@ fn base(n: usize, m: usize, cards: Vec<Card>) -> Config {
         live_budget: 200_000,
         fixes: Fixes::default(),
         v2: false,
+        evidence: 0,
+        byz: None,
+        max_byz: 0,
+        operator: false,
     }
 }
 
@@ -1941,14 +2146,36 @@ fn shape_amnesia(n: usize, m: usize, rule: Rule) -> Config {
 }
 
 fn shape(name: &str, n: usize, m: usize) -> Config {
+    if let Some(rest) = name.strip_suffix("_x2") {
+        let mut c = shape(rest, n, m);
+        c.max_amnesia = 2;
+        return c;
+    }
     match name {
         "withdraw" => shape_withdraw(n, m),
+        "withdraw_nolate" => {
+            let mut c = shape_withdraw(n, m);
+            c.cards.truncate(1);
+            c
+        }
         "restore" => shape_restore(n, m),
         "restore_withdraw" => shape_restore_withdraw(n, m),
         "old" => shape_old(n, m),
         "amnesia_a" => shape_amnesia(n, m, Rule::A),
         "amnesia_b" => shape_amnesia(n, m, Rule::B),
         "amnesia_c" => shape_amnesia(n, m, Rule::C),
+        "amnesia_import" => shape_amnesia(n, m, Rule::Import),
+        // O2: the last seat is Byzantine and proposes F, which no honest seat approves
+        "byz" => {
+            let mut f = card(n - 1, false);
+            f.approvers = 0;
+            let mut c = base(n, m, vec![card(0, false), f]);
+            c.byz = Some(n - 1);
+            c.max_byz = 3;
+            c.max_deaths = 0;
+            c.v2 = true;
+            c
+        }
         "amnesia_c_all" => {
             let mut c = shape_amnesia(n, m, Rule::C);
             c.all_report = true;
@@ -1960,11 +2187,30 @@ fn shape(name: &str, n: usize, m: usize) -> Config {
 
 fn summary(cfg: &Config, r: &Report) -> String {
     let mut s = format!(
-        "n={} m={} fixes={:?}: states={} edges={} pruned={} complete={} depth={} halts={} live_unknown={}",
-        cfg.n, cfg.m, cfg.fixes, r.states, r.edges, r.pruned, r.complete, r.depth, r.halts, r.live_unknown
+        "n={} m={} fixes={:?} v2={} evidence={}: states={} edges={} pruned={} complete={} depth={} halts={} fair_halts={} operator_resolvable={} b3_holds={}",
+        cfg.n,
+        cfg.m,
+        cfg.fixes,
+        cfg.v2,
+        cfg.evidence,
+        r.states,
+        r.edges,
+        r.pruned,
+        r.complete,
+        r.depth,
+        r.halts,
+        r.live_unknown,
+        r.operator_resolvable,
+        r.b3_holds
     );
     for (k, (count, t)) in &r.violations {
         let _ = write!(s, "\n  VIOLATION {k} x{count}:");
+        for (i, step) in t.iter().enumerate() {
+            let _ = write!(s, "\n    {:2}. {step}", i + 1);
+        }
+    }
+    if let Some(t) = &r.b3_trace {
+        let _ = write!(s, "\n  B3 HOLD (nothing chosen, a lost seat's old device runs):");
         for (i, step) in t.iter().enumerate() {
             let _ = write!(s, "\n    {:2}. {step}", i + 1);
         }
@@ -2023,6 +2269,15 @@ fn bounds_from_env(cfg: &mut Config) {
     if let Some(v) = env_u("LOCK_V2") {
         cfg.v2 = v != 0;
     }
+    if let Some(v) = u8_of("LOCK_EVIDENCE") {
+        cfg.evidence = v;
+    }
+    if let Some(v) = u8_of("LOCK_MAX_BYZ") {
+        cfg.max_byz = v;
+    }
+    if let Some(v) = env_u("LOCK_OPERATOR") {
+        cfg.operator = v != 0;
+    }
     if let Ok(v) = std::env::var("LOCK_APPROVERS") {
         for (card, mask) in cfg.cards.iter_mut().zip(v.split(',')) {
             card.approvers = mask.parse().expect("approver mask");
@@ -2044,22 +2299,78 @@ fn fixes_of(bits: &str) -> Fixes {
     Fixes { f1: b[0], f2: b[1], f3: b[2], f4: b[3] }
 }
 
+const H1_TRACE: [&str; 13] = [
+    "deliver B->A Card(X)",
+    "deliver B->C Card(X)",
+    "B intent X",
+    "C intent X",
+    "deliver B->A Intent(X)",
+    "deliver C->A Intent(X)",
+    "A opens a ballot",
+    "deliver A->B Prepare(r1)",
+    "deliver B->A Promise(1:A)",
+    "deliver A->B Accept(r1, X)",
+    "B WITHDRAWS X",
+    "deliver B->A Withdraw(X)",
+    "C DIES",
+];
+
+const H2_PREFIX: [&str; 10] = [
+    "C REVIVES (old device)",
+    "A intent R(C)",
+    "A opens a ballot",
+    "deliver A->B Prepare(r1)",
+    "deliver B->A Promise(1:A)",
+    "deliver B->C Card(Y)",
+    "B intent Y",
+    "deliver B->C Intent(Y)",
+    "C intent Y",
+    "A DIES, its frames in flight lost",
+];
+
+/// H1: every fault-free continuation of the trace stays unsealed under the
+/// pinned rules (the whole closure, no fresh card); master completes it.
 #[test]
-fn exhaustive_search_finds_the_withdrawn_forced_halt() {
-    let cfg = shape_withdraw(3, 2);
-    let r = cfg.explore(true);
-    eprintln!("{}", summary(&cfg, &r));
-    assert!(r.complete);
-    assert!(r.halts > 0, "H1 not found");
+fn a_forced_withdrawn_value_halts_on_the_pinned_rules_and_seals_on_master() {
+    let mut cfg = shape("withdraw_nolate", 3, 2);
+    let mut memo = Live { live: HashSet::new(), dead: HashSet::new() };
+    cfg.live_budget = 200_000;
+    assert_eq!(cfg.can_seal(&mut memo, &cfg.after(&H1_TRACE)), Some(false), "H1 not found");
+    cfg.v2 = true;
+    let mut memo = Live { live: HashSet::new(), dead: HashSet::new() };
+    assert_eq!(cfg.can_seal(&mut memo, &cfg.after(&H1_TRACE)), Some(true));
 }
 
+/// H2: from the prefix the pinned rules fork within four steps; master
+/// does not within the same bound.
 #[test]
-fn exhaustive_search_finds_the_revived_subject_fork() {
-    let cfg = shape_restore(3, 2);
-    let r = cfg.explore(false);
-    eprintln!("{}", summary(&cfg, &r));
-    assert!(r.complete);
+fn a_revived_subject_forks_on_the_pinned_rules_and_not_on_master() {
+    let mut cfg = shape_restore(3, 2);
+    cfg.max_states = 30_000;
+    let r = cfg.explore_after(&H2_PREFIX, false);
     assert!(r.violations.contains_key("lock-lock"), "H2 not found");
+    cfg.v2 = true;
+    let r = cfg.explore_after(&H2_PREFIX, false);
+    assert!(r.violations.is_empty(), "{}", summary(&cfg, &r));
+}
+
+/// (L) A deviating seat that reports a made-up value keeps it forced
+/// exactly while `1 + unheard >= m`: the real `Leader::forced`.
+#[test]
+fn a_made_up_holding_is_forced_only_while_m_minus_one_others_are_unheard() {
+    for n in 2..=5usize {
+        for m in 2..=n {
+            for unheard in 0..n {
+                let mut l = Leader::new(slot(), Quorum { n, m }, ballot((5, 0)));
+                // seats 0..n-1-unheard honest and heard, the last one deviates
+                for j in 0..n - 1 - unheard {
+                    l.promise(&name(j), &ballot((5, 0)), None);
+                }
+                l.promise(&name(n - 1), &ballot((5, 0)), Some((ballot((4, u(n - 1))), Value { digest: digest(1), need: m })));
+                assert_eq!(l.forced().is_some(), 1 + unheard >= m, "n={n} m={m} unheard={unheard}");
+            }
+        }
+    }
 }
 
 /// `LOCK_EXPLORE="withdraw:3:2:0000 restore:3:2:1111"` (fixes = F1..F4
@@ -2229,6 +2540,23 @@ fn scenario(name: &str) -> (Config, Vec<&'static str>) {
                 "deliver C->B Promise(1:B)",
             ],
         ),
+        // O1: R(C) chosen by A and B while C is gone; then C's old device
+        // comes back and is heard
+        "o1" => (
+            shape_restore(3, 2),
+            vec![
+                "deliver A->B Card(R(C))",
+                "A intent R(C)",
+                "B intent R(C)",
+                "deliver B->A Intent(R(C))",
+                "A opens a ballot",
+                "deliver A->B Prepare(r1)",
+                "deliver B->A Promise(1:A)",
+                "deliver A->B Accept(r1, R(C))",
+            ],
+        ),
+        // O3/amnesia: the scenario is the shape itself
+        "import" => (shape_amnesia(3, 2, Rule::Import), vec![]),
         other => panic!("unknown scenario {other}"),
     }
 }
