@@ -761,6 +761,72 @@ liveness and the downgrade boundary. Each fix has a red-first test.
   is lost on the forced path (L5); no divergence follows, the change is
   the chain's. Pinned: `a_forced_withdrawn_value_completes_with_any_promiser`,
   `lock_sim` (H1 halt on the old rule at seed 32).
+- **Item 3, a forced value carries evidence.** H1 alone let ONE bad
+  seat lead a `LockAccept { forced: true }` with any change and collect
+  m - 1 good signatures. Now a forced Accept carries `evidence`: real
+  position signatures on exactly that change at that height by TWO
+  DISTINCT seats, the sender allowed as one (`lock::evidence_holds`,
+  called by the wire and the simulation alike). One signer other than
+  the sender is not enough: a bad seat answers a good leader's Prepare
+  with a made-up value it "accepted" (it signs what it likes), the good
+  leader is forced to it and forwards that signature - modelled, 1911
+  acceptances of made-up values over 900 seeds, 0 with two signers. A
+  promise that reports a held value carries the holder's own signature;
+  the leader sends the acceptances it collected (promises, `LockAccepted`
+  frames, at most two) and adds its own only where it accepts the value
+  itself (it holds it, approved it, or already has two). A reported
+  value's `need` is recomputed from its change and a report whose change
+  does not hash to its digest is dropped - a need-1 lie would otherwise
+  force the value at every ballot. Without valid evidence a seat judges
+  the value as it would a free one: only its own approval lets it accept.
+  Induction (one bad seat B, signatures unforgeable): every value a good
+  seat accepts was approved by a good seat. A free acceptance needs the
+  acceptor's own approval; a forced one needs two distinct real
+  acceptances, at least one by a good seat, which (earlier in time) rests
+  on a good seat's approval; a good leader signs only what it accepts.
+  So B cannot get a change no good seat approved accepted. What B still
+  can do: (a) replay acceptances good seats really gave - force a value
+  good seats once accepted at that height (approved, possibly withdrawn
+  since) at a higher ballot without a phase 1; Paxos is not
+  Byzantine-tolerant, and a leader skipping phase 1 can make a second
+  value chosen among values good seats approved, as it already could
+  among freely approved ones. (b) Stall: its lie forces the made-up value
+  only while 1 + unheard >= m (`Leader::forced` counts every unheard seat
+  as holding it), so it stalls a height only while m - 1 other seats are
+  unreachable, and the height decides once they are heard (S3 waits one
+  interval for a fuller hearing; a stale ballot re-runs phase 1). Free
+  signing stalls when fewer than m good seats are reachable: the mode is
+  worse only where m - 1 <= n - 1 - m (2-of-5: the liar and one absent
+  seat stall the mode, free signing still has three good seats; 2-of-3
+  and 3-of-5 stall together). Modelled: `a_liar_stalls_only_while_m_minus_one_seats_are_away`
+  (2-of-3, 2-of-5, 3-of-5, 4-of-7 with m - 1 away and back decide; 2-of-5
+  with one away for good stalls in 150 of 150 runs).
+  Liveness exit: a value only the leader (or one seat) holds has no
+  evidence. A seat withholds it (`lock=withheld reason=needs approval`),
+  its status reads `decision <id> may already be made - approve to
+  complete it`, and an `approve` of that card is accepted although the
+  card is withdrawn; every other approve of a withdrawn card stays
+  refused (`AlreadyTerminal`). MCP `approve` works; the board shows the
+  card as withdrawn and the window has no control for it yet (required,
+  wiring plan §12). How often honest runs reach it (the simulation, 150
+  runs per shape, 15 % / 45 % frame loss): 2-of-3 in 22-53 runs (a seat
+  dying or coming back raises it); 3-of-5 and larger at most 1 run; n-of-n
+  never. Expect operators of 2-of-3 republics to see it.
+  Size: under the mode the propose and wire gates also bound the largest
+  lock frame (`proposals::lock_frame_plaintext_len`: a forced Accept with
+  the change and two evidence signatures, a promise with the change and
+  one); with two seats these outgrow the block by about 180 B, so the
+  largest payload is 96 575 B instead of 96 754 B under a 97 508 B
+  ceiling (`a_forced_accept_with_evidence_fits_the_transport`). Additive
+  wire: `LockAccept.evidence` and `LockAcceptedValue.sig` are skipped
+  when empty (the old byte pins hold), filled pins are added, and an
+  older reader ignores them.
+  Pinned: `a_forced_value_without_evidence_waits_for_an_approve`,
+  `forced_evidence_needs_two_real_acceptances`,
+  `a_promise_cannot_lie_about_need_or_digest`,
+  `an_approve_of_a_withdrawn_card_is_refused_unless_the_status_names_it`;
+  modelled: `a_made_up_forced_value_finds_no_good_acceptor`,
+  `how_often_the_exit_prompt_appears`.
 - **M3, a chosen value seals.** `lock_seal` holds nothing: the
   seat-still-active gate decides only what a seat ACCEPTS, never the
   seal of a value the lock already chose (a gate at the seal pinned the

@@ -3357,6 +3357,10 @@ pub enum WorkspaceEvent {
         /// stood for the card accepts it although it was withdrawn since.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         forced: bool,
+        /// A forced value's evidence: real acceptances of it, by two
+        /// distinct seats where it counts.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        evidence: Vec<chain::LockEvidence>,
     },
     /// Phase 2b: the sender accepted `digest` at the ballot; `sig` is its
     /// ordinary position signature over the change's approval bytes.
@@ -10091,9 +10095,28 @@ mod tests {
                         need: 2,
                         id: 7,
                         change: None,
+                        sig: String::new(),
                     }),
                 },
                 r#"{"type":"lock_promise","height":5,"base":"b","round":2,"leader":"dora","accepted":{"round":1,"leader":"mara","digest":"d","need":2,"id":7}}"#,
+            ),
+            (
+                WorkspaceEvent::LockPromise {
+                    height: 5,
+                    base: "b".into(),
+                    round: 2,
+                    leader: "dora".into(),
+                    accepted: Some(chain::LockAcceptedValue {
+                        round: 1,
+                        leader: "mara".into(),
+                        digest: "d".into(),
+                        need: 2,
+                        id: 7,
+                        change: None,
+                        sig: "s".into(),
+                    }),
+                },
+                r#"{"type":"lock_promise","height":5,"base":"b","round":2,"leader":"dora","accepted":{"round":1,"leader":"mara","digest":"d","need":2,"id":7,"sig":"s"}}"#,
             ),
             (
                 WorkspaceEvent::LockAccept {
@@ -10105,6 +10128,7 @@ mod tests {
                     id: ProposalId(9),
                     change: Some(cut),
                     forced: false,
+                    evidence: Vec::new(),
                 },
                 r#"{"type":"lock_accept","height":5,"base":"b","round":2,"digest":"d","need":3,"id":9,"change":{"kind":"checkpoint","upto":4,"state_hash":"abababababababababababababababababababababababababababababababab"}}"#,
             ),
@@ -10118,8 +10142,23 @@ mod tests {
                     id: ProposalId(9),
                     change: None,
                     forced: true,
+                    evidence: Vec::new(),
                 },
                 r#"{"type":"lock_accept","height":5,"base":"b","round":2,"digest":"d","need":2,"id":9,"forced":true}"#,
+            ),
+            (
+                WorkspaceEvent::LockAccept {
+                    height: 5,
+                    base: "b".into(),
+                    round: 2,
+                    digest: "d".into(),
+                    need: 2,
+                    id: ProposalId(9),
+                    change: None,
+                    forced: true,
+                    evidence: vec![chain::LockEvidence { member: "mara".into(), sig: "s".into() }],
+                },
+                r#"{"type":"lock_accept","height":5,"base":"b","round":2,"digest":"d","need":2,"id":9,"forced":true,"evidence":[{"member":"mara","sig":"s"}]}"#,
             ),
             (
                 WorkspaceEvent::LockAccepted {
