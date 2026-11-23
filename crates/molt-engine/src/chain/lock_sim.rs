@@ -45,6 +45,9 @@
 //! | `h2` refuse a subject | `lock_on_prepare`, `lock_on_accept` | `an_acceptor_refuses_a_restore_subjects_prepare` |
 //! | `h1`                  | `lock_acceptor_accept` -> `lock_forced_invalid` | `a_forced_withdrawn_value_completes_with_any_promiser` |
 //! | `m3`                  | `lock_seal` (no gate) | `a_chosen_restore_seals_while_the_old_device_is_heard` |
+//! | `evidence`            | `lock_acceptor_accept` -> `lock_forced_vouched` | `a_forced_value_without_evidence_waits_for_an_approve` |
+//! | `evidence_two`        | `lock::evidence_holds(.., two = true)` | `forced_evidence_needs_two_real_acceptances` |
+//! | reported need is the change's | `lock_on_promise` | `a_promise_cannot_lie_about_need_or_digest` |
 //! | `amnesia_rule`        | NOT BUILT (wiring plan, open items) | none |
 
 use super::*;
@@ -96,7 +99,9 @@ enum Msg {
     Intent { digest: String, from: usize },
     Withdraw { digest: String },
     Prepare { slot: Slot, ballot: Ballot },
-    Accept { slot: Slot, ballot: Ballot, value: Value, forced: bool },
+    /// `evidence`: a seat whose acceptance of exactly this value at this
+    /// height the forced frame carries (its position signature).
+    Accept { slot: Slot, ballot: Ballot, value: Value, forced: bool, evidence: Vec<usize> },
     Reply { from: usize, reply: Reply },
     Decided { height: u64, value: Value },
     /// An amnesiac seat asks the others what it may have touched.
@@ -117,6 +122,9 @@ struct Run {
     leader: Leader,
     forced: bool,
     waiting: bool,
+    /// digest -> the promisers that reported holding it.
+    holders: BTreeMap<String, BTreeSet<usize>>,
+    evidence: Vec<usize>,
 }
 
 #[derive(Default)]
@@ -163,6 +171,15 @@ pub(super) struct Fixes {
     /// leads above the highest round they saw from it. Off: it carries on
     /// with a fresh acceptor at once (the control).
     pub amnesia_rule: bool,
+    /// A forced Accept carries another seat's acceptance of exactly that
+    /// value as evidence; a seat without valid evidence judges it like a
+    /// free value, and the status prompt (a human approves the card,
+    /// withdrawn or not) is the exit.
+    pub evidence: bool,
+    /// The evidence names two distinct seats (the sender may be one): with
+    /// one bad seat at least one of them is good. Off: one seat other than
+    /// the sender - which a bad promiser defeats through a good leader.
+    pub evidence_two: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -188,6 +205,16 @@ pub(super) struct WConfig {
     pub amnesia: u64,
     /// An amnesia also loses the seat's newest decided heights.
     pub tail_loss: bool,
+    /// Seat 0 is bad: it sends forced Accepts at high ballots without a
+    /// phase 1 - for a value it made up (no card, claiming another seat's
+    /// acceptance) or replaying a real acceptance of another value - and
+    /// its promises report a made-up value it "accepted" (it signs what
+    /// it likes).
+    pub bad: bool,
+    /// Seats 1..=away are unreachable (no restore: they are not lost)
+    /// until step `back_at`.
+    pub away: usize,
+    pub back_at: usize,
 }
 
 #[derive(Debug, Default)]
@@ -196,6 +223,11 @@ pub(super) struct WOutcome {
     pub learned_twice: usize,
     pub undecided: usize,
     pub decided: usize,
+    /// Acceptances by a good seat of a made-up value it never approved.
+    pub unapproved: usize,
+    /// Forced values a good seat withheld for want of evidence, its human
+    /// asked to approve (item 3's exit), distinct by (seat, height, value).
+    pub prompts: usize,
 }
 
 struct Sim {
@@ -211,6 +243,10 @@ struct Sim {
     deferred: Vec<(usize, Msg)>,
     ghost: BTreeMap<u64, BTreeMap<(Ballot, Value), BTreeSet<usize>>>,
     learned_twice: usize,
+    /// Values seat 0 made up (cfg.bad).
+    made_up: BTreeSet<String>,
+    unapproved: usize,
+    prompts: BTreeSet<(usize, u64, String)>,
     step: usize,
     serial: u64,
     drop: u64,
@@ -239,6 +275,9 @@ impl Sim {
             deferred: Vec::new(),
             ghost: BTreeMap::new(),
             learned_twice: 0,
+            made_up: BTreeSet::new(),
+            unapproved: 0,
+            prompts: BTreeSet::new(),
             step: 0,
             serial: 0,
             drop: cfg.drop,
@@ -353,6 +392,9 @@ impl Sim {
     }
 
     fn send_all(&mut self, from: usize, msg: &Msg) {
+        if self.away(from) {
+            return;
+        }
         for to in 0..self.cfg.n {
             if to != from {
                 self.net.push((to, msg.clone()));
@@ -395,8 +437,12 @@ impl Sim {
         self.send_all(i, &Msg::Intent { digest: digest.to_string(), from: i });
     }
 
+    fn away(&self, i: usize) -> bool {
+        (1..=self.cfg.away).contains(&i) && self.step < self.cfg.back_at
+    }
+
     fn deliver(&mut self, i: usize, msg: Msg) {
-        if !self.acting(i) {
+        if !self.acting(i) || self.away(i) {
             return;
         }
         match &msg {
@@ -456,6 +502,11 @@ impl Sim {
             Msg::Prepare { slot, ballot } if self.refuses_frame(i, &ballot) => {
                 let _ = slot;
             }
+            Msg::Prepare { slot, ballot } if self.cfg.bad && i == 0 && ballot.round > 1 => {
+                let value = Value { need: 1, ..self.make_up(slot.height) };
+                let lie = Some((Ballot { round: ballot.round - 1, leader: name(0) }, value));
+                self.send_all(0, &Msg::Reply { from: 0, reply: Reply::Promise { slot, ballot, accepted: lie } });
+            }
             Msg::Prepare { slot, ballot } => {
                 let seen = self.seats[i].seen_round.entry(slot.height).or_default();
                 *seen = (*seen).max(ballot.round);
@@ -469,11 +520,28 @@ impl Sim {
                 }
             }
             Msg::Accept { ballot, .. } if self.refuses_frame(i, &ballot) => {}
-            Msg::Accept { slot, ballot, value, forced } => {
+            Msg::Accept { slot, ballot, value, forced, evidence } => {
                 // a membership change rides the frame: the seat learns it
                 self.learn(i, &value.digest);
-                if self.seats[i].decided.contains_key(&slot.height) || !self.accepts(i, &slot, &value, forced) {
+                if self.seats[i].decided.contains_key(&slot.height) {
                     return;
+                }
+                let leader: usize = ballot.leader[1..].parse().expect("a seat");
+                if !self.accepts(i, &slot, &value, forced, leader, &evidence) {
+                    // the exit: "decision may already be made - approve to
+                    // complete it"; the human answers the prompt
+                    let known = self.cards.contains_key(&value.digest) && !self.made_up.contains(&value.digest);
+                    let prompted = forced && self.fix.evidence && known && !self.seats[i].mine.contains(&value.digest);
+                    if prompted && !(self.cfg.bad && i == 0) {
+                        self.prompts.insert((i, slot.height, value.digest.clone()));
+                    }
+                    if prompted && self.rng.chance(self.cfg.approve) {
+                        self.cast_intent(i, &value.digest);
+                    }
+                    return;
+                }
+                if self.made_up.contains(&value.digest) && !self.seats[i].mine.contains(&value.digest) && !(self.cfg.bad && i == 0) {
+                    self.unapproved += 1;
                 }
                 let step = self.seats[i].acceptor.accept(&slot, &ballot, &value);
                 if let Some(reply) = self.step_acceptor(i, step) {
@@ -488,7 +556,7 @@ impl Sim {
     }
 
     /// `lock_acceptor_accept`'s judgement.
-    fn accepts(&self, i: usize, slot: &Slot, value: &Value, forced: bool) -> bool {
+    fn accepts(&self, i: usize, slot: &Slot, value: &Value, forced: bool, leader: usize, evidence: &[usize]) -> bool {
         if self.seats[i].acceptor.holds(slot, value) {
             return true;
         }
@@ -498,7 +566,16 @@ impl Sim {
             return false;
         }
         if forced && self.fix.h1 {
-            return true;
+            // a signature cannot be forged: the evidence holds only where
+            // that seat really accepted the value at this height
+            let claimed: Vec<String> = evidence.iter().map(|e| name(*e)).collect();
+            let claimed: Vec<&str> = claimed.iter().map(String::as_str).collect();
+            let holds = evidence_holds(&name(leader), &claimed, self.fix.evidence_two, |e| {
+                e[1..].parse().is_ok_and(|e: usize| self.really_accepted(e, slot.height, value))
+            });
+            if !self.fix.evidence || holds {
+                return true;
+            }
         }
         let Some(view) = self.seats[i].knows.get(&value.digest) else { return false };
         let mine = self.seats[i].mine.contains(&value.digest);
@@ -514,6 +591,14 @@ impl Sim {
             }
         }
         true
+    }
+
+    fn really_accepted(&self, e: usize, h: u64, value: &Value) -> bool {
+        // the bad seat signs whatever it likes
+        if self.cfg.bad && e == 0 {
+            return true;
+        }
+        self.ghost.get(&h).is_some_and(|by| by.iter().any(|((_, v), who)| v == value && who.contains(&e)))
     }
 
     fn step_acceptor(&mut self, i: usize, step: Step) -> Option<Reply> {
@@ -557,7 +642,8 @@ impl Sim {
         self.seats[i].touched = self.seats[i].touched.max(h);
         let ballot = Ballot { round, leader: name(i) };
         let q = self.quorum();
-        self.seats[i].runs.insert(h, Run { leader: Leader::new(s.clone(), q, ballot.clone()), forced: false, waiting: false });
+        let run = Run { leader: Leader::new(s.clone(), q, ballot.clone()), forced: false, waiting: false, holders: BTreeMap::new(), evidence: Vec::new() };
+        self.seats[i].runs.insert(h, run);
         self.seats[i].seen_round.insert(h, round);
         let msg = Msg::Prepare { slot: s, ballot };
         self.deliver(i, msg.clone());
@@ -583,6 +669,11 @@ impl Sim {
         if let Some((_, v)) = &accepted {
             self.learn(i, &v.digest);
         }
+        // the reported need is the change's, never the promiser's word
+        let accepted = accepted.map(|(b, v)| {
+            let need = self.cards.get(&v.digest).map_or(v.need, |c| c.need);
+            (b, Value { need, ..v })
+        });
         // a seat known as a restore's subject is no promiser
         if from != i && self.subjects_of(i).contains(&from) {
             return;
@@ -597,6 +688,10 @@ impl Sim {
         }
         if let Some((d, z)) = excuse {
             run.leader.excuse(&d, &name(z));
+        }
+        // the promise reports the holder's own acceptance signature
+        if let Some((_, v)) = &accepted {
+            run.holders.entry(v.digest.clone()).or_default().insert(from);
         }
         run.leader.promise(&name(from), ballot, accepted);
         self.try_propose(i, slot.height, false);
@@ -621,7 +716,9 @@ impl Sim {
         let Some(value) = run.leader.propose(own) else { return };
         run.forced = forced.is_some();
         run.waiting = false;
-        let msg = Msg::Accept { slot: run.leader.slot.clone(), ballot: run.leader.ballot.clone(), value, forced: run.forced };
+        // the leader forwards another holder's acceptance, never its own
+        run.evidence = if run.forced { run.holders.get(&value.digest).map(|h| h.iter().copied().collect()).unwrap_or_default() } else { Vec::new() };
+        let msg = Msg::Accept { slot: run.leader.slot.clone(), ballot: run.leader.ballot.clone(), value, forced: run.forced, evidence: run.evidence.clone() };
         self.deliver(i, msg.clone());
         self.send_all(i, &msg);
     }
@@ -720,7 +817,7 @@ impl Sim {
             // the leader re-sends its Accept
             if let Some(run) = self.seats[i].runs.get(&h) {
                 if let Some(v) = run.leader.proposed() {
-                    let msg = Msg::Accept { slot: run.leader.slot.clone(), ballot: run.leader.ballot.clone(), value: v.clone(), forced: run.forced };
+                    let msg = Msg::Accept { slot: run.leader.slot.clone(), ballot: run.leader.ballot.clone(), value: v.clone(), forced: run.forced, evidence: run.evidence.clone() };
                     self.send_all(i, &msg);
                 }
             }
@@ -764,6 +861,8 @@ impl Sim {
                 };
                 self.new_card(i, h, kind);
             }
+        } else if self.cfg.bad && i == 0 && roll < 9 {
+            self.bad_accept(h);
         } else if roll < 6 + self.cfg.withdraw {
             let mine: Vec<String> = self.cards.iter().filter(|(_, c)| c.proposer == i).map(|(d, _)| d.clone()).collect();
             if self.acting(i) && !mine.is_empty() {
@@ -792,6 +891,31 @@ impl Sim {
         }
     }
 
+    /// Seat 0, bad: a forced Accept at a ballot above everything, no
+    /// phase 1. Half the time a value it made up (claiming a random other
+    /// seat's acceptance), else a real acceptance of another seat replayed.
+    fn bad_accept(&mut self, h: u64) {
+        let n = self.cfg.n;
+        let claim = 1 + self.rng.below(n - 1);
+        let replay = self.ghost.get(&h).and_then(|by| by.iter().find_map(|((_, v), who)| who.iter().find(|e| **e != 0).map(|e| (v.clone(), *e))));
+        let (value, evidence) = match replay.filter(|_| self.rng.chance(50)) {
+            Some((v, e)) => (v, vec![0, e]),
+            None => (self.make_up(h), vec![0, claim]),
+        };
+        self.serial += 1;
+        let ballot = Ballot { round: 1_000_000 + self.serial, leader: name(0) };
+        let msg = Msg::Accept { slot: Self::slot(h), ballot, value, forced: true, evidence };
+        self.send_all(0, &msg);
+    }
+
+    fn make_up(&mut self, h: u64) -> Value {
+        self.serial += 1;
+        let digest = format!("c{h}-{}-bad", self.serial);
+        self.cards.insert(digest.clone(), Card { height: h, kind: Kind::Change, need: self.cfg.m, proposer: 0 });
+        self.made_up.insert(digest.clone());
+        Value { digest, need: self.cfg.m }
+    }
+
     fn chaos(&mut self, steps: usize) {
         for _ in 0..steps {
             self.step += 1;
@@ -816,7 +940,7 @@ impl Sim {
 
     fn undecided(&self) -> Vec<u64> {
         (1..=self.cfg.heights)
-            .filter(|h| (0..self.cfg.n).any(|i| self.acting(i) && !self.seats[i].decided.contains_key(h)))
+            .filter(|h| (0..self.cfg.n).any(|i| self.acting(i) && !self.away(i) && !self.seats[i].decided.contains_key(h)))
             .collect()
     }
 
@@ -834,7 +958,7 @@ impl Sim {
             if undecided.is_empty() {
                 return 0;
             }
-            let leader = (0..self.cfg.n).find(|i| self.may_lead(*i) && self.life[*i] == Life::Alive);
+            let leader = (0..self.cfg.n).find(|i| self.may_lead(*i) && self.life[*i] == Life::Alive && !(self.cfg.bad && *i == 0) && !self.away(*i));
             for h in undecided {
                 if let Some(i) = (0..self.cfg.n).find(|i| self.seats[*i].decided.contains_key(&h)) {
                     let value = self.seats[i].decided[&h].clone();
@@ -865,7 +989,7 @@ impl Sim {
     }
 
     fn outcome(&self) -> WOutcome {
-        let mut out = WOutcome { learned_twice: self.learned_twice, ..WOutcome::default() };
+        let mut out = WOutcome { learned_twice: self.learned_twice, unapproved: self.unapproved, prompts: self.prompts.len(), ..WOutcome::default() };
         for by in self.ghost.values() {
             let chosen: BTreeSet<&Value> = by.iter().filter(|((_, v), who)| who.len() >= v.need).map(|((_, v), _)| v).collect();
             out.forks += usize::from(chosen.len() > 1);
@@ -884,6 +1008,8 @@ pub(super) fn run(cfg: WConfig, fix: Fixes, seed: u64) -> WOutcome {
     out.forks = out.forks.max(after.forks);
     out.learned_twice = after.learned_twice;
     out.decided = after.decided;
+    out.unapproved = after.unapproved;
+    out.prompts = after.prompts;
     out
 }
 
@@ -902,6 +1028,9 @@ pub(super) fn base(n: usize, m: usize) -> WConfig {
         drop: 15,
         amnesia: 0,
         tail_loss: false,
+        bad: false,
+        away: 0,
+        back_at: 0,
     }
 }
 
@@ -955,7 +1084,7 @@ fn the_wire_rules_before_the_fourth_review_fork_and_halt() {
 /// two lost, n-of-n.
 #[test]
 fn with_the_fixes_no_fork_and_every_height_decides() {
-    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false };
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true };
     for (name, cfg) in configs() {
         for drop in [15, 45] {
             for seed in 0..SIM_SEEDS {
@@ -989,7 +1118,7 @@ fn amnesia_configs() -> Vec<(&'static str, WConfig)> {
 /// recovery ritual is the only exit.
 #[test]
 fn an_amnesiac_seat_waits_for_the_others_and_never_forks() {
-    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: true };
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: true, evidence: true, evidence_two: true };
     let control = Fixes { amnesia_rule: false, ..fix };
     let mut control_forks = 0;
     for (name, cfg) in amnesia_configs() {
@@ -1002,4 +1131,79 @@ fn an_amnesiac_seat_waits_for_the_others_and_never_forks() {
     }
     assert!(control_forks > 0, "amnesia without the rule never forked");
     eprintln!("amnesia without the rule: {control_forks} forks");
+}
+
+/// Item 3, the evidence rule: a bad seat's made-up value never finds a
+/// good seat that did not approve it - neither leading it forced, nor
+/// lying in its promises to a good leader. H1 alone fails the first; one
+/// signature other than the sender's fails the second (the bad seat's
+/// own signature, forwarded by a good leader); two distinct signers
+/// hold. Replaying a real acceptance stays possible (the residual).
+#[test]
+fn a_made_up_forced_value_finds_no_good_acceptor() {
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true };
+    let control = Fixes { evidence: false, evidence_two: false, ..fix };
+    let one = Fixes { evidence_two: false, ..fix };
+    let (mut control_unapproved, mut one_unapproved) = (0, 0);
+    for (name, cfg) in [("2-of-3", base(3, 2)), ("3-of-5", base(5, 3)), ("3-of-3", base(3, 3))] {
+        let cfg = WConfig { bad: true, ..cfg };
+        for seed in 0..SIM_SEEDS / 2 {
+            assert_eq!(run(cfg, fix, seed).unapproved, 0, "{name}: a made-up value accepted at seed {seed}");
+            control_unapproved += run(cfg, control, seed).unapproved;
+            one_unapproved += run(cfg, one, seed).unapproved;
+        }
+    }
+    assert!(control_unapproved > 0, "without the rule no made-up value was ever accepted");
+    assert!(one_unapproved > 0, "one signer besides the sender was never defeated");
+    eprintln!("unapproved acceptances: no evidence {control_unapproved}, one signer {one_unapproved}, two signers 0");
+}
+
+/// Item 3's liveness residual: a lying seat forces its made-up value only
+/// while 1 + unheard >= m, i.e. with m - 1 other seats unreachable; when
+/// they are heard again every height decides. Lost seats come back here
+/// (their old devices), the liar keeps lying.
+#[test]
+fn a_liar_stalls_only_while_m_minus_one_seats_are_away() {
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true };
+    for (name, cfg) in [
+        ("2-of-3, one away, back", WConfig { away: 1, back_at: 400, ..base(3, 2) }),
+        ("2-of-5, one away, back", WConfig { away: 1, back_at: 400, ..base(5, 2) }),
+        ("3-of-5, two away, back", WConfig { away: 2, back_at: 400, ..base(5, 3) }),
+        ("4-of-7, three away, back", WConfig { away: 3, back_at: 400, ..base(7, 4) }),
+        ("3-of-5, one away throughout", WConfig { away: 1, back_at: usize::MAX, ..base(5, 3) }),
+        ("2-of-3", base(3, 2)),
+        ("3-of-5", base(5, 3)),
+    ] {
+        let cfg = WConfig { bad: true, ..cfg };
+        for seed in 0..SIM_SEEDS / 4 {
+            let out = run(cfg, fix, seed);
+            assert_eq!(out.undecided, 0, "{name}: undecided at seed {seed}");
+            assert_eq!(out.unapproved, 0, "{name}: a made-up value accepted at seed {seed}");
+        }
+    }
+    // the residual itself: 2-of-5 with the liar and m - 1 = 1 seat away for
+    // good stalls, where free signing would still have three good seats
+    let stall = WConfig { bad: true, away: 1, back_at: usize::MAX, ..base(5, 2) };
+    let stalled = (0..SIM_SEEDS / 4).filter(|seed| run(stall, fix, *seed).undecided > 0).count();
+    assert!(stalled > 0, "2-of-5, liar and one away: never stalled");
+    eprintln!("2-of-5, liar and one seat away for good: {stalled} of {} runs stall", SIM_SEEDS / 4);
+}
+
+/// Item 3's exit in honest runs: how often a good seat's human is asked
+/// to approve a forced value only one other seat holds. Printed per shape
+/// for the release notes; no seat misbehaves here.
+#[test]
+fn how_often_the_exit_prompt_appears() {
+    let fix = Fixes { h2: true, h1: true, m3: true, amnesia_rule: false, evidence: true, evidence_two: true };
+    for (name, cfg) in configs() {
+        for drop in [15, 45] {
+            let (mut runs, mut prompts) = (0, 0);
+            for seed in 0..SIM_SEEDS / 4 {
+                let p = run(WConfig { drop, ..cfg }, fix, seed).prompts;
+                runs += usize::from(p > 0);
+                prompts += p;
+            }
+            eprintln!("{name} drop {drop}: {runs} of {} runs prompt, {prompts} prompts", SIM_SEEDS / 4);
+        }
+    }
 }

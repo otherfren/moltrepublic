@@ -174,6 +174,52 @@ pub(crate) fn applied_block_plaintext_len(
     serde_json::to_vec(&env).map_or(usize::MAX, |v| v.len())
 }
 
+/// The largest lock frame `payload` rides in under Strict Order Mode, in
+/// the worst case: a forced Accept with the change and two evidence
+/// signatures, or a promise with the change and one (item 3).
+pub(crate) fn lock_frame_plaintext_len(surface: Surface, payload: &Value, roster: &[molt_core::MemberId]) -> usize {
+    let change = molt_core::chain::ChainChange::Applied { proposal_id: u64::MAX, surface, payload: payload.clone() };
+    let by = roster.iter().max_by_key(|m| m.len()).cloned().unwrap_or_default();
+    let ev = molt_core::chain::LockEvidence { member: by.clone(), sig: "f".repeat(128) };
+    let len = |body| {
+        let env = molt_core::EventEnvelope { seq: u64::MAX, prev_seq: u64::MAX, ts: u64::MAX, by: by.clone(), body };
+        serde_json::to_vec(&env).map_or(usize::MAX, |v| v.len())
+    };
+    let accept = len(WorkspaceEvent::LockAccept {
+        height: u64::MAX,
+        base: "f".repeat(64),
+        round: u64::MAX,
+        digest: "f".repeat(64),
+        need: u64::MAX,
+        id: molt_core::ProposalId(u64::MAX),
+        change: Some(change.clone()),
+        forced: true,
+        evidence: vec![ev.clone(), ev],
+    });
+    let promise = len(WorkspaceEvent::LockPromise {
+        height: u64::MAX,
+        base: "f".repeat(64),
+        round: u64::MAX,
+        leader: by.clone(),
+        accepted: Some(molt_core::chain::LockAcceptedValue {
+            round: u64::MAX,
+            leader: by.clone(),
+            digest: "f".repeat(64),
+            need: u64::MAX,
+            id: u64::MAX,
+            change: Some(change),
+            sig: "f".repeat(128),
+        }),
+    });
+    accept.max(promise)
+}
+
+/// [`payload_fits`], and under Strict Order Mode (`lock`, chain state, so
+/// every seat agrees) its lock frames fit too.
+pub(crate) fn payload_fits_mode(surface: Surface, payload: &Value, roster: &[molt_core::MemberId], lock: bool) -> bool {
+    payload_fits(surface, payload, roster) && (!lock || lock_frame_plaintext_len(surface, payload, roster) <= transport_plaintext_ceiling())
+}
+
 /// Can this payload ever become a publishable block? The shared verdict —
 /// the propose path refuses on it, and the wire guard drops on it.
 pub(crate) fn payload_fits(
@@ -223,8 +269,9 @@ fn validate_payload_fits(
     surface: Surface,
     payload: &Value,
     roster: &[molt_core::MemberId],
+    lock: bool,
 ) -> Result<(), MoltError> {
-    if payload_fits(surface, payload, roster) {
+    if payload_fits_mode(surface, payload, roster, lock) {
         return Ok(());
     }
     // the image wording belongs to a set_image and nothing else: any payload
@@ -242,8 +289,9 @@ fn validate_payload_fits(
             image_headroom(surface, payload, roster) / 1024
         )));
     }
-    let over = applied_block_plaintext_len(surface, payload, roster)
-        .saturating_sub(transport_plaintext_ceiling());
+    let framed = applied_block_plaintext_len(surface, payload, roster);
+    let framed = if lock { framed.max(lock_frame_plaintext_len(surface, payload, roster)) } else { framed };
+    let over = framed.saturating_sub(transport_plaintext_ceiling());
     Err(MoltError::BadPayload(format!(
         "the proposal is {} KiB over what this republic's relays carry",
         over.div_ceil(1024)
@@ -673,7 +721,7 @@ impl State {
         }
         let roster = self.roster();
         // bytes that fit, or that are no base64 at all, take the plain path
-        if file.is_none() && (bytes.is_none() || payload_fits(surface, payload, &roster)) {
+        if file.is_none() && (bytes.is_none() || payload_fits_mode(surface, payload, &roster, self.lock_enabled())) {
             return Ok(None);
         }
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
@@ -832,7 +880,7 @@ impl State {
         } else {
             (Vec::new(), Vec::new())
         };
-        validate_payload_fits(surface, &payload, &self.roster())?;
+        validate_payload_fits(surface, &payload, &self.roster(), self.lock_enabled())?;
         let mut warnings = self.wiki_patch_check(surface, &payload)?;
         warnings.extend(kanban_warnings);
         // R6: a pool edit that would strand a DECLARED member — sharing no
@@ -1050,6 +1098,12 @@ impl State {
         note: Option<String>,
     ) -> Result<Reply, MoltError> {
         self.refuse_a_lagging_vote()?;
+        // Strict Order Mode's exit (item 3): a withdrawn card the status
+        // names may already be decided; this approve completes it. Every
+        // other approve of a withdrawn card stays refused below.
+        if self.lock_approve_forced(proposal.0) {
+            return Ok(self.vote_reply(proposal));
+        }
         let mut wallet_refused = None;
         let (late, operator_already_voted) = {
             let p = self
@@ -5154,7 +5208,7 @@ mod size_gate_tests {
         let roster = roster();
         let headroom = image_headroom(Surface::Organization, &image_payload(&[]), &roster);
         let payload = image_payload(&padded_bmp(headroom * 2));
-        let err = validate_payload_fits(Surface::Organization, &payload, &roster)
+        let err = validate_payload_fits(Surface::Organization, &payload, &roster, false)
             .expect_err("an oversized image is refused");
         let MoltError::BadPayload(msg) = err else {
             panic!("expected BadPayload");
@@ -5175,7 +5229,7 @@ mod size_gate_tests {
             "op": "set_charter",
             "value": "x".repeat(transport_plaintext_ceiling() + 1),
         });
-        let err = validate_payload_fits(Surface::Organization, &payload, &roster)
+        let err = validate_payload_fits(Surface::Organization, &payload, &roster, false)
             .expect_err("an over-long charter is refused");
         let MoltError::BadPayload(msg) = err else {
             panic!("expected BadPayload");
@@ -5265,7 +5319,7 @@ mod size_gate_tests {
         let roster = roster();
         let headroom = image_headroom(Surface::Organization, &member_image_payload(&[]), &roster);
         let payload = member_image_payload(&padded_bmp(headroom * 2));
-        let err = validate_payload_fits(Surface::Organization, &payload, &roster)
+        let err = validate_payload_fits(Surface::Organization, &payload, &roster, false)
             .expect_err("an oversized avatar is refused");
         let MoltError::BadPayload(msg) = err else {
             panic!("expected BadPayload");

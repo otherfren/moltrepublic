@@ -2292,6 +2292,7 @@ fn under_the_lock_a_restore_is_accepted_only_after_its_settle() {
                 id: ProposalId(id),
                 change: Some(change.clone()),
                 forced: false,
+                evidence: Vec::new(),
             },
         );
     };
@@ -2359,6 +2360,7 @@ fn a_chosen_restore_seals_after_its_withdrawal() {
             id: ProposalId(id),
             change: Some(change.clone()),
             forced: false,
+            evidence: Vec::new(),
         },
     );
     assert!(
@@ -2462,6 +2464,7 @@ fn a_chosen_restore_seals_while_the_old_device_is_heard() {
             id: ProposalId(id),
             change: Some(change.clone()),
             forced: false,
+            evidence: Vec::new(),
         },
     );
     assert!(walter.chain.lock.outbox.iter().any(|e| matches!(e.body, WorkspaceEvent::LockAccepted { .. })), "walter accepted");

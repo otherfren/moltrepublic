@@ -280,7 +280,7 @@ fn a_restarted_seat_keeps_its_promise() {
         &mut again,
         "dora",
         2,
-        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 4, digest, need: 2, id: ProposalId(id), change: None, forced: false },
+        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 4, digest, need: 2, id: ProposalId(id), change: None, forced: false, evidence: Vec::new() },
     );
     assert_eq!(sent_kinds(&again), vec!["nack", "nack"], "the lower ballot is refused twice");
 }
@@ -847,6 +847,7 @@ fn an_accepted_value_is_accepted_again_after_a_withdraw_or_decline() {
                     id: ProposalId(id),
                     change: None,
                     forced: false,
+                    evidence: Vec::new(),
                 },
             );
         };
@@ -992,6 +993,7 @@ fn a_forced_value_waits_for_a_fuller_hearing() {
             digest: digest.clone(),
             id: v,
             change: None,
+            sig: String::new(),
         });
         wire(st, from, seq, WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round, leader: "dora".into(), accepted });
     };
@@ -1118,6 +1120,7 @@ fn a_withdrawn_restore_held_by_one_survivor_is_not_forced() {
         need: u64::try_from(value.need).expect("small"),
         id,
         change: Some(change),
+        sig: String::new(),
     };
     for (seq, (from, accepted)) in [("mara", Some(held)), ("olga", None), ("paul", None)].into_iter().enumerate() {
         let promise = WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round, leader: "dora".into(), accepted };
@@ -1331,6 +1334,7 @@ fn a_restore_subject_is_excused_only_for_its_own_restore() {
         need: u64::try_from(value.need).expect("small"),
         id,
         change,
+        sig: String::new(),
     };
     let promises = [
         ("b", held(&r_value, 1, "a", rid_restore, Some(restore.clone()))),
@@ -1406,14 +1410,15 @@ fn a_forced_withdrawn_value_completes_with_any_promiser() {
         need: u64::try_from(value.need).expect("small"),
         id: w,
         change: None,
+        sig: identity_sign(b.key("mara"), &approval_bytes(&b.republic_id, 1, &change)),
     };
     wire(&mut dora, "mara", 1, WorkspaceEvent::LockPromise { height: 1, base: base.clone(), round, leader: "dora".into(), accepted: Some(held) });
     // S3: one interval for a fuller hearing, walter stays silent
     dora.presence.clock_override = Some(T + 60);
     hear(&mut dora, T + 60, &["dora", "mara"]);
     dora.lock_tick();
-    let forced_out = dora.chain.lock.outbox.iter().any(|e| matches!(&e.body, WorkspaceEvent::LockAccept { forced: true, digest, .. } if *digest == value.digest));
-    assert!(forced_out, "w proposed as forced: {:?}", sent_kinds(&dora));
+    let forced_out = dora.chain.lock.outbox.iter().any(|e| matches!(&e.body, WorkspaceEvent::LockAccept { forced: true, digest, evidence, .. } if *digest == value.digest && evidence.iter().map(|e| e.member.as_str()).collect::<Vec<_>>() == ["dora", "mara"]));
+    assert!(forced_out, "w proposed as forced, mara's and dora's acceptances as evidence: {:?}", sent_kinds(&dora));
     assert!(sent_kinds(&dora).contains(&"accepted"), "dora's intent stood: she accepts the withdrawn w");
     let sig = identity_sign(b.key("mara"), &approval_bytes(&b.republic_id, 1, &change));
     wire(&mut dora, "mara", 2, WorkspaceEvent::LockAccepted { height: 1, base: base.clone(), round, leader: "dora".into(), digest: value.digest.clone(), sig });
@@ -1435,7 +1440,7 @@ fn a_forced_withdrawn_value_completes_with_any_promiser() {
         &mut walter,
         "dora",
         2,
-        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 5, digest: v2.digest, need: 2, id: ProposalId(w2), change: None, forced: true },
+        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 5, digest: v2.digest, need: 2, id: ProposalId(w2), change: None, forced: true, evidence: vec![evidence_of(&b, "mara", &change2), evidence_of(&b, "dora", &change2)] },
     );
     assert!(sent_kinds(&walter).contains(&"accepted"), "forced: accepted without an intent: {:?}", sent_kinds(&walter));
 }
@@ -1806,7 +1811,7 @@ fn a_withheld_forced_value_is_retried_with_its_carried_change() {
         &mut walter,
         "dora",
         1,
-        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 5, digest: value.digest, need: 2, id: ProposalId(id), change: Some(change), forced: true },
+        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 5, digest: value.digest, need: 2, id: ProposalId(id), change: Some(change.clone()), forced: true, evidence: vec![evidence_of(&b, "mara", &change), evidence_of(&b, "dora", &change)] },
     );
     assert!(!sent_kinds(&walter).contains(&"accepted"), "withheld without a key");
     walter.identity_sk = sk;
@@ -1842,4 +1847,163 @@ fn a_restored_seats_acceptance_never_counts_for_its_restore() {
     x.lock_count_accepted("walter", &slot, &ballot, &sig, id, change);
     let counted = x.chain.lock.sigs.get(&(slot, ballot, digest)).is_some_and(|s| s.contains_key("walter"));
     assert!(!counted, "walter is no voice for his own restore");
+}
+
+fn evidence_of(b: &Builder, member: &str, change: &ChainChange) -> molt_core::chain::LockEvidence {
+    molt_core::chain::LockEvidence { member: member.into(), sig: identity_sign(b.key(member), &approval_bytes(&b.republic_id, 1, change)) }
+}
+
+/// walter knows dora's card `w` and saw it withdrawn; dora sends it forced
+/// at height 1 with `evidence`.
+fn forced_at_walter(evidence: impl FnOnce(&Builder, &ChainChange) -> Vec<molt_core::chain::LockEvidence>) -> (crate::State, u64) {
+    let b = Builder::new(&SEATS, 2);
+    let mut walter = seat("walter", &b);
+    let mut x = seat("dora", &b);
+    let w = note(&mut x, "w");
+    let change = x.proposal_change(w).expect("w");
+    let ChainChange::Applied { payload, .. } = change.clone() else { panic!("applied") };
+    assert!(walter.receive_proposed(w, Surface::Memory, payload, "dora"));
+    wire(&mut walter, "dora", 1, WorkspaceEvent::Withdrawn { id: ProposalId(w), by: "dora".into() });
+    let slot = walter.lock_slot().expect("slot");
+    let v = walter.lock_value(1, &change).expect("value");
+    walter.chain.lock.outbox.clear();
+    let ev = evidence(&b, &change);
+    wire(
+        &mut walter,
+        "dora",
+        2,
+        WorkspaceEvent::LockAccept { height: 1, base: slot.base, round: 5, digest: v.digest, need: 2, id: ProposalId(w), change: None, forced: true, evidence: ev },
+    );
+    (walter, w)
+}
+
+/// Item 3: a forced value with only the leader's acceptance behind it is
+/// not accepted on the leader's word; the status asks this seat's human,
+/// and an approve of the withdrawn card completes it.
+#[test]
+fn a_forced_value_without_evidence_waits_for_an_approve() {
+    let (mut walter, w) = forced_at_walter(|b, c| vec![evidence_of(b, "dora", c)]);
+    assert!(!sent_kinds(&walter).contains(&"accepted"), "no evidence, no approval: withheld");
+    let (_, _, wait) = walter.lock_status();
+    assert_eq!(wait, format!("decision {w} may already be made - approve to complete it"));
+    walter.cmd_approve(ProposalId(w), None).expect("the exit approve");
+    assert!(sent_kinds(&walter).contains(&"accepted"), "approved: accepted {:?}", sent_kinds(&walter));
+    let (_, _, wait) = walter.lock_status();
+    assert!(!wait.contains("approve to complete"), "{wait}");
+}
+
+/// Item 3: evidence counts only as real acceptances of exactly this value
+/// by two distinct seats (the sender may be one): one bad seat could sign
+/// a made-up value itself and lie about it in a promise to a good leader.
+#[test]
+fn forced_evidence_needs_two_real_acceptances() {
+    let other = ChainChange::Applied { proposal_id: 99, surface: Surface::Memory, payload: json!({ "op": "add_note", "title": "z" }) };
+    // (case, signers: (seat, signs this change rather than another))
+    let cases: [(&str, &[(&str, bool)]); 5] = [
+        ("the sender alone", &[("dora", true)]),
+        ("one other seat alone", &[("mara", true)]),
+        ("one seat twice", &[("mara", true), ("mara", true)]),
+        ("a signature over another change", &[("dora", true), ("mara", false)]),
+        ("two real acceptances", &[("dora", true), ("mara", true)]),
+    ];
+    for (name, signers) in cases {
+        let other = other.clone();
+        let (walter, _) = forced_at_walter(move |b, c| signers.iter().map(|(m, this)| evidence_of(b, m, if *this { c } else { &other })).collect());
+        assert_eq!(sent_kinds(&walter).contains(&"accepted"), name == "two real acceptances", "{name}");
+    }
+}
+
+/// Item 3: outside that exit an approve of a withdrawn card stays refused.
+#[test]
+fn an_approve_of_a_withdrawn_card_is_refused_unless_the_status_names_it() {
+    let (mut walter, w) = forced_at_walter(|b, c| vec![evidence_of(b, "dora", c), evidence_of(b, "mara", c)]);
+    assert!(walter.chain.lock.needs_approval.is_none());
+    let err = walter.cmd_approve(ProposalId(w), None).expect_err("refused");
+    assert!(matches!(err, molt_core::MoltError::AlreadyTerminal(..)), "{err}");
+}
+
+/// Item 3: a promise's reported `need` is the change's, never the
+/// sender's word - a need-1 lie would force its value at every ballot -
+/// and a report whose change does not hash to its digest is no report.
+#[test]
+fn a_promise_cannot_lie_about_need_or_digest() {
+    let b = Builder::new(&SEATS, 2);
+    let mut dora = seat("dora", &b);
+    let mut x = seat("mara", &b);
+    let v = note(&mut x, "v");
+    let change = x.proposal_change(v).expect("v");
+    let value = x.lock_value(1, &change).expect("value");
+    for (case, digest) in [("need 1", value.digest.clone()), ("wrong digest", "ab".repeat(32))] {
+        dora.chain.lock.run = None;
+        dora.lock_start(0);
+        let (base, round) = {
+            let run = dora.chain.lock.run.as_ref().expect("dora leads");
+            (run.leader.slot.base.clone(), run.leader.ballot.round)
+        };
+        let lie = molt_core::chain::LockAcceptedValue {
+            round: round - 1,
+            leader: "mara".into(),
+            digest,
+            need: 1,
+            id: v,
+            change: Some(change.clone()),
+            sig: identity_sign(b.key("mara"), &approval_bytes(&b.republic_id, 1, &change)),
+        };
+        dora.lock_on_promise("mara", 1, base.clone(), round, "dora".into(), Some(lie));
+        dora.lock_on_promise("walter", 1, base, round, "dora".into(), None);
+        let run = dora.chain.lock.run.as_ref().expect("run");
+        assert_eq!(run.leader.forced(), None, "{case}: every seat heard, one holds it: not forced");
+    }
+}
+
+/// Item 3: under Strict Order Mode the largest change a proposal may carry
+/// still fits the transport in a forced Accept with both evidence
+/// signatures and in a promise with the change and one - the propose and
+/// wire gates bound those frames too (with two seats they outgrow the
+/// block by some 180 B).
+#[test]
+fn a_forced_accept_with_evidence_fits_the_transport() {
+    let ceiling = crate::proposals::transport_plaintext_ceiling();
+    let roster: Vec<String> = vec!["a".repeat(32), "b".repeat(32)];
+    let payload = |len: usize| json!({ "op": "add_note", "title": "t".repeat(len) });
+    let (mut lo, mut hi) = (0usize, ceiling);
+    while lo + 1 < hi {
+        let mid = (lo + hi) / 2;
+        if crate::proposals::payload_fits_mode(Surface::Memory, &payload(mid), &roster, true) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let change = ChainChange::Applied { proposal_id: u64::MAX, surface: Surface::Memory, payload: payload(lo) };
+    let ev = |m: &String| molt_core::chain::LockEvidence { member: m.clone(), sig: "f".repeat(128) };
+    let env = |body| serde_json::to_vec(&EventEnvelope { seq: u64::MAX, prev_seq: u64::MAX, ts: u64::MAX, by: roster[0].clone(), body }).expect("json").len();
+    let accept = env(WorkspaceEvent::LockAccept {
+        height: u64::MAX,
+        base: "f".repeat(64),
+        round: u64::MAX,
+        digest: "f".repeat(64),
+        need: u64::MAX,
+        id: ProposalId(u64::MAX),
+        change: Some(change.clone()),
+        forced: true,
+        evidence: roster.iter().map(ev).collect(),
+    });
+    let promise = env(WorkspaceEvent::LockPromise {
+        height: u64::MAX,
+        base: "f".repeat(64),
+        round: u64::MAX,
+        leader: roster[1].clone(),
+        accepted: Some(molt_core::chain::LockAcceptedValue {
+            round: u64::MAX,
+            leader: roster[1].clone(),
+            digest: "f".repeat(64),
+            need: u64::MAX,
+            id: u64::MAX,
+            change: Some(change),
+            sig: "f".repeat(128),
+        }),
+    });
+    eprintln!("ceiling {ceiling} B, largest payload {lo} B: forced accept {accept} B, promise {promise} B");
+    assert!(accept <= ceiling && promise <= ceiling, "accept {accept}, promise {promise}, ceiling {ceiling}");
 }

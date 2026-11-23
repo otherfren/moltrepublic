@@ -405,6 +405,7 @@ fn intents_wait_behind_a_gap_and_lock_frames_never_do() {
             id: ProposalId(1),
             change: None,
             forced: false,
+            evidence: Vec::new(),
         },
         WorkspaceEvent::LockAccepted {
             height: 1,

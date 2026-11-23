@@ -406,6 +406,21 @@ impl Subjects {
     }
 }
 
+/// Item 3, the evidence rule: a forced value is accepted on the strength
+/// of real acceptances of exactly that value - `two`: by two distinct
+/// seats (the sender may be one), so with one bad seat a good one is
+/// among them; else one seat other than the sender. `really_accepted`
+/// checks one (a signature on the wire, the record in the simulation).
+pub(crate) fn evidence_holds(sender: &str, evidence: &[&str], two: bool, mut really_accepted: impl FnMut(&str) -> bool) -> bool {
+    let mut seen: Vec<&str> = Vec::new();
+    for e in evidence {
+        if !seen.contains(e) && (two || *e != sender) && really_accepted(e) {
+            seen.push(e);
+        }
+    }
+    seen.len() >= if two { 2 } else { 1 }
+}
+
 /// What a slot may be sealed with: one ballot's acceptances of one value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Sealable {
