@@ -376,8 +376,21 @@ pub(crate) fn build_ui_snapshot(ui: &AppWindow) -> molt_core::UiSnapshot {
         "join" => format!("join:{}", ui.get_jw_step()),
         _ => String::new(),
     };
+    let mut discussions = Vec::new();
+    for c in ui.get_chat_channels().iter() {
+        if c.header {
+            if !c.open {
+                discussions.extend(c.members.split_whitespace().map(|k| format!("{k} group={} collapsed", c.group)));
+            }
+        } else if c.group.is_empty() {
+            discussions.push(c.key.to_string());
+        } else {
+            discussions.push(format!("{} group={} open", c.key, c.group));
+        }
+    }
     molt_core::UiSnapshot {
         screen: screen.to_string(),
+        discussions,
         surface: ui.get_selected_surface().to_string(),
         view: ui.get_selected_view().to_string(),
         channel: ui.get_selected_channel().to_string(),
@@ -1506,6 +1519,10 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
             icon: c.icon.as_str().into(),
             unread: c.unread,
             note: c.note.as_str().into(),
+            group: c.group.as_str().into(),
+            header: c.header,
+            open: c.open,
+            members: c.members.as_str().into(),
         })
         .collect();
     // does the CURRENT filter have a row of its own? The Gruppe nav row

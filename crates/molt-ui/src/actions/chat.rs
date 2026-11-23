@@ -37,6 +37,15 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     }
 
     {
+        // flips what is SHOWN: a group expanded only for its selected
+        // member stores "collapsed", which shows once the selection moves
+        let cx = ctx.clone();
+        ui.on_toggle_discussion_group(move |kind, open| {
+            cx.issue(Command::SetDiscussionGroup { kind: kind.to_string(), open: !open });
+        });
+    }
+
+    {
         // Channel selection (chat bus). UI-LOCAL state, not a session
         // command: the filter itself is engine-side (`ReadState{channel}`),
         // so co-equality holds — an MCP agent passes its own filter and

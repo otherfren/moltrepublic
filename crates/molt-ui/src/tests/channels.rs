@@ -443,3 +443,85 @@ fn a_threads_time_left_is_short() {
     assert_eq!(thread_ends_label(0, 100 + 86_400 + 1, 100), "1 d");
     assert_eq!(thread_ends_label(0, 100, 100), "1 min", "never a zero");
 }
+
+/// A topic plus `memory` wiki-patch discussions with ids `1..=memory`
+/// and `org` organization ones after them, as `derive_channels` lists them.
+fn discussion_rows(memory: u64, org: u64) -> Vec<ChannelRowData> {
+    let mut rows = vec![ChannelRowData {
+        key: "topic:plan".to_string(),
+        label: "plan".to_string(),
+        ..ChannelRowData::default()
+    }];
+    rows.extend((1..=memory).map(|id| patch_row(id, "memory")));
+    rows.extend((memory + 1..=memory + org).map(|id| patch_row(id, "organization")));
+    rows
+}
+
+fn patch_row(id: u64, kind: &str) -> ChannelRowData {
+    ChannelRowData {
+        key: format!("patch:{id}"),
+        label: format!("#{id}"),
+        icon: "🗳️".to_string(),
+        kind: kind.to_string(),
+        ..ChannelRowData::default()
+    }
+}
+
+fn keys(rows: &[ChannelRowData]) -> Vec<&str> {
+    rows.iter().map(|r| r.key.as_str()).collect()
+}
+
+#[test]
+fn three_of_a_kind_stay_plain_rows() {
+    let rows = discussion_rows(3, 0);
+    assert_eq!(group_channels(0, rows.clone(), &[], ""), rows);
+}
+
+#[test]
+fn four_of_a_kind_fold_into_one_collapsed_header_with_their_unread() {
+    let mut rows = discussion_rows(4, 2);
+    rows[2].unread = 3;
+    rows[4].unread = 1;
+    let grouped = group_channels(0, rows, &[], "");
+    assert_eq!(keys(&grouped), ["topic:plan", "group:memory", "patch:5", "patch:6"]);
+    let h = &grouped[1];
+    assert!(h.header && !h.open);
+    assert_eq!((h.label.as_str(), h.unread, h.group.as_str()), ("Wiki patches (4)", 4, "memory"));
+    assert_eq!(h.members, "patch:1 patch:2 patch:3 patch:4");
+    assert_eq!(group_channels(1, discussion_rows(4, 0), &[], "")[1].label, "Wiki-Patches (4)");
+}
+
+#[test]
+fn an_expanded_group_lists_its_members_under_the_header() {
+    let grouped = group_channels(0, discussion_rows(4, 0), &["memory".to_string()], "");
+    assert_eq!(keys(&grouped), ["topic:plan", "group:memory", "patch:1", "patch:2", "patch:3", "patch:4"]);
+    assert!(grouped[1].open);
+    assert!(grouped[2..].iter().all(|r| r.group == "memory" && !r.header));
+}
+
+#[test]
+fn the_selected_discussion_keeps_its_collapsed_group_expanded() {
+    let grouped = group_channels(0, discussion_rows(4, 0), &[], "patch:2");
+    assert!(grouped[1].open);
+    assert_eq!(grouped.len(), 6);
+}
+
+#[test]
+fn a_group_sits_where_its_newest_member_sat() {
+    let rows = vec![
+        patch_row(1, "memory"),
+        patch_row(2, "memory"),
+        patch_row(3, "organization"),
+        patch_row(4, "memory"),
+        patch_row(5, "memory"),
+        patch_row(6, "organization"),
+    ];
+    assert_eq!(keys(&group_channels(0, rows, &[], "")), ["patch:3", "group:memory", "patch:6"]);
+}
+
+#[test]
+fn each_kind_with_four_gets_its_own_header() {
+    let grouped = group_channels(0, discussion_rows(4, 4), &[], "");
+    assert_eq!(keys(&grouped), ["topic:plan", "group:memory", "group:organization"]);
+    assert_eq!(grouped[2].label, "Organization (4)");
+}

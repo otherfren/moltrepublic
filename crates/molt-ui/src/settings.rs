@@ -143,6 +143,7 @@ pub(crate) fn read_settings_draft(ui: &AppWindow, stored: &SessionSettings) -> S
         font_app: d.font_app,
         font_nav: d.font_nav,
         font_editor: d.font_editor,
+        discussion_groups_open: stored.discussion_groups_open.clone(),
         // not a config-tab field: the draft echoes the STORED cap so a
         // wholesale save keeps it (0 is a VALUE now — sharing off, FP4)
         file_cap_bytes: stored.file_cap_bytes,

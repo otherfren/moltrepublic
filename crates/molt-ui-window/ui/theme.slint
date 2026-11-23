@@ -115,6 +115,10 @@ export struct ChannelItem {
     icon: string, // Twemoji glyph per kind
     unread: int, // messages since last seen (0 = caught up)
     note: string, // quiet right-aligned fact: a topic's time left ("3 d")
+    group: string, // the group kind this row lists under, or a header's own ("" = none)
+    header: bool, // a group header: "<kind> (N)", toggles its members
+    open: bool, // the group renders expanded
+    members: string, // a header's member keys, space-separated
 }
 
 // One member's stance on a pending proposal (the voting row's pills).
@@ -1963,6 +1967,7 @@ export global Strings {
     // chat channels (chat bus)
     in property <string> ch-discussions;
     in property <string> ch-group;
+    in property <string> ch-grp-wiki;
     in property <string> ch-new-topic;
     in property <string> ch-topic-ph;
     in property <string> ch-to-vote;

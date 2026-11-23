@@ -1288,6 +1288,7 @@ fn settings_arg(args: &Value) -> Result<SessionSettings, String> {
         font_app: d.font_app,
         font_nav: d.font_nav,
         font_editor: d.font_editor,
+        discussion_groups_open: d.discussion_groups_open.clone(),
         workspace_dir: text("workspace_dir")?,
         // REQUIRED, null = no cap (mirroring.md §1), 0 = sharing off
         // (FP4): an absent key must not flip a human's "off" to unlimited
@@ -2449,6 +2450,24 @@ pub fn tools() -> Vec<ToolDef> {
                 app: font_arg(args, "app")?,
                 nav: font_arg(args, "nav")?,
                 editor: font_arg(args, "editor")?,
+            }),
+        },
+        ToolDef {
+            name: "set_discussion_group",
+            command: "set_discussion_group",
+            scope: Scope::Seat,
+            description: "Show one kind of discussion group expanded or collapsed in this node's GUI nav (a view preference, persisted to config.toml). kind is a gated surface key; read_state lists every discussion regardless.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["organization", "memory", "quests", "vault", "wallet", "files"] },
+                    "open": { "type": "boolean" }
+                },
+                "required": ["kind", "open"]
+            }),
+            build: |args| Ok(Command::SetDiscussionGroup {
+                kind: str_arg(args, "kind")?,
+                open: bool_arg(args, "open")?,
             }),
         },
         ToolDef {

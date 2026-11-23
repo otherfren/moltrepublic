@@ -84,6 +84,7 @@ pub(crate) fn derive_channels(
                 label: name.to_string(),
                 icon: if info.closed { "🔒" } else { "🏷️" }.to_string(),
                 note: thread_ends_label(lang, info.expires_at, now),
+                ..ChannelRowData::default()
             }
         })
         .collect();
@@ -107,10 +108,70 @@ pub(crate) fn derive_channels(
             key,
             label: display_title(lang, &k.payload),
             icon: "🗳️".to_string(),
-            note: String::new(),
+            kind: k.surface.as_str().to_string(),
+            ..ChannelRowData::default()
         })
     }));
     rows
+}
+
+/// From this many discussions of one kind on, they list under a group header.
+pub(crate) const GROUP_MIN: usize = 4;
+
+/// Fold [`derive_channels`] rows into groups: a kind with [`GROUP_MIN`]
+/// or more discussions becomes one header row (sitting where its newest
+/// member sat) followed by its members while expanded. `open` = kinds
+/// the user expanded; the group holding `selected` renders expanded.
+pub(crate) fn group_channels(
+    lang: i32,
+    rows: Vec<ChannelRowData>,
+    open: &[String],
+    selected: &str,
+) -> Vec<ChannelRowData> {
+    let mut members: HashMap<&str, Vec<&ChannelRowData>> = HashMap::new();
+    for r in rows.iter().filter(|r| !r.kind.is_empty()) {
+        members.entry(r.kind.as_str()).or_default().push(r);
+    }
+    members.retain(|_, m| m.len() >= GROUP_MIN);
+    let mut out = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let Some(group) = members.get(r.kind.as_str()) else {
+            out.push(r.clone());
+            continue;
+        };
+        if group.last().map_or(true, |last| last.key != r.key) {
+            continue;
+        }
+        let expanded = open.contains(&r.kind) || group.iter().any(|m| m.key == selected);
+        out.push(ChannelRowData {
+            key: format!("group:{}", r.kind),
+            label: format!("{} ({})", group_label(lang, &r.kind), group.len()),
+            // expanded, the members carry their own counts
+            unread: if expanded {
+                0
+            } else {
+                group.iter().fold(0, |n, m| n.saturating_add(m.unread))
+            },
+            group: r.kind.clone(),
+            header: true,
+            open: expanded,
+            members: group.iter().map(|m| m.key.as_str()).collect::<Vec<_>>().join(" "),
+            ..ChannelRowData::default()
+        });
+        if expanded {
+            out.extend(group.iter().map(|m| ChannelRowData { group: m.kind.clone(), ..(*m).clone() }));
+        }
+    }
+    out
+}
+
+/// A group header's name: the kind's surface, wiki patches by their own word.
+fn group_label(lang: i32, kind: &str) -> String {
+    match Surface::parse(kind) {
+        Some(Surface::Memory) => crate::i18n::Lexicon::of(lang).ch_grp_wiki.to_string(),
+        Some(s) => crate::labels::surface_name(lang, s).to_string(),
+        None => kind.to_string(),
+    }
 }
 
 /// Unix seconds now (the thread rows' time-left base).

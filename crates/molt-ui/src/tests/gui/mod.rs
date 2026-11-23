@@ -15,6 +15,7 @@
 mod agent_tab;
 mod chat;
 mod discussion;
+mod discussion_groups;
 mod files;
 #[cfg(feature = "live-preview")]
 mod founding_charter;
@@ -213,6 +214,11 @@ fn sv_backup_orphan() -> (SessionView, String) {
 /// A node with storage, a founded workspace, and chat in it — the state
 /// a user's second launch starts from.
 fn node_with_chat(root: &std::path::Path) -> (WalletHandle, String) {
+    (node_with_settings(root, molt_core::SessionSettings::default()), String::new())
+}
+
+/// [`node_with_chat`], started with `settings` (its workspace dir is `root`).
+fn node_with_settings(root: &std::path::Path, settings: SessionSettings) -> WalletHandle {
     // exactly the session `moltd` hands the engine at startup: the
     // workspaces are what is ON DISK. `SessionView::default()` carries
     // the demo fixtures, which would list six republics that do not
@@ -224,12 +230,11 @@ fn node_with_chat(root: &std::path::Path) -> (WalletHandle, String) {
             .collect(),
         settings: molt_core::SessionSettings {
             workspace_dir: root.display().to_string(),
-            ..molt_core::SessionSettings::default()
+            ..settings
         },
         ..SessionView::default()
     };
-    let w = molt_engine::spawn_with_storage(GroupConfig::demo(), session);
-    (w, String::new())
+    molt_engine::spawn_with_storage(GroupConfig::demo(), session)
 }
 
 fn rt() -> tokio::runtime::Runtime {
