@@ -726,165 +726,152 @@ Pins: `net::delivery_tests` (`a_newest_first_replay_past_the_window_loses_nothin
 ## 11. A restored seat's new incarnation (v0.1.2)
 
 A restored seat's new device numbers its log from the start (the
-materialized genesis is seq 1, its own stream follows). A seat whose window
-still holds the old incarnation's marks drops the new device's frames as
-duplicates (everything 1024 below its old `high` reads as accepted), every
-duplicate re-arms the ack, and the sheet's old `high` walks the new
-device's acked floor past frames nobody applied. Every other seat forgets
-the old incarnation's inbound state - window, frontier, links, held frames,
-ack deadline, catch-up debounce, height claim - when it is PROVEN stale,
-once per restore, and never blindly: a reset costs the seat's whole stream
-since the restore (below).
+materialized genesis is seq 1). A window that still holds the old
+incarnation's marks drops the new device's frames as duplicates
+(everything 1024 below its old `high` reads as accepted), every duplicate
+re-arms the ack, and the sheet's old `high` walks the new device's acked
+floor past frames nobody applied. Three sources of truth decide what
+happens; none reads a wall clock.
 
-- **Key.** `AcceptedWindow.restore` (the transport anchor the window counts
-  under) and `proof`, receiver-local, stripped from sheets, persisted with
-  the window: `unknown` (an older build's window, or keyed at open),
-  `pending` (born by first contact), `adopted` (a block keyed it, its merge
-  due), `block` (reset by the block, its merge due), `merge` (reset by that
-  restore's merge), `merge_pending` (reset by a merge whose block is still
-  to come; `restore` is the anchor before it), `evidence`. Every reset is
-  handed to the writer at once, ahead of the ratchet persist the same
-  merge queues: a kill cannot keep the merged ratchet and lose the reset.
-- **The re-key merge** (`cmd_net_peer_rekeyed`, and the coordinator's own
-  commit) always resets: before it no frame of the new device decrypts
-  here. A window `adopted`/`block` becomes `merge` (the merge of that
-  restore); any other becomes `merge_pending`.
-- **A block** (`settle_block`'s `Restored` arm, on every seat): a window
-  keyed to a DIFFERENT known restore holds that device's stream - reset to
-  `block`. A `merge_pending` window whose anchor differs adopts it as
-  `merge`. A `pending` window whose first accepted frame (`born`) is newer
-  than the restore's seal holds only the new device: `merge`; one born
-  more than the skew bound (900 s) before it holds the old one: reset
-  (`block`); a seal not stamped yet (this seat sealed it) counts as now.
-  Any other `pending` or unkeyed window is only keyed (`adopted`); the
-  evidence rule resets it if it predates the restore. The open judges a
-  `pending` window the same way. Two restores of one
-  seat each reset once; the second's block never meets a stale merge key.
-- **At open** (`reconcile_restore_windows`): an unkeyed window of a seat the
-  chain shows restored is keyed to its latest anchor, never reset.
-- **Evidence.** A dropped duplicate from a restored seat whose window is
-  not reset for its latest restore resets it (`accept_window_reset
-  via=Evidence`) when the frame is newer than (a) the restore - its
-  `Restored` block's `Committed` stamp, if known - and (b) everything the
-  window accepted: `(ts, seq)` above `(stamp, stamp_seq)`, the newest
-  accepted stamp and its highest seq (stamps are whole seconds; a later
-  frame of the same second has a higher seq). A window not proven to
-  postdate the restore (`adopted`, or keyed at open) keeps the bar it had:
-  a new-device frame accepted out of order must not lift it over the ones
-  it dropped. A healthy window has
-  accepted every frame it holds, so none of its duplicates is newer. With
-  no accepted stamp known (an older build's window, until its first fresh
-  accept) the reference is the open time plus the wire skew bound (900 s).
-  The frame that proves it is delivered again into the reset window, not
-  lost.
-  - Clocks: (a) compares the sender's envelope clock with the sealer's
-    (the earliest `Committed` envelope this seat saw, so a seat that got
-    the block only by catch-up holds a later stamp - later evidence, never
-    false); (b) compares the sender's clock with itself, except the
-    open-time fallback, which compares it with this seat's. A sender clock
-    AHEAD of this seat by more than 900 s plus the restart gap can make a
-    re-read frame look new: an unneeded reset, the cost below. A clock
-    behind only delays the evidence. A seat whose window predates the
-    restore but which already accepts the new device's frames above the
-    old `high` sees no newer duplicate any more: frames it dropped below
-    stay lost until the operator resyncs that seat (below).
-- **A reset window owes the new incarnation from its start**: an empty
-  window whose proof is a reset is history at seq 0 - the frontier starts
-  at 0, a later envelope waits behind its missing predecessors and is
-  asked for. A first contact keeps the baseline rule. A sender that answers
-  no want (v0.1.0) cannot fill it: after 60 s holding (the §10 fallback)
-  the frontier goes to just below the lowest held seq, loudly
-  (`inbound_gap_lost via=baseline`).
-- **Operator resync** (`resync_seat { member }`, a seat tool): the same
-  reset on demand (`proof` `operator`, `accept_window_reset via=operator`)
-  for the window the evidence rule cannot see. Refused for the own seat and
-  a non-seat; while nothing has been accepted since, or a gap is still
-  owed, a second call answers `resync of <seat> running`. Progress shows
-  in `status.inbound_held`. Not refused by build: every seat that reports
-  one (v0.1.2 and later) answers gap wants, and "none reported" includes
-  v0.1.1, which does; on a v0.1.0 sender it is useless but harmless (the
-  baseline after 60 s; re-delivered frames dedup per kind).
-- **Cost of one reset**, for a new device whose log since the restore holds
-  L positions with E own envelopes, by the restored seat's build:
+**1. The re-key merge resets.** The group runtime decodes in one task and
+hands a merged re-key (`NetPeerRekeyed`) to the engine over the same
+ordered sink as the frames, and MLS keeps no past epoch (`max_past_epochs
+= 0`): every frame of that seat delivered after the merge is the new
+leaf's, none delivered before it is. So the merge - and the coordinator's
+own commit - empties the window (`AcceptedWindow.proof` `merge`) and the
+incarnation's request/claim gates with it. The `Restored` block resets
+nothing. A window born by first contact in this build (`current`) is
+trusted: every later restore of that seat reaches it as a merge.
+- **Disk order.** The reset is queued to the writer at once; a refused
+  queue keeps it dirty, retries on every delivery beat, and holds every
+  ratchet persist back until it is queued. The merge itself is counted
+  inside the MLS state (`rekeys_unreported`) until the engine handled it,
+  and no ratchet snapshot is taken while it is non-zero - checked under the
+  lock the merge takes. The writer is FIFO: on disk the pair is
+  both-old or both-new; a kill in between merges the re-key again at the
+  reopen.
+- **Paths that reach a new epoch without the hook.** A seat joining by
+  Welcome (founding, a rejoiner's own bootstrap) holds no window yet. The
+  epoch-hold retry calls the hook. An import or a restore from an export
+  carries no `transport.state` (no window, no ratchet). The one path left
+  is an older build that persisted the merged ratchet and lost the window
+  save: that window is legacy (2).
+- Pins: `mls::tests::the_evicted_leaf_cannot_speak_after_the_rekey` and
+  the exporter-ring test (an old-epoch frame is refused after the merge),
+  `mls::tests::a_merged_rekey_stays_unreported_until_handled`,
+  `net::restore_reset_tests` (`the_merge_resets_once_and_the_block_resets_nothing`,
+  `a_first_contact_window_is_trusted_at_any_time`,
+  `a_refused_reset_save_holds_the_ratchet`).
 
-  | sender | how it fills | time |
-  |---|---|---|
-  | v0.1.2 | gap asks, and once a frame lands the sheet's `high` drops below the floor-setting one: regression rewind, one stall round re-offers the tail | about one round; the receiver applies as the frontier climbs |
-  | v0.1.1 | listings (one per 5 s, 1024 positions each) and named wants (64 frames per 10 s) | about E / 6 per second, 20 000 envelopes in about an hour; its live frames above the frontier + 1024 wait |
-  | v0.1.0 | none | 60 s, then a baseline at the held frames; what it dropped before stays lost |
+**2. A legacy window is left alone.** A window an older build wrote
+(`proof` absent, `unknown`) is neither reset nor proven stale: nothing
+the sender sends can prove it - a listing reveals only the publish
+cursor, which every stall round rewinds. It gives a hint instead:
+duplicates it drops from one seat at rising seqs are counted;
+at 32 `dup_streak from= first_seq= last_seq= count=` WARN, once per
+episode; 32 fresh frames in a row end it (`dup_streak_cleared`);
+`status.seats[].dup_streak` carries the count. A healthy seat trips it
+too when a peer's stall round re-offers a tail of 32 or more frames it
+already holds - the reach rule sends a round while any owed peer is
+heard, so after a peer's long absence it is common; the WARN says
+"repeats", not "stale".
 
-- **Receiver dedup of a re-delivery**: chat by `MessageId`; `ChatReacted`
-  with an `op` as an idempotent set/unset; `ChatDeleted`/`FileRemoved` as
-  terminal flags; `ChatRead` by id; `Proposed` by id; `Committed` by
-  height; `FileWanted`/`FileServed`/`FileRequested` are soft state a repeat
-  refreshes. Stances are ordered: each card keeps per foreign member the
-  stamp of the newest stance applied (`ProposalRecord.stances`, rebuilt by
-  the replay from the kept wire stamp); an `Approved` or `Declined`
-  stamped at or before it is dropped, so a re-delivered old decline never
-  joins a newer one into a rejection and an old approval never clears a
-  newer decline. A voter whose clock steps back between two stances on one
-  card loses the later one here (known limit). A withdrawal is terminal and
-  idempotent. A legacy reaction without `op` toggles; no current build
-  sends one. A chat message older than the retention that a full replay
-  re-lands is hidden by the read filter and dropped again by the next
-  compaction; no extra floor.
+**3. The operator resyncs.** `resync_seat { member }` (a seat tool) empties
+that seat's window (`proof` `operator`, `accept_window_reset via=operator`)
+and keeps the incarnation's request/claim gates. It is the heal for a
+legacy window that holds the old device, and the only one once the new
+device's seqs passed the old `high` (nothing can then prove it). Refused
+for the own seat and a non-seat; while the history is owed a second call
+answers so.
+
+**A reset window owes the stream from its start.** An empty reset window
+is history at seq 0: the frontier starts at 0, a later envelope waits
+behind its missing predecessors, and the gap asks fetch them - however
+long that takes. `status.inbound_held` shows the seat with `from_start`
+(waiting for its history). Nothing drops it on a timer;
+`resync_seat { member, give_up: true }` ends the wait, taking what is held
+as the new start (`inbound_gap_lost via=operator count=`; `count` in log
+positions). A v0.1.0 sender answers no want and never re-offers below its
+floor: without the operator the wait does not end.
+
+**Re-delivered history never acts.** The newest seq SEEN from a sender in
+its current incarnation (applied, held or dropped; the window's `high`
+before any arrival) is the source of "newest": a `ChainRequest` (round,
+serve, divergence clear, claim, seat head) and a `VoteRefused` (notice)
+act only for a frame at that seq; an older one is applied to state as
+history. A merge reset starts it anew; an operator resync keeps it. A
+`Committed` block's divergence mark keeps its rule - excused only by a
+newer frame that showed the sender on this branch (`peer_on_branch`) -
+which an operator resync keeps too.
+
+**Stances** are ordered per card and member by (stamp, wire seq): the
+kept own-log event carries the wire seq in `prev_seq` (it is never
+published), so the replay rebuilds the marks; an equal pair is the same
+frame. A re-delivered old decline never joins a newer one into a
+rejection, an old approval never clears a newer decline. Arrival order
+between DIFFERENT members still decides a rejection (a decline tips the
+card when it lands) - unchanged.
+
+**The sender side.**
 - **Ack-ahead guard** (`apply_group_ack`). A sheet whose `high` for us lies
   beyond our log (the tail read from that seq is empty - only the tail is
   read) proves nothing: once per episode the peer's floor falls to 0 with
-  `ack_seen`, the stall rounds re-offer the log, `ack_ahead from=
-  window_high= own_high=` WARN. Still ahead after a full backoff (600 s):
-  the floor goes to the own head and the episode stops re-offering
-  (`ack_ahead_stopped`, INFO); a later sheet within the log ends it, and a
-  later reset peer's lower sheet rewinds as below. Meanwhile the floor
-  pins compaction for at most that backoff. The honest case: a seat that
-  imported an export older than its last run reuses seqs its peers hold -
-  their windows are right, its log is behind; its new events at those
-  seqs are dropped as already seen. Known limit; operator text: restore
-  the seat with a recovery link instead of importing an older export.
-- **Regression rewind** (`apply_group_ack`). Every sheet carries its
-  writer's clock in milliseconds (`GroupAck.at`, additive; an older build
-  writes none and never triggers a rewind). The cursor keeps the `high`
+  `ack_seen`, `ack_ahead from= window_high= own_high=` WARN, and the stall
+  rounds re-offer the log. After 8 such rounds (`RESEND_GIVEUP_ROUNDS`,
+  the `send_failed` count) the peer is no longer re-offered to; its tail
+  stays owed until a plausible sheet ends the episode. The honest case: a
+  seat that imported an export older than its last run reuses seqs its
+  peers hold - known limit; restore the seat with a recovery link instead.
+- **Regression rewind.** Every sheet carries its writer's clock in
+  milliseconds (`GroupAck.at`, additive; an older build writes none and
+  never triggers a rewind). This orders ONE peer's sheets by that peer's
+  own clock - not a comparison across clocks. The cursor keeps the `high`
   and the stamp of the sheet that last moved the floor (`ack_high`,
-  `ack_at`). A sheet stamped LATER whose `high` is below that `high` (or,
-  with none recorded, below the floor) no longer holds what was acked. The
-  floor falls to what the sheet proves - recomputed over our log from
-  `high - 1025` (the window's last explicit bit is `high - 1024`) - and the
-  stall rounds re-offer the rest. A sheet stamped at or before `ack_at`
-  (late, reordered, re-read, the peer's previous device) cannot rewind.
-  Never below the log: positions compaction dropped are gone, counted once
-  as `compacted=`. `ack_regressed from= reported= floor= compacted=` WARN
-  once per episode (`regressed_from`; it ends when the floor is back). A
-  rewind publishes nothing itself: the rounds stay inside the hourly budget
-  (12 plus one heal round). A peer whose clock once ran far ahead pins
-  `ack_at` there; its rewinds are off until real time passes it (the safe
-  direction). A receiver that lost marks without its `high` dropping is not
-  detected; its gap asks recover those. An unchanged sheet is not
-  republished: the stamp alone does not count as a change.
-- **Visibility on the receiver.** A dropped duplicate newer than everything
-  accepted (`(ts, seq)` as above; 0 = unknown, nothing counts) at a seq
-  above the last counted one counts; at 32 `dup_streak from= first_seq=
-  last_seq= count=` WARN once per episode, ended by 32 fresh accepts or a
-  reset (`dup_streak_cleared`); `status.seats[].dup_streak` carries the
-  count. For a restored seat the evidence rule fires first; the counter
-  names the fault where no restore is known. Every reset logs
-  `accept_window_reset member= high= via=`.
-- **Mixed versions.** A v0.1.0/v0.1.1 peer that missed the reset keeps its
-  stale window until it runs this build; then the first newer frame the
-  restored seat sends resets it. Until then the restored seat refuses its
-  sheets, re-offers once, and stops after a backoff; its operator sees the
-  peer pinned unreachable after 8 fruitless rounds (`not acknowledging
-  deliveries - still resending`).
+  `ack_at`); a sheet stamped later whose `high` is below that `high` no
+  longer holds what was acked: the floor falls to what it proves
+  (recomputed from `high - 1025`, the last aged-out seq), never below the
+  log (`compacted=` counts dropped positions once), `ack_regressed from=
+  reported= floor= compacted=` WARN once per episode. A peer whose clock
+  once jumped far ahead pins `ack_at`; its rewinds stay off until real time
+  passes it (the safe direction). A rewind publishes nothing itself: the
+  rounds stay inside the hourly budget (12 plus one heal round).
+
+**Receiver dedup of re-delivered frames**: chat by `MessageId`;
+`ChatReacted` with an `op` as an idempotent set/unset; `ChatDeleted`,
+`FileRemoved` terminal; `ChatRead` by id; `Proposed` by id; `Committed` by
+height; `FileWanted`/`FileServed`/`FileRequested` soft state; stances as
+above. A legacy reaction without `op` toggles; no current build sends one.
+A chat message older than the retention that a full replay re-lands is
+hidden by the read filter and dropped again by the next compaction.
+
+**What heals what**, the restored seat's build × the build of a seat that
+kept its old window:
+
+| restored seat \ old-window seat | v0.1.0 / v0.1.1 | v0.1.2 |
+|---|---|---|
+| v0.1.0 | nothing; frames above the old `high` pass | `resync_seat`; it answers no want, so only `give_up` ends the wait (what it does not re-offer stays lost) |
+| v0.1.1 | nothing; frames above the old `high` pass | `resync_seat`; the history comes by listings and named wants (about 6 frames/s) |
+| v0.1.2 | refuses the stale acks, re-offers 8 rounds, then waits; frames above the old `high` pass | `resync_seat`; gap asks plus the sender's rewind on the lower sheet |
+
+A window lost to a v0.1.2 merge cannot occur (1).
+
+**Fixed times left in this path**: the accept-window save (5 s), the ack
+debounce (3 s) and the live ratchet persist (10 s) are persistence
+cadences; the gap asks (after 2 s, every 10 s, a 5 s grace after a passed
+round) and the 60 s order bound are §10's (order only, never the
+frontier); the resend ladder (10..600 s) and its hourly budget are §4.4's.
+None decides a reset, a loss or an episode.
 
 Pins: `net::restore_reset_tests`, `chain::stance_order_tests`,
+`mls::tests::a_merged_rekey_stays_unreported_until_handled`,
 `group_runtime::tests::{a_sheet_acking_above_the_own_log_is_refused_and_rewinds_the_peer,
-an_ack_ahead_episode_reads_the_tail_only_and_stops_after_a_backoff,
+an_ack_ahead_episode_reads_the_tail_only_and_stops_after_the_give_up_rounds,
 a_newer_sheet_below_the_floor_rewinds_once_per_episode,
 a_late_older_or_unstamped_sheet_does_not_rewind,
 a_rewind_below_the_compacted_log_counts_what_is_gone,
 a_rewind_reads_the_last_explicit_bit_as_unacked}`,
 `group_ack::tests::the_stamp_is_additive_both_ways`,
 `crates/molt-engine/tests/nostr_recovery.rs`
-(`a_bystander_that_missed_the_live_reset_hears_the_restored_seat`,
-`a_window_missed_before_this_build_heals_on_evidence_after_the_update`),
+(`a_seat_that_kept_its_old_window_hears_the_restored_seat_after_a_resync`),
 `crates/molt-engine/tests/nostr_delivery_guarantee.rs`
 (`a_receiver_whose_window_regressed_gets_the_tail_again_and_applies_it_once`).

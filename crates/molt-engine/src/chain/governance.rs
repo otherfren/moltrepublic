@@ -1239,10 +1239,6 @@ impl State {
                 // pattern (the committer also cleans by id upstream).
                 self.settle_membership_records(&block.change);
                 self.recovery.mesh_extension_at.remove(member);
-                // the block is the authority for the new incarnation
-                if let ChainChange::Membership { nostr_pk: Some(anchor), .. } = &block.change {
-                    self.reset_for_restore(member, anchor);
-                }
                 // item 7: a device without Strict Order Mode is not welcomed
                 // into a republic that runs it
                 let unwelcomed = self.coordinates_restore(member, &block.change)

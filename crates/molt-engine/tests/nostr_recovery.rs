@@ -2773,8 +2773,6 @@ async fn a_link_less_request_without_a_seat_proof_gets_no_answer() {
 async fn restore_with_vera_missing_the_reset(
     root: &std::path::Path,
     url: &str,
-    rekey: bool,
-    block: bool,
 ) -> (WalletHandle, WalletHandle, WalletHandle, String) {
     let (a, b, v, petra_phrase) = found_three_as(root, url, 2, true).await;
     const SPAN: usize = 120;
@@ -2792,9 +2790,7 @@ async fn restore_with_vera_missing_the_reset(
         assert!(tokio::time::Instant::now() < deadline, "the old span never reached vera");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    v.__skip_restore_reset(rekey, block);
-    // the old device spoke seconds, not minutes, before the restore
-    v.__evidence_skew_secs(Some(0));
+    v.__skip_rekey_reset(true);
     drop(b);
     let link = mint_for_petra(&a).await;
     let c = engine(&root.join("rejoiner"));
@@ -2857,45 +2853,18 @@ async fn sees_batch_once(w: &WalletHandle, prefix: &str, n: usize, secs: u64) ->
     }
 }
 
-/// **WP1 field shape.** A bystander whose live re-key reset was lost (a
-/// kill between the ratchet persist and the window save) still forgets the
-/// restored seat's old incarnation: the `Restored` block is the authority.
-/// The new device's chat reaches it and its vote seals a proposal of the
-/// new device. Counter: with the block reset lost too, nothing arrives
-/// (`a_window_missed_before_this_build_heals_at_the_next_open`).
+/// **WP1, the state an older build left in the field.** Vera's window
+/// for the restored seat survived its re-key (an older build lost the reset
+/// to a kill): she drops the new device's frames as already seen - the
+/// repeats show as a hint - and the new device refuses her stale acks and
+/// keeps them owed. No clock and no block resets it. The operator's
+/// `resync_seat` does: everything sent since the restore - chat and the
+/// open vote - arrives exactly once, and vera's vote seals it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_bystander_that_missed_the_live_reset_hears_the_restored_seat() {
+async fn a_seat_that_kept_its_old_window_hears_the_restored_seat_after_a_resync() {
     let (_relay, url) = roomy_relay().await;
     let tmp = tempfile::tempdir().expect("tmp");
-    let (_a, v, c, _) = restore_with_vera_missing_the_reset(tmp.path(), &url, true, false).await;
-    send_batch(&c, "comeback", 10).await;
-    assert!(sees_batch_once(&v, "comeback", 10, 60).await, "vera drops the restored seat's chat as seen");
-    c.execute(Command::Propose {
-        surface: molt_core::Surface::Organization,
-        payload: serde_json::json!({"op": "set_name", "value": "Rook Club"}),
-    })
-    .await
-    .expect("propose");
-    approve_value(&v, "Rook Club").await;
-    wait_for_secs(&c, "vera's vote to seal the new device's proposal", 60, |s| {
-        s.workspaces.iter().any(|w| w.name == "Rook Club")
-    })
-    .await;
-}
-
-/// **WP1, the state v0.1.0/v0.1.1 left in the field.** Both resets lost
-/// (and no evidence rule): vera drops the restored seat's frames as already
-/// seen and acks them; the new device refuses the ack (it names seqs above
-/// its own log) and keeps them owed. Vera updates: her open only keys the
-/// window; the first re-offered frame written after the restore and after
-/// everything the window accepted proves it stale, the window resets, and
-/// everything sent since the restore - chat and the open vote - arrives
-/// once; vera's vote then seals the vote.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_window_missed_before_this_build_heals_on_evidence_after_the_update() {
-    let (_relay, url) = roomy_relay().await;
-    let tmp = tempfile::tempdir().expect("tmp");
-    let (_a, v, c, vera_ws) = restore_with_vera_missing_the_reset(tmp.path(), &url, true, true).await;
+    let (_a, v, c, _vera_ws) = restore_with_vera_missing_the_reset(tmp.path(), &url).await;
     send_batch(&c, "stale", 40).await;
     c.execute(Command::Propose {
         surface: molt_core::Surface::Organization,
@@ -2925,13 +2894,12 @@ async fn a_window_missed_before_this_build_heals_on_evidence_after_the_update() 
         if seats.iter().any(|s| s.member == "petra" && s.dup_streak > 0) {
             break;
         }
-        assert!(tokio::time::Instant::now() < deadline, "vera's status never named the seat it drops: {seats:?}");
+        assert!(tokio::time::Instant::now() < deadline, "vera's status never hinted at the repeats: {seats:?}");
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    v.__skip_restore_reset(false, false);
-    v.execute(Command::CloseWorkspace).await.expect("vera closes");
-    v.execute(Command::OpenWorkspace { id: vera_ws }).await.expect("vera reopens");
-    assert!(sees_batch_once(&v, "stale", 40, 120).await, "the owed tail never reached vera after the heal");
+    v.__skip_rekey_reset(false);
+    v.execute(Command::ResyncSeat { member: "petra".to_string(), give_up: false }).await.expect("resync");
+    assert!(sees_batch_once(&v, "stale", 40, 120).await, "the owed tail never reached vera after the resync");
     approve_value(&v, "Rook Club").await;
     wait_for_secs(&c, "vera's vote to seal the new device's proposal", 90, |s| {
         s.workspaces.iter().any(|w| w.name == "Rook Club")

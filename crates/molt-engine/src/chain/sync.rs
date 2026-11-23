@@ -1365,7 +1365,7 @@ impl State {
     /// H1: whether frame `seq` is the newest `ChainRequest` of `from` in
     /// its current incarnation; a re-delivered older one is history.
     pub(crate) fn fresh_chain_request(&mut self, from: &str, seq: u64) -> bool {
-        if self.chain.request_seq.get(from).is_some_and(|last| seq <= *last) {
+        if self.chain.request_seq.get(from).is_some_and(|last| seq <= *last) || !self.newest_seen(from, seq) {
             return false;
         }
         self.chain.request_seq.insert(from.to_string(), seq);

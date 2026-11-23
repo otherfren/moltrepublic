@@ -359,6 +359,11 @@ pub struct MlsMember {
     /// under the epoch it was made at (`detached_reattach.md` §7).
     exporter_ring_epochs: Vec<u64>,
     group: Option<MlsGroup>,
+    /// Seats re-keyed by merged commits that the caller has not reported
+    /// handled yet ([`Self::rekey_reported`]); runtime-only. A snapshot
+    /// taken while it is non-zero holds a merge whose window reset may not
+    /// be on disk.
+    rekeys_unreported: usize,
 }
 
 /// The self-contained persistence blob: the provider's whole key-value map plus
@@ -465,6 +470,7 @@ impl MlsMember {
             roster_keys: None,
             exporter_ring: Vec::new(),
             exporter_ring_epochs: Vec::new(),
+            rekeys_unreported: 0,
         })
     }
 
@@ -832,6 +838,7 @@ impl MlsMember {
                 // and without a rewind slot the loser's branch would be its
                 // permanent home. Arming the slot on EVERY merge gives every
                 // node the same rule as the committers.
+                let rekeyed = removed.len();
                 self.arm_prior_slot(wire, from.clone(), removed)?;
                 let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
                 group
@@ -848,6 +855,7 @@ impl MlsMember {
                 if self_removed {
                     return Ok(MlsIncoming::Evicted { by: from });
                 }
+                self.rekeys_unreported += rekeyed;
                 Ok(MlsIncoming::Commit { readmitted })
             }
             ProcessedMessageContent::ProposalMessage(p) => {
@@ -953,6 +961,7 @@ impl MlsMember {
         let current = self.snapshot()?;
         let ring = (self.exporter_ring.clone(), self.exporter_ring_epochs.clone());
         self.provider_swap(MlsMember::restore(&ours.1)?);
+        let unreported = self.rekeys_unreported;
         let outcome = self.decrypt(wire);
         let theirs_win = match (&outcome, &self.prior) {
             (Ok(MlsIncoming::Commit { .. } | MlsIncoming::Evicted { .. }), Some(theirs)) => {
@@ -979,6 +988,7 @@ impl MlsMember {
             }
         }
         self.provider_swap(MlsMember::restore(&current)?);
+        self.rekeys_unreported = unreported;
         (self.exporter_ring, self.exporter_ring_epochs) = ring;
         self.prior = Some(ours);
         match outcome {
@@ -997,6 +1007,17 @@ impl MlsMember {
         self.provider = other.provider;
         self.signer = other.signer;
         self.group = other.group;
+    }
+
+    /// Re-keys merged and not yet reported handled.
+    #[must_use]
+    pub fn rekeys_unreported(&self) -> usize {
+        self.rekeys_unreported
+    }
+
+    /// The caller handled one reported re-key (its window reset is queued).
+    pub fn rekey_reported(&mut self) {
+        self.rekeys_unreported = self.rekeys_unreported.saturating_sub(1);
     }
 
     /// The anchored identity signature key per roster member (raw bytes,
@@ -1182,6 +1203,7 @@ impl MlsMember {
             // v2 blobs carry the ring; a v1 blob restored it empty above
             exporter_ring: snap.exporter_ring,
             exporter_ring_epochs: snap.exporter_ring_epochs,
+            rekeys_unreported: 0,
         })
     }
 }
@@ -1564,6 +1586,22 @@ mod tests {
             "cara",
             b"raced ahead of the commit",
         );
+    }
+
+    /// A merged re-key stays unreported until the caller handled it: a
+    /// snapshot taken meanwhile would persist the merge ahead of the window
+    /// reset it requires.
+    #[test]
+    fn a_merged_rekey_stays_unreported_until_handled() {
+        let (mut founder, _bob, mut cara) = three_seats();
+        let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
+        let (commit, _w) = cara.restore_member("bob", &bob2.key_package().expect("kp")).expect("restore");
+        assert_eq!(founder.rekeys_unreported(), 0);
+        founder.decrypt(&commit).expect("merge");
+        assert_eq!(founder.rekeys_unreported(), 1);
+        founder.rekey_reported();
+        assert_eq!(founder.rekeys_unreported(), 0);
+        assert_eq!(cara.rekeys_unreported(), 0, "the committer handles its own re-key in its call");
     }
 
     /// **Security: the EVICTED device cannot keep speaking.** The recovery

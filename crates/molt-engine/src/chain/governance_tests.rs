@@ -869,7 +869,7 @@ fn open_governance_reserves_the_own_decline() {
     // the retention gate below would age the card out immediately
     peer.proposals.get_mut(&8).expect("card").declined_at = crate::now_secs();
     // a parked own decline (own-log replay raced a re-served proposal)
-    peer.register_decline(11, "walter", 1_751_000_000, "");
+    peer.register_decline(11, "walter", 1_751_000_000, 0, "");
     let events = peer.open_governance_events();
     let own_declines: Vec<u64> = events
         .iter()

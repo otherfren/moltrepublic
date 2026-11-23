@@ -66,15 +66,25 @@ pub(crate) struct DropSeam {
     chat: Mutex<Option<String>>,
     /// The restore settle in seconds plus one (`0` = the constant).
     pub(crate) restore_settle: std::sync::atomic::AtomicU64,
-    /// A merged re-key commit / an applied `Restored` block forgets
-    /// nothing, as a reset lost to a kill before the window save.
+    /// A merged re-key commit forgets nothing, as an older build that lost
+    /// the reset to a kill before the window save.
     pub(crate) skip_rekey_reset: std::sync::atomic::AtomicBool,
-    pub(crate) skip_block_reset: std::sync::atomic::AtomicBool,
     /// Forget a sender's accept marks above a seq, as a window saved less
     /// recently than the ack that went out.
     pub(crate) regress: Mutex<Option<(MemberId, u64)>>,
-    /// The evidence rule's skew bound in seconds plus one (0 = the constant).
-    pub(crate) evidence_skew: std::sync::atomic::AtomicU64,
+    /// Window saves are refused, as by a full writer queue.
+    pub(crate) refuse_saves: std::sync::atomic::AtomicBool,
+}
+
+/// The live ratchet to persist - none while a merged re-key is not yet
+/// handled by the engine: its window reset must reach the writer first.
+/// Checked under the same lock the merge takes, so no merge slips between.
+pub(crate) fn ratchet_snapshot(mls: &Arc<Mutex<molt_net::MlsMember>>) -> Option<Vec<u8>> {
+    let g = mls.lock().ok()?;
+    if g.rekeys_unreported() > 0 {
+        return None;
+    }
+    g.snapshot().ok()
 }
 
 impl DropSeam {
@@ -86,15 +96,8 @@ impl DropSeam {
         self.regress.lock().ok().and_then(|mut r| r.take())
     }
 
-    pub(crate) fn evidence_skew(&self) -> u64 {
-        match self.evidence_skew.load(std::sync::atomic::Ordering::SeqCst) {
-            0 => ingest::WIRE_STAMP_SKEW_SECS,
-            v => v - 1,
-        }
-    }
-
-    pub(crate) fn keeps_window_on_block(&self) -> bool {
-        self.skip_block_reset.load(std::sync::atomic::Ordering::SeqCst)
+    pub(crate) fn refuses_window_saves(&self) -> bool {
+        self.refuse_saves.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Whether this is the armed chat body's first arrival (then lost).
@@ -740,11 +743,11 @@ impl State {
         // order, and the merge below SEALS `transport.state` against later
         // saves — enqueued before it, this one still lands (§4.7)
         if self.delivery.accepted_dirty {
-            if let Some(active) = self.active.as_ref() {
-                active.handle.save_accepted(self.delivery.accepted.clone());
-                self.delivery.accepted_dirty = false;
-            }
+            self.save_accepted_now();
         }
+        // a reset the writer refused: the ratchet stays where the disk's
+        // window is, and the reopen merges the re-key again
+        let ratchet_ok = self.ratchet_may_persist();
         // the group runtime's ratchet, on the same terms: stop it, then merge
         // durably. Without this the reopen restores the founding blob and the
         // next publish reuses sender generations — replay-rejected and
@@ -755,8 +758,8 @@ impl State {
             Some(group) => Some(group.mls.clone()),
             None => self.group_mls_parked.take(),
         };
-        if let Some(mls) = mls {
-            let snap = mls.lock().ok().and_then(|g| g.snapshot().ok());
+        if let Some(mls) = mls.filter(|_| ratchet_ok) {
+            let snap = crate::net::ratchet_snapshot(&mls);
             if let (Some(active), Some(snap)) = (self.active.as_ref(), snap) {
                 if !active.handle.persist_crypto_blocking(Some(snap), None) {
                     tracing::error!("the group ratchet did not reach the disk on close");
@@ -768,7 +771,7 @@ impl State {
         };
         let crypto = net.crypto_for_close();
         drop(net); // stop the supervisor before the durable merge
-        if let (Some(active), Some((mls, creds))) = (self.active.as_ref(), crypto) {
+        if let (Some(active), Some((mls, creds)), true) = (self.active.as_ref(), crypto, ratchet_ok) {
             if !active.handle.persist_crypto_blocking(mls, creds) {
                 tracing::error!("the group ratchet did not reach the disk on close");
             }
@@ -890,7 +893,7 @@ impl State {
             return;
         }
         // the stopped outbox may have advanced it since the last merge
-        let snap = mls.lock().ok().and_then(|g| g.snapshot().ok());
+        let snap = if self.ratchet_may_persist() { crate::net::ratchet_snapshot(&mls) } else { None };
         if let (Some(active), Some(snap)) = (self.active.as_ref(), snap) {
             let _ = active.handle.merge_mls_async(snap);
         }

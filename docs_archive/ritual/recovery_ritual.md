@@ -314,15 +314,14 @@ membership* feature (the mesh-based `ChainRequest{from: 0}` path from
 `persistent_chain.md` stays available once meshed).
 
 **❾ Every seat forgets the old incarnation.** `R`'s log seqs restart, so
-each other seat resets its inbound state for `R` once per restore, when it
-is proven stale: at the re-key merge, when a block of a later restore meets
-a window keyed to an earlier one, or on evidence - a dropped frame of `R`
-newer than the restore and than everything the window accepted. Never
-blindly: a reset owes `R`'s whole stream since the restore. The reset is
-keyed to the restore and written at once, so a replay, a reopen or the
-merge arriving after the block never resets twice. `R` refuses an ack that
-names seqs above its own log, and rewinds a peer whose later ack no longer
-holds what an earlier one acked (`delivery_guarantee.md` §11).
+each other seat empties its window for `R` when it merges the re-key commit
+- the one point after which every frame of `R` is the new device's (one
+ordered sink, no past epochs kept). The reset reaches the disk before the
+merged ratchet does. The `Restored` block resets nothing. A window an older
+build kept past the restore is left alone and shows as a hint; the operator
+heals it with `resync_seat`. `R` refuses an ack that names seqs above its
+own log, and rewinds a peer whose later ack no longer holds what an earlier
+one acked (`delivery_guarantee.md` §11).
 
 ---
 

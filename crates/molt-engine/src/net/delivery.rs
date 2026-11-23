@@ -55,19 +55,17 @@ const SESSION_MAX: usize = 65_536;
 /// Re-publications of a listed seq that never landed before it is given up.
 const LISTED_TRIES: u8 = 3;
 
-/// Dropped frames newer than anything accepted that make one episode, and
-/// consecutive fresh accepts that end it.
+/// Repeats in a row from one seat that make a hint.
 const DUP_EPISODE_MIN: u32 = 32;
 
-/// One sender's run of frames dropped as already seen although authored
-/// after everything accepted from it.
+/// One seat's run of frames a legacy window drops as already seen.
 #[derive(Debug, Default)]
 pub(crate) struct DupEpisode {
     first_seq: u64,
     last_seq: u64,
     count: u32,
     warned: bool,
-    /// Fresh accepts since the last counted drop.
+    /// Fresh accepts in a row since the last counted repeat.
     clean: u32,
 }
 
@@ -260,6 +258,13 @@ impl State {
         // lost device asked within the last thirty seconds
         self.chain.served_at.remove(member);
         self.forget_peer_claim(member);
+        self.delivery.seen_high.remove(member);
+        self.forget_inbound(member);
+    }
+
+    /// The window, its hold, its ack deadline and its repeat count - not
+    /// the request/claim gates, which belong to the incarnation.
+    fn forget_inbound(&mut self, member: &MemberId) {
         if self.delivery.accepted.remove(member).is_some() {
             self.delivery.accepted_dirty = true;
         }
@@ -271,152 +276,83 @@ impl State {
         self.delivery.dups.remove(member);
     }
 
-    /// [`Self::reset_peer_accept_window`], leaving an empty window keyed to
-    /// `restore` with `proof`, written at once: a reset a kill can lose is
-    /// the fault this exists for (§11).
-    fn forget_incarnation(&mut self, member: &str, restore: &str, proof: molt_core::RestoreProof) {
+    /// Empty `member`'s window as owed from its start, and hand it to the
+    /// writer before any ratchet persist (§11). A re-key merge forgets the
+    /// incarnation with it; an operator resync keeps it.
+    fn forget_incarnation(&mut self, member: &str, proof: molt_core::RestoreProof) {
         let member = member.to_string();
         let high = self.delivery.accepted.get(&member).map_or(0, |w| w.high);
-        self.reset_peer_accept_window(&member);
-        let window = molt_core::AcceptedWindow { restore: restore.to_string(), proof, ..Default::default() };
-        self.delivery.accepted.insert(member.clone(), window);
+        if proof == molt_core::RestoreProof::Merge {
+            self.reset_peer_accept_window(&member);
+        } else {
+            self.forget_inbound(&member);
+        }
+        self.delivery.accepted.insert(member.clone(), molt_core::AcceptedWindow { proof, ..Default::default() });
+        self.delivery.reset_unsaved = true;
         self.save_accepted_now();
         tracing::info!(%member, high, via = proof.label(), "accept_window_reset");
     }
 
-    fn save_accepted_now(&mut self) {
-        self.delivery.reset_saves = self.delivery.reset_saves.saturating_add(1);
+    /// Queue the windows now. A refused queue keeps them dirty, and a reset
+    /// among them holds every ratchet persist back until it is queued: the
+    /// writer is FIFO, so the reset reaches the disk first.
+    pub(crate) fn save_accepted_now(&mut self) {
         self.delivery.accepted_dirty = true;
-        if let Some(active) = self.active.as_ref() {
-            active.handle.save_accepted(self.delivery.accepted.clone());
+        let Some(active) = self.active.as_ref() else { return };
+        if !self.drop_seam.refuses_window_saves() && active.handle.save_accepted(self.delivery.accepted.clone()) {
             self.delivery.accepted_dirty = false;
+            self.delivery.reset_unsaved = false;
             self.delivery.accepted_saved_at = self.presence_now();
         }
     }
 
-    /// A re-key commit merged that re-admitted `member`. Always safe: before
-    /// the merge no frame of the new device can be decrypted here, so the
-    /// window holds the old incarnation only. It is the merge of the
-    /// restore whose block was applied here last, if that one's merge is
-    /// still due; else of one whose block is still to come.
+    /// Whether the live ratchet may be persisted: never while a window
+    /// reset waits for the writer.
+    pub(crate) fn ratchet_may_persist(&mut self) -> bool {
+        if self.delivery.reset_unsaved {
+            self.delivery.ratchet_held = self.delivery.ratchet_held.saturating_add(1);
+            return false;
+        }
+        true
+    }
+
+    /// A re-key commit merged that re-admitted `member`: THE reset of a
+    /// restore. The group runtime hands the merge over the same ordered
+    /// sink as the frames, and no past epoch is kept, so every frame of
+    /// `member` delivered after this is the new device's and none before it
+    /// was. The `Restored` block resets nothing.
     pub(crate) fn reset_after_rekey(&mut self, member: &str) {
-        use molt_core::RestoreProof as P;
-        let (restore, proof) = match self.delivery.accepted.get(member) {
-            Some(w) if matches!(w.proof, P::Adopted | P::Block) => (w.restore.clone(), P::Merge),
-            _ => (self.chain.anchors.get(member).cloned().unwrap_or_default(), P::MergePending),
-        };
-        self.forget_incarnation(member, &restore, proof);
+        self.forget_incarnation(member, molt_core::RestoreProof::Merge);
     }
 
-    /// A `Restored` block for `member` installing `anchor` is applied. A
-    /// window keyed to an earlier known restore holds that device's stream:
-    /// reset. A first-contact or unkeyed window is only keyed - the evidence
-    /// rule resets it if it predates the restore - and a merged one whose
-    /// block this is adopts the anchor.
-    pub(crate) fn reset_for_restore(&mut self, member: &str, anchor: &str) {
-        use molt_core::RestoreProof as P;
-        if anchor.is_empty() || member == self.member() || self.drop_seam.keeps_window_on_block() {
-            return;
-        }
-        let Some(w) = self.delivery.accepted.get(member) else { return };
-        // our own seal is stamped only after it settles: it is now
-        let sealed = match self.restore_sealed_at(member) {
-            0 => self.presence_now(),
-            t => t,
-        };
-        let next = match w.proof {
-            P::MergePending if w.restore != anchor => P::Merge,
-            _ if w.restore == anchor => return,
-            // a first contact made after the restore holds only the new
-            // device; one made clearly before it holds the old one
-            P::Pending if w.born > sealed => P::Merge,
-            P::Pending if w.born > 0 && w.born.saturating_add(self.drop_seam.evidence_skew()) <= sealed => {
-                self.forget_incarnation(member, anchor, P::Block);
-                return;
-            }
-            P::Pending => P::Adopted,
-            P::Unknown if w.restore.is_empty() => P::Adopted,
-            _ => {
-                self.forget_incarnation(member, anchor, P::Block);
-                return;
-            }
-        };
-        if let Some(w) = self.delivery.accepted.get_mut(member) {
-            w.restore = anchor.to_string();
-            w.proof = next;
-            self.delivery.accepted_dirty = true;
-        }
+    /// The highest seq seen from `from` in its current incarnation -
+    /// applied, held or dropped. Before any arrival this session, the
+    /// window's high.
+    pub(crate) fn seen_high(&self, from: &str) -> u64 {
+        self.delivery
+            .seen_high
+            .get(from)
+            .copied()
+            .unwrap_or_else(|| self.delivery.accepted.get(from).map_or(0, |w| w.high))
     }
 
-    /// At open: an unkeyed window of a restored seat is keyed to the chain's
-    /// latest restore of it, never reset - the evidence rule finds the ones
-    /// that predate it; a first-contact window is judged by its birth.
-    pub(crate) fn reconcile_restore_windows(&mut self) {
-        let me = self.member();
-        let mut anchors: Vec<(MemberId, String)> =
-            self.chain.anchors.iter().filter(|(m, _)| **m != me).map(|(m, a)| (m.clone(), a.clone())).collect();
-        anchors.sort();
-        for (member, anchor) in anchors {
-            let Some((proof, unkeyed)) = self.delivery.accepted.get(&member).map(|w| (w.proof, w.restore.is_empty())) else {
-                continue;
-            };
-            match proof {
-                // a first contact the block never reached: judged as the block would
-                molt_core::RestoreProof::Pending => self.reset_for_restore(&member, &anchor),
-                molt_core::RestoreProof::Unknown if unkeyed => {
-                    if let Some(w) = self.delivery.accepted.get_mut(&member) {
-                        w.restore = anchor;
-                    }
-                    self.delivery.accepted_dirty = true;
-                }
-                _ => {}
-            }
-        }
+    /// Whether frame `seq` of `from` is the newest seen from it: only such
+    /// a frame takes live effects (serve, divergence, notices); an older one
+    /// re-delivered after a reset or a rewind is history.
+    pub(crate) fn newest_seen(&self, from: &str, seq: u64) -> bool {
+        seq >= self.seen_high(from)
     }
 
-    /// The seal stamp of `member`'s latest `Restored` block (0 = unknown).
-    fn restore_sealed_at(&self, member: &str) -> u64 {
-        self.chain
-            .blocks
-            .iter()
-            .rev()
-            .find(|b| matches!(&b.change, molt_core::ChainChange::Membership { op: molt_core::MembershipOp::Restored, member: m, .. } if m == member))
-            .and_then(|b| self.chain.block_ts.get(&b.height).copied())
-            .unwrap_or(0)
+    fn note_seen(&mut self, from: &MemberId, seq: u64) {
+        let high = self.seen_high(from).max(seq);
+        self.delivery.seen_high.insert(from.clone(), high);
     }
 
-    /// Whether a dropped duplicate from `from` stamped `ts` proves its window
-    /// predates the seat's latest restore: the frame was written after the
-    /// restore and after everything the window accepted, so its mark can
-    /// only be the old incarnation's. With no accepted stamp known, the
-    /// open time plus the skew bound stands in for it.
-    fn dup_proves_stale(&self, from: &str, seq: u64, ts: u64) -> Option<String> {
-        if self.drop_seam.keeps_window_on_block() {
-            return None;
-        }
-        let anchor = self.chain.anchors.get(from)?;
-        let w = self.delivery.accepted.get(from)?;
-        let proven = matches!(
-            w.proof,
-            molt_core::RestoreProof::Block | molt_core::RestoreProof::Merge | molt_core::RestoreProof::Evidence | molt_core::RestoreProof::Operator
-        );
-        if w.restore == *anchor && proven {
-            return None;
-        }
-        let newer = if w.stamp > 0 {
-            (ts, seq) > (w.stamp, w.stamp_seq)
-        } else if self.delivery.opened_at > 0 {
-            ts > self.delivery.opened_at.saturating_add(self.drop_seam.evidence_skew())
-        } else {
-            return None;
-        };
-        (newer && ts > self.restore_sealed_at(from)).then(|| anchor.clone())
-    }
-
-    /// The operator resets `member`'s inbound state, as the evidence rule
-    /// does; the gap asks and the sender's rewind then re-deliver its
-    /// retained history. A second call while that runs changes nothing.
-    pub(crate) fn cmd_resync_seat(&mut self, member: MemberId) -> Result<Reply, MoltError> {
+    /// The operator resets `member`'s window, as a restore would; the gap
+    /// asks and the sender's rewind then re-deliver its retained history.
+    /// While that runs a second call changes nothing - unless `give_up`,
+    /// which takes what is held as the new start.
+    pub(crate) fn cmd_resync_seat(&mut self, member: MemberId, give_up: bool) -> Result<Reply, MoltError> {
         if self.active.is_none() && self.replica.is_none() {
             return Err(MoltError::Engine("no open republic".to_string()));
         }
@@ -426,20 +362,36 @@ impl State {
         if !self.roster().contains(&member) {
             return Err(MoltError::Engine(format!("{member} is not a seat")));
         }
-        if self.resync_running(&member) {
-            return Err(MoltError::Engine(format!("resync of {member} running")));
+        let running = self.resync_running(&member);
+        if give_up {
+            if !running {
+                return Err(MoltError::Engine(format!("no resync of {member} waiting")));
+            }
+            let to = self.delivery.inbound.get(&member).and_then(|h| h.held.keys().next().map(|s| s - 1));
+            if let Some(hold) = self.delivery.inbound.get_mut(&member) {
+                hold.from_start = false;
+            }
+            if let Some(to) = to {
+                let frontier = self.delivery.inbound.get(&member).map_or(0, |h| h.frontier);
+                tracing::warn!(%member, count = to.saturating_sub(frontier), first = frontier + 1, via = "operator", "inbound_gap_lost");
+                self.give_up_through(&member, to, "operator");
+            }
+            self.emit_session(crate::SessionScope::Full);
+            return Ok(Reply::Ack);
         }
-        let anchor = self.chain.anchors.get(&member).cloned().unwrap_or_default();
-        self.forget_incarnation(&member, &anchor, molt_core::RestoreProof::Operator);
+        if running {
+            return Err(MoltError::Engine(format!("resync of {member} running - give_up ends the wait")));
+        }
+        self.forget_incarnation(&member, molt_core::RestoreProof::Operator);
         self.emit_session(crate::SessionScope::Full);
         Ok(Reply::Ack)
     }
 
-    /// An operator resync still filling: nothing accepted yet, or a gap
-    /// still asked for.
+    /// A reset window still filling: nothing accepted yet, or a gap still
+    /// asked for.
     fn resync_running(&self, member: &str) -> bool {
         let Some(w) = self.delivery.accepted.get(member) else { return false };
-        w.proof == molt_core::RestoreProof::Operator
+        w.proof.is_reset()
             && (w.high == 0
                 || self
                     .delivery
@@ -448,22 +400,19 @@ impl State {
                     .is_some_and(|h| !h.held.is_empty() || !h.missing.is_empty() || h.listing.is_some()))
     }
 
-    /// `member`'s current drop episode size once it warned, else 0.
+    /// `member`'s repeat count once it warned, else 0.
     pub(crate) fn dup_streak(&self, member: &str) -> u32 {
         self.delivery.dups.get(member).filter(|e| e.warned).map_or(0, |e| e.count)
     }
 
-    /// A dropped duplicate. `true` = it proved the window stale: the window
-    /// was reset and the caller delivers the frame again.
-    pub(super) fn note_dup(&mut self, from: &MemberId, seq: u64, ts: u64) -> bool {
-        if let Some(anchor) = self.dup_proves_stale(from, seq, ts) {
-            self.forget_incarnation(from, &anchor, molt_core::RestoreProof::Evidence);
-            return true;
-        }
-        let (stamp, stamp_seq) = self.delivery.accepted.get(from).map_or((0, 0), |w| (w.stamp, w.stamp_seq));
+    /// A hint, no action: a window an older build wrote dropping frames of
+    /// `from` as already seen, at rising seqs. A genuine re-offer of a tail
+    /// can trip it too.
+    pub(super) fn note_dup(&mut self, from: &MemberId, seq: u64) {
+        let legacy = self.delivery.accepted.get(from).is_some_and(|w| w.proof == molt_core::RestoreProof::Unknown);
         let e = self.delivery.dups.entry(from.clone()).or_default();
-        if stamp == 0 || (ts, seq) <= (stamp, stamp_seq) || (e.count > 0 && seq <= e.last_seq) {
-            return false;
+        if !legacy || (e.count > 0 && seq <= e.last_seq) {
+            return;
         }
         if e.count == 0 {
             e.first_seq = seq;
@@ -475,24 +424,9 @@ impl State {
             e.warned = true;
             tracing::warn!(%from, first_seq = e.first_seq, last_seq = seq, count = e.count, "dup_streak");
         }
-        false
     }
 
-    pub(super) fn note_fresh(&mut self, from: &MemberId, seq: u64, ts: u64) {
-        if let Some(w) = self.delivery.accepted.get_mut(from) {
-            if w.born == 0 {
-                w.born = ts;
-            }
-            // a window not proven to postdate the seat's restore keeps the
-            // stamp it had: a frame of the new device accepted out of order
-            // must not lift the evidence bar over the ones it dropped
-            let unproven = w.proof == molt_core::RestoreProof::Adopted
-                || (w.proof == molt_core::RestoreProof::Unknown && !w.restore.is_empty());
-            if !unproven && (ts, seq) > (w.stamp, w.stamp_seq) {
-                w.stamp = ts;
-                w.stamp_seq = seq;
-            }
-        }
+    pub(super) fn note_fresh(&mut self, from: &MemberId) {
         let Some(e) = self.delivery.dups.get_mut(from) else { return };
         e.clean = e.clean.saturating_add(1);
         if e.clean >= DUP_EPISODE_MIN {
@@ -508,13 +442,11 @@ impl State {
     /// held it: the envelope is a duplicate/resend and the caller drops it
     /// (G2). Freshness dirties the window for the debounced persist.
     pub(crate) fn accept_envelope(&mut self, from: &MemberId, seq: u64) -> bool {
-        // first contact: the chain may not have caught up with this seat's
-        // restores yet, so the next one applied adopts the window
         let window = self
             .delivery
             .accepted
             .entry(from.clone())
-            .or_insert_with(|| molt_core::AcceptedWindow { proof: molt_core::RestoreProof::Pending, ..Default::default() });
+            .or_insert_with(|| molt_core::AcceptedWindow { proof: molt_core::RestoreProof::Current, ..Default::default() });
         let fresh = window.accept(seq);
         if fresh {
             self.delivery.accepted_dirty = true;
@@ -530,7 +462,7 @@ impl State {
     /// reopen's rewind-resend re-encrypts a step or two past what the peers
     /// consumed instead of replaying a whole session into replay rejection.
     pub(crate) fn persist_mls_if_due(&mut self, now: u64) {
-        if now.saturating_sub(self.delivery.mls_persisted_at) < MLS_PERSIST_SECS {
+        if now.saturating_sub(self.delivery.mls_persisted_at) < MLS_PERSIST_SECS || !self.ratchet_may_persist() {
             return;
         }
         // A Nostr workspace has no `NetRuntime`, but it very much has a live
@@ -539,7 +471,7 @@ impl State {
         // REUSES sender generations — which every peer replay-rejects and
         // silently drops.
         if let Some(group) = self.group_net.as_ref() {
-            let snap = group.mls.lock().ok().and_then(|g| g.snapshot().ok());
+            let snap = crate::net::ratchet_snapshot(&group.mls);
             if let (Some(snap), Some(active)) = (snap, self.active.as_ref()) {
                 if active.handle.merge_mls_async(snap) {
                     self.delivery.mls_persisted_at = now;
@@ -581,16 +513,14 @@ impl State {
     /// Fire-and-forget like the supervisor's cursor saves — a lost save only
     /// regresses the window, which resends + re-dedup absorb (§4.7).
     pub(crate) fn save_accepted_if_due(&mut self, now: u64) {
+        // a reset the writer refused retries on every beat
         if !self.delivery.accepted_dirty
-            || now.saturating_sub(self.delivery.accepted_saved_at) < ACCEPT_SAVE_SECS
+            || (!self.delivery.reset_unsaved && now.saturating_sub(self.delivery.accepted_saved_at) < ACCEPT_SAVE_SECS)
         {
             return;
         }
-        if let Some(active) = self.active.as_ref() {
-            active.handle.save_accepted(self.delivery.accepted.clone());
-            self.delivery.accepted_dirty = false;
-            self.delivery.accepted_saved_at = now;
-        }
+        self.save_accepted_now();
+        self.delivery.accepted_saved_at = now;
     }
 
     pub(crate) fn cmd_net_delivered(
@@ -618,6 +548,7 @@ impl State {
             tracing::warn!(%from, claimed = %envelope.by, "dropping a delivery whose author does not match its link");
             return Ok(Reply::Ack);
         }
+        self.note_seen(&from, envelope.seq);
         // G7 in-order hold (§10). A sender we hold NO accepted history
         // with cannot be ordered against that history (N4b §3.1a: a
         // rejoiner enters mid-stream): its first envelope is the baseline.
@@ -887,16 +818,6 @@ impl State {
                     hold.passed_at = None;
                 }
             }
-            // a reset window of a sender that answers no want (an older
-            // build) cannot be filled from its start: past the fallback
-            // what is held becomes the baseline, loudly
-            let baseline = if hold.from_start && !hold.answers {
-                hold.since
-                    .filter(|s| now.saturating_sub(*s) >= GAP_FALLBACK_SECS)
-                    .and(hold.held.keys().next().map(|s| s - 1))
-            } else {
-                None
-            };
             // listed seqs whose re-publication did not land count a try
             let mut given_up = Vec::new();
             if let Some(l) = hold.listing.as_mut() {
@@ -978,12 +899,6 @@ impl State {
             }
             if let Some(to) = jump {
                 self.give_up_through(&m, to, "resend_passed");
-            }
-            if let Some(to) = baseline {
-                if let Some(hold) = self.delivery.inbound.get_mut(&m) {
-                    hold.from_start = false;
-                }
-                self.give_up_through(&m, to, "baseline");
             }
             for (seq, via) in settle {
                 self.settle_gap(&m, seq, via);
@@ -1085,7 +1000,8 @@ impl State {
 
     /// The held streams, for the status view.
     pub(crate) fn inbound_held_view(&self) -> Vec<molt_core::InboundHeld> {
-        self.delivery
+        let mut rows: Vec<molt_core::InboundHeld> = self
+            .delivery
             .inbound
             .iter()
             .filter(|(_, h)| !h.held.is_empty() || !h.missing.is_empty() || !h.ahead.is_empty())
@@ -1097,8 +1013,16 @@ impl State {
                 frontier: h.frontier,
                 bytes: u64::try_from(h.bytes).unwrap_or(u64::MAX),
                 missing: u32::try_from(h.missing.len()).unwrap_or(u32::MAX),
+                from_start: h.from_start,
             })
-            .collect()
+            .collect();
+        // a reset window nothing has reached yet waits all the same
+        for (m, w) in &self.delivery.accepted {
+            if w.proof.is_reset() && w.high == 0 && !self.delivery.inbound.contains_key(m) {
+                rows.push(molt_core::InboundHeld { member: m.clone(), missing_seq: 1, from_start: true, ..Default::default() });
+            }
+        }
+        rows
     }
 
     /// Publish ONE claim sheet covering every member we owe an ack.
@@ -1190,7 +1114,7 @@ impl State {
     /// Test seam body: keep only `member`'s accept marks at or below `seq`.
     fn regress_window(&mut self, member: &MemberId, seq: u64, now: u64) {
         let Some(old) = self.delivery.accepted.get(member).cloned() else { return };
-        let mut w = molt_core::AcceptedWindow { restore: old.restore.clone(), proof: old.proof, ..Default::default() };
+        let mut w = molt_core::AcceptedWindow { proof: old.proof, ..Default::default() };
         for s in seq.saturating_sub(molt_core::ACCEPT_WINDOW_BITS)..=seq.min(old.high) {
             if s > 0 && old.is_accepted(s) {
                 let _ = w.accept(s);
