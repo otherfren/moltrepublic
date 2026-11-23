@@ -263,6 +263,15 @@ impl Acceptor {
     }
 
     /// The digests of every value accepted at an open slot.
+    /// The digests accepted above `height` (the open slots).
+    pub(crate) fn accepted_digests_above(&self, height: u64) -> BTreeSet<String> {
+        self.slots
+            .range(height.saturating_add(1)..)
+            .flat_map(|(_, bases)| bases.values())
+            .filter_map(|s| s.accepted.as_ref().map(|(_, v)| v.digest.clone()))
+            .collect()
+    }
+
     pub(crate) fn accepted_digests(&self) -> BTreeSet<String> {
         self.slots
             .values()
@@ -394,12 +403,6 @@ impl Subjects {
     /// promise alone where m = n).
     pub(crate) fn seats(&self) -> BTreeSet<String> {
         self.0.values().cloned().collect()
-    }
-
-    /// The subject of the restore `digest`, if it is one: its acceptance
-    /// of that value never counts.
-    pub(crate) fn of(&self, digest: &str) -> Option<&str> {
-        self.0.get(digest).map(String::as_str)
     }
 }
 

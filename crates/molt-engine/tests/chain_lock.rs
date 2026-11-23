@@ -87,19 +87,20 @@ async fn status(w: &WalletHandle) -> StatusView {
 /// The sealing line by name: dora, mara, walter. Returns the seats and
 /// dora's phrase.
 async fn found_trio(root: &std::path::Path, url: &str) -> ([WalletHandle; 3], String) {
-    found_trio_as(root, url, false).await
+    found_trio_as(root, url, true).await
 }
 
-/// [`found_trio`]; `pre_lock` founds a republic as before the lock existed.
-async fn found_trio_as(root: &std::path::Path, url: &str, pre_lock: bool) -> ([WalletHandle; 3], String) {
-    found_trio_with(root, url, pre_lock, true).await
+/// [`found_trio`]; `locked` founds with the lock in the charter (the test
+/// seam), else as every real founding: without it.
+async fn found_trio_as(root: &std::path::Path, url: &str, locked: bool) -> ([WalletHandle; 3], String) {
+    found_trio_with(root, url, locked, true).await
 }
 
 /// `available = false`: the build default, the lock dark (G).
-async fn found_trio_with(root: &std::path::Path, url: &str, pre_lock: bool, available: bool) -> ([WalletHandle; 3], String) {
+async fn found_trio_with(root: &std::path::Path, url: &str, locked: bool, available: bool) -> ([WalletHandle; 3], String) {
     let a = engine(&root.join("mara"));
     a.__lock_available(available);
-    a.__found_pre_lock(pre_lock);
+    a.__found_locked(locked);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
         name: "Drei".to_string(),
@@ -472,7 +473,7 @@ async fn a_vote_enables_the_lock_in_an_older_republic() {
     trace();
     let (_relay, url) = relay().await;
     let tmp = tempfile::tempdir().expect("tmp");
-    let ([mara, walter, dora], _) = found_trio_as(tmp.path(), &url, true).await;
+    let ([mara, walter, dora], _) = found_trio_as(tmp.path(), &url, false).await;
     // dora, first in the sealing line, is away during the vote: a short
     // fallback grace instead of sitting out the real 60 s
     for w in [&mara, &walter, &dora] {
@@ -531,7 +532,7 @@ async fn a_restored_seat_learns_every_capability_and_approves_the_enabling_vote(
     trace();
     let (_relay, url) = relay().await;
     let tmp = tempfile::tempdir().expect("tmp");
-    let ([mara, walter, dora], dora_phrase) = found_trio_as(tmp.path(), &url, true).await;
+    let ([mara, walter, dora], dora_phrase) = found_trio_as(tmp.path(), &url, false).await;
     every_seat_announced(&[&mara, &walter, &dora]).await;
     for w in [&mara, &walter] {
         w.__seat_active_secs(0);

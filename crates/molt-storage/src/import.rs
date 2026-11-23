@@ -74,19 +74,7 @@ impl ImportStaging {
                 return true;
             }
         }
-        if self.checkpoint.as_ref().is_some_and(|c| serde_json::to_string(c).is_ok_and(|s| s.contains(key))) {
-            return true;
-        }
-        self.chain.iter().any(|b| match &b.change {
-            molt_core::ChainChange::Applied { surface: molt_core::Surface::Organization, payload, .. } => {
-                payload.get("op").and_then(serde_json::Value::as_str) == Some("set_features")
-                    && payload
-                        .get("value")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|v| v.split_whitespace().any(|k| k == key))
-            }
-            _ => false,
-        })
+        crate::chain_runs_lock(self.checkpoint.as_ref(), &self.chain)
     }
 }
 

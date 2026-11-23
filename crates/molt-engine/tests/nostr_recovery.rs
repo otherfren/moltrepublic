@@ -285,7 +285,7 @@ async fn found_three_as(
     pre_lock: bool,
 ) -> (WalletHandle, WalletHandle, WalletHandle, String) {
     let a = engine(&root.join("founder"));
-    a.__found_pre_lock(pre_lock);
+    a.__found_locked(!pre_lock);
     adopt_relay(&a, url).await;
     a.execute(Command::CreateStart {
         name: "Chess Club".to_string(),

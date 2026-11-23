@@ -1053,6 +1053,8 @@ impl State {
     pub(crate) fn forget_peer_claim(&mut self, member: &str) {
         self.chain.peer_heights.remove(member);
         self.chain.peer_claim_seq.remove(member);
+        // D3: a new device's declarations carry its own clock
+        self.files.caps_at.remove(member);
     }
 
     /// The claims that count: roster seats on this node's branch - a peer

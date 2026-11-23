@@ -593,6 +593,10 @@ impl State {
             return;
         }
         let target = head.height + 1;
+        // item 7: a locked height is sealed by the lock alone
+        if self.lock_mode(target) == super::LockMode::Lock {
+            return;
+        }
         let Some(change) = self.proposal_change(id) else {
             return;
         };

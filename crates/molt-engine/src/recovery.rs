@@ -594,7 +594,12 @@ pub async fn run_rejoin<T: Transport>(
         anchor_first: false,
         version: String::new(),
         started: 0,
-        caps: vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
+        // D4: the loopback twin declares what this build runs
+        caps: if crate::chain::CHAIN_LOCK_AVAILABLE {
+            vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]
+        } else {
+            Vec::new()
+        },
     });
     let payload = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
     supervisor::send_framed(
