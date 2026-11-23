@@ -13,6 +13,25 @@ The first republic ended with three seats on three branches, because
 every seat coordinated a restore alone (N1), and the MLS group split. Its
 counts and shapes are the keystone below.
 
+## The majority rule (decided 2026-11-23)
+
+**Rule: a republic's threshold must satisfy m > floor(n/2), i.e. 2m > n.**
+3-of-5 is allowed, 2-of-5 is not.
+
+Why:
+- With 2m ≤ n, two disjoint groups can each reach the threshold: at one height, or in one branch choice, with no software fault at all. No repair can then say which half is the republic.
+- With 2m > n, any two deciding groups share at least one seat. That shared seat is what makes a branch choice unique (§2).
+
+| applies to | what happens | code |
+|---|---|---|
+| (a) the branch choice | offered only where 2m > n. Refused at propose and approve with `needs a majority of the members: <m> of <n> is not one` | `choose_branch`, `approve` (§8) |
+| (b) new foundings | refuse a threshold with 2m ≤ n (Q5: refuse vs warn). The wizard says it in one line: `the threshold must be more than half of the members` | engine: `lifecycles.rs` `cmd_create_start` (the `threshold < 2` gate, about line 805-809). Wizard: `crates/molt-ui-window/ui/app.slint`, the threshold `AppStepper` (`minimum: 2` -> `root.cw-rule-default`, already `floor(n/2)+1`) and the `changed` snap on the members stepper. MCP: the `create_start` schema and description (`molt-mcp/src/lib.rs`, "2..=members", "at least 2"). Optional: a joiner refuses a non-majority charter in `founding.rs` `verify_seal_proposal` (sign-what-you-see against an older founder) |
+| (c) existing republics with 2m ≤ n | keep running unchanged; NO branch choice; a one-line notice in status and Organization: `this republic's threshold is not a majority: a split cannot be repaired by vote` | status: `chain_sync` notice field. NOT in `verify_chain`: the rule is a founding and feature gate. A live republic's chain must keep verifying, the same reason the m ≥ 2 gate sits at founding, not in the verifier (comment at the gate) |
+| (d) m = n | allowed (it is a majority). Its own cost: any lost seat stalls every decision except its restore | unchanged |
+
+- **Changing the threshold:** impossible today. `rule_m` comes from the genesis and is copied unchanged from block to block (`chain/verify.rs` `verify_next`, `rule_m: head.rule_m`), and seats are fixed at founding (`verify.rs`, `joined` hard-rejected). A 2m ≤ n republic's way out is to found again.
+- **Consequence for the vault:** the vault needs m ≤ n - 2 (`molt-engine/src/vault/mod.rs`). Together with 2m > n it is only possible from n = 5 (3-of-5). A new republic of 3 or 4 seats can no longer enable the vault. The wallet's m < n stays possible from n = 3.
+
 ## 0. What changed against the earlier plan
 
 | earlier plan (F-X1) | now | why |
@@ -53,12 +72,12 @@ BranchChosen {
 
 ## 2. Uniqueness: one choice per seat and fork point
 
-Two m-sets always share a seat only when 2m > n.
+Two m-sets always share a seat only when 2m > n, which is the majority rule.
 
 | (n, m) | 2m > n | two choices at one fork point |
 |---|---|---|
-| 2-of-3, 3-of-4, 3-of-5, 4-of-5 | yes | impossible while the shared seat signs once |
-| 2-of-4, 2-of-5, 3-of-6 | no | two disjoint groups can each choose: the result is TWO republics |
+| 2-of-3, 3-of-4, 3-of-5, 4-of-5 | yes | impossible while the seats in the intersection each sign once |
+| 2-of-4, 2-of-5, 3-of-6 | no | refused: there, two disjoint groups could each choose, so a choice would decide nothing |
 
 **The record.** `chain.branch_choices: BTreeMap<base_height, (tip_hash, chosen_root)>`,
 part of the chain snapshot, written BLOCKING before the `Approved` frame
@@ -86,13 +105,9 @@ Handled without a protocol:
 2. The operator may override with `choose_branch`/`approve` argument `amnesia_ack: true`. The card then shows `B signs on a device restored above the fork point`.
 3. The restore in step 3 is itself refused on master while C sees the divergence (`restore_gate` -> `chain diverged`, `chain/membership.rs`). The schedule therefore needs C to be blind to the fork, i.e. a split group.
 
-This only narrows the risk; it is the hardest open point (§11).
-
-**m ≤ n/2.** Before anyone signs, the card and `chain_branches` (§8) show
-every choice this seat has SEEN for the same fork point, with its
-signers. The text reads `another choice at height f: signed by D, E`.
-Governance at such a threshold already allows two disjoint majorities;
-the plan states it and does not hide it.
+This only narrows the risk; it is the hardest open point (§11). The
+majority rule does not close it: the rule guarantees a shared seat, not
+that the shared seat remembers.
 
 ## 3. How far back
 
@@ -153,7 +168,7 @@ field asks for it (Q2).
 | refused commands | `approve`, `decline`, `propose`, `withdraw`, `propose_checkpoint`, `recover_invite_start` -> `branch abandoned` | `proposals.rs`, `membership.rs` |
 | coming back | a member on the chosen branch mints a link (`recover_invite_start`); the abandoned seat runs `recover_start` on a fresh workspace; anchor-first, consent, a `Restored` block (m-1 survivors + consent), re-key, Welcome (`recovery_ritual.md` §4). Its fresh state is a new incarnation: the re-key merge resets every peer's accept window for it (`delivery_guarantee.md` §11), which also clears the stale windows a divergence leaves | existing; the `restore_gate` gates `seat still active` and `chain diverged` must pass for a seat the chain names abandoned |
 | the old workspace | stays on disk, read-only, exportable | |
-| refuses and continues | 2m > n: n - m < m, so it can seal nothing. 2m ≤ n: with m of its own it is the second republic of §2 | |
+| refuses and continues | n - m < m under the majority rule, so it can seal nothing | |
 
 ## 7. The MLS group after the choice
 
@@ -171,7 +186,7 @@ field asks for it (Q2).
 |---|---|---|
 | `chain_branches` | Chain › Branches table | per seat: last reported head + hash (`seats[].head_height/head_hash`), `diverged`, the fork point this node can PROVE, blocks only on each side, choices seen |
 | `branch_export`, `branch_import` | Chain › Export/Import evidence | §5 (b) |
-| `choose_branch { base_height, tip_hash, amnesia_ack? }` | "Keep this branch" on a row | proposes the card; the reply carries the dropped list and its digest; refused without evidence (`no second branch`), below a cut, `amnesiac`, or when a signer-to-be runs a build without the capability `molt-branch-choice-v1` |
+| `choose_branch { base_height, tip_hash, amnesia_ack? }` | "Keep this branch" on a row | proposes the card; the reply carries the dropped list and its digest; refused where 2m ≤ n (`needs a majority of the members: <m> of <n> is not one`), without evidence (`no second branch`), below a cut, `amnesiac`, or when a signer-to-be runs a build without the capability `molt-branch-choice-v1` |
 | `approve { id, dropped_digest }`, `decline` | the card | `dropped_digest` must match the node's own computation: sign what you see |
 | result | the card turns applied; status shows the new head | |
 
@@ -193,12 +208,18 @@ field asks for it (Q2).
 - **A single faulty seat:**
   - cannot choose: it needs m - 1 others;
   - can withhold its signature, but only blocks the choice when it is needed for m;
-  - can sign two choices at one fork point only if it is dishonest. In 2m > n that is the shared-seat failure the lock design also cannot exclude without honest software (`chain_lock_wiring_plan.md` §12 (f)).
+  - can sign two choices at one fork point only if it is dishonest. Under the majority rule that is the shared-seat failure the lock design also cannot exclude without honest software (`chain_lock_wiring_plan.md` §12 (f)).
+- **What the majority rule buys:**
+
+  | property | with 2m > n |
+  |---|---|
+  | uniqueness of the branch choice | two choices at one fork point need two m-sets, and they intersect in at least 2m - n ≥ 1 seats; if each of those signs at most once per fork point, only one choice can seal |
+  | the shared seat | exactly the seats in the intersection carry the guarantee; each must sign at most once per fork point (the durable record, §2). A device restored during a split can forget, and the rule does not change that: the hardest open point stays |
+  | Strict Order Mode and E0 (pointer only) | both get simpler under the same rule: one quorum size m for both phases, no reduced fault tolerance, E0 safe within a round. Their hard problem, durable promises across crashes and device changes, does not go away (`chain_lock_wiring_plan.md` §12-§13) |
 - **Replay:** a `BranchChosen` cannot be replayed at another fork point (`base_height`, `base_hash` and the height are signed) or on another branch (`tip_hash` is signed and must equal `prev`). Replaying the same block on its own branch is a duplicate (`tie_break` identity check).
 - **The automatic fork rule:**
   - On every seat whose chain holds the choice, it outranks the hash tie-break for every fork at or below its height: a contender lacking it loses whatever its hash (`try_reorg`, `tie_break`: new log `fork=chosen`).
   - On every seat whose branch it abandons, it is a STOP, never an automatic re-base: the seat rejoins by link.
-  - Two choices at one fork point (2m ≤ n): neither yields, both sides stay marked `other_choice`.
 - **Checkpoints:** none above a fork point (§3). A cut after the choice is ordinary.
 - **Strict Order Mode:** dark (`CHAIN_LOCK_AVAILABLE = false`); no interaction. If it ever ships, a `BranchChosen` at a locked height is a value like any other.
 
@@ -208,7 +229,9 @@ field asks for it (Q2).
 |---|---|---|
 | the first republic's shape: 2-of-3, fork at f, mutual restores, three branches, split group; A and B export/import evidence, choose A's branch, C rejoins by link | one head on all three, a vote seals afterwards, every seat's `diverged` empty | without the stop rule C keeps sealing restores: red |
 | a pure fork that does not heal (no common readable path for the tie-break, group intact) | choice over the group, the loser stops, rejoins | |
-| 2-of-5, {A,B} choose X, {C,D} choose Y | two republics; each card showed the other choice before signing; neither corrupts the other (both chains verify) | |
+| the choice where 2m ≤ n (a 2-of-5 chain) | `choose_branch` and `approve` refused: `needs a majority of the members: 2 of 5 is not one` | the same at 3-of-5: allowed |
+| a founding with 2 of 5 | refused (engine and MCP); the wizard's stepper cannot go below 3 | 3 of 5 founds |
+| an existing 2-of-5 republic founded by an older build | still verifies, shows the notice, refused the branch choice | |
 | a dropped `Restored` block | the restored device is `abandoned`, rejoins, its window reset by the merge | |
 | a choice below a cut, or with no second branch | refused `below_cut` / `no second branch` | |
 | an older build | stops at the block (undecodable), no state change | |
@@ -217,7 +240,7 @@ field asks for it (Q2).
 
 | step | content | ships alone | agent-h |
 |---|---|---|---|
-| S1 | `chain_branches` read; `branch_export`/`branch_import` with evidence verification (the other branch links at the base with m signatures); no state change | yes: diagnosis | 14 |
+| S1 | the majority rule: founding gate (engine, MCP schema, wizard stepper and line) + the status/Organization notice; `chain_branches` read; `branch_export`/`branch_import` with evidence verification (the other branch links at the base with m signatures); no chain state change | yes: diagnosis + the gate | 17 |
 | S2 | `BranchChosen` variant, verifier, byte pin, uniqueness record, card + dropped list + digest, signature collection, seal and adoption on the choosers, tie-break precedence | yes, MCP only | 24 |
 | S3 | `abandoned` state and its gates, `restore_gate` exemption, rejoin path, GUI (Branches table, card, abandoned banner; one full window build), wake skill lists | yes | 18 |
 
@@ -228,8 +251,8 @@ field asks for it (Q2).
 | Q1 | reset to an earlier height without a second branch? | no: a decision is undone by a new decision |
 | Q2 | the channel | (b) bundle file first (S1); (a) gift-wrap only if asked |
 | Q3 | dropped wiki/quests cards: back as proposals? | yes, as open cards with stances cleared: each seat decides again |
-| Q4 | may a wake agent vote on a branch choice? | no: `choose_branch` on the deny list, branch cards skipped by the wake prompt; approve needs the dropped-list digest |
-| Q5 | irreversible effects | flag each row, count them in the card header, and require `dropped_digest` on approve |
+| Q4 | may a wake agent vote on a branch choice? | no: `choose_branch` on the deny list, branch cards skipped by the wake prompt; approve needs the dropped-list digest, which also covers the irreversible rows (§4) |
+| Q5 | a founding with 2m ≤ n: refuse or warn? | refuse: a warning leaves a republic whose split no vote can repair; note that it also ends the vault for n ≤ 4 |
 | Q6 | retire Strict Order Mode formally? | not yet: keep it dark until this ships and the field shows whether forks still need prevention |
 
 Hardest unresolved point: the shared seat's single choice across a
