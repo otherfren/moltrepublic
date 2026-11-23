@@ -418,7 +418,15 @@ fn reachable_floor(
     let owed: Vec<(&MemberId, u64)> = cfg
         .members
         .iter()
-        .filter_map(|m| state.outbound.get(m).filter(|c| c.ack_seen).map(|c| (m, c.acked_floor)))
+        // a peer that stayed ahead through every give-up round is left
+        // alone until a plausible sheet of it ends the episode
+        .filter_map(|m| {
+            state
+                .outbound
+                .get(m)
+                .filter(|c| c.ack_seen && !(c.ack_ahead && c.ahead_rounds >= RESEND_GIVEUP_ROUNDS))
+                .map(|c| (m, c.acked_floor))
+        })
         .filter(|(_, f)| envs.iter().any(|e| e.seq > *f && crate::supervisor::own_ackable(&cfg.member, e)))
         .collect();
     if owed.is_empty() {
@@ -725,17 +733,6 @@ async fn apply_group_ack<L: OutboxLog, S: StateStore>(
     from: &MemberId,
     ack: &crate::group_ack::GroupAck,
 ) {
-    apply_group_ack_at(log, store, me, from, ack, wall_secs()).await;
-}
-
-async fn apply_group_ack_at<L: OutboxLog, S: StateStore>(
-    log: &L,
-    store: &S,
-    me: &MemberId,
-    from: &MemberId,
-    ack: &crate::group_ack::GroupAck,
-    now: u64,
-) {
     let Some(window) = ack.window_for(me) else {
         return; // silence, not a claim of zero
     };
@@ -744,7 +741,7 @@ async fn apply_group_ack_at<L: OutboxLog, S: StateStore>(
     // only the tail from the claimed high is read: nothing there means the
     // claim is beyond our log
     if window.high > old && log.read_from(window.high).await.is_empty() {
-        refuse_ack_ahead(log, store, from, ack, window.high, now).await;
+        refuse_ack_ahead(log, store, from, window.high).await;
         return;
     }
     let envs = log.read_from(old.saturating_add(1)).await;
@@ -782,7 +779,7 @@ async fn apply_group_ack_at<L: OutboxLog, S: StateStore>(
             let cursor = state.outbound.entry(from.clone()).or_default();
             if cursor.ack_ahead {
                 cursor.ack_ahead = false;
-                cursor.ahead_since = 0;
+                cursor.ahead_rounds = 0;
                 changed = true;
             }
             // only ever forward: another sheet may have moved it meanwhile
@@ -864,38 +861,12 @@ async fn rewind_regressed<L: OutboxLog, S: StateStore>(
 /// A sheet acking seqs above our own log: either the peer holds a previous
 /// incarnation's window of this seat (it missed the restore), or this log
 /// is behind what the peer really has (an older export imported). The
-/// floor falls to 0 once so the stall rounds re-offer everything; if the
-/// peer is still ahead after a full backoff, re-offering is futile either
-/// way - the floor goes to the own head and the episode stops costing.
-async fn refuse_ack_ahead<L: OutboxLog, S: StateStore>(
-    log: &L,
-    store: &S,
-    from: &MemberId,
-    ack: &crate::group_ack::GroupAck,
-    window_high: u64,
-    now: u64,
-) {
+/// floor falls to 0 once so the stall rounds re-offer everything; after
+/// [`RESEND_GIVEUP_ROUNDS`] such rounds the peer is no longer re-offered
+/// to (`reachable_floor`) until a plausible sheet ends the episode.
+async fn refuse_ack_ahead<L: OutboxLog, S: StateStore>(log: &L, store: &S, from: &MemberId, window_high: u64) {
     let held = store.load().await.outbound.get(from).copied().unwrap_or_default();
-    if !held.ack_ahead {
-        let own_high = log.read_from(held.acked_floor.saturating_add(1)).await.last().map_or(held.acked_floor, |e| e.seq);
-        store
-            .update(|state| {
-                let cursor = state.outbound.entry(from.clone()).or_default();
-                cursor.ack_ahead = true;
-                cursor.ahead_since = now.max(1);
-                cursor.acked_floor = 0;
-                cursor.ack_seen = true;
-                let mut group = state.group.unwrap_or_default();
-                group.heal_evidence |= group.log_seq > 0;
-                state.group = Some(group);
-                true
-            })
-            .await;
-        tracing::warn!(%from, window_high, own_high, "ack_ahead");
-        return;
-    }
-    let futile = held.ahead_since > 0 && now.saturating_sub(held.ahead_since) >= RESEND_MAX_BACKOFF_SECS;
-    if !futile {
+    if held.ack_ahead {
         tracing::debug!(%from, window_high, "ack_ahead");
         return;
     }
@@ -903,14 +874,17 @@ async fn refuse_ack_ahead<L: OutboxLog, S: StateStore>(
     store
         .update(|state| {
             let cursor = state.outbound.entry(from.clone()).or_default();
-            cursor.ahead_since = 0;
-            cursor.acked_floor = cursor.acked_floor.max(own_high);
-            cursor.ack_high = own_high;
-            cursor.ack_at = cursor.ack_at.max(ack.at);
+            cursor.ack_ahead = true;
+            cursor.ahead_rounds = 0;
+            cursor.acked_floor = 0;
+            cursor.ack_seen = true;
+            let mut group = state.group.unwrap_or_default();
+            group.heal_evidence |= group.log_seq > 0;
+            state.group = Some(group);
             true
         })
         .await;
-    tracing::info!(%from, window_high, own_high, "ack_ahead_stopped");
+    tracing::warn!(%from, window_high, own_high, "ack_ahead");
 }
 
 /// Publish claim sheets as they are handed over.
@@ -1583,6 +1557,9 @@ async fn outbox_loop<L, S, K>(
                     return false;
                 };
                 state.group = Some(cur); // the consumed budget
+                for c in state.outbound.values_mut().filter(|c| c.ack_ahead) {
+                    c.ahead_rounds = c.ahead_rounds.saturating_add(1);
+                }
                 rewind_group_to(state, f);
                 round = StallRound::Granted { floor: f, heal };
                 true
@@ -3254,30 +3231,39 @@ mod tests {
     }
 
     /// While a peer stays ahead, its sheets read only the log's tail from
-    /// the claimed high - never the whole log every few seconds - and after
-    /// a full backoff the episode stops re-offering: the floor goes to the
-    /// own head (what the peer provably has once this log reaches it).
+    /// the claimed high - never the whole log every few seconds - and once
+    /// the give-up rounds re-offered to it in vain it is no longer owed a
+    /// round until a plausible sheet of it arrives: no timer decides.
     #[tokio::test]
-    async fn an_ack_ahead_episode_reads_the_tail_only_and_stops_after_a_backoff() {
+    async fn an_ack_ahead_episode_reads_the_tail_only_and_stops_after_the_give_up_rounds() {
         let log = CountingLog::default();
         let store = crate::MemStateStore::default();
         for seq in 1..=10u64 {
             log.0.push(walter_event(seq));
         }
         let (me, from) = ("walter".to_string(), "petra".to_string());
-        let t0 = 1_700_000_000;
-        apply_group_ack_at(&log, &store, &me, &from, &sheet_at(1, 6_000..=6_000), t0).await;
-        assert_eq!(petra_cursor(&store).await.acked_floor, 0, "the tail is re-offered once");
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(1, 6_000..=6_000)).await;
+        assert_eq!(petra_cursor(&store).await.acked_floor, 0, "the tail is re-offered");
         log.1.lock().expect("reads").clear();
         for i in 1..20u64 {
-            apply_group_ack_at(&log, &store, &me, &from, &sheet_at(1 + i, 6_000..=6_000), t0 + i).await;
+            apply_group_ack(&log, &store, &me, &from, &sheet_at(1 + i, 6_000..=6_000)).await;
         }
         let reads = log.1.lock().expect("reads").clone();
         assert!(reads.iter().all(|r| *r == 6_000), "a stale sheet read more than the tail: {reads:?}");
-        apply_group_ack_at(&log, &store, &me, &from, &sheet_at(100, 6_000..=6_000), t0 + RESEND_MAX_BACKOFF_SECS).await;
+        let envs = log.0.read_from(1).await;
+        let cfg = GroupNetConfig::fast("walter".into(), vec!["petra".into()]);
+        let reach = OutboxReach::default();
+        let mut st = <crate::MemStateStore as StateStore>::load(&store).await;
+        assert_eq!(reachable_floor(&st, &cfg, &envs, &reach, false), Ok(Some(0)), "owed while rounds remain");
+        if let Some(c) = st.outbound.get_mut("petra") {
+            c.ahead_rounds = RESEND_GIVEUP_ROUNDS;
+        }
+        assert_eq!(reachable_floor(&st, &cfg, &envs, &reach, false), Ok(None), "left alone after the give-up rounds");
+        // a plausible sheet ends the episode and the peer is owed again
+        store.update(|s| { *s = st.clone(); true }).await;
+        apply_group_ack(&log, &store, &me, &from, &sheet_at(200, 1..=4)).await;
         let cursor = petra_cursor(&store).await;
-        assert_eq!((cursor.acked_floor, cursor.ahead_since), (10, 0), "a futile episode stops re-offering");
-        assert!(cursor.ack_ahead, "the sheets stay refused");
+        assert_eq!((cursor.ack_ahead, cursor.ahead_rounds, cursor.acked_floor), (false, 0, 4));
     }
 
     /// The seq at `high - 1024` is still an explicit bit of the window; only

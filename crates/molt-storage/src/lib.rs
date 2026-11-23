@@ -3856,11 +3856,12 @@ impl StorageHandle {
     /// §4.7), merged into `transport.state` without touching the cursors or
     /// crypto. Fire-and-forget like [`Self::save_transport_state`]: a lost
     /// save only regresses the windows, which resends + re-dedup absorb.
+    /// `false` = not queued (writer full or gone): the caller keeps it dirty.
     pub fn save_accepted(
         &self,
         accepted: std::collections::BTreeMap<molt_core::MemberId, molt_core::AcceptedWindow>,
-    ) {
-        let _ = self.try_queue(WriterMsg::SaveAccepted(accepted), "accept-window save");
+    ) -> bool {
+        self.try_queue(WriterMsg::SaveAccepted(accepted), "accept-window save")
     }
 
     /// Persist the purse statuses and view key into `transport.state`,

@@ -83,12 +83,52 @@ fn a_re_delivered_withdrawal_changes_nothing() {
     assert_eq!(*card(&walter), after);
 }
 
-/// The card records the newest stance stamp per member (snapshot data; the
-/// replay rebuilds it from the kept events).
+/// The card records the newest stance per member as (stamp, wire seq).
 #[test]
-fn the_newest_stance_stamp_is_recorded_on_the_card() {
+fn the_newest_stance_is_recorded_on_the_card() {
     let mut walter = seat();
     from(&mut walter, "dora", 10, T + 10, decline("dora"));
     from(&mut walter, "dora", 11, T + 11, approve("dora"));
-    assert_eq!(card(&walter).stances.get("dora"), Some(&(T + 11)));
+    assert_eq!(card(&walter).stances.get("dora"), Some(&(T + 11, 11)));
+}
+
+/// (F5) Two stances of dora in one second - decline (seq 10), approve
+/// (seq 11) - and petra's decline, met in three delivery orders with dora's
+/// window re-filled after a reset: one card state everywhere, and the
+/// replay of the kept events rebuilds it.
+#[test]
+fn stances_of_one_second_converge_in_every_order() {
+    let d10 = || ("dora", 10, decline("dora"));
+    let d11 = || ("dora", 11, approve("dora"));
+    let p20 = || ("petra", 20, decline("petra"));
+    let orders: [Vec<(&str, u64, WorkspaceEvent)>; 3] = [
+        vec![d10(), d11(), p20(), ("reset", 0, decline("dora")), d10()],
+        vec![d11(), d10(), p20(), ("reset", 0, decline("dora")), d11(), d10()],
+        vec![d10(), d11(), ("reset", 0, decline("dora")), d10(), d11(), p20()],
+    ];
+    let mut cards = Vec::new();
+    for order in orders {
+        let mut walter = seat();
+        for (who, seq, body) in order {
+            if who == "reset" {
+                walter.reset_peer_accept_window(&"dora".to_string());
+                continue;
+            }
+            let ts = if who == "dora" { T + 11 } else { T + 20 };
+            from(&mut walter, who, seq, ts, body);
+        }
+        let c = card(&walter);
+        assert_eq!((c.state, c.decliners.clone()), (ProposalState::Proposed, vec!["petra".to_string()]));
+        cards.push((c.state, c.decliners.clone(), c.stances.clone()));
+    }
+    assert!(cards.windows(2).all(|w| w[0] == w[1]), "{cards:?}");
+    // the replay of the kept events (stamp, and the wire seq in prev_seq)
+    let mut replayed = seat();
+    for (who, seq, ts, body) in [("dora", 10, T + 11, decline("dora")), ("dora", 11, T + 11, approve("dora")), ("petra", 20, T + 20, decline("petra"))] {
+        let env = replayed.make_env_at(who.to_string(), ts, body);
+        let env = molt_core::EventEnvelope { prev_seq: seq, ..env };
+        replayed.apply(&env);
+    }
+    let c = card(&replayed);
+    assert_eq!((c.state, c.decliners.clone(), c.stances.clone()), cards[0].clone());
 }

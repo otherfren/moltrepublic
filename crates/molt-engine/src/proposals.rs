@@ -1520,22 +1520,23 @@ impl State {
             || member_parked >= PARKED_DECLINES_PER_MEMBER_MAX
     }
 
-    /// Whether `by`'s stance on card `id` stamped `ts` is not older than
-    /// the last one applied from it, recording it if so. A re-delivered older
+    /// Whether `by`'s stance on card `id` at `(ts, seq)` - its stamp and its
+    /// wire seq - is newer than the last one applied from it, recording it
+    /// if so. A re-delivered older
     /// stance (after a reset or a rewind) would otherwise be judged against
-    /// the other seats' CURRENT stances. Stamps, not seqs: the own log keeps
-    /// the wire stamp, so the replay rebuilds the same marks.
-    pub(crate) fn newer_stance(&mut self, id: u64, by: &str, ts: u64) -> bool {
+    /// the other seats' CURRENT stances. The own log keeps both (the kept
+    /// event's stamp and `prev_seq`), so the replay rebuilds the same marks.
+    pub(crate) fn newer_stance(&mut self, id: u64, by: &str, ts: u64, seq: u64) -> bool {
         if by == self.member() {
             return true;
         }
         let Some(p) = self.proposals.get_mut(&id) else { return true };
-        // the same second is no order: a re-signed approval after a re-base
-        // is often stamped with its original's second
-        if p.stances.get(by).is_some_and(|t| ts < *t) {
+        // (stamp, wire seq): the seq orders two stances of one second; an
+        // equal pair is the same frame again
+        if p.stances.get(by).is_some_and(|mark| (ts, seq) <= *mark) {
             return false;
         }
-        p.stances.insert(by.to_string(), ts);
+        p.stances.insert(by.to_string(), (ts, seq));
         true
     }
 
@@ -1544,12 +1545,13 @@ impl State {
         id: u64,
         by: &str,
         ts: u64,
+        seq: u64,
         hash: &str,
     ) -> DeclineOutcome {
         if self.retired.contains(&id) {
             return DeclineOutcome::Known;
         }
-        if !self.newer_stance(id, by, ts) {
+        if !self.newer_stance(id, by, ts, seq) {
             tracing::debug!(%id, %by, ts, "dropping an older decline than the stance applied");
             return DeclineOutcome::Known;
         }
@@ -1652,7 +1654,7 @@ impl State {
             return drain;
         };
         for (by, ts, hash) in parked {
-            match self.register_decline(id, &by, ts, &hash) {
+            match self.register_decline(id, &by, ts, 0, &hash) {
                 DeclineOutcome::Rejected => {
                     drain.voices.push(by);
                     drain.rejected = true;

@@ -394,7 +394,7 @@ mod tests {
         let again = st.receive_proposed(1, Surface::Memory, serde_json::json!({"op": "add_note", "title": "t"}), "petra");
         assert!(!again && !st.proposals.contains_key(&1), "a late re-serve does not reopen it");
         assert!(!st.decline_would_shed(1, "petra"), "accepted, so it is acked and not resent");
-        assert_eq!(st.register_decline(1, "petra", 9_000, ""), crate::proposals::DeclineOutcome::Known, "no park");
+        assert_eq!(st.register_decline(1, "petra", 9_000, 0, ""), crate::proposals::DeclineOutcome::Known, "no park");
         assert_eq!(st.register_withdraw(1, "petra", 9_000), crate::proposals::WithdrawOutcome::Ignored, "no park");
         assert!(!st.receive_approval(1, "petra", 1, "ab") && !st.chain.pending_sigs.contains_key(&1), "no vote kept");
         let mut restored = plain_state();

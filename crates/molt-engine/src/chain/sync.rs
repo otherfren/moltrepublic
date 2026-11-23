@@ -1356,6 +1356,10 @@ impl State {
     /// block is from a branch `from` has left, not a divergence. Evidence
     /// below it is a shared prefix and proves nothing (review R4).
     fn left_that_branch(&self, from: &str, seq: Option<u64>, block_height: u64) -> bool {
+        // a block re-delivered behind a newer frame of its sender is history
+        if seq.is_some_and(|s| !self.newest_seen(from, s)) {
+            return true;
+        }
         let (Some(seq), Some((at, height, hash))) = (seq, self.chain.peer_on_branch.get(from)) else {
             return false;
         };
@@ -1365,7 +1369,7 @@ impl State {
     /// H1: whether frame `seq` is the newest `ChainRequest` of `from` in
     /// its current incarnation; a re-delivered older one is history.
     pub(crate) fn fresh_chain_request(&mut self, from: &str, seq: u64) -> bool {
-        if self.chain.request_seq.get(from).is_some_and(|last| seq <= *last) {
+        if self.chain.request_seq.get(from).is_some_and(|last| seq <= *last) || !self.newest_seen(from, seq) {
             return false;
         }
         self.chain.request_seq.insert(from.to_string(), seq);

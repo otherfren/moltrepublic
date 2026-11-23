@@ -1332,8 +1332,6 @@ impl State {
         self.delivery.accepted = transport_state.accepted.clone();
         self.delivery.accepted_dirty = false;
         self.delivery.accepted_saved_at = 0;
-        self.delivery.opened_at = self.presence_now();
-        self.reconcile_restore_windows();
         // the transport context changes with the workspace: tear the old mesh
         // down and abandon any still-running founder bootstrap for the workspace
         // we are leaving (its ready would be ws-id-rejected anyway; this reaps

@@ -383,9 +383,9 @@ impl State {
                         }
                     }
                 }
-                // the live arm's stance mark, rebuilt from the kept stamp
+                // the live arm's stance mark, rebuilt from the kept stamp and seq
                 if env.by == *by {
-                    let _ = self.newer_stance(id.0, by, env.ts);
+                    let _ = self.newer_stance(id.0, by, env.ts, env.prev_seq);
                 }
                 // D2 replay twin of the live clears: the newest stance wins
                 // — an own log that recorded decline-then-approve must
@@ -422,7 +422,8 @@ impl State {
                 // the proposal back, and the vote must still be standing.
                 // All in [`State::register_decline`]; the outcome is
                 // ignored here, replay must not ring frontends.
-                let _ = self.register_decline(id.0, by, env.ts, hash);
+                let wire_seq = if env.by == self.member() { 0 } else { env.prev_seq };
+                let _ = self.register_decline(id.0, by, env.ts, wire_seq, hash);
             }
             WorkspaceEvent::Applied { id } => {
                 if let Some(p) = self.proposals.get_mut(&id.0) {
@@ -852,6 +853,7 @@ impl State {
         self.delivery.last_own_ackable = 0;
         self.delivery.inbound.clear();
         self.delivery.dups.clear();
+        self.delivery.seen_high.clear();
         // send-failure presence pins belong to the OLD workspace's mesh —
         // dropping them stops a same-named member showing offline in the next
         self.delivery.unreachable.clear();

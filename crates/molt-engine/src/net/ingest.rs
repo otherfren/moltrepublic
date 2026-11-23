@@ -41,8 +41,12 @@ impl State {
     /// in RAM alone, so a restart rebuilt it from whatever a catch-up
     /// re-serve happened to carry. Never re-broadcast: the outbox only
     /// wants events this node authored.
-    fn keep_peer_event(&mut self, by: MemberId, ts: u64, body: WorkspaceEvent) {
-        let env = self.make_env_at(by, ts, body);
+    /// Keep a peer's event in the own log at its wire stamp. It is never
+    /// published, so its `prev_seq` carries the sender's wire seq instead -
+    /// what orders two stances of one second on the replay.
+    fn keep_peer_event(&mut self, by: MemberId, ts: u64, wire_seq: u64, body: WorkspaceEvent) {
+        let mut env = self.make_env_at(by, ts, body);
+        env.prev_seq = wire_seq;
         self.record(env);
     }
 
@@ -127,12 +131,10 @@ impl State {
         self.delivery.ack_due.entry(from.clone()).or_insert(due);
         if !fresh {
             tracing::debug!(%from, seq = envelope.seq, "dropping an already-accepted envelope (duplicate/resend)");
-            if self.note_dup(&from, envelope.seq, envelope.ts) {
-                return self.cmd_net_delivered(from, envelope, None);
-            }
+            self.note_dup(&from, envelope.seq);
             return Ok(Reply::Ack);
         }
-        self.note_fresh(&from, envelope.seq, envelope.ts);
+        self.note_fresh(&from);
         match envelope.body {
             WorkspaceEvent::Chat(mut msg) => {
                 msg.from = from.clone(); // defense in depth: the link decides
@@ -457,6 +459,7 @@ impl State {
                         self.keep_peer_event(
                             from.clone(),
                             envelope.ts,
+                            envelope.seq,
                             WorkspaceEvent::Proposed { id, surface, payload },
                         );
                     }
@@ -469,6 +472,7 @@ impl State {
                             self.keep_peer_event(
                                 member.clone(),
                                 ts,
+                                0,
                                 WorkspaceEvent::Declined { id, by: member, hash },
                             );
                         }
@@ -477,6 +481,7 @@ impl State {
                         self.keep_peer_event(
                             who.clone(),
                             ts,
+                            0,
                             WorkspaceEvent::Withdrawn { id, by: who },
                         );
                     }
@@ -499,7 +504,7 @@ impl State {
                 }
             }
             WorkspaceEvent::Approved { id, by, height, sig } if self.is_chain_governed() => {
-                if by == from && !self.newer_stance(id.0, &by, envelope.ts) {
+                if by == from && !self.newer_stance(id.0, &by, envelope.ts, envelope.seq) {
                     tracing::debug!(%from, id = id.0, "dropping an older approval than the stance applied");
                     return Ok(Reply::Ack);
                 }
@@ -532,6 +537,7 @@ impl State {
                     self.keep_peer_event(
                         from.clone(),
                         envelope.ts,
+                        envelope.seq,
                         WorkspaceEvent::Approved { id, by: by.clone(), height, sig: String::new() },
                     );
                     self.lock_drive();
@@ -552,6 +558,7 @@ impl State {
                     self.keep_peer_event(
                         from.clone(),
                         envelope.ts,
+                        envelope.seq,
                         WorkspaceEvent::Approved { id, by: by.clone(), height, sig: sig.clone() },
                     );
                 }
@@ -579,7 +586,7 @@ impl State {
                     tracing::warn!(%from, claimed = %by, "dropping a decline claiming another member");
                     return Ok(Reply::Ack);
                 }
-                let outcome = self.register_decline(id.0, &from, envelope.ts, &hash);
+                let outcome = self.register_decline(id.0, &from, envelope.ts, envelope.seq, &hash);
                 // R12: a registered voice belongs in the own log (at the
                 // WIRE stamp — `declined_at` is ts-derived and must replay
                 // to the same value); a parked or refused one does not.
@@ -591,6 +598,7 @@ impl State {
                     self.keep_peer_event(
                         from.clone(),
                         envelope.ts,
+                        envelope.seq,
                         WorkspaceEvent::Declined { id, by: by.clone(), hash: hash.clone() },
                     );
                 }
@@ -633,6 +641,7 @@ impl State {
                     self.keep_peer_event(
                         from.clone(),
                         envelope.ts,
+                        envelope.seq,
                         WorkspaceEvent::Withdrawn { id, by: by.clone() },
                     );
                 }
@@ -653,7 +662,8 @@ impl State {
                 if self.is_chain_governed() && voter == self.member() =>
             {
                 // a replayed refusal must not raise a stale notice (L5)
-                let fresh = self.chain.peer_claim_seq.get(&from).map_or(true, |last| envelope.seq > *last);
+                let fresh = self.chain.peer_claim_seq.get(&from).map_or(true, |last| envelope.seq > *last)
+                    && self.newest_seen(&from, envelope.seq);
                 self.note_peer_claim(&from, head, Some(envelope.seq), crate::chain::PeerClaim::Head);
                 if fresh {
                     let _ = self.cmd_net_vote_refused(id, &from, head);
