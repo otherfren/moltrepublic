@@ -397,6 +397,9 @@ enum Act {
     Announce(u8),
     /// The Byzantine seat sends one frame.
     Byz(Msg),
+    /// B3's window passes at a seat: a silent (dead) old device is no
+    /// longer heard there.
+    Silence(u8),
     /// An operator approves a withdrawn card its seat never approved.
     OperatorApprove(u8, u8),
 }
@@ -577,6 +580,7 @@ impl Config {
                 format!("{} LOSES its lock state{}", s(i), if *tail { " and its chain tail" } else { "" })
             }
             Act::Announce(i) => format!("{} gossips its head", s(i)),
+            Act::Silence(i) => format!("{}: the old device's silence window passes", s(i)),
             Act::Byz(m) => format!("BYZANTINE {}->{} {}", s(&m.from), s(&m.to), self.show_p(&m.p)),
             Act::OperatorApprove(i, x) => format!("{}'s operator approves {}", s(i), c(x)),
         }
@@ -1417,6 +1421,7 @@ impl Config {
                     self.send(&mut w, i, P::Ask, false);
                 }
             }
+            Act::Silence(i) => w.seats[usize::from(*i)].heard_subject = false,
             Act::Byz(m) => {
                 w.byz_acts += 1;
                 let b = usize::from(m.from);
@@ -1488,6 +1493,10 @@ impl Config {
             }
             if s.head == 0 {
                 out.push(Act::CatchUp(u(i)));
+            }
+            let gone = self.cards.iter().filter_map(|c| c.restore_of).all(|z| !w.seats[z].alive);
+            if s.heard_subject && gone {
+                out.push(Act::Silence(u(i)));
             }
             if s.retry.is_some() && self.takes_part(w, i) && self.locked_mode(w, i) {
                 out.push(Act::Retry(u(i)));
@@ -1790,7 +1799,8 @@ impl Config {
         let quiet = |a: &Act| {
             matches!(
                 a,
-                Act::Deliver(_)
+                Act::Silence(_)
+                    | Act::Deliver(_)
                     | Act::Intent(..)
                     | Act::Propose(_)
                     | Act::Drive(_)
