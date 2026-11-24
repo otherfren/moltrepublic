@@ -336,6 +336,19 @@ state; a signature is only its expression at one head+1.
 - On a seat holding a choice, a block of another branch at or below it
   never wins the tie-break (`fork_decision outcome=chosen`).
 
+### 7.3 A displaced restore (v0.1.3)
+
+A `Restored` block that loses its height to a tip swap or a re-base
+returns to the vote like an applied card: the card it sealed reopens with
+the block's change, consent included (a consent binds neither height nor
+`prev`; a v2 one is re-judged at the new height), and the seat's stance
+re-signs. The coordinator's MLS re-key already ran and is not repeated.
+Known gap: if the reopened card then fails - declined, withdrawn, or its
+v2 consent's window passed - the new device stays in the MLS group while
+the chain keeps the old transport anchor, and nothing signals "re-key
+merged, block gone" today. Planned: a status flag for that case and an
+eviction re-key once the card is dead.
+
 ## 8. Threshold and recovery fall out of the chain
 
 - **Real threshold, no FROST.** A gated change is authorized iff its block

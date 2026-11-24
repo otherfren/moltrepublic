@@ -2785,3 +2785,107 @@ fn a_restore_dropped_by_a_rebase_returns_to_the_vote() {
     assert_eq!(walter.proposals[&id].state, ProposalState::Proposed, "back to the vote");
     assert!(walter.chain.proposal_changes.contains_key(&id), "its change is registered again");
 }
+
+/// Dora's restore card `id` with transport anchor `npk` on `st`, as the
+/// gossip lands it.
+fn restore_card(st: &mut crate::State, b: &Builder, id: u64, npk: &str, consent: Option<String>) -> ChainChange {
+    use molt_core::{ProposalId, WorkspaceEvent};
+    let env = st.make_env(
+        "petra".to_string(),
+        WorkspaceEvent::MembershipProposed {
+            id: ProposalId(id),
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk: b.pk("dora"),
+            nostr_pk: Some(npk.to_string()),
+            relays: Vec::new(),
+            consent: consent.clone(),
+        },
+    );
+    st.apply(&env);
+    st.receive_membership_proposal(id, MembershipOp::Restored, "dora", &b.pk("dora"), Some(npk.to_string()), Vec::new(), consent);
+    st.chain.proposal_changes[&id].clone()
+}
+
+/// Seal card `id` on walter at its head + 1: petra's signature, walter's vote.
+fn seal_card(walter: &mut crate::State, b: &Builder, id: u64) {
+    let height = walter.chain.head.as_ref().expect("head").height + 1;
+    let change = walter.proposal_change(id).expect("change");
+    let sig = molt_storage::identity_sign(b.key("petra"), &walter.signing_bytes_at(height, &change));
+    walter.receive_approval(id, "petra", height, &sig);
+    walter.cmd_approve(molt_core::ProposalId(id), None).expect("approves");
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, height, "sealed");
+}
+
+/// Review F1: two consented cards of one seat (3-of-4: consent and one
+/// signature keep each open); the first seals and is displaced. THAT card
+/// reopens with its own change; the other keeps its own.
+#[test]
+fn a_displaced_restore_reopens_the_card_it_sealed() {
+    use molt_core::{ProposalState, WorkspaceEvent};
+    let b = Builder::new(&["petra", "walter", "dora", "erika"], 3);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let (n1, n2) = ("d1".repeat(32), "d2".repeat(32));
+    let c1 = restore_card(&mut walter, &b, 5, &n1, Some(consent_for(&b, "dora", &n1)));
+    let c2 = restore_card(&mut walter, &b, 6, &n2, Some(consent_for(&b, "dora", &n2)));
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 0, "both open");
+    seal_card(&mut walter, &b, 5);
+    let restored = walter.chain.blocks[1].clone();
+    assert_eq!(restored.change, c1);
+    let other = (0..20u64)
+        .map(|i| {
+            let change = ChainChange::Applied { proposal_id: 900 + i, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": i }) };
+            b.seal(1, change, &["petra", "dora", "erika"])
+        })
+        .find(|c| block_hash(&b.republic_id, c) < block_hash(&b.republic_id, &restored))
+        .expect("a lower contender");
+    wire(&mut walter, "erika", 50, WorkspaceEvent::Committed(other));
+    assert_eq!(walter.proposals[&5].state, ProposalState::Proposed, "the sealed card reopens");
+    assert_eq!(walter.chain.proposal_changes[&5], c1);
+    assert_eq!(walter.chain.proposal_changes[&6], c2, "the other card keeps its own change");
+}
+
+/// Two restores of one seat in one dropped suffix map to their own cards.
+#[test]
+fn two_dropped_restores_of_one_seat_reopen_their_own_cards() {
+    use molt_core::{ProposalState, WorkspaceEvent};
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let c1 = restore_card(&mut walter, &b, 5, &"d1".repeat(32), None);
+    seal_card(&mut walter, &b, 5);
+    let c2 = restore_card(&mut walter, &b, 8, &"d2".repeat(32), None);
+    seal_card(&mut walter, &b, 8);
+    let first = walter.chain.blocks[1].clone();
+    wire(&mut walter, "dora", 50, WorkspaceEvent::Committed(lower_contender(&b, &first)));
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 1, "re-based");
+    for (id, change) in [(5, c1), (8, c2)] {
+        assert_eq!(walter.proposals[&id].state, ProposalState::Proposed, "{id} reopens");
+        assert_eq!(walter.chain.proposal_changes[&id], change, "{id} keeps its own change");
+    }
+}
+
+/// The m-1 + consent path: a consented restore displaced re-seals at the
+/// new height with the same consent and the proposer's re-signature.
+#[test]
+fn a_displaced_consented_restore_re_seals_with_its_consent() {
+    use molt_core::WorkspaceEvent;
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut petra = chain_signer("petra", &b, b.blocks.clone());
+    let consent = consent_for(&b, "dora", "");
+    let id = petra.propose_membership(MembershipOp::Restored, "dora", &b.pk("dora"), None, Vec::new(), Some(consent));
+    assert_eq!(petra.chain.head.as_ref().expect("head").height, 1, "petra + consent");
+    let restored = petra.chain.blocks[1].clone();
+    let other = (0..20u64)
+        .map(|i| {
+            let change = ChainChange::Applied { proposal_id: 900 + i, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": i }) };
+            b.seal(1, change, &["walter", "dora"])
+        })
+        .find(|c| block_hash(&b.republic_id, c) < block_hash(&b.republic_id, &restored))
+        .expect("a lower contender");
+    wire(&mut petra, "walter", 50, WorkspaceEvent::Committed(other));
+    let head = petra.chain.head.as_ref().expect("head");
+    assert_eq!(head.height, 2, "re-sealed at the new height");
+    assert_eq!(petra.chain.blocks[2].change, restored.change, "with the same consent");
+    assert!(petra.proposals.get(&id).is_some_and(|p| p.state == molt_core::ProposalState::Applied));
+    verify_chain(&petra.chain.blocks).expect("verifies");
+}

@@ -1344,6 +1344,10 @@ pub(crate) struct ChainProjection {
     pub(crate) catchup_since: u64,
     /// Fork decisions since open (S1 diagnostics).
     pub(crate) fork_decisions: u64,
+    /// The restore cards a sealed `Restored` block closed by its own
+    /// change, newest last: a displaced block reopens exactly these.
+    /// Runtime only; bounded.
+    pub(crate) sealed_restores: std::collections::VecDeque<(u64, molt_core::ChainChange)>,
     /// Test-only: every seat announced the v2 capability (or not).
     #[cfg(test)]
     pub(crate) block_v2_caps_override: Option<bool>,
