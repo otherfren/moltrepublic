@@ -1,6 +1,6 @@
 # Block identity without the signer set
 
-**Status: PLAN, not started; candidate for v0.1.3 beside
+**Status: PLAN, approved 2026-11-24, being built for v0.1.3; candidate for v0.1.3 beside
 `chain_rescue_plan.md`.** Source: public issue #10, part 1 (a 2-of-3
 republic; counts and shapes only). Part 2 of the issue (the stale accept
 window) is fixed in v0.1.2, `docs_archive/transport/delivery_guarantee.md`
@@ -206,7 +206,9 @@ activation vote can carry `block-v2`; the branch choice needs no vote
 (additive variant). Capabilities: one per mechanism; both ship in one
 build.
 
-## 8. Open questions (user)
+## 8. Questions and decisions (user, 2026-11-24)
+
+The user accepted every recommendation below.
 
 | # | question | recommendation |
 |---|---|---|

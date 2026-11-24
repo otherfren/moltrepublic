@@ -244,7 +244,10 @@ field asks for it (Q2).
 | S2 | `BranchChosen` variant, verifier, byte pin, uniqueness record, card + dropped list + digest, signature collection, seal and adoption on the choosers, tie-break precedence | yes, MCP only | 24 |
 | S3 | `abandoned` state and its gates, `restore_gate` exemption, rejoin path, GUI (Branches table, card, abandoned banner; one full window build), wake skill lists | yes | 18 |
 
-## 11. Open questions (user)
+## 11. Questions and decisions (user, 2026-11-24)
+
+The user accepted every recommendation below; Q7 stays open until the
+fork count after block identity v2 is known.
 
 | # | question | recommendation |
 |---|---|---|
