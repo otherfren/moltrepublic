@@ -2435,6 +2435,12 @@ export component FeatureTable inherits Rectangle {
                 DotLabel { tone: Theme.good; label: Strings.feat-st-active; label-size: Theme.fs-cap; }
                 Text { text: Strings.feat-d-always; color: Theme.dim; font-size: Theme.fs-cap; vertical-alignment: center; }
             }
+            // every founding carries it (block_identity_plan.md §4 (b)): fixed
+            Row {
+                AppCheck { label: Strings.feat-block-v2; checked: true; enabled: false; }
+                DotLabel { tone: Theme.good; label: Strings.feat-st-active; label-size: Theme.fs-cap; }
+                Text { text: Strings.feat-d-block-v2; color: Theme.dim; font-size: Theme.fs-cap; vertical-alignment: center; }
+            }
             Row {
                 AppCheck { label: Strings.feat-memory; checked <=> root.memory; enabled: root.editable; }
                 DotLabel { tone: Theme.good; label: Strings.feat-st-active; label-size: Theme.fs-cap; }
@@ -3034,7 +3040,8 @@ export component BusyModal inherits Rectangle {
                 font-size: Theme.fs-cap;
                 wrap: word-wrap;
             }
-            Rectangle {
+            // progress < 0: no bar (a wait without a measure)
+            if root.progress >= 0: Rectangle {
                 height: 10px;
                 border-radius: Theme.win95 ? 0px : 5px;
                 background: Theme.panel-2;
@@ -3058,7 +3065,7 @@ export component BusyModal inherits Rectangle {
                         root.alted();
                     }
                 }
-                AppButton {
+                if root.cancel-label != "": AppButton {
                     label: root.cancel-label;
                     clicked => {
                         root.cancelled();

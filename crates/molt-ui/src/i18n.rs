@@ -138,6 +138,21 @@ fn strict_order_de(t: &str) -> &str {
     }
 }
 
+/// A refusal reason in German: Strict Order Mode, or the `block-v2` gate
+/// naming the seat that holds it back.
+fn refusal_de(t: &str) -> String {
+    if t == "a seat runs an older build" {
+        return "ein Sitz läuft mit einer älteren Version".to_string();
+    }
+    if let Some(seat) = t.strip_suffix(" has not announced") {
+        return format!("{seat} hat sich noch nicht gemeldet");
+    }
+    if let Some(seat) = t.strip_suffix(" runs an older build") {
+        return format!("{seat} läuft mit einer älteren Version");
+    }
+    strict_order_de(t).to_string()
+}
+
 pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
     use molt_core::MoltError as E;
     if lang != 1 {
@@ -149,7 +164,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
     match e {
         E::UnknownProposal(id) => format!("Unbekannter Vorschlag #{}", id.0),
         E::NotGated(sf) => format!("{} ist ungated - nichts vorzuschlagen", sf.as_str()),
-        E::BadPayload(t) => format!("Ungültige Payload: {}", strict_order_de(t)),
+        E::BadPayload(t) => format!("Ungültige Payload: {}", refusal_de(t)),
         E::IndexBuilding { done, total } => {
             format!("Der Wiki-Index wird gebaut ({done} von {total} Dokumenten)")
         }
@@ -172,7 +187,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::ChainLagging { peers_ahead, peer } => {
             format!("{peer} ist {peers_ahead} Block/Blöcke voraus - diese Stimme zählt nicht")
         }
-        E::Branch(t) => format!("Zweigwahl: {t}"),
+        E::Branch(t) => format!("Zweig: {}", crate::branches::reason_de(t)),
         E::Settings(t) => format!("Einstellungen: {t}"),
         E::UnknownWorkspace(w) => format!("Unbekannter Workspace `{w}`"),
         E::WorkspaceBusy(t) => format!("Workspace ist belegt: {t}"),
@@ -181,7 +196,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::UnknownView(sf, v) => format!("Surface {sf:?} hat keine Ansicht `{v}`"),
         E::UnknownMessage(id) => format!("Unbekannte Chat-Nachricht {id}"),
         E::UnknownThread(n) => format!("Unbekannter Thread `{n}`"),
-        E::CannotSign(why) => format!("Stimme nicht signiert: {}", strict_order_de(why)),
+        E::CannotSign(why) => format!("Stimme nicht signiert: {}", refusal_de(why)),
         E::ThreadClosed(n) => format!("Thread `{n}` ist geschlossen"),
         E::NoFile(id) => format!("Nachricht {id} trägt keine geteilte Datei"),
         E::FileUnavailable(id) => format!("Die geteilte Datei an {id} ist nicht mehr verfügbar"),
@@ -1076,6 +1091,28 @@ lexicon! {
     os_col_build: "Build", "Build";
     os_build_unknown_tip: "Older than 0.1.2 or not heard yet", "Älter als 0.1.2 oder noch nicht gehört";
     os_builds_mixed: "Seats run different versions", "Sitze laufen mit unterschiedlichen Versionen";
+    feat_block_v2: "One block per decision", "Ein Block pro Entscheidung";
+    feat_d_block_v2: "The same decision is one block, whoever signed", "Dieselbe Entscheidung ist ein Block, egal wer unterschrieb";
+    os_bv2_label: "Block format", "Blockformat";
+    os_bv2_switch: "Switch block format", "Blockformat wechseln";
+    os_bv2_t_changes: "What changes", "Was sich ändert";
+    os_bv2_changes: "The same decision sealed by different members is one block. Every signature names the block before it.", "Dieselbe Entscheidung, von verschiedenen Mitgliedern besiegelt, ist ein Block. Jede Unterschrift nennt den Block davor.";
+    os_bv2_t_notice: "What you notice", "Was du merkst";
+    os_bv2_notice: "Fewer false \"other branch\" marks. Identical decisions no longer fork.", "Weniger falsche \"anderer Zweig\"-Hinweise. Gleiche Entscheidungen verzweigen nicht mehr.";
+    os_bv2_t_price: "The price", "Der Preis";
+    os_bv2_price: "Every seat needs 0.1.3 or newer. Afterwards older versions cannot open this republic. There is no way back.", "Jeder Sitz braucht 0.1.3 oder neuer. Danach können ältere Versionen diese Republik nicht mehr öffnen. Es gibt keinen Weg zurück.";
+    os_bv2_t_who: "Who decides", "Wer entscheidet";
+    os_bv2_who: "A vote with the usual approvals.", "Eine Abstimmung mit den üblichen Zustimmungen.";
+    os_bv2_card: "Turn on the new block format: blocks sealed by different members count as one, and every signature names the block before it.", "Neues Blockformat einschalten: von verschiedenen Mitgliedern besiegelte Blöcke zählen als einer, und jede Unterschrift nennt den Block davor.";
+    ob_title: "Branches", "Zweige";
+    ob_details: "Details", "Details";
+    ob_export: "Export evidence…", "Beweise exportieren…";
+    ob_import: "Import evidence…", "Beweise importieren…";
+    ob_later: "Repair by vote comes in a later version", "Reparatur per Abstimmung kommt in einer späteren Version";
+    ob_export_title: "Export evidence", "Beweise exportieren";
+    ob_import_title: "Import evidence", "Beweise importieren";
+    ob_pass: "Passphrase (10+ characters)", "Passphrase (10+ Zeichen)";
+    close_busy: "Closing - sending the last messages", "Wird geschlossen - die letzten Nachrichten gehen raus";
     os_other_branch_at: "other branch at", "anderer Zweig bei";
     os_other_branch: "other branch", "anderer Zweig";
     os_dropped: "many repeats from this seat - fetch its history again if messages are missing", "viele Wiederholungen von diesem Sitz - Verlauf neu holen, wenn Nachrichten fehlen";

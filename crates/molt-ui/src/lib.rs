@@ -60,6 +60,7 @@ pub use app::run_app;
 mod actions;
 mod alerts;
 mod app;
+mod branches;
 mod channels;
 mod chat_log;
 mod download_status;

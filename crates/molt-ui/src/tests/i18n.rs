@@ -416,3 +416,56 @@ fn the_majority_strings_are_compact() {
     let seats = molt_core::majority::VAULT_MIN_SEATS.to_string();
     assert!(Lexicon::en().feat_vault_members.contains(&seats) && Lexicon::de().feat_vault_members.contains(&seats));
 }
+
+/// The branch reasons and notices the dark build can produce, and the
+/// block-v2 gate, in German; compact, no em dash.
+#[test]
+fn branch_and_block_format_texts_render_german_and_compact() {
+    use molt_core::MoltError;
+    let de = |e: &MoltError| crate::i18n::localize_error(1, e);
+    assert_eq!(de(&MoltError::Branch("not available in this build".into())), "Zweig: in diesem Build nicht verfügbar");
+    assert_eq!(
+        de(&MoltError::Branch("needs a majority of the members: 2 of 4 is not one".into())),
+        "Zweig: braucht eine Mehrheit der Mitglieder: 2 von 4 ist keine"
+    );
+    assert_eq!(de(&MoltError::Branch("already chose at 12".into())), "Zweig: schon bei 12 gewählt");
+    assert_eq!(de(&MoltError::Branch("something new".into())), "Zweig: something new", "an unknown tail survives");
+    assert_eq!(crate::i18n::localize_error(0, &MoltError::Branch("no chain yet".into())), "branch: no chain yet");
+    assert_eq!(
+        de(&MoltError::BadPayload("bo runs an older build".into())),
+        "Ungültige Payload: bo läuft mit einer älteren Version"
+    );
+    assert_eq!(
+        de(&MoltError::BadPayload("bo has not announced".into())),
+        "Ungültige Payload: bo hat sich noch nicht gemeldet"
+    );
+    let toast = |lang, n: &str| crate::branches::notice_toast(lang, n).expect("a branch notice");
+    assert_eq!(toast(0, "branch-exported:/tmp/a"), ("Evidence saved: /tmp/a".to_string(), false));
+    assert_eq!(toast(1, "branch-imported:2:1"), ("Beweise gelesen: 2 Zweige, 1 Karten".to_string(), false));
+    assert_eq!(
+        toast(1, "branch-import-failed:another republic"),
+        ("Beweise nicht gelesen: andere Republik".to_string(), true)
+    );
+    assert!(toast(0, "branch-export-failed:disk full").1);
+    assert_eq!(toast(0, "branch-abandoned:7:ana,bo").0, "Branch at block 7 abandoned: ana, bo");
+    assert_eq!(toast(1, "branch-stale:7").0, "Zweigwahl bei Block 7 ist veraltet");
+    assert!(crate::branches::notice_toast(0, "saved").is_none());
+    for l in [Lexicon::en(), Lexicon::de()] {
+        for s in [
+            l.feat_block_v2,
+            l.feat_d_block_v2,
+            l.os_bv2_label,
+            l.os_bv2_switch,
+            l.os_bv2_changes,
+            l.os_bv2_notice,
+            l.os_bv2_price,
+            l.os_bv2_who,
+            l.os_bv2_card,
+            l.ob_title,
+            l.ob_later,
+            l.close_busy,
+        ] {
+            assert!(!s.is_empty() && !s.contains('\u{2014}'), "{s:?}");
+        }
+    }
+}

@@ -293,12 +293,12 @@ fn the_feature_table_states_each_rows_status() {
     let count = |ui: &AppWindow, t: &str| Handle::find_by_accessible_label(ui, t).count();
     let (ui, _shown) = setup_form(3, 5);
     let s = ui.global::<Strings>();
-    for locked in [s.get_feat_chat(), s.get_feat_files()] {
+    for locked in [s.get_feat_chat(), s.get_feat_files(), s.get_feat_block_v2()] {
         let row = checks_in(&window_root(&ui), &locked);
         assert_eq!(row.len(), 1, "{locked}: one row");
         assert!(has_text(&row[0], "✓"), "{locked}: always on");
     }
-    assert_eq!(count(&ui, &s.get_feat_st_active()), 3, "chat, file sharing, shared memory");
+    assert_eq!(count(&ui, &s.get_feat_st_active()), 4, "chat, file sharing, block format, shared memory");
     assert_eq!(count(&ui, &s.get_feat_st_wip()), 3, "kanban, vault, wallet");
     assert_eq!(count(&ui, &s.get_feat_st_off()), 0);
     for name in [s.get_feat_quests(), s.get_feat_vault(), s.get_feat_wallet()] {
@@ -325,7 +325,7 @@ fn the_feature_table_states_each_rows_status() {
             .iter()
             .flat_map(|t| xs(t))
             .collect();
-        assert_eq!(status.len(), 6, "{m}-of-{n}: one status per row");
+        assert_eq!(status.len(), 7, "{m}-of-{n}: one status per row");
         assert!(status.iter().all(|x| (x - status[0]).abs() < 1.0), "{m}-of-{n}: status in one column: {status:?}");
     }
 }

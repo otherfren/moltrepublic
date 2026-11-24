@@ -490,6 +490,9 @@ pub(crate) fn feature_name(lang: i32, key: &str) -> String {
     if key == molt_core::chain::CHAIN_LOCK_FEATURE {
         return if lang == 1 { "Kettensperre" } else { "Chain lock" }.to_string();
     }
+    if key == molt_core::chain::BLOCK_V2_FEATURE {
+        return crate::i18n::Lexicon::of(lang).feat_block_v2.to_string();
+    }
     Surface::parse(key).map_or_else(|| key.to_string(), |sf| surface_name(lang, sf).to_string())
 }
 

@@ -22,7 +22,26 @@ pub(crate) fn resync_outcome(ui: &AppWindow, outcome: Result<molt_core::Reply, m
     }
 }
 
+/// The evidence dialog's command: export to `path` or import from it.
+pub(crate) fn branch_evidence_command(mode: &str, path: &str, passphrase: &str) -> Option<Command> {
+    let (path, passphrase) = (path.trim().to_string(), passphrase.to_string());
+    match mode {
+        "export" => Some(Command::BranchExport { dest: path, passphrase }),
+        "import" => Some(Command::BranchImport { path, passphrase }),
+        _ => None,
+    }
+}
+
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
+    {
+        let cx = ctx.clone();
+        ui.on_branch_evidence(move |mode, path, passphrase| {
+            if let Some(cmd) = branch_evidence_command(&mode, &path, &passphrase) {
+                cx.issue(cmd);
+            }
+        });
+    }
+
     {
         let cx = ctx.clone();
         ui.on_resync_seat(move |member, give_up| {
