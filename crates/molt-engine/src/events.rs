@@ -876,6 +876,8 @@ impl State {
         self.delivery.ack_due.clear();
         self.delivery.last_own_ackable = 0;
         self.delivery.inbound.clear();
+        self.delivery.probed.clear();
+        self.delivery.behind.clear();
         self.delivery.dups.clear();
         self.delivery.seen_high.clear();
         // send-failure presence pins belong to the OLD workspace's mesh —

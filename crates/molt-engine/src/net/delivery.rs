@@ -55,6 +55,11 @@ const SESSION_MAX: usize = 65_536;
 /// Re-publications of a listed seq that never landed before it is given up.
 const LISTED_TRIES: u8 = 3;
 
+/// Unanswered listing asks before a sender's open probe stops, once it
+/// answered one; a sender that never answered gets one (it has nothing
+/// above, or an older build answers none).
+const PROBE_TRIES: u8 = 3;
+
 /// Repeats from one seat that make a hint.
 const DUP_EPISODE_MIN: u32 = 32;
 
@@ -130,6 +135,11 @@ pub(crate) struct SenderHold {
     answers: bool,
     /// A window reset for a restore: owed from seq 0.
     from_start: bool,
+    /// Since this session opened, nothing proves the sender has no more:
+    /// its frames read before a restart may be gone with the hold, and the
+    /// relay copies no longer open. Ask for the listing until it ends.
+    probe: bool,
+    probe_asks: u8,
 }
 
 impl SenderHold {
@@ -187,6 +197,17 @@ impl SenderHold {
             self.settled.pop_first();
         }
         true
+    }
+
+    /// Since when this stream is known to be behind: something held, or
+    /// owed and not here.
+    fn behind_since(&self) -> Option<u64> {
+        let missing = self.missing.values().map(|g| g.since).min();
+        let held = if self.held.is_empty() { None } else { self.since };
+        match (missing, held) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Chain `seq` (accepted, predecessor `prev`) onto the frontier.
@@ -876,7 +897,17 @@ impl State {
         } else {
             *self.delivery.replay_quiet_since.get_or_insert(now)
         };
-        let replaying = replaying || now.saturating_sub(quiet_since) < GAP_ASK_AFTER_SECS;
+        let replaying = replaying
+            || now.saturating_sub(quiet_since) < GAP_ASK_AFTER_SECS
+            || self.drop_seam.holds_wants();
+        // the first replay read through: what it brought is not asked for
+        let caught_up = self.group_net.as_ref().is_some_and(|g| {
+            let h = g.health.borrow();
+            h.subscribed && !h.catching_up
+        });
+        if caught_up && !replaying {
+            self.open_probes(&me);
+        }
         let members: Vec<MemberId> = self.delivery.inbound.keys().cloned().collect();
         for m in members {
             // a listing complete up to some seq: raise there
@@ -953,7 +984,7 @@ impl State {
             }
             // anything known above the frontier: ask for the listing of it
             let above = !hold.ahead.is_empty() || !hold.held.is_empty() || !hold.missing.is_empty();
-            let list_due = above
+            let list_due = (above || hold.probe)
                 && hold.listing.is_none()
                 && hold.listing_asked_at.map_or(true, |t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
                 && hold.since.map_or(true, |s| now.saturating_sub(s) >= GAP_ASK_AFTER_SECS);
@@ -963,6 +994,10 @@ impl State {
                     let want = molt_net::gap::GapWant::range(me.clone(), m.clone(), hold.frontier, hold.cap());
                     if group.handle.publish_control(want.to_frame()) {
                         hold.listing_asked_at = Some(now);
+                        if hold.probe && !above {
+                            hold.probe_asks = hold.probe_asks.saturating_add(1);
+                            hold.probe = hold.probe_asks < if hold.answers { PROBE_TRIES } else { 1 };
+                        }
                     }
                 }
                 if !ask.is_empty() {
@@ -994,6 +1029,11 @@ impl State {
                 self.settle_gap(&m, seq, via);
             }
             self.apply_ready(&m, "filled");
+        }
+        let behind = self.behind_peers();
+        if behind != self.delivery.behind {
+            self.delivery.behind = behind;
+            self.recompute_net_health();
         }
     }
 
@@ -1053,6 +1093,10 @@ impl State {
         let Some(hold) = self.delivery.inbound.get_mut(from) else { return };
         hold.answers = true;
         hold.passed_at = None;
+        // a full page, or a range that reached its width: there may be more
+        hold.probe = hold.probe
+            && (own.len() >= molt_net::gap::GAP_LIST_MAX || through >= after.saturating_add(molt_net::gap::GAP_RANGE_MAX));
+        hold.probe_asks = 0;
         if after > hold.frontier || through <= hold.frontier {
             return;
         }
@@ -1076,6 +1120,39 @@ impl State {
             }
         }
         self.apply_ready(from, "listed");
+    }
+
+    /// Arm the open probe once per session for every sender this seat holds
+    /// history with.
+    fn open_probes(&mut self, me: &MemberId) {
+        let fresh: Vec<MemberId> = self
+            .delivery
+            .accepted
+            .iter()
+            .filter(|(m, w)| *m != me && w.high > 0 && !self.delivery.probed.contains(*m))
+            .map(|(m, _)| m.clone())
+            .collect();
+        for m in fresh {
+            self.delivery.probed.insert(m.clone());
+            let Some(w) = self.delivery.accepted.get(&m) else { continue };
+            let (start, links) = (if w.frontier > 0 { w.frontier } else { w.high }, w.links.clone());
+            self.delivery.inbound.entry(m).or_insert_with(|| SenderHold::new(start, links)).probe = true;
+        }
+    }
+
+    /// The senders whose stream this seat knows it is behind on, for at
+    /// least the ask delay.
+    pub(crate) fn behind_peers(&self) -> Vec<MemberId> {
+        let now = self.presence_now();
+        let mut peers: Vec<MemberId> = self
+            .delivery
+            .inbound
+            .iter()
+            .filter(|(_, h)| h.behind_since().is_some_and(|s| now.saturating_sub(s) >= GAP_ASK_AFTER_SECS))
+            .map(|(m, _)| m.clone())
+            .collect();
+        peers.sort();
+        peers
     }
 
     /// A hold whose only content is a missing seq (a D7-refused first frame).

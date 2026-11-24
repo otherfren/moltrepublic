@@ -85,6 +85,8 @@ pub(crate) struct DropSeam {
     pub(crate) delay_ms: std::sync::atomic::AtomicU64,
     /// A partition: every inbound envelope of these seats is lost.
     pub(crate) cut: Mutex<std::collections::HashSet<MemberId>>,
+    /// No gap want or listing ask leaves.
+    pub(crate) hold_wants: std::sync::atomic::AtomicBool,
 }
 
 impl DropSeam {
@@ -99,6 +101,10 @@ impl DropSeam {
 
     pub(crate) fn take_regress(&self) -> Option<(MemberId, u64)> {
         self.regress.lock().ok().and_then(|mut r| r.take())
+    }
+
+    pub(crate) fn holds_wants(&self) -> bool {
+        self.hold_wants.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub(crate) fn parks_rekey(&self) -> bool {

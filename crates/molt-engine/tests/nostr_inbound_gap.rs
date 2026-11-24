@@ -146,3 +146,88 @@ async fn a_restart_with_one_withheld_early_envelope_is_not_deafened() {
     a.execute(Command::CloseWorkspace).await.expect("close a");
     b.execute(Command::CloseWorkspace).await.expect("close b");
 }
+
+async fn knows_far(w: &WalletHandle) -> bool {
+    match w.execute(Command::LIST_ALL_PROPOSALS).await.expect("list proposals") {
+        molt_core::Reply::Proposals { proposals, .. } => {
+            proposals.iter().any(|p| p.payload.get("value").and_then(|v| v.as_str()) == Some("Far"))
+        }
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+async fn status(w: &WalletHandle) -> molt_core::StatusView {
+    match w.execute(Command::Status).await.expect("status") {
+        molt_core::Reply::Status(s) => s,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// The field shape on a long history: a seat holds a sender's stream behind
+/// a gap (it asks nothing while a replay runs) while more than a window of
+/// newer envelopes arrives, the sender's proposal among them; it restarts,
+/// and the relay copies of what it read no longer open. It must show that
+/// it is behind and fetch the tail - the proposal included - without the
+/// sender's resend round and without any later traffic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restart_that_lost_a_far_ahead_hold_shows_it_is_behind_and_fetches_the_tail() {
+    backed_off_senders();
+    let (_relay, url) = store_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b) = found_pair(tmp.path(), &[&url], "Gap").await;
+    say(&a, "warm").await;
+    assert!(shows_all(&b, &["warm".to_string()], Duration::from_secs(30)).await.is_some());
+    tokio::time::sleep(Duration::from_secs(5)).await; // b's sheet lands
+
+    const SPAN: usize = 1_040;
+    b.__hold_gap_wants(true);
+    b.__drop_inbound_chat("t0");
+    for i in 0..SPAN {
+        say(&a, &format!("t{i}")).await;
+    }
+    a.execute(Command::Propose {
+        surface: molt_core::Surface::Organization,
+        payload: serde_json::json!({"op": "set_name", "value": "Far"}),
+    })
+    .await
+    .expect("propose");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let held = status(&b).await.inbound_held.iter().map(|h| h.held).max().unwrap_or(0);
+        if usize::try_from(held).unwrap_or(usize::MAX) >= SPAN {
+            break;
+        }
+        assert!(Instant::now() < deadline, "b never held the span: {held}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(!knows_far(&b).await, "the proposal is held, not applied");
+
+    let ws_b = read_session(&b).await.active_workspace.clone();
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+    b.__hold_gap_wants(false);
+    b.execute(Command::OpenWorkspace { id: ws_b }).await.expect("reopen b");
+
+    // (i) behind, visibly
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let s = status(&b).await;
+        let row = s.inbound_held.iter().any(|h| h.member == "petra" && h.missing > 0);
+        let health = format!("{:?}", read_session(&b).await.net_health);
+        if row && health.contains("behind") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "b never showed it is behind: rows={:?} health={health}", s.inbound_held);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    // (ii) the tail and the proposal, by asking
+    let deadline = Instant::now() + Duration::from_secs(600);
+    while !knows_far(&b).await {
+        assert!(Instant::now() < deadline, "the proposal never reached b");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let want: Vec<String> = (0..SPAN).map(|i| format!("t{i}")).collect();
+    assert!(shows_all(&b, &want, Duration::from_secs(120)).await.is_some(), "the chat tail");
+
+    a.execute(Command::CloseWorkspace).await.expect("close a");
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+}
