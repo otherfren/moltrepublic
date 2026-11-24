@@ -247,6 +247,28 @@ pub struct ChainBlock {
 /// path. `height`/`republic_id` arguments are ignored for the genesis (it is
 /// always height 0 and carries its own id).
 pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> Vec<u8> {
+    change_bytes(republic_id, height, None, change)
+}
+
+/// The fields every non-genesis change starts with: the tag, the republic
+/// id, the height, and from v3 on the predecessor's identity.
+fn change_head(republic_id: &str, height: u64, prev: Option<&str>) -> Vec<u8> {
+    let mut out = Vec::new();
+    match prev {
+        None => out.extend_from_slice(b"molt-chain-change-v2\0"),
+        Some(_) => out.extend_from_slice(b"molt-chain-change-v3\0"),
+    }
+    put_bytes(&mut out, republic_id.as_bytes());
+    out.extend_from_slice(&height.to_le_bytes());
+    if let Some(prev) = prev {
+        put_bytes(&mut out, prev.as_bytes());
+    }
+    out
+}
+
+/// [`approval_bytes`] (`prev` = `None`) and [`approval_bytes_v3`] in one
+/// writer, so no variant can take one layout's head without the other's.
+fn change_bytes(republic_id: &str, height: u64, prev: Option<&str>, change: &ChainChange) -> Vec<u8> {
     match change {
         ChainChange::Genesis {
             name: _,
@@ -271,10 +293,7 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             surface,
             payload,
         } => {
-            let mut out = Vec::new();
-            out.extend_from_slice(b"molt-chain-change-v2\0");
-            put_bytes(&mut out, republic_id.as_bytes());
-            out.extend_from_slice(&height.to_le_bytes());
+            let mut out = change_head(republic_id, height, prev);
             out.push(1); // variant tag: applied
             out.extend_from_slice(&proposal_id.to_le_bytes());
             put_bytes(&mut out, surface.as_str().as_bytes());
@@ -291,10 +310,7 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             relays,
             consent,
         } => {
-            let mut out = Vec::new();
-            out.extend_from_slice(b"molt-chain-change-v2\0");
-            put_bytes(&mut out, republic_id.as_bytes());
-            out.extend_from_slice(&height.to_le_bytes());
+            let mut out = change_head(republic_id, height, prev);
             out.push(2); // variant tag: membership
             out.push(match op {
                 MembershipOp::Joined => 0,
@@ -337,10 +353,7 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
         }
         ChainChange::Checkpoint { upto, state_hash }
         | ChainChange::CheckpointFolded { upto, state_hash } => {
-            let mut out = Vec::new();
-            out.extend_from_slice(b"molt-chain-change-v2\0");
-            put_bytes(&mut out, republic_id.as_bytes());
-            out.extend_from_slice(&height.to_le_bytes());
+            let mut out = change_head(republic_id, height, prev);
             // the folded cut is its own tag: the two commit to different
             // states, so their signatures must not be interchangeable
             out.push(match change {
@@ -352,10 +365,7 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             out
         }
         ChainChange::CheckpointVault { upto, state_hash, wiki_folded } => {
-            let mut out = Vec::new();
-            out.extend_from_slice(b"molt-chain-change-v2\0");
-            put_bytes(&mut out, republic_id.as_bytes());
-            out.extend_from_slice(&height.to_le_bytes());
+            let mut out = change_head(republic_id, height, prev);
             out.push(5);
             out.push(u8::from(*wiki_folded));
             out.extend_from_slice(&upto.to_le_bytes());
@@ -363,10 +373,7 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             out
         }
         ChainChange::BranchChosen { base_height, base_hash, tip_height, tip_hash, chosen_root, dropped } => {
-            let mut out = Vec::new();
-            out.extend_from_slice(b"molt-chain-change-v2\0");
-            put_bytes(&mut out, republic_id.as_bytes());
-            out.extend_from_slice(&height.to_le_bytes());
+            let mut out = change_head(republic_id, height, prev);
             out.push(6);
             out.extend_from_slice(&base_height.to_le_bytes());
             put_bytes(&mut out, base_hash.as_bytes());
@@ -921,17 +928,7 @@ pub fn block_id_bytes(republic_id: &str, block: &ChainBlock) -> Vec<u8> {
 /// height, so a signature is valid on one branch only. The genesis keeps
 /// its roster bytes.
 pub fn approval_bytes_v3(republic_id: &str, height: u64, prev: &str, change: &ChainChange) -> Vec<u8> {
-    const V2: &[u8] = b"molt-chain-change-v2\0";
-    let v2 = approval_bytes(republic_id, height, change);
-    if matches!(change, ChainChange::Genesis { .. }) {
-        return v2;
-    }
-    let fields = V2.len() + 4 + republic_id.len() + 8;
-    let mut out = b"molt-chain-change-v3\0".to_vec();
-    out.extend_from_slice(&v2[V2.len()..fields]);
-    put_bytes(&mut out, prev.as_bytes());
-    out.extend_from_slice(&v2[fields..]);
-    out
+    change_bytes(republic_id, height, Some(prev), change)
 }
 
 #[cfg(test)]
@@ -941,6 +938,45 @@ mod branch_tests;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// v3 over the applied and the membership arm: the v2 fields with
+    /// `prev` after the height, nothing else moved.
+    #[test]
+    fn approval_bytes_v3_pins_every_arm() {
+        let applied = ChainChange::Applied { proposal_id: 9, surface: Surface::Memory, payload: json!({ "op": "x" }) };
+        let mut want = b"molt-chain-change-v3\0".to_vec();
+        pin_put(&mut want, b"f00");
+        want.extend_from_slice(&7u64.to_le_bytes());
+        pin_put(&mut want, b"ab");
+        want.push(1);
+        want.extend_from_slice(&9u64.to_le_bytes());
+        pin_put(&mut want, b"memory");
+        pin_put(&mut want, br#"{"op":"x"}"#);
+        assert_eq!(approval_bytes_v3("f00", 7, "ab", &applied), want);
+        let restored = ChainChange::Membership {
+            op: MembershipOp::Restored,
+            member: "petra".to_string(),
+            identity_pk: "aa".to_string(),
+            nostr_pk: None,
+            relays: vec!["r".to_string()],
+            consent: Some("c".to_string()),
+        };
+        let mut want = b"molt-chain-change-v3\0".to_vec();
+        pin_put(&mut want, b"f00");
+        want.extend_from_slice(&7u64.to_le_bytes());
+        pin_put(&mut want, b"ab");
+        want.push(2);
+        want.push(1);
+        pin_put(&mut want, b"petra");
+        pin_put(&mut want, b"aa");
+        want.push(0);
+        want.push(1);
+        want.extend_from_slice(&1u64.to_le_bytes());
+        pin_put(&mut want, b"r");
+        want.push(2);
+        pin_put(&mut want, b"c");
+        assert_eq!(approval_bytes_v3("f00", 7, "ab", &restored), want);
+    }
 
     #[test]
     fn approval_bytes_v3_pin() {
