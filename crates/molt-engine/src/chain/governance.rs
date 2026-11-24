@@ -267,6 +267,9 @@ impl State {
         if self.chain.head.is_none() {
             return Some("no chain yet".to_string());
         }
+        if self.branch_abandoned() {
+            return Some(super::branch_run::ABANDONED.to_string());
+        }
         // G: a chain that runs the lock is beyond this build: no signature
         if self.lock_chain_unsupported() {
             return Some(crate::chain::LOCK_CHAIN_UNSUPPORTED.to_string());
@@ -698,7 +701,7 @@ impl State {
             return;
         };
         // a chain that runs the lock is extended by the lock only
-        if self.lock_chain_unsupported() {
+        if self.lock_chain_unsupported() || self.branch_abandoned() {
             return;
         }
         // already committed?
@@ -2123,7 +2126,8 @@ impl State {
     }
 
     pub(crate) fn serve_open_governance(&mut self) {
-        let events = self.open_governance_events();
+        let mut events = self.open_governance_events();
+        events.extend(self.branch_open_events());
         let me = self.member();
         for body in events {
             let env = self.make_env(me.clone(), body);

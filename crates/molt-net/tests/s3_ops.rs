@@ -94,7 +94,7 @@ async fn stub_server(status: u16) -> (String, Arc<Mutex<Seen>>) {
 fn client_for(endpoint: &str) -> S3Client {
     let config = S3Config::from_settings(endpoint, "AKIAEXAMPLE", "secret-example", "molt-bucket", "")
         .expect("config parses");
-    S3Client::new(config, Dialer::Direct)
+    S3Client::new(config, Dialer::direct())
 }
 
 #[tokio::test]

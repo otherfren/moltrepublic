@@ -1,6 +1,19 @@
 # Chain rescue: m members choose a branch
 
-**Status: PLAN, not started; release v0.1.3 (user decision 2026-11-23).**
+**Status: PARTLY BUILT (v0.1.3, 2026-11-24): the block, its verification,
+the evidence bundle, `branch_status`, the vote with the durable choice
+record, the seal and its adoption, the stop of a left-behind seat and the
+`restore_gate` exemption are in the engine and on MCP (`chain/branch.rs`,
+`chain/branch_run.rs`). Open: the GUI (Branches table, card, abandoned
+banner), the founding gate of the majority rule (agent B), the
+`molt-branch-choice-v1` capability gate, a multi-member restore commit
+(§7.2), a relay keystone of the full split; Q7 not built.**
+Built as decided (Q1-Q4): no reset without a second branch; the bundle
+file is the channel; dropped wiki/quests cards return as open proposals
+with stances cleared; the wake skill denies every branch tool and approval
+names the dropped-list digest. The signatures travel as their own
+`BranchChoiceApproved` frame, not `Approved`, so the head+1 machinery
+never sees them.
 When m members notice a split that does not heal and agree to set the
 chain back, they VOTE on which branch to keep. That vote is the next
 block on the chosen branch. The other n - m seats rejoin explicitly, by
@@ -57,8 +70,10 @@ BranchChosen {
     tip_height: u64,           // the chosen tip; == block height - 1
     tip_hash: String,          // the chosen tip's link hash; == block.prev
     chosen_root: String,       // chosen branch's block at base_height + 1 ("" when tip == base)
-    dropped: Vec<HeightHash>,  // per abandoned branch: its block at base_height + 1 and its head, as the proposer saw them
+    dropped: Vec<DroppedRun>,  // per abandoned branch: its block at base_height + 1 and its head, as the proposer saw them;
+                               // plus the chosen branch above the tip (from_height = tip_height + 1)
 }
+DroppedRun { from_height, first_hash, head_height, head_hash }
 ```
 
 | question | answer | code |
@@ -244,7 +259,10 @@ field asks for it (Q2).
 | S2 | `BranchChosen` variant, verifier, byte pin, uniqueness record, card + dropped list + digest, signature collection, seal and adoption on the choosers, tie-break precedence | yes, MCP only | 24 |
 | S3 | `abandoned` state and its gates, `restore_gate` exemption, rejoin path, GUI (Branches table, card, abandoned banner; one full window build), wake skill lists | yes | 18 |
 
-## 11. Open questions (user)
+## 11. Questions and decisions (user, 2026-11-24)
+
+The user accepted every recommendation below; Q7 stays open until the
+fork count after block identity v2 is known.
 
 | # | question | recommendation |
 |---|---|---|

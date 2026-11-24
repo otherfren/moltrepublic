@@ -56,10 +56,12 @@ async fn adopt_relay(w: &WalletHandle, url: &str) {
     w.execute(Command::RelayClearnetSession { unlock: true }).await.expect("unlock");
 }
 
-/// A 2-of-4 republic with `features` over `url`, founder first.
+/// A 2-of-4 republic (founded before the majority rule, via the seam)
+/// with `features` over `url`, founder first.
 async fn found(root: &std::path::Path, url: &str, features: &[&str]) -> Vec<WalletHandle> {
     let a = engine(&root.join(NAMES[0]));
     adopt_relay(&a, url).await;
+    a.__allow_minority_threshold(true);
     a.execute(Command::CreateStart { name: "R".into(), member: "a".into(), threshold: 2, members: 4, relays: Vec::new() })
         .await
         .expect("founding starts");
@@ -72,6 +74,7 @@ async fn found(root: &std::path::Path, url: &str, features: &[&str]) -> Vec<Wall
     for (i, link) in links.into_iter().enumerate() {
         let w = engine(&root.join(NAMES[i + 1]));
         adopt_relay(&w, url).await;
+        w.__allow_minority_threshold(true);
         w.execute(Command::JoinStart { invite: link, member: NAMES[i + 1].into(), relays: Vec::new() }).await.expect("join");
         all.push(w);
     }
@@ -217,6 +220,27 @@ async fn vault_tools_drive_seal_grant_read() {
     assert_eq!((read["text"].as_str(), read["name"].as_str()), (Some(text), Some("n")));
     let refused = call(b, SEAT, "vault_read", json!({ "secret_id": sid })).await.expect_err("b is not the reader");
     assert!(refused.contains("not the reader"), "{refused}");
+}
+
+/// The majority rule at the MCP door: `create_start` refuses 2m <= n,
+/// naming the smallest allowed m; a majority passes that gate.
+#[tokio::test]
+async fn create_start_over_mcp_refuses_a_threshold_that_is_no_majority() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let w = engine(tmp.path());
+    let port = serve(&w).await;
+    for (m, n, min) in [(2, 4, 3), (2, 5, 3), (3, 6, 4)] {
+        let err = call(port, SEAT, "create_start", json!({ "name": "R", "member": "a", "threshold": m, "members": n }))
+            .await
+            .expect_err("no majority");
+        assert!(err.contains(&format!("needs a majority: at least {min} of {n}")), "{m}-of-{n}: {err}");
+    }
+    for (m, n) in [(2, 3), (3, 4), (3, 5)] {
+        let err = call(port, SEAT, "create_start", json!({ "name": "R", "member": "a", "threshold": m, "members": n }))
+            .await
+            .expect_err("no relay here");
+        assert!(!err.contains("majority"), "{m}-of-{n}: {err}");
+    }
 }
 
 #[tokio::test]

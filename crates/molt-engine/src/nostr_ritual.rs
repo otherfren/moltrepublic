@@ -64,6 +64,21 @@ const REPLAY_WAIT: Duration = Duration::from_secs(120);
 const PUBLISH_RETRY_INITIAL: Duration = Duration::from_secs(2);
 const PUBLISH_RETRY_CAP: Duration = Duration::from_secs(60);
 
+/// Between two attempts: after `NetError::Withdrawn` wait for consent (no
+/// timer, no dial), else for `wait`. `false` = never again (the engine ended).
+async fn pause_retry(
+    e: &molt_net::NetError,
+    wait: Duration,
+    consent: impl std::future::Future<Output = bool>,
+) -> bool {
+    if matches!(e, molt_net::NetError::Withdrawn) {
+        consent.await
+    } else {
+        tokio::time::sleep(wait).await;
+        true
+    }
+}
+
 /// What the founder inbox task needs to render one seat's v2 link.
 pub(crate) struct SeatInvite {
     pub seat: u32,
@@ -87,6 +102,8 @@ pub(crate) struct JoinCtx {
     pub generation: u64,
     /// This build runs the chain lock: the JoinRequest declares it.
     pub lock: bool,
+    /// Test seam: ratify a threshold that is no majority.
+    pub minority_ok: bool,
 }
 
 /// How many `Committed` frames the rejoiner buffers while it waits for a
@@ -423,8 +440,7 @@ pub(crate) fn spawn_recover_frames(
             let mut wait = PUBLISH_RETRY_INITIAL;
             while let Err(e) = net.send_ritual(&to, &msg).await {
                 tracing::warn!(what, error = %e, retry_in_s = wait.as_secs(), "recover_frame=unsent");
-                tokio::time::sleep(wait).await;
-                if tx.upgrade().is_none() {
+                if !pause_retry(&e, wait, net.until_dialable()).await || tx.upgrade().is_none() {
                     return;
                 }
                 wait = (wait * 2).min(PUBLISH_RETRY_CAP);
@@ -474,9 +490,11 @@ pub(crate) fn spawn_rekey_delivery(
                 }
                 Err(e) => {
                     tracing::warn!(%member, attempt, error = %e, retry_in_s = wait.as_secs(), "rekey_commit=unsent");
+                    if !pause_retry(&e, wait, channel.until_dialable()).await {
+                        return;
+                    }
                 }
             }
-            tokio::time::sleep(wait).await;
             if tx.upgrade().is_none() {
                 return;
             }
@@ -493,9 +511,11 @@ pub(crate) fn spawn_rekey_delivery(
                 }
                 Err(e) => {
                     tracing::warn!(%member, attempt, error = %e, retry_in_s = wait.as_secs(), "recover_welcome=unsent");
+                    if !pause_retry(&e, wait, net.until_dialable()).await {
+                        return;
+                    }
                 }
             }
-            tokio::time::sleep(wait).await;
             if tx.upgrade().is_none() {
                 return;
             }
@@ -696,10 +716,9 @@ pub(crate) fn spawn_welcome(
                 note: format!("⚠ a welcome did not publish - {e} · retrying"),
                 generation: Some(generation),
             };
-            if !send_cmd(&tx, note).await {
+            if !send_cmd(&tx, note).await || !pause_retry(&e, wait, net.until_dialable()).await {
                 return;
             }
-            tokio::time::sleep(wait).await;
             wait = (wait * 2).min(PUBLISH_RETRY_CAP);
         }
     })
@@ -2023,6 +2042,7 @@ async fn member_join(
 
     // the joiner's identity — derived exactly as the ritual anchors it
     let mut seat = MemberSeat::derive(h.seat, &h.ticket, &ctx.phrase)?;
+    seat.minority_ok = ctx.minority_ok;
     if ctx.lock {
         seat.caps.push(molt_core::chain::CHAIN_LOCK_CAP.to_string());
     }
@@ -2139,6 +2159,36 @@ async fn member_join(
 
 #[cfg(test)]
 mod tests {
+    /// A retry that met a withdrawn relay set waits for consent, not for
+    /// its timer, and stops for good once the engine (the keeper) is gone.
+    #[tokio::test(start_paused = true)]
+    async fn a_withdrawn_retry_waits_for_consent_not_for_its_timer() {
+        let url = "wss://relay.example.org".to_string();
+        let keeper = molt_net::dial::RelayGateKeeper::default();
+        let net = molt_net::ritual_net::GroupChannel::new(
+            molt_net::dial::Dialer::direct().with_gate(keeper.gate()),
+            vec![url.clone()],
+            [7u8; 32],
+        );
+        let wait = std::time::Duration::from_secs(2);
+        let waiting = tokio::spawn({
+            let net = net.clone();
+            async move { super::pause_retry(&molt_net::NetError::Withdrawn, wait, net.until_dialable()).await }
+        });
+        tokio::time::sleep(wait * 100).await;
+        assert!(!waiting.is_finished(), "a timer ended the wait");
+        keeper.set(std::slice::from_ref(&url));
+        assert!(waiting.await.expect("task"), "consent resumes it");
+
+        keeper.set(&[]);
+        let parked = tokio::spawn(async move {
+            super::pause_retry(&molt_net::NetError::Withdrawn, wait, net.until_dialable()).await
+        });
+        tokio::task::yield_now().await;
+        drop(keeper);
+        assert!(!parked.await.expect("task"), "an ended engine ends it");
+    }
+
     /// The two production gates composed the way the leg applies them:
     /// "someone else published this" (ignored) and "the founder published
     /// something wrong" (refused) must NOT be handled the same way.

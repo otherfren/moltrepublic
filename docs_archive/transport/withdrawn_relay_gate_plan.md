@@ -1,8 +1,8 @@
 # A withdrawn relay is not dialed: one gate at the dial
 
-Status: PLAN, not started; candidate for v0.1.3. Spec it amends:
-`docs_archive/transport/relay_pool.md` §3 (withdrawing consent reaches
-the live transport at once).
+Status: EXECUTED (v0.1.3). The behaviour is specified in
+`docs_archive/transport/relay_pool.md` §3 rule 3; this file keeps the
+reasoning.
 
 ## The gap
 
@@ -48,8 +48,28 @@ no TCP accept for that relay; switching back on dials again. The engine
 test `a_withdrawn_relay_is_not_redialed_by_the_running_republic` drops
 its grace for in-flight dials.
 
-## Open
+## Decided while building
 
-- Does the Tor test button (`session.rs`) carry the gate?
-- An established socket to a withdrawn relay: dropped by its owner at the
-  next send, or closed by the gate's epoch change?
+- The set is the pool's consent (`relay::dialable(pool, clearnet)`), not
+  the group's ratified set: a founding or join dials pool relays before
+  any group exists, and a pool vote is no withdrawal of consent.
+- The keeper is a `watch` channel: `dialer_for` re-publishes the set on
+  every dialer it hands out, so a path that edits the pool without
+  `dialable_relays_changed` cannot leave the gate stale.
+- An established socket ends at once, not at its owner's next send: a
+  waiting `RelayWs::recv` selects on the gate and returns
+  `Dead(Withdrawn)`, a send or ping refuses, `close` sends no close frame.
+- Owed work waits for consent instead of ending: a subscription
+  supervisor, the re-key delivery, recovery frames and a seat Welcome park
+  on the gate (no timer, no dial) and resume when a relay is allowed
+  again; they end with the engine. Optional work ends: a piece publish
+  (`transient_publish_error`), a refusal retry, the publish pool's breaker
+  is not tripped (consent given again dials at once).
+- The Tor test button carries the gate: its target is a dialable relay,
+  so the gate only stops a test racing that relay's withdrawal.
+- The NIP-11 probe and the relay probe of a relay being decided on run
+  `ungated()`; S3 and the wallet daemon never consult the gate (they use
+  `dial_host` / `dial_maybe_tls`, not `RelayWs::connect`).
+- Not converted: the ritual legs (founder inbox, `spawn_publish_frame`,
+  join/recovery inboxes) keep their timers. Every attempt is refused at
+  the gate, so they dial nothing; only the wake-ups remain.

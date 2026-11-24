@@ -310,7 +310,8 @@ impl State {
     /// Spawn the off-actor relay probe; its verdict returns as
     /// [`molt_core::Command::NetRelayProbed`].
     fn spawn_relay_probe(&mut self, url: String, confirm: bool) -> Result<Reply, MoltError> {
-        let dialer = self.resolve_dialer().map_err(MoltError::Settings)?;
+        // the relay being decided on is not in the dialable set yet
+        let dialer = self.resolve_dialer().map_err(MoltError::Settings)?.ungated();
         self.session.notice = format!("relay-probing:{url}");
         self.emit_session(SessionScope::Full);
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
@@ -593,6 +594,7 @@ impl State {
         // the plaintext S3 acknowledgement too: a save neither grants nor drops it
         settings.s3_plaintext_confirmed = self.session.settings.s3_plaintext_confirmed.clone();
         self.session.settings = settings;
+        self.sync_relay_gate();
         self.prune_backup_checks();
         self.mark_restart_required();
         if self.store.is_some() {
@@ -860,8 +862,11 @@ impl State {
                 ..molt_core::TorTest::default()
             });
         }
+        // gated: its target is a dialable relay, so the gate only ever
+        // stops a test that races that relay's withdrawal
+        self.sync_relay_gate();
         let dialer = match molt_net::dial::Dialer::resolve(&network, &mode, port) {
-            Ok(dialer) => dialer,
+            Ok(dialer) => dialer.with_gate(self.relay_gate.gate()),
             Err(e) => {
                 return self.settle_tor_test(molt_core::TorTest {
                     state: molt_core::TorTestState::Misconfigured,
@@ -1203,9 +1208,22 @@ impl State {
     /// and every misconfiguration (`embedded` without the feature, unknown
     /// mode, `nym`) is a fail-closed [`molt_net::NetError::TorMisconfigured`] —
     /// never a silent clearnet fallback.
+    /// The dialer carries this engine's relay gate (`relay_pool.md` §3 rule 3).
     pub(crate) fn dialer_for(&self) -> Result<molt_net::dial::Dialer, molt_net::NetError> {
         let s = &self.session.settings;
-        molt_net::dial::Dialer::resolve(&s.anonymity, &s.tor_mode, s.tor_port)
+        self.sync_relay_gate();
+        Ok(molt_net::dial::Dialer::resolve(&s.anonymity, &s.tor_mode, s.tor_port)?
+            .with_gate(self.relay_gate.gate()))
+    }
+
+    /// Publish the pool's dialable set to the gate. Called on every dialer
+    /// handed out and on every consent change, so no path that edits the
+    /// pool can leave the gate behind it.
+    pub(crate) fn sync_relay_gate(&self) {
+        self.relay_gate.set(&molt_core::relay::dialable(
+            &self.session.settings.relays,
+            self.clearnet_session,
+        ));
     }
 
     /// Adopt this seat's Nostr transport material into the live actor state.
@@ -1582,6 +1600,7 @@ impl State {
         let wallet_scan = opened.read_wallet_scan();
         // B7: the lock's promises, loaded before the transport starts
         let chain_lock = opened.read_chain_lock().map_err(|e| e.to_string());
+        let branch_state = opened.read_branch_state().map_err(|e| e.to_string());
         // point of no return: swap the actor state to the new workspace
         self.close_active_storage();
         self.reset_workspace_state();
@@ -1627,6 +1646,7 @@ impl State {
         }
         let lock_marker = self.active.as_ref().is_some_and(|a| a.prefs.chain_lock);
         self.load_chain_lock(chain_lock, lock_marker);
+        self.load_branch_state(branch_state);
         // …and the tree behind the chain's own commitment. Checked against
         // it here: bytes that do not answer the commitment are deleted, and
         // the holder goes base-pending rather than reading a wrong wiki.

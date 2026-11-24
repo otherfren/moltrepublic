@@ -586,6 +586,8 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::LockNack { .. }
             | WorkspaceEvent::LockAmnesiaAsk { .. }
             | WorkspaceEvent::LockAmnesiaReply { .. }
+            | WorkspaceEvent::BranchChoiceProposed { .. }
+            | WorkspaceEvent::BranchChoiceApproved { .. }
     )
 }
 
@@ -864,6 +866,8 @@ impl State {
     /// the ratchet travels as the SHARED Arc, so no sender generation is
     /// reused.
     pub(crate) fn dialable_relays_changed(&mut self, before: &[String]) {
+        // first: every dial under way stops at the gate before this returns
+        self.sync_relay_gate();
         let after = self.dialable_group_relays();
         let same = |a: &[String], b: &[String]| {
             a.len() == b.len() && a.iter().all(|r| b.contains(r))

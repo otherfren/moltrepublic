@@ -814,6 +814,10 @@ impl State {
                 "threshold must be within 2..=members and members within 2..=13".to_string(),
             ));
         }
+        // the majority rule: a founding gate for the same reason
+        if !self.minority_ok() && !molt_core::majority::threshold_is_majority(threshold, members) {
+            return Err(MoltError::Create(molt_core::majority::majority_refusal(members)));
+        }
         // pool-settled gate, BEFORE the destructive prelude below: a probe
         // still in flight means the pool is about to change — minting
         // invites now would silently drop the relay the operator just
@@ -1458,6 +1462,7 @@ impl State {
                 phrase: self.session.join.seed.clone().into(),
                 generation,
                 lock: self.lock_cap_on(),
+                minority_ok: self.minority_ok(),
             },
             confirm_rx,
             backup_rx,

@@ -1972,6 +1972,84 @@ pub fn tools() -> Vec<ToolDef> {
             build: |_| Ok(Command::ReadChain),
         },
         ToolDef {
+            name: "branch_status",
+            command: "branch_status",
+            scope: Scope::Seat,
+            description: "The branch choice (rescue of a split that does not heal): the forks this node can PROVE (its own chain plus a verified other branch from the same block, held from the tie-break or a branch_import), per branch its blocks since the fork with kind, surface, op, signers and `risk` (\"irreversible\" = a vault grant or a wallet init; \"flagged\" = an effect outside the chain may remain), counts by kind and the seats that signed on more than one branch (`shared`); the open choice cards with their dropped list and the `digest` an approval names; this seat's recorded choices; `incarnation` (the height this device was restored at); `majority` (2m > n - only then is a choice offered); `abandoned` once the chain chose another branch.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::BranchStatus),
+        },
+        ToolDef {
+            name: "branch_export",
+            command: "branch_export",
+            scope: Scope::Seat,
+            description: "Write this seat's evidence to a passphrase-sealed bundle file: its chain above the fork points it knows (above its anchor when it knows none), the other branches it holds, the open choice cards and their signatures. For seats that cannot read each other: move the file by any side channel, the other seat runs branch_import. The file carries republic content. Runs off the actor; the outcome lands in the session notice (`branch-exported:<path>` / `branch-export-failed:<why>`).",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "dest": { "type": "string", "description": "target file: absolute, or a bare name in the download directory" },
+                    "passphrase": { "type": "string", "description": "at least 10 characters" }
+                },
+                "required": ["dest", "passphrase"]
+            }),
+            build: |args| Ok(Command::BranchExport { dest: str_arg(args, "dest")?, passphrase: str_arg(args, "passphrase")? }),
+        },
+        ToolDef {
+            name: "branch_import",
+            command: "branch_import",
+            scope: Scope::Seat,
+            description: "Read a bundle another seat wrote with branch_export. Every block of another branch must carry its threshold against this republic's roster and link to this chain, or the whole bundle is refused; blocks that extend this chain apply like a catch-up; cards and signatures register; a sealed choice in it applies (or stops this seat). The outcome lands in the session notice (`branch-imported:<branches>:<cards>` / `branch-import-failed:<why>`).",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "the bundle file" },
+                    "passphrase": { "type": "string" }
+                },
+                "required": ["path", "passphrase"]
+            }),
+            build: |args| Ok(Command::BranchImport { path: str_arg(args, "path")?, passphrase: str_arg(args, "passphrase")? }),
+        },
+        ToolDef {
+            name: "choose_branch",
+            command: "choose_branch",
+            scope: Scope::Seat,
+            description: "Propose keeping one branch of a fork branch_status shows: `base_height` is the fork point, `tip_hash` the block that becomes the head (any block of one branch at or above the fork, the fork block itself included). Signs nothing. Answers the card id, every block the choice drops and the `digest` approve_branch needs. Refused where m is not a majority of n, without a second branch, below a cut, on a device restored above the fork point (unless `amnesia_ack`), or on a seat the chain already left behind.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "base_height": { "type": "integer" },
+                    "tip_hash": { "type": "string" },
+                    "amnesia_ack": { "type": "boolean", "description": "optional: act although this device was restored above the fork point" }
+                },
+                "required": ["base_height", "tip_hash"]
+            }),
+            build: |args| Ok(Command::ChooseBranch {
+                base_height: u64_arg(args, "base_height")?,
+                tip_hash: str_arg(args, "tip_hash")?,
+                amnesia_ack: opt_bool_arg(args, "amnesia_ack")?,
+            }),
+        },
+        ToolDef {
+            name: "approve_branch",
+            command: "approve_branch",
+            scope: Scope::Seat,
+            description: "Sign a branch choice card. `dropped_digest` must equal the digest this node computes over the dropped list (branch_status `cards[].digest`, choose_branch's reply): sign what you see. A seat signs ONE choice per fork point, recorded on disk before its signature leaves. At m signatures a seat holding the chosen tip seals the choice; the other branches' seats stop and rejoin with a recovery link. A wake agent never calls this.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "dropped_digest": { "type": "string" },
+                    "amnesia_ack": { "type": "boolean", "description": "optional: sign although this device was restored above the fork point" }
+                },
+                "required": ["id", "dropped_digest"]
+            }),
+            build: |args| Ok(Command::ApproveBranch {
+                id: ProposalId(u64_arg(args, "id")?),
+                dropped_digest: str_arg(args, "dropped_digest")?,
+                amnesia_ack: opt_bool_arg(args, "amnesia_ack")?,
+            }),
+        },
+        ToolDef {
             name: "wiki_list",
             command: "wiki_list",
             scope: Scope::Read,
@@ -2306,7 +2384,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "status",
             command: "status",
             scope: Scope::Seat,
-            description: "Read a one-shot status summary of the group and surfaces. `founded_ts` is the founder's founding stamp, the same on every copy. `surfaces[].implemented` says a real engine stands behind a surface; the others are listed and gated but carry nothing yet. `chain_lag.peers_ahead` = how many blocks the furthest peer on this branch reported beyond this node's head, named in `chain_sync.ahead_peer`/`ahead_height` (0 = level; anything else means votes cast here would not count, and approve/decline refuse); `chain_lag.silent` lists seats unheard-of, with the age of the last sighting (0 = never seen, age unknown). `chain_diverged` is the other failure and a different one: a peer on another branch. `chain_sync` = how this node syncs: `head_hash`, the open catch-up (`catchup_from`, `catchup_since`; 0 = none), buffered blocks of another branch (`fork_candidates`, `fork_lowest`, `fork_highest`), `fork_decisions` since open and `last_fork` (peer, height, outcome kept|rebased|relinked|dropped|tip_swapped, both short hashes), and `blob_bytes` against `blob_cap` (a checkpoint blob over the cap cannot be served in one frame), `refused` (the last blocks this node refused: height, hash, from, `rule` code, at) and `heal_stuck` (present while a heal makes no progress: peer, since, height, last rule). `seats` = one row per seat: `last_seen` (0 = never), `height` (this node's head for itself, else the head a peer last reported, raised by blocks it sent since - a quiet seat may be further; null = never reported), `signed` (highest height it signed for), `files` (persistent shares it holds whole, of `persistent_files`), `dup_streak` (a hint: repeats of it a window an older build wrote dropped while nothing of it was accepted; `resync_seat` if its messages are missing; 0 = none), `build` (the version its latest declaration named; absent = unknown: older than v0.1.2 or not heard yet), `head_hash` (12 hex) and `head_height` (the head it last reported in a catch-up request or beacon; the own seat: its head), `diverged` (true = on another branch, see chain_diverged). `evicted` = this seat was re-keyed for another device: it neither reads nor publishes until a rejoin with a link. `open_proposals` = this seat's open proposals; at `open_proposals_max` propose is refused until one leaves the vote. `relay_refusals` (absent = none) = group relays that answered an event with a refusal since start: `busy` = transient refusals in the last hour (retried there), `last_refusal` = the latest shape (busy, rate_limited, error, invalid, blocked, pow, restricted, unsupported, auth_required, unprefixed) at `last_refusal_at`; a refusing relay is not unreachable.",
+            description: "Read a one-shot status summary of the group and surfaces. `founded_ts` is the founder's founding stamp, the same on every copy. `surfaces[].implemented` says a real engine stands behind a surface; the others are listed and gated but carry nothing yet. `chain_lag.peers_ahead` = how many blocks the furthest peer on this branch reported beyond this node's head, named in `chain_sync.ahead_peer`/`ahead_height` (0 = level; anything else means votes cast here would not count, and approve/decline refuse); `chain_lag.silent` lists seats unheard-of, with the age of the last sighting (0 = never seen, age unknown). `chain_diverged` is the other failure and a different one: a peer on another branch. `chain_sync` = how this node syncs: `head_hash`, the open catch-up (`catchup_from`, `catchup_since`; 0 = none), buffered blocks of another branch (`fork_candidates`, `fork_lowest`, `fork_highest`), `fork_decisions` since open and `last_fork` (peer, height, outcome kept|rebased|relinked|dropped|tip_swapped, both short hashes), and `blob_bytes` against `blob_cap` (a checkpoint blob over the cap cannot be served in one frame), `refused` (the last blocks this node refused: height, hash, from, `rule` code, at) and `heal_stuck` (present while a heal makes no progress: peer, since, height, last rule). `seats` = one row per seat: `last_seen` (0 = never), `height` (this node's head for itself, else the head a peer last reported, raised by blocks it sent since - a quiet seat may be further; null = never reported), `signed` (highest height it signed for), `files` (persistent shares it holds whole, of `persistent_files`), `dup_streak` (a hint: repeats of it a window an older build wrote dropped while nothing of it was accepted; `resync_seat` if its messages are missing; 0 = none), `build` (the version its latest declaration named; absent = unknown: older than v0.1.2 or not heard yet), `head_hash` (12 hex) and `head_height` (the head it last reported in a catch-up request or beacon; the own seat: its head), `diverged` (true = on another branch, see chain_diverged). `below_majority` (absent = false) = the threshold is half the members or fewer (founded before the majority rule): a split cannot be repaired by vote. `evicted` = this seat was re-keyed for another device: it neither reads nor publishes until a rejoin with a link. `open_proposals` = this seat's open proposals; at `open_proposals_max` propose is refused until one leaves the vote. `relay_refusals` (absent = none) = group relays that answered an event with a refusal since start: `busy` = transient refusals in the last hour (retried there), `last_refusal` = the latest shape (busy, rate_limited, error, invalid, blocked, pow, restricted, unsupported, auth_required, unprefixed) at `last_refusal_at`; a refusing relay is not unreachable.",
             schema: || json!({ "type": "object", "properties": {} }),
             build: |_| Ok(Command::Status),
         },
@@ -3101,13 +3179,13 @@ pub fn tools() -> Vec<ToolDef> {
             name: "create_start",
             command: "create_start",
             scope: Scope::Seat,
-            description: "Begin founding a new republic: the engine derives the founder's identity, mints one-time invite links per member, and runs the real founding ritual with a live log; read_session shows the joinable links, each seat filling in and the founder's recovery phrase (create.seed) for confirm_seed_backup - a founding completes headless. Once every member has joined, propose the charter with create_propose. Needs a CONFIRMED relay first (relay_add, then confirm) - without one it refuses with \"cannot found: no relay configured\". The threshold must be at least 2.",
+            description: "Begin founding a new republic: the engine derives the founder's identity, mints one-time invite links per member, and runs the real founding ritual with a live log; read_session shows the joinable links, each seat filling in and the founder's recovery phrase (create.seed) for confirm_seed_backup - a founding completes headless. Once every member has joined, propose the charter with create_propose. Needs a CONFIRMED relay first (relay_add, then confirm) - without one it refuses with \"cannot found: no relay configured\". The threshold must be a majority (2m > n: 3-of-5, not 2-of-5); otherwise it refuses with the smallest allowed m.",
             schema: || json!({
                 "type": "object",
                 "properties": {
                     "name": { "type": "string", "description": "the new republic's name (must be unique locally)" },
                     "member": { "type": "string", "description": "the founder's handle (ASCII + ä ö ü ß)" },
-                    "threshold": { "type": "integer", "description": "approvals required (m), 2..=members" },
+                    "threshold": { "type": "integer", "description": "approvals required (m), more than half of members: members/2+1..=members" },
                     "members": { "type": "integer", "description": "member count (n), 2..=13" },
                     "relays": { "type": "array", "items": { "type": "string" }, "description": "the relays the republic runs on, carried by every invite; omitted = every one this node can dial" }
                 },
@@ -3201,7 +3279,7 @@ pub fn tools() -> Vec<ToolDef> {
                 "properties": {
                     "name": { "type": "string", "description": "the final republic name to ratify" },
                     "agenda": { "type": "string", "description": "the free-text charter/agenda to ratify" },
-                    "features": { "type": "array", "items": { "type": "string", "enum": feature_enum() }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) is real; vault is real, needs 2 <= m <= n-2, and can also be enabled later by a set_features vote; quests (the kanban) is real; wallet alone creates no purse: that takes 2 <= m <= n-1 and the wallet_init vote" }
+                    "features": { "type": "array", "items": { "type": "string", "enum": feature_enum() }, "description": "the optional surfaces to activate (chat is always on); omitted = none. memory (the shared wiki) is real; vault is real, needs 2 <= m <= n-2 (with the majority rule: 5 or more members), and can also be enabled later by a set_features vote; quests (the kanban) is real; wallet alone creates no purse: that takes 2 <= m <= n-1 and the wallet_init vote" }
                 },
                 "required": ["name"]
             }),
@@ -3464,7 +3542,7 @@ pub(crate) mod tests {
         // hook; the value itself rides the settings surface as
         // `poke_wake_command` (ADR-0007), so this stays internal only
         // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 96] = [
+        const INTERNAL: [&str; 98] = [
             // not a door of its own: chat_send/approve/decline/withdraw
             // build it from their `operator`/`agent` arguments
             "as_operator",
@@ -3500,6 +3578,10 @@ pub(crate) mod tests {
             "net_restore_failed",
             "net_export_done",
             "net_export_failed",
+            // the off-actor branch bundle task's outcome (branch_export and
+            // branch_import are the tools)
+            "net_branch_exported",
+            "net_branch_loaded",
             // the off-actor WIKI export task reporting its real outcome
             // (wiki_export is the tool; an agent must not be able to forge
             // an export success, least of all one that claims a proof

@@ -147,7 +147,10 @@ async fn found_n_with(
         }
         w
     };
+    // a threshold below majority is the pre-rule shape: built through the seam
+    let legacy = !molt_core::majority::threshold_is_majority(m, n);
     let a = prepare(engine(&root.join(NAMES[0])), 0).await;
+    a.__allow_minority_threshold(legacy);
     a.__found_locked(!pre_lock);
     a.execute(Command::CreateStart {
         name: "R".to_string(),
@@ -169,6 +172,7 @@ async fn found_n_with(
     let mut all = vec![a];
     for (i, link) in links.into_iter().enumerate() {
         let w = prepare(engine(&root.join(NAMES[i + 1])), i + 1).await;
+        w.__allow_minority_threshold(legacy);
         w.execute(Command::JoinStart { invite: link, member: NAMES[i + 1].to_string(), relays: Vec::new() })
             .await
             .expect("join starts");

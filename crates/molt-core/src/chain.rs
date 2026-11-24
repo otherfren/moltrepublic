@@ -187,6 +187,39 @@ pub enum ChainChange {
         /// The memory group is folded too.
         wiki_folded: bool,
     },
+    /// m members chose which branch of a fork stays the chain
+    /// (`docs/chain/chain_rescue_plan.md` §1). Sealed at `tip_height + 1`
+    /// on the chosen branch; `tip_hash` binds it there, since member
+    /// signatures do not cover `prev`.
+    BranchChosen {
+        /// The last block both branches share.
+        base_height: u64,
+        /// Its link hash.
+        base_hash: String,
+        /// The chosen tip: the block height minus one.
+        tip_height: u64,
+        /// Its link hash: the block's `prev`.
+        tip_hash: String,
+        /// The chosen branch's block at `base_height + 1`; "" when the tip
+        /// is the base.
+        chosen_root: String,
+        /// The runs that stop counting, as the proposer saw them.
+        dropped: Vec<DroppedRun>,
+    },
+}
+
+/// One run of blocks a [`ChainChange::BranchChosen`] drops: another
+/// branch from the fork point, or the chosen branch above its tip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DroppedRun {
+    /// The run's first height.
+    pub from_height: u64,
+    /// The link hash of its first block.
+    pub first_hash: String,
+    /// The run's last height.
+    pub head_height: u64,
+    /// The link hash of its last block.
+    pub head_hash: String,
 }
 
 /// One committed block in the persistent chain: a threshold-signed change plus
@@ -326,6 +359,26 @@ pub fn approval_bytes(republic_id: &str, height: u64, change: &ChainChange) -> V
             out.push(u8::from(*wiki_folded));
             out.extend_from_slice(&upto.to_le_bytes());
             put_bytes(&mut out, state_hash.as_bytes());
+            out
+        }
+        ChainChange::BranchChosen { base_height, base_hash, tip_height, tip_hash, chosen_root, dropped } => {
+            let mut out = Vec::new();
+            out.extend_from_slice(b"molt-chain-change-v2\0");
+            put_bytes(&mut out, republic_id.as_bytes());
+            out.extend_from_slice(&height.to_le_bytes());
+            out.push(6);
+            out.extend_from_slice(&base_height.to_le_bytes());
+            put_bytes(&mut out, base_hash.as_bytes());
+            out.extend_from_slice(&tip_height.to_le_bytes());
+            put_bytes(&mut out, tip_hash.as_bytes());
+            put_bytes(&mut out, chosen_root.as_bytes());
+            put_count_u64(&mut out, dropped.len());
+            for run in dropped {
+                out.extend_from_slice(&run.from_height.to_le_bytes());
+                put_bytes(&mut out, run.first_hash.as_bytes());
+                out.extend_from_slice(&run.head_height.to_le_bytes());
+                put_bytes(&mut out, run.head_hash.as_bytes());
+            }
             out
         }
     }
@@ -879,6 +932,9 @@ pub fn approval_bytes_v3(republic_id: &str, height: u64, prev: &str, change: &Ch
     out.extend_from_slice(&v2[fields..]);
     out
 }
+
+#[cfg(test)]
+mod branch_tests;
 
 #[cfg(test)]
 mod tests {

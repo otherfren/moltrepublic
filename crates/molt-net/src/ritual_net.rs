@@ -195,6 +195,12 @@ impl RitualNet {
         &self.relays
     }
 
+    /// After [`NetError::Withdrawn`]: resolves once one of the relays is
+    /// consented to again; `false` = never.
+    pub async fn until_dialable(&self) -> bool {
+        self.dialer.until_any_allowed(&self.relays).await
+    }
+
     /// Publish one signed event with ≥1-OK semantics over a fresh runtime,
     /// returning the PER-RELAY outcome.
     ///
@@ -484,6 +490,11 @@ impl GroupChannel {
         };
         let dialer = dialer.isolated(&format!("group:{sub_lane}"));
         Self { dialer, relays, rotation_seed, pool, group_expiry_secs: None, file_expires_at: None }
+    }
+
+    /// [`RitualNet::until_dialable`] for this channel's relays.
+    pub async fn until_dialable(&self) -> bool {
+        self.dialer.until_any_allowed(&self.relays).await
     }
 
     /// Stop every clone's publishes (`PublishPool::close`).
@@ -1054,7 +1065,7 @@ mod tests {
     #[test]
     fn the_relay_deadline_follows_the_channel_and_the_kind() {
         let seed = [7u8; 32];
-        let ritual = GroupChannel::new(crate::dial::Dialer::Direct, Vec::new(), seed);
+        let ritual = GroupChannel::new(crate::dial::Dialer::direct(), Vec::new(), seed);
         let running = ritual.clone().with_group_expiry();
         let share = running.with_file_expiry(9_999);
         let (group, file) = (crate::kinds::KIND_GROUP, crate::kinds::KIND_FILE_CHUNK);

@@ -205,6 +205,7 @@ pub struct WalletHandle {
     backup_skew: std::sync::Arc<std::sync::atomic::AtomicU64>,
     drop_seam: std::sync::Arc<net::DropSeam>,
     seal_first: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    minority_seam: std::sync::Arc<std::sync::atomic::AtomicBool>,
     lock_seams: std::sync::Arc<chain::LockSeams>,
     farewells: Farewells,
 }
@@ -350,6 +351,14 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __seal_first(&self, on: bool) {
         self.seal_first.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: this node founds and ratifies a threshold that is no
+    /// majority, as a build before the majority rule did - the fixture
+    /// for republics founded then.
+    #[doc(hidden)]
+    pub fn __allow_minority_threshold(&self, on: bool) {
+        self.minority_seam.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (vault plan S3c): this holder's receipts report a
@@ -740,6 +749,7 @@ fn spawn_actor(
     let backup_skew = state.backup_skew.clone();
     let drop_seam = state.drop_seam.clone();
     let seal_first = state.seal_first.clone();
+    let minority_seam = state.minority_seam.clone();
     let lock_seams = state.lock_seams.clone();
     if vault::receipts::lab_complain_at_spawn() {
         tracing::warn!("vault_lab=complain");
@@ -778,6 +788,7 @@ fn spawn_actor(
         backup_skew,
         drop_seam,
         seal_first,
+        minority_seam,
         lock_seams,
         farewells,
     }
@@ -1316,6 +1327,8 @@ pub(crate) struct ChainProjection {
     pub(crate) request_seq: BTreeMap<MemberId, u64>,
     /// B7: the sealing lock (`chain/lock_wire.rs`).
     pub(crate) lock: chain::LockRuntime,
+    /// The branch choice (`chain/branch_run.rs`).
+    pub(crate) branch: chain::BranchRuntime,
 }
 
 /// Recovery on both sides of the open workspace: what this seat coordinates
@@ -1661,6 +1674,8 @@ pub(crate) struct State {
     /// B4 test seam: coordinate every recovery seal-first, as an older
     /// build does.
     pub(crate) seal_first: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Test seam: the majority rule off for this node's foundings.
+    pub(crate) minority_seam: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The sealing lock's test seams (never a `Command`).
     pub(crate) lock_seams: std::sync::Arc<chain::LockSeams>,
     /// Grant answers and asks of the open workspace (vault plan S4).
@@ -1687,6 +1702,10 @@ pub(crate) struct State {
     /// no clearnet packet leaves before the user acts again
     /// (`docs_archive/transport/relay_pool.md` §3). Onion relays are unaffected.
     pub(crate) clearnet_session: bool,
+    /// This engine's dialable relay set, carried by every dialer it hands
+    /// out (`dialer_for`); per engine, so engines sharing a process share
+    /// nothing.
+    pub(crate) relay_gate: molt_net::dial::RelayGateKeeper,
     /// Relay confirmations whose probe verdict has not landed yet
     /// (`cmd_relay_confirm` → async probe → `cmd_net_relay_probed`).
     /// Founding and joining REFUSE while this is non-empty: minting invites
@@ -1990,6 +2009,7 @@ impl State {
             seat_active: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
             drop_seam: std::sync::Arc::default(),
             seal_first: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            minority_seam: std::sync::Arc::default(),
             lock_seams: std::sync::Arc::default(),
             vault_grants: vault::grant::GrantRuntime::default(),
             group_net: None,
@@ -2037,6 +2057,7 @@ impl State {
             // (ADR-0004 amendment): an operator who acknowledged clearnet
             // exposure is not asked again on every restart
             clearnet_session: session.settings.clearnet_relays_enabled,
+            relay_gate: molt_net::dial::RelayGateKeeper::default(),
             pending_relay_confirms: std::collections::HashSet::new(),
             seeds: std::collections::HashMap::new(),
             s3_list_gen: 0,
@@ -2151,6 +2172,21 @@ impl State {
         self.ev_tx.subscribe()
     }
 
+    pub(crate) fn minority_ok(&self) -> bool {
+        self.minority_seam.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A chain republic founded before the majority rule (2m <= n).
+    pub(crate) fn below_majority(&self) -> bool {
+        self.is_chain_governed()
+            && self.replica.as_ref().is_some_and(|r| {
+                !molt_core::majority::threshold_is_majority(
+                    r.rule_m,
+                    u8::try_from(self.roster().len()).unwrap_or(u8::MAX),
+                )
+            })
+    }
+
     pub(crate) fn threshold(&self) -> usize {
         self.replica
             .as_ref()
@@ -2163,6 +2199,9 @@ impl State {
     fn handle(&mut self, cmd: Command) -> Result<Reply, MoltError> {
         if self.delivery.evicted && needs_the_group(&cmd) {
             return Err(MoltError::SeatEvicted);
+        }
+        if self.branch_abandoned() && chain::branch::stopped_when_abandoned(&cmd) {
+            return Err(MoltError::Branch(chain::branch::ABANDONED.to_string()));
         }
         match cmd {
             Command::AsOperator { operator, inner } => self.cmd_as_operator(operator, *inner),
@@ -2478,6 +2517,17 @@ impl State {
             Command::ReadUiState => Ok(Reply::UiState { snapshot: self.ui_state.clone() }),
             Command::UiAction { action } => self.cmd_ui_action(action),
             Command::ReadChain => self.cmd_read_chain(),
+            Command::BranchStatus => self.cmd_branch_status(),
+            Command::BranchExport { dest, passphrase } => self.cmd_branch_export(&dest, passphrase),
+            Command::BranchImport { path, passphrase } => self.cmd_branch_import(&path, passphrase),
+            Command::ChooseBranch { base_height, tip_hash, amnesia_ack } => {
+                self.cmd_choose_branch(base_height, &tip_hash, amnesia_ack)
+            }
+            Command::ApproveBranch { id, dropped_digest, amnesia_ack } => {
+                self.cmd_approve_branch(id.0, &dropped_digest, amnesia_ack)
+            }
+            Command::NetBranchExported { dest, error } => self.cmd_net_branch_exported(&dest, &error),
+            Command::NetBranchLoaded { bundle, error } => self.cmd_net_branch_loaded(&bundle, &error),
             Command::WikiList {
                 prefix,
                 cursor,

@@ -17,6 +17,18 @@ is **constituted before it exists**. There are no open seats and no "add member
 later": a workspace only ever comes into being with its **complete, sealed
 member list**, signed by everyone, from its very first byte on disk.
 
+**The rule is a majority: 2m > n** (since v0.1.3, decided 2026-11-23,
+`docs/chain/chain_rescue_plan.md`), so any two deciding groups share a
+seat; 3-of-5 founds, 2-of-5 does not. Every door of a NEW founding
+refuses 2m ≤ n with `needs a majority: at least <m> of <n>`, naming the
+smallest allowed m (`molt_core::majority`): the founder's `create_start`
+(`cmd_create_start`, beside the m ≥ 2 gate), the wizard (the threshold
+stepper's floor is ⌊n/2⌋+1, with one line `more than half must agree`)
+and the member at ❺. It is never a verifier rule: a republic founded
+before it keeps verifying and running, and its status carries
+`below_majority` (Organization: `half or fewer decide - a split cannot be
+repaired by vote`).
+
 Three properties fall out of this and shape the whole ritual:
 
 - **Everyone signs everyone.** The final act is a *roster* — the ordered table
@@ -230,7 +242,10 @@ bound too, via the republic id that salts `T`).
 **❺–❻ Ratify.** Each `Mᵢ` sees the proposed name+agenda and — on an **explicit
 human confirm** — signs `T` with its identity key and returns the signature; `F`
 verifies each against the anchored `pkᵢ`. Until a member confirms, nothing
-seals: the workspace opens only after *everyone* has ratified. The seat handler
+seals: the workspace opens only after *everyone* has ratified. Before any of
+that, a member refuses a table with 2m ≤ n (an older founder's), at the point
+it decides to sign (`run_member_ladder`), not in `verify_seal_proposal` or
+`verify_sealed_roster`. The seat handler
 is idempotent — a second, distinct signature for a seat is ignored, so one
 member cannot inflate the roster.
 

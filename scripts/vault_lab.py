@@ -9,7 +9,7 @@ Headless seats s1..sN run the live-preview `moltd` built with the
     CARGO_TARGET_DIR=target/dev-ui SLINT_LIVE_PREVIEW=1 \\
         cargo build -j 2 -p molt-app --features live-preview,vault-lab
     cargo run -p molt-net --example dev_relay        # prints ws://127.0.0.1:<port>
-    python3 scripts/vault_lab.py up --relay ws://127.0.0.1:<port> [--seats 3] [--complainer s3] [--founder-headless]
+    python3 scripts/vault_lab.py up --relay ws://127.0.0.1:<port> [--seats 4] [--complainer s3] [--founder-headless]
     python3 scripts/vault_lab.py join [--no-vault]
     python3 scripts/vault_lab.py enable [--by s1]   # the set_features vote, after join --no-vault
     python3 scripts/vault_lab.py seal s1 a one
@@ -593,8 +593,8 @@ def main():
     sub = p.add_subparsers(dest="cmd", required=True)
     up = sub.add_parser("up")
     up.add_argument("--relay", required=True)
-    up.add_argument("--seats", type=int, default=3)
-    up.add_argument("--threshold", type=int, default=2)
+    up.add_argument("--seats", type=int, default=4)
+    up.add_argument("--threshold", type=int, default=3)
     up.add_argument("--complainer", default="")
     up.add_argument("--founder-headless", action="store_true")
     j = sub.add_parser("join")
