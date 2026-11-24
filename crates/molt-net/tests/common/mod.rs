@@ -174,10 +174,20 @@ pub mod held_socks {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::{oneshot, Mutex};
 
+    /// One held CONNECT: release it, then read what the client did.
+    pub struct Request {
+        pub release: oneshot::Sender<()>,
+        /// The client's first bytes after the reply; `None` = it hung up
+        /// while still held.
+        pub first: oneshot::Receiver<Option<usize>>,
+        /// Bytes after those first ones, once the client hung up.
+        pub rest: oneshot::Receiver<usize>,
+    }
+
     pub struct Held {
         pub port: u16,
-        /// Fires once per CONNECT request; the sender releases it.
-        pub requests: Mutex<tokio::sync::mpsc::Receiver<(oneshot::Sender<()>, oneshot::Receiver<usize>)>>,
+        /// Fires once per CONNECT request.
+        pub requests: Mutex<tokio::sync::mpsc::Receiver<Request>>,
     }
 
     pub async fn run() -> Held {
@@ -220,18 +230,32 @@ pub mod held_socks {
                     let mut port_bytes = [0u8; 2];
                     let _ = s.read_exact(&mut port_bytes).await;
                     let (release_tx, release) = oneshot::channel();
-                    let (sent_tx, sent) = oneshot::channel();
-                    if req_tx.send((release_tx, sent)).await.is_err() {
+                    let (first_tx, first) = oneshot::channel();
+                    let (rest_tx, rest) = oneshot::channel();
+                    let req = Request { release: release_tx, first, rest };
+                    if req_tx.send(req).await.is_err() {
                         return;
                     }
-                    if release.await.is_err() {
-                        return;
+                    let mut buf = [0u8; 4096];
+                    // a held client sends nothing, so a read ending is its hang-up
+                    tokio::select! {
+                        r = release => if r.is_err() { return },
+                        _ = s.read(&mut buf) => {
+                            let _ = first_tx.send(None);
+                            return;
+                        }
                     }
                     let _ = s.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
-                    // the client's first bytes, or 0 once it hung up silent
-                    let mut buf = [0u8; 4096];
-                    let after = s.read(&mut buf).await.unwrap_or(0);
-                    let _ = sent_tx.send(after);
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let _ = first_tx.send(Some(n));
+                    let mut more = 0usize;
+                    while let Ok(m) = s.read(&mut buf).await {
+                        if m == 0 {
+                            break;
+                        }
+                        more += m;
+                    }
+                    let _ = rest_tx.send(more);
                 });
             }
         });

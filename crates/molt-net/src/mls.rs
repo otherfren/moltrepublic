@@ -1639,6 +1639,42 @@ mod tests {
         );
     }
 
+    /// **A snapshot this build writes is one v0.1.2 reads.** The layout of
+    /// `MlsSnapshot` in v0.1.2 (`git show v0.1.2:crates/molt-net/src/mls.rs`),
+    /// copied field for field: a rollback to the released build must restore
+    /// every ratchet this one persisted. Bump the version only with a plan
+    /// for the downgrade.
+    #[test]
+    fn a_snapshot_of_this_build_decodes_as_v0_1_2() {
+        #[derive(Serialize, Deserialize)]
+        struct V012 {
+            version: u8,
+            name: String,
+            signer_pub: Vec<u8>,
+            group_id: Vec<u8>,
+            storage: Vec<u8>,
+            exporter_ring: Vec<[u8; EXPORTER_LEN]>,
+            exporter_ring_epochs: Vec<u64>,
+            prior: Option<PriorSlot>,
+        }
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let mut cara = MlsMember::new(&key(3), "cara").expect("cara");
+        founder.create_group().expect("create");
+        let welcome = founder
+            .add_members(&[bob.key_package().expect("kp"), cara.key_package().expect("kp")])
+            .expect("add")
+            .expect("welcome");
+        cara.join_from_welcome(&welcome).expect("cara joins");
+        let bob2 = MlsMember::new(&key(2), "bob").expect("bob2");
+        cara.restore_member("bob", &bob2.key_package().expect("kp")).expect("restore");
+        let blob = cara.snapshot().expect("snapshot");
+        let old: V012 = bincode::deserialize(&blob).expect("v0.1.2 decodes it");
+        assert_eq!(old.version, 5, "v0.1.2 accepts version 5 only");
+        assert!(old.prior.is_some());
+        assert_eq!(bincode::serialize(&old).expect("bytes"), blob, "no trailing field v0.1.2 would not read");
+    }
+
     /// **The prior slot survives a snapshot round trip (M3).** A node that
     /// restarted between two concurrent same-epoch commits must decide the
     /// tiebreak exactly like one that did not — else survivors fork.

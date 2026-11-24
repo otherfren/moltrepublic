@@ -38,6 +38,7 @@ fn head_hash(st: &State) -> String {
 
 #[test]
 fn an_imported_bundle_proves_the_fork() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (_, _, mut a, _, c) = seats();
     let e = a.cmd_choose_branch(1, &head_hash(&a), false).expect_err("no evidence yet");
     assert!(e.to_string().contains("no second branch"), "{e}");
@@ -56,6 +57,7 @@ fn an_imported_bundle_proves_the_fork() {
 
 #[test]
 fn a_forged_bundle_is_refused_whole() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (_, _, mut a, _, c) = seats();
     let mut bundle = c.branch_bundle();
     let last = bundle.runs[0].last_mut().expect("y's block");
@@ -70,6 +72,7 @@ fn a_forged_bundle_is_refused_whole() {
 
 #[test]
 fn no_choice_where_m_is_not_a_majority() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let mut b = Builder::new(&["a", "b", "c", "d", "e"], 2);
     b.commit_applied(1, &["a", "b"]);
     let mut st = genesis_seat("a", &b, b.blocks.clone());
@@ -84,6 +87,7 @@ fn no_choice_where_m_is_not_a_majority() {
 
 #[test]
 fn a_choice_below_a_cut_is_refused() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (mut x, y) = fork();
     let blob = checkpoint_state(&x.blocks, 3).expect("state@3");
     let cut = x.seal(4, ChainChange::Checkpoint { upto: 3, state_hash: checkpoint_state_hash(&blob) }, &["a", "b"]);
@@ -100,6 +104,7 @@ fn a_choice_below_a_cut_is_refused() {
 /// its first block, c stops, the dropped card is a vote again, c rejoins.
 #[test]
 fn a_split_is_repaired_by_two_seats_and_the_third_rejoins() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (x, _y, mut a, mut b, mut c) = seats();
     for st in [&mut a, &mut b] {
         let mut card = ProposalRecord::new(Surface::Memory, serde_json::json!({ "op": "add_note", "id": 201 }), "a".to_string());
@@ -176,6 +181,7 @@ fn a_split_is_repaired_by_two_seats_and_the_third_rejoins() {
 /// crash between the record and the send.
 #[test]
 fn the_shared_seat_signs_one_choice_per_fork_point() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (x, y, mut a, mut b, mut c) = seats();
     a.import_bundle(&bundle_of(&c)).expect("a holds y");
     c.import_bundle(&bundle_of(&a)).expect("c holds x");
@@ -200,6 +206,7 @@ fn the_shared_seat_signs_one_choice_per_fork_point() {
 /// write sends nothing.
 #[test]
 fn no_signature_leaves_without_the_durable_record() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (x, _, mut a, _, c) = seats();
     a.import_bundle(&bundle_of(&c)).expect("a holds y");
     let (id, digest) = chosen(&mut a, 1, &hash(&x, 3));
@@ -218,6 +225,7 @@ fn no_signature_leaves_without_the_durable_record() {
 /// by default; the operator may override.
 #[test]
 fn a_device_restored_above_the_fork_refuses_by_default() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (mut x, mut y) = fork();
     let npk = "ee".repeat(32);
     let restore = ChainChange::Membership {
@@ -246,6 +254,7 @@ fn a_device_restored_above_the_fork_refuses_by_default() {
 /// no longer wins the fork.
 #[test]
 fn the_choice_outranks_the_hash_tie_break() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (x, y) = fork();
     // keep the branch whose block at the fork has the HIGHER hash, so the
     // hash rule alone would re-base onto the other one
@@ -269,4 +278,27 @@ fn the_choice_outranks_the_hash_tie_break() {
     }
     assert_eq!(head_hash(&own), head, "the lower hash never displaces the choice");
     assert_eq!(own.chain.last_fork.as_ref().map(|f| f.outcome.as_str()), Some("chosen"));
+}
+
+/// Dark (step 0): no choice is proposed, signed, taken in or followed;
+/// status, export and import stay as diagnostics.
+#[test]
+fn a_dark_build_neither_chooses_nor_follows() {
+    let (x, y, mut a, _, c) = seats();
+    assert_eq!(a.import_bundle(&bundle_of(&c)).expect("evidence still imports"), (1, 0));
+    assert_eq!(a.branch_status_view().forks.len(), 1, "status stays");
+    let e = a.cmd_choose_branch(1, &hash(&x, 3), false).expect_err("dark");
+    assert_eq!(e.to_string(), "branch: not available in this build");
+    let e = a.cmd_approve_branch(7, "00", false).expect_err("dark");
+    assert_eq!(e.to_string(), "branch: not available in this build");
+    let change = super::branch_tests::keep_x(&x, &y);
+    a.receive_branch_card("b", 7, change.clone());
+    assert!(a.chain.branch.file.cards.is_empty(), "a card is ignored");
+    let mut chain = x.blocks.clone();
+    chain.push(x.seal(4, change, &["a", "b"]));
+    let err = verify_chain(&chain).expect_err("a dark build does not follow");
+    assert!(err.contains("not available in this build"), "{err}");
+    let head = head_hash(&a);
+    a.receive_block_from("b", chain[4].clone());
+    assert_eq!(head_hash(&a), head);
 }

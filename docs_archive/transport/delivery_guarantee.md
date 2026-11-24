@@ -955,3 +955,50 @@ a_rewind_reads_the_last_explicit_bit_as_unacked}`,
 `a_coordinator_killed_before_its_rekey_went_out_publishes_it_at_the_reopen`),
 `crates/molt-engine/tests/nostr_delivery_guarantee.rs`
 (`a_receiver_whose_window_regressed_gets_the_tail_again_and_applies_it_once`).
+
+## 12. A clean close publishes what was recorded (v0.1.3)
+
+Measured on v0.1.1 and v0.1.2: five `chat_send` answered `ok`, SIGTERM
+under a millisecond later - the other seat held one or two until the
+stopped seat's next start. The outbox was parked on its wakeup when the
+stop came, and the stop won.
+
+**Rule.** A clean close (`CloseWorkspace`, a workspace switch, the
+service's SIGTERM/SIGINT - all run `persist_net_crypto_on_close`) closes
+the group runtime with `GroupHandle::close`: the engine blocks in it, so
+it accepts nothing meanwhile, and the outbox, after its stop, reads the
+log once more from its cursor and offers every own envelope it finds,
+each to every relay ONCE. The pass ends at the first envelope no relay
+took (the cursor holds there for the next start) or at the end of the
+log; then the ratchet snapshot is taken, so it covers every frame the
+pass sealed. `outbox=closed sent= [held_at= error=]`. The pass calls
+nothing back into the engine, and every sink call of the outbox gives way
+to the stop - a blocked engine answers nothing.
+
+**No clock decides the drain.** What bounds it is the transport's
+per-publish bounds (`[transport.nostr] connect_timeout_secs` 60,
+`publish_timeout_secs` 30): a relay costs at most a dial plus one OK
+round-trip, re-asked on a transient refusal only inside that publish
+bound - about connect + 2 x publish (120 s by default) - and the relays
+are asked concurrently. Every relay unreachable: the first envelope
+fails within that bound and the pass ends. One relay accepting while
+another hangs: each envelope waits the accepting relay plus the 2 s
+grace until the hung one trips its breaker. A second SIGTERM/SIGINT ends
+the process at once (`stop=forced`, exit 1, no durable close); SIGKILL
+always does.
+
+**Not drained.** A withdrawal (`withdraw()`, a relay left the dialable
+set) closes the channel: the pass publishes nothing. A relay the dial gate
+refuses (`Withdrawn`) counts as refused: the pass never waits for consent. A plain drop or
+`shutdown()` (eviction, the parked-re-key seam, a context reset) stops
+at once as before. A hard kill is unchanged - the at-least-once resend
+covers it. A current-thread runtime (unit tests) cannot block in place
+and drops the handle instead.
+
+Pins: `group_runtime::tests::{a_clean_close_publishes_the_tail_the_outbox_never_read,
+a_plain_shutdown_takes_no_final_pass, a_withdrawn_close_publishes_nothing,
+a_gate_withdrawn_relay_ends_the_close_at_once,
+an_unanswering_relay_holds_the_close_for_one_attempt_only}`,
+`crates/molt-engine/tests/nostr_clean_stop.rs`,
+`crates/molt-app/tests/service.rs`
+(`a_sigterm_right_after_sending_delivers_every_message`).

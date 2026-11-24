@@ -63,38 +63,80 @@ async fn a_withdrawn_relay_gets_no_one_shot_publish_and_comes_back_on_consent() 
     assert_eq!(proxy.accepts(), 2);
 }
 
-/// A dial begun before the withdrawal: its Tor/TCP connect completes after
-/// it, and it sends nothing - no TLS hello, no WebSocket handshake. The
-/// same dial still allowed does speak (the counter-case).
+/// Bound on a dial that should already have ended: a failure bound, never
+/// a verdict (green returns at once).
+const ENDED: Duration = Duration::from_secs(5);
+
+fn held_dialer(socks: &common::held_socks::Held, keeper: &RelayGateKeeper) -> Dialer {
+    Dialer::on(Route::Socks5 { proxy: format!("127.0.0.1:{}", socks.port), session: "t".into() })
+        .with_gate(keeper.gate())
+}
+
+fn spawn_dial(dialer: &Dialer, url: &str) -> tokio::task::JoinHandle<Result<(), NetError>> {
+    let (d, u) = (dialer.clone(), url.to_string());
+    tokio::spawn(async move { RelayWs::connect(&d, &u).await.map(|_| ()) })
+}
+
+/// A dial whose Tor/SOCKS connect is still pending at the withdrawal is
+/// dropped there: the connect never completes, nothing is sent.
 #[tokio::test]
-async fn a_dial_in_flight_at_the_withdrawal_sends_no_handshake() {
+async fn a_dial_held_at_its_tor_connect_is_dropped_at_the_withdrawal() {
     let socks = common::held_socks::run().await;
     let url = "wss://relay.example.org".to_string();
     let keeper = RelayGateKeeper::default();
     keeper.set(std::slice::from_ref(&url));
-    let dialer = Dialer::on(Route::Socks5 {
-        proxy: format!("127.0.0.1:{}", socks.port),
-        session: "t".into(),
-    })
-    .with_gate(keeper.gate());
+    let dial = spawn_dial(&held_dialer(&socks, &keeper), &url);
+    let req = socks.requests.lock().await.recv().await.expect("a CONNECT");
+    keeper.set(&[]);
+    let res = tokio::time::timeout(ENDED, dial).await.expect("ended at the withdrawal").expect("task");
+    assert!(matches!(res, Err(NetError::Withdrawn)), "{res:?}");
+    assert_eq!(req.first.await.expect("socks verdict"), None, "the held connect completed");
+}
 
-    for withdraw in [false, true] {
-        let (d, u) = (dialer.clone(), url.clone());
-        let dial = tokio::spawn(async move { RelayWs::connect(&d, &u).await.map(|_| ()) });
-        let (release, sent) = socks.requests.lock().await.recv().await.expect("a CONNECT");
-        if withdraw {
-            keeper.set(&[]);
-        }
-        release.send(()).expect("release");
-        let res = dial.await.expect("dial task");
-        let bytes = sent.await.expect("socks verdict");
-        if withdraw {
-            assert!(matches!(res, Err(NetError::Withdrawn)), "{res:?}");
-            assert_eq!(bytes, 0, "the in-flight dial spoke to a withdrawn relay");
-        } else {
-            assert!(bytes > 0, "an allowed dial starts its handshake");
-        }
-    }
+/// A dial past its connect, mid TLS handshake, at the withdrawal: it ends
+/// there and sends nothing more - no WebSocket upgrade. The same dial left
+/// allowed has spoken first (its TLS hello), the counter-case.
+#[tokio::test]
+async fn a_dial_mid_handshake_at_the_withdrawal_sends_nothing_more() {
+    let socks = common::held_socks::run().await;
+    let url = "wss://relay.example.org".to_string();
+    let keeper = RelayGateKeeper::default();
+    keeper.set(std::slice::from_ref(&url));
+    let dial = spawn_dial(&held_dialer(&socks, &keeper), &url);
+    let req = socks.requests.lock().await.recv().await.expect("a CONNECT");
+    req.release.send(()).expect("release");
+    let hello = req.first.await.expect("socks verdict");
+    assert!(hello.is_some_and(|n| n > 0), "an allowed dial starts its handshake");
+    keeper.set(&[]);
+    let res = tokio::time::timeout(ENDED, dial).await.expect("ended at the withdrawal").expect("task");
+    assert!(matches!(res, Err(NetError::Withdrawn)), "{res:?}");
+    assert_eq!(req.rest.await.expect("hang-up"), 0, "spoke on after the withdrawal");
+}
+
+/// The NIP-11 probe asks the gate like every relay dial.
+#[tokio::test]
+async fn the_nip11_probe_asks_the_gate() {
+    let (_relay, proxy) = relay_behind_proxy().await;
+    let keeper = RelayGateKeeper::default();
+    let err = molt_net::relay_runtime::probe_nip11_max_message(&gated(&keeper), &proxy.url())
+        .await
+        .expect_err("withdrawn");
+    assert!(matches!(err, NetError::Withdrawn), "{err:?}");
+    assert_eq!(proxy.accepts(), 0);
+}
+
+/// An idle pooled publish socket has no reader: the withdrawal itself must
+/// close it, with no further publish.
+#[tokio::test]
+async fn an_idle_pooled_socket_closes_at_the_withdrawal() {
+    let (_relay, proxy) = relay_behind_proxy().await;
+    let keeper = RelayGateKeeper::default();
+    keeper.set(&[proxy.url()]);
+    let chan = GroupChannel::new(gated(&keeper), vec![proxy.url()], [7u8; 32]);
+    chan.publish_frame(&[9u8; 32], b"keeps the socket").await.expect("publish");
+    keeper.set(&[]);
+    proxy.wait_closes(1).await;
+    assert_eq!(proxy.accepts(), 1);
 }
 
 /// The re-key delivery's shape: ONE task publishing over two relays loses
