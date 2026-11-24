@@ -2404,6 +2404,13 @@ mod ritual_ops {
             // B7: a founding that runs the chain lock from height 1 (test
             // seam only); an older build would sign it freely. Told on both
             // sides, the ticket stays usable after an update.
+            // every founding of this build ratifies block-v2 (charter)
+            if !caps.iter().any(|c| c == molt_core::chain::BLOCK_V2_CAP) {
+                tracing::warn!(seat, %member, "founding join rejected: no block-v2");
+                let why = "this founding needs a newer build - update and use the link again";
+                self.tell_activator(idx, seat, &member, &nostr_pk, &reply, why.to_string());
+                return self.refuse_join(idx, crate::chain::older_device(&member));
+            }
             let lock = molt_core::chain::CHAIN_LOCK_CAP;
             if self.lock_cap_on()
                 && self.lock_seams.found_locked.load(std::sync::atomic::Ordering::SeqCst)
@@ -4213,11 +4220,78 @@ mod tests {
             .expect("handler never errors");
         };
         let anchored = |st: &State| st.net_ritual.as_ref().expect("ritual").seats[0].identity.clone();
-        join(&mut st, Vec::new());
+        join(&mut st, vec![molt_core::chain::BLOCK_V2_CAP.to_string()]);
         assert!(anchored(&st).is_none(), "not anchored");
         let line = "✗ invite 1: bob runs a build without the lock - refused".to_string();
         assert!(st.session.create.run.log.contains(&line), "{:?}", st.session.create.run.log);
-        join(&mut st, vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]);
+        join(&mut st, vec![molt_core::chain::BLOCK_V2_CAP.to_string(), molt_core::chain::CHAIN_LOCK_CAP.to_string()]);
+        assert_eq!(anchored(&st).expect("the updated build anchors").member, "bob");
+    }
+
+    /// A joiner on a build without the v2 block identity is refused early:
+    /// every founding of this build ratifies `block-v2`.
+    #[test]
+    fn a_join_from_a_build_without_block_v2_is_refused_visibly() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        let _guard = rt.enter();
+        let mut st = crate::tests::plain_state();
+        let (founder_sk, founder_pk) = molt_storage::derive_identity_key(&[9u8; 32], "f");
+        let hub = LoopbackHub::calm();
+        st.net_ritual = Some(RitualRuntime {
+            transport: hub.transport(),
+            name: "R".to_string(),
+            agenda: String::new(),
+            charter_proposed: false,
+            founded_ts: 0,
+            features: None,
+            rule_m: 2,
+            rule_n: 2,
+            founder: MemberIdentity {
+                member: "founder".to_string(),
+                identity_pk: founder_pk,
+                nostr_pk: npk_founder(),
+                vault_pk: String::new(),
+            },
+            founder_sk,
+            founder_nostr_sk: zeroize::Zeroizing::new(vec![7u8; 32]),
+            seats: vec![bare_seat("t0")],
+            generation: 0,
+            _sim: Vec::new(),
+            seq: std::sync::atomic::AtomicU64::new(0),
+            nostr: None,
+        });
+        let reply = serde_json::to_string(&invite::ReplyHandover {
+            server: String::new(),
+            queue_id: "aa".to_string(),
+            wrap: "ef".repeat(32),
+        })
+        .expect("handover json");
+        let npk = molt_net::nostr_identity(b"j-entropy", "t0").1;
+        let (sk, pk) = molt_storage::derive_identity_key(&[5u8; 32], "bob");
+        let kp = hex::encode(molt_net::MlsMember::new(&sk, "bob").expect("mls").key_package().expect("kp"));
+        let join = |st: &mut State, caps: Vec<String>| {
+            st.cmd_net_join_requested(
+                0,
+                "bob".to_string(),
+                pk.clone(),
+                npk.clone(),
+                invite::join_mac("t0", "bob", &pk, &npk),
+                reply.clone(),
+                String::new(),
+                kp.clone(),
+                Vec::new(),
+                crate::vault::seat_vault_key(b"bob", &npk, &pk).1,
+                caps,
+                None,
+            )
+            .expect("handler never errors");
+        };
+        let anchored = |st: &State| st.net_ritual.as_ref().expect("ritual").seats[0].identity.clone();
+        join(&mut st, Vec::new());
+        assert!(anchored(&st).is_none(), "not anchored");
+        let line = "✗ invite 1: bob's device runs an older build".to_string();
+        assert!(st.session.create.run.log.contains(&line), "{:?}", st.session.create.run.log);
+        join(&mut st, vec![molt_core::chain::BLOCK_V2_CAP.to_string()]);
         assert_eq!(anchored(&st).expect("the updated build anchors").member, "bob");
     }
 

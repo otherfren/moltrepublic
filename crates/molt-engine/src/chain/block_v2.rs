@@ -7,6 +7,11 @@
 
 use super::*;
 
+/// Why a device on a build without the v2 identity is not let in.
+pub(crate) fn older_device(member: &str) -> String {
+    format!("{member}'s device runs an older build")
+}
+
 impl State {
     /// The first seat that keeps `block-v2` off, and why; `None` when every
     /// other seat announced the capability.

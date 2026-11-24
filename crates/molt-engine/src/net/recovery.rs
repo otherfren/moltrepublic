@@ -164,6 +164,14 @@ impl State {
             }
             return Ok(Reply::Ack);
         }
+        // a device that cannot follow the v2 identity would join the MLS
+        // group and never follow the chain
+        if self.block_v2_from().is_some() && !caps.iter().any(|c| c == molt_core::chain::BLOCK_V2_CAP) {
+            if !self.recovery.attempts.is_spent(&attempt) && proven() {
+                self.refuse_recover_request(&member, &sender_npub, crate::chain::older_device(&member), &attempt);
+            }
+            return Ok(Reply::Ack);
+        }
         // item 7: what the device runs decides at the seal whether it is
         // welcomed (the mode may be enabled while the card is open)
         self.recovery.rejoiner_caps.retain(|(a, _)| *a != attempt);

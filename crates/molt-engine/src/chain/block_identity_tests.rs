@@ -362,3 +362,49 @@ fn different_signer_subsets_fork_before_the_activation() {
     let (forks, _) = three_seals_per_block(&plain(2), 6);
     assert!(forks > 0, "v1 variants are fork decisions");
 }
+
+// --- review M3: an older device does not rejoin an activated republic ---
+
+fn recover_request(coord: &mut crate::State, b: &Builder, caps: Vec<String>) {
+    let kp_hex = kp_hex_for(b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), "t", &kp_hex, &b.republic_id, "", &[]);
+    coord
+        .cmd_net_recover_requested(
+            "dora".to_string(),
+            b.pk("dora"),
+            kp_hex,
+            "t".to_string(),
+            proof,
+            String::new(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            (false, 0, caps),
+            None,
+        )
+        .expect("ack");
+}
+
+#[test]
+fn a_device_without_block_v2_is_refused_a_restore() {
+    let b = enabled(3);
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    coord.recovery.tickets.insert("t".to_string(), "dora".to_string());
+    recover_request(&mut coord, &b, Vec::new());
+    assert_eq!(coord.session.notice, "recover-refused:dora:dora's device runs an older build");
+    assert!(coord.recovery.tickets.contains_key("t"), "the ticket stays live");
+    coord.session.notice.clear();
+    recover_request(&mut coord, &b, vec![molt_core::chain::BLOCK_V2_CAP.to_string()]);
+    assert!(!coord.session.notice.starts_with("recover-refused"), "{}", coord.session.notice);
+}
+
+/// Counter-test: before the activation the same device is not refused.
+#[test]
+fn before_the_activation_an_older_device_may_restore() {
+    let b = plain(3);
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    coord.recovery.tickets.insert("t".to_string(), "dora".to_string());
+    recover_request(&mut coord, &b, Vec::new());
+    assert!(!coord.session.notice.starts_with("recover-refused"), "{}", coord.session.notice);
+}
