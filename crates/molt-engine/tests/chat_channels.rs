@@ -406,7 +406,7 @@ async fn channels_govern_chat_and_filter_coequally_across_instances() {
         surface: Surface::Memory,
         payload: payload.clone(),
     };
-    let bytes = molt_core::approval_bytes(&sealed.republic_id, 1, &change);
+    let bytes = common::signed_on_head(&a, &sealed.republic_id, 1, &change).await;
     let b_sig = molt_storage::identity_sign(&b_sk, &bytes);
     member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 6,

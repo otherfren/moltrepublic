@@ -32,10 +32,11 @@
 //!   founding attestations over [`roster_canonical_bytes`], so founding needs no
 //!   new signing path and a rejoiner verifies the constitution the same way
 //!   every member ratified it.
-//! * **`prev` is a structural link, not signed.** Each block records the hash of
-//!   the previous block's [`block_link_bytes`]; the chain verifier checks the
-//!   links form an unbroken line from the genesis. Swapping a block's signature
-//!   set breaks the link (the sigs are folded into the hashed bytes).
+//! * **`prev` links, and from the v2 activation it is signed.** Each block
+//!   records the previous block's identity ([`block_link_bytes`], from
+//!   [`BLOCK_V2_FEATURE`]'s activation [`block_id_bytes`]); the verifier checks
+//!   the links form an unbroken line from the genesis. From the activation the
+//!   members sign [`approval_bytes_v3`], which covers `prev`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

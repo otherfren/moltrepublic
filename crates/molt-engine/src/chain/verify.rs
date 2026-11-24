@@ -183,14 +183,14 @@ pub fn block_identities(checkpoint: Option<&molt_core::CheckpointState>, blocks:
     out
 }
 
-/// S3 prototype switch: members sign `prev` from the v2 activation on.
-pub(crate) static PREV_BINDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// A signature at `height` covers its predecessor's identity
-/// (`molt-chain-change-v3`).
+/// (`molt-chain-change-v3`): the same activation as the v2 identity.
 pub(crate) fn prev_bound(v2_from: Option<u64>, height: u64) -> bool {
-    PREV_BINDING.load(std::sync::atomic::Ordering::SeqCst) && v2_from.is_some_and(|h| height >= h)
+    block_v2_known() && !PREV_UNBOUND.load(std::sync::atomic::Ordering::SeqCst) && v2_from.is_some_and(|h| height >= h)
 }
+
+/// Measurement seam: sign as before the binding (`__prev_unbound`).
+pub(crate) static PREV_UNBOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// What a member signs for `change` at `height` on `prev`.
 pub(crate) fn signing_bytes(republic_id: &str, height: u64, prev: &str, change: &ChainChange, v2_from: Option<u64>) -> Vec<u8> {

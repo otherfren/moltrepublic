@@ -12,8 +12,9 @@
 
 use super::*;
 
-/// S3 measurement: own standing approvals signed again.
-pub(crate) static RESIGNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Measurement seam: own standing approvals signed again, per card;
+/// `None` (nothing kept) until a test arms it.
+pub(crate) static RESIGNS: std::sync::Mutex<Option<std::collections::BTreeMap<u64, u64>>> = std::sync::Mutex::new(None);
 
 /// One voter is told its vote was dropped at most this often.
 const VOTE_REFUSAL_DEBOUNCE_SECS: u64 = 30;
@@ -484,7 +485,9 @@ impl State {
         let bytes = self.signing_bytes_at(height, &change);
         let sig = molt_storage::identity_sign(sk, &bytes);
         if self.chain.own_approvals.contains(&id) {
-            RESIGNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if let Some(r) = RESIGNS.lock().ok().as_mut().and_then(|r| r.as_mut()) {
+                *r.entry(id).or_default() += 1;
+            }
         }
         let me = self.member();
         // the decision register: the ONLY writer (see `rebase_pending_approvals`)

@@ -148,7 +148,12 @@ impl Builder {
 
     /// Sign `change` at `height` with each named member and return the block.
     pub(crate) fn seal(&self, height: u64, change: ChainChange, signers: &[&str]) -> ChainBlock {
-        let bytes = signing_bytes(&self.republic_id, height, &self.head_hash, &change, self.v2_from);
+        self.seal_on(height, &self.head_hash, change, signers)
+    }
+
+    /// [`Self::seal`] on the predecessor `prev`.
+    pub(crate) fn seal_on(&self, height: u64, prev: &str, change: ChainChange, signers: &[&str]) -> ChainBlock {
+        let bytes = signing_bytes(&self.republic_id, height, prev, &change, self.v2_from);
         let sigs = signers
             .iter()
             .map(|name| {
@@ -165,7 +170,7 @@ impl Builder {
             .collect();
         ChainBlock {
             height,
-            prev: self.head_hash.clone(),
+            prev: prev.to_string(),
             change,
             sigs,
         }

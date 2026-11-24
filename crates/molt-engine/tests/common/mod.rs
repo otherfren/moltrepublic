@@ -669,3 +669,13 @@ pub async fn found_pair(
     .await;
     (a, b)
 }
+
+/// What a member signs for `change` at `height` on `w`'s head: the
+/// `molt-chain-change-v3` bytes every founding of this build ratifies.
+#[allow(dead_code)]
+pub async fn signed_on_head(w: &WalletHandle, rid: &str, height: u64, change: &molt_core::ChainChange) -> Vec<u8> {
+    let Ok(molt_core::Reply::Status(s)) = w.execute(Command::Status).await else {
+        panic!("status answers Reply::Status");
+    };
+    molt_core::chain::approval_bytes_v3(rid, height, &s.chain_sync.head_hash, change)
+}

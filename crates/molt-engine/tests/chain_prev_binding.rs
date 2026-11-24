@@ -3,8 +3,9 @@
 
 //! **The gate of `block_identity_plan.md` §3b, measured**: a 2-of-3
 //! republic over a local relay, one seat's inbound delayed by about one
-//! block, 50 proposals. Propose-to-sealed per card with and without the
-//! `prev` binding (`molt-chain-change-v3`). Run explicitly:
+//! block, 50 proposals; propose-to-sealed per card with the `prev` binding
+//! (`molt-chain-change-v3`). The run without it (2026-11-24, before the
+//! binding shipped) is in `persistent_chain.md` §5.1. Run explicitly:
 //! `cargo test -p molt-engine --test chain_prev_binding -- --ignored --nocapture`.
 
 mod common;
@@ -105,9 +106,19 @@ async fn status(w: &WalletHandle) -> molt_core::StatusView {
     }
 }
 
-/// One run: `(per-card propose-to-sealed, re-sign rounds, fork decisions)`.
-async fn run(bound: bool) -> (Vec<Duration>, u64, u64) {
-    molt_engine::__prev_binding(bound);
+/// One card of a run.
+struct Card {
+    secs: f64,
+    resigns: u64,
+    /// Its place in its burst (0 = first proposed).
+    slot: usize,
+    /// Cards of its burst sealed before it.
+    sealed_before: usize,
+}
+
+/// One run of `cards` cards: per card, and the fork decisions.
+async fn run(unbound: bool, cards: usize) -> (Vec<Card>, u64) {
+    molt_engine::__prev_unbound(unbound);
     let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
@@ -115,19 +126,18 @@ async fn run(bound: bool) -> (Vec<Duration>, u64, u64) {
     assert!(status(&seats[0]).await.chain_sync.block_v2_since > 0, "a new founding ratifies block-v2");
     // dora lags one block: the seal pace is 5 s
     seats[2].__delay_inbound_ms(6_000);
-    let resigns_before = molt_engine::__resign_count();
-    const CARDS: usize = 50;
+    let resigns_before = molt_engine::__resign_counts();
     const BURST: usize = 5;
-    let mut opened: Vec<(u64, Instant)> = Vec::new();
-    let mut sealed: std::collections::BTreeMap<u64, Duration> = std::collections::BTreeMap::new();
-    let deadline = Instant::now() + Duration::from_secs(1800);
+    let mut opened: Vec<(u64, Instant, usize)> = Vec::new();
+    let mut sealed: std::collections::BTreeMap<u64, (Duration, usize)> = std::collections::BTreeMap::new();
+    let deadline = Instant::now() + Duration::from_secs(7200);
     let mut next = 0usize;
-    while sealed.len() < CARDS {
-        let open = opened.len() - sealed.len();
-        if open == 0 && next < CARDS {
-            for _ in 0..BURST.min(CARDS - next) {
-                let proposer = &seats[next % 2];
-                let reply = proposer
+    let mut burst_sealed = 0usize;
+    while sealed.len() < cards {
+        if opened.len() == sealed.len() && next < cards {
+            burst_sealed = 0;
+            for slot in 0..BURST.min(cards - next) {
+                let reply = seats[next % 2]
                     .execute(Command::Propose {
                         surface: molt_core::Surface::Memory,
                         payload: add_page(&format!("p{next}.md"), "x"),
@@ -135,7 +145,7 @@ async fn run(bound: bool) -> (Vec<Duration>, u64, u64) {
                     .await
                     .expect("proposes");
                 let Reply::Proposed { id, .. } = reply else { panic!("{reply:?}") };
-                opened.push((id.0, Instant::now()));
+                opened.push((id.0, Instant::now(), slot));
                 next += 1;
             }
         }
@@ -143,12 +153,13 @@ async fn run(bound: bool) -> (Vec<Duration>, u64, u64) {
             approve_open(w).await;
         }
         let views = proposals(&seats[0]).await;
-        for (id, at) in &opened {
+        for (id, at, _) in &opened {
             if !sealed.contains_key(id) && views.iter().any(|p| p.id.0 == *id && p.state == ProposalState::Applied) {
-                sealed.insert(*id, at.elapsed());
+                sealed.insert(*id, (at.elapsed(), burst_sealed));
+                burst_sealed += 1;
             }
         }
-        assert!(Instant::now() < deadline, "sealed {} of {CARDS}", sealed.len());
+        assert!(Instant::now() < deadline, "sealed {} of {cards}", sealed.len());
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     let mut forks = 0;
@@ -156,30 +167,52 @@ async fn run(bound: bool) -> (Vec<Duration>, u64, u64) {
         forks += status(w).await.chain_sync.fork_decisions;
     }
     seats[2].__delay_inbound_ms(0);
-    (sealed.into_values().collect(), molt_engine::__resign_count() - resigns_before, forks)
+    let after = molt_engine::__resign_counts();
+    let out = opened
+        .iter()
+        .map(|(id, _, slot)| {
+            let (d, sealed_before) = sealed[id];
+            let resigns = after.get(id).copied().unwrap_or(0) - resigns_before.get(id).copied().unwrap_or(0);
+            Card { secs: d.as_secs_f64(), resigns, slot: *slot, sealed_before }
+        })
+        .collect();
+    (out, forks)
 }
 
-fn pct(sorted: &[Duration], p: usize) -> f64 {
+fn pct(sorted: &[f64], p: usize) -> f64 {
     let i = (sorted.len() * p).div_ceil(100).saturating_sub(1).min(sorted.len() - 1);
-    sorted[i].as_secs_f64()
+    sorted[i]
 }
 
+/// n >= 200 per run, three runs per mode: the tail and its re-signs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "a measurement: about 30 min"]
+#[ignore = "a measurement: about two hours"]
 async fn prev_binding_adds_no_wait_with_a_lagging_seat() {
-    let mut medians = [Vec::new(), Vec::new()];
+    let _ = molt_engine::__resign_counts();
     for round in 0..3 {
-        for (i, bound) in [false, true].into_iter().enumerate() {
-            let (mut times, resigns, forks) = run(bound).await;
-            times.sort();
+        for unbound in [true, false] {
+            let (cards, forks) = run(unbound, 200).await;
+            let mut secs: Vec<f64> = cards.iter().map(|c| c.secs).collect();
+            secs.sort_by(f64::total_cmp);
+            let mut hist = std::collections::BTreeMap::<u64, usize>::new();
+            for c in &cards {
+                *hist.entry(c.resigns).or_default() += 1;
+            }
+            let out_of_order = cards.iter().filter(|c| c.slot != c.sealed_before).count();
+            let mut slow: Vec<&Card> = cards.iter().collect();
+            slow.sort_by(|a, b| b.secs.total_cmp(&a.secs));
+            let tail: Vec<String> = slow.iter().take(5).map(|c| format!("{:.0}s/slot{}/resigns{}", c.secs, c.slot, c.resigns)).collect();
             eprintln!(
-                "measure round={round} bound={bound} median={:.2} p95={:.2} max={:.2} resigns={resigns} forks={forks}",
-                pct(&times, 50),
-                pct(&times, 95),
-                pct(&times, 100)
+                "measure round={round} bound={} n={} median={:.2} p90={:.2} p95={:.2} p99={:.2} max={:.2} forks={forks} resigns_per_card={hist:?} out_of_slot_order={out_of_order} slowest={tail:?}",
+                !unbound,
+                secs.len(),
+                pct(&secs, 50),
+                pct(&secs, 90),
+                pct(&secs, 95),
+                pct(&secs, 99),
+                pct(&secs, 100)
             );
-            medians[i].push(pct(&times, 50));
         }
     }
-    eprintln!("measure medians unbound={:?} bound={:?}", medians[0], medians[1]);
+    molt_engine::__prev_unbound(false);
 }

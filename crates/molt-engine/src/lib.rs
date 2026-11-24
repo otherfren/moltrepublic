@@ -133,16 +133,19 @@ const EVENT_QUEUE: usize = 512;
 /// `STALE_SECS`), so a slow beat is plenty and keeps the actor quiet.
 const PRESENCE_TICK_MS: u64 = 30_000;
 
-/// Test seam (S3 prototype): members sign `prev` from the v2 activation on.
+/// Test seam (measurement): own standing approvals signed again, per
+/// card, process-wide, since the first call (which arms the count).
 #[doc(hidden)]
-pub fn __prev_binding(on: bool) {
-    chain::PREV_BINDING.store(on, std::sync::atomic::Ordering::SeqCst);
+pub fn __resign_counts() -> std::collections::BTreeMap<u64, u64> {
+    chain::RESIGNS.lock().map(|mut r| r.get_or_insert_with(Default::default).clone()).unwrap_or_default()
 }
 
-/// Test seam (S3 measurement): own standing approvals signed again, process-wide.
+/// Test seam (measurement): every engine in the process signs without
+/// `prev`, as before the binding. A chain sealed so is refused by a build
+/// without the seam.
 #[doc(hidden)]
-pub fn __resign_count() -> u64 {
-    chain::RESIGNS.load(std::sync::atomic::Ordering::SeqCst)
+pub fn __prev_unbound(on: bool) {
+    chain::PREV_UNBOUND.store(on, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Shorten the resumable fetch's wait before it asks for missing pieces
