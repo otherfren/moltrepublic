@@ -108,6 +108,14 @@ export struct RelayItem {
     busy: int, // transient refusals in the last hour (StatusView.relay_refusals)
 }
 
+// One row of a fork's detail table (branch diagnostics).
+export struct BranchRow {
+    fork: int, // the fork it belongs to (index into the fork lines)
+    heading: bool, // a branch's heading row, else one of its blocks
+    text: string,
+    flag: string, // "" or what dropping the block cannot undo
+}
+
 // One chat channel in the sidebar (chat bus): a VIEW over the one log,
 // never a boundary. Built Rust-side from the engine's channel enumeration.
 export struct ChannelItem {
@@ -1502,6 +1510,28 @@ export global Strings {
     in property <string> os-col-build;
     in property <string> os-build-unknown-tip;
     in property <string> os-builds-mixed;
+    in property <string> feat-block-v2;
+    in property <string> feat-d-block-v2;
+    in property <string> os-bv2-label;
+    in property <string> os-bv2-switch;
+    in property <string> os-bv2-t-changes;
+    in property <string> os-bv2-changes;
+    in property <string> os-bv2-t-notice;
+    in property <string> os-bv2-notice;
+    in property <string> os-bv2-t-price;
+    in property <string> os-bv2-price;
+    in property <string> os-bv2-t-who;
+    in property <string> os-bv2-who;
+    in property <string> os-bv2-card;
+    in property <string> ob-title;
+    in property <string> ob-details;
+    in property <string> ob-export;
+    in property <string> ob-import;
+    in property <string> ob-later;
+    in property <string> ob-export-title;
+    in property <string> ob-import-title;
+    in property <string> ob-pass;
+    in property <string> close-busy;
     in property <string> os-other-branch-at;
     in property <string> os-other-branch;
     in property <string> os-dropped;

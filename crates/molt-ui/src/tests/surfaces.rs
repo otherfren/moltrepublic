@@ -1144,3 +1144,75 @@ fn mixed_builds_need_two_known_versions_or_an_unknown_beside_a_known_one() {
     assert!(builds_mixed(&with(&[Some("0.1.2"), None])));
     assert!(!builds_mixed(&with(&[None, None])), "nothing known, nothing to compare");
 }
+
+/// The block format row: new from its height on, else waiting for the one
+/// seat the engine names, else ready; hidden outside a chain republic.
+#[test]
+fn the_block_format_row_names_its_state_and_who_holds_it_back() {
+    use crate::surfaces::{block_format_row, builds_note};
+    assert_eq!(block_format_row(0, true, 12, ""), (1, "new (since block 12)".to_string(), String::new()));
+    assert_eq!(block_format_row(1, true, 12, ""), (1, "neu (seit Block 12)".to_string(), String::new()));
+    assert_eq!(
+        block_format_row(0, true, 0, "bo runs an older build"),
+        (2, "old - waiting for bo".to_string(), "bo runs an older build".to_string())
+    );
+    assert_eq!(
+        block_format_row(1, true, 0, "bo has not announced"),
+        (2, "alt - wartet auf bo".to_string(), "bo hat sich noch nicht gemeldet".to_string())
+    );
+    assert_eq!(block_format_row(0, true, 0, "").0, 3);
+    assert_eq!(block_format_row(0, false, 0, "").0, 0);
+    assert_eq!(
+        builds_note(0, true, 0, "bo runs an older build"),
+        "Seats run different versions - bo holds back the new block format"
+    );
+    assert_eq!(builds_note(0, true, 5, ""), "", "on: the plain line");
+    assert_eq!(builds_note(0, false, 0, "bo runs an older build"), "", "no mixed builds, no line");
+}
+
+/// The vote that turns the format on is titled and explained as such.
+#[test]
+fn the_block_format_vote_reads_as_what_it_does() {
+    let payload = serde_json::json!({ "op": "set_features", "value": " memory block-v2" });
+    assert_eq!(display_title(0, &payload), "Block format");
+    assert_eq!(display_title(1, &payload), "Blockformat");
+    assert_eq!(display_title(0, &serde_json::json!({ "op": "set_features", "value": " memory" })), "Features");
+    assert_eq!(crate::labels::feature_name(0, "block-v2"), "One block per decision");
+    assert_eq!(crate::labels::feature_name(1, "block-v2"), "Ein Block pro Entscheidung");
+}
+
+/// The branch diagnostics: one line per fork, ours named, the tables
+/// flag what cannot be undone.
+#[test]
+fn fork_lines_and_rows_render_both_languages() {
+    use molt_core::branch::{BranchBlockRow, BranchStatusView, BranchView, ForkView};
+    let status = BranchStatusView {
+        forks: vec![ForkView {
+            base_height: 7,
+            branches: vec![
+                BranchView {
+                    head_height: 9,
+                    head_hash: "abcdef12".to_string(),
+                    own: true,
+                    blocks: vec![BranchBlockRow {
+                        height: 8,
+                        kind: "membership".to_string(),
+                        op: "restore".to_string(),
+                        risk: "flagged".to_string(),
+                        ..BranchBlockRow::default()
+                    }],
+                    ..BranchView::default()
+                },
+                BranchView { head_height: 8, head_hash: "123456ab".to_string(), ..BranchView::default() },
+            ],
+            ..ForkView::default()
+        }],
+        ..BranchStatusView::default()
+    };
+    assert_eq!(crate::branches::fork_lines(0, &status), ["At block 7: ours 9 · abcdef, other 8 · 123456"]);
+    assert_eq!(crate::branches::fork_lines(1, &status), ["Bei Block 7: unser 9 · abcdef, anderer 8 · 123456"]);
+    let rows = crate::branches::branch_rows(1, &status);
+    assert_eq!(rows.len(), 3);
+    assert_eq!((rows[1].text.as_str(), rows[1].flag.as_str()), ("8 · Mitgliedschaft restore", "prüfen"));
+    assert!(rows[0].heading && rows[2].heading);
+}

@@ -13,6 +13,8 @@
 
 #[cfg(feature = "live-preview")]
 mod agent_tab;
+#[cfg(feature = "live-preview")]
+mod chain_surface;
 mod chat;
 #[cfg(feature = "live-preview")]
 mod chat_scroll;

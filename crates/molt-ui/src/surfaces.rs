@@ -259,6 +259,20 @@ pub(crate) struct OrgStats {
     /// The seat table (engine `StatusView.seats`), rendered.
     pub(crate) seats: Vec<SeatRowData>,
     pub(crate) builds_mixed: bool,
+    /// The mixed-builds line naming who holds back the block format
+    /// ("" = the plain line).
+    pub(crate) builds_note: String,
+    /// The block format row: 0 hidden, 1 new, 2 waiting, 3 ready; its text
+    /// and why it waits.
+    pub(crate) bv2_state: i32,
+    pub(crate) bv2_text: String,
+    pub(crate) bv2_tip: String,
+    /// Raw `chain_sync` facts, rendered once the language is known.
+    pub(crate) bv2_since: u64,
+    pub(crate) bv2_wait: String,
+    /// The forks `branch_status` proves, one line each, and their tables.
+    pub(crate) fork_lines: Vec<String>,
+    pub(crate) branch_rows: Vec<crate::branches::BranchRowData>,
     /// Group relays that refused events (engine `StatusView.relay_refusals`).
     pub(crate) relay_refusals: Vec<molt_core::RelayRefusals>,
 }
@@ -352,6 +366,64 @@ pub(crate) fn seat_rows(
             }
         })
         .collect()
+}
+
+/// The seat `block_v2_wait` names, and why in the active language.
+fn block_v2_waiting(lang: i32, wait: &str) -> Option<(String, String)> {
+    let (seat, why) = if let Some(seat) = wait.strip_suffix(" has not announced") {
+        (seat, if lang == 1 { "hat sich noch nicht gemeldet" } else { "has not announced" })
+    } else if let Some(seat) = wait.strip_suffix(" runs an older build") {
+        (seat, if lang == 1 { "läuft mit einer älteren Version" } else { "runs an older build" })
+    } else if wait.is_empty() {
+        return None;
+    } else {
+        ("?", wait)
+    };
+    Some((seat.to_string(), format!("{seat} {why}")))
+}
+
+/// The block format row: `(state, text, tooltip)`; state 0 hidden, 1 new,
+/// 2 waiting for a seat, 3 ready to switch.
+pub(crate) fn block_format_row(lang: i32, governed: bool, since: u64, wait: &str) -> (i32, String, String) {
+    let de = lang == 1;
+    if since > 0 {
+        let text = if de { format!("neu (seit Block {since})") } else { format!("new (since block {since})") };
+        return (1, text, String::new());
+    }
+    if !governed {
+        return (0, String::new(), String::new());
+    }
+    match block_v2_waiting(lang, wait) {
+        Some((seat, why)) => {
+            let text = if de { format!("alt - wartet auf {seat}") } else { format!("old - waiting for {seat}") };
+            (2, text, why)
+        }
+        None => (3, if de { "alt - bereit zum Wechsel" } else { "old - ready to switch" }.to_string(), String::new()),
+    }
+}
+
+/// The mixed-builds line, naming the seat that holds back the block
+/// format while it is old ("" = the plain line).
+pub(crate) fn builds_note(lang: i32, mixed: bool, since: u64, wait: &str) -> String {
+    if !mixed || since > 0 {
+        return String::new();
+    }
+    let Some((seat, _)) = block_v2_waiting(lang, wait) else { return String::new() };
+    let lex = Lexicon::of(lang);
+    if lang == 1 {
+        format!("{} - {seat} hält das neue Blockformat auf", lex.os_builds_mixed)
+    } else {
+        format!("{} - {seat} holds back the new block format", lex.os_builds_mixed)
+    }
+}
+
+/// A `set_features` vote that turns on `block-v2`.
+fn enables_block_v2(payload: &serde_json::Value) -> bool {
+    payload.get("op").and_then(serde_json::Value::as_str) == Some("set_features")
+        && payload
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|v| v.split_whitespace().any(|k| k == molt_core::chain::BLOCK_V2_FEATURE))
 }
 
 /// The seats' builds differ: two known versions, or an unknown beside a
@@ -1086,6 +1158,14 @@ pub(crate) async fn gather_surfaces(
                 // rendered once the language is known, below
                 seats: Vec::new(),
                 builds_mixed: false,
+                builds_note: String::new(),
+                bv2_state: 0,
+                bv2_text: String::new(),
+                bv2_tip: String::new(),
+                bv2_since: s.chain_sync.block_v2_since,
+                bv2_wait: s.chain_sync.block_v2_wait.clone(),
+                fork_lines: Vec::new(),
+                branch_rows: Vec::new(),
                 relay_refusals: s.relay_refusals,
             },
             (s.seats, s.persistent_files, s.inbound_held),
@@ -1312,6 +1392,15 @@ pub(crate) async fn gather_surfaces(
     org_stats.seats = seat_rows(&seat_src.0, seat_src.1, &member, lang, unix_now(), &local_heads);
     mark_fetching(&mut org_stats.seats, &seat_src.2);
     org_stats.builds_mixed = builds_mixed(&seat_src.0);
+    (org_stats.bv2_state, org_stats.bv2_text, org_stats.bv2_tip) =
+        block_format_row(lang, org_stats.chain_governed, org_stats.bv2_since, &org_stats.bv2_wait);
+    org_stats.builds_note = builds_note(lang, org_stats.builds_mixed, org_stats.bv2_since, &org_stats.bv2_wait);
+    if org_stats.chain_governed {
+        if let Ok(Reply::Branches(b)) = wallet.execute(Command::BranchStatus).await {
+            org_stats.fork_lines = crate::branches::fork_lines(lang, &b);
+            org_stats.branch_rows = crate::branches::branch_rows(lang, &b);
+        }
+    }
     let uploads_total = uploads.len();
     let (unread, first_seen, known, org_view, list_pages, mut uploads, mut persistent) = {
         // …and here for the same reason: this is the chat pane's own
@@ -1949,6 +2038,8 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
     let (notes, notes_bad) = if p.surface == Surface::Wallet && op == "wallet_init" {
         // approving the card is this seat's consent to the run (design §3.3)
         (crate::wallet::consent_notes(lang), false)
+    } else if enables_block_v2(&p.payload) {
+        (Lexicon::of(lang).os_bv2_card.to_string(), false)
     } else {
         kanban_notes(lang, p)
     };
@@ -2168,6 +2259,9 @@ pub(crate) fn display_title(lang: i32, v: &serde_json::Value) -> String {
         } else {
             format!("{label} ({summary})")
         };
+    }
+    if enables_block_v2(v) {
+        return Lexicon::of(lang).os_bv2_label.to_string();
     }
     if let Some(t) = vault_title(lang, v, &VaultView::default(), false) {
         return t;

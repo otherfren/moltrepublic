@@ -21,7 +21,7 @@
 import "assets/fonts/Twemoji.Mozilla.ttf";
 import "assets/fonts/DejaVuSansMono.ttf";
 
-import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ChatSeg, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, WorkspaceItem, MemberSync, MemberRow, SeatRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, LogRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
+import { Theme, Strings, HintTip, WikiState, PatchView, Poke, Kanban, AppScreen, SurfaceTab, ViewItem, LogLine, ChatSeg, ReactionItem, ReceiptItem, ProposalRow, ChannelItem, BranchRow, WorkspaceItem, MemberSync, MemberRow, SeatRow, UploadRow, RitualSeat, RecoverSeatRow, SeedRow, SeedWord, LinkPreview, BackupRow, LogRow, ChainRow, RelayItem, RelayPick, LinkRelay, VaultDepositRow, VaultGrantRow, VaultUnsealedRow, Purse, WalletTxRow, WalletSeatRow } from "theme.slint";
 import {
     AppButton, AppField, AppArea, AppDropdown, AppStepper, AppCheck, ChromeControls, ScrollHint, HoverTip,
     ConfirmModal, SkillModal, DotLabel, InsetWell, WordChip
@@ -752,6 +752,11 @@ component OrgSettingsCard inherits DetailGroup {
     in property <[string]> relays;
     callback edit();
     callback edit-relays();
+    // the block format: 0 hidden, 1 new, 2 waiting for a seat, 3 ready
+    in property <int> bv2-state;
+    in property <string> bv2-text;
+    in property <string> bv2-tip;
+    callback switch-block-format();
     title: Strings.ocs-title;
     if root.relays.length > 0: VerticalLayout {
         spacing: 4px;
@@ -843,6 +848,49 @@ component OrgSettingsCard inherits DetailGroup {
             tooltip-left: true;
             clicked => {
                 root.edit-thread();
+            }
+        }
+    }
+    if root.bv2-state > 0: VerticalLayout {
+        spacing: 4px;
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: Strings.os-bv2-label;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            Rectangle {
+                horizontal-stretch: 1;
+                height: ocs-bv2.preferred-height;
+                ocs-bv2 := Text {
+                    width: 100%;
+                    text: root.bv2-text;
+                    color: root.bv2-state == 2 ? Theme.warn : Theme.dim;
+                    font-size: Theme.fs-body;
+                    horizontal-alignment: right;
+                    overflow: elide;
+                }
+                if root.bv2-tip != "": TouchArea {
+                    property <int> tip-gen;
+                    changed has-hover => {
+                        if (self.has-hover) {
+                            self.tip-gen = HintTip.show(root.bv2-tip,
+                                parent.absolute-position.x,
+                                parent.absolute-position.y + parent.height + 4px);
+                        } else {
+                            HintTip.hide(self.tip-gen);
+                        }
+                    }
+                }
+            }
+        }
+        if root.bv2-state == 3: AppButton {
+            label: Strings.os-bv2-switch;
+            clicked => {
+                root.switch-block-format();
             }
         }
     }
@@ -1634,6 +1682,24 @@ export component AppWindow inherits Window {
     in property <[SeatRow]> org-seats;
     // the seats' known builds differ, or an unknown sits beside a known one
     in property <bool> org-builds-mixed;
+    // the block format row and its switch (block_identity_plan.md §4)
+    in property <int> org-bv2-state;
+    in property <string> org-bv2-text;
+    in property <string> org-bv2-tip;
+    in property <string> org-builds-note;
+    in-out property <bool> org-bv2-modal-open;
+    // the forks branch_status proves, one line each, and their tables;
+    // org-branch-open = the fork whose details are shown (-1 = none)
+    in property <[string]> org-fork-lines;
+    in property <[BranchRow]> org-branch-rows;
+    in-out property <int> org-branch-open: -1;
+    // the evidence dialog: "export" | "import" ("" = closed)
+    in-out property <string> ob-ev-mode;
+    in-out property <string> ob-ev-path;
+    property <string> ob-ev-pass;
+    callback branch-evidence(string /* mode */, string /* path */, string /* passphrase */);
+    // a clean close may wait for the relays
+    in-out property <bool> closing;
     // the seat a resync waits to be confirmed for ("" = no dialog)
     in-out property <string> os-resync-member;
     // the dialog gives up the wait instead of starting a fetch
@@ -1889,6 +1955,10 @@ export component AppWindow inherits Window {
         || root.org-retention-modal-open
         || root.org-relays-modal-open
         || root.os-resync-member != ""
+        || root.org-bv2-modal-open
+        || root.org-branch-open >= 0
+        || root.ob-ev-mode != ""
+        || root.closing
         || root.org-features-modal-open
         || root.decrypt-modal-open
         || root.charter-view-open
@@ -3006,6 +3076,12 @@ export component AppWindow inherits Window {
             root.org-relays-modal-open = false;
         } else if (root.os-resync-member != "") {
             root.os-resync-member = "";
+        } else if (root.ob-ev-mode != "") {
+            root.ob-ev-mode = "";
+        } else if (root.org-branch-open >= 0) {
+            root.org-branch-open = -1;
+        } else if (root.org-bv2-modal-open) {
+            root.org-bv2-modal-open = false;
         } else if (root.org-features-modal-open) {
             root.org-features-modal-open = false;
         } else if (root.decrypt-modal-open) {
@@ -6629,6 +6705,12 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     if os-row.side-settings: OrgSettingsCard {
+                                        bv2-state: root.org-bv2-state;
+                                        bv2-text: root.org-bv2-text;
+                                        bv2-tip: root.org-bv2-tip;
+                                        switch-block-format => {
+                                            root.org-bv2-modal-open = true;
+                                        }
                                         width: 300px * Theme.ui-scale;
                                         retention: root.org-chat-retention;
                                         thread-retention: root.org-thread-retention;
@@ -6754,6 +6836,12 @@ export component AppWindow inherits Window {
                                 // shown down here only when the pane is too
                                 // narrow to seat the card beside the strip
                                 if !os-row.side-settings: OrgSettingsCard {
+                                    bv2-state: root.org-bv2-state;
+                                    bv2-text: root.org-bv2-text;
+                                    bv2-tip: root.org-bv2-tip;
+                                    switch-block-format => {
+                                        root.org-bv2-modal-open = true;
+                                    }
                                     retention: root.org-chat-retention;
                                     thread-retention: root.org-thread-retention;
                                     relays: root.org-relays;
@@ -6891,7 +6979,8 @@ export component AppWindow inherits Window {
                                     os-seats := DetailGroup {
                                         title: Strings.os-seats;
                                         if root.org-builds-mixed: Text {
-                                            text: Strings.os-builds-mixed;
+                                            text: root.org-builds-note != "" ? root.org-builds-note : Strings.os-builds-mixed;
+                                            wrap: word-wrap;
                                             color: Theme.warn;
                                             font-size: Theme.fs-cap;
                                         }
@@ -7123,6 +7212,52 @@ export component AppWindow inherits Window {
                                                     }
                                                 }
                                             }
+                                        }
+                                    }
+                                }
+                                // forks this node can prove; the choice is dark
+                                // in this build, the evidence moves by file
+                                if root.org-fork-lines.length > 0: HorizontalLayout {
+                                    alignment: start;
+                                    ob-group := DetailGroup {
+                                        title: Strings.ob-title;
+                                        for line[i] in root.org-fork-lines: HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: line;
+                                                color: Theme.bad;
+                                                font-size: Theme.fs-body;
+                                                vertical-alignment: center;
+                                            }
+                                            AppButton {
+                                                label: Strings.ob-details;
+                                                height: 24px * Theme.ui-scale;
+                                                pad: 8px * Theme.ui-scale;
+                                                clicked => {
+                                                    root.org-branch-open = i;
+                                                }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            alignment: start;
+                                            AppButton {
+                                                label: Strings.ob-export;
+                                                clicked => {
+                                                    root.ob-ev-mode = "export";
+                                                }
+                                            }
+                                            AppButton {
+                                                label: Strings.ob-import;
+                                                clicked => {
+                                                    root.ob-ev-mode = "import";
+                                                }
+                                            }
+                                        }
+                                        Text {
+                                            text: Strings.ob-later;
+                                            color: Theme.faint;
+                                            font-size: Theme.fs-cap;
                                         }
                                     }
                                 }
@@ -11847,6 +11982,139 @@ export component AppWindow inherits Window {
     // R6: the pool edit — a gated proposal like the retention next to it.
     // The draft is a ROW TABLE (delete per row, add below); the rows and
     // the space-joined payload string are kept in step Rust-side.
+    // the block format switch: what changes, what it costs, who decides
+    if root.org-bv2-modal-open: ConfirmModal {
+        dialog-width: 560px;
+        title: Strings.os-bv2-switch;
+        body: "";
+        confirm-label: Strings.oc-propose;
+        dismissed => {
+            root.org-bv2-modal-open = false;
+        }
+        confirmed => {
+            root.org-bv2-modal-open = false;
+            // the enabled surfaces ride along: a set must not drop them
+            root.org-propose("set_features",
+                (root.org-feat-memory ? " memory" : "")
+                + (root.org-feat-quests ? " quests" : "")
+                + " block-v2");
+        }
+        GridLayout {
+            spacing-horizontal: 14px;
+            spacing-vertical: 10px;
+            for row in [
+                { k: Strings.os-bv2-t-changes, v: Strings.os-bv2-changes },
+                { k: Strings.os-bv2-t-notice, v: Strings.os-bv2-notice },
+                { k: Strings.os-bv2-t-price, v: Strings.os-bv2-price },
+                { k: Strings.os-bv2-t-who, v: Strings.os-bv2-who },
+            ]: Row {
+                Text {
+                    text: row.k;
+                    color: Theme.text;
+                    font-size: Theme.fs-cap;
+                    font-weight: 700;
+                    width: 120px * Theme.ui-scale;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: row.v;
+                    color: Theme.dim;
+                    font-size: Theme.fs-cap;
+                    wrap: word-wrap;
+                    horizontal-stretch: 1;
+                    preferred-width: 0px;
+                }
+            }
+        }
+    }
+
+    // a fork's per-branch table, its blocks and what cannot be undone
+    if root.org-branch-open >= 0 && root.org-branch-open < root.org-fork-lines.length: ConfirmModal {
+        dialog-width: 560px;
+        title: root.org-fork-lines[root.org-branch-open];
+        body: "";
+        confirm-label: Strings.ob-export;
+        dismissed => {
+            root.org-branch-open = -1;
+        }
+        confirmed => {
+            root.org-branch-open = -1;
+            root.ob-ev-mode = "export";
+        }
+        ob-fl := Flickable {
+            height: min(360px * Theme.ui-scale, ob-list.preferred-height);
+            viewport-height: ob-list.preferred-height;
+            ob-list := VerticalLayout {
+                alignment: start;
+                for r in root.org-branch-rows: VerticalLayout {
+                    if r.fork == root.org-branch-open: HorizontalLayout {
+                        padding-top: r.heading ? 8px : 2px;
+                        spacing: 8px;
+                        Text {
+                            text: r.text;
+                            color: r.heading ? Theme.text : Theme.dim;
+                            font-size: Theme.fs-cap;
+                            font-weight: r.heading ? 700 : 400;
+                            horizontal-stretch: 1;
+                            wrap: word-wrap;
+                            preferred-width: 0px;
+                        }
+                        if r.flag != "": Text {
+                            text: r.flag;
+                            color: Theme.bad;
+                            font-size: Theme.fs-cap;
+                            font-weight: 700;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // the evidence file: path + passphrase, like the manual backup
+    if root.ob-ev-mode != "": ob-dlg := ConfirmModal {
+        dialog-width: 440px;
+        child-focus: true;
+        title: root.ob-ev-mode == "export" ? Strings.ob-export-title : Strings.ob-import-title;
+        body: "";
+        confirm-label: root.ob-ev-mode == "export" ? Strings.ob-export-title : Strings.ob-import-title;
+        confirm-enabled: root.ob-ev-path != "" && root.ob-ev-pass.character-count >= 10;
+        dismissed => {
+            root.ob-ev-mode = "";
+            root.ob-ev-pass = "";
+        }
+        confirmed => {
+            root.branch-evidence(root.ob-ev-mode, root.ob-ev-path, root.ob-ev-pass);
+            root.ob-ev-mode = "";
+            root.ob-ev-pass = "";
+        }
+        AppField {
+            text <=> root.ob-ev-path;
+            placeholder: "~/branch-evidence.molt.enc";
+            init => {
+                self.focus-input();
+            }
+            accepted => {
+                ob-dlg.confirm-from-field();
+            }
+        }
+        AppField {
+            text <=> root.ob-ev-pass;
+            secret: true;
+            placeholder: Strings.ob-pass;
+            accepted => {
+                ob-dlg.confirm-from-field();
+            }
+        }
+    }
+
+    if root.closing: BusyModal {
+        title: Strings.close-busy;
+        detail: "";
+        progress: -1;
+        cancel-label: "";
+    }
+
     // one line: a resync costs traffic and holds the seat's live messages
     if root.os-resync-member != "": ConfirmModal {
         title: root.os-resync-give-up ? Strings.os-give-up : Strings.os-resync;

@@ -885,6 +885,12 @@ pub(crate) fn apply_session(
             ui.invoke_show_toast_error(crate::labels::sealed_after_withdrawal_copy(lang).into());
         } else if let Some(member) = sv.notice.strip_prefix("restore-abandoned:") {
             ui.invoke_show_toast_error(crate::labels::restore_abandoned_copy(lang, member).into());
+        } else if let Some((text, error)) = crate::branches::notice_toast(lang, &sv.notice) {
+            if error {
+                ui.invoke_show_toast_error(text.into());
+            } else {
+                ui.invoke_show_toast(text.into());
+            }
         } else if let Some(rest) = sv.notice.strip_prefix("chain-diverged:") {
             // A2.1: Rust-side copy like genesis-undelivered - no window rebuild
             ui.invoke_show_toast_error(chain_diverged_copy(lang, rest).into());
@@ -1761,6 +1767,23 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         .collect();
     crate::models::sync_rows(&ui.get_org_seats(), seats, |m| ui.set_org_seats(m));
     ui.set_org_builds_mixed(b.org_stats.builds_mixed);
+    ui.set_org_builds_note(b.org_stats.builds_note.as_str().into());
+    ui.set_org_bv2_state(b.org_stats.bv2_state);
+    ui.set_org_bv2_text(b.org_stats.bv2_text.as_str().into());
+    ui.set_org_bv2_tip(b.org_stats.bv2_tip.as_str().into());
+    crate::models::sync_strings(&ui.get_org_fork_lines(), &b.org_stats.fork_lines, |m| ui.set_org_fork_lines(m));
+    let branch_rows: Vec<crate::BranchRow> = b
+        .org_stats
+        .branch_rows
+        .iter()
+        .map(|r| crate::BranchRow {
+            fork: r.fork,
+            heading: r.heading,
+            text: r.text.as_str().into(),
+            flag: r.flag.as_str().into(),
+        })
+        .collect();
+    crate::models::sync_rows(&ui.get_org_branch_rows(), branch_rows, |m| ui.set_org_branch_rows(m));
     apply_relay_busy(ui, &b.org_stats.relay_refusals);
     // the R6 pencil's draft prefill: the same pool, space-joined
     ui.set_org_relays_joined(b.org_stats.relays.join(" ").into());

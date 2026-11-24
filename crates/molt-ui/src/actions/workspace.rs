@@ -12,6 +12,14 @@ use crate::mirror::sort_ws_items;
 use crate::app::Ctx;
 use crate::{AppWindow, WorkspaceItem};
 
+/// The close returned: the busy state goes, a refusal shows.
+pub(crate) fn close_done(ui: &AppWindow, outcome: Result<Reply, molt_core::MoltError>) {
+    ui.set_closing(false);
+    if let Err(e) = outcome {
+        ui.invoke_show_toast_error(error_toast(ui, &e));
+    }
+}
+
 pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {
         let cx = ctx.clone();
@@ -62,7 +70,19 @@ pub(crate) fn wire(ui: &AppWindow, ctx: &Ctx) {
     {
         let cx = ctx.clone();
         ui.on_close_workspace(move || {
-            cx.issue(Command::CloseWorkspace);
+            // the close may wait for the relays: say so until it returns
+            if let Some(ui) = cx.weak.upgrade() {
+                ui.set_closing(true);
+            }
+            let (w, weak) = (cx.wallet.clone(), cx.weak.clone());
+            cx.rt.spawn(async move {
+                let outcome = w.execute(Command::CloseWorkspace).await;
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        close_done(&ui, outcome);
+                    }
+                });
+            });
         });
     }
 
