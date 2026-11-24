@@ -1454,7 +1454,7 @@ impl State {
         match reply {
             Reply::Accepted { .. } => {
                 let Some(sk) = self.identity_sk.as_ref() else { return };
-                let sig = molt_storage::identity_sign(sk, &approval_bytes(&self.republic_id(), slot.height, &change));
+                let sig = molt_storage::identity_sign(sk, &self.signing_bytes_at(slot.height, &change));
                 if changed {
                     tracing::info!(height = slot.height, ballot = %fmt_ballot(ballot), id, "lock=accepted");
                 }
@@ -1599,7 +1599,7 @@ impl State {
                     // leader forced to the value
                     let full = change.clone().or_else(|| self.proposal_change(id));
                     let sig = match (full, self.identity_sk.as_ref()) {
-                        (Some(c), Some(sk)) => molt_storage::identity_sign(sk, &approval_bytes(&self.republic_id(), height, &c)),
+                        (Some(c), Some(sk)) => molt_storage::identity_sign(sk, &self.signing_bytes_at(height, &c)),
                         _ => String::new(),
                     };
                     molt_core::chain::LockAcceptedValue {
@@ -1680,7 +1680,7 @@ impl State {
                         return None;
                     }
                     a.need = u64::try_from(need).unwrap_or(u64::MAX);
-                    let bytes = approval_bytes(&self.republic_id(), height, &c);
+                    let bytes = self.signing_bytes_at(height, &c);
                     sig_ok = !a.sig.is_empty()
                         && self.chain.head.as_ref().is_some_and(|h| {
                             h.identities.iter().any(|i| i.member == from && molt_storage::identity_verify(&i.identity_pk, &bytes, &a.sig))
@@ -1823,7 +1823,7 @@ impl State {
         if approved {
             return true;
         }
-        let bytes = approval_bytes(&self.republic_id(), height, change);
+        let bytes = self.signing_bytes_at(height, change);
         let Some(head) = self.chain.head.as_ref() else { return false };
         let genuine = |m: &str| {
             evidence.iter().any(|e| {
@@ -1861,7 +1861,7 @@ impl State {
             let vouched = self.lock_forced_vouched(slot.height, &ballot.leader, id, &change, &out)
                 && self.lock_forced_invalid(id, &change, slot.height).is_none();
             if holds || vouched {
-                let sig = molt_storage::identity_sign(sk, &approval_bytes(&self.republic_id(), slot.height, &change));
+                let sig = molt_storage::identity_sign(sk, &self.signing_bytes_at(slot.height, &change));
                 out.insert(0, LockEvidence { member: me, sig });
             }
         }
@@ -1896,7 +1896,7 @@ impl State {
         }
         let Some((id, change)) = self.lock_resolve(height, digest) else { return };
         let Some(head) = self.chain.head.as_ref() else { return };
-        let bytes = approval_bytes(&self.republic_id(), height, &change);
+        let bytes = self.signing_bytes_at(height, &change);
         let genuine = head
             .identities
             .iter()

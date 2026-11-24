@@ -12,6 +12,9 @@
 
 use super::*;
 
+/// S3 measurement: own standing approvals signed again.
+pub(crate) static RESIGNS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// One voter is told its vote was dropped at most this often.
 const VOTE_REFUSAL_DEBOUNCE_SECS: u64 = 30;
 
@@ -110,6 +113,8 @@ impl ParkedApproval {
 pub(crate) struct PendingApproval {
     /// The chain height every signature here is bound to.
     pub height: u64,
+    /// The head identity they are bound to, where signatures bind `prev`.
+    pub prev: String,
     /// One signature per distinct member (latest wins).
     pub sigs: Vec<RosterAttestation>,
     /// Members whose CURRENT signature verified against the live target's
@@ -227,9 +232,24 @@ impl State {
         if self.lock_mode(target) == LockMode::Lock && self.chain.lock.intent_sent.contains(&id) {
             return true;
         }
+        let bound = prev_bound(head.block_v2_from, target);
         self.chain.pending_sigs
             .get(&id)
-            .is_some_and(|p| p.height == target && p.sigs.iter().any(|a| a.member == me))
+            .is_some_and(|p| p.height == target && (!bound || p.prev == head.hash) && p.sigs.iter().any(|a| a.member == me))
+    }
+
+    /// What this seat signs for `change` at `height` on its head.
+    pub(crate) fn signing_bytes_at(&self, height: u64, change: &ChainChange) -> Vec<u8> {
+        let (prev, v2) = self.chain.head.as_ref().map_or((GENESIS_PREV, None), |h| (h.hash.as_str(), h.block_v2_from));
+        signing_bytes(&self.republic_id(), height, prev, change, v2)
+    }
+
+    /// Signatures bound to a head this seat no longer holds at `height`.
+    fn bound_elsewhere(&self, p: &PendingApproval, height: u64) -> bool {
+        self.chain
+            .head
+            .as_ref()
+            .is_some_and(|h| prev_bound(h.block_v2_from, height) && !p.prev.is_empty() && p.prev != h.hash)
     }
 
     /// Sign this node's approval of a proposal at the current head+1 and
@@ -458,8 +478,11 @@ impl State {
         let Some(sk) = self.identity_sk.as_ref() else {
             return;
         };
-        let bytes = approval_bytes(&self.republic_id(), height, &change);
+        let bytes = self.signing_bytes_at(height, &change);
         let sig = molt_storage::identity_sign(sk, &bytes);
+        if self.chain.own_approvals.contains(&id) {
+            RESIGNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         let me = self.member();
         // the decision register: the ONLY writer (see `rebase_pending_approvals`)
         self.chain.own_approvals.insert(id);
@@ -589,13 +612,25 @@ impl State {
         if !verified && member == self.member() {
             return;
         }
+        // a set ahead of the head binds its predecessor once that arrives
+        let head_hash = self
+            .chain
+            .head
+            .as_ref()
+            .filter(|h| h.height + 1 == height)
+            .map(|h| h.hash.clone())
+            .unwrap_or_default();
+        let moved = self.chain.pending_sigs.get(&id).is_some_and(|p| p.height == height && self.bound_elsewhere(p, height));
         let entry = self.chain.pending_sigs.entry(id).or_default();
-        if height > entry.height {
+        if height > entry.height || moved {
             entry.height = height;
+            entry.prev = head_hash;
             entry.sigs.clear();
             entry.verified.clear();
         } else if height < entry.height {
             return;
+        } else if entry.prev.is_empty() {
+            entry.prev = head_hash;
         }
         if !verified && entry.verified.contains(member) {
             return;
@@ -624,7 +659,7 @@ impl State {
         let Some(change) = self.proposal_change(id) else {
             return false;
         };
-        let bytes = approval_bytes(&self.republic_id(), height, &change);
+        let bytes = self.signing_bytes_at(height, &change);
         head.identities
             .iter()
             .any(|i| i.member == member && molt_storage::identity_verify(&i.identity_pk, &bytes, sig))
@@ -678,7 +713,7 @@ impl State {
         let Some(change) = self.proposal_change(id) else {
             return;
         };
-        let bytes = approval_bytes(&self.republic_id(), target, &change);
+        let bytes = self.signing_bytes_at(target, &change);
         let Some(pending) = self.chain.pending_sigs.get(&id) else {
             return;
         };
@@ -1376,7 +1411,7 @@ impl State {
         let stale: Vec<u64> = self
             .chain.pending_sigs
             .iter()
-            .filter(|(_, p)| p.height < target)
+            .filter(|(_, p)| p.height < target || (p.height == target && self.bound_elsewhere(p, target)))
             .map(|(id, _)| *id)
             .collect();
         // sweep checkpoint entries that never made it into pending_sigs
@@ -1431,6 +1466,8 @@ impl State {
             return false;
         };
         let verified = match self.proposal_change(id) {
+            // its predecessor is not held yet: judged when it is due
+            Some(_) if prev_bound(head.block_v2_from, height) => false,
             Some(change) => {
                 let bytes = approval_bytes(&self.republic_id(), height, &change);
                 if !molt_storage::identity_verify(&identity.identity_pk, &bytes, sig) {

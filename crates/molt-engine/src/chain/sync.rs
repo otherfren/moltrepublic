@@ -737,7 +737,10 @@ impl State {
         let same_decisions = suffix
             .iter()
             .all(|c| ours_at(self, c.height).map_or(true, |o| o.change == c.change));
-        if same_decisions {
+        // a relink rewrites `prev`, which a v3 signature covers: re-base instead
+        let top = suffix.last().map_or(f, |b| b.height);
+        let rebinds = self.chain.blocks.iter().any(|b| b.height > top && prev_bound(self.block_v2_from(), b.height));
+        if same_decisions && !rebinds {
             self.relink_onto_variant(from, f, candidate, (&mine, &theirs, ids));
             return;
         }
@@ -1013,7 +1016,7 @@ impl State {
         // carry, so they are checked against the roster before anything
         // moves (the roster is stable across blocks — `Joined` is refused)
         let signed = self.chain.head.as_ref().is_some_and(|h| {
-            block_signers(&rid, &h.identities, &block)
+            block_signers(&rid, &h.identities, &block, h.block_v2_from)
                 .is_ok_and(|signers| signers.len() >= usize::from(h.rule_m))
         });
         if shared_prev && existing.change == block.change {

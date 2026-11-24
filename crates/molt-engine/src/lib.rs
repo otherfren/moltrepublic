@@ -133,6 +133,18 @@ const EVENT_QUEUE: usize = 512;
 /// `STALE_SECS`), so a slow beat is plenty and keeps the actor quiet.
 const PRESENCE_TICK_MS: u64 = 30_000;
 
+/// Test seam (S3 prototype): members sign `prev` from the v2 activation on.
+#[doc(hidden)]
+pub fn __prev_binding(on: bool) {
+    chain::PREV_BINDING.store(on, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Test seam (S3 measurement): own standing approvals signed again, process-wide.
+#[doc(hidden)]
+pub fn __resign_count() -> u64 {
+    chain::RESIGNS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Shorten the resumable fetch's wait before it asks for missing pieces
 /// (`docs_archive/files/mirroring.md` §3.2; 10 min in production). A test seam for
 /// the integration tests, like `__spawn_with_reopen_transport`.
@@ -354,6 +366,13 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __drop_inbound_every(&self, n: u64) {
         self.drop_seam.every.store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: every inbound frame reaches this engine `ms` late (0 =
+    /// at once), as a seat that lags. No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __delay_inbound_ms(&self, ms: u64) {
+        self.drop_seam.delay_ms.store(ms, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam: lose the next inbound wire chat carrying `body` once, as

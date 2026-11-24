@@ -183,6 +183,24 @@ pub fn block_identities(checkpoint: Option<&molt_core::CheckpointState>, blocks:
     out
 }
 
+/// S3 prototype switch: members sign `prev` from the v2 activation on.
+pub(crate) static PREV_BINDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A signature at `height` covers its predecessor's identity
+/// (`molt-chain-change-v3`).
+pub(crate) fn prev_bound(v2_from: Option<u64>, height: u64) -> bool {
+    PREV_BINDING.load(std::sync::atomic::Ordering::SeqCst) && v2_from.is_some_and(|h| height >= h)
+}
+
+/// What a member signs for `change` at `height` on `prev`.
+pub(crate) fn signing_bytes(republic_id: &str, height: u64, prev: &str, change: &ChainChange, v2_from: Option<u64>) -> Vec<u8> {
+    if prev_bound(v2_from, height) {
+        molt_core::chain::approval_bytes_v3(republic_id, height, prev, change)
+    } else {
+        approval_bytes(republic_id, height, change)
+    }
+}
+
 /// [`block_id`] of a chain without the v2 identity.
 #[cfg(test)]
 pub(crate) fn block_hash(republic_id: &str, block: &ChainBlock) -> String {
@@ -372,8 +390,9 @@ pub(super) fn block_signers(
     republic_id: &str,
     identities: &[MemberIdentity],
     block: &ChainBlock,
+    v2_from: Option<u64>,
 ) -> Result<BTreeSet<String>, String> {
-    let bytes = approval_bytes(republic_id, block.height, &block.change);
+    let bytes = signing_bytes(republic_id, block.height, &block.prev, &block.change, v2_from);
     let mut signers = valid_signers(identities, &bytes, &block.sigs);
     if let ChainChange::Membership {
         op,
@@ -571,7 +590,7 @@ fn verify_next(
             }
         }
     }
-    let signers = block_signers(&head.republic_id, &head.identities, block)?;
+    let signers = block_signers(&head.republic_id, &head.identities, block, head.block_v2_from)?;
     if signers.len() < usize::from(head.rule_m) {
         return Err(format!(
             "block {} has {} valid approvals, threshold is {}",
@@ -1062,7 +1081,9 @@ pub fn verify_wiki_export(
                 block.height
             ));
         }
-        let signers = block_signers(&head.republic_id, &identities, block)?;
+        // the bundle omits the enabling block: either layout attests
+        let mut signers = block_signers(&head.republic_id, &identities, block, None)?;
+        signers.extend(block_signers(&head.republic_id, &identities, block, Some(0))?);
         // §7e rule 3 over the shipped membership blocks: every re-anchor
         // rides the bundle, so the working anchors fold exactly
         consent_spends(&block.change, |m| {
@@ -1393,7 +1414,8 @@ pub(crate) fn walk_suffix_chain(
             ));
         }
     }
-    let bytes = approval_bytes(&blob.republic_id, anchor.height, &anchor.change);
+    let block_v2_from = blob_block_v2(blob).then_some(anchor.height);
+    let bytes = signing_bytes(&blob.republic_id, anchor.height, &anchor.prev, &anchor.change, block_v2_from);
     let signers = valid_signers(&blob.founding_identities, &bytes, &anchor.sigs);
     if signers.len() < usize::from(blob.rule_m) {
         return Err(format!(
@@ -1406,7 +1428,6 @@ pub(crate) fn walk_suffix_chain(
     // state-neutral). `seen` MUST come from the blob's consumed ids: the
     // blocks carrying the pre-cut proposal ids are gone, so the surviving
     // suffix cannot answer the double-apply question on its own.
-    let block_v2_from = blob_block_v2(blob).then_some(anchor.height);
     let mut walk = ChainWalk {
         head: ChainHead {
             height: anchor.height,

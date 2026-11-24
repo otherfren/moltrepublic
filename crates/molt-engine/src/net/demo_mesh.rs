@@ -149,6 +149,7 @@ impl State {
             CmdSink {
                 tx: self.cmd_tx.clone(),
                 generation: Some(self.net_generation),
+                seam: None,
             },
             wakeup_rx,
             None, // the demo mesh's peers share no MLS group (plaintext path)
@@ -217,6 +218,7 @@ fn spawn_demo_peer(
             // the peer's one and only mesh: State::new starts the
             // generation counter at 0 and nothing on a peer bumps it
             generation: Some(0),
+            seam: None,
         },
         wakeup_rx,
         None, // demo peer: plaintext path (no MLS group)

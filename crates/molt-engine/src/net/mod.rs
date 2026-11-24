@@ -81,6 +81,8 @@ pub(crate) struct DropSeam {
     /// A re-key stops the group runtime before its commit is logged and
     /// publishes nothing: the node as killed right after the persist.
     pub(crate) park_rekey: std::sync::atomic::AtomicBool,
+    /// Every inbound frame reaches the engine this many ms late.
+    pub(crate) delay_ms: std::sync::atomic::AtomicU64,
 }
 
 impl DropSeam {
@@ -165,6 +167,7 @@ impl DropSeam {
 pub struct CmdSink {
     tx: mpsc::WeakSender<Envelope>,
     generation: Option<u64>,
+    seam: Option<std::sync::Arc<DropSeam>>,
 }
 
 impl crate::WalletHandle {
@@ -175,6 +178,7 @@ impl crate::WalletHandle {
         CmdSink {
             tx: self.cmd_tx.downgrade(),
             generation: None,
+            seam: None,
         }
     }
 }
@@ -197,12 +201,22 @@ impl CmdSink {
 
 impl EngineSink for CmdSink {
     async fn deliver(&self, from: &MemberId, env: EventEnvelope) -> Result<(), NetError> {
-        self.execute(Command::NetDelivered {
+        let cmd = Command::NetDelivered {
             from: from.clone(),
             envelope: env,
             generation: self.generation,
-        })
-        .await
+        };
+        let delay = self.seam.as_ref().map_or(0, |s| s.delay_ms.load(std::sync::atomic::Ordering::SeqCst));
+        if delay > 0 {
+            // test seam: a lagging seat, the frame's ack is not held back
+            let sink = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                let _ = sink.execute(cmd).await;
+            });
+            return Ok(());
+        }
+        self.execute(cmd).await
     }
 
     async fn peer_seen(&self, member: &MemberId) {
@@ -1004,7 +1018,7 @@ impl State {
             store,
             // `generation: None`: the generation gate requires `self.net` to be
             // Some, and a Nostr workspace builds no NetRuntime at all
-            CmdSink { tx: self.cmd_tx.clone(), generation: None },
+            CmdSink { tx: self.cmd_tx.clone(), generation: None, seam: Some(self.drop_seam.clone()) },
             wakeup_rx,
             health_tx,
         );
@@ -1077,6 +1091,7 @@ impl State {
             CmdSink {
                 tx: self.cmd_tx.clone(),
                 generation: Some(generation),
+                seam: Some(self.drop_seam.clone()),
             },
             wakeup_rx,
             Some(MlsChannel::from_shared(mls_arc.clone())),

@@ -148,7 +148,7 @@ impl Builder {
 
     /// Sign `change` at `height` with each named member and return the block.
     pub(crate) fn seal(&self, height: u64, change: ChainChange, signers: &[&str]) -> ChainBlock {
-        let bytes = approval_bytes(&self.republic_id, height, &change);
+        let bytes = signing_bytes(&self.republic_id, height, &self.head_hash, &change, self.v2_from);
         let sigs = signers
             .iter()
             .map(|name| {

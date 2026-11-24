@@ -1313,7 +1313,7 @@ fn a_v2_consent_outside_its_window_rejects_the_chain() {
     let roster = verify_chain(&b.blocks).expect("genesis").identities;
     let voices = |height: u64| {
         let block = b.seal(height, restore_v2(&b, 3, FOUNDING_NPK, &[], &[]), &["petra"]);
-        block_signers(&b.republic_id, &roster, &block).map(|s| s.len())
+        block_signers(&b.republic_id, &roster, &block, None).map(|s| s.len())
     };
     assert_eq!(voices(4), Ok(2), "one block past the anchor");
     assert_eq!(voices(3 + w), Ok(2), "the window's last height");
