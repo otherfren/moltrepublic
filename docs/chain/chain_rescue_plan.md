@@ -7,7 +7,11 @@ record, the seal and its adoption, the stop of a left-behind seat and the
 `chain/branch_run.rs`). Open: the GUI (Branches table, card, abandoned
 banner), the founding gate of the majority rule (agent B), the
 `molt-branch-choice-v1` capability gate, a multi-member restore commit
-(§7.2), a relay keystone of the full split; Q7 not built.**
+(§7.2), a relay keystone of the full split; Q7 not built.
+It ships DARK (`BRANCH_CHOICE_AVAILABLE = false`, review 2026-11-24):
+choose/approve are refused, cards and signatures ignored, and a
+`BranchChosen` block is refused in verification; status, export and
+import stay as diagnostics.**
 Built as decided (Q1-Q4): no reset without a second branch; the bundle
 file is the channel; dropped wiki/quests cards return as open proposals
 with stances cleared; the wake skill denies every branch tool and approval

@@ -223,6 +223,9 @@ impl State {
     }
 
     fn branch_gate(&self) -> Result<(), MoltError> {
+        if !super::branch::branch_choice_available() {
+            return Err(err(super::branch::BRANCH_CHOICE_DARK));
+        }
         if self.chain.head.is_none() {
             return Err(err("no chain yet"));
         }
@@ -608,7 +611,7 @@ impl State {
 
     /// A card from the wire or a bundle.
     pub(crate) fn receive_branch_card(&mut self, by: &str, id: u64, change: ChainChange) {
-        if self.branch_abandoned() || !self.is_chain_governed() {
+        if !super::branch::branch_choice_available() || self.branch_abandoned() || !self.is_chain_governed() {
             return;
         }
         let ChainChange::BranchChosen { base_height, base_hash, tip_height, tip_hash, .. } = &change else {
@@ -651,7 +654,7 @@ impl State {
 
     /// A signature from the wire or a bundle.
     pub(crate) fn receive_branch_sig(&mut self, id: u64, by: &str, sig: &str) {
-        if self.branch_abandoned() || !self.is_chain_governed() {
+        if !super::branch::branch_choice_available() || self.branch_abandoned() || !self.is_chain_governed() {
             return;
         }
         if !self.chain.branch.file.cards.contains_key(&id) {

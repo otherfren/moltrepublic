@@ -11,6 +11,31 @@ pub(crate) use super::branch_run::ABANDONED;
 /// The most runs one choice may drop.
 pub(crate) const DROPPED_RUNS_MAX: usize = 16;
 
+/// The branch choice ships DARK, like Strict Order Mode: a dark build
+/// proposes, signs and follows no choice; status, export and import stay.
+pub(crate) const BRANCH_CHOICE_AVAILABLE: bool = false;
+
+/// The refusal while dark.
+pub(crate) const BRANCH_CHOICE_DARK: &str = "not available in this build";
+
+/// Test seam for whole nodes (`WalletHandle::__branch_choice_available`).
+pub(crate) static BRANCH_CHOICE_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+thread_local! {
+    /// Unit-test seam: per test thread, so a dark test never races an armed one.
+    pub(crate) static ARMED_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this build runs the branch choice.
+pub(crate) fn branch_choice_available() -> bool {
+    #[cfg(test)]
+    if ARMED_HERE.with(std::cell::Cell::get) {
+        return true;
+    }
+    BRANCH_CHOICE_AVAILABLE || BRANCH_CHOICE_ARMED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// §6: what a seat the chain left behind refuses until it rejoins.
 pub(crate) fn stopped_when_abandoned(cmd: &molt_core::Command) -> bool {
     use molt_core::Command;
@@ -37,6 +62,10 @@ pub(super) fn check_shape(block: &ChainBlock) -> Result<(), String> {
         return Ok(());
     };
     let h = block.height;
+    // a dark build must not follow a choice it could not have helped check
+    if !branch_choice_available() {
+        return Err(format!("branch choice at {h}: {BRANCH_CHOICE_DARK}"));
+    }
     if block.height.checked_sub(1) != Some(*tip_height) {
         return Err(format!("branch choice tip {tip_height} must be its block height {h} minus one"));
     }
