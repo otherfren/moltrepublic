@@ -2743,7 +2743,7 @@ fn lower_contender(b: &Builder, than: &ChainBlock) -> ChainBlock {
 /// again, and seals at the next height (lock off).
 #[test]
 fn a_restore_displaced_by_a_tip_swap_returns_to_the_vote() {
-    use molt_core::{ProposalId, ProposalState, WorkspaceEvent};
+    use molt_core::{ProposalState, WorkspaceEvent};
     let (b, mut walter, id) = sealed_restore();
     let restored = walter.chain.blocks[1].clone();
     // another decision at 1 with a lower hash takes the tip
