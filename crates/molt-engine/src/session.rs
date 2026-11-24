@@ -312,8 +312,8 @@ impl State {
     /// [`molt_core::Command::NetRelayProbed`].
     fn spawn_relay_probe(&mut self, url: String, confirm: bool) -> Result<Reply, MoltError> {
         // the relay being decided on is not in the dialable set: the probe
-        // dials under its own keeper, which a withdrawal drops
-        let keeper = molt_net::dial::RelayGateKeeper::default();
+        // dials under its own keeper, which a withdrawal empties
+        let keeper = std::sync::Arc::new(molt_net::dial::RelayGateKeeper::default());
         keeper.set(std::slice::from_ref(&url));
         let dialer = self
             .resolve_dialer()
@@ -325,7 +325,12 @@ impl State {
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Ok(Reply::Ack);
         };
-        self.probe_gates.push((url.clone(), keeper));
+        self.probe_gates.push(crate::RelayProbe {
+            url: url.clone(),
+            confirm,
+            keeper: std::sync::Arc::downgrade(&keeper),
+            withdrawn: false,
+        });
         tokio::spawn(async move {
             let (error, unreachable) = match molt_net::relay_runtime::probe_relay(&dialer, &url)
                 .await
@@ -334,6 +339,8 @@ impl State {
                 molt_net::relay_runtime::ProbeVerdict::Unreachable(e) => (e, true),
                 molt_net::relay_runtime::ProbeVerdict::Unusable(e) => (e, false),
             };
+            // gone before the verdict: the actor tells this probe's entry by it
+            drop(keeper);
             crate::send_internal(&cmd_tx, molt_core::Command::NetRelayProbed { url, error, unreachable, confirm }).await;
         });
         Ok(Reply::Ack)
@@ -363,14 +370,16 @@ impl State {
             self.pending_relay_confirms.remove(&url);
         }
         // a probe whose relay was withdrawn meanwhile decides nothing
-        let Some(at) = self.probe_gates.iter().position(|(u, _)| *u == url) else {
-            if self.session.notice == format!("relay-probing:{url}") {
-                self.session.notice = String::new();
-                self.emit_session(SessionScope::Full);
+        let ended = |p: &crate::RelayProbe| p.url == url && p.confirm == confirm && p.keeper.strong_count() == 0;
+        if let Some(at) = self.probe_gates.iter().position(ended) {
+            if self.probe_gates.remove(at).withdrawn {
+                if self.session.notice == format!("relay-probing:{url}") {
+                    self.session.notice = String::new();
+                    self.emit_session(SessionScope::Full);
+                }
+                return Ok(Reply::Ack);
             }
-            return Ok(Reply::Ack);
-        };
-        self.probe_gates.remove(at);
+        }
         if !error.is_empty() && !unreachable {
             self.session.notice = format!("relay-refused:{url} - {error}");
             self.emit_session(SessionScope::Full);
@@ -447,7 +456,12 @@ impl State {
     /// Stop the relay probes `withdrawn` names: their keeper goes (the probe
     /// stops dialing at once) and so does any confirmation they would land.
     fn withdraw_probes(&mut self, withdrawn: impl Fn(&str) -> bool) {
-        self.probe_gates.retain(|(u, _)| !withdrawn(u));
+        for probe in self.probe_gates.iter_mut().filter(|p| withdrawn(&p.url)) {
+            probe.withdrawn = true;
+            if let Some(keeper) = probe.keeper.upgrade() {
+                keeper.set(&[]);
+            }
+        }
         self.pending_relay_confirms.retain(|u| !withdrawn(u));
     }
 
