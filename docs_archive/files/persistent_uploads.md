@@ -4,7 +4,8 @@
 that carries this file into the archive (2026-09-03). The MIRRORING
 addendum below was decided the same evening and is designed in
 `docs_archive/files/mirroring.md` (executed 2026-09-04). The shipping behaviour is
-the code and its tests; D1-D3 below name the shipped identifiers.**
+the code and its tests; D1-D3 below name the shipped identifiers. D5
+(2026-11-24) ships the moot marker and the `ShareGone` refusal.**
 
 **Round 3 (2026-09-06, `mcp_agent_friction_fixes_round_3.md` D1/D2/D4)
 added three things on top:** a share is IMMUTABLE - `share_file` stamps
@@ -158,6 +159,49 @@ Added 2026-11-13: each `read_uploads` row carries `vote` (`op`,
 `proposal`, `mine_open`) while a files vote on it is open, and
 `list_proposals` takes `surface` - another seat finds the card without
 scanning every proposal.
+
+## D5 - A vote whose share is gone here (field report v0.1.2, 2026-11-24)
+
+The field shape: a 2-of-3 seat held about ten of its OWN open `persist`
+votes, one seat approved, one declined, the proposer itself open, and its
+approve failed with `bad payload: not a shared file here`.
+
+The cause is a seat RESTORED after proposing (`recovery_ritual.md`):
+
+- A share is a chat message of its sharer's log. A restored device gets
+  the chain and the re-served open cards (`open_governance_events`), never
+  the old log, so the proposer's own share messages and its `share_paths`
+  stay on the lost device. Until a vote applies, nothing else on the new
+  device names the share (`share_identity` = live message or Files fold).
+- The proposer's co-signature died with its height: the `Restored` block
+  takes the next height, every collected signature re-bases, and only a
+  seat whose `own_approvals` holds the decision re-signs. That register is
+  rebuilt from the own log, which the new device does not have.
+- It is NOT re-signed for the restored seat, by design: a signature is
+  position-bound (`persistent_chain.md`), so standing at the new height is
+  a new signature, and the approve door re-checks the file against THIS
+  seat's own view (`check_files_vote`, sign-what-you-see). A device that
+  never saw the file cannot ratify its identity, and a re-sign on its
+  behalf would be exactly the unattended approval the decision register
+  exists to prevent.
+
+What each door answers then, on the restored proposer C (A approved, B
+declined): `approve` refuses with `ShareGone` (`share is gone here -
+decline or withdraw this vote`); `withdraw` works (`attribute_card` names
+the minting seat, not the re-server); `decline` works and is the second
+decline, which rejects the card (2-of-3: `declines > n - m`). A may take
+its approval back by declining (D2 retracts the signature), which with
+B's is two as well. A and B approve or decline as before. Keystones:
+`molt-engine/src/tests/files_moot_tests.rs`.
+
+**Moot marker.** `ProposalView.moot` (additive, absent when not moot) says
+why THIS seat can never approve an open files vote: `gone` (no message,
+no Files state), `expired`, `deleted`, or `persistent` (a persist vote for
+a share another vote already pinned). It is computed locally on every
+read and closes nothing: the card ends only by a decline or a withdraw,
+like every vote. A moot vote blocks no new persist: the open-vote guard
+fires only where the share identity is live, which is where the open vote
+is approvable; a share put up again is a new message id anyway.
 
 ## Keystones (red first)
 

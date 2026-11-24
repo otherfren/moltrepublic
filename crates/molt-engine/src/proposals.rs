@@ -2098,6 +2098,10 @@ impl State {
             } else {
                 Vec::new()
             },
+            moot: (p.surface == Surface::Files && p.state == ProposalState::Proposed)
+                .then(|| self.files_vote_moot(&p.payload))
+                .flatten()
+                .map(str::to_string),
         }
     }
 

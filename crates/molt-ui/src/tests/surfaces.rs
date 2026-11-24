@@ -56,6 +56,7 @@ fn a_feature_diff_never_shows_a_removal_and_renders_labels() {
         void: None,
         advisories: Vec::new(),
         rendered: Vec::new(),
+        moot: None,
     };
     let row = proposal_row(0, &pv);
     assert!(
@@ -212,6 +213,7 @@ fn applied_log_lines_carry_their_patch_id() {
             void: None,
             advisories: Vec::new(),
             rendered: Vec::new(),
+            moot: None,
         }],
         channels: Vec::new(),
         has_archive: false,
@@ -707,6 +709,7 @@ fn outcome_snapshot(pending: usize, applied: usize, declined: usize) -> molt_cor
                 void: None,
                 advisories: Vec::new(),
                 rendered: Vec::new(),
+                moot: None,
             })
             .collect()
     };
@@ -894,6 +897,7 @@ fn a_decided_row_carries_its_decision_date() {
         void: None,
         advisories: Vec::new(),
         rendered: Vec::new(),
+        moot: None,
     };
     let ts = 1_750_000_000;
     let applied = proposal_row(0, &view(ProposalState::Applied, ts, 0));

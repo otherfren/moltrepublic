@@ -7855,6 +7855,11 @@ pub struct ProposalView {
     /// its value now (`kanban_review::render_acts`). Display only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rendered: Vec<String>,
+    /// An open files vote THIS seat can never approve, and why: `gone`,
+    /// `expired`, `deleted` or `persistent`. Reader-relative and display
+    /// only - nothing closes it but a decline or a withdraw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moot: Option<String>,
 }
 
 /// One chat channel as the engine enumerates it for the read contract
@@ -9564,6 +9569,10 @@ pub enum MoltError {
     /// good, not aged out.
     #[error("the shared file at message {0} was deleted by vote")]
     FileDeleted(MessageId),
+    /// A files vote names a share this seat holds neither as a message nor
+    /// as a vote's record (a restored device, a pruned log).
+    #[error("share is gone here - decline or withdraw this vote")]
+    ShareGone,
     /// Only the member who shared a file can remove it.
     #[error("only the member who shared the file at message {0} can remove it")]
     NotYourFile(MessageId),
