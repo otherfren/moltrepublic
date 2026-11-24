@@ -58,4 +58,3 @@ i-slint-backend-testing = { version = "1.17", optional = true }
 [dev-dependencies]
 tempfile.workspace = true
 serde_json.workspace = true
-nostr-relay-builder.workspace = true

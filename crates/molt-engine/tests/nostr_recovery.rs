@@ -284,9 +284,21 @@ async fn found_three_as(
     threshold: u8,
     pre_lock: bool,
 ) -> (WalletHandle, WalletHandle, WalletHandle, String) {
+    found_three_on(root, &[url], threshold, pre_lock).await
+}
+
+/// [`found_three_as`] with every seat on each of `urls`.
+async fn found_three_on(
+    root: &std::path::Path,
+    urls: &[&str],
+    threshold: u8,
+    pre_lock: bool,
+) -> (WalletHandle, WalletHandle, WalletHandle, String) {
     let a = engine(&root.join("founder"));
     a.__found_locked(!pre_lock);
-    adopt_relay(&a, url).await;
+    for url in urls {
+        adopt_relay(&a, url).await;
+    }
     a.execute(Command::CreateStart {
         name: "Chess Club".to_string(),
         member: "walter".to_string(),
@@ -308,7 +320,9 @@ async fn found_three_as(
     let links: Vec<String> = s.create.seats.iter().map(|seat| seat.link.clone()).collect();
 
     let b = engine(&root.join("joiner-petra"));
-    adopt_relay(&b, url).await;
+    for url in urls {
+        adopt_relay(&b, url).await;
+    }
     b.execute(Command::JoinStart {
         invite: links[0].clone(),
         member: "petra".to_string(),
@@ -323,7 +337,9 @@ async fn found_three_as(
         .clone();
 
     let v = engine(&root.join("joiner-vera"));
-    adopt_relay(&v, url).await;
+    for url in urls {
+        adopt_relay(&v, url).await;
+    }
     v.execute(Command::JoinStart {
         invite: links[1].clone(),
         member: "vera".to_string(),
@@ -3070,4 +3086,56 @@ async fn a_coordinator_killed_before_its_rekey_went_out_publishes_it_at_the_reop
     send_batch(&c2, "second device", 5).await;
     assert!(sees_batch_once(&v, "second device", 5, 60).await, "vera reads the second device");
     assert!(sees_batch_once(&a2, "second device", 5, 60).await, "the coordinator reads the second device");
+}
+
+/// **A re-key delivery follows the relays this node may dial.** The link
+/// names A and B; B is withdrawn while the restore card is open, so walter
+/// re-keys with A alone and his delivery is held there. A is withdrawn and
+/// B allowed again before it publishes: it starts over on B, and the
+/// Welcome reaches the rejoiner, who listens on both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rekey_delivery_moves_to_a_relay_allowed_after_its_own_were_withdrawn() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+    let (_ra, url_a) = roomy_relay().await;
+    let (_rb, url_b) = roomy_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, _v, phrase) = found_three_on(tmp.path(), &[&url_a, &url_b], 2, true).await;
+    let confirmed = |s: &molt_core::SessionView, url: &str| {
+        s.settings.relays.iter().any(|r| r.url.trim_end_matches('/') == url.trim_end_matches('/') && r.confirmed)
+    };
+    drop(b);
+    let height = chain_len(&a).await;
+    let link = mint_for_petra(&a).await;
+    let to = rejoiner_anchor(&link, &phrase);
+    WalletHandle::__hold_rekey_delivery(&to, true);
+    let c = engine(&tmp.path().join("rejoiner"));
+    for url in [&url_a, &url_b] {
+        adopt_relay(&c, url).await;
+    }
+    c.execute(Command::RecoverStart { link, phrase, relays: Vec::new() }).await.expect("recover start");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(150);
+    while open_proposals(&a).await == 0 && chain_len(&a).await <= height {
+        assert!(tokio::time::Instant::now() < deadline, "the restore card never opened");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    a.execute(Command::RelayRevoke { url: url_b.clone() }).await.expect("revoke b");
+    while chain_len(&a).await <= height {
+        assert!(tokio::time::Instant::now() < deadline, "the coordinator never applied the restore");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    a.execute(Command::RelayRevoke { url: url_a.clone() }).await.expect("revoke a");
+    wait_for(&a, "a revoked", |s| !confirmed(s, &url_a)).await;
+    a.execute(Command::RelayConfirm { url: url_b.clone(), accept_clearnet: true }).await.expect("confirm b");
+    wait_for(&a, "b confirmed", |s| confirmed(s, &url_b)).await;
+    WalletHandle::__hold_rekey_delivery(&to, false);
+    let s = wait_for_secs(&c, "the recovery to open over b", 150, |s| {
+        (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()) || s.notice.starts_with("recover-failed:")
+    })
+    .await;
+    assert!(!s.notice.starts_with("recover-failed:"), "recovery: {:?}", s.notice);
 }

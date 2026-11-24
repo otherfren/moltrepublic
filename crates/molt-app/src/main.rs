@@ -466,13 +466,15 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
-    // the close drains the outbox through relays that may not answer: a
-    // second stop signal ends it, as SIGKILL always does
-    rt.spawn(async {
-        shutdown_signal().await;
-        tracing::warn!(stop = "forced", "second stop signal - exiting without the durable close");
-        std::process::exit(1);
-    });
+    // the close drains the outbox through relays that may not answer: after
+    // a stop by signal, a second one ends it (SIGKILL always does)
+    if STOP_SIGNALLED.load(std::sync::atomic::Ordering::SeqCst) {
+        rt.spawn(async {
+            shutdown_signal().await;
+            tracing::warn!(stop = "forced", "second stop signal - exiting without the durable close");
+            std::process::exit(1);
+        });
+    }
     // A founding or join in flight dies with the process: tell the other
     // side instead of leaving it waiting.
     rt.block_on(async {
@@ -821,6 +823,14 @@ fn run_headless(
 /// resolves if a handler cannot be installed (logged; the stop is then
 /// the default, a hard kill).
 async fn shutdown_signal() {
+    shutdown_signal_inner().await;
+    STOP_SIGNALLED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The run phase ended on a stop signal.
+static STOP_SIGNALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+async fn shutdown_signal_inner() {
     use tokio::signal::unix::{signal, SignalKind};
     let (mut term, mut int) = match (signal(SignalKind::terminate()), signal(SignalKind::interrupt())) {
         (Ok(t), Ok(i)) => (t, i),

@@ -25,7 +25,8 @@ ProtectHome=yes
 ExecStart=/usr/local/bin/moltd --config /var/lib/molt/config.toml --mcp-tcp 127.0.0.1:4041
 Restart=on-failure
 KillSignal=SIGTERM
-TimeoutStopSec=30
+# above the close's worst case: farewells 15 s + [transport.nostr] connect + 2x publish timeout
+TimeoutStopSec=180
 
 [Install]
 WantedBy=multi-user.target

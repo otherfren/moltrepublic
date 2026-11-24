@@ -892,6 +892,7 @@ impl State {
             || self.group_mls_parked.is_some()
             || self.recovery.seat_inbox.is_some();
         self.rebuild_group_net(!before.iter().all(|r| after.contains(r)));
+        self.restart_rekey_deliveries();
         if live {
             self.spawn_seat_inbox_if_nostr();
         }

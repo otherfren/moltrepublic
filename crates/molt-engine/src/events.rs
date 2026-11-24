@@ -912,6 +912,10 @@ impl State {
         for task in self.recovery.inboxes.drain(..) {
             task.abort();
         }
+        // owed to the workspace being left; its outbox re-offers the commit
+        for task in self.recovery.rekey_deliveries.drain(..).filter_map(|d| d.task) {
+            task.abort();
+        }
         if let Some(task) = self.recovery.seat_inbox.take() {
             task.abort();
         }
