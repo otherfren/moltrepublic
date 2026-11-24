@@ -63,7 +63,7 @@ the live conversation stays ephemeral.
 ```
 ChainBlock {
   height : u64             // 0 = genesis, strictly monotonic, no gaps
-  prev   : hash            // hash of the previous block's link bytes (§5);
+  prev   : hash            // identity of the previous block (§5);
                            // GENESIS_PREV (32 zero bytes) for block 0
   change : ChainChange     // Genesis | Applied{proposal_id,surface,payload}
                            //         | Membership{op,member,identity_pk}
@@ -116,8 +116,51 @@ Two distinct byte strings, deliberately separated:
   ```
 
   So neither the change nor its signatures can be altered without breaking every
-  downstream `prev`. `prev` is a **structural** link the verifier checks; it is
-  not itself covered by the member signatures (the height already pins position).
+  downstream `prev`. Below the v2 activation `prev` is a **structural** link
+  the verifier checks, not covered by the member signatures.
+
+### 5.1 Block identity v2 and `prev` in the signature (v0.1.3)
+
+From the activation height H the two layouts change together:
+
+| | below H | from H |
+|---|---|---|
+| identity (what `prev` names) | `molt-chain-block-v1`: link bytes with the signer set | `molt-chain-block-v2` = tag ‖ height ‖ prev ‖ `approval_bytes` (v2 change bytes), no signer set |
+| member signature | `molt-chain-change-v2`: `republic_id ‖ height ‖ change` | `molt-chain-change-v3`: `republic_id ‖ height ‖ prev ‖ change` |
+
+- The block at H links to the v1 identity of H-1; every later block to the
+  v2 identity of its predecessor. The genesis keeps its v1 hash and its
+  roster signatures.
+- Any valid m-subset attests a v2 block: two seats that sealed one decision
+  with different signers hold ONE block. A holder keeps the first
+  attestation it verified and never replaces it; another attestation is a
+  duplicate (it clears a divergence like any duplicate), not a fork. The
+  verifier still demands m valid signers - the identity vouches for the
+  decision, not for the attestation.
+- A v3 signature is valid on one branch only. A standing approval whose
+  head moved at the same height (a tip swap) re-signs on the new
+  predecessor; a signature that names another predecessor does not count.
+  `relink_onto_variant` stays for history below H and never rewrites a
+  block at or above it (a re-base takes its place).
+- The gate of the binding (`block_identity_plan.md` §3b), measured
+  2026-11-24 with `tests/chain_prev_binding.rs`: 2-of-3 over a local relay,
+  one seat 6 s behind, 50 cards per run, three runs each. Median
+  propose-to-sealed 30.8-32.7 s without the binding, 28.4-33.0 s with it;
+  no fork decision in any run.
+- Activation (`block_identity_plan.md` §4): the feature key `block-v2`.
+  A new founding ratifies it in its charter (H = 1). An existing republic
+  enables it by a `set_features` vote, proposed and signed only once every
+  seat announced the capability `molt-block-identity-v2` in its mirror
+  declaration; H is the height after the enabling block. Everything that
+  compares blocks (`ChainRequest.known`, `seats[].head_hash`,
+  `chain_sync.head_hash`, the tie-break, the catch-up serve) uses the
+  identity. `status.chain_sync.block_v2_since` reports H (a pruned holder
+  whose anchor lies above the enabling block reports its anchor),
+  `block_v2_wait` the seat that keeps the vote back.
+- Downgrade wall: a chain on disk that enables `block-v2` raises the
+  manifest to `STORAGE_VERSION_BLOCK_V2 = 5`; an older binary refuses the
+  workspace. An older build on the network applies the enabling block and
+  refuses the block at H (`threshold`), so it stops extending.
 
 ## 6. Verification — every check is hard-reject
 
@@ -131,8 +174,8 @@ rejoiner that trusted a prefix could fork the republic's state. The checks:
   roster has *n* identities; and it is signed **unanimously** — every anchored
   member's attestation verifies over `roster_canonical_bytes`.
 - **Each later block.** `height = prev.height + 1` (gapless); `prev` equals the
-  predecessor's link hash; at least *m* **distinct** roster members have a valid
-  signature over the block's approval bytes (a repeated or unknown signer never
+  predecessor's identity (§5.1); at least *m* **distinct** roster members have a valid
+  signature over the block's signed bytes (v2, or v3 from H) (a repeated or unknown signer never
   inflates the count); and no proposal id is `Applied` twice.
 - **Roster evolution.** A `Membership` block grows the roster (`Joined`) or
   re-admits an existing seat (`Restored`). `Restored` never moves the anchored

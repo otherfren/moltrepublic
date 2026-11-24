@@ -309,16 +309,22 @@ It is the state-model twin of the founding ritual — load-bearing invariants:
   fork a second signing path for it. Genesis is n-of-n; later blocks are m-of-n.
 - **Signatures are position-bound.** Members sign over `republic_id ‖ height ‖
   change`, so a block cannot move/reorder/splice without re-signing. A "re-base"
-  onto a contended slot means a **new height → the members re-sign**. `prev` is a
-  structural hash-link `verify_chain` checks, not part of the member signature.
+  onto a contended slot means a **new height → the members re-sign**. Below the
+  `block-v2` activation `prev` is a structural hash-link only; from it on the
+  signature covers `prev` too (`molt-chain-change-v3`), so a tip change at the
+  same height re-signs as well.
 - **`verify_chain` is hard-reject, all-or-nothing.** Bad sig, broken `prev`,
   height gap, below-threshold, repeated/unknown signer, double-applied proposal,
   forged genesis id → the whole chain is rejected. A partially-trusted prefix
   could fork state, so there is no soft path. Deterministic convergence demands it.
 - **Versioned byte layouts, like the roster.** `approval_bytes` /
-  `block_link_bytes` carry `molt-chain-change-v2` / `molt-chain-block-v1` — bump
-  the tag and update `verify_chain` together if you change a layout, or
-  signatures silently break. `ChainChange` is additive-only (`WorkspaceEvent`
+  `block_link_bytes` carry `molt-chain-change-v2` / `molt-chain-block-v1`; from
+  the `block-v2` activation height (`persistent_chain.md` §5.1)
+  `approval_bytes_v3` / `block_id_bytes` carry `molt-chain-change-v3` /
+  `molt-chain-block-v2` (the identity without the signer set; every identity
+  comparison goes through `block_id`, never `block_link_bytes` or struct
+  equality) — bump the tag and update `verify_chain` together if you change a
+  layout, or signatures silently break. `ChainChange` is additive-only (`WorkspaceEvent`
   rule): an unknown variant must stop a reader from extending the chain.
 - **Additive, not an `EventEnvelope` change.** The chain is a *separate*
   structure; the local ephemeral event log (chat + materialized blocks) is
