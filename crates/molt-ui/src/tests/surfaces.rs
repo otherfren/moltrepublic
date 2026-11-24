@@ -1170,6 +1170,14 @@ fn the_block_format_row_names_its_state_and_who_holds_it_back() {
     assert_eq!(builds_note(0, false, 0, "bo runs an older build"), "", "no mixed builds, no line");
 }
 
+/// "Who decides" names the republic's own rule.
+#[test]
+fn the_switch_names_the_republic_s_rule() {
+    assert_eq!(crate::surfaces::who_decides(0, 2, 3), "2 of 3 members must agree.");
+    assert_eq!(crate::surfaces::who_decides(1, 2, 3), "2 von 3 Mitgliedern müssen zustimmen.");
+    assert_eq!(crate::surfaces::who_decides(0, 0, 0), "", "no rule known: the generic line");
+}
+
 /// The vote that turns the format on is titled and explained as such.
 #[test]
 fn the_block_format_vote_reads_as_what_it_does() {

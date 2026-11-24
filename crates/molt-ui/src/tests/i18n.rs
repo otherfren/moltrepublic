@@ -417,6 +417,29 @@ fn the_majority_strings_are_compact() {
     assert!(Lexicon::en().feat_vault_members.contains(&seats) && Lexicon::de().feat_vault_members.contains(&seats));
 }
 
+/// A device without the new block format: the founder's invite line, the
+/// joiner's failure and the coordinator's refused restore, in German.
+#[test]
+fn an_older_device_is_named_in_both_languages() {
+    assert_eq!(
+        super::localize_log_line(1, "✗ invite 2: bob's device runs an older build"),
+        "✗ Einladung 2: Das Gerät von bob läuft mit einer älteren Version"
+    );
+    assert_eq!(
+        super::localize_log_line(
+            1,
+            "✗ join failed: the founder refused this activation: this founding needs a newer build - update and use the link again"
+        ),
+        "✗ Beitritt fehlgeschlagen: the founder refused this activation: Diese Gründung braucht eine neuere Version - aktualisieren und den Link erneut verwenden"
+    );
+    assert_eq!(
+        crate::labels::recover_refused_copy(1, "bob:bob's device runs an older build"),
+        "Das Gerät von bob läuft mit einer älteren Version"
+    );
+    assert_eq!(crate::labels::recover_refused_copy(0, "bob:bob's device runs an older build"), "bob's device runs an older build");
+    assert_eq!(crate::labels::recover_refused_copy(1, "bob:no relay in common"), "bob:no relay in common", "others as before");
+}
+
 /// The branch reasons and notices the dark build can produce, and the
 /// block-v2 gate, in German; compact, no em dash.
 #[test]

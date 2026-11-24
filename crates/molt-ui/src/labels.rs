@@ -485,6 +485,21 @@ pub(crate) fn surface_name(lang: i32, sf: Surface) -> &'static str {
     }
 }
 
+/// A refused restore (`recover-refused:<seat>:<reason>`) for the link
+/// dialog's error slot.
+pub(crate) fn recover_refused_copy(lang: i32, rest: &str) -> String {
+    if let Some((seat, why)) = rest.split_once(':') {
+        if why.strip_suffix("'s device runs an older build") == Some(seat) {
+            return if lang == 1 {
+                format!("Das Gerät von {seat} läuft mit einer älteren Version")
+            } else {
+                why.to_string()
+            };
+        }
+    }
+    rest.to_string()
+}
+
 /// A feature key's label: a surface's name, or the sealing lock.
 pub(crate) fn feature_name(lang: i32, key: &str) -> String {
     if key == molt_core::chain::CHAIN_LOCK_FEATURE {

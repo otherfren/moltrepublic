@@ -642,13 +642,23 @@ pub(crate) fn localize_log_line(lang: i32, line: &str) -> String {
             for (i, part) in de.iter().enumerate() {
                 out.push_str(part);
                 if let Some(s) = slots.get(i) {
-                    out.push_str(s);
+                    out.push_str(&slot_de(s));
                 }
             }
             return out;
         }
     }
     line.to_string()
+}
+
+/// Whole engine phrases a slot may carry (a founder's reason relayed to
+/// the joiner), in German; the rest of the slot stays verbatim.
+fn slot_de(slot: &str) -> String {
+    const PHRASES: &[(&str, &str)] = &[(
+        "this founding needs a newer build - update and use the link again",
+        "Diese Gründung braucht eine neuere Version - aktualisieren und den Link erneut verwenden",
+    )];
+    PHRASES.iter().fold(slot.to_string(), |s, (en, de)| s.replace(en, de))
 }
 
 /// The German renderings, one pair per engine shape (set-equality with
@@ -777,6 +787,10 @@ pub(crate) static LOG_SHAPES_DE: &[(&[&str], &[&str])] = &[
     (
         &["✗ invite ", ": ", " runs a build without the lock - refused"],
         &["✗ Einladung ", ": ", " nutzt einen Build ohne Kettensperre - abgelehnt"],
+    ),
+    (
+        &["✗ invite ", ": ", "'s device runs an older build"],
+        &["✗ Einladung ", ": Das Gerät von ", " läuft mit einer älteren Version"],
     ),
     (
         &["✗ invite ", ": no usable reply address in the request - refused"],

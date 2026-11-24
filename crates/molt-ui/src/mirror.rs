@@ -835,7 +835,7 @@ pub(crate) fn apply_session(
                 // coordinator: the request was refused — same link dialog,
                 // loud error slot (the reason names what to fix, e.g. the
                 // relay the pool must gain)
-                ui.set_recovery_link_error(what.into());
+                ui.set_recovery_link_error(crate::labels::recover_refused_copy(lang, &what).into());
                 ui.set_recover_link_open(true);
             }
             RecoverNotice::None => {}
@@ -1771,6 +1771,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_org_bv2_state(b.org_stats.bv2_state);
     ui.set_org_bv2_text(b.org_stats.bv2_text.as_str().into());
     ui.set_org_bv2_tip(b.org_stats.bv2_tip.as_str().into());
+    ui.set_org_bv2_who(b.org_stats.bv2_who.as_str().into());
     crate::models::sync_strings(&ui.get_org_fork_lines(), &b.org_stats.fork_lines, |m| ui.set_org_fork_lines(m));
     let branch_rows: Vec<crate::BranchRow> = b
         .org_stats
