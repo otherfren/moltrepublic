@@ -2595,3 +2595,100 @@ fn an_import_turns_amnesiac_when_the_mode_comes_on() {
     assert_eq!(petra.chain.lock.amnesia, None);
     assert!(!petra.active.as_ref().expect("active").prefs.lock_unknown, "known from here on");
 }
+
+/// A Nostr coordinator holding dora's pending restore; the card anchors
+/// her new device at `anchor`.
+fn nostr_coordinator_with_dora_pending(anchor: &str) -> (Builder, crate::State, ChainChange) {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    coord.transport_kind = Some(molt_core::TransportKind::Nostr);
+    let card = ChainChange::Membership {
+        op: MembershipOp::Restored,
+        member: "dora".to_string(),
+        identity_pk: b.pk("dora"),
+        nostr_pk: Some(anchor.to_string()),
+        relays: Vec::new(),
+        consent: None,
+    };
+    coord.recovery.pending.insert(
+        "dora".to_string(),
+        super::membership::PendingRecovery {
+            key_package: kp_hex_for(&b, "dora"),
+            reply: String::new(),
+            card: card.clone(),
+            ticket: "t".to_string(),
+        },
+    );
+    (b, coord, card)
+}
+
+fn unfinished(st: &crate::State, member: &str) -> bool {
+    st.seat_syncs(&std::collections::HashSet::new())
+        .into_iter()
+        .any(|s| s.member == member && s.restore_unfinished)
+}
+
+/// A `Restored` block whose re-key cannot run here (no live group: the
+/// non-onion switch went off before the seal) tells the operator
+/// (`recover-interrupted:`), flags the seat in status, and answers the
+/// waiting device `link outdated` on its next frame; the seat's next
+/// re-key clears all of it.
+#[test]
+fn a_restore_without_its_rekey_is_reported_and_answered() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let anchor = Builder::seat_keys(7).1;
+    let (mut b, mut coord, card) = nostr_coordinator_with_dora_pending(&anchor);
+    let block = b.commit(card, &["petra", "walter"]);
+    assert!(coord.append_committed_block(block.clone()));
+    coord.after_block_applied(&block);
+    assert_eq!(coord.session.notice, "recover-interrupted:dora");
+    assert!(unfinished(&coord, "dora"), "status flags the seat");
+    assert!(!unfinished(&coord, "walter"));
+
+    let outdated = |st: &crate::State, from: &str| {
+        st.recovery.unsolicited_cooldown.contains_key(&("outdated:dora:run".to_string(), from.to_string()))
+    };
+    let stranger = Builder::seat_keys(8).1;
+    coord.cmd_net_recover_ready("dora", "t", "run", &stranger, None).expect("ack");
+    assert!(!outdated(&coord, &stranger), "only the waiting device is answered");
+    coord.cmd_net_recover_ready("dora", "t", "run", &anchor, None).expect("ack");
+    assert!(outdated(&coord, &anchor), "the waiting device hears link outdated");
+
+    coord.rekey_reset("dora");
+    assert!(!unfinished(&coord, "dora"), "a re-key clears the flag");
+    assert_eq!(coord.session.notice, "", "and the notice");
+    assert!(coord.recovery.interrupted.is_empty());
+}
+
+/// A seat that coordinates nothing flags the restore until the re-key
+/// merges - in either order - and never raises the notice.
+#[test]
+fn a_bystander_flags_a_restore_until_its_rekey_merges() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let card = |b: &Builder, anchor: &str| ChainChange::Membership {
+        op: MembershipOp::Restored,
+        member: "dora".to_string(),
+        identity_pk: b.pk("dora"),
+        nostr_pk: Some(anchor.to_string()),
+        relays: Vec::new(),
+        consent: None,
+    };
+    let first = b.commit(card(&b, &"aa".repeat(32)), &["petra", "walter"]);
+    assert!(walter.append_committed_block(first.clone()));
+    walter.after_block_applied(&first);
+    assert!(unfinished(&walter, "dora"));
+    assert_eq!(walter.session.notice, "", "no notice off the coordinator");
+    walter.rekey_reset("dora");
+    assert!(!unfinished(&walter, "dora"));
+
+    // the re-key merged before its block arrived
+    walter.rekey_reset("dora");
+    let second = b.commit(card(&b, &"bb".repeat(32)), &["petra", "walter"]);
+    assert!(walter.append_committed_block(second.clone()));
+    walter.after_block_applied(&second);
+    assert!(!unfinished(&walter, "dora"), "a re-key ahead of its block counts");
+}

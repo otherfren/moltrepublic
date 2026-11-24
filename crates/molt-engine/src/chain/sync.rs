@@ -1522,6 +1522,7 @@ impl State {
                     signed: if governed { self.last_signed(&member) } else { None },
                     files: u32::try_from(files).unwrap_or(u32::MAX),
                     dup_streak: self.dup_streak(&member),
+                    restore_unfinished: self.recovery.unfinished.contains(&member),
                     member,
                     ..Default::default()
                 }

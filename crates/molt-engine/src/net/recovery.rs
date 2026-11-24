@@ -34,6 +34,10 @@ const REJOINER_CAPS_MAX: usize = 64;
 /// not hold (it restarted, or the link was re-minted).
 pub(crate) const LINK_OUTDATED: &str = "link outdated";
 
+/// Notice prefix: a sealed restore of the seat that follows was never
+/// re-keyed here - a new link finishes it.
+pub(crate) const RECOVER_INTERRUPTED: &str = "recover-interrupted:";
+
 
 impl State {
     /// A returning member's recovery request reached this coordinator (recovery
@@ -110,6 +114,13 @@ impl State {
                 %member,
                 "recovery request claims a transport key it did not sign with - refused (possible impersonation)"
             );
+            return Ok(Reply::Ack);
+        }
+        // the device an interrupted restore left waiting asks again
+        if !canonical.is_empty()
+            && self.anchor_seen_in_chain(&canonical)
+            && self.answer_interrupted(&member, &attempt, &canonical)
+        {
             return Ok(Reply::Ack);
         }
         // the seat proved: only such a sender is ever answered (review R4)
@@ -615,6 +626,9 @@ impl State {
     /// for a ticket it minted and has not spent (review R4); anything else
     /// is a relay's replay or a prober, dropped.
     fn answer_unheld(&mut self, member: &str, ticket: &str, attempt: &str, sender: &str) {
+        if self.answer_interrupted(member, attempt, sender) {
+            return;
+        }
         if self.recovery.attempts.minted(ticket) && !self.recovery.spent_tickets.contains(ticket) {
             self.answer_link_outdated(member, attempt, sender);
         } else {
@@ -833,6 +847,57 @@ impl State {
         let version = if version.is_empty() { "unknown" } else { version };
         tracing::warn!(%member, version, reason, "recovery_failed");
         Ok(Reply::Ack)
+    }
+
+    /// A `Restored` block for `member` applied: the seat stays
+    /// `restore_unfinished` until its re-key merges here (it may have
+    /// merged first). This node's own restore starts its view afresh.
+    pub(crate) fn note_restored_block(&mut self, member: &str) {
+        if member == self.member() {
+            self.recovery.unfinished.clear();
+            self.recovery.rekey_ahead.clear();
+        } else if !self.recovery.rekey_ahead.remove(member) {
+            self.recovery.unfinished.insert(member.to_string());
+        }
+    }
+
+    /// A merged commit re-keyed `member`'s seat.
+    pub(crate) fn note_rekey_merged(&mut self, member: &str) {
+        if !self.recovery.unfinished.remove(member) {
+            self.recovery.rekey_ahead.insert(member.to_string());
+        }
+        if self.recovery.interrupted.remove(member).is_some()
+            && self.session.notice == format!("{RECOVER_INTERRUPTED}{member}")
+        {
+            self.session.notice = String::new();
+            self.emit_session(SessionScope::Full);
+        }
+    }
+
+    /// This coordinator's re-key for a sealed restore could not run: the
+    /// device waits for a Welcome that never comes. Told to the operator,
+    /// and the device is answered `link outdated` when it asks again.
+    pub(crate) fn restore_interrupted(&mut self, member: &str, p: &crate::chain::PendingRecovery) {
+        let anchor = match &p.card {
+            molt_core::ChainChange::Membership { nostr_pk: Some(a), .. } => a.clone(),
+            _ => String::new(),
+        };
+        tracing::warn!(%member, "recover_interrupted");
+        self.recovery.interrupted.insert(member.to_string(), anchor);
+        self.session.notice = format!("{RECOVER_INTERRUPTED}{member}");
+        self.snapshot_to_disk();
+        self.emit_session(SessionScope::Full);
+    }
+
+    /// A frame from the device an interrupted restore left waiting:
+    /// answered `link outdated`, so it stops waiting. `false` = not that
+    /// device.
+    fn answer_interrupted(&mut self, member: &str, attempt: &str, sender: &str) -> bool {
+        if sender.is_empty() || self.recovery.interrupted.get(member).is_none_or(|a| a != sender) {
+            return false;
+        }
+        self.answer_link_outdated(member, attempt, sender);
+        true
     }
 
     /// F2: remember the run a sealed restore re-keyed for.

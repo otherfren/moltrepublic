@@ -1285,6 +1285,7 @@ impl State {
                 // pattern (the committer also cleans by id upstream).
                 self.settle_membership_records(&block.change);
                 self.recovery.mesh_extension_at.remove(member);
+                self.note_restored_block(member);
                 // item 7: a device without Strict Order Mode is not welcomed
                 // into a republic that runs it
                 let unwelcomed = self.coordinates_restore(member, &block.change)
