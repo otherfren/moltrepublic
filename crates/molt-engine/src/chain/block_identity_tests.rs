@@ -411,7 +411,7 @@ fn different_signer_subsets_fork_before_the_activation() {
 const PAGE_A: &str = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,1 @@\n+one\n";
 
 fn page_tree() -> std::collections::BTreeMap<String, String> {
-    std::collections::BTreeMap::from([("a.md".to_string(), "one\n".to_string())])
+    std::collections::BTreeMap::from([(format!("{}.md", "a"), "one\n".to_string())])
 }
 
 fn wiki_change(id: u64) -> ChainChange {
