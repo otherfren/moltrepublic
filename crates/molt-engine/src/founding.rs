@@ -2061,6 +2061,8 @@ mod ritual_ops {
                 relays: relays.clone(),
                 // the founding roster carries the date; only a recovery Welcome does
                 founded_ts: 0,
+                // the charter says it
+                block_v2: false,
             };
             let mut tasks = Vec::new();
             for npub in targets {

@@ -91,6 +91,10 @@ pub struct WelcomePayload {
     /// The republic's founding date (unix seconds) for a rejoiner, whose
     /// chain carries no time; 0 = unknown. Absent on an older wire.
     pub founded_ts: u64,
+    /// The coordinator's chain runs the new block format: a rejoiner whose
+    /// anchor lies below the switch raises its manifest wall on this word.
+    /// Absent (false) on an older wire.
+    pub block_v2: bool,
 }
 
 /// The wire form of [`WelcomePayload`] — versioned, hex-encoded byte fields.
@@ -102,6 +106,8 @@ struct WelcomeWire {
     relays: Vec<String>,
     #[serde(default)]
     founded_ts: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    block_v2: bool,
 }
 
 const WELCOME_PAYLOAD_VERSION: u8 = 2;
@@ -123,6 +129,7 @@ impl WelcomePayload {
             rotation_seed: hex::encode(self.rotation_seed),
             relays: self.relays.clone(),
             founded_ts: self.founded_ts,
+            block_v2: self.block_v2,
         };
         serde_json::to_string(&wire).map_err(|e| WelcomeError::Payload(e.to_string()))
     }
@@ -157,6 +164,7 @@ impl WelcomePayload {
             rotation_seed,
             relays: wire.relays,
             founded_ts: wire.founded_ts,
+            block_v2: wire.block_v2,
         })
     }
 }
@@ -219,5 +227,9 @@ mod tests {
         let roundtrip = WelcomePayload { founded_ts: 1_700_000_000, ..p };
         let again = WelcomePayload::decode(&roundtrip.encode().expect("encodes")).expect("decodes");
         assert_eq!(again.founded_ts, 1_700_000_000);
+        assert!(!again.block_v2, "an older coordinator says nothing");
+        let switched = WelcomePayload { block_v2: true, ..again };
+        let wire = switched.encode().expect("encodes");
+        assert!(WelcomePayload::decode(&wire).expect("decodes").block_v2, "the word rides the same version");
     }
 }

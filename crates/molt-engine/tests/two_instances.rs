@@ -2656,6 +2656,7 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
         nostr_sk: String::new(),
         rotation_seed: String::new(),
         founded_ts: 0,
+        block_v2: false,
         generation: Some(1),
     })
     .await
@@ -2715,6 +2716,7 @@ async fn recovery_completes_end_to_end_and_the_rejoiner_materializes() {
         nostr_sk: String::new(),
         rotation_seed: String::new(),
         founded_ts: 0,
+        block_v2: false,
         generation: Some(1),
     })
     .await
@@ -3025,6 +3027,7 @@ async fn a_second_recovery_round_after_a_dead_first_attempt_succeeds() {
         nostr_sk: String::new(),
         rotation_seed: String::new(),
         founded_ts: 0,
+        block_v2: false,
         generation: Some(1),
     })
     .await

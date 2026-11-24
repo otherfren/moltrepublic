@@ -2935,6 +2935,7 @@ impl State {
                 nostr_sk,
                 rotation_seed,
                 founded_ts,
+                block_v2,
                 generation,
             } => self.cmd_net_recover_sealed(
                 member,
@@ -2944,6 +2945,7 @@ impl State {
                 nostr_sk,
                 rotation_seed,
                 founded_ts,
+                block_v2,
                 generation,
             ),
             Command::NetRecoverFailed { error, generation } => {

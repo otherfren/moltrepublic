@@ -1647,6 +1647,7 @@ async fn recovery_rejoin(
             nostr_sk: hex::encode(&*nostr_sk),
             rotation_seed: hex::encode(payload.rotation_seed),
             founded_ts: payload.founded_ts,
+            block_v2: payload.block_v2,
             generation,
         },
     )
@@ -2617,7 +2618,7 @@ mod admission_tests {
     }
 
     fn welcome() -> molt_net::welcome::WelcomePayload {
-        molt_net::welcome::WelcomePayload { welcome: vec![1, 2, 3], rotation_seed: [7; 32], relays: Vec::new(), founded_ts: 0 }
+        molt_net::welcome::WelcomePayload { welcome: vec![1, 2, 3], rotation_seed: [7; 32], relays: Vec::new(), founded_ts: 0, block_v2: false }
     }
 
     /// An anchor-first coordinator: the anchor after `after`, one piece
