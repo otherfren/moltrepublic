@@ -315,6 +315,49 @@ fn a_standing_vote_re_signs_after_a_tip_swap_at_the_same_height() {
     b.push(low);
 }
 
+/// Review: a PEER's signature bound to the old tip leaves with the swap.
+#[test]
+fn a_foreign_signature_on_the_old_tip_is_dropped_at_a_swap() {
+    let b = enabled(2);
+    let change = |id: u64| ChainChange::Applied {
+        proposal_id: id,
+        surface: Surface::Memory,
+        payload: serde_json::json!({ "op": "add_note", "id": id }),
+    };
+    let mut tips = vec![b.seal(2, change(60), &["walter", "dora"]), b.seal(2, change(61), &["walter", "dora"])];
+    tips.sort_by_key(|t| v2_id(&b, t));
+    let (high, low) = (tips[1].clone(), tips[0].clone());
+    let mut held = b.blocks.clone();
+    held.push(high.clone());
+    let mut petra = genesis_seat("petra", &b, held);
+    // petra holds the card without a vote: one signature does not seal
+    petra.config.self_cosign = false;
+    let id = propose(&mut petra, Surface::Memory, serde_json::json!({ "op": "add_note", "title": "x" }));
+    let card = petra.proposal_change(id).expect("change");
+    let on_high = molt_core::chain::approval_bytes_v3(&b.republic_id, 3, &v2_id(&b, &high), &card);
+    let sig = molt_storage::identity_sign(b.key("walter"), &on_high);
+    petra.receive_approval(id, "walter", 3, &sig);
+    let holds = |st: &crate::State| st.chain.pending_sigs.get(&id).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
+    assert!(holds(&petra));
+    wire(&mut petra, "dora", 10, WorkspaceEvent::Committed(low));
+    assert!(!holds(&petra), "walter's signature named the displaced tip");
+    assert_eq!(petra.chain.blocks.len(), 3, "and sealed nothing");
+}
+
+/// Review: a later `set_features` re-listing `block-v2` keeps H, one
+/// omitting it cannot turn it off.
+#[test]
+fn a_later_feature_vote_neither_moves_nor_ends_the_activation() {
+    let mut b = enabled(3);
+    b.commit_org(40, "set_features", &format!("memory quests {BLOCK_V2_FEATURE}"), &["petra", "walter"]);
+    b.commit_org(41, "set_features", "memory quests", &["petra", "walter"]);
+    b.commit_applied(42, &["walter", "dora"]);
+    assert_eq!(b.v2_from, Some(2));
+    let head = verify_chain(&b.blocks).expect("verifies");
+    assert_eq!(head.block_v2_from, Some(2));
+    assert_eq!(head.hash, v2_id(&b, &b.blocks[5]));
+}
+
 // --- S5: the keystone -----------------------------------------------------
 
 /// Every block of `n` sealed three times by different 2-of-3 subsets, each
