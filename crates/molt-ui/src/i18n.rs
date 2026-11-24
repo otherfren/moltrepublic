@@ -168,6 +168,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::ChainLagging { peers_ahead, peer } => {
             format!("{peer} ist {peers_ahead} Block/Blöcke voraus - diese Stimme zählt nicht")
         }
+        E::Branch(t) => format!("Zweigwahl: {t}"),
         E::Settings(t) => format!("Einstellungen: {t}"),
         E::UnknownWorkspace(w) => format!("Unbekannter Workspace `{w}`"),
         E::WorkspaceBusy(t) => format!("Workspace ist belegt: {t}"),
