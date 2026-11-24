@@ -655,7 +655,6 @@ impl State {
     pub(crate) fn cmd_read_chain(&self) -> Result<molt_core::Reply, molt_core::MoltError> {
         // D4: the display stamp per height, off the local log's `Committed`
         // envelopes (the chain itself is unstamped)
-        let rid = self.republic_id();
         let mut blocks: Vec<molt_core::ChainBlockView> = self
             .chain
             .blocks
@@ -663,7 +662,7 @@ impl State {
             .rev()
             .map(|b| molt_core::ChainBlockView {
                 ts: self.chain.block_ts.get(&b.height).copied().unwrap_or(0),
-                hash: block_hash(&rid, b),
+                hash: self.block_id_of(b),
                 ..chain_block_view(b)
             })
             .collect();

@@ -79,7 +79,7 @@ pub fn seal_at_rest(ws_dir: &Path, phrase: &str) -> Result<(), StorageError> {
     // be stale (a concurrently-closing engine's rename or version bump)
     // and writing it back below would silently revert those updates
     let manifest = crate::read_manifest(ws_dir)?;
-    if manifest.version > molt_core::STORAGE_VERSION_LOCK {
+    if manifest.version > molt_core::STORAGE_VERSION_BLOCK_V2 {
         return Err(StorageError::NewerVersion(manifest.version));
     }
     let id = crate::id_bytes(&manifest.workspace.id)?;
@@ -164,7 +164,7 @@ fn seal_trash_copies(
         }
         let _lock = crate::acquire_lock(&dir)?;
         let manifest = crate::read_manifest(&dir)?;
-        if manifest.version <= molt_core::STORAGE_VERSION_LOCK && verify_phrase_key(&dir, id, key).is_ok() {
+        if manifest.version <= molt_core::STORAGE_VERSION_BLOCK_V2 && verify_phrase_key(&dir, id, key).is_ok() {
             seal_dir(&dir, manifest, id, key)?;
         } else {
             strip_key_material(&dir, &manifest)?;
@@ -303,7 +303,7 @@ pub fn unseal_at_rest(root: &Path, ws_dir: &Path, phrase: &str) -> Result<(), St
     // (re)read under the lock — the pre-lock copy could be stale and its
     // write-back below would revert concurrent manifest updates
     let mut manifest = crate::read_manifest(ws_dir)?;
-    if manifest.version > molt_core::STORAGE_VERSION_LOCK {
+    if manifest.version > molt_core::STORAGE_VERSION_BLOCK_V2 {
         return Err(StorageError::NewerVersion(manifest.version));
     }
     let id = crate::id_bytes(&manifest.workspace.id)?;
@@ -371,6 +371,9 @@ fn verify_phrase_key(ws_dir: &Path, id: &[u8; 32], key: &[u8; 32]) -> Result<(),
 ///   exists to hard-stop. Over-describing only costs an old binary a
 ///   polite refusal.
 fn chain_version_floor(ws_dir: &Path, key: &[u8; 32], id: &[u8; 32]) -> u32 {
+    if crate::read_chain_at(ws_dir, key, id).is_ok_and(|(c, b)| crate::chain_runs_block_v2(c.as_ref(), &b)) {
+        return molt_core::STORAGE_VERSION_BLOCK_V2;
+    }
     // the lock ran here: an older binary would ignore its promises
     if ws_dir.join(crate::CHAIN_LOCK_FILE).exists() {
         return molt_core::STORAGE_VERSION_LOCK;
@@ -950,11 +953,11 @@ mod tests {
         }
         // simulate a manifest one capability ahead of THIS build
         let mut m = read_manifest(&dir).expect("m");
-        m.version = molt_core::STORAGE_VERSION_LOCK + 1;
+        m.version = molt_core::STORAGE_VERSION_BLOCK_V2 + 1;
         let text = toml::to_string_pretty(&m).expect("render");
         fs::write(dir.join("manifest.toml"), text).expect("write");
         match open_workspace(&dir) {
-            Err(StorageError::NewerVersion(v)) => assert_eq!(v, molt_core::STORAGE_VERSION_LOCK + 1),
+            Err(StorageError::NewerVersion(v)) => assert_eq!(v, molt_core::STORAGE_VERSION_BLOCK_V2 + 1),
             other => panic!("expected NewerVersion, got {:?}", other.map(|_| ())),
         }
         match seal_at_rest(&dir, &phrase) {

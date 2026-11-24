@@ -173,7 +173,7 @@ impl Surface {
     /// diagnosis (it is not "unknown", it is not optional), anything the
     /// vocabulary does not name is refused.
     fn check_feature_key(key: &str) -> Result<(), String> {
-        if key == crate::chain::CHAIN_LOCK_FEATURE {
+        if key == crate::chain::CHAIN_LOCK_FEATURE || key == crate::chain::BLOCK_V2_FEATURE {
             return Ok(());
         }
         match Surface::parse(key) {
@@ -1772,8 +1772,14 @@ pub const STORAGE_VERSION_SEALED: u32 = 3;
 /// write (`docs/chain/chain_lock_design.md` §8): an older binary ignores
 /// `chain_lock.state` and would sign freely where this seat promised or
 /// accepted - a fork - so it refuses the whole workspace at the manifest
-/// gate instead. The highest version this build opens.
+/// gate instead.
 pub const STORAGE_VERSION_LOCK: u32 = 4;
+
+/// The manifest version a workspace is RAISED to when its chain on disk
+/// enables [`chain::BLOCK_V2_FEATURE`]: an older binary cannot verify the
+/// blocks above the activation, so it refuses the workspace at the manifest
+/// gate instead. The highest version this build opens.
+pub const STORAGE_VERSION_BLOCK_V2: u32 = 5;
 
 /// [`CryptoParams::sealed`] marker of the default at-rest state: key material
 /// device-sealed under `~/.moltrepublic/device.key` (`keys/workspace.key` +
@@ -9050,6 +9056,13 @@ pub struct ChainSync {
     /// founding; 0 = the chain has not enabled the lock).
     #[serde(default)]
     pub lock_since: u64,
+    /// The first height whose block identity is v2, or this pruned holder's
+    /// anchor when the enabling block lies below it (0 = not enabled).
+    #[serde(default)]
+    pub block_v2_since: u64,
+    /// Why `block-v2` cannot be enabled now ("" = it can, or it is on).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub block_v2_wait: String,
     /// A6: the furthest peer ahead of this node on its branch ("" = level).
     #[serde(default)]
     pub ahead_peer: MemberId,

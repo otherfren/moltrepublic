@@ -2708,6 +2708,7 @@ mod ritual_ops {
             // §11: a founding starts without the lock; the members enable it
             // by vote (the seam founds locked for tests)
             let mut features = features;
+            features.push(molt_core::chain::BLOCK_V2_FEATURE.to_string());
             if self.lock_cap_on() && self.lock_seams.found_locked.load(std::sync::atomic::Ordering::SeqCst) {
                 features.push(molt_core::chain::CHAIN_LOCK_FEATURE.to_string());
             }

@@ -9,7 +9,7 @@ use super::*;
 use molt_core::{ProposalRecord, Reply};
 
 fn hash(b: &Builder, h: usize) -> String {
-    block_hash(&b.republic_id, &b.blocks[h])
+    block_id(&b.republic_id, &b.blocks[h], b.v2_from)
 }
 
 fn bundle_of(st: &State) -> String {

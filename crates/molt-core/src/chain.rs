@@ -432,6 +432,16 @@ pub const CHAIN_LOCK_CAP: &str = "molt-chain-lock-v1";
 /// `charter_features.md` D1).
 pub const CHAIN_LOCK_FEATURE: &str = "chain-lock";
 
+/// The feature key that switches the block identity to
+/// [`block_id_bytes`] from the height after the enabling block (height 1
+/// when the founding ratifies it). Not a surface key, like
+/// [`CHAIN_LOCK_FEATURE`].
+pub const BLOCK_V2_FEATURE: &str = "block-v2";
+
+/// The capability a seat announces when its build follows a
+/// [`BLOCK_V2_FEATURE`] chain; enabling it needs every seat's.
+pub const BLOCK_V2_CAP: &str = "molt-block-identity-v2";
+
 /// A lock ballot on the wire: ordered by round, then leader name.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LockBallot {
@@ -888,6 +898,19 @@ pub fn block_link_bytes(republic_id: &str, block: &ChainBlock) -> Vec<u8> {
         put_bytes(&mut out, member.as_bytes());
         put_bytes(&mut out, sig.as_bytes());
     }
+    out
+}
+
+/// **A block's identity from the activation height on**
+/// (`block_identity_plan.md` §3, [`BLOCK_V2_FEATURE`]): what [`block_link_bytes`]
+/// commits to, without the signer set. Any valid m-subset attests the same
+/// block, so two seats that sealed one decision hold one identity.
+pub fn block_id_bytes(republic_id: &str, block: &ChainBlock) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"molt-chain-block-v2\0");
+    out.extend_from_slice(&block.height.to_le_bytes());
+    put_bytes(&mut out, block.prev.as_bytes());
+    put_bytes(&mut out, &approval_bytes(republic_id, block.height, &block.change));
     out
 }
 
@@ -1938,6 +1961,54 @@ mod tests {
             assert!(seen.iter().all(|v| *v != b));
         }
         assert_ne!(seen[0], seen[1]);
+    }
+
+    fn pin_block(sigs: &[(&str, &str)]) -> ChainBlock {
+        ChainBlock {
+            height: 7,
+            prev: "ab".to_string(),
+            change: ChainChange::Checkpoint { upto: 6, state_hash: "cd".to_string() },
+            sigs: sigs
+                .iter()
+                .map(|(m, s)| RosterAttestation { member: (*m).to_string(), sig: (*s).to_string() })
+                .collect(),
+        }
+    }
+
+    fn pin_put(out: &mut Vec<u8>, b: &[u8]) {
+        out.extend_from_slice(&u32::try_from(b.len()).unwrap_or(0).to_le_bytes());
+        out.extend_from_slice(b);
+    }
+
+    #[test]
+    fn block_link_bytes_v1_pin() {
+        let block = pin_block(&[("walter", "02"), ("petra", "01")]);
+        let mut want = b"molt-chain-block-v1\0".to_vec();
+        want.extend_from_slice(&7u64.to_le_bytes());
+        pin_put(&mut want, b"ab");
+        pin_put(&mut want, &approval_bytes("f00", 7, &block.change));
+        for (m, s) in [("petra", "01"), ("walter", "02")] {
+            pin_put(&mut want, m.as_bytes());
+            pin_put(&mut want, s.as_bytes());
+        }
+        assert_eq!(block_link_bytes("f00", &block), want);
+    }
+
+    /// `block_identity_plan.md` §3: the v2 identity drops the signer set.
+    #[test]
+    fn block_id_bytes_v2_pin() {
+        let block = pin_block(&[("petra", "01"), ("walter", "02")]);
+        let mut want = b"molt-chain-block-v2\0".to_vec();
+        want.extend_from_slice(&7u64.to_le_bytes());
+        pin_put(&mut want, b"ab");
+        pin_put(&mut want, &approval_bytes("f00", 7, &block.change));
+        assert_eq!(block_id_bytes("f00", &block), want);
+        let other = pin_block(&[("dora", "03"), ("walter", "02")]);
+        assert_eq!(block_id_bytes("f00", &other), want, "another attestation, one identity");
+        assert_ne!(block_link_bytes("f00", &other), block_link_bytes("f00", &block));
+        let mut moved = block.clone();
+        moved.prev = "ac".to_string();
+        assert_ne!(block_id_bytes("f00", &moved), want, "prev is part of the identity");
     }
 
     /// The additive-only rule: a build that predates the variant refuses

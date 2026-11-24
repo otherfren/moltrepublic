@@ -706,7 +706,7 @@ const PUBLISH_PIECE_PATIENCE: Duration = Duration::from_secs(120);
 /// same answer in a second and in an hour - no.
 pub(crate) fn transient_publish_error(e: &NetError) -> bool {
     match e {
-        NetError::Framing(_) | NetError::Crypto(_) => false,
+        NetError::Framing(_) | NetError::Crypto(_) | NetError::Withdrawn => false,
         NetError::Refused { transient, .. } => *transient,
         NetError::Unreachable(text) => {
             let text = text.to_ascii_lowercase();

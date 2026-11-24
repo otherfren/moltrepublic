@@ -51,7 +51,7 @@ async fn stub_server(pages: Vec<(u16, String)>) -> (String, Arc<Mutex<Vec<String
 fn client_for(endpoint: &str) -> S3Client {
     let config = S3Config::from_settings(endpoint, "AKIAEXAMPLE", "secret-example", "molt-bucket", "")
         .expect("config parses");
-    S3Client::new(config, Dialer::Direct)
+    S3Client::new(config, Dialer::direct())
 }
 
 fn contents(key: &str, size: u64, modified: &str) -> String {

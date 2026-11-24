@@ -168,6 +168,10 @@ pub enum NetError {
     /// fail-closed config error, never a silent clearnet fallback.
     #[error("tor misconfigured: {0}")]
     TorMisconfigured(String),
+    /// This node's consent for the relay was withdrawn (`dial::RelayGate`):
+    /// no socket opens, and a retry waits for consent, not for a timer.
+    #[error("relay withdrawn")]
+    Withdrawn,
 }
 
 /// A queue id: random, meaningless bytes — no accounts, no user identifiers.

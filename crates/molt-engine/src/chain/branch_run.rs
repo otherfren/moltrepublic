@@ -89,7 +89,7 @@ pub(crate) struct Bundle {
 }
 
 /// One block as a status row.
-pub(crate) fn block_row(rid: &str, block: &ChainBlock) -> BranchBlockRow {
+pub(crate) fn block_row(hash: String, block: &ChainBlock) -> BranchBlockRow {
     let (kind, surface, op, proposal_id) = match &block.change {
         ChainChange::Applied { proposal_id, surface, payload } => (
             "applied",
@@ -113,7 +113,7 @@ pub(crate) fn block_row(rid: &str, block: &ChainBlock) -> BranchBlockRow {
     };
     BranchBlockRow {
         height: block.height,
-        hash: block_hash(rid, block),
+        hash,
         kind: kind.to_string(),
         surface,
         op,
@@ -210,10 +210,9 @@ impl State {
     }
 
     fn own_hash(&self, height: u64) -> Option<String> {
-        let rid = self.republic_id();
         let first = self.chain.blocks.first()?.height;
         let i = usize::try_from(height.checked_sub(first)?).ok()?;
-        self.chain.blocks.get(i).filter(|b| b.height == height).map(|b| block_hash(&rid, b))
+        self.chain.blocks.get(i).filter(|b| b.height == height).map(|b| self.block_id_of(b))
     }
 
     fn majority(&self) -> (bool, u8, usize) {
@@ -259,7 +258,7 @@ impl State {
         let mut prev: Option<&ChainBlock> = None;
         for b in run {
             if let Some(p) = prev {
-                if b.height != p.height + 1 || b.prev != block_hash(&rid, p) {
+                if b.height != p.height + 1 || b.prev != self.block_id_of(p) {
                     return Err(format!("run breaks at {}", b.height));
                 }
             }
@@ -280,12 +279,11 @@ impl State {
     /// Keep a verified run of another branch: the blocks above the last
     /// one this chain shares. `Ok(false)` = nothing new.
     fn keep_evidence(&mut self, rest: &[ChainBlock]) -> Result<bool, String> {
-        let rid = self.republic_id();
         let Some(first) = rest.first() else {
             return Ok(false);
         };
         self.verify_run(rest)?;
-        let root = block_hash(&rid, first);
+        let root = self.block_id_of(first);
         let held = self.chain.branch.file.evidence.get(&root).map(Vec::len);
         if held.is_some_and(|n| n >= rest.len()) {
             return Ok(false);
@@ -299,8 +297,7 @@ impl State {
 
     /// The part of `run` this chain does not hold.
     fn unheld<'a>(&self, run: &'a [ChainBlock]) -> &'a [ChainBlock] {
-        let rid = self.republic_id();
-        let split = run.iter().position(|b| !self.holds_block(b.height, &block_hash(&rid, b))).unwrap_or(run.len());
+        let split = run.iter().position(|b| !self.holds_block(b.height, &self.block_id_of(b))).unwrap_or(run.len());
         &run[split..]
     }
 
@@ -310,11 +307,10 @@ impl State {
         if self.chain.fork_candidates.is_empty() || self.branch_abandoned() || self.chain.head.is_none() {
             return;
         }
-        let rid = self.republic_id();
         let mut runs: Vec<Vec<ChainBlock>> = Vec::new();
         for c in self.chain.fork_candidates.values() {
             match runs.last_mut() {
-                Some(run) if run.last().is_some_and(|p| p.height + 1 == c.height && block_hash(&rid, p) == c.prev) => {
+                Some(run) if run.last().is_some_and(|p| p.height + 1 == c.height && self.block_id_of(p) == c.prev) => {
                     run.push(c.clone());
                 }
                 _ => runs.push(vec![c.clone()]),
@@ -349,18 +345,17 @@ impl State {
 
     /// The blocks a dropped run names, from this chain or the evidence.
     fn run_blocks(&self, run: &molt_core::chain::DroppedRun) -> Option<Vec<ChainBlock>> {
-        let rid = self.republic_id();
         let blocks: Vec<ChainBlock> = if self.own_hash(run.from_height).as_deref() == Some(run.first_hash.as_str()) {
             self.chain.blocks.iter().filter(|b| b.height >= run.from_height && b.height <= run.head_height).cloned().collect()
         } else {
             self.chain.branch.file.evidence.values().find_map(|e| {
-                let i = e.iter().position(|b| b.height == run.from_height && block_hash(&rid, b) == run.first_hash)?;
+                let i = e.iter().position(|b| b.height == run.from_height && self.block_id_of(b) == run.first_hash)?;
                 Some(e[i..].iter().filter(|b| b.height <= run.head_height).cloned().collect::<Vec<_>>())
             })?
         };
         let last = blocks.last()?;
         let whole = last.height == run.head_height
-            && block_hash(&rid, last) == run.head_hash
+            && self.block_id_of(last) == run.head_hash
             && u64::try_from(blocks.len()).ok() == Some(run.head_height - run.from_height + 1);
         whole.then_some(blocks)
     }
@@ -370,10 +365,9 @@ impl State {
         let ChainChange::BranchChosen { dropped, .. } = change else {
             return None;
         };
-        let rid = self.republic_id();
         let mut rows = Vec::new();
         for run in dropped {
-            rows.extend(self.run_blocks(run)?.iter().map(|b| block_row(&rid, b)));
+            rows.extend(self.run_blocks(run)?.iter().map(|b| block_row(self.block_id_of(b), b)));
         }
         Some(rows)
     }
@@ -384,8 +378,8 @@ impl State {
         Ok(Reply::Branches(Box::new(self.branch_status_view())))
     }
 
-    fn branch_view(rid: &str, blocks: &[ChainBlock], own: bool) -> BranchView {
-        let rows: Vec<BranchBlockRow> = blocks.iter().map(|b| block_row(rid, b)).collect();
+    fn branch_view(&self, blocks: &[ChainBlock], own: bool) -> BranchView {
+        let rows: Vec<BranchBlockRow> = blocks.iter().map(|b| block_row(self.block_id_of(b), b)).collect();
         let mut counts = BTreeMap::new();
         let mut signers: BTreeSet<MemberId> = BTreeSet::new();
         for r in &rows {
@@ -421,8 +415,8 @@ impl State {
             .into_iter()
             .map(|(base_height, base_hash)| {
                 let own: Vec<ChainBlock> = self.chain.blocks.iter().filter(|b| b.height > base_height).cloned().collect();
-                let mut branches = vec![Self::branch_view(&rid, &own, true)];
-                branches.extend(self.branches_at(base_height).iter().map(|r| Self::branch_view(&rid, r, false)));
+                let mut branches = vec![self.branch_view(&own, true)];
+                branches.extend(self.branches_at(base_height).iter().map(|r| self.branch_view(r, false)));
                 let mut seen: BTreeMap<MemberId, usize> = BTreeMap::new();
                 for b in &branches {
                     for s in &b.signers {
@@ -479,7 +473,6 @@ impl State {
     /// Build the change that keeps the branch ending at `tip_hash` at the
     /// fork point `base_height`.
     fn build_choice(&self, base_height: u64, tip_hash: &str) -> Result<ChainChange, MoltError> {
-        let rid = self.republic_id();
         let anchor = self.chain.blocks.first().map_or(0, |b| b.height);
         if base_height < anchor {
             return Err(err(BELOW_CUT));
@@ -495,9 +488,9 @@ impl State {
             let (f, l) = (blocks.first()?, blocks.last()?);
             Some(molt_core::chain::DroppedRun {
                 from_height: f.height,
-                first_hash: block_hash(&rid, f),
+                first_hash: self.block_id_of(f),
                 head_height: l.height,
-                head_hash: block_hash(&rid, l),
+                head_hash: self.block_id_of(l),
             })
         };
         let (tip_height, chosen) = if tip_hash == base_hash {
@@ -506,7 +499,7 @@ impl State {
             let found = branches
                 .iter()
                 .enumerate()
-                .find_map(|(i, br)| br.iter().find(|b| block_hash(&rid, b) == tip_hash).map(|b| (b.height, i)));
+                .find_map(|(i, br)| br.iter().find(|b| self.block_id_of(b) == tip_hash).map(|b| (b.height, i)));
             let (h, i) = found.ok_or_else(|| err("tip not on a branch of this fork"))?;
             (h, Some(i))
         };
@@ -514,7 +507,7 @@ impl State {
         let mut chosen_root = String::new();
         for (i, br) in branches.iter().enumerate() {
             if Some(i) == chosen {
-                chosen_root = br.first().map(|b| block_hash(&rid, b)).unwrap_or_default();
+                chosen_root = br.first().map(|b| self.block_id_of(b)).unwrap_or_default();
                 let tail: Vec<ChainBlock> = br.iter().filter(|b| b.height > tip_height).cloned().collect();
                 dropped.extend(run_of(&tail));
             } else {
@@ -794,7 +787,7 @@ impl State {
             return false;
         };
         let rid = self.republic_id();
-        if self.holds_block(block.height, &block_hash(&rid, block)) {
+        if self.holds_block(block.height, &self.block_id_of(block)) {
             return false;
         }
         let Some(head) = self.chain.head.clone() else {

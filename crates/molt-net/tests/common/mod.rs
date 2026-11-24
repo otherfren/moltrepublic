@@ -105,5 +105,137 @@ pub mod proxy {
             }
         }
     }
+
+    /// A forwarding proxy that counts TCP accepts and the inbound sides
+    /// that closed, both awaitable: "no accept" is read off the counter,
+    /// never off a sleep.
+    pub struct Counting {
+        pub port: u16,
+        accepts: tokio::sync::watch::Receiver<usize>,
+        closes: tokio::sync::watch::Receiver<usize>,
+    }
+
+    impl Counting {
+        pub async fn run(target: String) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind proxy");
+            let port = listener.local_addr().expect("addr").port();
+            let (acc_tx, accepts) = tokio::sync::watch::channel(0usize);
+            let (close_tx, closes) = tokio::sync::watch::channel(0usize);
+            let close_tx = Arc::new(close_tx);
+            tokio::spawn(async move {
+                while let Ok((mut inbound, _)) = listener.accept().await {
+                    acc_tx.send_modify(|n| *n += 1);
+                    let (target, close_tx) = (target.clone(), close_tx.clone());
+                    tokio::spawn(async move {
+                        if let Ok(mut outbound) = TcpStream::connect(&target).await {
+                            let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                        }
+                        close_tx.send_modify(|n| *n += 1);
+                    });
+                }
+            });
+            Self { port, accepts, closes }
+        }
+
+        pub fn url(&self) -> String {
+            format!("ws://127.0.0.1:{}", self.port)
+        }
+
+        pub fn accepts(&self) -> usize {
+            *self.accepts.borrow()
+        }
+
+        /// A failure bound, never a verdict: green returns as soon as it holds.
+        const BOUND: std::time::Duration = std::time::Duration::from_secs(15);
+
+        pub async fn wait_accepts(&self, n: usize) {
+            let mut rx = self.accepts.clone();
+            tokio::time::timeout(Self::BOUND, rx.wait_for(|c| *c >= n))
+                .await
+                .expect("the accept never came")
+                .expect("proxy alive");
+        }
+
+        pub async fn wait_closes(&self, n: usize) {
+            let mut rx = self.closes.clone();
+            tokio::time::timeout(Self::BOUND, rx.wait_for(|c| *c >= n))
+                .await
+                .expect("the connection never closed")
+                .expect("proxy alive");
+        }
+    }
+}
+
+/// A SOCKS5 proxy that holds each CONNECT until released, then answers
+/// success and counts what the client sends after it: the window between
+/// a dial's TCP/Tor connect and its handshake, made observable.
+pub mod held_socks {
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::{oneshot, Mutex};
+
+    pub struct Held {
+        pub port: u16,
+        /// Fires once per CONNECT request; the sender releases it.
+        pub requests: Mutex<tokio::sync::mpsc::Receiver<(oneshot::Sender<()>, oneshot::Receiver<usize>)>>,
+    }
+
+    pub async fn run() -> Held {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind socks");
+        let port = listener.local_addr().expect("addr").port();
+        let (req_tx, requests) = tokio::sync::mpsc::channel(8);
+        let req_tx = Arc::new(req_tx);
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                let req_tx = req_tx.clone();
+                tokio::spawn(async move {
+                    let mut head = [0u8; 2];
+                    if s.read_exact(&mut head).await.is_err() {
+                        return;
+                    }
+                    let mut methods = vec![0u8; usize::from(head[1])];
+                    if s.read_exact(&mut methods).await.is_err() {
+                        return;
+                    }
+                    let _ = s.write_all(&[0x05, 0x02]).await;
+                    let mut ah = [0u8; 2];
+                    if s.read_exact(&mut ah).await.is_err() {
+                        return;
+                    }
+                    let mut user = vec![0u8; usize::from(ah[1])];
+                    let _ = s.read_exact(&mut user).await;
+                    let mut pl = [0u8; 1];
+                    let _ = s.read_exact(&mut pl).await;
+                    let mut pass = vec![0u8; usize::from(pl[0])];
+                    let _ = s.read_exact(&mut pass).await;
+                    let _ = s.write_all(&[0x01, 0x00]).await;
+                    let mut ch = [0u8; 4];
+                    if s.read_exact(&mut ch).await.is_err() {
+                        return;
+                    }
+                    let mut hl = [0u8; 1];
+                    let _ = s.read_exact(&mut hl).await;
+                    let mut host = vec![0u8; usize::from(hl[0])];
+                    let _ = s.read_exact(&mut host).await;
+                    let mut port_bytes = [0u8; 2];
+                    let _ = s.read_exact(&mut port_bytes).await;
+                    let (release_tx, release) = oneshot::channel();
+                    let (sent_tx, sent) = oneshot::channel();
+                    if req_tx.send((release_tx, sent)).await.is_err() {
+                        return;
+                    }
+                    if release.await.is_err() {
+                        return;
+                    }
+                    let _ = s.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+                    // the client's first bytes, or 0 once it hung up silent
+                    let mut buf = [0u8; 4096];
+                    let after = s.read(&mut buf).await.unwrap_or(0);
+                    let _ = sent_tx.send(after);
+                });
+            }
+        });
+        Held { port, requests: Mutex::new(requests) }
+    }
 }
 

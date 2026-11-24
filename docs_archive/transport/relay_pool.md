@@ -199,9 +199,23 @@ than read the pool directly.
    on. What is gained: the consent is a decision the operator makes once,
    instead of a prompt they learn to click through. A withdrawal (switch
    off, revoke, remove) reaches the RUNNING republic at once: the group
-   runtime, seat inbox and mirror fetches restart on the remaining set, an
-   open recovery inbox stops (re-mint), and only a publish already in
-   flight may finish (`State::dialable_relays_changed`).
+   runtime, seat inbox and mirror fetches restart on the remaining set, and
+   an open recovery inbox stops (re-mint) (`State::dialable_relays_changed`).
+   Below that, ONE gate at the dial covers every other task (v0.1.3,
+   `withdrawn_relay_gate_plan.md`): each engine keeps its dialable set in a
+   `dial::RelayGateKeeper`, every dialer it hands out (`dialer_for`) carries
+   a view of it, and the set is updated before the withdrawing command
+   returns. `RelayWs::connect` refuses a relay outside the set before any
+   socket opens (`NetError::Withdrawn`) and again after the TCP/Tor connect
+   and after TLS, so a dial in flight sends no handshake. An established
+   socket ends at once: a waiting receive wakes on the gate, a send or ping
+   refuses. Retries do not run on a timer against a withdrawn relay: a
+   subscription's supervisor, the re-key delivery and the recovery frames
+   wait for consent and resume on it; a piece publish and a refused
+   publish end. A task over several relays loses only the withdrawn one.
+   Ungated by design: the probe of a relay the operator is deciding on, S3
+   and the wallet daemon (no relay). The Tor test is gated: its target is
+   a dialable relay, so the gate only stops a test racing a withdrawal.
 
 Tor does not waive rule 3. Routing a clearnet relay over Tor hides the node's
 IP from the relay operator, but it is still a clearnet endpoint with a

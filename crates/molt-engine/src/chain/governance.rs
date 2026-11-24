@@ -263,6 +263,9 @@ impl State {
         if let Some(why) = self.lock_enable_blocker(&change) {
             return Some(why);
         }
+        if let Some(why) = self.block_v2_enable_blocker(&change) {
+            return Some(why);
+        }
         // item 3: a card registered before the mode turned on may be too
         // large for its lock frames - it stays open and withdrawable
         if let ChainChange::Applied { surface, payload, .. } = &change {

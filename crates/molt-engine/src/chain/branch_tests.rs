@@ -7,10 +7,18 @@ use super::test_support::Builder;
 use super::*;
 use molt_core::chain::DroppedRun;
 
-/// A 2-of-3 fork at height 1: `x` (a + b) holds two blocks above it, `y`
-/// (b + c) one.
+/// A 2-of-3 fork at height 1 of a current founding (block identity v2
+/// from height 1): `x` (a + b) holds two blocks above it, `y` (b + c) one.
 pub(super) fn fork() -> (Builder, Builder) {
-    let mut base = Builder::new(&["a", "b", "c"], 2);
+    fork_from(Builder::new_with_features(&["a", "b", "c"], 2, &[molt_core::chain::BLOCK_V2_FEATURE], false))
+}
+
+/// [`fork`] of an older founding (v1 identities throughout).
+fn fork_v1() -> (Builder, Builder) {
+    fork_from(Builder::new(&["a", "b", "c"], 2))
+}
+
+fn fork_from(mut base: Builder) -> (Builder, Builder) {
     base.commit_applied(100, &["a", "b"]);
     let mut x = base.clone();
     x.commit_applied(200, &["a", "b"]);
@@ -21,7 +29,7 @@ pub(super) fn fork() -> (Builder, Builder) {
 }
 
 fn hash(b: &Builder, h: usize) -> String {
-    block_hash(&b.republic_id, &b.blocks[h])
+    block_id(&b.republic_id, &b.blocks[h], b.v2_from)
 }
 
 /// `x` kept up to its head, `y` dropped from the fork.
@@ -59,9 +67,10 @@ fn edit(change: &ChainChange, f: impl FnOnce(&mut ChainChange)) -> ChainChange {
 
 #[test]
 fn a_branch_choice_seals_on_its_tip() {
-    let (x, y) = fork();
-    let head = verify_chain(&with(&x, keep_x(&x, &y), &["a", "b"])).expect("verifies");
-    assert_eq!(head.height, 4);
+    for (x, y) in [fork(), fork_v1()] {
+        let head = verify_chain(&with(&x, keep_x(&x, &y), &["a", "b"])).expect("verifies");
+        assert_eq!(head.height, 4);
+    }
 }
 
 #[test]

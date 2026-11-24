@@ -190,7 +190,7 @@ impl AsyncWrite for DialStream {
 /// [`Dialer::resolve`]: under `network = tor` there is **no** path to
 /// `Direct` (transport concept §6, T4 §P1).
 #[derive(Clone, Debug, Default)]
-pub enum Dialer {
+pub enum Route {
     /// Direct TCP — no Tor.
     #[default]
     Direct,
@@ -209,6 +209,113 @@ pub enum Dialer {
     Arti(ArtiHandle),
 }
 
+/// A route plus, on a running node, the relay consent it dials under
+/// (`docs_archive/transport/relay_pool.md` §3 rule 3). `gate: None` dials any
+/// relay: the probe of a not-yet-confirmed relay, S3, the wallet daemon.
+#[derive(Clone, Debug, Default)]
+pub struct Dialer {
+    /// How the socket is reached.
+    pub route: Route,
+    /// The engine's dialable relay set, checked by `RelayWs::connect`.
+    pub gate: Option<RelayGate>,
+}
+
+/// One engine's relay consent: the canonical URLs it may dial now. Every
+/// dialer the engine hands out carries a [`RelayGate`] view of it, so a
+/// withdrawal reaches dials already under way.
+#[derive(Debug)]
+pub struct RelayGateKeeper {
+    tx: tokio::sync::watch::Sender<GateSet>,
+}
+
+#[derive(Debug, Default)]
+struct GateSet {
+    epoch: u64,
+    urls: std::collections::HashSet<String>,
+}
+
+/// A dialer's view of its engine's [`RelayGateKeeper`]. Once the keeper is
+/// gone (the engine ended) it allows nothing.
+#[derive(Clone, Debug)]
+pub struct RelayGate {
+    rx: tokio::sync::watch::Receiver<GateSet>,
+}
+
+impl Default for RelayGateKeeper {
+    fn default() -> Self {
+        Self { tx: tokio::sync::watch::Sender::new(GateSet::default()) }
+    }
+}
+
+impl RelayGateKeeper {
+    /// A view for a dialer.
+    #[must_use]
+    pub fn gate(&self) -> RelayGate {
+        RelayGate { rx: self.tx.subscribe() }
+    }
+
+    /// Replace the dialable set (pool URLs, canonical). The epoch moves
+    /// only when the set does.
+    pub fn set(&self, urls: &[String]) {
+        let urls: std::collections::HashSet<String> = urls.iter().cloned().collect();
+        self.tx.send_if_modified(|set| {
+            if set.urls == urls {
+                return false;
+            }
+            set.urls = urls;
+            set.epoch = set.epoch.wrapping_add(1);
+            true
+        });
+    }
+
+    /// How often the set changed.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.tx.borrow().epoch
+    }
+}
+
+impl RelayGate {
+    /// Whether `url` may be dialed now. A URL that does not normalize is no
+    /// pool entry, so it is refused.
+    #[must_use]
+    pub fn allows(&self, url: &str) -> bool {
+        if self.rx.has_changed().is_err() {
+            return false;
+        }
+        molt_core::relay::normalize_relay_url(url)
+            .is_ok_and(|canonical| self.rx.borrow().urls.contains(&canonical))
+    }
+
+    /// The keeper's epoch as last published.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.rx.borrow().epoch
+    }
+
+    /// Resolves once `url` is no longer allowed.
+    pub async fn withdrawn(&mut self, url: &str) {
+        while self.allows(url) {
+            if self.rx.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Wait until any of `urls` is allowed; `false` = the keeper is gone and
+    /// nothing will be.
+    pub async fn until_any_allowed(&mut self, urls: &[String]) -> bool {
+        loop {
+            if urls.iter().any(|u| self.allows(u)) {
+                return true;
+            }
+            if self.rx.changed().await.is_err() {
+                return false;
+            }
+        }
+    }
+}
+
 /// Mint a per-session random isolation prefix (8 bytes, hex).
 pub(crate) fn session_token() -> Result<String, NetError> {
     Ok(hex::encode(crate::os_random::<8>()?))
@@ -218,7 +325,7 @@ impl Dialer {
     /// Resolve the transport config to a dialer — the **single, fail-closed**
     /// routing decision (T4 §P1):
     ///
-    /// - `network = none` → [`Dialer::Direct`] (clearnet).
+    /// - `network = none` → [`Route::Direct`] (clearnet).
     /// - `network = tor, mode = local` → SOCKS5h at `127.0.0.1:<port>`.
     /// - `network = tor, mode = whonix` → SOCKS5h at the gateway `10.152.152.10:9050`.
     /// - `network = tor, mode = embedded` → the arti dialer with
@@ -231,7 +338,7 @@ impl Dialer {
     /// whole fail-closed guarantee, concentrated here.
     pub fn resolve(network: &str, mode: &str, port: u16) -> Result<Dialer, NetError> {
         match network {
-            "none" => Ok(Dialer::Direct),
+            "none" => Ok(Dialer::direct()),
             "tor" => match mode {
                 "local" => Dialer::socks5(format!("127.0.0.1:{port}")),
                 "whonix" => Dialer::socks5("10.152.152.10:9050".to_string()),
@@ -247,12 +354,53 @@ impl Dialer {
         }
     }
 
+    /// Direct TCP, no gate.
+    #[must_use]
+    pub fn direct() -> Dialer {
+        Dialer::default()
+    }
+
+    /// `route`, no gate.
+    #[must_use]
+    pub fn on(route: Route) -> Dialer {
+        Dialer { route, gate: None }
+    }
+
+    /// The same route under `gate`.
+    #[must_use]
+    pub fn with_gate(self, gate: RelayGate) -> Dialer {
+        Dialer { gate: Some(gate), ..self }
+    }
+
+    /// The same route with no gate: for a relay the operator is deciding on.
+    #[must_use]
+    pub fn ungated(self) -> Dialer {
+        Dialer { gate: None, ..self }
+    }
+
+    /// `Err(Withdrawn)` when the gate no longer allows `url`.
+    pub fn check_gate(&self, url: &str) -> Result<(), NetError> {
+        match &self.gate {
+            Some(gate) if !gate.allows(url) => Err(NetError::Withdrawn),
+            _ => Ok(()),
+        }
+    }
+
+    /// After a [`NetError::Withdrawn`]: wait until one of `urls` is allowed
+    /// again. `false` = never (no gate, or the engine ended).
+    pub async fn until_any_allowed(&self, urls: &[String]) -> bool {
+        match self.gate.clone() {
+            Some(mut gate) => gate.until_any_allowed(urls).await,
+            None => false,
+        }
+    }
+
     /// A SOCKS5h dialer with a fresh isolation session.
     fn socks5(proxy: String) -> Result<Dialer, NetError> {
-        Ok(Dialer::Socks5 {
+        Ok(Dialer::on(Route::Socks5 {
             proxy,
             session: session_token()?,
-        })
+        }))
     }
 
     /// Resolve `mode = embedded` (arti). With the feature, route to the
@@ -261,7 +409,7 @@ impl Dialer {
     /// in-process client, so it is ignored here.
     #[cfg(feature = "embedded-tor")]
     fn resolve_embedded(_port: u16) -> Result<Dialer, NetError> {
-        Ok(Dialer::Arti(ArtiHandle::new()))
+        Ok(Dialer::on(Route::Arti(ArtiHandle::new())))
     }
 
     /// Without the `embedded-tor` feature, `mode = embedded` is a clean
@@ -296,35 +444,36 @@ impl Dialer {
             use sha2::{Digest, Sha256};
             hex::encode(&Sha256::digest(lane.as_bytes())[..8])
         };
-        match self {
-            Dialer::Direct => Dialer::Direct,
-            Dialer::Socks5 { proxy, session } => Dialer::Socks5 {
+        let route = match &self.route {
+            Route::Direct => Route::Direct,
+            Route::Socks5 { proxy, session } => Route::Socks5 {
                 proxy: proxy.clone(),
                 session: format!("{session}-{tag}"),
             },
             #[cfg(feature = "embedded-tor")]
-            Dialer::Arti(handle) => Dialer::Arti(handle.with_lane(&tag)),
-        }
+            Route::Arti(handle) => Route::Arti(handle.with_lane(&tag)),
+        };
+        Dialer { route, gate: self.gate.clone() }
     }
 
     /// The route as a log field (`direct`, `socks5://…`, `arti`).
     pub fn route(&self) -> String {
-        match self {
-            Dialer::Direct => "direct".to_string(),
-            Dialer::Socks5 { proxy, .. } => format!("socks5://{proxy}"),
+        match &self.route {
+            Route::Direct => "direct".to_string(),
+            Route::Socks5 { proxy, .. } => format!("socks5://{proxy}"),
             #[cfg(feature = "embedded-tor")]
-            Dialer::Arti(_) => "arti".to_string(),
+            Route::Arti(_) => "arti".to_string(),
         }
     }
 
     /// Whether this dialer routes over Tor (so `.onion` alternates are
     /// preferred and local DNS never happens).
     pub fn tor_on(&self) -> bool {
-        match self {
-            Dialer::Direct => false,
-            Dialer::Socks5 { .. } => true,
+        match &self.route {
+            Route::Direct => false,
+            Route::Socks5 { .. } => true,
             #[cfg(feature = "embedded-tor")]
-            Dialer::Arti(_) => true,
+            Route::Arti(_) => true,
         }
     }
 
@@ -348,8 +497,8 @@ impl Dialer {
     }
 
     async fn dial_host_inner(&self, host: &str, port: u16) -> Result<DialStream, NetError> {
-        match self {
-            Dialer::Direct => {
+        match &self.route {
+            Route::Direct => {
                 // a resolver-less direct dial can never reach an .onion — fail
                 // closed with a clear reason instead of a DNS error / hang.
                 // `x.onion.` is the same name, and getaddrinfo would look it up
@@ -366,7 +515,7 @@ impl Dialer {
                     .map_err(|e| NetError::Unreachable(format!("tcp {addr}: {e}")))?;
                 Ok(DialStream::Tcp(tcp))
             }
-            Dialer::Socks5 { proxy, session } => {
+            Route::Socks5 { proxy, session } => {
                 // One Tor circuit per remote host (IsolateSOCKSAuth): the
                 // SOCKS username is `molt-<session>-<host>`, capped at the
                 // RFC 1929 limit (tokio-socks refuses an oversized field
@@ -404,7 +553,7 @@ impl Dialer {
                 Ok(DialStream::Tcp(stream.into_inner()))
             }
             #[cfg(feature = "embedded-tor")]
-            Dialer::Arti(handle) => {
+            Route::Arti(handle) => {
                 // No outer connect deadline here: the FIRST embedded dial also
                 // bootstraps the Tor directory (slow — minutes on a cold cache),
                 // and arti applies its own per-circuit/connect timeouts, so a
@@ -425,22 +574,22 @@ mod tests {
     fn resolve_maps_every_mode_and_fails_closed() {
         // none -> Direct (clearnet).
         assert!(matches!(
-            Dialer::resolve("none", "local", 9050).expect("none"),
-            Dialer::Direct
+            Dialer::resolve("none", "local", 9050).expect("none").route,
+            Route::Direct
         ));
         // tor + local -> SOCKS at 127.0.0.1:<port>.
         assert!(matches!(
-            Dialer::resolve("tor", "local", 9050).expect("local"),
-            Dialer::Socks5 { proxy, .. } if proxy == "127.0.0.1:9050"
+            Dialer::resolve("tor", "local", 9050).expect("local").route,
+            Route::Socks5 { proxy, .. } if proxy == "127.0.0.1:9050"
         ));
         assert!(matches!(
-            Dialer::resolve("tor", "local", 9150).expect("local port"),
-            Dialer::Socks5 { proxy, .. } if proxy == "127.0.0.1:9150"
+            Dialer::resolve("tor", "local", 9150).expect("local port").route,
+            Route::Socks5 { proxy, .. } if proxy == "127.0.0.1:9150"
         ));
         // tor + whonix -> the gateway SOCKS listener.
         assert!(matches!(
-            Dialer::resolve("tor", "whonix", 9050).expect("whonix"),
-            Dialer::Socks5 { proxy, .. } if proxy == "10.152.152.10:9050"
+            Dialer::resolve("tor", "whonix", 9050).expect("whonix").route,
+            Route::Socks5 { proxy, .. } if proxy == "10.152.152.10:9050"
         ));
         // tor + embedded WITHOUT the feature -> fail closed.
         #[cfg(not(feature = "embedded-tor"))]
@@ -466,11 +615,32 @@ mod tests {
         for mode in ["local", "whonix", "embedded", "", "nonsense"] {
             if let Ok(d) = Dialer::resolve("tor", mode, 9050) {
                 assert!(
-                    !matches!(d, Dialer::Direct),
+                    !matches!(d.route, Route::Direct),
                     "network=tor mode={mode} must never resolve to Direct"
                 );
             }
         }
+    }
+
+    /// The gate compares canonical URLs, moves its epoch only on a real
+    /// change, carries through `isolated`, and allows nothing once its
+    /// engine (the keeper) is gone.
+    #[test]
+    fn the_gate_reads_canonical_urls_and_dies_with_its_keeper() {
+        let keeper = RelayGateKeeper::default();
+        let gate = keeper.gate();
+        assert!(!gate.allows("wss://relay.example.org"), "an empty set allows nothing");
+        keeper.set(&["wss://relay.example.org".to_string()]);
+        assert_eq!(keeper.epoch(), 1);
+        keeper.set(&["wss://relay.example.org".to_string()]);
+        assert_eq!(keeper.epoch(), 1, "an unchanged set keeps its epoch");
+        assert!(gate.allows("WSS://Relay.Example.org:443/"), "one relay, two spellings");
+        assert!(!gate.allows("wss://other.example.org"));
+        let dialer = Dialer::direct().with_gate(gate).isolated("lane");
+        assert!(dialer.check_gate("wss://relay.example.org").is_ok());
+        assert!(Dialer::direct().check_gate("wss://other.example.org").is_ok(), "no gate, no refusal");
+        drop(keeper);
+        assert!(matches!(dialer.check_gate("wss://relay.example.org"), Err(NetError::Withdrawn)));
     }
 
     #[cfg(not(feature = "embedded-tor"))]
@@ -486,8 +656,8 @@ mod tests {
     #[test]
     fn two_lanes_to_one_host_yield_distinct_socks_credentials() {
         let base = Dialer::resolve("tor", "local", 9050).expect("tor");
-        let session = |d: &Dialer| match d {
-            Dialer::Socks5 { session, .. } => session.clone(),
+        let session = |d: &Dialer| match &d.route {
+            Route::Socks5 { session, .. } => session.clone(),
             other => panic!("not a socks dialer: {other:?}"),
         };
         let a = session(&base.isolated("anchor:abc"));
@@ -497,7 +667,7 @@ mod tests {
         assert_eq!(a, session(&base.isolated("anchor:abc")), "a lane is stable");
         assert!(a.starts_with(&session(&base)), "the session survives inside the lane");
         assert!(
-            matches!(Dialer::Direct.isolated("x"), Dialer::Direct),
+            matches!(Dialer::direct().isolated("x").route, Route::Direct),
             "no circuits, no lanes"
         );
     }
@@ -506,7 +676,7 @@ mod tests {
     /// the dialer uppercased).
     #[tokio::test]
     async fn direct_refuses_an_uppercase_onion_too() {
-        let err = Dialer::Direct.dial_host("ABC.ONION", 80).await.expect_err("refused");
+        let err = Dialer::direct().dial_host("ABC.ONION", 80).await.expect_err("refused");
         assert!(matches!(err, NetError::TorMisconfigured(_)), "{err:?}");
     }
 
@@ -516,7 +686,7 @@ mod tests {
         // circuit linkability).
         let a = Dialer::resolve("tor", "local", 9050).expect("a");
         let b = Dialer::resolve("tor", "local", 9050).expect("b");
-        let (Dialer::Socks5 { session: sa, .. }, Dialer::Socks5 { session: sb, .. }) = (a, b)
+        let (Route::Socks5 { session: sa, .. }, Route::Socks5 { session: sb, .. }) = (a.route, b.route)
         else {
             panic!("expected socks dialers");
         };
@@ -531,14 +701,14 @@ mod tests {
             .enable_all()
             .build()
             .expect("rt");
-        let res = rt.block_on(Dialer::Direct.dial_host("abcd.onion", 5223));
+        let res = rt.block_on(Dialer::direct().dial_host("abcd.onion", 5223));
         assert!(
             matches!(res, Err(NetError::TorMisconfigured(_))),
             "got {res:?}"
         );
         // the FQDN spelling is the same name: it must not reach getaddrinfo
         for host in ["abcd.onion.", "abcd.ONION.."] {
-            let res = rt.block_on(Dialer::Direct.dial_host(host, 5223));
+            let res = rt.block_on(Dialer::direct().dial_host(host, 5223));
             assert!(
                 matches!(res, Err(NetError::TorMisconfigured(_))),
                 "{host}: got {res:?}"
@@ -558,10 +728,10 @@ mod tests {
                 held.push(s); // hold open, never respond
             }
         });
-        let dialer = Dialer::Socks5 {
+        let dialer = Dialer::on(Route::Socks5 {
             proxy: addr.to_string(),
             session: "test".to_string(),
-        };
+        });
         let started = tokio::time::Instant::now();
         let res = dialer.dial_host("example.invalid", 5223).await;
         let elapsed = started.elapsed();

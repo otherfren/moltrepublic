@@ -432,9 +432,6 @@ impl CountingProxy {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_withdrawn_relay_is_not_redialed_by_the_running_republic() {
     molt_net::timeouts::set_relay_timeouts(5, molt_net::timeouts::DEFAULT_PUBLISH_SECS);
-    // a dial in flight at the withdrawal cannot be recalled (the SYN is out);
-    // it lands within its connect bound
-    let grace = molt_net::timeouts::RelayTimeouts::configured().connect + Duration::from_secs(1);
     let relay = MockRelay::run().await.expect("in-process relay");
     let proxy = CountingProxy::run(&relay.url().await.to_string()).await;
     let tmp = tempfile::tempdir().expect("tmp");
@@ -456,11 +453,9 @@ async fn a_withdrawn_relay_is_not_redialed_by_the_running_republic() {
         }
     };
 
+    // no grace for a dial in flight: the gate stops it before its handshake
     a.execute(Command::RelayClearnetSession { unlock: false }).await.expect("switch off");
     proxy.cut().await;
-    tokio::time::sleep(grace).await;
-    assert_eq!(proxy.used(), 0, "switched off, yet the relay was used");
-    proxy.forget_accepts();
     say("after off").await;
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert_eq!(proxy.accepts(), 0, "switched off, yet the relay was dialed");
@@ -478,9 +473,6 @@ async fn a_withdrawn_relay_is_not_redialed_by_the_running_republic() {
 
     a.execute(Command::RelayRevoke { url: proxy.url.clone() }).await.expect("revoke");
     proxy.cut().await;
-    tokio::time::sleep(grace).await;
-    assert_eq!(proxy.used(), 0, "revoked, yet the relay was used");
-    proxy.forget_accepts();
     say("after revoke").await;
     tokio::time::sleep(Duration::from_secs(6)).await;
     assert_eq!(proxy.accepts(), 0, "revoked, yet the relay was dialed");
