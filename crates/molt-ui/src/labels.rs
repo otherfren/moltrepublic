@@ -485,6 +485,15 @@ pub(crate) fn surface_name(lang: i32, sf: Surface) -> &'static str {
     }
 }
 
+/// `recover-interrupted:<seat>`: the sealed restore's re-key never merged.
+pub(crate) fn recover_interrupted_copy(lang: i32, seat: &str) -> String {
+    if lang == 1 {
+        format!("Wiederherstellung von {seat} unterbrochen - neuen Link erstellen")
+    } else {
+        format!("Restore of {seat} interrupted - create a new link")
+    }
+}
+
 /// A refused restore (`recover-refused:<seat>:<reason>`) for the link
 /// dialog's error slot.
 pub(crate) fn recover_refused_copy(lang: i32, rest: &str) -> String {

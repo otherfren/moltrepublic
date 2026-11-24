@@ -885,6 +885,8 @@ pub(crate) fn apply_session(
             ui.invoke_show_toast_error(crate::labels::sealed_after_withdrawal_copy(lang).into());
         } else if let Some(member) = sv.notice.strip_prefix("restore-abandoned:") {
             ui.invoke_show_toast_error(crate::labels::restore_abandoned_copy(lang, member).into());
+        } else if let Some(seat) = sv.notice.strip_prefix("recover-interrupted:") {
+            ui.invoke_show_toast_error(crate::labels::recover_interrupted_copy(lang, seat).into());
         } else if let Some((text, error)) = crate::branches::notice_toast(lang, &sv.notice) {
             if error {
                 ui.invoke_show_toast_error(text.into());
