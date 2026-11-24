@@ -146,7 +146,11 @@ From the activation height H the two layouts change together:
   2026-11-24 with `tests/chain_prev_binding.rs`: 2-of-3 over a local relay,
   one seat 6 s behind, 50 cards per run, three runs each. Median
   propose-to-sealed 30.8-32.7 s without the binding, 28.4-33.0 s with it;
-  no fork decision in any run.
+  no fork decision in any run. At 200 cards per run (three runs each):
+  p95 63.2/65.0/65.1 s without, 62.5/64.2/65.3 s with; p99 80.0/76.6/78.5
+  against 65.5/74.5/77.6. The slow cards are the last of a burst: every
+  standing card re-signs at each new height in both modes, and the
+  binding adds a re-sign only on a tip change at the same height.
 - Activation (`block_identity_plan.md` §4): the feature key `block-v2`.
   A new founding ratifies it in its charter (H = 1). An existing republic
   enables it by a `set_features` vote, proposed and signed only once every
