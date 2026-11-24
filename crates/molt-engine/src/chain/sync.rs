@@ -781,7 +781,8 @@ impl State {
         self.forget_wiki_stamps();
         self.adopt_chain(candidate);
         // R4: what our dropped suffix decided and theirs does not is a vote again
-        for b in &dropped {
+        // top-down: the newest restore of a seat finds its card first
+        for b in dropped.iter().rev() {
             if let ChainChange::Applied { proposal_id, .. } = &b.change {
                 if kept.contains(proposal_id) {
                     continue;
@@ -989,17 +990,28 @@ impl State {
         let ChainChange::Membership { op: MembershipOp::Restored, member, .. } = &displaced.change else {
             return;
         };
-        let card = self
-            .proposals
-            .iter()
-            .filter(|(_, p)| {
-                p.state == ProposalState::Applied
-                    && p.payload.get("op").and_then(serde_json::Value::as_str) == Some("restore_member")
-                    && p.payload.get("member").and_then(serde_json::Value::as_str) == Some(member.as_str())
-            })
-            .map(|(id, _)| *id)
-            .max();
-        let Some(id) = card else { return };
+        // the card this change sealed; else (a restart forgot it) only a
+        // closed card whose own change is gone, never one that kept its own
+        let recorded = self.chain.sealed_restores.iter().rposition(|(_, c)| *c == displaced.change);
+        let card = match recorded {
+            Some(i) => self.chain.sealed_restores.remove(i).map(|(id, _)| id),
+            None => self
+                .proposals
+                .iter()
+                .filter(|(id, p)| {
+                    p.state == ProposalState::Applied
+                        && !self.chain.proposal_changes.contains_key(*id)
+                        && p.payload.get("op").and_then(serde_json::Value::as_str) == Some("restore_member")
+                        && p.payload.get("member").and_then(serde_json::Value::as_str) == Some(member.as_str())
+                })
+                .map(|(id, _)| *id)
+                .max(),
+        };
+        let Some(id) = card else {
+            // the card comes back with the re-serve of the open governance
+            tracing::info!(%member, height = displaced.height, "restore=displaced card=unknown");
+            return;
+        };
         let me = self.member();
         self.chain.proposal_changes.insert(id, displaced.change.clone());
         if let Some(p) = self.proposals.get_mut(&id) {

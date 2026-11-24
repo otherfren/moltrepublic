@@ -17,6 +17,9 @@ use super::*;
 #[cfg(feature = "measure")]
 pub(crate) static RESIGNS: std::sync::Mutex<Option<std::collections::BTreeMap<u64, u64>>> = std::sync::Mutex::new(None);
 
+/// Restore cards remembered with the change that sealed them.
+const SEALED_RESTORES_KEPT: usize = 64;
+
 /// One voter is told its vote was dropped at most this often.
 const VOTE_REFUSAL_DEBOUNCE_SECS: u64 = 30;
 
@@ -1393,6 +1396,12 @@ impl State {
             .filter(|(_, p)| p.state == ProposalState::Proposed && is_membership_card(p, *op, member))
             .map(|(id, _)| *id)
             .collect();
+        for id in ids.iter().filter(|id| self.chain.proposal_changes.get(*id) == Some(sealed)) {
+            self.chain.sealed_restores.push_back((*id, sealed.clone()));
+        }
+        while self.chain.sealed_restores.len() > SEALED_RESTORES_KEPT {
+            self.chain.sealed_restores.pop_front();
+        }
         for id in ids {
             if let Some(p) = self.proposals.get_mut(&id) {
                 p.settle_applied();
