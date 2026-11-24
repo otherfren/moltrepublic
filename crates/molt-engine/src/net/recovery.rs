@@ -893,7 +893,7 @@ impl State {
     /// answered `link outdated`, so it stops waiting. `false` = not that
     /// device.
     fn answer_interrupted(&mut self, member: &str, attempt: &str, sender: &str) -> bool {
-        if sender.is_empty() || self.recovery.interrupted.get(member).is_none_or(|a| a != sender) {
+        if sender.is_empty() || !self.recovery.interrupted.get(member).is_some_and(|a| a == sender) {
             return false;
         }
         self.answer_link_outdated(member, attempt, sender);
