@@ -28,6 +28,7 @@ use molt_core::{
 use crate::State;
 
 pub(crate) mod blob_parts;
+mod block_v2;
 mod checkpoint;
 mod governance;
 mod lock;
@@ -43,6 +44,8 @@ mod wiki_base;
 
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(test)]
+mod block_identity_tests;
 #[cfg(test)]
 mod checkpoint_tests;
 #[cfg(test)]
@@ -66,7 +69,7 @@ mod verify_tests;
 #[cfg(test)]
 mod vault_founding_tests;
 
-pub use verify::{verify_chain, verify_wiki_export, ChainHead, WikiExportReport};
+pub use verify::{block_identities, verify_chain, verify_wiki_export, ChainHead, WikiExportReport};
 pub(crate) use verify::{
     checkpoint_state, checkpoint_state_hash, effective_relays_of_served, verify_served,
     verify_suffix_chain, working_anchors, ChainWalk, ServedChainWire,

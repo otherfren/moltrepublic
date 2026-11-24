@@ -488,7 +488,8 @@ async fn a_vote_enables_the_lock_in_an_older_republic() {
         let dir = molt_storage::find_workspace_dir(&tmp.path().join(name), &ws).expect("workspace dir");
         assert!(!dir.join(molt_storage::CHAIN_LOCK_FILE).exists(), "{name}: no lock file");
         let version = molt_storage::read_manifest(&dir).expect("manifest").version;
-        assert!(version < molt_core::STORAGE_VERSION_LOCK, "{name}: manifest {version}");
+        // the charter's block-v2 wall, never the lock's
+        assert_eq!(version, molt_core::STORAGE_VERSION_BLOCK_V2, "{name}: manifest {version}");
         assert!(!molt_storage::read_prefs(&dir).chain_lock, "{name}: no lock marker");
     }
     // every seat announced the capability before dora goes away
@@ -666,7 +667,7 @@ async fn the_lock_is_dark_in_this_build() {
     let tmp = tempfile::tempdir().expect("tmp");
     let ([mara, walter, dora], _) = found_trio_with(tmp.path(), &url, false, false).await;
     for w in [&mara, &walter, &dora] {
-        assert_eq!(status(w).await.features, vec!["memory".to_string()], "the v0.1.0 charter");
+        assert_eq!(status(w).await.features, vec!["block-v2".to_string(), "memory".to_string()], "a charter without the lock");
         assert!(!status(w).await.chain_sync.lock_active);
     }
     let names = ["mara", "walter", "dora"];
@@ -682,7 +683,8 @@ async fn the_lock_is_dark_in_this_build() {
         let dir = molt_storage::find_workspace_dir(&tmp.path().join(name), &ws).expect("workspace dir");
         assert!(!dir.join(molt_storage::CHAIN_LOCK_FILE).exists(), "{name}: no lock file");
         let version = molt_storage::read_manifest(&dir).expect("manifest").version;
-        assert!(version < molt_core::STORAGE_VERSION_LOCK, "{name}: manifest {version}");
+        // the charter's block-v2 wall, never the lock's
+        assert_eq!(version, molt_core::STORAGE_VERSION_BLOCK_V2, "{name}: manifest {version}");
         assert!(!molt_storage::read_prefs(&dir).chain_lock, "{name}: no lock marker");
     }
 }

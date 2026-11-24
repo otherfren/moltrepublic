@@ -957,6 +957,11 @@ impl State {
                     return Err(MoltError::BadPayload(why));
                 }
             }
+            if proposed.contains(molt_core::chain::BLOCK_V2_FEATURE) {
+                if let Some(why) = self.block_v2_not_capable() {
+                    return Err(MoltError::BadPayload(why));
+                }
+            }
         }
         // the proposer co-signs below: a seat that cannot sign must not put
         // up a card that reads as its own vote while counting as nobody's

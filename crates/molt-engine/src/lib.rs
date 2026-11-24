@@ -98,7 +98,7 @@ use std::path::PathBuf;
 
 pub use configstore::ConfigStoreHandle;
 #[doc(hidden)]
-pub use chain::{verify_chain, ChainHead};
+pub use chain::{block_identities, verify_chain, ChainHead};
 /// The public wiki-export verifier — the reference implementation an external
 /// reviewer runs (`cargo run -p molt-engine --example verify_wiki_export`).
 pub use chain::{verify_wiki_export, WikiExportReport};
@@ -1266,6 +1266,9 @@ pub(crate) struct ChainProjection {
     pub(crate) catchup_since: u64,
     /// Fork decisions since open (S1 diagnostics).
     pub(crate) fork_decisions: u64,
+    /// Test-only: every seat announced the v2 capability (or not).
+    #[cfg(test)]
+    pub(crate) block_v2_caps_override: Option<bool>,
     /// The latest fork decision (S1 diagnostics).
     pub(crate) last_fork: Option<molt_core::ForkDecision>,
     /// WP2: the head+1 at which each own standing signature was last

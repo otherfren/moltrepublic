@@ -19,6 +19,8 @@ pub(crate) struct Builder {
     pub(crate) keys: Vec<(String, SigningKey)>,
     pub(crate) blocks: Vec<ChainBlock>,
     pub(crate) head_hash: String,
+    /// The v2 activation of the chain built so far.
+    pub(crate) v2_from: Option<u64>,
 }
 
 impl Builder {
@@ -87,6 +89,7 @@ impl Builder {
         let all: Vec<&str> = all.iter().map(String::as_str).collect();
         self.blocks.clear();
         self.head_hash = GENESIS_PREV.to_string();
+        self.v2_from = None;
         let block = self.seal(0, change, &all);
         self.push(block);
     }
@@ -134,6 +137,7 @@ impl Builder {
             keys,
             blocks: Vec::new(),
             head_hash: GENESIS_PREV.to_string(),
+            v2_from: None,
         };
         // genesis is unanimous
         let all: Vec<&str> = members.to_vec();
@@ -168,7 +172,8 @@ impl Builder {
     }
 
     pub(crate) fn push(&mut self, block: ChainBlock) {
-        self.head_hash = block_hash(&self.republic_id, &block);
+        self.head_hash = block_id(&self.republic_id, &block, self.v2_from);
+        self.v2_from = block_v2_after(self.v2_from, &block);
         self.blocks.push(block);
     }
 

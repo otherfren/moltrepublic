@@ -1742,6 +1742,20 @@ impl OpenedWorkspace {
         Ok(())
     }
 
+    /// Raise the manifest to [`molt_core::STORAGE_VERSION_BLOCK_V2`] once,
+    /// before a chain that enables the v2 identity reaches the disk.
+    /// Idempotent.
+    pub fn bump_block_v2_version(&mut self) -> Result<(), StorageError> {
+        if self.manifest.version >= molt_core::STORAGE_VERSION_BLOCK_V2 {
+            return Ok(());
+        }
+        let mut raised = self.manifest.clone();
+        raised.version = molt_core::STORAGE_VERSION_BLOCK_V2;
+        write_manifest(&self.dir, &raised)?;
+        self.manifest = raised;
+        Ok(())
+    }
+
     /// WP4b stage 5 (see [`Self::bump_lock_version`] for the lock's twin).
     pub fn bump_pruned_version(&mut self) -> Result<(), StorageError> {
         if self.manifest.version >= molt_core::STORAGE_VERSION_PRUNED {
@@ -2606,6 +2620,31 @@ pub(crate) fn decode_chain_state(
 /// Read the `chain.state` of a workspace directory: absent → `Ok((None,
 /// []))`; present but unreadable → a typed error (the L7 policy, see
 /// [`OpenedWorkspace::read_chain`]).
+/// The chain enables [`molt_core::chain::BLOCK_V2_FEATURE`]: in the
+/// genesis, a checkpoint's state or a `set_features` block.
+pub(crate) fn chain_runs_block_v2(checkpoint: Option<&molt_core::CheckpointState>, blocks: &[molt_core::ChainBlock]) -> bool {
+    let key = molt_core::chain::BLOCK_V2_FEATURE;
+    let sets = |payload: &serde_json::Value| {
+        payload.get("op").and_then(serde_json::Value::as_str) == Some("set_features")
+            && payload
+                .get("value")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|v| v.split_whitespace().any(|k| k == key))
+    };
+    if let Some(c) = checkpoint {
+        if c.founding_features.as_ref().is_some_and(|f| f.iter().any(|k| k == key))
+            || c.applied.iter().any(|(s, l)| *s == molt_core::Surface::Organization && l.iter().any(|(_, p)| sets(p)))
+        {
+            return true;
+        }
+    }
+    blocks.iter().any(|b| match &b.change {
+        molt_core::ChainChange::Genesis { features: Some(f), .. } => f.iter().any(|k| k == key),
+        molt_core::ChainChange::Applied { surface: molt_core::Surface::Organization, payload, .. } => sets(payload),
+        _ => false,
+    })
+}
+
 /// The chain carries Strict Order Mode's key ([`molt_core::chain::CHAIN_LOCK_FEATURE`]):
 /// in the genesis, a checkpoint's state or a `set_features` block.
 /// Conservative (a cut's state is searched whole); a false yes only sets a
@@ -2919,7 +2958,7 @@ pub fn create_workspace(
 /// accident, and the typed [`StorageError::Sealed`] routes every frontend
 /// to the decrypt flow).
 fn openable_gate(manifest: &WorkspaceManifest) -> Result<(), StorageError> {
-    if manifest.version > molt_core::STORAGE_VERSION_LOCK {
+    if manifest.version > molt_core::STORAGE_VERSION_BLOCK_V2 {
         return Err(StorageError::NewerVersion(manifest.version));
     }
     // both sealed shapes route to the decrypt flow: S6 (unseal) and the S7
@@ -4608,6 +4647,15 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                                 ok = false;
                             }
                         }
+                        // the same order for the v2 identity's wall
+                        if ws.manifest.version < molt_core::STORAGE_VERSION_BLOCK_V2
+                            && chain_runs_block_v2(blob.as_ref(), &blocks)
+                        {
+                            if let Err(e) = ws.bump_block_v2_version() {
+                                fail(&failed_flag, "manifest version bump", &e);
+                                ok = false;
+                            }
+                        }
                         if let Err(e) =
                             ws.write_chain(blob.as_ref(), &blocks).and_then(|()| ws.sync())
                         {
@@ -6182,7 +6230,7 @@ mod tests {
         let mut m = read_manifest(&dir).expect("manifest");
         // one past everything this build understands (S6 raised the ceiling
         // to STORAGE_VERSION_SEALED)
-        m.version = molt_core::STORAGE_VERSION_LOCK + 1;
+        m.version = molt_core::STORAGE_VERSION_BLOCK_V2 + 1;
         {
             let text = toml::to_string_pretty(&m).expect("render");
             fs::write(dir.join("manifest.toml"), text).expect("write");
@@ -6191,6 +6239,34 @@ mod tests {
             open_workspace(&dir).is_err(),
             "a too-new manifest version refuses the workspace"
         );
+    }
+
+    /// The v2 identity's wall: the first persist of a chain that enables
+    /// it raises the manifest; a chain without it keeps the version.
+    #[test]
+    fn a_chain_enabling_block_v2_raises_the_manifest() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let seed = seed_entropy(&generate_seed_phrase().expect("gen")).expect("entropy");
+        let ws = create_workspace(tmp.path(), &seed, &founded(43)).expect("create");
+        let dir = ws.dir().to_path_buf();
+        let handle = start_writer(ws);
+        let block = |h: u64, value: &str| molt_core::ChainBlock {
+            height: h,
+            prev: String::new(),
+            change: molt_core::ChainChange::Applied {
+                proposal_id: h,
+                surface: molt_core::Surface::Organization,
+                payload: serde_json::json!({ "op": "set_features", "value": value }),
+            },
+            sigs: Vec::new(),
+        };
+        assert!(handle.persist_chain_blocking(None, vec![block(1, "memory quests")]), "durable");
+        assert_eq!(read_manifest(&dir).expect("manifest").version, molt_core::STORAGE_VERSION);
+        let key = molt_core::chain::BLOCK_V2_FEATURE;
+        assert!(handle.persist_chain_blocking(None, vec![block(1, "memory quests"), block(2, key)]), "durable");
+        handle.close(None);
+        assert_eq!(read_manifest(&dir).expect("manifest").version, molt_core::STORAGE_VERSION_BLOCK_V2);
+        open_workspace(&dir).expect("this build opens it");
     }
 
     #[test]

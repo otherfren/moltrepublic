@@ -179,7 +179,7 @@ impl State {
             }
             // the buffered suffix drains behind it — ONE write for the
             // whole batch, at the end
-            let (height, hash) = (block.height, block_hash(&self.republic_id(), &block));
+            let (height, hash) = (block.height, self.block_id_of(&block));
             let applied = self.in_block_batch(|st| {
                 let ok = st.apply_next_block(from, block);
                 if ok {
@@ -281,7 +281,6 @@ impl State {
     /// (head, head-1, head-2, head-4, ...) down to the anchor - at most
     /// [`KNOWN_HEADS_MAX`] entries.
     pub(crate) fn known_heads(&self) -> Vec<molt_core::HeightHash> {
-        let rid = self.republic_id();
         let Some(head) = self.chain.blocks.last().map(|b| b.height) else {
             return Vec::new();
         };
@@ -290,7 +289,7 @@ impl State {
         while out.len() < KNOWN_HEADS_MAX {
             let Some(h) = head.checked_sub(back) else { break };
             if let Some(b) = self.chain.blocks.iter().find(|b| b.height == h) {
-                out.push(molt_core::HeightHash { height: h, hash: block_hash(&rid, b) });
+                out.push(molt_core::HeightHash { height: h, hash: self.block_id_of(b) });
             } else {
                 break;
             }
@@ -303,7 +302,6 @@ impl State {
     /// heights one by one, then the geometric samples below them, so the
     /// fork point is found whatever its depth.
     pub(crate) fn dense_known_heads(&self) -> Vec<molt_core::HeightHash> {
-        let rid = self.republic_id();
         let Some(head) = self.chain.blocks.last().map(|b| b.height) else {
             return Vec::new();
         };
@@ -314,16 +312,25 @@ impl State {
             .iter()
             .rev()
             .take_while(|b| b.height > floor)
-            .map(|b| molt_core::HeightHash { height: b.height, hash: block_hash(&rid, b) })
+            .map(|b| molt_core::HeightHash { height: b.height, hash: self.block_id_of(b) })
             .collect();
         out.extend(self.known_heads().into_iter().filter(|k| k.height <= floor));
         out
     }
 
-    /// Whether this node holds the block at `height` with link hash `hash`.
+    /// The first height of this chain whose identity is v2.
+    pub(crate) fn block_v2_from(&self) -> Option<u64> {
+        self.chain.head.as_ref().and_then(|h| h.block_v2_from)
+    }
+
+    /// The identity of `block` on this chain ([`block_id`]).
+    pub(crate) fn block_id_of(&self, block: &ChainBlock) -> String {
+        block_id(&self.republic_id(), block, self.block_v2_from())
+    }
+
+    /// Whether this node holds the block at `height` with identity `hash`.
     pub(crate) fn holds_block(&self, height: u64, hash: &str) -> bool {
-        let rid = self.republic_id();
-        self.chain.blocks.iter().any(|b| b.height == height && block_hash(&rid, b) == hash)
+        self.chain.blocks.iter().any(|b| b.height == height && self.block_id_of(b) == hash)
     }
 
     /// S5: a fallback sealer asks its peers for a block at `height` it may
@@ -631,15 +638,9 @@ impl State {
     /// Where a fork-aware request wants serving from: one above the highest
     /// `known` sample that names a block we hold, else `from_height`.
     pub(crate) fn serve_from_for(&self, from_height: u64, known: &[molt_core::HeightHash]) -> u64 {
-        let rid = self.republic_id();
         known
             .iter()
-            .filter(|k| {
-                self.chain
-                    .blocks
-                    .iter()
-                    .any(|b| b.height == k.height && block_hash(&rid, b) == k.hash)
-            })
+            .filter(|k| self.holds_block(k.height, &k.hash))
             .map(|k| k.height.saturating_add(1))
             .max()
             .unwrap_or(from_height)
@@ -659,7 +660,6 @@ impl State {
     /// proposals to the vote (R4). A run that does not link yet asks the
     /// peer for the heights below it (R5). Never below the anchor (R2).
     fn try_reorg(&mut self, from: &str) {
-        let rid = self.republic_id();
         let Some(anchor) = self.chain.blocks.first().map(|b| b.height) else {
             return;
         };
@@ -671,7 +671,7 @@ impl State {
                 continue;
             }
             if let Some(below) = ours_at(self, h - 1) {
-                if block_hash(&rid, &below) == cand.prev {
+                if self.block_id_of(&below) == cand.prev {
                     fork = Some(*h);
                     break;
                 }
@@ -683,9 +683,9 @@ impl State {
                 if lowest > anchor.saturating_add(1) {
                     let want = lowest.saturating_sub(1).max(anchor.saturating_add(1));
                     let suppressed = self.chain.catchup_from == Some(want);
-                    let theirs = block_hash(&rid, &cand);
+                    let theirs = self.block_id_of(&cand);
                     let ours = ours_at(self, lowest);
-                    let mine = ours.as_ref().map(|b| block_hash(&rid, b)).unwrap_or_default();
+                    let mine = ours.as_ref().map(|b| self.block_id_of(b)).unwrap_or_default();
                     let (mine_id, theirs_id) = (ours.as_ref().map_or(0, applied_id), applied_id(&cand));
                     let line = format!("{want}:{mine}:{theirs}");
                     if let Some(repeated) = self.log_gate(&format!("unlinked:{from}:{lowest}"), &line) {
@@ -705,11 +705,14 @@ impl State {
         // the contiguous run of candidates from f upward
         let mut suffix: Vec<ChainBlock> = Vec::new();
         let mut h = f;
+        // the candidates' own activation: their branch may enable it above f
+        let mut v2 = self.block_v2_from().filter(|from| *from <= f);
         while let Some(c) = self.chain.fork_candidates.get(&h) {
             if let Some(prev) = suffix.last() {
-                if c.prev != block_hash(&rid, prev) {
+                if c.prev != block_id(&self.republic_id(), prev, v2) {
                     break;
                 }
+                v2 = block_v2_after(v2, prev);
             }
             suffix.push(c.clone());
             h = h.saturating_add(1);
@@ -717,7 +720,7 @@ impl State {
         let Some(ours_f) = ours_at(self, f) else {
             return;
         };
-        let (mine, theirs) = (block_hash(&rid, &ours_f), block_hash(&rid, &suffix[0]));
+        let (mine, theirs) = (self.block_id_of(&ours_f), self.block_id_of(&suffix[0]));
         let ids = (applied_id(&ours_f), applied_id(&suffix[0]));
         if mine <= theirs {
             // ours wins at the fork (R1): the peer re-bases, not this node
@@ -809,12 +812,11 @@ impl State {
         mut candidate: Vec<ChainBlock>,
         (mine, theirs, ids): (&str, &str, (u64, u64)),
     ) {
-        let rid = self.republic_id();
         let old_head = self.chain.head.as_ref().map_or(0, |h| h.height);
         let top = candidate.last().map_or(0, |b| b.height);
         for b in self.chain.blocks.iter().filter(|b| b.height > top) {
             let mut b = b.clone();
-            b.prev = candidate.last().map(|p| block_hash(&rid, p)).unwrap_or_default();
+            b.prev = candidate.last().map(|p| self.block_id_of(p)).unwrap_or_default();
             candidate.push(b);
         }
         self.chain.fork_candidates.clear();
@@ -869,9 +871,8 @@ impl State {
             .filter(|b| b.height >= from)
             .cloned()
             .collect();
-        let rid = self.republic_id();
-        let first = blocks.first().map(|b| short_hash(&block_hash(&rid, b)).to_string()).unwrap_or_default();
-        let last = blocks.last().map(|b| short_hash(&block_hash(&rid, b)).to_string()).unwrap_or_default();
+        let first = blocks.first().map(|b| short_hash(&self.block_id_of(b)).to_string()).unwrap_or_default();
+        let last = blocks.last().map(|b| short_hash(&self.block_id_of(b)).to_string()).unwrap_or_default();
         let line = format!("{from}:{}:{first}:{last}", blocks.len());
         if let Some(repeated) = self.log_gate(&format!("served:{peer}"), &line) {
             tracing::info!(%peer, from, blocks = blocks.len(), first = %first, last = %last, repeated, "chain_catchup=served");
@@ -983,10 +984,11 @@ impl State {
         let Some(existing) = self.chain.blocks.iter().find(|b| b.height == block.height) else {
             return;
         };
-        if existing == &block {
-            // duplicate broadcast of the block we already hold: the sender
-            // holds our history at this height
-            let hash = block_hash(&self.republic_id(), &block);
+        let (incoming, current) = (self.block_id_of(&block), self.block_id_of(existing));
+        if incoming == current {
+            // the block we hold, or another attestation of it (v2): the
+            // sender holds our history at this height; the first one stays
+            let hash = incoming;
             self.note_on_branch(from, seq, block.height, hash);
             // a shared block below the fork height proves nothing (review R4)
             if self.chain.diverged.get(from).map_or(true, |d| block.height >= d.since_height) {
@@ -995,8 +997,6 @@ impl State {
             return;
         }
         let rid = self.republic_id();
-        let incoming = molt_storage::content_hash(&block_link_bytes(&rid, &block));
-        let current = molt_storage::content_hash(&block_link_bytes(&rid, existing));
         let existing_id = applied_id(existing);
         let is_tip = self.chain.blocks.last().is_some_and(|b| b.height == block.height);
         // A2.1: a contender on a foreign `prev`, or one below the tip, is
@@ -1007,7 +1007,7 @@ impl State {
             .blocks
             .iter()
             .find(|b| b.height.saturating_add(1) == block.height)
-            .map_or(true, |below| block_hash(&rid, below) == block.prev);
+            .map_or(true, |below| self.block_id_of(below) == block.prev);
         // CHEAP FIRST (review C5): a ground low-hash block costs a full
         // re-walk per frame; the signatures are what any contender must
         // carry, so they are checked against the roster before anything
@@ -1194,7 +1194,10 @@ impl State {
         });
         let (lock_active, lock_ballot, lock_wait) = self.lock_status();
         let (ahead_peer, ahead_height) = self.furthest_peer_ahead().unwrap_or_default();
+        let (block_v2_since, block_v2_wait) = self.block_v2_status();
         molt_core::ChainSync {
+            block_v2_since,
+            block_v2_wait,
             ahead_peer,
             ahead_height,
             lock_active,
@@ -1244,7 +1247,7 @@ impl State {
     /// H1: keep a refused block for `status` and count it as a heal round
     /// with its sender; the block's short hash, for the caller's line.
     pub(crate) fn note_refused(&mut self, from: &str, block: &ChainBlock, rule: &str) -> String {
-        let full = block_hash(&self.republic_id(), block);
+        let full = self.block_id_of(block);
         let hash = short_hash(&full).to_string();
         let at = self.presence_now();
         self.chain.refusals.push_back(molt_core::BlockRefusal {
