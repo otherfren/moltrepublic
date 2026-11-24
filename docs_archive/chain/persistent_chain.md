@@ -244,6 +244,7 @@ state; a signature is only its expression at one head+1.
   `cut_state`, `cut_floor`, `cut_kind`, `threshold`, `consent_spent`,
   `consent_stale`, `consent_invalid`, `consent_malformed`, `consent_twice`,
   `consent_misplaced`, `unknown_member`, `restore_key`, `joined`, `vault`,
+  `branch`, `below_cut` (a branch choice, `docs/chain/chain_rescue_plan.md`),
   `far_future`, `other`.
 - A catch-up round that moves nothing is a heal round: on the server, the
   same peer asking from the same height with the same top sample; on the
@@ -262,6 +263,18 @@ state; a signature is only its expression at one head+1.
   `chain_catchup=requested` / `served` lines carry the first and last hash
   of their range. An identical line goes out once per key per minute, the
   next one carries `repeated=<n>`.
+
+### 7.3 A fork that does not heal: the branch choice (v0.1.3)
+
+- `ChainChange::BranchChosen` is sealed m-of-n at `tip_height + 1` on the
+  chosen branch (`docs/chain/chain_rescue_plan.md`). Its `tip_hash` must
+  equal the block's `prev`, so the signed bytes name one branch; the walk
+  checks `base_hash` and `chosen_root` against its own chain, never below
+  its anchor, and refuses a choice that drops no second branch.
+- A seat holding the tip adopts it and drops what lies above; a seat on
+  another branch stops (`status.chain_sync.abandoned`) and rejoins by link.
+- On a seat holding a choice, a block of another branch at or below it
+  never wins the tie-break (`fork_decision outcome=chosen`).
 
 ## 8. Threshold and recovery fall out of the chain
 

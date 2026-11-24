@@ -573,8 +573,12 @@ impl State {
             u64::MAX => super::sync::SILENT_AFTER_SECS,
             secs => secs,
         };
+        // §6: a seat the last branch choice left behind rejoins while alive
+        let left = self.seat_left_by_choice(member);
         let active = if member == self.member() {
             !self.delivery.evicted
+        } else if left {
+            false
         } else {
             let seen = self.restore_heard_at(member);
             seen != molt_core::MemberInfo::NEVER && self.presence_now().saturating_sub(seen) < window
@@ -583,7 +587,8 @@ impl State {
             return Some(SEAT_STILL_ACTIVE);
         }
         // the restored seat's own entry clears only once it is back
-        if self.chain_unsettled_besides(Some(member)) {
+        let unsettled = if left { self.unsettled_besides_left(member) } else { self.chain_unsettled_besides(Some(member)) };
+        if unsettled {
             return Some(CHAIN_DIVERGED);
         }
         None

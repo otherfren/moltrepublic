@@ -1972,6 +1972,84 @@ pub fn tools() -> Vec<ToolDef> {
             build: |_| Ok(Command::ReadChain),
         },
         ToolDef {
+            name: "branch_status",
+            command: "branch_status",
+            scope: Scope::Seat,
+            description: "The branch choice (rescue of a split that does not heal): the forks this node can PROVE (its own chain plus a verified other branch from the same block, held from the tie-break or a branch_import), per branch its blocks since the fork with kind, surface, op, signers and `risk` (\"irreversible\" = a vault grant or a wallet init; \"flagged\" = an effect outside the chain may remain), counts by kind and the seats that signed on more than one branch (`shared`); the open choice cards with their dropped list and the `digest` an approval names; this seat's recorded choices; `incarnation` (the height this device was restored at); `majority` (2m > n - only then is a choice offered); `abandoned` once the chain chose another branch.",
+            schema: || json!({ "type": "object", "properties": {} }),
+            build: |_| Ok(Command::BranchStatus),
+        },
+        ToolDef {
+            name: "branch_export",
+            command: "branch_export",
+            scope: Scope::Seat,
+            description: "Write this seat's evidence to a passphrase-sealed bundle file: its chain above the fork points it knows (above its anchor when it knows none), the other branches it holds, the open choice cards and their signatures. For seats that cannot read each other: move the file by any side channel, the other seat runs branch_import. The file carries republic content. Runs off the actor; the outcome lands in the session notice (`branch-exported:<path>` / `branch-export-failed:<why>`).",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "dest": { "type": "string", "description": "target file: absolute, or a bare name in the download directory" },
+                    "passphrase": { "type": "string", "description": "at least 10 characters" }
+                },
+                "required": ["dest", "passphrase"]
+            }),
+            build: |args| Ok(Command::BranchExport { dest: str_arg(args, "dest")?, passphrase: str_arg(args, "passphrase")? }),
+        },
+        ToolDef {
+            name: "branch_import",
+            command: "branch_import",
+            scope: Scope::Seat,
+            description: "Read a bundle another seat wrote with branch_export. Every block of another branch must carry its threshold against this republic's roster and link to this chain, or the whole bundle is refused; blocks that extend this chain apply like a catch-up; cards and signatures register; a sealed choice in it applies (or stops this seat). The outcome lands in the session notice (`branch-imported:<branches>:<cards>` / `branch-import-failed:<why>`).",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "the bundle file" },
+                    "passphrase": { "type": "string" }
+                },
+                "required": ["path", "passphrase"]
+            }),
+            build: |args| Ok(Command::BranchImport { path: str_arg(args, "path")?, passphrase: str_arg(args, "passphrase")? }),
+        },
+        ToolDef {
+            name: "choose_branch",
+            command: "choose_branch",
+            scope: Scope::Seat,
+            description: "Propose keeping one branch of a fork branch_status shows: `base_height` is the fork point, `tip_hash` the block that becomes the head (any block of one branch at or above the fork, the fork block itself included). Signs nothing. Answers the card id, every block the choice drops and the `digest` approve_branch needs. Refused where m is not a majority of n, without a second branch, below a cut, on a device restored above the fork point (unless `amnesia_ack`), or on a seat the chain already left behind.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "base_height": { "type": "integer" },
+                    "tip_hash": { "type": "string" },
+                    "amnesia_ack": { "type": "boolean", "description": "optional: act although this device was restored above the fork point" }
+                },
+                "required": ["base_height", "tip_hash"]
+            }),
+            build: |args| Ok(Command::ChooseBranch {
+                base_height: u64_arg(args, "base_height")?,
+                tip_hash: str_arg(args, "tip_hash")?,
+                amnesia_ack: opt_bool_arg(args, "amnesia_ack")?,
+            }),
+        },
+        ToolDef {
+            name: "approve_branch",
+            command: "approve_branch",
+            scope: Scope::Seat,
+            description: "Sign a branch choice card. `dropped_digest` must equal the digest this node computes over the dropped list (branch_status `cards[].digest`, choose_branch's reply): sign what you see. A seat signs ONE choice per fork point, recorded on disk before its signature leaves. At m signatures a seat holding the chosen tip seals the choice; the other branches' seats stop and rejoin with a recovery link. A wake agent never calls this.",
+            schema: || json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer" },
+                    "dropped_digest": { "type": "string" },
+                    "amnesia_ack": { "type": "boolean", "description": "optional: sign although this device was restored above the fork point" }
+                },
+                "required": ["id", "dropped_digest"]
+            }),
+            build: |args| Ok(Command::ApproveBranch {
+                id: ProposalId(u64_arg(args, "id")?),
+                dropped_digest: str_arg(args, "dropped_digest")?,
+                amnesia_ack: opt_bool_arg(args, "amnesia_ack")?,
+            }),
+        },
+        ToolDef {
             name: "wiki_list",
             command: "wiki_list",
             scope: Scope::Read,
@@ -3464,7 +3542,7 @@ pub(crate) mod tests {
         // hook; the value itself rides the settings surface as
         // `poke_wake_command` (ADR-0007), so this stays internal only
         // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 96] = [
+        const INTERNAL: [&str; 98] = [
             // not a door of its own: chat_send/approve/decline/withdraw
             // build it from their `operator`/`agent` arguments
             "as_operator",
@@ -3500,6 +3578,10 @@ pub(crate) mod tests {
             "net_restore_failed",
             "net_export_done",
             "net_export_failed",
+            // the off-actor branch bundle task's outcome (branch_export and
+            // branch_import are the tools)
+            "net_branch_exported",
+            "net_branch_loaded",
             // the off-actor WIKI export task reporting its real outcome
             // (wiki_export is the tool; an agent must not be able to forge
             // an export success, least of all one that claims a proof

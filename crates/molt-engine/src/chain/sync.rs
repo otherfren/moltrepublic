@@ -135,6 +135,9 @@ impl State {
     /// delayed old block cannot outrank a newer head report.
     pub(crate) fn receive_block_at(&mut self, from: &str, seq: Option<u64>, block: ChainBlock) {
         self.note_peer_claim(from, block.height, seq, PeerClaim::Holds);
+        if self.branch_intercepts(from, &block) {
+            return;
+        }
         let Some(head) = self.chain.head.clone() else {
             // a headless rejoiner (total device loss) bootstraps its chain from
             // the genesis a survivor serves, then drains whatever else arrived
@@ -388,6 +391,10 @@ impl State {
             return;
         };
         let now = self.presence_now();
+        // a fork that went loud keeps its other branch as evidence
+        if self.chain.heal_escalated {
+            self.harvest_branch_evidence();
+        }
         // candidates that never linked in a while are a branch nobody holds
         // any more; a catch-up mark at or below the head is stale
         if self.chain.fork_candidates.is_empty() {
@@ -721,9 +728,11 @@ impl State {
         };
         let (mine, theirs) = (block_hash(&rid, &ours_f), block_hash(&rid, &suffix[0]));
         let ids = (applied_id(&ours_f), applied_id(&suffix[0]));
-        if mine <= theirs {
+        // a branch choice above the fork outranks the hash (rescue plan §9)
+        let chosen = self.chain.blocks.iter().any(|b| b.height >= f && matches!(b.change, ChainChange::BranchChosen { .. }));
+        if mine <= theirs || chosen {
             // ours wins at the fork (R1): the peer re-bases, not this node
-            self.note_fork(from, f, "kept", &mine, &theirs, ids);
+            self.note_fork(from, f, if chosen { "chosen" } else { "kept" }, &mine, &theirs, ids);
             self.chain.fork_candidates.clear();
             // B3: hand the peer our branch instead of waiting for it to ask
             self.serve_branch_to(from, f);
@@ -1000,6 +1009,7 @@ impl State {
         let incoming = molt_storage::content_hash(&block_link_bytes(&rid, &block));
         let current = molt_storage::content_hash(&block_link_bytes(&rid, existing));
         let existing_id = applied_id(existing);
+        let existing_chosen = matches!(existing.change, ChainChange::BranchChosen { .. });
         let is_tip = self.chain.blocks.last().is_some_and(|b| b.height == block.height);
         // A2.1: a contender on a foreign `prev`, or one below the tip, is
         // not a race the tip rule can settle - the sender is on another
@@ -1048,7 +1058,7 @@ impl State {
             tracing::warn!(height = block.height, %hash, %from, rule = "threshold", "tie-break contender without a valid threshold - dropped");
             return;
         }
-        if is_tip && incoming < current {
+        if is_tip && incoming < current && !existing_chosen {
             let ids = (existing_id, applied_id(&block));
             self.note_fork(from, block.height, "tip_swapped", &current, &incoming, ids);
             // the incoming block wins the tip; swap it in and re-verify
@@ -1215,6 +1225,7 @@ impl State {
             blob_cap: u64::try_from(Self::served_blob_cap()).unwrap_or(u64::MAX),
             refused: self.chain.refusals.iter().cloned().collect(),
             heal_stuck: self.heal_stuck(),
+            abandoned: self.chain.branch.file.abandoned.clone(),
         }
     }
 

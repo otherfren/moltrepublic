@@ -6,8 +6,26 @@
 
 use super::*;
 
+pub(crate) use super::branch_run::ABANDONED;
+
 /// The most runs one choice may drop.
 pub(crate) const DROPPED_RUNS_MAX: usize = 16;
+
+/// §6: what a seat the chain left behind refuses until it rejoins.
+pub(crate) fn stopped_when_abandoned(cmd: &molt_core::Command) -> bool {
+    use molt_core::Command;
+    matches!(
+        cmd,
+        Command::Propose { .. }
+            | Command::Approve { .. }
+            | Command::Decline { .. }
+            | Command::Withdraw { .. }
+            | Command::ProposeCheckpoint
+            | Command::RecoverInviteStart { .. }
+            | Command::ChooseBranch { .. }
+            | Command::ApproveBranch { .. }
+    )
+}
 
 /// The block-local rules of a branch choice (§1): it sits right above its
 /// tip, the tip is at or above the base, and it drops a second branch
