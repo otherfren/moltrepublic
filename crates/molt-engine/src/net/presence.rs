@@ -440,6 +440,9 @@ impl State {
             if !self.delivery.behind.is_empty() {
                 parts.push(format!("behind: {}", self.delivery.behind.join(", ")));
             }
+            if let Some((owed, _)) = &self.delivery.resend_held {
+                parts.push(format!("resend budget spent, owed: {}", owed.join(", ")));
+            }
             // a stuck broadcast outbox names no peer — the channel is the
             // trouble, so its reason joins the channel verdict
             parts.extend(self.delivery.send_stuck.values().cloned());
@@ -447,12 +450,7 @@ impl State {
             // while LIVE frames arrive that no held key opens. B3: reported,
             // never self-healed; the operator rejoins with a link.
             let mark = self.group_net.as_ref().map_or(0, |g| g.lockout.mark);
-            let stuck = self
-                .delivery
-                .send_stuck
-                .values()
-                .any(|r| !r.starts_with(molt_net::group_runtime::BUDGET_SPENT));
-            if stuck && h.live_opaque > mark {
+            if !self.delivery.send_stuck.is_empty() && h.live_opaque > mark {
                 self.note_locked_out("key_behind");
                 let raised = self.group_net.as_mut().is_some_and(|g| !std::mem::replace(&mut g.lockout.active, true));
                 if raised {

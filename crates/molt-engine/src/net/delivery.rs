@@ -55,10 +55,14 @@ const SESSION_MAX: usize = 65_536;
 /// Re-publications of a listed seq that never landed before it is given up.
 const LISTED_TRIES: u8 = 3;
 
-/// Unanswered listing asks before a sender's open probe stops, once it
-/// answered one; a sender that never answered gets one (it has nothing
-/// above, or an older build answers none).
-const PROBE_TRIES: u8 = 3;
+/// The open probe (§13): one switch, independent of the `behind` signal.
+pub(crate) const OPEN_PROBE: bool = true;
+
+/// The probe's re-ask interval grows from [`GAP_ASK_EVERY_SECS`] to this.
+const PROBE_EVERY_MAX_SECS: u64 = 600;
+
+/// A stream counts as behind once its hold or gap is this old.
+const BEHIND_AFTER_SECS: u64 = 10;
 
 /// Repeats from one seat that make a hint.
 const DUP_EPISODE_MIN: u32 = 32;
@@ -139,7 +143,9 @@ pub(crate) struct SenderHold {
     /// its frames read before a restart may be gone with the hold, and the
     /// relay copies no longer open. Ask for the listing until it ends.
     probe: bool,
-    probe_asks: u8,
+    probe_asks: u32,
+    /// The last listing was a full page: more is owed than listed so far.
+    probe_more: bool,
 }
 
 impl SenderHold {
@@ -199,15 +205,31 @@ impl SenderHold {
         true
     }
 
-    /// Since when this stream is known to be behind: something held, or
-    /// owed and not here.
-    fn behind_since(&self) -> Option<u64> {
-        let missing = self.missing.values().map(|g| g.since).min();
-        let held = if self.held.is_empty() { None } else { self.since };
-        match (missing, held) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
+    /// Known to be behind: a listed own seq not here, or held content or
+    /// an owed gap older than [`BEHIND_AFTER_SECS`] (a declined seq is
+    /// parked, not owed).
+    fn behind(&self, window: &molt_core::AcceptedWindow, now: u64) -> bool {
+        let old = |since: u64| now.saturating_sub(since) >= BEHIND_AFTER_SECS;
+        let listed = self.probe_more || self.listing.as_ref().is_some_and(|l| l.own.iter().any(|s| !window.is_accepted(*s)));
+        let held = !self.held.is_empty() && self.since.is_some_and(old);
+        let owed = self.missing.iter().any(|(s, g)| !self.refused.contains(s) && old(g.since));
+        listed || held || owed
+    }
+
+    /// Whether the open probe asks now. Re-asks on a growing interval
+    /// until a listing answers; a sender not known to answer listings
+    /// gets one ask until it is.
+    fn probe_due(&self, now: u64, capable: bool) -> bool {
+        if !self.probe {
+            return false;
         }
+        let Some(at) = self.listing_asked_at else { return true };
+        if !capable {
+            return false;
+        }
+        let shift = self.probe_asks.saturating_sub(1).min(6);
+        let every = GAP_ASK_EVERY_SECS.saturating_mul(1 << shift).min(PROBE_EVERY_MAX_SECS);
+        now.saturating_sub(at) >= every
     }
 
     /// Chain `seq` (accepted, predecessor `prev`) onto the frontier.
@@ -897,15 +919,16 @@ impl State {
         } else {
             *self.delivery.replay_quiet_since.get_or_insert(now)
         };
-        let replaying = replaying
-            || now.saturating_sub(quiet_since) < GAP_ASK_AFTER_SECS
-            || self.drop_seam.holds_wants();
+        if self.drop_seam.holds_wants() {
+            return;
+        }
+        let replaying = replaying || now.saturating_sub(quiet_since) < GAP_ASK_AFTER_SECS;
         // the first replay read through: what it brought is not asked for
         let caught_up = self.group_net.as_ref().is_some_and(|g| {
             let h = g.health.borrow();
             h.subscribed && !h.catching_up
         });
-        if caught_up && !replaying {
+        if OPEN_PROBE && caught_up && !replaying {
             self.open_probes(&me);
         }
         let members: Vec<MemberId> = self.delivery.inbound.keys().cloned().collect();
@@ -921,7 +944,9 @@ impl State {
                 }
             }
             let window = self.delivery.accepted.get(&m).cloned().unwrap_or_default();
+            let capable = self.reported_build(&m);
             let Some(hold) = self.delivery.inbound.get_mut(&m) else { continue };
+            let capable = capable || hold.answers;
             // an older sender's round passed: below its top, what did not
             // come will not; the frontier may go as far as the held ones
             let mut jump = None;
@@ -964,7 +989,7 @@ impl State {
                 let listed = hold.listing.as_ref().is_some_and(|l| l.own.contains(&seq));
                 if !refused && !listed && gap.settle_at.is_some_and(|t| now >= t) {
                     settle.push((seq, "resend_passed"));
-                } else if now.saturating_sub(gap.since) >= GAP_FALLBACK_SECS {
+                } else if !listed && now.saturating_sub(gap.since) >= GAP_FALLBACK_SECS {
                     settle.push((seq, "fallback"));
                 } else if !refused
                     && now.saturating_sub(gap.since) >= GAP_ASK_AFTER_SECS
@@ -984,23 +1009,22 @@ impl State {
             }
             // anything known above the frontier: ask for the listing of it
             let above = !hold.ahead.is_empty() || !hold.held.is_empty() || !hold.missing.is_empty();
-            // an ask the sender left unanswered ends the probe at the next
-            if hold.probe && !above && hold.probe_asks >= if hold.answers { PROBE_TRIES } else { 1 } {
-                hold.probe = false;
-            }
-            let list_due = (above || hold.probe)
-                && hold.listing.is_none()
-                && hold.listing_asked_at.map_or(true, |t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
-                && hold.since.map_or(true, |s| now.saturating_sub(s) >= GAP_ASK_AFTER_SECS);
+            let probing = !above && hold.listing.is_none() && hold.probe_due(now, capable);
+            let list_due = probing
+                || (above
+                    && hold.listing.is_none()
+                    && hold.listing_asked_at.map_or(true, |t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
+                    && hold.since.map_or(true, |s| now.saturating_sub(s) >= GAP_ASK_AFTER_SECS));
             ask.truncate(molt_net::gap::GAP_MAX_SEQS);
             if let Some(group) = self.group_net.as_ref().filter(|_| !replaying) {
                 if list_due {
                     let want = molt_net::gap::GapWant::range(me.clone(), m.clone(), hold.frontier, hold.cap());
-                    if group.handle.publish_control(want.to_frame()) {
-                        hold.listing_asked_at = Some(now);
-                        if hold.probe && !above {
-                            hold.probe_asks = hold.probe_asks.saturating_add(1);
-                        }
+                    if !self.drop_seam.drops_listing_ask() && group.handle.publish_control(want.to_frame()) {
+                        tracing::debug!(member = %m, after = hold.frontier, probe = probing, "gap_list_ask");
+                    }
+                    hold.listing_asked_at = Some(now);
+                    if probing {
+                        hold.probe_asks = hold.probe_asks.saturating_add(1);
                     }
                 }
                 if !ask.is_empty() {
@@ -1096,9 +1120,16 @@ impl State {
         let Some(hold) = self.delivery.inbound.get_mut(from) else { return };
         hold.answers = true;
         hold.passed_at = None;
+        // too wide, or a stale page beside a newer one held: changes nothing
+        if through > after.saturating_add(molt_net::gap::GAP_RANGE_MAX)
+            || hold.listing.as_ref().is_some_and(|l| l.through >= through)
+        {
+            return;
+        }
         // a full page, or a range that reached its width: there may be more
         hold.probe = hold.probe
             && (own.len() >= molt_net::gap::GAP_LIST_MAX || through >= after.saturating_add(molt_net::gap::GAP_RANGE_MAX));
+        hold.probe_more = hold.probe;
         hold.probe_asks = 0;
         if after > hold.frontier || through <= hold.frontier {
             return;
@@ -1126,7 +1157,7 @@ impl State {
     }
 
     /// Arm the open probe once per session for every sender this seat holds
-    /// history with.
+    /// history with; a runtime rebuild keeps the holds, so it re-arms none.
     fn open_probes(&mut self, me: &MemberId) {
         let fresh: Vec<MemberId> = self
             .delivery
@@ -1147,15 +1178,32 @@ impl State {
     /// least the ask delay.
     pub(crate) fn behind_peers(&self) -> Vec<MemberId> {
         let now = self.presence_now();
+        let empty = molt_core::AcceptedWindow::default();
         let mut peers: Vec<MemberId> = self
             .delivery
             .inbound
             .iter()
-            .filter(|(_, h)| h.behind_since().is_some_and(|s| now.saturating_sub(s) >= GAP_ASK_AFTER_SECS))
+            .filter(|(m, h)| h.behind(self.delivery.accepted.get(*m).unwrap_or(&empty), now))
             .map(|(m, _)| m.clone())
             .collect();
         peers.sort();
         peers
+    }
+
+    /// The own outbox holds a tail these seats are owed: its hourly budget
+    /// is spent (empty = a round went out again).
+    pub(crate) fn cmd_net_resend_held(&mut self, owed: Vec<MemberId>, generation: Option<u64>) -> Result<Reply, MoltError> {
+        if !self.net_generation_current(generation) {
+            return Ok(Reply::Ack);
+        }
+        let now = self.presence_now();
+        self.delivery.resend_held = if owed.is_empty() {
+            None
+        } else {
+            Some((owed, self.delivery.resend_held.as_ref().map_or(now, |(_, since)| *since)))
+        };
+        self.recompute_net_health();
+        Ok(Reply::Ack)
     }
 
     /// A hold whose only content is a missing seq (a D7-refused first frame).
@@ -1164,6 +1212,11 @@ impl State {
         let now = self.presence_now();
         let hold = self.delivery.inbound.entry(member.to_string()).or_insert_with(|| SenderHold::new(0, Vec::new()));
         hold.note_missing(seq, now);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn listing_through_for_test(&self, member: &str) -> Option<u64> {
+        self.delivery.inbound.get(member).and_then(|h| h.listing.as_ref()).map(|l| l.through)
     }
 
     #[cfg(test)]
@@ -1409,5 +1462,96 @@ impl State {
         {
             tracing::debug!(member = %peer.member, error = %e, "mesh ping send failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    fn hold(probe: bool) -> SenderHold {
+        SenderHold { probe, ..SenderHold::new(10, Vec::new()) }
+    }
+
+    /// An unanswered ask is judged when the next one is due, never on the
+    /// tick after it; a sender known to answer is asked again on a
+    /// growing interval and never given up on by time.
+    #[test]
+    fn the_probe_re_asks_a_capable_sender_on_a_growing_interval() {
+        let mut h = hold(true);
+        assert!(h.probe_due(100, true), "the first ask goes at once");
+        h.listing_asked_at = Some(100);
+        h.probe_asks = 1;
+        assert!(!h.probe_due(101, true), "not on the next tick");
+        assert!(!h.probe_due(109, true));
+        assert!(h.probe_due(110, true), "due after the ask interval");
+        h.listing_asked_at = Some(110);
+        h.probe_asks = 2;
+        assert!(!h.probe_due(129, true) && h.probe_due(130, true), "the interval doubles");
+        h.probe_asks = 30;
+        assert!(h.probe_due(110 + PROBE_EVERY_MAX_SECS, true), "capped, never given up");
+        assert!(h.probe, "still armed");
+    }
+
+    /// A sender not known to answer listings (an older build) gets the one
+    /// ask; silence after it asks nothing more until it is known.
+    #[test]
+    fn an_old_sender_gets_one_ask_then_silence() {
+        let mut h = hold(true);
+        assert!(h.probe_due(100, false));
+        h.listing_asked_at = Some(100);
+        h.probe_asks = 1;
+        assert!(!h.probe_due(100 + PROBE_EVERY_MAX_SECS * 10, false), "no second ask");
+        assert!(h.probe_due(100 + GAP_ASK_EVERY_SECS, true), "a reported build resumes it");
+    }
+
+    /// The probe ends on a short page or on a "nothing above" answer, and
+    /// goes on after a full one.
+    #[test]
+    fn the_probe_pages_on_a_full_listing_and_ends_on_a_short_or_level_one() {
+        let mut st = crate::net::test_support::presence_fixture();
+        let bob = "bob".to_string();
+        let me = st.member();
+        st.delivery.inbound.insert(bob.clone(), hold(true));
+        let full: Vec<u64> = (11..).take(molt_net::gap::GAP_LIST_MAX).collect();
+        let through = *full.last().expect("full");
+        st.cmd_net_gap_listed(&bob, &me, 10, through, full);
+        assert!(st.delivery.inbound[&bob].probe && st.delivery.inbound[&bob].probe_more, "a full page: more to come");
+        st.delivery.inbound.insert(bob.clone(), hold(true));
+        st.cmd_net_gap_listed(&bob, &me, 10, 12, vec![11, 12]);
+        assert!(!st.delivery.inbound[&bob].probe, "a short page ends it");
+        st.delivery.inbound.insert(bob.clone(), hold(true));
+        st.cmd_net_gap_listed(&bob, &me, 10, 10, Vec::new());
+        assert!(!st.delivery.inbound[&bob].probe && !st.delivery.inbound[&bob].probe_more, "level: nothing above");
+    }
+
+    /// `behind` holds while a listed own seq is not here, whatever its age,
+    /// and clears only when the window has it.
+    #[test]
+    fn behind_holds_until_the_listed_tail_is_accepted() {
+        let mut h = hold(false);
+        let mut w = molt_core::AcceptedWindow::default();
+        assert!(w.accept(10));
+        h.listing = Some(Listing { through: 12, own: [11, 12].into_iter().collect(), tries: Default::default() });
+        assert!(h.behind(&w, 0), "listed and not here");
+        assert!(w.accept(11));
+        assert!(h.behind(&w, 0));
+        assert!(w.accept(12));
+        assert!(!h.behind(&w, 0), "level");
+        h.probe_more = true;
+        assert!(h.behind(&w, 0), "a full page promised more");
+    }
+
+    /// A gap shorter than the behind delay, or a declined (parked) seq, is
+    /// not "behind": ordinary reordering does not flap the health.
+    #[test]
+    fn a_short_gap_or_a_parked_seq_is_not_behind() {
+        let mut h = hold(false);
+        let w = molt_core::AcceptedWindow::default();
+        h.note_missing(11, 100);
+        assert!(!h.behind(&w, 100 + BEHIND_AFTER_SECS - 1));
+        assert!(h.behind(&w, 100 + BEHIND_AFTER_SECS));
+        h.refused.insert(11);
+        assert!(!h.behind(&w, 1_000), "parked, not owed");
     }
 }

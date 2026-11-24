@@ -37,6 +37,12 @@ impl SeatReports {
 }
 
 impl State {
+    /// Whether `member` reported a build (v0.1.2 and later; every such
+    /// build answers gap listings).
+    pub(crate) fn reported_build(&self, member: &MemberId) -> bool {
+        self.seat_reports.builds.get(member).is_some_and(|b| !b.is_empty())
+    }
+
     /// A declaration's build; called only when its capabilities are taken
     /// (the same order: the sender's clock).
     pub(crate) fn note_seat_build(&mut self, from: &MemberId, build: &str) {

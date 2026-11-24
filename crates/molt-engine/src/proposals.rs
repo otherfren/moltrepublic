@@ -4882,6 +4882,9 @@ impl State {
             evicted: self.delivery.evicted,
             open_proposals,
             open_proposals_max,
+            behind: self.delivery.behind.clone(),
+            resend_held: self.delivery.resend_held.as_ref().map(|(o, _)| o.clone()).unwrap_or_default(),
+            resend_held_since: self.delivery.resend_held.as_ref().map_or(0, |(_, s)| *s),
         }
     }
 }

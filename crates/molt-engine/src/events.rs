@@ -878,6 +878,7 @@ impl State {
         self.delivery.inbound.clear();
         self.delivery.probed.clear();
         self.delivery.behind.clear();
+        self.delivery.resend_held = None;
         self.delivery.dups.clear();
         self.delivery.seen_high.clear();
         // send-failure presence pins belong to the OLD workspace's mesh —

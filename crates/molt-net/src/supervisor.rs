@@ -693,6 +693,12 @@ pub trait EngineSink: Send + Sync + Clone + 'static {
         let _ = (member, frame);
         async {}
     }
+    /// The outbox's hourly resend budget is spent while `owed` are owed its
+    /// tail; empty = a round went out again. Default no-op (additive).
+    fn resend_held(&self, owed: &[MemberId]) -> impl std::future::Future<Output = ()> + Send {
+        let _ = owed;
+        async {}
+    }
     /// Sends to `member` keep failing; the outbox is backing off.
     fn send_failed(
         &self,

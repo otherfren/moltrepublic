@@ -4749,6 +4749,15 @@ pub enum Command {
         #[serde(default)]
         generation: Option<u64>,
     },
+    /// The own outbox's hourly resend budget is spent while these seats are
+    /// owed its tail; empty = a round went out again (engine-internal).
+    NetResendHeld {
+        /// The owed seats.
+        owed: Vec<MemberId>,
+        /// Mesh incarnation (see [`Command::NetDelivered`]).
+        #[serde(default)]
+        generation: Option<u64>,
+    },
     /// A member's inbound subscription is live (engine-internal transport
     /// health; the resubscribe watchdog confirms the leg, clearing its
     /// degraded state).
@@ -8891,6 +8900,16 @@ pub struct StatusView {
     /// Peers whose inbound stream is held behind a missing envelope.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inbound_held: Vec<InboundHeld>,
+    /// Seats this node knows it is behind on (a held stream, an owed gap,
+    /// a listed tail not here).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub behind: Vec<MemberId>,
+    /// Seats owed this node's tail while its hourly resend budget is spent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resend_held: Vec<MemberId>,
+    /// Since when (unix seconds; 0 = not held).
+    #[serde(default)]
+    pub resend_held_since: u64,
     /// One row per roster seat: where it stands, as far as this node knows.
     #[serde(default)]
     pub seats: Vec<SeatSync>,

@@ -85,8 +85,10 @@ pub(crate) struct DropSeam {
     pub(crate) delay_ms: std::sync::atomic::AtomicU64,
     /// A partition: every inbound envelope of these seats is lost.
     pub(crate) cut: Mutex<std::collections::HashSet<MemberId>>,
-    /// No gap want or listing ask leaves.
+    /// No gap want or listing ask leaves, and no gap is settled.
     pub(crate) hold_wants: std::sync::atomic::AtomicBool,
+    /// This many listing asks are lost on the way.
+    pub(crate) drop_list_asks: std::sync::atomic::AtomicU64,
 }
 
 impl DropSeam {
@@ -101,6 +103,11 @@ impl DropSeam {
 
     pub(crate) fn take_regress(&self) -> Option<(MemberId, u64)> {
         self.regress.lock().ok().and_then(|mut r| r.take())
+    }
+
+    pub(crate) fn drops_listing_ask(&self) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.drop_list_asks.fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok()
     }
 
     pub(crate) fn holds_wants(&self) -> bool {
@@ -407,6 +414,15 @@ impl EngineSink for CmdSink {
         let _ = self
             .execute(Command::NetEvicted {
                 by: by.clone(),
+                generation: self.generation,
+            })
+            .await;
+    }
+
+    async fn resend_held(&self, owed: &[MemberId]) {
+        let _ = self
+            .execute(Command::NetResendHeld {
+                owed: owed.to_vec(),
                 generation: self.generation,
             })
             .await;
