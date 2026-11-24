@@ -1030,7 +1030,8 @@ the process at once (`stop=forced`, exit 1, no durable close); SIGKILL
 always does.
 
 **Not drained.** A withdrawal (`withdraw()`, a relay left the dialable
-set) closes the channel: the pass publishes nothing. A plain drop or
+set) closes the channel: the pass publishes nothing. A relay the dial gate
+refuses (`Withdrawn`) counts as refused: the pass never waits for consent. A plain drop or
 `shutdown()` (eviction, the parked-re-key seam, a context reset) stops
 at once as before. A hard kill is unchanged - the at-least-once resend
 covers it. A current-thread runtime (unit tests) cannot block in place
@@ -1038,6 +1039,7 @@ and drops the handle instead.
 
 Pins: `group_runtime::tests::{a_clean_close_publishes_the_tail_the_outbox_never_read,
 a_plain_shutdown_takes_no_final_pass, a_withdrawn_close_publishes_nothing,
+a_gate_withdrawn_relay_ends_the_close_at_once,
 an_unanswering_relay_holds_the_close_for_one_attempt_only}`,
 `crates/molt-engine/tests/nostr_clean_stop.rs`,
 `crates/molt-app/tests/service.rs`

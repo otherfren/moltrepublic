@@ -3195,6 +3195,10 @@ mod tests {
     /// `who`'s runtime over `url` with `n` own events in the log, its
     /// outbox held asleep from the start (it never reads the log itself).
     fn held_seat(who: &str, url: String, n: u64) -> (GroupHandle, crate::MemStateStore) {
+        held_seat_on(crate::dial::Dialer::direct(), who, url, n)
+    }
+
+    fn held_seat_on(dialer: crate::dial::Dialer, who: &str, url: String, n: u64) -> (GroupHandle, crate::MemStateStore) {
         use crate::mls::MlsMember;
         use ed25519_dalek::SigningKey;
         __hold_outbox(who, true);
@@ -3210,7 +3214,7 @@ mod tests {
         let (_wake, wake_rx) = watch::channel(0u64);
         let (health_tx, _health) = watch::channel(GroupHealth::default());
         let handle = spawn_group(
-            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], [7u8; 32]),
+            crate::ritual_net::GroupChannel::new(dialer, vec![url], [7u8; 32]),
             MlsChannel::new(m),
             GroupNetConfig::fast(who.into(), vec!["petra".into()]),
             log,
@@ -3265,6 +3269,19 @@ mod tests {
         handle.withdraw();
         handle.close().await;
         assert_eq!(accepts.load(Ordering::SeqCst), 0, "a withdrawn close dialed the relay");
+        assert_eq!(cursor(&store).await, 0);
+    }
+
+    /// **A relay withdrawn at the gate counts as refused**: the close
+    /// waits for no consent, publishes nothing and keeps the cursor.
+    #[tokio::test]
+    async fn a_gate_withdrawn_relay_ends_the_close_at_once() {
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let keeper = crate::dial::RelayGateKeeper::default();
+        let dialer = crate::dial::Dialer::direct().with_gate(keeper.gate());
+        let (handle, store) = held_seat_on(dialer, "wiebke", relay.url().await.to_string(), 3);
+        let done = tokio::time::timeout(std::time::Duration::from_secs(30), handle.close()).await;
+        assert!(done.is_ok(), "the close waited for consent");
         assert_eq!(cursor(&store).await, 0);
     }
 
@@ -3329,7 +3346,7 @@ mod tests {
         let (_wake, wake_rx) = watch::channel(0u64);
         let (health_tx, _health) = watch::channel(GroupHealth::default());
         let handle = spawn_group(
-            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![relay.url().await.to_string()], [7u8; 32]),
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![relay.url().await.to_string()], [7u8; 32]),
             MlsChannel::new(cara),
             GroupNetConfig::fast("cara".into(), vec!["founder".into()]),
             log,
