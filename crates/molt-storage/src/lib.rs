@@ -4035,12 +4035,6 @@ impl StorageHandle {
         self.try_queue(msg, "live MLS merge")
     }
 
-    /// Merge only the MLS snapshot, no seal, and BLOCK until durable.
-    #[must_use]
-    pub fn merge_mls_blocking(&self, mls: Vec<u8>) -> bool {
-        self.merge_crypto_blocking(Some(mls), None, None, false)
-    }
-
     fn merge_crypto_blocking(
         &self,
         mls: Option<Vec<u8>>,

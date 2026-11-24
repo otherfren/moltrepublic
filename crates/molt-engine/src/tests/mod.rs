@@ -16,6 +16,7 @@ mod join_tests;
 mod logo_tests;
 mod proposal_store_tests;
 mod recovery_tests;
+mod relay_gate_tests;
 mod session_tests;
 mod thread_tests;
 mod upload_refs_tests;

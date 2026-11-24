@@ -71,11 +71,33 @@ async fn pause_retry(
     wait: Duration,
     consent: impl std::future::Future<Output = bool>,
 ) -> bool {
-    if matches!(e, molt_net::NetError::Withdrawn) {
+    pause_until(matches!(e, molt_net::NetError::Withdrawn), wait, consent).await
+}
+
+/// [`pause_retry`] for a loop that already knows whether it was withdrawn.
+async fn pause_until(
+    withdrawn: bool,
+    wait: Duration,
+    consent: impl std::future::Future<Output = bool>,
+) -> bool {
+    if withdrawn {
         consent.await
     } else {
         tokio::time::sleep(wait).await;
         true
+    }
+}
+
+/// One log line per withdrawal: `true` for the first round of one, and for
+/// every round that is not withdrawn.
+#[derive(Default)]
+struct OncePerWithdrawal(bool);
+
+impl OncePerWithdrawal {
+    fn report(&mut self, withdrawn: bool) -> bool {
+        let first = !(withdrawn && self.0);
+        self.0 = withdrawn;
+        first
     }
 }
 
@@ -141,6 +163,7 @@ pub(crate) fn spawn_founder_inbox(
         // trying, loudly; no link is published before it is.
         let mut wait = PUBLISH_RETRY_INITIAL;
         let mut inbox = loop {
+            let mut withdrawn = false;
             let why = match net.inbox().await {
                 Ok(mut inbox) => {
                     let st = inbox.read_state(LIVE_WAIT).await;
@@ -156,16 +179,18 @@ pub(crate) fn spawn_founder_inbox(
                     }
                     "not readable on any relay".to_string()
                 }
-                Err(e) => e.to_string(),
+                Err(e) => {
+                    withdrawn = matches!(e, molt_net::NetError::Withdrawn);
+                    e.to_string()
+                }
             };
             let note = Command::NetRitualNote {
                 note: format!("⚠ the founding inbox is not up - {why} · retrying"),
                 generation: Some(generation),
             };
-            if !send_cmd(&tx, note).await {
+            if !send_cmd(&tx, note).await || !pause_until(withdrawn, wait, net.until_dialable()).await {
                 return;
             }
-            tokio::time::sleep(wait).await;
             wait = (wait * 2).min(PUBLISH_RETRY_CAP);
         };
         for s in &seats {
@@ -266,6 +291,7 @@ async fn readable_inbox(
 ) -> Option<molt_net::ritual_net::RitualInbox> {
     let mut wait = PUBLISH_RETRY_INITIAL;
     loop {
+        let mut withdrawn = false;
         let (why, short) = match net.inbox().await {
             Ok(mut inbox) => {
                 let st = inbox.read_state(LIVE_WAIT).await;
@@ -277,7 +303,10 @@ async fn readable_inbox(
                 }
                 ("no relay answered".to_string(), "no relay answers")
             }
-            Err(e) => (e.to_string(), "no relay reachable"),
+            Err(e) => {
+                withdrawn = matches!(e, molt_net::NetError::Withdrawn);
+                (e.to_string(), "no relay reachable")
+            }
         };
         if let Some(cmd) = waiting(short) {
             if !send_cmd(tx, cmd).await {
@@ -285,7 +314,9 @@ async fn readable_inbox(
             }
         }
         tracing::warn!(inbox = what, error = %why, retry_in_s = wait.as_secs(), "inbox_down");
-        tokio::time::sleep(wait).await;
+        if !pause_until(withdrawn, wait, net.until_dialable()).await {
+            return None;
+        }
         tx.upgrade()?;
         wait = (wait * 2).min(PUBLISH_RETRY_CAP);
     }
@@ -468,9 +499,7 @@ pub(crate) fn spawn_recover_frames(
 ///   split, with nothing in the product to heal it.
 ///
 /// One landed relay is enough to be durable: relays store the frame, so a
-/// survivor that was offline picks the commit up on its catch-up. The
-/// first OK is recorded in `store` (delivery guarantee §11).
-#[allow(clippy::too_many_arguments)] // one re-key's wiring, not a bag
+/// survivor that was offline picks the commit up on its catch-up.
 pub(crate) fn spawn_rekey_delivery(
     channel: GroupChannel,
     net: RitualNet,
@@ -479,9 +508,6 @@ pub(crate) fn spawn_rekey_delivery(
     payload: molt_net::welcome::WelcomePayload,
     member: String,
     tx: mpsc::WeakSender<Envelope>,
-    store: Option<crate::net::FileStateStore>,
-    me: String,
-    seq: u64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut wait = PUBLISH_RETRY_INITIAL;
@@ -491,9 +517,6 @@ pub(crate) fn spawn_rekey_delivery(
             match channel.publish_frame_at(&rekey.prev_exporter, &rekey.commit, rekey.stamp).await {
                 Ok((stamp, report)) => {
                     tracing::info!(%member, stamp, relays = report.accepted.len(), "rekey_commit=published");
-                    if let (Some(store), false) = (&store, report.accepted.is_empty()) {
-                        molt_net::group_runtime::record_commit_ok(store, &me, seq, &rekey.commit).await;
-                    }
                     break;
                 }
                 Err(e) => {
@@ -652,16 +675,20 @@ pub(crate) fn spawn_publish_frame(
 
         let mut wait = retry.backoff;
         let mut attempt = 0u32;
+        let mut once = OncePerWithdrawal::default();
         let published = loop {
             attempt = attempt.saturating_add(1);
             match chan.publish_frame(&exporter, &ct).await {
                 Ok((_stamp, report)) => break Ok(report),
                 Err(e) => {
-                    tracing::warn!(what, attempt, error = %e, "ritual 445 frame did not publish");
+                    let say = once.report(matches!(e, molt_net::NetError::Withdrawn));
+                    if say {
+                        tracing::warn!(what, attempt, error = %e, "ritual 445 frame did not publish");
+                    }
                     if attempt >= retry.attempts {
                         break Err(e.to_string());
                     }
-                    if attempt >= 3 {
+                    if attempt >= 3 && say {
                         let note = Command::NetRitualNote {
                             note: format!("⚠ {what} did not publish - {e} · retrying"),
                             generation,
@@ -701,7 +728,9 @@ pub(crate) fn spawn_publish_frame(
             if stopped || tx.upgrade().is_none() {
                 return;
             }
-            if let Err(e) = chan.publish_frame(&exporter, &ct).await {
+            let res = chan.publish_frame(&exporter, &ct).await;
+            let say = once.report(matches!(res, Err(molt_net::NetError::Withdrawn)));
+            if let (true, Err(e)) = (say, res) {
                 tracing::warn!(what, error = %e, "ritual 445 frame did not re-publish");
             }
         }
@@ -836,12 +865,33 @@ const MEMBER_LOOKBACK_SECS: u64 = 30 * 86_400;
 async fn readable_group_sub(
     chan: &GroupChannel,
     since: u64,
-) -> Result<molt_net::ritual_net::GroupSub, String> {
-    let mut sub = chan.subscribe_from(since).await.map_err(|e| e.to_string())?;
+) -> Result<molt_net::ritual_net::GroupSub, SubFail> {
+    let mut sub = chan.subscribe_from(since).await.map_err(SubFail::Net)?;
     if sub.read_state(REPLAY_WAIT).await.any() {
         Ok(sub)
     } else {
-        Err("not readable on any relay".to_string())
+        Err(SubFail::Unread)
+    }
+}
+
+/// Why a ritual group subscription is not up.
+enum SubFail {
+    Net(molt_net::NetError),
+    Unread,
+}
+
+impl SubFail {
+    fn withdrawn(&self) -> bool {
+        matches!(self, SubFail::Net(molt_net::NetError::Withdrawn))
+    }
+}
+
+impl std::fmt::Display for SubFail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubFail::Net(e) => e.fmt(f),
+            SubFail::Unread => f.write_str("not readable on any relay"),
+        }
     }
 }
 
@@ -867,10 +917,11 @@ pub(crate) fn spawn_founder_group_recv(
                         note: format!("⚠ cannot hear the group channel - {why} · still retrying"),
                         generation: Some(generation),
                     };
-                    if !send_cmd(&tx, note).await {
+                    if !send_cmd(&tx, note).await
+                        || !pause_until(why.withdrawn(), wait, chan.until_dialable()).await
+                    {
                         return;
                     }
-                    tokio::time::sleep(wait).await;
                     wait = (wait * 2).min(PUBLISH_RETRY_CAP);
                 }
             }
@@ -1242,6 +1293,7 @@ pub(crate) async fn await_admission(
     let mut advisories: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut reask_wait = REASK_INITIAL;
     let mut reask_at = tokio::time::Instant::now() + reask_wait;
+    let (mut quiet, withdrawn) = (OncePerWithdrawal::default(), molt_net::NetError::Withdrawn.to_string());
     loop {
         let now = tokio::time::Instant::now();
         // nothing heard yet: the count of pieces is unknown, so ask again
@@ -1251,7 +1303,11 @@ pub(crate) async fn await_admission(
                 Ok(()) => {
                     let _ = note("asked the coordinator again".to_string()).await;
                 }
-                Err(e) => tracing::warn!(error = %e, "recover_reask=unsent"),
+                Err(e) => {
+                    if quiet.report(e == withdrawn) {
+                        tracing::warn!(error = %e, "recover_reask=unsent");
+                    }
+                }
             }
             reask_wait = (reask_wait * 2).min(REASK_CAP);
             reask_at = now + reask_wait;
@@ -1279,7 +1335,11 @@ pub(crate) async fn await_admission(
                     Ok(()) => {
                         let _ = note(format!("asked again for anchor parts {}", list.join(" "))).await;
                     }
-                    Err(e) => tracing::warn!(error = %e, "recover_want=unsent"),
+                    Err(e) => {
+                        if quiet.report(e == withdrawn) {
+                            tracing::warn!(error = %e, "recover_want=unsent");
+                        }
+                    }
                 }
             }
             want_wait = (want_wait * 2).min(WANT_CAP);
@@ -1293,7 +1353,9 @@ pub(crate) async fn await_admission(
                     ready_repeat = (ready_repeat * 2).min(READY_REPEAT_CAP);
                 }
                 Err(e) => {
-                    let _ = note(format!("⚠ the ready answer did not publish - {e} · retrying")).await;
+                    if quiet.report(e == withdrawn) {
+                        let _ = note(format!("⚠ the ready answer did not publish - {e} · retrying")).await;
+                    }
                     ready_at = Some(now + ready_fail);
                     ready_fail = (ready_fail * 2).min(PUBLISH_RETRY_CAP);
                 }
@@ -1415,7 +1477,9 @@ async fn recovery_rejoin(
             Ok(inbox) => break inbox,
             Err(e) => {
                 let _ = note(format!("⚠ the recovery inbox is not up - {e} · retrying")).await;
-                tokio::time::sleep(wait).await;
+                if !pause_retry(&e, wait, net.until_dialable()).await {
+                    return Err("relay withdrawn".to_string());
+                }
                 wait = (wait * 2).min(PUBLISH_RETRY_CAP);
             }
         }
@@ -1825,7 +1889,9 @@ impl NostrLeg {
                         "⚠ cannot hear the group channel - {why} · still retrying"
                     ))
                     .await;
-                    tokio::time::sleep(wait).await;
+                    if !pause_until(why.withdrawn(), wait, chan.until_dialable()).await {
+                        return Err("relay withdrawn".to_string());
+                    }
                     wait = (wait * 2).min(PUBLISH_RETRY_CAP);
                 }
             }
@@ -2167,6 +2233,15 @@ async fn member_join(
 
 #[cfg(test)]
 mod tests {
+    /// A loop that keeps meeting a withdrawal reports it once; any other
+    /// failure, and the next withdrawal after it, report again.
+    #[test]
+    fn a_withdrawal_is_reported_once_per_withdrawal() {
+        let mut once = super::OncePerWithdrawal::default();
+        let rounds: Vec<bool> = [true, true, true, false, false, true, true].iter().map(|w| once.report(*w)).collect();
+        assert_eq!(rounds, [true, false, false, true, true, true, false]);
+    }
+
     /// A retry that met a withdrawn relay set waits for consent, not for
     /// its timer, and stops for good once the engine (the keeper) is gone.
     #[tokio::test(start_paused = true)]

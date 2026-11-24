@@ -2776,11 +2776,6 @@ pub struct GroupCursor {
     /// resets with the window).
     #[serde(default)]
     pub heal_rounds: u32,
-    /// Log seq and SHA-256 of the newest own `MlsCommit` a relay accepted
-    /// (a resend of an older one never replaces it): an own re-key not
-    /// named here is shelved at the open (delivery guarantee §11).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit_ok: Option<(u64, [u8; 32])>,
 }
 
 /// One event in a workspace's append-only history: the envelope every log
