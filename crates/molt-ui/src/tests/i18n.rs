@@ -441,6 +441,16 @@ fn an_older_device_is_named_in_both_languages() {
 }
 
 #[test]
+fn the_behind_and_resend_health_parts_read_german() {
+    let r = "behind: ana, bo; resend budget spent, owed: cy";
+    assert_eq!(crate::i18n::localize_net_reason(0, r), r);
+    assert_eq!(
+        crate::i18n::localize_net_reason(1, r),
+        "im Rückstand bei: ana, bo; Nachsende-Kontingent verbraucht, offen für: cy"
+    );
+}
+
+#[test]
 fn an_interrupted_restore_is_told_in_both_languages() {
     assert_eq!(crate::labels::recover_interrupted_copy(0, "bo"), "Restore of bo interrupted - create a new link");
     assert_eq!(crate::labels::recover_interrupted_copy(1, "bo"), "Wiederherstellung von bo unterbrochen - neuen Link erstellen");

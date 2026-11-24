@@ -1212,6 +1212,49 @@ fn an_unfinished_restore_is_marked_once_it_lasts() {
     assert_eq!(de[0].note, "Wiederherstellung unvollständig - neuen Link erstellen");
 }
 
+/// A seat this node is behind on says so, unless its history is already
+/// being fetched.
+#[test]
+fn a_seat_this_node_is_behind_on_is_marked() {
+    use crate::surfaces::{mark_behind, seat_rows};
+    let seats: Vec<molt_core::SeatSync> = ["ana", "bo", "cy"]
+        .iter()
+        .map(|m| molt_core::SeatSync { member: (*m).into(), ..molt_core::SeatSync::default() })
+        .collect();
+    let mut rows = seat_rows(&seats, 0, "ana", 0, 0, &HashMap::new());
+    rows[2].fetching = true;
+    mark_behind(&mut rows, 0, &["bo".to_string(), "cy".to_string()]);
+    assert_eq!(rows[0].note, "");
+    assert_eq!(rows[1].note, "behind - fetch its history again if it stays");
+    assert_eq!(rows[2].note, "", "fetching already says it");
+    let mut de = seat_rows(&seats[1..2], 0, "ana", 1, 0, &HashMap::new());
+    mark_behind(&mut de, 1, &["bo".to_string()]);
+    assert_eq!(de[0].note, "liegt zurück - Verlauf neu holen, falls es bleibt");
+}
+
+/// A files vote this seat can never approve: approve greys with the
+/// mark, the reason rides as the tooltip, the list knows it.
+#[test]
+fn a_moot_files_vote_is_marked_with_its_reason() {
+    let view = |moot: Option<&str>| molt_core::ProposalView {
+        surface: Surface::Files,
+        payload: serde_json::json!({ "op": "persist", "name": "a.pdf", "id": "00" }),
+        moot: moot.map(str::to_string),
+        ..super::channels::view_of(4, "a", ProposalState::Proposed)
+    };
+    let row = proposal_row(0, &view(Some("expired")));
+    assert!(row.moot);
+    assert_eq!(row.blocked, "moot here - decline or withdraw");
+    assert_eq!(row.blocked_tip, "the share expired here");
+    let de = proposal_row(1, &view(Some("persistent")));
+    assert_eq!((de.blocked.as_str(), de.blocked_tip.as_str()), ("hier gegenstandslos - ablehnen oder zurückziehen", "hier schon dauerhaft"));
+    for (code, en) in [("gone", "the shared file is gone here"), ("deleted", "the share was deleted by a vote")] {
+        assert_eq!(proposal_row(0, &view(Some(code))).blocked_tip, en);
+    }
+    let fine = proposal_row(0, &view(None));
+    assert!(!fine.moot && fine.blocked.is_empty());
+}
+
 /// "Who decides" names the republic's own rule.
 #[test]
 fn the_switch_names_the_republic_s_rule() {

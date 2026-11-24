@@ -1571,11 +1571,12 @@ export component DecisionTable inherits Rectangle {
                     // content lives behind the discussion jump. A
                     // superseded patch says so here (the base moved).
                     text: r.withdrawn ? "↩ \{Strings.pc-withdrawn}"
+                        : r.moot ? r.blocked
                         : r.notes-bad ? r.notes
                         : (r.superseded ? Strings.pc-superseded
                         : (r.patch-op || r.charter-op ? "" : (r.proposed != "" ? r.proposed : r.current)));
                     horizontal-stretch: 1;
-                    color: r.notes-bad ? Theme.bad : r.superseded || r.withdrawn ? Theme.moved : Theme.dim;
+                    color: r.notes-bad ? Theme.bad : r.moot ? Theme.warn : r.superseded || r.withdrawn ? Theme.moved : Theme.dim;
                     font-size: Theme.fs-body;
                     vertical-alignment: center;
                     overflow: elide;
@@ -2167,9 +2168,21 @@ export component ProposalCard inherits Rectangle {
             }
             if !root.read-only && root.p.blocked != "": Text {
                 text: root.p.blocked;
-                color: Theme.faint;
+                color: root.p.moot ? Theme.warn : Theme.faint;
                 font-size: Theme.fs-cap;
                 vertical-alignment: center;
+                if root.p.blocked-tip != "": TouchArea {
+                    property <int> tip-gen;
+                    changed has-hover => {
+                        if (self.has-hover) {
+                            self.tip-gen = HintTip.show(root.p.blocked-tip,
+                                parent.absolute-position.x,
+                                parent.absolute-position.y + parent.height + 4px);
+                        } else {
+                            HintTip.hide(self.tip-gen);
+                        }
+                    }
+                }
             }
             if !root.read-only: AppButton {
                 emoji: "👎";

@@ -309,6 +309,12 @@ pub(crate) fn localize_net_reason(lang: i32, reason: &str) -> String {
         if part == "catching up" {
             return "holt Verlauf nach".to_string();
         }
+        if let Some(seats) = part.strip_prefix("behind: ") {
+            return format!("im Rückstand bei: {seats}");
+        }
+        if let Some(seats) = part.strip_prefix("resend budget spent, owed: ") {
+            return format!("Nachsende-Kontingent verbraucht, offen für: {seats}");
+        }
         if let Some(n) = part.strip_suffix(" new messages unreadable") {
             return format!("{n} neue Nachrichten nicht lesbar");
         }
@@ -1139,6 +1145,12 @@ lexicon! {
     os_give_up_ask_pre: "Stop waiting for ", "Nicht länger auf den Verlauf von ";
     os_give_up_ask_post: "'s history? Messages not fetched yet stay missing.", " warten? Noch nicht geholte Nachrichten bleiben verloren.";
     os_restore_unfinished: "restore unfinished - create a new link", "Wiederherstellung unvollständig - neuen Link erstellen";
+    os_behind: "behind - fetch its history again if it stays", "liegt zurück - Verlauf neu holen, falls es bleibt";
+    pc_moot: "moot here - decline or withdraw", "hier gegenstandslos - ablehnen oder zurückziehen";
+    pc_moot_gone: "the shared file is gone here", "die geteilte Datei ist hier weg";
+    pc_moot_expired: "the share expired here", "die Freigabe ist hier abgelaufen";
+    pc_moot_deleted: "the share was deleted by a vote", "die Freigabe wurde per Abstimmung gelöscht";
+    pc_moot_persistent: "already persistent here", "hier schon dauerhaft";
     os_dropped_tip: "Likely a restore this node missed", "Vermutlich eine verpasste Wiederherstellung";
     oa_col_surface: "Surface", "Bereich";
     oa_pending: "Pending", "Offen";
