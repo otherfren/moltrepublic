@@ -115,7 +115,7 @@ impl DaemonTransport {
             }
         }
         let dialer = match kind {
-            RelayKind::Local => Dialer::Direct,
+            RelayKind::Local => Dialer::direct(),
             RelayKind::Onion | RelayKind::Clearnet => base.isolated("wallet-daemon"),
         };
         let parsed = url::Url::parse(&canon).map_err(|_| DaemonError::BadUrl)?;
@@ -589,7 +589,7 @@ mod tests {
     use super::*;
 
     fn local(url: &str, login: &str) -> DaemonTransport {
-        DaemonTransport::new(url, login, true, true, &Dialer::Direct).expect("allowed")
+        DaemonTransport::new(url, login, true, true, &Dialer::direct()).expect("allowed")
     }
 
     #[tokio::test]
@@ -649,7 +649,7 @@ mod tests {
             (true, false, DaemonError::NonOnionOff),
             (false, false, DaemonError::Unconfirmed),
         ] {
-            let got = DaemonTransport::new(&d.url, "", confirmed, clearnet, &Dialer::Direct).map(|_| ());
+            let got = DaemonTransport::new(&d.url, "", confirmed, clearnet, &Dialer::direct()).map(|_| ());
             assert_eq!(got, Err(want));
         }
         assert_eq!(d.hits(), 0);
@@ -660,15 +660,15 @@ mod tests {
             (true, false, Err(DaemonError::NonOnionOff)),
             (true, true, Ok(())),
         ] {
-            assert_eq!(DaemonTransport::new(plain, "", confirmed, clearnet, &Dialer::Direct).map(|_| ()), want);
+            assert_eq!(DaemonTransport::new(plain, "", confirmed, clearnet, &Dialer::direct()).map(|_| ()), want);
         }
         assert_eq!(
-            DaemonTransport::new("https://u:p@node.example.org", "", true, true, &Dialer::Direct).map(|_| ()),
+            DaemonTransport::new("https://u:p@node.example.org", "", true, true, &Dialer::direct()).map(|_| ()),
             Err(DaemonError::BadUrl)
         );
-        assert_eq!(DaemonTransport::new("", "", true, true, &Dialer::Direct).map(|_| ()), Err(DaemonError::None));
+        assert_eq!(DaemonTransport::new("", "", true, true, &Dialer::direct()).map(|_| ()), Err(DaemonError::None));
         let onion = format!("http://{}.onion:18081", "a".repeat(56));
-        let t = DaemonTransport::new(&onion, "", false, false, &Dialer::Direct).expect("an onion needs no consent");
+        let t = DaemonTransport::new(&onion, "", false, false, &Dialer::direct()).expect("an onion needs no consent");
         let got = daemon_height(t, "mainnet").await;
         assert!(matches!(&got, Err(DaemonError::Rpc(e)) if e.contains("Tor is off")), "{got:?}");
     }

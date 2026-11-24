@@ -10,7 +10,7 @@
 //! no privileges, yet still proves both halves:
 //!
 //! 1. **Routing is fail-closed.** [`Dialer::resolve`] under `network = tor`
-//!    never yields [`Dialer::Direct`] for *any* mode (incl. `embedded` without
+//!    never yields [`Route::Direct`] for *any* mode (incl. `embedded` without
 //!    the feature → `TorMisconfigured`, and `nym` → error). Exactly one
 //!    clearnet path exists — `network = none` — and only that.
 //! 2. **Egress targets the proxy, never the server.** A Tor-configured dialer,
@@ -30,7 +30,7 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 
-use molt_net::dial::Dialer;
+use molt_net::dial::{Dialer, Route};
 use molt_net::NetError;
 
 /// Bind a loopback `TcpListener` that counts and immediately closes every
@@ -59,8 +59,8 @@ async fn blackhole_listener() -> (u16, Arc<AtomicUsize>) {
 fn resolve_under_network_tor_never_yields_direct() {
     // the one clearnet path.
     assert!(matches!(
-        Dialer::resolve("none", "local", 9050).expect("none is clearnet"),
-        Dialer::Direct
+        Dialer::resolve("none", "local", 9050).expect("none is clearnet").route,
+        Route::Direct
     ));
 
     // network=tor, EVERY mode: either a fail-closed error, or a non-Direct
@@ -68,7 +68,7 @@ fn resolve_under_network_tor_never_yields_direct() {
     for mode in ["local", "whonix", "embedded", "", "nonsense", "nym"] {
         match Dialer::resolve("tor", mode, 9050) {
             Ok(dialer) => assert!(
-                !matches!(dialer, Dialer::Direct),
+                !matches!(dialer.route, Route::Direct),
                 "network=tor mode={mode} resolved to Direct — a clearnet leak"
             ),
             Err(NetError::TorMisconfigured(_)) => {}
@@ -104,7 +104,7 @@ async fn tor_dialer_targets_the_socks_proxy_never_the_server() {
 
     // resolved exactly as the app resolves it: tor + local → SOCKS 127.0.0.1:port
     let dialer = Dialer::resolve("tor", "local", proxy_port).expect("tor+local dialer");
-    assert!(!matches!(dialer, Dialer::Direct), "tor must not be Direct");
+    assert!(!matches!(dialer.route, Route::Direct), "tor must not be Direct");
 
     // the "server" host is a bound loopback port: a direct-dial LEAK would land
     // here. Under SOCKS5h the host is only sent proxy-side, so it must not.

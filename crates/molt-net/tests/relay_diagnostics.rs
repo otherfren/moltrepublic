@@ -91,7 +91,7 @@ async fn an_unreachable_relay_logs_the_reason_not_silence() {
     let buf = capture_logs();
     let url = format!("ws://127.0.0.1:{}", dead_port());
 
-    let rt = RelayRuntime::new(Dialer::Direct, vec![url.clone()])
+    let rt = RelayRuntime::new(Dialer::direct(), vec![url.clone()])
         .with_backoff(Duration::from_millis(20), Duration::from_millis(40));
     let sub = rt
         .subscribe(nostr::Filter::new().kind(nostr::Kind::Custom(445)))
@@ -125,7 +125,7 @@ async fn an_unreachable_relay_logs_the_reason_not_silence() {
 #[test]
 fn an_empty_pool_says_it_will_contact_nothing() {
     let buf = capture_logs();
-    let _rt = RelayRuntime::new(Dialer::Direct, Vec::new());
+    let _rt = RelayRuntime::new(Dialer::direct(), Vec::new());
     let log = logged(&buf);
     assert!(
         log.contains("no dialable relay"),
@@ -137,7 +137,7 @@ fn an_empty_pool_says_it_will_contact_nothing() {
 /// went through Tor at all" — the operator's actual question.
 #[test]
 fn the_route_names_the_proxy_it_would_use() {
-    assert_eq!(Dialer::Direct.route(), "direct");
+    assert_eq!(Dialer::direct().route(), "direct");
     let socks = Dialer::resolve("tor", "local", 9050).expect("socks dialer");
     assert_eq!(socks.route(), "socks5://127.0.0.1:9050");
     let whonix = Dialer::resolve("tor", "whonix", 0).expect("whonix dialer");
