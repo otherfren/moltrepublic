@@ -466,6 +466,13 @@ fn main() -> anyhow::Result<()> {
         }
     };
 
+    // the close drains the outbox through relays that may not answer: a
+    // second stop signal ends it, as SIGKILL always does
+    rt.spawn(async {
+        shutdown_signal().await;
+        tracing::warn!(stop = "forced", "second stop signal - exiting without the durable close");
+        std::process::exit(1);
+    });
     // A founding or join in flight dies with the process: tell the other
     // side instead of leaving it waiting.
     rt.block_on(async {

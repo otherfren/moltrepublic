@@ -760,9 +760,11 @@ impl State {
         // next publish reuses sender generations — replay-rejected and
         // silently lost at every peer.
         let mls = match self.group_net.take() {
-            // signals stop and aborts the inbox; the outbox finishes its
-            // in-flight publish and exits on its own
-            Some(group) => Some(group.mls.clone()),
+            Some(group) => {
+                let mls = group.mls.clone();
+                close_group_runtime(group.handle);
+                Some(mls)
+            }
             None => self.group_mls_parked.take(),
         };
         if let Some(mls) = mls.filter(|_| ratchet_ok) {
@@ -785,6 +787,24 @@ impl State {
         }
     }
 
+}
+
+/// A clean close of the group runtime: the outbox's final pass publishes
+/// what was recorded before the close (delivery guarantee §12), and the
+/// ratchet snapshot taken after it covers every frame it sealed. Blocks the
+/// actor - nothing else is accepted meanwhile. A current-thread runtime
+/// (tests) cannot block in place: there the outbox only drains its
+/// in-flight publish.
+fn close_group_runtime(handle: molt_net::group_runtime::GroupHandle) {
+    let rt = tokio::runtime::Handle::current();
+    if rt.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread {
+        tokio::task::block_in_place(|| rt.block_on(handle.close()));
+    } else {
+        drop(handle);
+    }
+}
+
+impl State {
     /// Build the **real** T2 runtime for the open workspace from its persisted
     /// `transport.state`: restore the MLS group, rebuild the full-mesh
     /// [`PeerLink`]s, and spawn a supervisor whose outbox is the encrypted
