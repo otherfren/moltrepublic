@@ -218,6 +218,46 @@ fn evidence_export_and_import_hand_their_commands() {
     assert!(crate::actions::org::branch_evidence_command("choose", "/tmp/a", "p").is_none());
 }
 
+/// A moot files vote: the mark on the card with its reason as the tooltip,
+/// approve greyed.
+#[test]
+fn a_moot_vote_card_says_so_and_names_why() {
+    i_slint_backend_testing::init_no_event_loop();
+    let ui = AppWindow::new().expect("headless window");
+    ui.window().set_size(slint::PhysicalSize::new(1400, 900));
+    ui.set_screen(AppScreen::Main);
+    ui.set_selected_surface("organization".into());
+    ui.set_selected_view("pending".into());
+    ui.set_surfaces(ModelRc::new(VecModel::from(vec![SurfaceTab {
+        key: "organization".into(),
+        gated: true,
+        pending_count: 1,
+        pending: ModelRc::new(VecModel::from(vec![ProposalRow {
+            id: 4,
+            text: "Persist: a.pdf".into(),
+            threshold: 2,
+            moot: true,
+            blocked: "moot here - decline or withdraw".into(),
+            blocked_tip: "the share expired here".into(),
+            ..ProposalRow::default()
+        }])),
+        ..SurfaceTab::default()
+    }])));
+    apply_strings(&ui, 0);
+    let _shown = show_headless(&ui);
+    rail_settled();
+    let mark = Handle::find_by_accessible_label(&ui, "moot here - decline or withdraw")
+        .filter(|e| e.size().width > 0.0)
+        .max_by(|a, b| a.absolute_position().y.total_cmp(&b.absolute_position().y))
+        .expect("the mark on the card");
+    let at = slint::LogicalPosition::new(
+        mark.absolute_position().x + mark.size().width / 2.0,
+        mark.absolute_position().y + mark.size().height / 2.0,
+    );
+    ui.window().dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
+    assert_eq!(ui.global::<HintTip>().get_label(), "the share expired here");
+}
+
 /// A clean close may wait for the relays: the window says so until the
 /// command returns.
 #[test]

@@ -339,6 +339,15 @@ pub(crate) fn mark_unfinished(rows: &mut [SeatRowData], lang: i32, shown: &std::
     }
 }
 
+/// Mark the seats this node is behind on (`status.behind`), unless their
+/// history is already being fetched.
+pub(crate) fn mark_behind(rows: &mut [SeatRowData], lang: i32, behind: &[String]) {
+    let hint = Lexicon::of(lang).os_behind;
+    for r in rows.iter_mut().filter(|r| !r.fetching && behind.contains(&r.member)) {
+        r.note = if r.note.is_empty() { hint.to_string() } else { format!("{} · {hint}", r.note) };
+    }
+}
+
 /// Mark the seats whose history this node waits for from the start.
 pub(crate) fn mark_fetching(rows: &mut [SeatRowData], held: &[molt_core::InboundHeld]) {
     for r in rows {
@@ -1142,6 +1151,10 @@ pub(crate) struct ProposalRowData {
     /// Why approve is grayed ("" = approvable): a vault deposit this seat
     /// has not verified yet (spec §7).
     pub(crate) blocked: String,
+    /// Why `blocked` holds, as the mark's tooltip ("" = none).
+    pub(crate) blocked_tip: String,
+    /// A files vote this seat can never approve (`ProposalView::moot`).
+    pub(crate) moot: bool,
     /// Kanban: a pending card's acts and advisories, an applied void's reason.
     pub(crate) notes: String,
     /// The notes say it would void, or did.
@@ -1220,7 +1233,7 @@ pub(crate) async fn gather_surfaces(
                 branch_rows: Vec::new(),
                 relay_refusals: s.relay_refusals,
             },
-            (s.seats, s.persistent_files, s.inbound_held),
+            (s.seats, s.persistent_files, s.inbound_held, s.behind),
         ),
         _ => return None,
     };
@@ -1443,6 +1456,7 @@ pub(crate) async fn gather_surfaces(
         chain_rows.iter().filter(|b| !b.hash.is_empty()).map(|b| (b.height, b.hash.clone())).collect();
     org_stats.seats = seat_rows(&seat_src.0, seat_src.1, &member, lang, unix_now(), &local_heads);
     mark_fetching(&mut org_stats.seats, &seat_src.2);
+    mark_behind(&mut org_stats.seats, lang, &seat_src.3);
     let flagged: Vec<String> = seat_src.0.iter().filter(|s| s.restore_unfinished).map(|s| s.member.clone()).collect();
     let shown = chat_ui
         .lock()
@@ -1793,7 +1807,7 @@ pub(crate) fn surface_data(
                 .and_then(|ctx| vault_title(lang, &p.payload, ctx, pending_replaces(ctx, &p.payload)));
             let blocked = vault.and_then(|v| vault_vote_block(v, p.id.0)).map(|r| crate::i18n::localize_vault_refusal(lang, &r));
             let row = ProposalRowData {
-                blocked: blocked.unwrap_or_default(),
+                blocked: blocked.unwrap_or_else(|| row.blocked.clone()),
                 talk: talk.get(&p.id.0).cloned().unwrap_or_default(),
                 ..row
             };
@@ -2006,6 +2020,8 @@ pub(crate) fn to_proposal_row(p: &ProposalRowData) -> ProposalRow {
                 .collect::<Vec<_>>(),
         )),
         blocked: p.blocked.as_str().into(),
+        blocked_tip: p.blocked_tip.as_str().into(),
+        moot: p.moot,
         notes: p.notes.as_str().into(),
         notes_bad: p.notes_bad,
     }
@@ -2098,6 +2114,7 @@ fn decided_stamp(p: &molt_core::ProposalView) -> String {
 }
 
 pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRowData {
+    let lex = Lexicon::of(lang);
     let op = p
         .payload
         .get("op")
@@ -2195,7 +2212,17 @@ pub(crate) fn proposal_row(lang: i32, p: &molt_core::ProposalView) -> ProposalRo
         withdrawn: p.withdrawn,
         unread: 0, // filled by the caller where the unread map is at hand
         talk: Vec::new(),
-        blocked: String::new(),
+        blocked: if p.moot.is_some() { lex.pc_moot.to_string() } else { String::new() },
+        blocked_tip: match p.moot.as_deref() {
+            Some("gone") => lex.pc_moot_gone,
+            Some("expired") => lex.pc_moot_expired,
+            Some("deleted") => lex.pc_moot_deleted,
+            Some("persistent") => lex.pc_moot_persistent,
+            Some(other) => other,
+            None => "",
+        }
+        .to_string(),
+        moot: p.moot.is_some(),
         notes,
         notes_bad,
     }

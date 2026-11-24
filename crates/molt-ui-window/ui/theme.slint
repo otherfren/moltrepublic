@@ -192,6 +192,8 @@ export struct ProposalRow {
     // why approve is grayed ("" = approvable): a vault deposit this seat
     // has not verified yet
     blocked: string,
+    blocked-tip: string, // why `blocked` holds ("" = none)
+    moot: bool, // a files vote this seat can never approve
     // kanban: the acts, impact and would-void lines; an applied void's reason
     notes: string,
     notes-bad: bool,
@@ -1536,6 +1538,12 @@ export global Strings {
     in property <string> os-other-branch;
     in property <string> os-dropped;
     in property <string> os-dropped-tip;
+    in property <string> os-behind;
+    in property <string> pc-moot;
+    in property <string> pc-moot-gone;
+    in property <string> pc-moot-expired;
+    in property <string> pc-moot-deleted;
+    in property <string> pc-moot-persistent;
     in property <string> os-restore-unfinished;
     in property <string> os-resync;
     in property <string> os-resync-ask-pre;
