@@ -435,6 +435,13 @@ impl WalletHandle {
         self.drop_seam.dropped.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Test seam: the branch choice armed in this PROCESS although the
+    /// build ships it dark (`true`), or the build default (`false`).
+    #[doc(hidden)]
+    pub fn __branch_choice_available(&self, on: bool) {
+        crate::chain::branch::BRANCH_CHOICE_ARMED.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam (G): the chain lock on for this engine although the build
     /// ships it dark (`true`), or the build default (`false`).
     #[doc(hidden)]

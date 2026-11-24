@@ -67,6 +67,7 @@ fn edit(change: &ChainChange, f: impl FnOnce(&mut ChainChange)) -> ChainChange {
 
 #[test]
 fn a_branch_choice_seals_on_its_tip() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     for (x, y) in [fork(), fork_v1()] {
         let head = verify_chain(&with(&x, keep_x(&x, &y), &["a", "b"])).expect("verifies");
         assert_eq!(head.height, 4);
@@ -75,6 +76,7 @@ fn a_branch_choice_seals_on_its_tip() {
 
 #[test]
 fn a_branch_choice_needs_the_threshold() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (x, y) = fork();
     let e = verify_chain(&with(&x, keep_x(&x, &y), &["a"])).expect_err("one signer");
     assert_eq!(super::refusal_rule(&e), "threshold");
@@ -84,6 +86,7 @@ fn a_branch_choice_needs_the_threshold() {
 /// one branch, so the same signed block refuses on another one.
 #[test]
 fn a_choice_replayed_on_another_branch_is_refused() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (x, mut y) = fork();
     y.commit_applied(301, &["b", "c"]);
     let block = x.seal(4, keep_x(&x, &y), &["a", "b"]);
@@ -97,6 +100,7 @@ fn a_choice_replayed_on_another_branch_is_refused() {
 
 #[test]
 fn a_choice_moved_to_another_base_does_not_verify() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (x, y) = fork();
     let mut block = x.seal(4, keep_x(&x, &y), &["a", "b"]);
     if let ChainChange::BranchChosen { base_height, .. } = &mut block.change {
@@ -110,6 +114,7 @@ fn a_choice_moved_to_another_base_does_not_verify() {
 
 #[test]
 fn the_named_blocks_must_be_on_the_chain() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (x, y) = fork();
     let good = keep_x(&x, &y);
     let cases = [
@@ -129,6 +134,7 @@ fn the_named_blocks_must_be_on_the_chain() {
 /// Q1: a threshold may not reset its own history without a second branch.
 #[test]
 fn no_choice_without_a_second_branch() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (x, y) = fork();
     let own_tail = DroppedRun { from_height: 3, first_hash: hash(&x, 3), head_height: 3, head_hash: hash(&x, 3) };
     let tail_only = ChainChange::BranchChosen {
@@ -160,6 +166,7 @@ fn no_choice_without_a_second_branch() {
 /// The common block itself may be the tip: both branches drop.
 #[test]
 fn the_base_itself_may_be_chosen() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (x, y) = fork();
     let at_base = ChainChange::BranchChosen {
         base_height: 1,
@@ -184,6 +191,7 @@ fn the_base_itself_may_be_chosen() {
 /// §3: never below a cut - a suffix holder cannot verify the base.
 #[test]
 fn a_choice_below_the_anchor_is_refused() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
     let (mut x, y) = fork();
     let blob = checkpoint_state(&x.blocks, 3).expect("state@3");
     let anchor = x.seal(4, ChainChange::Checkpoint { upto: 3, state_hash: checkpoint_state_hash(&blob) }, &["a", "b"]);

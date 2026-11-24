@@ -2013,7 +2013,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "choose_branch",
             command: "choose_branch",
             scope: Scope::Seat,
-            description: "Propose keeping one branch of a fork branch_status shows: `base_height` is the fork point, `tip_hash` the block that becomes the head (any block of one branch at or above the fork, the fork block itself included). Signs nothing. Answers the card id, every block the choice drops and the `digest` approve_branch needs. Refused where m is not a majority of n, without a second branch, below a cut, on a device restored above the fork point (unless `amnesia_ack`), or on a seat the chain already left behind.",
+            description: "Propose keeping one branch of a fork branch_status shows: `base_height` is the fork point, `tip_hash` the block that becomes the head (any block of one branch at or above the fork, the fork block itself included). Signs nothing. While this build ships the choice dark it is refused (`not available in this build`). Answers the card id, every block the choice drops and the `digest` approve_branch needs. Refused where m is not a majority of n, without a second branch, below a cut, on a device restored above the fork point (unless `amnesia_ack`), or on a seat the chain already left behind.",
             schema: || json!({
                 "type": "object",
                 "properties": {
@@ -2033,7 +2033,7 @@ pub fn tools() -> Vec<ToolDef> {
             name: "approve_branch",
             command: "approve_branch",
             scope: Scope::Seat,
-            description: "Sign a branch choice card. `dropped_digest` must equal the digest this node computes over the dropped list (branch_status `cards[].digest`, choose_branch's reply): sign what you see. A seat signs ONE choice per fork point, recorded on disk before its signature leaves. At m signatures a seat holding the chosen tip seals the choice; the other branches' seats stop and rejoin with a recovery link. A wake agent never calls this.",
+            description: "Sign a branch choice card (refused while the choice is dark). `dropped_digest` must equal the digest this node computes over the dropped list (branch_status `cards[].digest`, choose_branch's reply): sign what you see. A seat signs ONE choice per fork point, recorded on disk before its signature leaves. At m signatures a seat holding the chosen tip seals the choice; the other branches' seats stop and rejoin with a recovery link. A wake agent never calls this.",
             schema: || json!({
                 "type": "object",
                 "properties": {
