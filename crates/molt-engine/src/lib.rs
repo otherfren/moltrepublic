@@ -98,7 +98,7 @@ use std::path::PathBuf;
 
 pub use configstore::ConfigStoreHandle;
 #[doc(hidden)]
-pub use chain::{verify_chain, ChainHead};
+pub use chain::{block_identities, verify_chain, ChainHead};
 /// The public wiki-export verifier — the reference implementation an external
 /// reviewer runs (`cargo run -p molt-engine --example verify_wiki_export`).
 pub use chain::{verify_wiki_export, WikiExportReport};
