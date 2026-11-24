@@ -746,6 +746,7 @@ fn collect_entries(
             // local working copies and fired wakes: this node's, not history
             "wiki_draft.json" | "kanban_draft.json" | "kanban_wakes.json" | crate::PREFS_SEALED_FILE
             | crate::CHAIN_LOCK_FILE
+            | crate::branch::BRANCH_FILE
                 if !is_dir => {}
             "keys" | "tmp" if is_dir => {}
             "log" if is_dir => {
@@ -814,7 +815,7 @@ fn collect_entries(
 }
 
 /// Argon2id: stretch the NFC-normalized passphrase into 32 key bytes.
-fn passphrase_key(
+pub(crate) fn passphrase_key(
     pass: &str,
     salt: &[u8],
     m_kib: u32,
@@ -1249,7 +1250,7 @@ mod tests {
     fn local_drafts_stay_home_silently() {
         let tmp = tempfile::tempdir().expect("tmp");
         let (root, dir, _seed) = make_ws(tmp.path());
-        for f in ["wiki_draft.json", "kanban_draft.json", "kanban_wakes.json", crate::CHAIN_LOCK_FILE] {
+        for f in ["wiki_draft.json", "kanban_draft.json", "kanban_wakes.json", crate::CHAIN_LOCK_FILE, crate::branch::BRANCH_FILE] {
             fs::write(dir.join(f), b"local").expect("draft");
         }
         let mut blob = Vec::new();
@@ -1258,7 +1259,7 @@ mod tests {
         assert_eq!(outcome.skipped, vec!["notes.txt".to_string()]);
         let a = read_export(&mut blob.as_slice(), &ExportSecret::passphrase(PASS))
             .expect("decrypt");
-        for f in ["wiki_draft.json", "kanban_draft.json", "kanban_wakes.json", crate::CHAIN_LOCK_FILE] {
+        for f in ["wiki_draft.json", "kanban_draft.json", "kanban_wakes.json", crate::CHAIN_LOCK_FILE, crate::branch::BRANCH_FILE] {
             assert!(entry(&a, f).is_none(), "{f} travelled");
         }
     }

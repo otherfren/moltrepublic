@@ -46,6 +46,7 @@
 pub mod sealing;
 pub use sealing::{is_restored, is_sealed, seal_at_rest, unseal_at_rest};
 
+pub mod branch;
 pub mod export;
 pub mod import;
 mod segkeys;
@@ -223,7 +224,7 @@ const WIKI_DRAFT_SEGMENT: u64 = u64::MAX - 12;
 const CHAIN_LOCK_SEGMENT: u64 = u64::MAX - 13;
 /// The lowest reserved marker — a log file numbered at or above it is
 /// ignored (see [`list_sorted`]).
-const RESERVED_SEGMENT_FLOOR: u64 = CHAIN_LOCK_SEGMENT;
+const RESERVED_SEGMENT_FLOOR: u64 = branch::BRANCH_SEGMENT;
 /// B7: this seat's sealing-lock promises (`docs/chain/chain_lock_design.md`
 /// §6) - local, sealed, never exported.
 pub const CHAIN_LOCK_FILE: &str = "chain_lock.state";
@@ -3632,6 +3633,11 @@ enum WriterMsg {
         bytes: Vec<u8>,
         ack: mpsc::SyncSender<bool>,
     },
+    /// Rewrite [`branch::BRANCH_FILE`], acking when durable.
+    PersistBranch {
+        bytes: Vec<u8>,
+        ack: mpsc::SyncSender<bool>,
+    },
     /// Append one keys record, acking when durable (wallet design I4).
     PersistWalletKeys {
         record: Zeroizing<Vec<u8>>,
@@ -4025,6 +4031,13 @@ impl StorageHandle {
     #[must_use]
     pub fn persist_chain_lock_blocking(&self, bytes: Vec<u8>) -> bool {
         self.send_acked(|ack| WriterMsg::PersistChainLock { bytes, ack })
+    }
+
+    /// Rewrite the branch choice record and BLOCK until it is durable: the
+    /// signature it records may leave only after this returned `true`.
+    #[must_use]
+    pub fn persist_branch_blocking(&self, bytes: Vec<u8>) -> bool {
+        self.send_acked(|ack| WriterMsg::PersistBranch { bytes, ack })
     }
 
     /// Append a keys record and BLOCK until it is durable: the attestation
@@ -4620,6 +4633,13 @@ pub fn start_writer(mut ws: OpenedWorkspace) -> StorageHandle {
                         let wrote = ws.write_chain_lock(&bytes).and_then(|()| ws.bump_lock_version());
                         if let Err(e) = &wrote {
                             tracing::error!(error = %e, "chain_lock=unwritten");
+                        }
+                        let _ = ack.send(wrote.is_ok());
+                    }
+                    Ok(WriterMsg::PersistBranch { bytes, ack }) => {
+                        let wrote = ws.write_branch_state(&bytes);
+                        if let Err(e) = &wrote {
+                            tracing::error!(error = %e, "branch=unwritten");
                         }
                         let _ = ack.send(wrote.is_ok());
                     }
@@ -6108,10 +6128,11 @@ mod tests {
     /// number is ignored, never the active segment.
     #[test]
     fn segment_floor_ignores_the_reserved_markers() {
-        assert_eq!(RESERVED_SEGMENT_FLOOR, CHAIN_LOCK_SEGMENT);
+        assert_eq!(RESERVED_SEGMENT_FLOOR, branch::BRANCH_SEGMENT);
         const {
             assert!(
-                CHAIN_LOCK_SEGMENT < WIKI_DRAFT_SEGMENT
+                branch::BRANCH_SEGMENT < CHAIN_LOCK_SEGMENT
+                    && CHAIN_LOCK_SEGMENT < WIKI_DRAFT_SEGMENT
                     && WIKI_DRAFT_SEGMENT < PREFS_SEALED_SEGMENT
                     && PREFS_SEALED_SEGMENT < WALLET_SCAN_SEGMENT
                     && WALLET_SCAN_SEGMENT < WALLET_KEYS_SEGMENT
@@ -6125,6 +6146,7 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tmp");
         let dir = make_ws(tmp.path(), 2);
         for no in [
+            branch::BRANCH_SEGMENT,
             CHAIN_LOCK_SEGMENT,
             WIKI_DRAFT_SEGMENT,
             PREFS_SEALED_SEGMENT,
@@ -6139,7 +6161,7 @@ mod tests {
         }
         let (ws, loaded) = open_workspace(&dir).expect("opens despite the planted files");
         assert_eq!(loaded.tail.len(), 3);
-        assert!(ws.seg_no < CHAIN_LOCK_SEGMENT);
+        assert!(ws.seg_no < branch::BRANCH_SEGMENT);
     }
 
     /// WP4b stage 5: the FIRST pruned chain persist raises the manifest
