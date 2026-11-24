@@ -374,3 +374,32 @@ fn a_held_approval_survives_its_block_being_displaced() {
     net.flush();
     assert_eq!(net.approvals_sent(W, c, 2), 1, "signed at the new head+1");
 }
+
+/// Review: the block-v2 gate through `approve`, then the real seal on
+/// every seat, and the next block under v3.
+#[test]
+fn block_v2_is_approved_sealed_and_followed_by_every_seat() {
+    let mut net = Net::new();
+    for st in &mut net.seats {
+        st.chain.block_v2_caps_override = Some(true);
+    }
+    let key = molt_core::chain::BLOCK_V2_FEATURE;
+    let id = propose(&mut net.seats[P], Surface::Organization, json!({ "op": "set_features", "value": format!("{key} memory") }));
+    net.pump();
+    net.seats[W].chain.block_v2_caps_override = Some(false);
+    let e = net.seats[W].cmd_approve(ProposalId(id), None).expect_err("a seat cannot follow");
+    assert!(e.to_string().contains("older build"), "{e}");
+    assert_eq!(net.seats[W].chain.head.as_ref().map(|h| h.height), Some(0));
+    net.seats[W].chain.block_v2_caps_override = Some(true);
+    net.seats[W].cmd_approve(ProposalId(id), None).expect("approves");
+    net.pump();
+    for st in &net.seats {
+        assert_eq!(st.chain.head.as_ref().and_then(|h| h.block_v2_from), Some(2), "{}", st.member());
+    }
+    let next = note(&mut net.seats[D], "after");
+    net.pump();
+    net.seats[W].cmd_approve(ProposalId(next), None).expect("approves");
+    net.pump();
+    assert_converged(&net, &[id, next]);
+    assert_eq!(net.tip(D), net.tip(P));
+}

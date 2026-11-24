@@ -1064,7 +1064,7 @@ async fn a_request_wrapped_by_another_key_is_refused_and_leaves_the_ticket_unspe
                 version: String::new(),
                 consent: String::new(),
                 started: 0,
-                caps: Vec::new(),
+                caps: vec![molt_core::chain::BLOCK_V2_CAP.to_string()],
             }),
         )
         .await
@@ -1674,7 +1674,7 @@ async fn a_link_less_request_from_an_older_build_is_refused_and_answered() {
             version: String::new(),
             consent: String::new(),
             started: 0,
-            caps: Vec::new(),
+            caps: vec![molt_core::chain::BLOCK_V2_CAP.to_string()],
         }),
     )
     .await
@@ -1927,7 +1927,7 @@ impl ManualRejoiner {
             anchor_first,
             version: if anchor_first { "0.0.21".to_string() } else { String::new() },
             started: shape.started,
-            caps: Vec::new(),
+            caps: vec![molt_core::chain::BLOCK_V2_CAP.to_string()],
         });
         net.send_ritual(&h.npub, &request).await.expect("the request publishes");
         ManualRejoiner { net, inbox, coordinator: h.npub, ticket: h.ticket, request, attempt, mls }
@@ -2763,7 +2763,7 @@ async fn a_link_less_request_without_a_seat_proof_gets_no_answer() {
                 version: String::new(),
                 consent: String::new(),
                 started: 0,
-                caps: Vec::new(),
+                caps: vec![molt_core::chain::BLOCK_V2_CAP.to_string()],
             }),
         )
         .await

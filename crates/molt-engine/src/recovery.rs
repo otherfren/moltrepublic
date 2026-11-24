@@ -596,9 +596,9 @@ pub async fn run_rejoin<T: Transport>(
         started: 0,
         // D4: the loopback twin declares what this build runs
         caps: if crate::chain::CHAIN_LOCK_AVAILABLE {
-            vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()]
+            vec![molt_core::chain::BLOCK_V2_CAP.to_string(), molt_core::chain::CHAIN_LOCK_CAP.to_string()]
         } else {
-            Vec::new()
+            vec![molt_core::chain::BLOCK_V2_CAP.to_string()]
         },
     });
     let payload = serde_json::to_vec(&request).map_err(|e| e.to_string())?;

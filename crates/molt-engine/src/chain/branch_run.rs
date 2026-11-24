@@ -240,12 +240,29 @@ impl State {
     /// What a seat signs for a choice, at height tip + 1 over prev = the
     /// chosen tip (never the own head: the choice may seal on another
     /// branch). The one signing site for sign and check alike.
-    fn branch_signing_bytes(&self, change: &ChainChange) -> Vec<u8> {
+    pub(super) fn branch_signing_bytes(&self, change: &ChainChange) -> Vec<u8> {
         let (height, prev) = match change {
             ChainChange::BranchChosen { tip_height, tip_hash, .. } => (tip_height + 1, tip_hash.as_str()),
             _ => (0, ""),
         };
-        signing_bytes(&self.republic_id(), height, prev, change, self.block_v2_from())
+        let v2 = self.chosen_v2_from(height.saturating_sub(1), prev);
+        signing_bytes(&self.republic_id(), height, prev, change, v2)
+    }
+
+    /// The block-v2 activation at tip + 1 on the CHOSEN branch, which may
+    /// enable it above the fork where this one does not (or the reverse).
+    fn chosen_v2_from(&self, tip_height: u64, tip_hash: &str) -> Option<u64> {
+        if self.holds_block(tip_height, tip_hash) {
+            return self.block_v2_from().filter(|h| *h <= tip_height + 1);
+        }
+        for run in self.chain.branch.file.evidence.values() {
+            let ids = self.run_ids(run);
+            if let Some(i) = run.iter().zip(&ids).position(|(b, id)| b.height == tip_height && id == tip_hash) {
+                let fork = run.first().map_or(0, |f| f.height);
+                return run[..=i].iter().fold(self.block_v2_from().filter(|h| *h <= fork), block_v2_after);
+            }
+        }
+        self.block_v2_from()
     }
 
     /// The identities of a run of another branch, each under ITS branch's
@@ -990,7 +1007,7 @@ impl State {
         let Some(head) = self.chain.head.clone() else {
             return false;
         };
-        let standalone = check_shape(block).and_then(|()| block_signers(&rid, &head.identities, block, head.block_v2_from));
+        let standalone = check_shape(block).and_then(|()| block_signers(&rid, &head.identities, block, self.chosen_v2_from(*tip_height, tip_hash)));
         if !standalone.is_ok_and(|s| s.len() >= usize::from(head.rule_m)) {
             let hash = self.note_refused(from, block, "branch");
             tracing::warn!(%from, %hash, "branch=choice_refused");

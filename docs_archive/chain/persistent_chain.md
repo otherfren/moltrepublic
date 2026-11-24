@@ -142,6 +142,12 @@ From the activation height H the two layouts change together:
   predecessor; a signature that names another predecessor does not count.
   `relink_onto_variant` stays for history below H and never rewrites a
   block at or above it (a re-base takes its place).
+- An approval for head+2 is parked unverified (its predecessor is not
+  held yet), so a junk copy under a seat's name is not displaced by rank
+  before the head moves: it only delays that seat's voice by one height.
+- Which signers a block records is first arrival ("the first stays"):
+  `applied_sigs`, `approved_by_me`, `last_signed`/`stale_signers` and the
+  recover progress are per-seat display values, never consensus.
 - The gate of the binding (`block_identity_plan.md` §3b), measured
   2026-11-24 with `tests/chain_prev_binding.rs`: 2-of-3 over a local relay,
   one seat 6 s behind, 50 cards per run, three runs each. Median

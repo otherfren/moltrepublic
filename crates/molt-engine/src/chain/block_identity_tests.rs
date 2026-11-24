@@ -315,6 +315,49 @@ fn a_standing_vote_re_signs_after_a_tip_swap_at_the_same_height() {
     b.push(low);
 }
 
+/// Review: a PEER's signature bound to the old tip leaves with the swap.
+#[test]
+fn a_foreign_signature_on_the_old_tip_is_dropped_at_a_swap() {
+    let b = enabled(2);
+    let change = |id: u64| ChainChange::Applied {
+        proposal_id: id,
+        surface: Surface::Memory,
+        payload: serde_json::json!({ "op": "add_note", "id": id }),
+    };
+    let mut tips = [b.seal(2, change(60), &["walter", "dora"]), b.seal(2, change(61), &["walter", "dora"])];
+    tips.sort_by_key(|t| v2_id(&b, t));
+    let (high, low) = (tips[1].clone(), tips[0].clone());
+    let mut held = b.blocks.clone();
+    held.push(high.clone());
+    let mut petra = genesis_seat("petra", &b, held);
+    // petra holds the card without a vote: one signature does not seal
+    petra.config.self_cosign = false;
+    let id = propose(&mut petra, Surface::Memory, serde_json::json!({ "op": "add_note", "title": "x" }));
+    let card = petra.proposal_change(id).expect("change");
+    let on_high = molt_core::chain::approval_bytes_v3(&b.republic_id, 3, &v2_id(&b, &high), &card);
+    let sig = molt_storage::identity_sign(b.key("walter"), &on_high);
+    petra.receive_approval(id, "walter", 3, &sig);
+    let holds = |st: &crate::State| st.chain.pending_sigs.get(&id).is_some_and(|p| p.sigs.iter().any(|a| a.member == "walter"));
+    assert!(holds(&petra));
+    wire(&mut petra, "dora", 10, WorkspaceEvent::Committed(low));
+    assert!(!holds(&petra), "walter's signature named the displaced tip");
+    assert_eq!(petra.chain.blocks.len(), 3, "and sealed nothing");
+}
+
+/// Review: a later `set_features` re-listing `block-v2` keeps H, one
+/// omitting it cannot turn it off.
+#[test]
+fn a_later_feature_vote_neither_moves_nor_ends_the_activation() {
+    let mut b = enabled(3);
+    b.commit_org(40, "set_features", &format!("memory quests {BLOCK_V2_FEATURE}"), &["petra", "walter"]);
+    b.commit_org(41, "set_features", "memory quests", &["petra", "walter"]);
+    b.commit_applied(42, &["walter", "dora"]);
+    assert_eq!(b.v2_from, Some(2));
+    let head = verify_chain(&b.blocks).expect("verifies");
+    assert_eq!(head.block_v2_from, Some(2));
+    assert_eq!(head.hash, v2_id(&b, &b.blocks[5]));
+}
+
 // --- S5: the keystone -----------------------------------------------------
 
 /// Every block of `n` sealed three times by different 2-of-3 subsets, each
@@ -361,4 +404,116 @@ fn different_signer_subsets_never_fork_after_the_activation() {
 fn different_signer_subsets_fork_before_the_activation() {
     let (forks, _) = three_seals_per_block(&plain(2), 6);
     assert!(forks > 0, "v1 variants are fork decisions");
+}
+
+// --- review L1: one layout per block in a wiki export ---------------------
+
+const PAGE_A: &str = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,1 @@\n+one\n";
+
+fn page_tree() -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::from([("a.md".to_string(), "one\n".to_string())])
+}
+
+fn wiki_change(id: u64) -> ChainChange {
+    ChainChange::Applied { proposal_id: id, surface: Surface::Memory, payload: serde_json::json!({ "op": "wiki_patch", "value": PAGE_A }) }
+}
+
+fn export_of(blocks: &[ChainBlock]) -> String {
+    serde_json::to_string(&crate::wiki_export::bundle_from_chain(blocks).expect("genesis")).expect("json")
+}
+
+/// An export of an activated republic verifies, and its patch must carry
+/// m signatures of ONE layout: a v2 and a v3 signature do not add up.
+#[test]
+fn a_wiki_export_counts_one_layout_per_block() {
+    let mut b = enabled(2);
+    let page = b.seal(2, wiki_change(30), &["petra", "walter"]);
+    b.push(page);
+    verify_wiki_export(&export_of(&b.blocks), &page_tree()).expect("an honest export verifies");
+    let mut mixed = b.blocks.clone();
+    let v2 = approval_bytes(&b.republic_id, 2, &wiki_change(30));
+    mixed[2].sigs = vec![
+        mixed[2].sigs.iter().find(|a| a.member == "petra").expect("petra").clone(),
+        RosterAttestation { member: "walter".to_string(), sig: molt_storage::identity_sign(b.key("walter"), &v2) },
+    ];
+    let err = verify_wiki_export(&export_of(&mixed), &page_tree()).expect_err("one v2 and one v3 signature");
+    assert!(err.contains("valid approvals"), "{err}");
+}
+
+// --- review M3: an older device does not rejoin an activated republic ---
+
+fn recover_request(coord: &mut crate::State, b: &Builder, caps: Vec<String>) {
+    let kp_hex = kp_hex_for(b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), "t", &kp_hex, &b.republic_id, "", &[]);
+    coord
+        .cmd_net_recover_requested(
+            "dora".to_string(),
+            b.pk("dora"),
+            kp_hex,
+            "t".to_string(),
+            proof,
+            String::new(),
+            Vec::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+            (false, 0, caps),
+            None,
+        )
+        .expect("ack");
+}
+
+#[test]
+fn a_device_without_block_v2_is_refused_a_restore() {
+    let b = enabled(3);
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    coord.recovery.tickets.insert("t".to_string(), "dora".to_string());
+    recover_request(&mut coord, &b, Vec::new());
+    assert_eq!(coord.session.notice, "recover-refused:dora:dora's device runs an older build");
+    assert!(coord.recovery.tickets.contains_key("t"), "the ticket stays live");
+    coord.session.notice.clear();
+    recover_request(&mut coord, &b, vec![molt_core::chain::BLOCK_V2_CAP.to_string()]);
+    assert!(!coord.session.notice.starts_with("recover-refused"), "{}", coord.session.notice);
+}
+
+/// Counter-test: before the activation the same device is not refused.
+#[test]
+fn before_the_activation_an_older_device_may_restore() {
+    let b = plain(3);
+    let mut coord = genesis_seat("petra", &b, b.blocks.clone());
+    coord.recovery.tickets.insert("t".to_string(), "dora".to_string());
+    recover_request(&mut coord, &b, Vec::new());
+    assert!(!coord.session.notice.starts_with("recover-refused"), "{}", coord.session.notice);
+}
+
+/// Review, the adversarial order: k valid seals at one height for other
+/// cards, released in DESCENDING identity order. Each one swaps the tip
+/// and re-signs every standing card; it ends on the lowest identity, the
+/// cost bounded by k x open cards.
+#[test]
+fn seals_released_in_descending_identity_order_converge() {
+    let b = enabled(2);
+    let mut petra = genesis_seat("petra", &b, b.blocks.clone());
+    let open: Vec<u64> = (0..5)
+        .map(|i| propose(&mut petra, Surface::Memory, serde_json::json!({ "op": "add_note", "title": format!("o{i}") })))
+        .collect();
+    let mut seals: Vec<ChainBlock> = (0..6u64)
+        .map(|i| {
+            let change = ChainChange::Applied { proposal_id: 700 + i, surface: Surface::Memory, payload: serde_json::json!({ "op": "add_note", "id": i }) };
+            b.seal(2, change, &["walter", "dora"])
+        })
+        .collect();
+    seals.sort_by_key(|s| std::cmp::Reverse(v2_id(&b, s)));
+    RECORDED_CHAIN.with(|r| r.borrow_mut().clear());
+    for (i, s) in seals.iter().enumerate() {
+        wire(&mut petra, "dora", 100 + u64::try_from(i).expect("small"), WorkspaceEvent::Committed(s.clone()));
+    }
+    let lowest = seals.last().expect("seals");
+    assert_eq!(petra.chain.head.as_ref().expect("head").hash, v2_id(&b, lowest), "the lowest identity holds");
+    assert_eq!(petra.chain.fork_decisions, 5, "one swap per later seal");
+    let resigns = RECORDED_CHAIN.with(|r| r.borrow().iter().filter(|(k, h)| *k == "approved" && *h == 3).count());
+    assert_eq!(resigns, seals.len() * open.len(), "every head move re-signs every standing card once");
+    for id in &open {
+        assert!(petra.own_signature_stands(*id), "{id} stands on the final tip");
+    }
 }

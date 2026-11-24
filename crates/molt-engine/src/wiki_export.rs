@@ -32,7 +32,9 @@ pub struct WikiExportBundle {
     /// Every `Membership` block and every applied `wiki_patch`, ascending by
     /// height. Membership blocks ride along because they are the identity
     /// history: a later patch signed by a seat that joined after the founding
-    /// verifies only against the roster those blocks establish.
+    /// verifies only against the roster those blocks establish. The block
+    /// that enabled `block-v2` rides along too: it says which layout the
+    /// later signatures use.
     #[serde(default)]
     pub blocks: Vec<ChainBlock>,
 }
@@ -58,12 +60,15 @@ pub(crate) fn bundle_from_chain(chain: &[ChainBlock]) -> Option<WikiExportBundle
     if !matches!(genesis.change, ChainChange::Genesis { .. }) {
         return None;
     }
-    let blocks = chain
-        .iter()
-        .skip(1)
-        .filter(|b| matches!(b.change, ChainChange::Membership { .. }) || is_wiki_patch(&b.change))
-        .cloned()
-        .collect();
+    let mut v2 = crate::chain::block_v2_after(None, genesis);
+    let mut blocks = Vec::new();
+    for b in chain.iter().skip(1) {
+        let enables = v2.is_none() && crate::chain::block_v2_after(None, b).is_some();
+        if enables || matches!(b.change, ChainChange::Membership { .. }) || is_wiki_patch(&b.change) {
+            blocks.push(b.clone());
+        }
+        v2 = crate::chain::block_v2_after(v2, b);
+    }
     Some(WikiExportBundle {
         format: WIKI_EXPORT_FORMAT.to_string(),
         genesis: genesis.clone(),

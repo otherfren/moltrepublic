@@ -90,7 +90,7 @@ impl MemberSeat {
             nostr_sk,
             nostr_pk,
             vault_pk,
-            caps: Vec::new(),
+            caps: vec![molt_core::chain::BLOCK_V2_CAP.to_string()],
             minority_ok: false,
         })
     }

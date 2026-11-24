@@ -135,6 +135,7 @@ const PRESENCE_TICK_MS: u64 = 30_000;
 
 /// Test seam (measurement): own standing approvals signed again, per
 /// card, process-wide, since the first call (which arms the count).
+#[cfg(feature = "measure")]
 #[doc(hidden)]
 pub fn __resign_counts() -> std::collections::BTreeMap<u64, u64> {
     chain::RESIGNS.lock().map(|mut r| r.get_or_insert_with(Default::default).clone()).unwrap_or_default()
@@ -143,6 +144,7 @@ pub fn __resign_counts() -> std::collections::BTreeMap<u64, u64> {
 /// Test seam (measurement): every engine in the process signs without
 /// `prev`, as before the binding. A chain sealed so is refused by a build
 /// without the seam.
+#[cfg(feature = "measure")]
 #[doc(hidden)]
 pub fn __prev_unbound(on: bool) {
     chain::PREV_UNBOUND.store(on, std::sync::atomic::Ordering::SeqCst);

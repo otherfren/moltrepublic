@@ -118,6 +118,11 @@ struct Card {
 
 /// One run of `cards` cards: per card, and the fork decisions.
 async fn run(unbound: bool, cards: usize) -> (Vec<Card>, u64) {
+    run_with(unbound, cards, [0, 0, 6_000]).await
+}
+
+/// [`run`] with each seat's inbound delay in ms (mara, walter, dora).
+async fn run_with(unbound: bool, cards: usize, delays: [u64; 3]) -> (Vec<Card>, u64) {
     molt_engine::__prev_unbound(unbound);
     let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
     let url = relay.url().await.to_string();
@@ -125,7 +130,9 @@ async fn run(unbound: bool, cards: usize) -> (Vec<Card>, u64) {
     let seats = found_trio(tmp.path(), &url).await;
     assert!(status(&seats[0]).await.chain_sync.block_v2_since > 0, "a new founding ratifies block-v2");
     // dora lags one block: the seal pace is 5 s
-    seats[2].__delay_inbound_ms(6_000);
+    for (w, d) in seats.iter().zip(delays) {
+        w.__delay_inbound_ms(d);
+    }
     let resigns_before = molt_engine::__resign_counts();
     const BURST: usize = 5;
     let mut opened: Vec<(u64, Instant, usize)> = Vec::new();
@@ -166,7 +173,9 @@ async fn run(unbound: bool, cards: usize) -> (Vec<Card>, u64) {
     for w in &seats {
         forks += status(w).await.chain_sync.fork_decisions;
     }
-    seats[2].__delay_inbound_ms(0);
+    for w in &seats {
+        w.__delay_inbound_ms(0);
+    }
     let after = molt_engine::__resign_counts();
     let out = opened
         .iter()
@@ -213,6 +222,32 @@ async fn prev_binding_adds_no_wait_with_a_lagging_seat() {
                 pct(&secs, 100)
             );
         }
+    }
+    molt_engine::__prev_unbound(false);
+}
+
+/// The review's symmetric case: the two sealing seats (mara and walter
+/// propose) each see the other 6 s late; dora is prompt. n = 100.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "a measurement: about an hour"]
+async fn prev_binding_with_two_seats_behind_each_other() {
+    let _ = molt_engine::__resign_counts();
+    for unbound in [false, true] {
+        let (cards, forks) = run_with(unbound, 100, [6_000, 6_000, 0]).await;
+        let mut secs: Vec<f64> = cards.iter().map(|c| c.secs).collect();
+        secs.sort_by(f64::total_cmp);
+        let mut hist = std::collections::BTreeMap::<u64, usize>::new();
+        for c in &cards {
+            *hist.entry(c.resigns).or_default() += 1;
+        }
+        eprintln!(
+            "measure symmetric bound={} n={} median={:.2} p95={:.2} max={:.2} forks={forks} resigns_per_card={hist:?}",
+            !unbound,
+            secs.len(),
+            pct(&secs, 50),
+            pct(&secs, 95),
+            pct(&secs, 100)
+        );
     }
     molt_engine::__prev_unbound(false);
 }

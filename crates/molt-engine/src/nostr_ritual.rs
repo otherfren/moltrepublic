@@ -1564,7 +1564,11 @@ async fn recovery_rejoin(
         anchor_first: true,
         version: env!("CARGO_PKG_VERSION").to_string(),
         started: asked_at,
-        caps: if ctx.lock { vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()] } else { Vec::new() },
+        caps: if ctx.lock {
+            vec![molt_core::chain::BLOCK_V2_CAP.to_string(), molt_core::chain::CHAIN_LOCK_CAP.to_string()]
+        } else {
+            vec![molt_core::chain::BLOCK_V2_CAP.to_string()]
+        },
     });
     if let Ok(mut w) = withdrawal.lock() {
         let msg = RitualMsg::RecoverFailed {
