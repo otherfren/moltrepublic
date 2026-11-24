@@ -36,6 +36,39 @@ pub(super) fn head_hash(st: &State) -> String {
     st.chain.head.as_ref().expect("a head").hash.clone()
 }
 
+/// Review M2: a seat on a branch without block-v2 signs a choice of a
+/// branch that enabled it above the fork with the CHOSEN branch's layout.
+#[test]
+fn a_choice_signs_with_the_chosen_branchs_activation() {
+    super::branch::ARMED_HERE.with(|a| a.set(true));
+    let mut base = Builder::new(&["a", "b", "c"], 2);
+    base.commit_applied(100, &["a", "b"]);
+    let mut x = base.clone();
+    x.commit_org(200, "set_features", &format!("memory {}", molt_core::chain::BLOCK_V2_FEATURE), &["a", "b"]);
+    x.commit_applied(201, &["a", "b"]);
+    let mut y = base;
+    y.commit_applied(300, &["b", "c"]);
+    let a = genesis_seat("a", &x, x.blocks.clone());
+    let mut c = genesis_seat("c", &y, y.blocks.clone());
+    assert_eq!(c.import_bundle(&bundle_of(&a)).expect("imports"), (1, 0));
+    let change = ChainChange::BranchChosen {
+        base_height: 1,
+        base_hash: hash(&x, 1),
+        tip_height: 3,
+        tip_hash: hash(&x, 3),
+        chosen_root: hash(&x, 2),
+        dropped: vec![molt_core::chain::DroppedRun {
+            from_height: 2,
+            first_hash: hash(&y, 2),
+            head_height: 2,
+            head_hash: hash(&y, 2),
+        }],
+    };
+    let want = molt_core::chain::approval_bytes_v3(&x.republic_id, 4, &hash(&x, 3), &change);
+    assert_eq!(c.branch_signing_bytes(&change), want, "c signs as x verifies");
+    assert_eq!(a.branch_signing_bytes(&change), want, "a holds the tip itself");
+}
+
 #[test]
 fn an_imported_bundle_proves_the_fork() {
     super::branch::ARMED_HERE.with(|a| a.set(true));
