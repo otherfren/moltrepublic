@@ -95,6 +95,8 @@ pub(crate) fn refusal_rule(error: &str) -> &'static str {
         ("below the blob coverage", "cut_floor"),
         ("legacy checkpoint", "cut_kind"),
         ("vault checkpoint outside", "cut_kind"),
+        ("lies below the anchor", "below_cut"),
+        ("branch choice", "branch"),
         ("vault", "vault"),
     ];
     RULES.iter().find(|(needle, _)| error.contains(needle)).map_or("other", |(_, rule)| rule)

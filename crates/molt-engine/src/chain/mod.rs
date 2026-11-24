@@ -28,6 +28,7 @@ use molt_core::{
 use crate::State;
 
 pub(crate) mod blob_parts;
+pub(crate) mod branch;
 mod checkpoint;
 mod governance;
 mod lock;
@@ -43,6 +44,8 @@ mod wiki_base;
 
 #[cfg(test)]
 pub(crate) mod test_support;
+#[cfg(test)]
+mod branch_tests;
 #[cfg(test)]
 mod checkpoint_tests;
 #[cfg(test)]
