@@ -787,6 +787,8 @@ impl State {
                     continue;
                 }
                 self.return_displaced_card(*proposal_id, b);
+            } else if !suffix.iter().any(|s| s.change == b.change) {
+                self.return_displaced_restore(b);
             }
         }
         self.vault_displaced(&dropped, &kept);
@@ -977,6 +979,40 @@ impl State {
     /// WP2: the seal consumed this seat's signature and the head move
     /// pruned its stance; the displaced block or the stashed voters prove
     /// it, so the approval stands again and re-signs at the new head.
+    /// A displaced `Restored` block goes back to the vote like an applied
+    /// card: its card reopens (the newest one this seat settled for the
+    /// seat) with the block's change registered again, consent included,
+    /// and this seat's stance stands where its signature or vote shows it.
+    /// The consent is height- and prev-free; a v2 one is re-judged at the
+    /// new height. The coordinator's re-key already ran and is not repeated.
+    fn return_displaced_restore(&mut self, displaced: &ChainBlock) {
+        let ChainChange::Membership { op: MembershipOp::Restored, member, .. } = &displaced.change else {
+            return;
+        };
+        let card = self
+            .proposals
+            .iter()
+            .filter(|(_, p)| {
+                p.state == ProposalState::Applied
+                    && p.payload.get("op").and_then(serde_json::Value::as_str) == Some("restore_member")
+                    && p.payload.get("member").and_then(serde_json::Value::as_str) == Some(member.as_str())
+            })
+            .map(|(id, _)| *id)
+            .max();
+        let Some(id) = card else { return };
+        let me = self.member();
+        self.chain.proposal_changes.insert(id, displaced.change.clone());
+        if let Some(p) = self.proposals.get_mut(&id) {
+            p.state = ProposalState::Proposed;
+            let approved = (displaced.sigs.iter().any(|a| a.member == me) || p.voted.contains(&me))
+                && !p.decliners.contains(&me);
+            if approved {
+                self.chain.own_approvals.insert(id);
+            }
+        }
+        tracing::info!(%member, id, height = displaced.height, "restore=displaced");
+    }
+
     fn return_displaced_card(&mut self, proposal_id: u64, displaced: &ChainBlock) {
         let me = self.member();
         let materialized = self.proposals.get(&proposal_id).is_some_and(|p| p.by.is_empty());
@@ -1082,6 +1118,8 @@ impl State {
                     // the displaced block was folded: the stamps above its
                     // height belong to the fold that just changed
                     self.forget_wiki_stamps();
+                } else if let Some(b) = displaced.as_ref().filter(|b| b.change != block.change) {
+                    self.return_displaced_restore(b);
                 }
                 if let Some(b) = displaced.as_ref() {
                     let kept: BTreeSet<u64> = match &block.change {
