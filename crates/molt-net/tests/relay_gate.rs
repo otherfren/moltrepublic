@@ -113,6 +113,31 @@ async fn a_dial_mid_handshake_at_the_withdrawal_sends_nothing_more() {
     assert_eq!(req.rest.await.expect("hang-up"), 0, "spoke on after the withdrawal");
 }
 
+/// The engine ending is not a withdrawal: a frame its last task sends (a
+/// recovery cancel's withdraw) still leaves, and a dial in flight when the
+/// keeper went completes.
+#[tokio::test]
+async fn an_ended_engine_withdraws_nothing() {
+    let (_relay, proxy) = relay_behind_proxy().await;
+    let keeper = RelayGateKeeper::default();
+    keeper.set(&[proxy.url()]);
+    let rt = RelayRuntime::new(gated(&keeper), vec![proxy.url()]);
+    drop(keeper);
+    rt.publish(&note("the last frame")).await.expect("still consented");
+    assert_eq!(proxy.accepts(), 1);
+
+    let socks = common::held_socks::run().await;
+    let url = "wss://relay.example.org".to_string();
+    let keeper = RelayGateKeeper::default();
+    keeper.set(std::slice::from_ref(&url));
+    let dial = spawn_dial(&held_dialer(&socks, &keeper), &url);
+    let req = socks.requests.lock().await.recv().await.expect("a CONNECT");
+    drop(keeper);
+    req.release.send(()).expect("the dial is still there");
+    assert!(req.first.await.expect("socks verdict").is_some_and(|n| n > 0), "the dial went on");
+    dial.abort();
+}
+
 /// The NIP-11 probe asks the gate like every relay dial.
 #[tokio::test]
 async fn the_nip11_probe_asks_the_gate() {

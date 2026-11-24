@@ -234,8 +234,9 @@ struct GateSet {
     urls: std::collections::HashSet<String>,
 }
 
-/// A dialer's view of its engine's [`RelayGateKeeper`]. Once the keeper is
-/// gone (the engine ended) it allows nothing.
+/// A dialer's view of its engine's [`RelayGateKeeper`]. Only `set` withdraws
+/// consent: once the keeper is gone (the engine ended) its last set holds,
+/// so what an ending sends - a cancel's withdraw frame - still leaves.
 #[derive(Clone, Debug)]
 pub struct RelayGate {
     rx: tokio::sync::watch::Receiver<GateSet>,
@@ -280,9 +281,6 @@ impl RelayGate {
     /// pool entry, so it is refused.
     #[must_use]
     pub fn allows(&self, url: &str) -> bool {
-        if self.rx.has_changed().is_err() {
-            return false;
-        }
         molt_core::relay::normalize_relay_url(url)
             .is_ok_and(|canonical| self.rx.borrow().urls.contains(&canonical))
     }
@@ -293,11 +291,12 @@ impl RelayGate {
         self.rx.borrow().epoch
     }
 
-    /// Resolves once `url` is no longer allowed.
+    /// Resolves once `url` is no longer allowed; never after the keeper is
+    /// gone (its last set holds).
     pub async fn withdrawn(&mut self, url: &str) {
         while self.allows(url) {
             if self.rx.changed().await.is_err() {
-                return;
+                std::future::pending::<()>().await;
             }
         }
     }
@@ -623,10 +622,11 @@ mod tests {
     }
 
     /// The gate compares canonical URLs, moves its epoch only on a real
-    /// change, carries through `isolated`, and allows nothing once its
-    /// engine (the keeper) is gone.
-    #[test]
-    fn the_gate_reads_canonical_urls_and_dies_with_its_keeper() {
+    /// change and carries through `isolated`. Its engine ending (the keeper
+    /// gone) withdraws nothing: the last set holds, so a cancel's last frame
+    /// still leaves, and a parked wait ends instead of waiting forever.
+    #[tokio::test]
+    async fn the_gate_reads_canonical_urls_and_outlives_its_keeper() {
         let keeper = RelayGateKeeper::default();
         let gate = keeper.gate();
         assert!(!gate.allows("wss://relay.example.org"), "an empty set allows nothing");
@@ -639,8 +639,11 @@ mod tests {
         let dialer = Dialer::direct().with_gate(gate).isolated("lane");
         assert!(dialer.check_gate("wss://relay.example.org").is_ok());
         assert!(Dialer::direct().check_gate("wss://other.example.org").is_ok(), "no gate, no refusal");
+        let other = vec!["wss://other.example.org".to_string()];
         drop(keeper);
-        assert!(matches!(dialer.check_gate("wss://relay.example.org"), Err(NetError::Withdrawn)));
+        assert!(dialer.check_gate("wss://relay.example.org").is_ok(), "an ended engine withdrew nothing");
+        assert!(matches!(dialer.check_gate(&other[0]), Err(NetError::Withdrawn)));
+        assert!(!dialer.until_any_allowed(&other).await, "nothing will allow it any more");
     }
 
     #[cfg(not(feature = "embedded-tor"))]
