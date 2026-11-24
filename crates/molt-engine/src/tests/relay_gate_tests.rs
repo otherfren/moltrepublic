@@ -155,6 +155,30 @@ async fn the_engines_relay_channels_dial_nothing_after_a_revoke() {
     assert_eq!(proxy.accepts(), 0, "revoked, yet the relay was dialed");
 }
 
+/// An engine that ends withdraws no consent: what its last task sends - a
+/// recovery cancel's withdraw frame, after `RecoverCancel` and the engine's
+/// drop - still reaches the relay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_last_frame_of_an_ended_engine_still_leaves() {
+    let (_relay, target) = relay().await;
+    let proxy = HeldProxy::run(target, false).await;
+    let mut st = plain_state();
+    st.transport_kind = Some(molt_core::TransportKind::Nostr);
+    st.nostr = Some(crate::NostrTransport {
+        sk: zeroize::Zeroizing::new(vec![1u8; 32]),
+        relays: vec![proxy.url.clone()],
+        rotation_seed: [7u8; 32],
+    });
+    st.session.settings.relays =
+        vec![molt_core::relay::RelayEntry { url: proxy.url.clone(), confirmed: true }];
+    st.clearnet_session = true;
+    let ritual = st.recover_net().expect("ritual endpoint");
+    drop(st);
+    let msg = molt_net::invite::RitualMsg::Aborted { reason: "a".into() };
+    ritual.send_ritual(&ritual.pk_hex(), &msg).await.expect("the withdraw frame leaves");
+    assert_eq!(proxy.accepts(), 1);
+}
+
 /// Every dialer the engine builds comes from `dialer_for` (gated) - except
 /// the probe of a relay being decided on, which carries its own keeper.
 /// A new ungated construction in engine code is a finding.

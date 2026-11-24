@@ -221,7 +221,9 @@ than read the pool directly.
    no relay and are not gated. The Tor test is gated: its target is a
    dialable relay, so the gate only stops a test racing a withdrawal.
    Consent is per URL, not per host: `wss://h` revoked and `wss://h/x`
-   confirmed still dials host `h`.
+   confirmed still dials host `h`. Only a consent change withdraws: an
+   ending (a cancel, a close, the engine dropped) keeps the last set, so
+   its final frames - a recovery withdraw, a ritual abort - still leave.
 
 Tor does not waive rule 3. Routing a clearnet relay over Tor hides the node's
 IP from the relay operator, but it is still a clearnet endpoint with a
