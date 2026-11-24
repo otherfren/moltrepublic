@@ -811,6 +811,8 @@ impl State {
             WorkspaceEvent::LockAmnesiaReply { to, nonce, touched, round } => {
                 self.lock_on_amnesia_reply(&from, &to, nonce, touched, round);
             }
+            WorkspaceEvent::BranchChoiceProposed { id, change } => self.receive_branch_card(&from, id.0, change),
+            WorkspaceEvent::BranchChoiceApproved { id, by, sig } => self.receive_branch_sig(id.0, &by, &sig),
             // dynamic mesh membership ❸: a relayed mesh announce — authenticate
             // the ANNOUNCER by MLS decryption (the event author is only the
             // relay) and extend this node's own mesh toward it. A nonce'd

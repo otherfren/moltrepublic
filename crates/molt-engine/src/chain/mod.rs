@@ -29,6 +29,8 @@ use crate::State;
 
 pub(crate) mod blob_parts;
 mod block_v2;
+pub(crate) mod branch;
+mod branch_run;
 mod checkpoint;
 mod governance;
 mod lock;
@@ -46,6 +48,10 @@ mod wiki_base;
 pub(crate) mod test_support;
 #[cfg(test)]
 mod block_identity_tests;
+#[cfg(test)]
+mod branch_tests;
+#[cfg(test)]
+mod branch_run_tests;
 #[cfg(test)]
 mod checkpoint_tests;
 #[cfg(test)]
@@ -160,6 +166,7 @@ pub(crate) use membership::{AnchorFirst, AttemptBook, NostrRekey, MINTED_TICKETS
 pub(crate) use membership::RECOVER_PART_MAX;
 pub(crate) use lock_wire::{LockMode, LockRuntime, LockSeams, CHAIN_LOCK_AVAILABLE, LOCK_CHAIN_UNSUPPORTED};
 pub(crate) use sync::{refusal_rule, PeerClaim};
+pub(crate) use branch_run::BranchRuntime;
 
 use verify::*;
 

@@ -234,6 +234,12 @@ pub(super) fn chain_block_view(block: &ChainBlock) -> molt_core::ChainBlockView 
             serde_json::Value::from(*upto),
             0,
         ),
+        ChainChange::BranchChosen { base_height, .. } => (
+            "branch",
+            String::new(),
+            serde_json::Value::from(*base_height),
+            0,
+        ),
     };
     molt_core::ChainBlockView {
         height: block.height,
@@ -570,6 +576,7 @@ fn verify_next(
                 ));
             }
         }
+        ChainChange::BranchChosen { .. } => super::branch::check_shape(block)?,
     }
     let signers = block_signers(&head.republic_id, &head.identities, block)?;
     if signers.len() < usize::from(head.rule_m) {
@@ -636,6 +643,9 @@ pub(crate) struct ChainWalk {
     /// The vault context of THIS chain, from its own genesis or anchor
     /// (plan 1.3.8); `None` outside a roster-v6 republic.
     vault: Option<VaultCtx>,
+    /// Link hash per height from the anchor up: a branch choice names
+    /// blocks below its predecessor.
+    pub(super) links: Vec<String>,
 }
 
 impl ChainWalk {
@@ -659,6 +669,7 @@ impl ChainWalk {
     /// (round 3, D9).
     pub(super) fn step(&mut self, block: &ChainBlock, held: Held<'_>) -> Result<(), String> {
         let (head, consumed) = verify_next(&self.head, block, &self.seen)?;
+        super::branch::check_on_walk(&self.links, block)?;
         consent_spends(&block.change, |m| walk_working_anchor(&self.running, m))
             .map_err(|why| format!("block {}: {why}", block.height))?;
         let cut = CutKind::of(&block.change);
@@ -704,6 +715,7 @@ impl ChainWalk {
         if let Some(id) = consumed {
             self.seen.insert(id);
         }
+        self.links.push(head.hash.clone());
         self.head = head;
         self.folded += 1;
         Ok(())
@@ -891,7 +903,8 @@ pub(crate) fn fold_one(
         ChainChange::Genesis { .. }
         | ChainChange::Checkpoint { .. }
         | ChainChange::CheckpointFolded { .. }
-        | ChainChange::CheckpointVault { .. } => {}
+        | ChainChange::CheckpointVault { .. }
+        | ChainChange::BranchChosen { .. } => {}
     }
     Ok(())
 }
@@ -1178,7 +1191,9 @@ pub(crate) fn walk_chain(blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
         folded: 1,
         folded_cut: false,
         vault: crate::vault::ctx_from_founding(*rule_m, identities),
+        links: Vec::new(),
     };
+    walk.links.push(walk.head.hash.clone());
     for block in rest {
         // a genesis-rooted projection carries no base commitment, so there
         // is no tree to fold onto
@@ -1425,7 +1440,9 @@ pub(crate) fn walk_suffix_chain(
         folded_cut: anchor_kind.wiki,
         // the anchor's own founding table (plan 1.3.8)
         vault: crate::vault::ctx_from_founding(blob.rule_m, &blob.founding_identities),
+        links: Vec::new(),
     };
+    walk.links.push(walk.head.hash.clone());
     for block in rest {
         walk.step(block, held)?;
     }

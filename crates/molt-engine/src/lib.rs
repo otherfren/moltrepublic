@@ -1297,6 +1297,8 @@ pub(crate) struct ChainProjection {
     pub(crate) request_seq: BTreeMap<MemberId, u64>,
     /// B7: the sealing lock (`chain/lock_wire.rs`).
     pub(crate) lock: chain::LockRuntime,
+    /// The branch choice (`chain/branch_run.rs`).
+    pub(crate) branch: chain::BranchRuntime,
 }
 
 /// Recovery on both sides of the open workspace: what this seat coordinates
@@ -2150,6 +2152,9 @@ impl State {
         if self.delivery.evicted && needs_the_group(&cmd) {
             return Err(MoltError::SeatEvicted);
         }
+        if self.branch_abandoned() && chain::branch::stopped_when_abandoned(&cmd) {
+            return Err(MoltError::Branch(chain::branch::ABANDONED.to_string()));
+        }
         match cmd {
             Command::AsOperator { operator, inner } => self.cmd_as_operator(operator, *inner),
             // chat.rs
@@ -2464,6 +2469,17 @@ impl State {
             Command::ReadUiState => Ok(Reply::UiState { snapshot: self.ui_state.clone() }),
             Command::UiAction { action } => self.cmd_ui_action(action),
             Command::ReadChain => self.cmd_read_chain(),
+            Command::BranchStatus => self.cmd_branch_status(),
+            Command::BranchExport { dest, passphrase } => self.cmd_branch_export(&dest, passphrase),
+            Command::BranchImport { path, passphrase } => self.cmd_branch_import(&path, passphrase),
+            Command::ChooseBranch { base_height, tip_hash, amnesia_ack } => {
+                self.cmd_choose_branch(base_height, &tip_hash, amnesia_ack)
+            }
+            Command::ApproveBranch { id, dropped_digest, amnesia_ack } => {
+                self.cmd_approve_branch(id.0, &dropped_digest, amnesia_ack)
+            }
+            Command::NetBranchExported { dest, error } => self.cmd_net_branch_exported(&dest, &error),
+            Command::NetBranchLoaded { bundle, error } => self.cmd_net_branch_loaded(&bundle, &error),
             Command::WikiList {
                 prefix,
                 cursor,

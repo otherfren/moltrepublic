@@ -21,6 +21,7 @@ use serde_json::Value;
 
 /// The republic's persistent-change chain: a single-branch, threshold-signed
 /// sequence of commit blocks (the founding is block 0). See [`chain`].
+pub mod branch;
 pub mod chain;
 pub mod kanban_calendar;
 pub mod kanban_dates;
@@ -39,7 +40,7 @@ pub mod wiki_refs;
 pub use operator::ChatOperator;
 pub use chain::{
     applied_lww_slot, approval_bytes, block_link_bytes, checkpoint_canonical_bytes, ChainBlock,
-    ChainChange, CheckpointState, MembershipOp, GENESIS_PREV,
+    ChainChange, CheckpointState, DroppedRun, MembershipOp, GENESIS_PREV,
 };
 
 /// A member of the republic (the holder of one threshold share). In this
@@ -3296,6 +3297,24 @@ pub enum WorkspaceEvent {
         #[serde(default)]
         known: Vec<HeightHash>,
     },
+    /// A branch choice was put forward (`docs/chain/chain_rescue_plan.md`
+    /// §8). Transport-only; unowed on the wire.
+    BranchChoiceProposed {
+        /// The card id.
+        id: ProposalId,
+        /// The [`chain::ChainChange::BranchChosen`] it seals.
+        change: ChainChange,
+    },
+    /// A seat signed a branch choice at the choice's own height (its tip
+    /// plus one). Transport-only; unowed on the wire.
+    BranchChoiceApproved {
+        /// The card id.
+        id: ProposalId,
+        /// The signer.
+        by: MemberId,
+        /// Its signature over the change's approval bytes.
+        sig: String,
+    },
     /// A membership change (a re-admission or an added seat) was put forward for
     /// threshold approval — the gossip that lets every member sign the SAME
     /// change. Transport-only, like `Committed` (`apply` is a no-op); the
@@ -4918,6 +4937,62 @@ pub enum Command {
     /// state hash itself; every receiver recomputes it from its own chain
     /// before co-signing (sign-what-you-see), and the block seals at m.
     ProposeCheckpoint,
+    /// The forks this node can prove, the open branch choice cards and
+    /// this seat's choices (`docs/chain/chain_rescue_plan.md` §8).
+    BranchStatus,
+    /// Write this seat's evidence (its branch from each fork point, the
+    /// open choice cards and their signatures) to a passphrase-sealed
+    /// bundle file. Runs off the actor; the outcome lands in the notice.
+    BranchExport {
+        /// Target file: absolute, or a bare name in the download directory.
+        dest: String,
+        /// The bundle passphrase (the export's policy).
+        passphrase: String,
+    },
+    /// Read a bundle another seat exported: its blocks verify standalone
+    /// against this republic's roster, its cards and signatures register.
+    BranchImport {
+        /// The bundle file.
+        path: String,
+        /// Its passphrase.
+        passphrase: String,
+    },
+    /// Propose keeping the branch whose block `tip_hash` is the tip, at the
+    /// fork point `base_height`. Answers the dropped list and its digest.
+    ChooseBranch {
+        /// The fork point.
+        base_height: u64,
+        /// The chosen tip's link hash.
+        tip_hash: String,
+        /// Act although this device was restored above the fork point.
+        #[serde(default)]
+        amnesia_ack: bool,
+    },
+    /// Sign a branch choice card. `dropped_digest` must equal the digest
+    /// this node computes (sign what you see).
+    ApproveBranch {
+        /// The card id.
+        id: ProposalId,
+        /// The digest of the dropped list the approver saw.
+        dropped_digest: String,
+        /// Sign although this device was restored above the fork point.
+        #[serde(default)]
+        amnesia_ack: bool,
+    },
+    /// The bundle task wrote the file (engine-internal).
+    NetBranchExported {
+        /// The written file.
+        dest: String,
+        /// "" on success, else the reason.
+        error: String,
+    },
+    /// The bundle task opened a file (engine-internal).
+    NetBranchLoaded {
+        /// The bundle's plaintext JSON ("" on failure).
+        bundle: String,
+        /// "" on success, else the reason.
+        error: String,
+    },
     /// Read a one-shot status summary of the group and surfaces.
     Status,
     /// Read the member table of the open workspace (Organization → Members):
@@ -7603,6 +7678,18 @@ pub enum Reply {
         #[serde(default)]
         stale_signers: Vec<StaleSigner>,
     },
+    /// `branch_status`.
+    Branches(Box<branch::BranchStatusView>),
+    /// `choose_branch`: the card, what it drops, and the digest an
+    /// approval names.
+    BranchProposed {
+        /// The card id.
+        id: ProposalId,
+        /// The dropped blocks.
+        dropped: Vec<branch::BranchBlockRow>,
+        /// Their digest.
+        digest: String,
+    },
 }
 
 /// Lifecycle state of a proposal (a deliberately collapsed subset of the full
@@ -8868,6 +8955,8 @@ pub fn unowed_on_the_wire(body: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::LockNack { .. }
             | WorkspaceEvent::LockAmnesiaAsk { .. }
             | WorkspaceEvent::LockAmnesiaReply { .. }
+            | WorkspaceEvent::BranchChoiceProposed { .. }
+            | WorkspaceEvent::BranchChoiceApproved { .. }
     )
 }
 
@@ -8986,6 +9075,10 @@ pub struct ChainSync {
     /// G3: a heal that makes no progress (none = healthy).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heal_stuck: Option<HealStuck>,
+    /// The chain chose another branch: this node stopped and rejoins by
+    /// link (`chain_rescue_plan.md` §6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abandoned: Option<branch::BranchAbandoned>,
 }
 
 /// One delivered block this node refused ([`ChainSync::refused`]).
@@ -9531,6 +9624,9 @@ pub enum MoltError {
     /// proposer: a further one would be dropped by every receiver.
     #[error("{0} open proposals - wait for a seal")]
     OpenProposalsCap(usize),
+    /// A branch choice refused (`chain_rescue_plan.md` §8).
+    #[error("branch: {0}")]
+    Branch(String),
     /// The engine task is gone or did not answer.
     #[error("engine: {0}")]
     Engine(String),

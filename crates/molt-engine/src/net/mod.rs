@@ -572,6 +572,8 @@ pub(crate) fn crosses_wire(event: &WorkspaceEvent) -> bool {
             | WorkspaceEvent::LockNack { .. }
             | WorkspaceEvent::LockAmnesiaAsk { .. }
             | WorkspaceEvent::LockAmnesiaReply { .. }
+            | WorkspaceEvent::BranchChoiceProposed { .. }
+            | WorkspaceEvent::BranchChoiceApproved { .. }
     )
 }
 
