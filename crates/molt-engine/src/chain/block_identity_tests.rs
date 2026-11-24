@@ -192,3 +192,71 @@ fn before_the_activation_a_second_attestation_is_a_fork() {
     assert_eq!(walter.chain.fork_decisions, 1, "a v1 variant is decided");
 }
 
+// --- S2: activation -------------------------------------------------------
+
+fn enable_payload() -> serde_json::Value {
+    serde_json::json!({ "op": "set_features", "value": format!("memory {BLOCK_V2_FEATURE}") })
+}
+
+/// Proposing and signing the enabling vote waits for every seat's
+/// capability; another feature vote does not.
+#[test]
+fn enabling_needs_every_seat_capability() {
+    let b = plain(1);
+    let mut petra = genesis_seat("petra", &b, b.blocks.clone());
+    petra.chain.block_v2_caps_override = Some(false);
+    let err = petra
+        .cmd_propose(Surface::Organization, enable_payload())
+        .expect_err("a seat cannot follow");
+    assert!(err.to_string().contains("older build"), "{err}");
+    let change = ChainChange::Applied { proposal_id: 7, surface: Surface::Organization, payload: enable_payload() };
+    assert!(petra.block_v2_enable_blocker(&change).is_some());
+    assert_eq!(petra.chain_sync().block_v2_wait, "a seat runs an older build");
+    let other = ChainChange::Applied {
+        proposal_id: 8,
+        surface: Surface::Organization,
+        payload: serde_json::json!({ "op": "set_features", "value": "memory quests" }),
+    };
+    assert!(petra.block_v2_enable_blocker(&other).is_none(), "another feature is not held");
+    petra.chain.block_v2_caps_override = Some(true);
+    assert!(petra.block_v2_enable_blocker(&change).is_none());
+    petra.cmd_propose(Surface::Organization, enable_payload()).expect("every seat can follow");
+}
+
+/// Without an announcement a seat counts as not capable.
+#[test]
+fn an_unheard_seat_keeps_it_off() {
+    let b = plain(1);
+    let petra = genesis_seat("petra", &b, b.blocks.clone());
+    assert!(petra.block_v2_not_capable().is_some_and(|w| w.ends_with("has not announced")));
+}
+
+/// A holder follows the chain block by block across the activation and
+/// reports it.
+#[test]
+fn a_holder_follows_the_chain_across_the_activation() {
+    let b = enabled(6);
+    let mut walter = chain_peer_3("walter", &plain(1));
+    for blk in &b.blocks[1..] {
+        walter.receive_block(blk.clone());
+    }
+    let head = walter.chain.head.as_ref().expect("head");
+    assert_eq!((head.height, head.hash.as_str()), (5, b.head_hash.as_str()));
+    assert_eq!(walter.chain_sync().block_v2_since, 2);
+    assert_eq!(walter.chain_sync().head_hash, v2_id(&b, &b.blocks[5]));
+}
+
+/// A rejoiner verifies a served v2 chain, full or anchored on a cut above
+/// the activation, to the same head identity.
+#[test]
+fn a_rejoiner_verifies_a_served_chain_after_the_activation() {
+    let mut b = enabled(4);
+    let state = checkpoint_state(&b.blocks, 3).expect("state");
+    let cut = b.seal(4, ChainChange::Checkpoint { upto: 3, state_hash: checkpoint_state_hash(&state) }, &SEATS3);
+    b.push(cut);
+    b.commit_applied(40, &["walter", "dora"]);
+    let (full, _) = verify_served(None, &b.blocks, Some(&b.republic_id)).expect("full");
+    let (anchored, _) = verify_served(Some(&state), &b.blocks[4..], Some(&b.republic_id)).expect("anchored");
+    assert_eq!(full.hash, anchored.hash);
+    assert_eq!(full.hash, v2_id(&b, &b.blocks[5]));
+}

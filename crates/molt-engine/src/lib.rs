@@ -1266,6 +1266,9 @@ pub(crate) struct ChainProjection {
     pub(crate) catchup_since: u64,
     /// Fork decisions since open (S1 diagnostics).
     pub(crate) fork_decisions: u64,
+    /// Test-only: every seat announced the v2 capability (or not).
+    #[cfg(test)]
+    pub(crate) block_v2_caps_override: Option<bool>,
     /// The latest fork decision (S1 diagnostics).
     pub(crate) last_fork: Option<molt_core::ForkDecision>,
     /// WP2: the head+1 at which each own standing signature was last
