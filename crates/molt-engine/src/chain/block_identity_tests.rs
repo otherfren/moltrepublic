@@ -485,3 +485,35 @@ fn before_the_activation_an_older_device_may_restore() {
     recover_request(&mut coord, &b, Vec::new());
     assert!(!coord.session.notice.starts_with("recover-refused"), "{}", coord.session.notice);
 }
+
+/// Review, the adversarial order: k valid seals at one height for other
+/// cards, released in DESCENDING identity order. Each one swaps the tip
+/// and re-signs every standing card; it ends on the lowest identity, the
+/// cost bounded by k x open cards.
+#[test]
+fn seals_released_in_descending_identity_order_converge() {
+    let b = enabled(2);
+    let mut petra = genesis_seat("petra", &b, b.blocks.clone());
+    let open: Vec<u64> = (0..5)
+        .map(|i| propose(&mut petra, Surface::Memory, serde_json::json!({ "op": "add_note", "title": format!("o{i}") })))
+        .collect();
+    let mut seals: Vec<ChainBlock> = (0..6u64)
+        .map(|i| {
+            let change = ChainChange::Applied { proposal_id: 700 + i, surface: Surface::Memory, payload: serde_json::json!({ "op": "add_note", "id": i }) };
+            b.seal(2, change, &["walter", "dora"])
+        })
+        .collect();
+    seals.sort_by_key(|s| std::cmp::Reverse(v2_id(&b, s)));
+    RECORDED_CHAIN.with(|r| r.borrow_mut().clear());
+    for (i, s) in seals.iter().enumerate() {
+        wire(&mut petra, "dora", 100 + u64::try_from(i).expect("small"), WorkspaceEvent::Committed(s.clone()));
+    }
+    let lowest = seals.last().expect("seals");
+    assert_eq!(petra.chain.head.as_ref().expect("head").hash, v2_id(&b, lowest), "the lowest identity holds");
+    assert_eq!(petra.chain.fork_decisions, 5, "one swap per later seal");
+    let resigns = RECORDED_CHAIN.with(|r| r.borrow().iter().filter(|(k, h)| *k == "approved" && *h == 3).count());
+    assert_eq!(resigns, seals.len() * open.len(), "every head move re-signs every standing card once");
+    for id in &open {
+        assert!(petra.own_signature_stands(*id), "{id} stands on the final tip");
+    }
+}
