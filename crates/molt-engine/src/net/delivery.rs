@@ -984,6 +984,10 @@ impl State {
             }
             // anything known above the frontier: ask for the listing of it
             let above = !hold.ahead.is_empty() || !hold.held.is_empty() || !hold.missing.is_empty();
+            // an ask the sender left unanswered ends the probe at the next
+            if hold.probe && !above && hold.probe_asks >= if hold.answers { PROBE_TRIES } else { 1 } {
+                hold.probe = false;
+            }
             let list_due = (above || hold.probe)
                 && hold.listing.is_none()
                 && hold.listing_asked_at.map_or(true, |t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
@@ -996,7 +1000,6 @@ impl State {
                         hold.listing_asked_at = Some(now);
                         if hold.probe && !above {
                             hold.probe_asks = hold.probe_asks.saturating_add(1);
-                            hold.probe = hold.probe_asks < if hold.answers { PROBE_TRIES } else { 1 };
                         }
                     }
                 }

@@ -205,6 +205,7 @@ async fn a_restart_that_lost_a_far_ahead_hold_shows_it_is_behind_and_fetches_the
     let ws_b = read_session(&b).await.active_workspace.clone();
     b.execute(Command::CloseWorkspace).await.expect("close b");
     b.__hold_gap_wants(false);
+    let reopened = Instant::now();
     b.execute(Command::OpenWorkspace { id: ws_b }).await.expect("reopen b");
 
     // (i) behind, visibly
@@ -219,8 +220,9 @@ async fn a_restart_that_lost_a_far_ahead_hold_shows_it_is_behind_and_fetches_the
         assert!(Instant::now() < deadline, "b never showed it is behind: rows={:?} health={health}", s.inbound_held);
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    // (ii) the tail and the proposal, by asking
-    let deadline = Instant::now() + Duration::from_secs(600);
+    // (ii) the tail and the proposal, by asking - well before the sender's
+    // pinned 600 s round could bring it
+    let deadline = reopened + Duration::from_secs(300);
     while !knows_far(&b).await {
         assert!(Instant::now() < deadline, "the proposal never reached b");
         tokio::time::sleep(Duration::from_millis(500)).await;
