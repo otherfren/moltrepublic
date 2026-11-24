@@ -679,3 +679,103 @@ pub async fn signed_on_head(w: &WalletHandle, rid: &str, height: u64, change: &m
     };
     molt_core::chain::approval_bytes_v3(rid, height, &s.chain_sync.head_hash, change)
 }
+
+/// `askers` hold `sender`'s stream behind a lost `t0` while `span` chats
+/// arrive (with `propose`, a proposal after them), asking nothing and
+/// settling nothing; then each closes and reopens: what it held is gone and
+/// the relay copies of it no longer open. Returns the reopen instant.
+#[allow(dead_code)]
+pub async fn hold_tail_and_reopen(
+    sender: &WalletHandle,
+    askers: &[&WalletHandle],
+    span: usize,
+    propose: bool,
+) -> std::time::Instant {
+    for b in askers {
+        b.__hold_gap_wants(true);
+        b.__drop_inbound_chat("t0");
+    }
+    for i in 0..span {
+        sender
+            .execute(Command::Chat {
+                body: format!("t{i}"),
+                quote: None,
+                channel: molt_core::ChannelRef::Group,
+            })
+            .await
+            .expect("chat");
+    }
+    if propose {
+        sender
+            .execute(Command::Propose {
+                surface: molt_core::Surface::Organization,
+                payload: serde_json::json!({"op": "set_name", "value": "Far"}),
+            })
+            .await
+            .expect("propose");
+    }
+    // a seam holds the gap beat still, so this wait is not a race
+    for b in askers {
+        let deadline = std::time::Instant::now() + Duration::from_secs(600);
+        loop {
+            let held = match b.execute(Command::Status).await.expect("status") {
+                molt_core::Reply::Status(s) => s.inbound_held.iter().map(|h| h.held).max().unwrap_or(0),
+                other => panic!("unexpected: {other:?}"),
+            };
+            if usize::try_from(held).unwrap_or(usize::MAX) + 1 >= span {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the span was never held: {held}");
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    let mut ids = Vec::new();
+    for b in askers {
+        ids.push(read_session(b).await.active_workspace.clone());
+        b.execute(Command::CloseWorkspace).await.expect("close");
+        b.__hold_gap_wants(false);
+    }
+    let reopened = std::time::Instant::now();
+    for (b, id) in askers.iter().zip(ids) {
+        b.execute(Command::OpenWorkspace { id }).await.expect("reopen");
+    }
+    reopened
+}
+
+/// Wait until `w` shows the chats `t0..t{span}`: it must say it is behind
+/// on `sender` within `grace`, and on every look from then on while any is
+/// missing. The elapsed time since `from`.
+#[allow(dead_code)]
+pub async fn fetches_the_tail_and_says_so(
+    w: &WalletHandle,
+    sender: &str,
+    span: usize,
+    from: std::time::Instant,
+    grace: Duration,
+    within: Duration,
+) -> Duration {
+    let want: Vec<String> = (0..span).map(|i| format!("t{i}")).collect();
+    let mut shown = false;
+    loop {
+        // the status first: a tail completing between the two reads must
+        // not read as "short and not behind"
+        let behind = match w.execute(Command::Status).await.expect("status") {
+            molt_core::Reply::Status(s) => s.behind.iter().any(|m| m == sender),
+            other => panic!("unexpected: {other:?}"),
+        };
+        let have: Vec<String> = read_chat(w)
+            .await
+            .iter()
+            .filter_map(|r| r.get("body").and_then(|v| v.as_str()).map(str::to_string))
+            .collect();
+        let missing = want.iter().filter(|b| !have.contains(b)).count();
+        if missing == 0 {
+            return from.elapsed();
+        }
+        assert!(behind || !shown, "{missing} chats short, and behind was cleared");
+        shown |= behind;
+        assert!(shown || from.elapsed() < grace, "{missing} chats short, never shown behind");
+        assert!(from.elapsed() < within, "{missing} chats never arrived");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}

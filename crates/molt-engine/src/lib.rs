@@ -412,8 +412,15 @@ impl WalletHandle {
         self.drop_seam.skip_rekey_reset.store(skip, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Test seam: this seat asks no sender for gaps or listings, as during
-    /// a long relay replay. No `Command` reaches it.
+    /// Test seam: the next `n` listing asks of this seat are lost on the
+    /// way. No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __drop_listing_asks(&self, n: u64) {
+        self.drop_seam.drop_list_asks.store(n, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: this seat asks no sender for gaps or listings and settles
+    /// no gap, as during a long relay replay. No `Command` reaches it.
     #[doc(hidden)]
     pub fn __hold_gap_wants(&self, on: bool) {
         self.drop_seam.hold_wants.store(on, std::sync::atomic::Ordering::SeqCst);
@@ -974,6 +981,8 @@ pub(crate) struct DeliveryState {
     pub(crate) probed: std::collections::BTreeSet<MemberId>,
     /// Senders this seat is known to be behind on (health surface).
     pub(crate) behind: Vec<MemberId>,
+    /// The own outbox's spent budget holds a tail: the owed seats, since.
+    pub(crate) resend_held: Option<(Vec<MemberId>, u64)>,
     /// Per sender: repeats a legacy window drops (`net/delivery.rs`).
     /// Runtime-only.
     pub(crate) dups: std::collections::HashMap<MemberId, net::DupEpisode>,
@@ -2663,6 +2672,7 @@ impl State {
                 reason,
                 generation,
             } => self.cmd_net_send_failed(member, reason, generation),
+            Command::NetResendHeld { owed, generation } => self.cmd_net_resend_held(owed, generation),
             Command::NetLinkUp { member, generation } => {
                 self.cmd_net_link_up(member, generation)
             }

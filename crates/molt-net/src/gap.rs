@@ -46,7 +46,8 @@ pub struct GapWant {
     pub range: Option<(u64, u64)>,
 }
 
-/// The sender's own ackable seqs in `(after, through]`, complete.
+/// The sender's own ackable seqs in `(after, through]`, complete;
+/// `through == after` with nothing listed says the log ends at `after`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GapListing {
     /// Exclusive lower bound, as asked.
@@ -208,7 +209,9 @@ impl GapFrame {
             return Err(GapError::BadSeqs);
         }
         if a.listing.as_ref().is_some_and(|l| {
-            l.after >= l.through
+            // `after == through`: "nothing above", an empty listing only
+            l.after > l.through
+                || (l.after == l.through && !l.own.is_empty())
                 || l.own.len() > GAP_LIST_MAX
                 || l.own.iter().any(|s| *s <= l.after || *s > l.through)
         }) {
@@ -250,6 +253,12 @@ mod tests {
         assert_eq!(GapFrame::from_frame(&r.to_frame()), Ok(GapFrame::Want(r)));
         let stray = GapAnswer::listing("b".into(), "a".into(), GapListing { after: 10, through: 20, own: vec![21] });
         assert_eq!(GapFrame::from_frame(&stray.to_frame()), Err(GapError::BadRange));
+        let level = GapAnswer::listing("b".into(), "a".into(), GapListing { after: 10, through: 10, own: vec![] });
+        assert_eq!(GapFrame::from_frame(&level.to_frame()), Ok(GapFrame::Answer(level)), "nothing above");
+        let empty_lie = GapAnswer::listing("b".into(), "a".into(), GapListing { after: 10, through: 10, own: vec![10] });
+        assert_eq!(GapFrame::from_frame(&empty_lie.to_frame()), Err(GapError::BadRange));
+        let behind = GapAnswer::listing("b".into(), "a".into(), GapListing { after: 10, through: 9, own: vec![] });
+        assert_eq!(GapFrame::from_frame(&behind.to_frame()), Err(GapError::BadRange));
         let mut big = GAP_WANT_TAG.to_vec();
         big.extend(std::iter::repeat_n(b' ', GAP_MAX_BYTES + 1));
         assert!(matches!(GapFrame::from_frame(&big), Err(GapError::TooBig(_))));

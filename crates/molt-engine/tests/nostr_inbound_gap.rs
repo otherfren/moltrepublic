@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::{found_pair, read_chat, read_session};
+use common::{fetches_the_tail_and_says_so, found_pair, hold_tail_and_reopen, read_chat, read_session, wait_for};
 use std::time::{Duration, Instant};
 
 use molt_core::Command;
@@ -180,56 +180,116 @@ async fn a_restart_that_lost_a_far_ahead_hold_shows_it_is_behind_and_fetches_the
     tokio::time::sleep(Duration::from_secs(5)).await; // b's sheet lands
 
     const SPAN: usize = 1_040;
-    b.__hold_gap_wants(true);
-    b.__drop_inbound_chat("t0");
-    for i in 0..SPAN {
-        say(&a, &format!("t{i}")).await;
-    }
-    a.execute(Command::Propose {
-        surface: molt_core::Surface::Organization,
-        payload: serde_json::json!({"op": "set_name", "value": "Far"}),
-    })
-    .await
-    .expect("propose");
-    let deadline = Instant::now() + Duration::from_secs(120);
-    loop {
-        let held = status(&b).await.inbound_held.iter().map(|h| h.held).max().unwrap_or(0);
-        if usize::try_from(held).unwrap_or(usize::MAX) >= SPAN {
-            break;
-        }
-        assert!(Instant::now() < deadline, "b never held the span: {held}");
+    let reopened = hold_tail_and_reopen(&a, &[&b], SPAN, true).await;
+    // well before the sender's pinned 600 s round could bring anything
+    let took = fetches_the_tail_and_says_so(&b, "petra", SPAN, reopened, Duration::from_secs(30), Duration::from_secs(500)).await;
+    eprintln!("tail_after={took:?}");
+    assert!(knows_far(&b).await, "the proposal came with the tail");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !status(&b).await.behind.is_empty() {
+        assert!(Instant::now() < deadline, "level, but still shown behind");
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    assert!(!knows_far(&b).await, "the proposal is held, not applied");
-
-    let ws_b = read_session(&b).await.active_workspace.clone();
-    b.execute(Command::CloseWorkspace).await.expect("close b");
-    b.__hold_gap_wants(false);
-    let reopened = Instant::now();
-    b.execute(Command::OpenWorkspace { id: ws_b }).await.expect("reopen b");
-
-    // (i) behind, visibly
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let s = status(&b).await;
-        let row = s.inbound_held.iter().any(|h| h.member == "petra" && h.missing > 0);
-        let health = format!("{:?}", read_session(&b).await.net_health);
-        if row && health.contains("behind") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "b never showed it is behind: rows={:?} health={health}", s.inbound_held);
-        tokio::time::sleep(Duration::from_millis(250)).await;
-    }
-    // (ii) the tail and the proposal, by asking - well before the sender's
-    // pinned 600 s round could bring it
-    let deadline = reopened + Duration::from_secs(300);
-    while !knows_far(&b).await {
-        assert!(Instant::now() < deadline, "the proposal never reached b");
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    let want: Vec<String> = (0..SPAN).map(|i| format!("t{i}")).collect();
-    assert!(shows_all(&b, &want, Duration::from_secs(120)).await.is_some(), "the chat tail");
 
     a.execute(Command::CloseWorkspace).await.expect("close a");
     b.execute(Command::CloseWorkspace).await.expect("close b");
+}
+
+/// The first listing ask of the reopened seat is lost on the way: the
+/// probe asks again and the tail arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_probe_ask_is_asked_again() {
+    backed_off_senders();
+    let (_relay, url) = store_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b) = found_pair(tmp.path(), &[&url], "Gap").await;
+    say(&a, "warm").await;
+    assert!(shows_all(&b, &["warm".to_string()], Duration::from_secs(30)).await.is_some());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    b.__drop_listing_asks(1);
+    let reopened = hold_tail_and_reopen(&a, &[&b], 40, false).await;
+    fetches_the_tail_and_says_so(&b, "petra", 40, reopened, Duration::from_secs(60), Duration::from_secs(300)).await;
+
+    a.execute(Command::CloseWorkspace).await.expect("close a");
+    b.execute(Command::CloseWorkspace).await.expect("close b");
+}
+
+/// Three seats: the founder petra and the joiners walter and vera.
+async fn found_trio(root: &std::path::Path, url: &str) -> (WalletHandle, WalletHandle, WalletHandle) {
+    let a = common::engine(&root.join("founder"));
+    common::adopt_relay(&a, url).await;
+    a.execute(Command::CreateStart {
+        name: "Gap".to_string(),
+        member: "petra".to_string(),
+        threshold: 2,
+        members: 3,
+        relays: Vec::new(),
+    })
+    .await
+    .expect("create start");
+    let s = wait_for(&a, "both seat links", |s| {
+        s.create.seats.len() == 2 && s.create.seats.iter().all(|x| molt_engine::FoundingInvite::parse(&x.link).is_ok())
+    })
+    .await;
+    let links: Vec<String> = s.create.seats.iter().map(|x| x.link.clone()).collect();
+    let mut joiners = Vec::new();
+    for (name, link) in ["walter", "vera"].iter().zip(links) {
+        let w = common::engine(&root.join(name));
+        common::adopt_relay(&w, url).await;
+        w.execute(Command::JoinStart { invite: link, member: (*name).to_string(), relays: Vec::new() })
+            .await
+            .expect("join");
+        joiners.push(w);
+    }
+    wait_for(&a, "both joins", |s| s.create.can_propose).await;
+    a.execute(Command::CreatePropose { name: "Gap".to_string(), agenda: String::new(), features: vec!["memory".to_string()] })
+        .await
+        .expect("charter");
+    let seed = read_session(&a).await.create.seed.clone();
+    a.execute(Command::ConfirmSeedBackup { phrase: seed }).await.expect("backup");
+    for w in &joiners {
+        wait_for(w, "the charter", |s| s.join.awaiting_ratify).await;
+        w.execute(Command::JoinConfirmCharter).await.expect("ratify");
+        let seed = read_session(w).await.join.seed.clone();
+        w.execute(Command::ConfirmSeedBackup { phrase: seed }).await.expect("backup");
+    }
+    wait_for(&a, "the seal", |s| s.create.run.outcome == 1).await;
+    a.execute(Command::CreateFinish).await.expect("finish");
+    for w in &joiners {
+        wait_for(w, "the join seal", |s| s.join.run.outcome == 1 && !s.join.sealed_id.is_empty()).await;
+        w.execute(Command::JoinFinish).await.expect("join finish");
+        wait_for(w, "the joiner to enter", |s| s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()).await;
+    }
+    let v = joiners.pop().expect("vera");
+    let b = joiners.pop().expect("walter");
+    (a, b, v)
+}
+
+/// Two seats probe one sender at once: they share its gap budget, so a
+/// page fills slower than the 60 s order bound. Both get the whole tail,
+/// and both say they are behind until they have it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_seats_probing_one_sender_both_get_the_tail() {
+    backed_off_senders();
+    let (_relay, url) = store_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, v) = found_trio(tmp.path(), &url).await;
+    say(&a, "warm").await;
+    for w in [&b, &v] {
+        assert!(shows_all(w, &["warm".to_string()], Duration::from_secs(60)).await.is_some());
+    }
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    const SPAN: usize = 600;
+    let reopened = hold_tail_and_reopen(&a, &[&b, &v], SPAN, false).await;
+    let (tb, tv) = tokio::join!(
+        fetches_the_tail_and_says_so(&b, "petra", SPAN, reopened, Duration::from_secs(30), Duration::from_secs(580)),
+        fetches_the_tail_and_says_so(&v, "petra", SPAN, reopened, Duration::from_secs(30), Duration::from_secs(580)),
+    );
+    eprintln!("walter_after={tb:?} vera_after={tv:?}");
+
+    for w in [&a, &b, &v] {
+        w.execute(Command::CloseWorkspace).await.expect("close");
+    }
 }

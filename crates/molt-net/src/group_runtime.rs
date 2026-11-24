@@ -112,6 +112,27 @@ struct GapAsks {
     wake: tokio::sync::Notify,
 }
 
+/// Test seam: ms slept before each listing answer and each re-published
+/// gap frame (`0` = production).
+static GAP_LIST_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GAP_RESEND_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test seam: a slow answering sender - every listing answer and every
+/// re-published gap frame of every runtime in this process waits this long.
+#[doc(hidden)]
+pub fn __set_gap_delays(listing: Duration, resend: Duration) {
+    let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+    GAP_LIST_DELAY_MS.store(ms(listing), std::sync::atomic::Ordering::SeqCst);
+    GAP_RESEND_DELAY_MS.store(ms(resend), std::sync::atomic::Ordering::SeqCst);
+}
+
+async fn gap_delay(ms: &std::sync::atomic::AtomicU64) {
+    let ms = ms.load(std::sync::atomic::Ordering::SeqCst);
+    if ms > 0 {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
+}
+
 /// Test seam for the stall backoff, packed ms `first << 32 | cap` (`0` =
 /// production).
 static RESEND_BACKOFF_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -658,6 +679,13 @@ async fn gap_loop<L: OutboxLog, S: StateStore>(
                     };
                     tracing::debug!(%to, after, through, own = own.len(), "gap_listed");
                     let listing = crate::gap::GapListing { after, through, own };
+                    gap_delay(&GAP_LIST_DELAY_MS).await;
+                    publish_gap_answer(&channel, &mls, crate::gap::GapAnswer::listing(me.clone(), to.clone(), listing)).await;
+                } else {
+                    // nothing above the asker's frontier: say so, or its
+                    // open probe keeps asking
+                    let listing = crate::gap::GapListing { after, through: after, own: Vec::new() };
+                    gap_delay(&GAP_LIST_DELAY_MS).await;
                     publish_gap_answer(&channel, &mls, crate::gap::GapAnswer::listing(me.clone(), to.clone(), listing)).await;
                 }
             }
@@ -711,6 +739,7 @@ async fn gap_loop<L: OutboxLog, S: StateStore>(
             GAP_REPUBLISHED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             w.1 += 1;
             minute.1 += 1;
+            gap_delay(&GAP_RESEND_DELAY_MS).await;
             match channel.publish_frame(&frame.exporter, &frame.ciphertext).await {
                 Ok((_, report)) if !report.accepted.is_empty() => resent.push(seq),
                 Ok(_) => tracing::debug!(%to, seq, "gap resend accepted by no relay"),
@@ -1115,10 +1144,6 @@ async fn persist_cursor<S: StateStore>(store: &S, start: u64, published_through:
         .await;
 }
 
-/// The own seat's send-failure reason while the hourly resend budget holds
-/// a tail some peers are owed; the peers follow it.
-pub const BUDGET_SPENT: &str = "resend budget spent";
-
 /// The stall clock's verdict on one fired round.
 #[derive(Debug)]
 enum StallRound {
@@ -1271,7 +1296,7 @@ impl HeldFrame {
 /// outbox is backing off. ANCHORED (`since`), not recomputed per iteration:
 /// traffic must not starve the timer — a chatty republic would otherwise
 /// never resend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct StallClock {
     last_floor: Option<u64>,
     backoff: Backoff,
@@ -1283,8 +1308,8 @@ struct StallClock {
     granted: u32,
     /// The last round was skipped: nobody owed can be reached.
     quiet: Option<Quiet>,
-    /// The spent budget was reported on the health surface.
-    spent_told: bool,
+    /// The owed seats last reported with a spent budget.
+    spent_told: Vec<MemberId>,
 }
 
 /// Why a round was skipped.
@@ -1320,7 +1345,7 @@ impl StallClock {
             since: None,
             granted: 0,
             quiet: None,
-            spent_told: false,
+            spent_told: Vec::new(),
         }
     }
 
@@ -1768,8 +1793,8 @@ where
             .await;
         let f = match round {
             StallRound::NoFloor => {
-                if std::mem::take(&mut stall.spent_told) {
-                    tell(&stop, sink.send_ok(&cfg.member)).await;
+                if !std::mem::take(&mut stall.spent_told).is_empty() {
+                    tell(&stop, sink.resend_held(&[])).await;
                 }
                 stall.disarm();
                 continue;
@@ -1797,17 +1822,16 @@ where
                     floor = f,
                     "the resend budget for this hour is spent — holding the tail"
                 );
-                if !stall.spent_told && !owed.is_empty() {
-                    stall.spent_told = true;
-                    let reason = format!("{BUDGET_SPENT}, owed: {}", owed.join(", "));
-                    tell(&stop, sink.send_failed(&cfg.member, &reason)).await;
+                if stall.spent_told != owed {
+                    tell(&stop, sink.resend_held(&owed)).await;
+                    stall.spent_told = owed;
                 }
                 stall.escalate(tokio::time::Instant::now());
                 continue;
             }
             StallRound::Granted { floor, heal } => {
-                if std::mem::take(&mut stall.spent_told) {
-                    tell(&stop, sink.send_ok(&cfg.member)).await;
+                if !std::mem::take(&mut stall.spent_told).is_empty() {
+                    tell(&stop, sink.resend_held(&[])).await;
                 }
                 if let Some(q) = stall.quiet.take() {
                     tracing::info!(me = %cfg.member, was = q.reason(), floor, "outbox=resumed");

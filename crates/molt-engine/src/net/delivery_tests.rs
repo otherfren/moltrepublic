@@ -464,3 +464,51 @@ fn an_unowed_lock_frame_never_takes_an_owed_link() {
     let frontier = st.delivery.accepted["bob"].frontier;
     assert!(frontier >= 4, "the frontier passes the owed envelope: {frontier}");
 }
+
+/// The spent resend budget has its own field: it names the owed seats in
+/// the health and the status, keeps its start when the seats change,
+/// leaves a real publish failure alone, clears on an empty report and
+/// never counts toward the locked-out verdict.
+#[test]
+fn a_held_resend_is_its_own_note_and_never_a_lockout() {
+    let mut st = presence_fixture();
+    at(&mut st, 0);
+    let healthy = molt_net::group_runtime::GroupHealth { subscribed: true, ..Default::default() };
+    st.delivery.send_stuck.insert("ada".to_string(), "no relay accepted the frame".to_string());
+    st.cmd_net_resend_held(vec!["bob".to_string()], None).expect("ack");
+    st.apply_group_health(healthy.clone());
+    match &st.session.net_health {
+        molt_core::NetHealth::Degraded { reason } => {
+            assert!(reason.contains("resend budget spent, owed: bob"), "{reason}");
+            assert!(reason.contains("no relay accepted"), "the publish failure stays: {reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    let status = st.status();
+    assert_eq!((status.resend_held, status.resend_held_since), (vec!["bob".to_string()], T));
+    at(&mut st, 50);
+    st.cmd_net_resend_held(vec!["bob".to_string(), "cid".to_string()], None).expect("ack");
+    assert_eq!(st.delivery.resend_held, Some((vec!["bob".to_string(), "cid".to_string()], T)), "the start stays");
+    st.delivery.send_stuck.clear();
+    st.apply_group_health(molt_net::group_runtime::GroupHealth { live_opaque: 9, ..healthy.clone() });
+    assert!(!st.delivery.locked_out_noted, "a spent budget is no lockout");
+    st.cmd_net_resend_held(Vec::new(), None).expect("ack");
+    st.apply_group_health(healthy);
+    assert_eq!(st.session.net_health, molt_core::NetHealth::Ok);
+    assert!(st.status().resend_held.is_empty());
+}
+
+/// A listing wider than the asked range is refused, and a stale page
+/// never replaces the newer one already held.
+#[test]
+fn a_lying_or_stale_listing_changes_nothing() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, replay_env(3));
+    let (bob, ada) = ("bob".to_string(), "ada".to_string());
+    st.cmd_net_gap_listed(&bob, &ada, 1, 2 + molt_core::ACCEPT_WINDOW_BITS, vec![2, 3]);
+    assert_eq!(st.listing_through_for_test("bob"), None, "a range wider than a window is refused");
+    st.cmd_net_gap_listed(&bob, &ada, 1, 400, vec![2, 3, 400]);
+    st.cmd_net_gap_listed(&bob, &ada, 1, 200, vec![2, 3]);
+    assert_eq!(st.listing_through_for_test("bob"), Some(400), "the stale page did not replace the newer one");
+}
