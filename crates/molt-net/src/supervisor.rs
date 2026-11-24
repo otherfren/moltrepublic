@@ -136,14 +136,6 @@ impl MlsChannel {
         Some(GroupFrame { ciphertext, exporter, stamp })
     }
 
-    /// Whether `env` is the shelved own re-key (delivery guarantee §11).
-    pub(crate) fn shelved(&self, env: &EventEnvelope) -> bool {
-        let WorkspaceEvent::MlsCommit { commit, .. } = &env.body else {
-            return false;
-        };
-        hex::decode(commit).is_ok_and(|bytes| self.member.lock().is_ok_and(|m| m.is_shelved(&bytes)))
-    }
-
     /// Whether a merged commit removed this node's own leaf.
     pub(crate) fn evicted(&self) -> bool {
         self.member.lock().is_ok_and(|m| m.is_evicted())
