@@ -2692,3 +2692,60 @@ fn a_bystander_flags_a_restore_until_its_rekey_merges() {
     walter.after_block_applied(&second);
     assert!(!unfinished(&walter, "dora"), "a re-key ahead of its block counts");
 }
+
+/// A restore whose block loses its height to another decision returns to
+/// the vote on the seat that had applied it, with its change registered
+/// again, and seals at the next height (lock off).
+#[test]
+fn a_restore_displaced_by_a_tip_swap_returns_to_the_vote() {
+    use molt_core::{ProposalId, ProposalState, WorkspaceEvent};
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut coord = chain_signer("petra", &b, b.blocks.clone());
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let ticket = "recovery-ticket-xyz";
+    let kp_hex = &kp_hex_for(&b, "dora");
+    let proof = crate::make_seat_proof(b.key("dora"), ticket, kp_hex, &b.republic_id, "", &[]);
+    let id = coord
+        .verify_and_propose_restore("dora", &b.pk("dora"), kp_hex, ticket, &proof, "", &[], "", "")
+        .expect("proposes");
+    let env = walter.make_env(
+        "petra".to_string(),
+        WorkspaceEvent::MembershipProposed {
+            id: ProposalId(id),
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk: b.pk("dora"),
+            nostr_pk: None,
+            relays: Vec::new(),
+            consent: None,
+        },
+    );
+    walter.apply(&env);
+    walter.receive_membership_proposal(id, MembershipOp::Restored, "dora", &b.pk("dora"), None, Vec::new(), None);
+    let petra_sig = coord.chain.pending_sigs[&id].sigs.iter().find(|a| a.member == "petra").expect("petra").sig.clone();
+    walter.receive_approval(id, "petra", 1, &petra_sig);
+    walter.cmd_approve(ProposalId(id), None).expect("approves");
+    assert_eq!(walter.proposals[&id].state, ProposalState::Applied, "the restore sealed at 1");
+    let restored = walter.chain.blocks[1].clone();
+    // another decision at 1 with a lower hash takes the tip
+    let other = (0..20u64)
+        .map(|i| {
+            let change = ChainChange::Applied { proposal_id: 900 + i, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": i }) };
+            b.seal(1, change, &["petra", "dora"])
+        })
+        .find(|c| block_hash(&b.republic_id, c) < block_hash(&b.republic_id, &restored))
+        .expect("a lower contender");
+    wire(&mut walter, "dora", 50, WorkspaceEvent::Committed(other));
+    assert_ne!(walter.chain.blocks[1].change, restored.change, "the restore lost its height");
+    assert_eq!(walter.proposals[&id].state, ProposalState::Proposed, "back to the vote");
+    assert!(walter.chain.proposal_changes.contains_key(&id), "its change is registered again");
+    assert!(walter.chain.own_approvals.contains(&id), "walter's stance stands");
+    // petra's signature at the new height seals it again
+    let change = walter.proposal_change(id).expect("change");
+    let bytes = walter.signing_bytes_at(2, &change);
+    let sig2 = molt_storage::identity_sign(b.key("petra"), &bytes);
+    walter.receive_approval(id, "petra", 2, &sig2);
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 2, "re-sealed at 2");
+    assert_eq!(walter.proposals[&id].state, ProposalState::Applied);
+    verify_chain(&walter.chain.blocks).expect("verifies");
+}
