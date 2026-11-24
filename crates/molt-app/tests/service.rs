@@ -264,3 +264,194 @@ fn no_token_binds_no_mcp_port_and_the_node_stays_up() {
         assert_eq!(node.wait_exit(15), Some(0), "{}", node.stderr());
     }
 }
+
+/// One MCP session to a seat, kept open across calls.
+struct Mcp {
+    stream: TcpStream,
+    reader: BufReader<TcpStream>,
+    id: u64,
+}
+
+impl Mcp {
+    fn open(port: u16) -> Mcp {
+        let stream = connect(port);
+        stream.set_read_timeout(Some(Duration::from_secs(60))).expect("timeout");
+        let reader = BufReader::new(stream.try_clone().expect("clone"));
+        let mut mcp = Mcp { stream, reader, id: 0 };
+        mcp.rpc("initialize", serde_json::json!({ "token": TOKEN }));
+        mcp
+    }
+
+    fn rpc(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.id += 1;
+        let mut line = serde_json::json!({"jsonrpc":"2.0","id":self.id,"method":method,"params":params}).to_string();
+        line.push('\n');
+        self.stream.write_all(line.as_bytes()).expect("write");
+        loop {
+            let mut resp = String::new();
+            self.reader.read_line(&mut resp).expect("read");
+            let v: serde_json::Value = serde_json::from_str(&resp).expect("json");
+            if v["id"] == serde_json::json!(self.id) {
+                return v;
+            }
+        }
+    }
+
+    /// `Ok(value)` or the refusal text.
+    fn tool(&mut self, name: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
+        let r = self.rpc("tools/call", serde_json::json!({ "name": name, "arguments": args }));
+        let text = r["result"]["content"][0]["text"].as_str().unwrap_or("").to_string();
+        if r["result"]["isError"] == serde_json::json!(true) || r.get("error").is_some() {
+            return Err(format!("{text}{}", r["error"]));
+        }
+        Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)))
+    }
+
+    fn call(&mut self, name: &str, args: serde_json::Value) -> serde_json::Value {
+        self.tool(name, args).unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    fn wait(&mut self, what: &str, secs: u64, pred: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_secs(secs);
+        loop {
+            let s = self.call("read_session", serde_json::json!({}));
+            if pred(&s) {
+                return s;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    fn chat_bodies(&mut self) -> Vec<String> {
+        let v = self.call("read_state", serde_json::json!({ "surface": "chat" }));
+        v["applied"]
+            .as_array()
+            .map(|rows| rows.iter().filter_map(|r| r["body"].as_str().map(str::to_string)).collect())
+            .unwrap_or_default()
+    }
+}
+
+/// A headless seat with `relay` confirmed and clearnet on.
+fn relay_seat(dir: &Path, relay: &str) -> Node {
+    let port = free_port();
+    let mcp_tcp = free_port();
+    let config = dir.join("config.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "[node]\nheadless = true\n\
+             [storage]\nworkspace_dir = \"{}\"\n\
+             [mcp]\nport = {port}\nallow = \"127.0.0.1\"\ntoken = \"{TOKEN}\"\n\
+             [transport.nostr]\nclearnet_enabled = true\n\
+             [[transport.nostr.relay]]\nurl = \"{relay}\"\nconfirmed = true\n",
+            dir.join("ws").display()
+        ),
+    )
+    .expect("write config");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_moltd"))
+        .arg("--config")
+        .arg(&config)
+        .arg("--mcp-tcp")
+        .arg(format!("127.0.0.1:{mcp_tcp}"))
+        .env("RUST_LOG", "info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn moltd");
+    let stderr = Arc::new(Mutex::new(Vec::new()));
+    let mut pipe = child.stderr.take().expect("stderr pipe");
+    let sink = stderr.clone();
+    std::thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = pipe.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            sink.lock().expect("stderr lock").extend_from_slice(&buf[..n]);
+        }
+    });
+    Node { child, port, mcp_tcp, stderr }
+}
+
+/// **A SIGTERM right after the last `chat_send` delivers every message**
+/// (delivery guarantee §12): the close's final pass publishes what was
+/// recorded before the stop, so the other seat holds all five while the
+/// stopped seat stays down.
+#[test]
+fn a_sigterm_right_after_sending_delivers_every_message() {
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("runtime");
+    let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).expect("relay");
+    let url = rt.block_on(relay.url()).to_string();
+    let dir_a = tempfile::tempdir().expect("tempdir");
+    let dir_b = tempfile::tempdir().expect("tempdir");
+    let mut ada = relay_seat(dir_a.path(), &url);
+    let ben = relay_seat(dir_b.path(), &url);
+    let mut a = Mcp::open(ada.port);
+    let mut b = Mcp::open(ben.port);
+    let confirmed = |s: &serde_json::Value| {
+        s["settings"]["relays"].as_array().is_some_and(|r| r.iter().any(|r| r["confirmed"] == serde_json::json!(true)))
+    };
+    a.wait("ada's relay", 60, confirmed);
+    b.wait("ben's relay", 60, confirmed);
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while let Err(e) = a.tool(
+        "create_start",
+        serde_json::json!({ "name": "Club", "member": "ada", "threshold": 2, "members": 2 }),
+    ) {
+        assert!(Instant::now() < deadline, "create_start: {e}");
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    let s = a.wait("the invite", 60, |s| {
+        s["create"]["seats"][0]["link"].as_str().is_some_and(|l| l.starts_with("molt://invite/"))
+    });
+    let link = s["create"]["seats"][0]["link"].as_str().expect("link").to_string();
+    b.call("join_start", serde_json::json!({ "invite": link, "member": "ben" }));
+    a.wait("the join", 120, |s| s["create"]["can_propose"] == serde_json::json!(true));
+    a.call("create_propose", serde_json::json!({ "name": "Club", "agenda": "", "features": ["memory"] }));
+    b.wait("the charter", 120, |s| s["join"]["awaiting_ratify"] == serde_json::json!(true));
+    b.call("join_confirm_charter", serde_json::json!({}));
+    let s = b.wait("ben's backup step", 120, |s| s["join"]["awaiting_backup"] == serde_json::json!(true));
+    b.call("confirm_seed_backup", serde_json::json!({ "phrase": s["join"]["seed"] }));
+    let s = a.wait("ada's backup step", 120, |s| s["create"]["seed"].as_str().is_some_and(|p| !p.is_empty()));
+    a.call("confirm_seed_backup", serde_json::json!({ "phrase": s["create"]["seed"] }));
+    let sealed = |side: &'static str| {
+        move |s: &serde_json::Value| {
+            s[side]["outcome"] == serde_json::json!(1) || s[side]["run"]["outcome"] == serde_json::json!(1)
+        }
+    };
+    a.wait("ada's seal", 120, sealed("create"));
+    a.call("create_finish", serde_json::json!({}));
+    b.wait("ben's seal", 120, sealed("join"));
+    b.call("join_finish", serde_json::json!({}));
+    let open = |s: &serde_json::Value| s["active_workspace"].as_str().is_some_and(|w| !w.is_empty());
+    a.wait("ada's workspace", 60, open);
+    b.wait("ben's workspace", 60, open);
+
+    a.call("chat_send", serde_json::json!({ "body": "warm" }));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !b.chat_bodies().iter().any(|m| m == "warm") {
+        assert!(Instant::now() < deadline, "the live path never worked\n{}", ada.stderr());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    let bodies: Vec<String> = (0..5).map(|i| format!("last {i}")).collect();
+    for body in &bodies {
+        a.call("chat_send", serde_json::json!({ "body": body }));
+    }
+    ada.sigterm();
+    assert_eq!(ada.wait_exit(180), Some(0), "{}", ada.stderr());
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let got = b.chat_bodies();
+        let landed = bodies.iter().filter(|m| got.contains(m)).count();
+        if landed == bodies.len() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{landed} of {} landed\n{}", bodies.len(), ada.stderr());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}

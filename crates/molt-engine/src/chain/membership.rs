@@ -1409,6 +1409,23 @@ impl State {
         }
     }
 
+    /// Delete this seat's newest live rejoin note for `member`.
+    pub(crate) fn withdraw_rejoin_note(&mut self, member: &str) {
+        let me = self.member();
+        let note = rejoin_note(member);
+        let id = self
+            .chat
+            .iter()
+            .rev()
+            .find(|m| m.from == me && m.kind == molt_core::ChatKind::System && m.body == note && m.deleted_by.is_none())
+            .map(|m| m.id);
+        if let Some(id) = id {
+            if let Err(e) = self.cmd_delete_chat(id) {
+                tracing::warn!(error = %e, "rejoin note not withdrawn");
+            }
+        }
+    }
+
     /// **The Nostr coordinator's re-key** (N4b step 6c).
     ///
     /// Everything the mesh arm does through a `NetRuntime` and a reply queue,
@@ -1531,10 +1548,12 @@ impl State {
         // merged epoch are on disk BEFORE anything is published. A kill
         // after that leaves this seat at most an epoch ahead, and the outbox
         // re-offers the logged commit; never an epoch behind (§11)
+        let commit_seq = commit_env.seq;
         if !self.record_own_commit(commit_env, &mls) {
             tracing::warn!(%member, "rekey_persist=unconfirmed");
         }
         if !parked {
+            let store = self.active.as_ref().map(|a| crate::net::FileStateStore::new(a.handle.clone()));
             crate::nostr_ritual::spawn_rekey_delivery(
                 channel,
                 net,
@@ -1543,6 +1562,9 @@ impl State {
                 payload,
                 member.to_string(),
                 self.cmd_tx.clone(),
+                store,
+                self.member(),
+                commit_seq,
             );
         }
         // the rejoiner's trust root, over the same 445 channel it just

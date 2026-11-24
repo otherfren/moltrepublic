@@ -124,6 +124,27 @@ pub fn __set_resend_backoff(first: Duration, cap: Duration) {
     RESEND_BACKOFF_MS.store((ms(first) << 32) | ms(cap), std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Test seam: the members whose outbox sleeps through every wakeup until
+/// its stop (a close then finds the whole tail unread).
+static HOLD_OUTBOX: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Test seam: hold `member`'s outbox asleep until its stop, or release it.
+#[doc(hidden)]
+pub fn __hold_outbox(member: &str, hold: bool) {
+    if let Ok(mut held) = HOLD_OUTBOX.lock() {
+        if hold {
+            held.insert(member.to_string());
+        } else {
+            held.remove(member);
+        }
+    }
+}
+
+fn outbox_held(member: &str) -> bool {
+    HOLD_OUTBOX.lock().is_ok_and(|h| h.contains(member))
+}
+
 fn resend_backoff() -> (Duration, Duration) {
     match RESEND_BACKOFF_MS.load(std::sync::atomic::Ordering::SeqCst) {
         0 => (Duration::from_secs(RESEND_AFTER_SECS), Duration::from_secs(RESEND_MAX_BACKOFF_SECS)),
@@ -230,6 +251,8 @@ pub struct GroupHandle {
     /// synchronous stretch that built it (the recovery path did) signalled
     /// into the void and left an orphaned outbox publishing every frame twice.
     stop: watch::Sender<bool>,
+    /// Set by [`Self::close`] before the stop: the outbox takes its final pass.
+    drain: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The latest claim sheet awaiting publication. FULL STATE, so a newer
     /// sheet supersedes an unsent one by construction — no queue to drain and
     /// no coalescing logic to get wrong.
@@ -262,6 +285,21 @@ impl GroupHandle {
     /// pure inbound and is aborted.
     pub async fn shutdown(mut self) {
         let _ = self.stop.send(true);
+        self.join().await;
+    }
+
+    /// A clean close: the outbox reads the log once more from its cursor
+    /// and offers every own envelope it finds before it exits - each to
+    /// every relay once, ending at the first one no relay took. A
+    /// withdrawn channel publishes nothing. The caller has stopped
+    /// recording, and nothing in the final pass calls back into it.
+    pub async fn close(mut self) {
+        self.drain.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.stop.send(true);
+        self.join().await;
+    }
+
+    async fn join(&mut self) {
         if let Some(inbox) = self.inbox.take() {
             inbox.abort();
         }
@@ -473,6 +511,7 @@ where
     // the group publishes without a deadline, a joiner may read it late
     let channel = channel.with_group_expiry();
     let (stop, stop_rx) = watch::channel(false);
+    let drain = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (log2, store2) = (log.clone(), store.clone());
     let (acks, acks_rx) = watch::channel(None);
     // the ack-wake (§3.1a): an applied claim sheet can create the outbox's
@@ -529,6 +568,7 @@ where
         reach_rx,
         busy_tx,
         stop_rx.clone(),
+        drain.clone(),
     ));
     let inbox = tokio::spawn(inbox_loop(
         channel.clone(),
@@ -543,6 +583,7 @@ where
     ));
     GroupHandle {
         stop,
+        drain,
         acks,
         controls,
         gaps,
@@ -969,6 +1010,96 @@ pub(crate) fn permanent_refusal(e: &crate::NetError) -> Option<String> {
     }
 }
 
+/// Test seam: members whose relay OK for an own commit is never recorded
+/// (a kill between the OK and its record).
+static LOSE_COMMIT_OK: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Test seam: lose (or record again) `member`'s commit OKs.
+#[doc(hidden)]
+pub fn __lose_commit_ok(member: &str, lose: bool) {
+    if let Ok(mut set) = LOSE_COMMIT_OK.lock() {
+        if lose {
+            set.insert(member.to_string());
+        } else {
+            set.remove(member);
+        }
+    }
+}
+
+/// A relay accepted `env`: when it is an own commit, remember its digest
+/// (delivery guarantee §11) - an own re-key not named here is shelved at
+/// the next open.
+pub async fn note_commit_ok<S: StateStore>(store: &S, me: &str, env: &EventEnvelope) {
+    let molt_core::WorkspaceEvent::MlsCommit { commit, .. } = &env.body else {
+        return;
+    };
+    if let Ok(bytes) = hex::decode(commit) {
+        record_commit_ok(store, me, env.seq, &bytes).await;
+    }
+}
+
+/// [`note_commit_ok`] for the raw commit bytes.
+pub async fn record_commit_ok<S: StateStore>(store: &S, me: &str, seq: u64, commit: &[u8]) {
+    if LOSE_COMMIT_OK.lock().is_ok_and(|set| set.contains(me)) {
+        return;
+    }
+    let digest = crate::mls::CommitKey::new(commit).digest;
+    store
+        .update(|state| {
+            let mut cur = state.group.unwrap_or_default();
+            if cur.commit_ok.is_some_and(|(at, _)| at >= seq) {
+                return false;
+            }
+            cur.commit_ok = Some((seq, digest));
+            state.group = Some(cur);
+            true
+        })
+        .await;
+}
+
+/// A sink call that gives way to the stop: a closing engine awaits the
+/// outbox and answers no command until it has ended.
+async fn tell(stop: &watch::Receiver<bool>, call: impl std::future::Future<Output = ()>) {
+    let mut stop = stop.clone();
+    tokio::select! {
+        () = call => {}
+        _ = stop.wait_for(|s| *s) => {}
+    }
+}
+
+/// Why one publish found no taker.
+#[derive(Debug)]
+enum Refused {
+    /// Every relay answered, none accepted.
+    None,
+    Error(crate::NetError),
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refused::None => f.write_str("no relay accepted"),
+            Refused::Error(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// One publish of `frame` to every relay, each bounded by the transport's
+/// connect and publish timeouts.
+async fn publish_once(channel: &GroupChannel, frame: &crate::supervisor::GroupFrame) -> Result<(), Refused> {
+    let published = match frame.stamp {
+        // a commit rides its ORIGINAL stamp on every resend (M8)
+        Some(at) => channel.publish_frame_at(&frame.exporter, &frame.ciphertext, at).await,
+        None => channel.publish_frame(&frame.exporter, &frame.ciphertext).await,
+    };
+    match published {
+        Ok((_stamp, report)) if !report.accepted.is_empty() => Ok(()),
+        Ok(_) => Err(Refused::None),
+        Err(e) => Err(Refused::Error(e)),
+    }
+}
+
 /// Publish one framed envelope, retrying a relay-side refusal on a backoff.
 async fn publish_with_backoff(
     channel: &GroupChannel,
@@ -981,17 +1112,12 @@ async fn publish_with_backoff(
         // the SAME bytes across relay retries inside one attempt chain: a relay
         // NAK is not a peer rejection, and re-encrypting would burn a ratchet
         // generation for nothing. A REWIND re-frames instead (N5.3).
-        let published = match frame.stamp {
-            // a commit rides its ORIGINAL stamp on every resend (M8)
-            Some(at) => channel.publish_frame_at(&frame.exporter, &frame.ciphertext, at).await,
-            None => channel.publish_frame(&frame.exporter, &frame.ciphertext).await,
-        };
-        match published {
-            Ok((_stamp, report)) if !report.accepted.is_empty() => return Ok(()),
-            Ok((_stamp, _report)) => {
+        match publish_once(channel, frame).await {
+            Ok(()) => return Ok(()),
+            Err(Refused::None) => {
                 tracing::warn!("no relay accepted a group frame — retrying");
             }
-            Err(e) => {
+            Err(Refused::Error(e)) => {
                 if let Some(why) = permanent_refusal(&e) {
                     // no backoff: this answer is the same in a second and in
                     // an hour, and the delay only postpones the diagnosis
@@ -1379,6 +1505,11 @@ where
             *published_through = env.seq;
             continue;
         }
+        if mls.shelved(&env) {
+            tracing::debug!(seq = env.seq, "outbox skips the shelved re-key");
+            *published_through = env.seq;
+            continue;
+        }
         let Some(frame) = mls.group_frame(&env) else {
             // evicted: nothing this node frames can be read; hold the cursor
             if mls.evicted() {
@@ -1394,9 +1525,10 @@ where
         match publish_with_backoff(channel, &frame, cfg, stop).await {
             Ok(()) => {
                 tracing::debug!(me = %cfg.member, seq = env.seq, "group frame published");
+                note_commit_ok(store, &cfg.member, &env).await;
                 if held.published() {
                     // the backoff exit — the channel publishes again
-                    sink.send_ok(&cfg.member).await;
+                    tell(stop, sink.send_ok(&cfg.member)).await;
                 }
                 *published_through = env.seq;
             }
@@ -1431,7 +1563,7 @@ where
                     }
                     _ => "no relay accepted the frame".to_string(),
                 };
-                sink.send_failed(&cfg.member, &reason).await;
+                tell(stop, sink.send_failed(&cfg.member, &reason)).await;
                 held.failed(permanent);
                 persist_cursor(store, start, *published_through).await;
                 return PassOutcome::Held;
@@ -1453,12 +1585,88 @@ async fn outbox_loop<L, S, K>(
     log: L,
     store: S,
     sink: K,
+    wakeup: watch::Receiver<u64>,
+    ack_wake: std::sync::Arc<tokio::sync::Notify>,
+    reach: watch::Receiver<OutboxReach>,
+    busy: watch::Sender<bool>,
+    stop: watch::Receiver<bool>,
+    drain: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) where
+    L: OutboxLog,
+    S: StateStore,
+    K: EngineSink,
+{
+    let stopped = outbox_passes(&channel, &mls, &cfg, &log, &store, &sink, wakeup, ack_wake, reach, &busy, stop).await;
+    if stopped && drain.load(std::sync::atomic::Ordering::SeqCst) {
+        final_pass(&channel, &mls, &cfg, &log, &store).await;
+    }
+}
+
+/// The close's last pass (delivery guarantee §12): every own envelope from the cursor, each
+/// offered to every relay ONCE; it ends at the first one no relay took
+/// (the cursor holds there for the next start). No sink call: the engine
+/// awaits this task and answers nothing meanwhile.
+async fn final_pass<L: OutboxLog, S: StateStore>(
+    channel: &GroupChannel,
+    mls: &MlsChannel,
+    cfg: &GroupNetConfig,
+    log: &L,
+    store: &S,
+) {
+    if mls.evicted() {
+        return;
+    }
+    let start = store.load().await.group.unwrap_or_default().log_seq;
+    let mut through = start;
+    let mut sent = 0u64;
+    let mut held = None;
+    for env in log.read_from(start + 1).await {
+        if env.by != cfg.member || mls.shelved(&env) {
+            through = env.seq;
+            continue;
+        }
+        let Some(frame) = mls.group_frame(&env) else {
+            if mls.evicted() {
+                break;
+            }
+            through = env.seq;
+            continue;
+        };
+        match publish_once(channel, &frame).await {
+            Ok(()) => {
+                note_commit_ok(store, &cfg.member, &env).await;
+                through = env.seq;
+                sent += 1;
+            }
+            Err(why) => {
+                held = Some((env.seq, why));
+                break;
+            }
+        }
+    }
+    persist_cursor(store, start, through).await;
+    match held {
+        Some((seq, why)) => tracing::warn!(me = %cfg.member, sent, held_at = seq, error = %why, "outbox=closed"),
+        None => tracing::info!(me = %cfg.member, sent, "outbox=closed"),
+    }
+}
+
+/// The publish loop; `true` when it ended on the stop signal.
+#[allow(clippy::too_many_arguments)]
+async fn outbox_passes<L, S, K>(
+    channel: &GroupChannel,
+    mls: &MlsChannel,
+    cfg: &GroupNetConfig,
+    log: &L,
+    store: &S,
+    sink: &K,
     mut wakeup: watch::Receiver<u64>,
     ack_wake: std::sync::Arc<tokio::sync::Notify>,
     mut reach: watch::Receiver<OutboxReach>,
-    busy: watch::Sender<bool>,
+    busy: &watch::Sender<bool>,
     mut stop: watch::Receiver<bool>,
-) where
+) -> bool
+where
     L: OutboxLog,
     S: StateStore,
     K: EngineSink,
@@ -1469,16 +1677,19 @@ async fn outbox_loop<L, S, K>(
         // an evicted seat publishes nothing: no pass, no re-offer
         if mls.evicted() {
             tracing::debug!(me = %cfg.member, "outbox=stopped reason=evicted");
-            return;
+            return false;
         }
-        match publish_pass(&channel, &mls, &cfg, &log, &store, &sink, &mut held, &busy, &mut stop).await {
-            PassOutcome::Stopped => return,
+        if outbox_held(&cfg.member) {
+            return stop.wait_for(|s| *s).await.is_ok() || *stop.borrow();
+        }
+        match publish_pass(channel, mls, cfg, log, store, sink, &mut held, busy, &mut stop).await {
+            PassOutcome::Stopped => return !mls.evicted(),
             PassOutcome::Held => stall.disarm(),
             PassOutcome::Done => {}
         }
         // --- the stall clock -------------------------------------------------
         let state = store.load().await;
-        let floor = group_floor(&state, &cfg);
+        let floor = group_floor(&state, cfg);
         let cursor = state.group.unwrap_or_default().log_seq;
         if stall.observe_floor(floor) {
             // the republic confirmed progress — clear the report on the
@@ -1486,7 +1697,7 @@ async fn outbox_loop<L, S, K>(
             // the surface blame the operator's own seat for a peer that
             // stopped acking)
             for m in &cfg.members {
-                sink.send_ok(m).await;
+                tell(&stop, sink.send_ok(m)).await;
             }
         }
         // "cursor > floor" alone is not an own-ackable tail: the broadcast
@@ -1521,13 +1732,13 @@ async fn outbox_loop<L, S, K>(
             tokio::select! {
                 r = wakeup.changed() => {
                     if r.is_err() {
-                        return;
+                        return false;
                     }
                 }
                 // an applied claim sheet can flip `tail` without any append —
                 // re-evaluate (§3.1a: the rejoiner's first sheet at floor 0)
                 () = ack_wake.notified() => {}
-                _ = stop.changed() => return,
+                _ = stop.changed() => return true,
                 () = tokio::time::sleep(retry_in), if retry_armed => {
                     let backoff_secs = held.backoff.escalate();
                     tracing::info!(me = %cfg.member, backoff_secs, "held frame - retrying the publish");
@@ -1548,7 +1759,7 @@ async fn outbox_loop<L, S, K>(
         let (fired, by_event) = tokio::select! {
             r = wakeup.changed() => {
                 if r.is_err() {
-                    return;
+                    return false;
                 }
                 (false, false) // new work first; the stall clock keeps running
             }
@@ -1558,11 +1769,11 @@ async fn outbox_loop<L, S, K>(
             // a quiet stall resumes the moment the engine hears an owed peer
             r = reach.changed(), if quiet => {
                 if r.is_err() {
-                    return;
+                    return false;
                 }
                 (true, true)
             }
-            _ = stop.changed() => return,
+            _ = stop.changed() => return true,
             () = tokio::time::sleep_until(deadline) => (true, false),
         };
         if !fired {
@@ -1585,7 +1796,7 @@ async fn outbox_loop<L, S, K>(
         let now_wall = wall_secs();
         store
             .update(|state| {
-                round = plan_round(state, &cfg, &envs, &reach_now, open, now_wall);
+                round = plan_round(state, cfg, &envs, &reach_now, open, now_wall);
                 matches!(round, StallRound::Granted { .. })
             })
             .await;
@@ -1606,7 +1817,7 @@ async fn outbox_loop<L, S, K>(
                 stall.quiet = Some(q);
                 if stall.round_granted() {
                     for m in &cfg.members {
-                        sink.send_failed(m, "not acknowledging deliveries").await;
+                        tell(&stop, sink.send_failed(m, "not acknowledging deliveries")).await;
                     }
                 }
                 stall.escalate(tokio::time::Instant::now());
@@ -1653,8 +1864,7 @@ async fn outbox_loop<L, S, K>(
         }
         if report {
             for m in &cfg.members {
-                sink.send_failed(m, "not acknowledging deliveries - still resending")
-                    .await;
+                tell(&stop, sink.send_failed(m, "not acknowledging deliveries - still resending")).await;
             }
         }
         stall.escalate(tokio::time::Instant::now());
@@ -2980,6 +3190,179 @@ mod tests {
     #[tokio::test]
     async fn a_dropped_runtime_still_publishes_its_in_flight_frame() {
         assert_eq!(accepts_after_drop(false).await, 1, "a plain drop closed the channel");
+    }
+
+    /// `who`'s runtime over `url` with `n` own events in the log, its
+    /// outbox held asleep from the start (it never reads the log itself).
+    fn held_seat(who: &str, url: String, n: u64) -> (GroupHandle, crate::MemStateStore) {
+        held_seat_on(crate::dial::Dialer::direct(), who, url, n)
+    }
+
+    fn held_seat_on(dialer: crate::dial::Dialer, who: &str, url: String, n: u64) -> (GroupHandle, crate::MemStateStore) {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        __hold_outbox(who, true);
+        let mut m = MlsMember::new(&SigningKey::from_bytes(&[5u8; 32]), who).expect("mls");
+        m.create_group().expect("group");
+        let log = crate::MemLog::default();
+        for seq in 1..=n {
+            let mut env = walter_event(seq);
+            env.by = who.to_string();
+            log.push(env);
+        }
+        let store = crate::MemStateStore::default();
+        let (_wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, _health) = watch::channel(GroupHealth::default());
+        let handle = spawn_group(
+            crate::ritual_net::GroupChannel::new(dialer, vec![url], [7u8; 32]),
+            MlsChannel::new(m),
+            GroupNetConfig::fast(who.into(), vec!["petra".into()]),
+            log,
+            store.clone(),
+            NullSink,
+            wake_rx,
+            health_tx,
+        );
+        (handle, store)
+    }
+
+    async fn cursor(store: &crate::MemStateStore) -> u64 {
+        store.load().await.group.unwrap_or_default().log_seq
+    }
+
+    /// **A clean close publishes what was recorded before it.** The outbox
+    /// slept through every append (the seam); the close's final pass reads
+    /// the log from the cursor and every own envelope gets a relay OK.
+    #[tokio::test]
+    async fn a_clean_close_publishes_the_tail_the_outbox_never_read() {
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let (handle, store) = held_seat("wilma", relay.url().await.to_string(), 5);
+        handle.close().await;
+        assert_eq!(cursor(&store).await, 5, "the close left recorded envelopes unpublished");
+    }
+
+    /// Counter-test: a stop without the close's pass leaves the tail for
+    /// the next start.
+    #[tokio::test]
+    async fn a_plain_shutdown_takes_no_final_pass() {
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let (handle, store) = held_seat("wendy", relay.url().await.to_string(), 5);
+        handle.shutdown().await;
+        assert_eq!(cursor(&store).await, 0);
+    }
+
+    /// **A withdrawn channel's close dials nothing.**
+    #[tokio::test]
+    async fn a_withdrawn_close_publishes_nothing() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("ws://{}", listener.local_addr().expect("addr"));
+        let accepts = std::sync::Arc::new(AtomicUsize::new(0));
+        let counted = accepts.clone();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                drop(sock);
+            }
+        });
+        let (handle, store) = held_seat("wren", url, 3);
+        handle.withdraw();
+        handle.close().await;
+        assert_eq!(accepts.load(Ordering::SeqCst), 0, "a withdrawn close dialed the relay");
+        assert_eq!(cursor(&store).await, 0);
+    }
+
+    /// **A relay withdrawn at the gate counts as refused**: the close
+    /// waits for no consent, publishes nothing and keeps the cursor.
+    #[tokio::test]
+    async fn a_gate_withdrawn_relay_ends_the_close_at_once() {
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let keeper = crate::dial::RelayGateKeeper::default();
+        let dialer = crate::dial::Dialer::direct().with_gate(keeper.gate());
+        let (handle, store) = held_seat_on(dialer, "wiebke", relay.url().await.to_string(), 3);
+        let done = tokio::time::timeout(std::time::Duration::from_secs(30), handle.close()).await;
+        assert!(done.is_ok(), "the close waited for consent");
+        assert_eq!(cursor(&store).await, 0);
+    }
+
+    /// **A relay that never answers holds the close for the transport
+    /// bounds of ONE attempt, not longer.** The first envelope no relay
+    /// took ends the pass; the cursor stays for the next start.
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswering_relay_holds_the_close_for_one_attempt_only() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("ws://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            let mut kept = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                kept.push(sock);
+            }
+        });
+        let (handle, store) = held_seat("wanda", url, 5);
+        let bounds = crate::timeouts::RelayTimeouts::configured();
+        let began = tokio::time::Instant::now();
+        handle.close().await;
+        let took = began.elapsed();
+        assert!(
+            took <= bounds.connect + bounds.publish,
+            "the close waited {took:?} on one dead relay"
+        );
+        assert_eq!(cursor(&store).await, 0);
+    }
+
+    /// **The outbox records a commit's relay OK** (delivery guarantee §11),
+    /// and a shelved commit never leaves.
+    #[tokio::test]
+    async fn the_outbox_records_a_commits_ok_and_skips_a_shelved_one() {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let commit_env = |seq: u64, c: &[u8]| molt_core::EventEnvelope {
+            prev_seq: 0,
+            seq,
+            ts: 1_751_000_000,
+            by: "cara".to_string(),
+            body: molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(c), stamp: 0 },
+        };
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let mut cara = MlsMember::new(&key(3), "cara").expect("cara");
+        founder.create_group().expect("group");
+        let welcome = founder
+            .add_members(&[bob.key_package().expect("kp"), cara.key_package().expect("kp")])
+            .expect("add")
+            .expect("welcome");
+        cara.join_from_welcome(&welcome).expect("cara joins");
+        let dev = MlsMember::new(&key(2), "bob").expect("device");
+        let (first, _w) = cara.restore_member("bob", &dev.key_package().expect("kp")).expect("re-key");
+        let dev = MlsMember::new(&key(2), "bob").expect("device");
+        let (second, _w) = cara.restore_member("bob", &dev.key_package().expect("kp")).expect("re-key");
+        cara.shelve_own_rekey().expect("shelve");
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let log = crate::MemLog::default();
+        log.push(commit_env(1, &first));
+        log.push(commit_env(2, &second));
+        let store = crate::MemStateStore::default();
+        let (_wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, _health) = watch::channel(GroupHealth::default());
+        let handle = spawn_group(
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![relay.url().await.to_string()], [7u8; 32]),
+            MlsChannel::new(cara),
+            GroupNetConfig::fast("cara".into(), vec!["founder".into()]),
+            log,
+            store.clone(),
+            NullSink,
+            wake_rx,
+            health_tx,
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while cursor(&store).await < 2 {
+            assert!(tokio::time::Instant::now() < deadline, "the outbox never passed both commits");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        handle.shutdown().await;
+        let cur = store.load().await.group.unwrap_or_default();
+        assert_eq!(cur.commit_ok, Some((1, crate::mls::CommitKey::new(&first).digest)), "the shelved commit went out");
     }
 
     /// **A fresh incarnation's claim sheet is EVIDENCE, even at floor 0.**

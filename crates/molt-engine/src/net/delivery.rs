@@ -382,6 +382,43 @@ impl State {
         durable
     }
 
+    /// The open's check (delivery guarantee §11): an own re-key whose relay
+    /// OK is not on record goes back on the shelf, durably, before any
+    /// runtime starts, and its rejoin note is withdrawn. Returns the blob
+    /// to run on; the stored one when there is nothing to shelve or the
+    /// shelved state did not reach the disk.
+    pub(crate) fn shelve_unconfirmed_rekey(&mut self, blob: &[u8], commit_ok: Option<[u8; 32]>) -> Vec<u8> {
+        let Ok(mut mls) = molt_net::MlsMember::restore(blob) else {
+            return blob.to_vec();
+        };
+        let Some((key, removed)) = mls.own_rekey() else {
+            return blob.to_vec();
+        };
+        if commit_ok == Some(key.digest) {
+            return blob.to_vec();
+        }
+        let shelved = match mls.shelve_own_rekey() {
+            Ok(Some(epoch)) => mls.snapshot().ok().map(|snap| (epoch, snap)),
+            Ok(None) => None,
+            Err(e) => {
+                tracing::warn!(error = %e, action = "kept", "rekey_unconfirmed");
+                None
+            }
+        };
+        let Some((epoch, snap)) = shelved else {
+            return blob.to_vec();
+        };
+        if !self.active.as_ref().is_some_and(|a| a.handle.merge_mls_blocking(snap.clone())) {
+            tracing::warn!(action = "kept", reason = "not_durable", "rekey_unconfirmed");
+            return blob.to_vec();
+        }
+        tracing::warn!(member = %removed.join(","), epoch, action = "shelved", "rekey_unconfirmed");
+        for member in &removed {
+            self.withdraw_rejoin_note(member);
+        }
+        snap
+    }
+
     /// A re-key commit merged that re-admitted `member`: THE reset of a
     /// restore. The group runtime hands the merge over the same ordered
     /// sink as the frames, and no past epoch is kept, so every frame of

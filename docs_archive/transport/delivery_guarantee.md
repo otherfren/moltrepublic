@@ -770,36 +770,78 @@ trusted: every later restore of that seat reaches it as a merge.
   outbox reads the log through the same writer, so no read returns the
   commit before its epoch is on disk; the delivery task starts after. A
   kill after that leaves it at most AHEAD of the group: the
-  outbox publishes own log entries from its persisted cursor, so the
-  logged commit goes out at the reopen, sealed under the exporter of the
-  epoch it was made at (the ring is part of the MLS snapshot). The late
+  outbox publishes own log entries from its persisted cursor, so a logged
+  commit a relay acknowledged goes out again at the reopen, sealed under
+  the exporter of the epoch it was made at (the ring is part of the MLS
+  snapshot); one no relay is known to hold is shelved (below). The late
   merge resets the bystanders' window for the seat; what they sent at the
   old epoch meanwhile reaches the coordinator by re-send. The `Restored`
   block is applied in the same handler, before the re-key, and rides the
   same outbox ahead of it. Not re-sent: the Welcome - the reopened
   coordinator answers the device `link outdated`, and a restore by a new
-  link re-keys on top. That link mints only once the seat was silent for
+  link re-keys on top (or, after a shelved re-key, from the old leaf).
+  That link mints only once the seat was silent for
   the window (120 s): before, the mint answers `seat still active`
   (`restore_gate`); the test sets the window to 0. Founding's `add_members` is written whole at the
   seal (the ritual's first disk write). Pins:
-  `a_coordinator_killed_right_after_its_rekey_reopens_at_the_new_epoch`,
-  `a_coordinator_killed_before_its_rekey_went_out_publishes_it_at_the_reopen`.
-- **v0.1.3 note.** (a) A durable pending re-key (commit + Welcome, re-sent
-  at the reopen until the Welcome landed) would close the Welcome gap.
-  (b) A seat behind its own commit is detectable at the open (the last own
-  `MlsCommit` was made at an epoch >= the ratchet's); today it shows only
-  as `N new messages unreadable` - the frames' epoch sits inside the outer
-  layer, so the inbound side cannot tell "newer epoch" from opaque.
-  (c) An own commit that never left races a later one. Coordinator C makes
-  K_C at epoch N, persists, dies before any relay took it; the device gets
-  a new link from seat S, which makes K_S at N. C reopens and re-offers
-  K_C: with the lower digest every seat rewinds onto it (the second
-  restore undone, the device locked out again); after two or more commits
-  during the outage the others ignore K_C and C stays split. v0.1.1 had
-  the same (its log re-offered the commit too). Planned fix: remember the
-  first relay OK for an own commit durably; at the open an own commit
-  never published is rolled back to the prior slot (persisted with the
-  snapshot) instead of re-offered.
+  `a_coordinator_killed_right_after_its_rekey_reopens_at_the_new_epoch`.
+- **An own re-key no relay is known to hold is shelved at the open
+  (v0.1.3).** Re-offering it is unsound: coordinator C makes K_C at epoch
+  N, persists, dies before any relay took it; the device gets a new link
+  from seat S, which makes K_S at N. Re-offered, K_C wins every contest it
+  has the lower digest for (the second restore undone, the device locked
+  out again), and after two or more commits during the outage the others
+  ignore it and C stays split. Rolling back alone is unsound too: a relay
+  may have stored K_C with its OK lost, the group merged it, and the
+  committer cannot re-merge its own commit (its path secrets lived in the
+  discarded pending state). So:
+  - **The record.** `GroupCursor.commit_ok` holds the digest of the last
+    own `MlsCommit` a relay accepted, written right after the OK through
+    the transport-state gate - by the outbox and by the re-key delivery
+    task, whichever publishes first.
+  - **The open.** The seat's prior slot names its own re-key (committer
+    = this seat, a seat removed, the ratchet one epoch past it) and its
+    digest is not `commit_ok`: the seat returns to the slot's state (epoch
+    N) and keeps the merged state aside (`MlsMember` shelf, snapshot v6:
+    merged state, digest, removed seats, N), written durably before the
+    runtime starts. `rekey_unconfirmed member= epoch= action=shelved`
+    WARN, once. The outbox never publishes the shelved commit, and the
+    coordinator withdraws its own rejoin note (a `ChatDeleted`: the note
+    rides the outbox behind the commit). The `Restored` block stays on the
+    chain: the seat table names the shelved device's anchor until the next
+    restore of the seat, which a new link starts at once (the seat is
+    silent).
+  - **The replay decides.** Relays replay a seat its own frames, so a
+    stored K_C comes back. A commit whose digest is the shelf's: at N
+    (nothing merged since) the seat re-adopts the merged state - a merge
+    like any other. At N+1 by a foreign commit F of epoch N (the prior
+    slot) it runs the contest every other seat ran (eviction first, then
+    the lower digest) and re-adopts on a win, else drops the shelf. Later
+    than N+1 the shelf is gone (any merge past N+1 drops it).
+
+  | schedule | relays | C at the reopen | result |
+  |---|---|---|---|
+  | B1: K_C never left; S makes K_S at N (and K_S2 at N+1) | K_S (K_S2) | shelves K_C, merges K_S (K_S2) from the replay | second restore stands, C on the group's epoch |
+  | K_C never left, nobody commits | - | shelves K_C, stays at N | the device holds no Welcome; a new link (after the 120 s silence) re-keys at N |
+  | lost OK: a relay holds K_C, the group merged it | K_C | shelves, then re-adopts on K_C's replay | C at N+1 with the group |
+  | lost OK and a concurrent F at N | K_C, F | shelves, replays both, decides like everyone | one winner everywhere |
+  | an OK recorded | K_C | today's re-offer | the commit is out; a later commit at N is a real race |
+
+  Known limits: a lost OK while C stays down past the relays' replay
+  window leaves C at N (`N new messages unreadable`; heal: restore the
+  seat). A relay that acknowledged K_C and lost it before anyone read it
+  is the B1 race again. The device the shelved re-key was for gets no
+  Welcome; the reopened coordinator answers it `link outdated` (above).
+  (b) of the v0.1.2 note stands: a seat behind its own commit still shows
+  only as unreadable frames.
+  Pins: `mls::tests::an_unconfirmed_own_rekey_is_shelved_and_re_adopted_on_its_replay`,
+  `mls::tests::a_shelved_rekey_contests_a_foreign_commit_like_a_bystander`,
+  `mls::tests::the_shelf_survives_snapshot_and_restore`,
+  `crates/molt-engine/tests/nostr_recovery.rs`
+  (`a_rekey_lost_before_any_relay_yields_to_the_second_restore`,
+  `two_commits_during_the_outage_leave_the_shelved_coordinator_on_the_group_epoch`,
+  `a_rekey_whose_ok_was_lost_is_re_adopted_from_the_replay`,
+  `a_shelved_rekey_seat_rejoins_by_a_new_link`).
 - Pins: `mls::tests::the_evicted_leaf_cannot_speak_after_the_rekey` and
   the exporter-ring test (an old-epoch frame is refused after the merge),
   `mls::tests::a_merged_rekey_stays_listed_until_taken`,
@@ -952,6 +994,53 @@ a_rewind_reads_the_last_explicit_bit_as_unacked}`,
 `crates/molt-engine/tests/nostr_recovery.rs`
 (`a_seat_that_kept_its_old_window_hears_the_restored_seat_after_a_resync`,
 `a_coordinator_killed_right_after_its_rekey_reopens_at_the_new_epoch`,
-`a_coordinator_killed_before_its_rekey_went_out_publishes_it_at_the_reopen`),
+`a_shelved_rekey_seat_rejoins_by_a_new_link`),
 `crates/molt-engine/tests/nostr_delivery_guarantee.rs`
 (`a_receiver_whose_window_regressed_gets_the_tail_again_and_applies_it_once`).
+
+## 12. A clean close publishes what was recorded (v0.1.3)
+
+Measured on v0.1.1 and v0.1.2: five `chat_send` answered `ok`, SIGTERM
+under a millisecond later - the other seat held one or two until the
+stopped seat's next start. The outbox was parked on its wakeup when the
+stop came, and the stop won.
+
+**Rule.** A clean close (`CloseWorkspace`, a workspace switch, the
+service's SIGTERM/SIGINT - all run `persist_net_crypto_on_close`) closes
+the group runtime with `GroupHandle::close`: the engine blocks in it, so
+it accepts nothing meanwhile, and the outbox, after its stop, reads the
+log once more from its cursor and offers every own envelope it finds,
+each to every relay ONCE. The pass ends at the first envelope no relay
+took (the cursor holds there for the next start) or at the end of the
+log; then the ratchet snapshot is taken, so it covers every frame the
+pass sealed. `outbox=closed sent= [held_at= error=]`. The pass calls
+nothing back into the engine, and every sink call of the outbox gives way
+to the stop - a blocked engine answers nothing.
+
+**No clock decides the drain.** What bounds it is the transport's
+per-publish bounds (`[transport.nostr] connect_timeout_secs` 60,
+`publish_timeout_secs` 30): a relay costs at most a dial plus one OK
+round-trip, re-asked on a transient refusal only inside that publish
+bound - about connect + 2 x publish (120 s by default) - and the relays
+are asked concurrently. Every relay unreachable: the first envelope
+fails within that bound and the pass ends. One relay accepting while
+another hangs: each envelope waits the accepting relay plus the 2 s
+grace until the hung one trips its breaker. A second SIGTERM/SIGINT ends
+the process at once (`stop=forced`, exit 1, no durable close); SIGKILL
+always does.
+
+**Not drained.** A withdrawal (`withdraw()`, a relay left the dialable
+set) closes the channel: the pass publishes nothing. A relay the dial gate
+refuses (`Withdrawn`) counts as refused: the pass never waits for consent. A plain drop or
+`shutdown()` (eviction, the parked-re-key seam, a context reset) stops
+at once as before. A hard kill is unchanged - the at-least-once resend
+covers it. A current-thread runtime (unit tests) cannot block in place
+and drops the handle instead.
+
+Pins: `group_runtime::tests::{a_clean_close_publishes_the_tail_the_outbox_never_read,
+a_plain_shutdown_takes_no_final_pass, a_withdrawn_close_publishes_nothing,
+a_gate_withdrawn_relay_ends_the_close_at_once,
+an_unanswering_relay_holds_the_close_for_one_attempt_only}`,
+`crates/molt-engine/tests/nostr_clean_stop.rs`,
+`crates/molt-app/tests/service.rs`
+(`a_sigterm_right_after_sending_delivers_every_message`).
