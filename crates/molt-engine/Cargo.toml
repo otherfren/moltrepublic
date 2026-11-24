@@ -17,6 +17,9 @@ workspace = true
 # MOLT_VAULT_LAB_COMPLAIN=1 at spawn makes this node's holder receipts
 # complain (vault build plan S3c step 7).
 vault-lab = []
+# Dev only, like vault-lab: the prev-binding measurement seams
+# (`tests/chain_prev_binding.rs`).
+measure = []
 
 [dependencies]
 molt-core.workspace = true
@@ -68,3 +71,7 @@ tokio = { workspace = true, features = ["test-util"] }
 # in-process Nostr relay for the N4 ritual keystones (the engine-level twin
 # of two_instances over a MockRelay) — dev-only, like molt-net's
 nostr-relay-builder = { workspace = true }
+
+[[test]]
+name = "chain_prev_binding"
+required-features = ["measure"]

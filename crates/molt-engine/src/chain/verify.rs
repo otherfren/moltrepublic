@@ -186,10 +186,15 @@ pub fn block_identities(checkpoint: Option<&molt_core::CheckpointState>, blocks:
 /// A signature at `height` covers its predecessor's identity
 /// (`molt-chain-change-v3`): the same activation as the v2 identity.
 pub(crate) fn prev_bound(v2_from: Option<u64>, height: u64) -> bool {
-    block_v2_known() && !PREV_UNBOUND.load(std::sync::atomic::Ordering::SeqCst) && v2_from.is_some_and(|h| height >= h)
+    #[cfg(feature = "measure")]
+    if PREV_UNBOUND.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    block_v2_known() && v2_from.is_some_and(|h| height >= h)
 }
 
 /// Measurement seam: sign as before the binding (`__prev_unbound`).
+#[cfg(feature = "measure")]
 pub(crate) static PREV_UNBOUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// What a member signs for `change` at `height` on `prev`.

@@ -170,7 +170,9 @@ pub(crate) use membership::{AnchorFirst, AttemptBook, NostrRekey, MINTED_TICKETS
 pub(crate) use membership::RECOVER_PART_MAX;
 pub(crate) use lock_wire::{LockMode, LockRuntime, LockSeams, CHAIN_LOCK_AVAILABLE, LOCK_CHAIN_UNSUPPORTED};
 pub(crate) use sync::{refusal_rule, PeerClaim};
+#[cfg(feature = "measure")]
 pub(crate) use governance::RESIGNS;
+#[cfg(feature = "measure")]
 pub(crate) use verify::PREV_UNBOUND;
 pub(crate) use branch_run::BranchRuntime;
 

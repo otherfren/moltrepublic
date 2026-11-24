@@ -14,6 +14,7 @@ use super::*;
 
 /// Measurement seam: own standing approvals signed again, per card;
 /// `None` (nothing kept) until a test arms it.
+#[cfg(feature = "measure")]
 pub(crate) static RESIGNS: std::sync::Mutex<Option<std::collections::BTreeMap<u64, u64>>> = std::sync::Mutex::new(None);
 
 /// One voter is told its vote was dropped at most this often.
@@ -484,6 +485,7 @@ impl State {
         };
         let bytes = self.signing_bytes_at(height, &change);
         let sig = molt_storage::identity_sign(sk, &bytes);
+        #[cfg(feature = "measure")]
         if self.chain.own_approvals.contains(&id) {
             if let Some(r) = RESIGNS.lock().ok().as_mut().and_then(|r| r.as_mut()) {
                 *r.entry(id).or_default() += 1;
