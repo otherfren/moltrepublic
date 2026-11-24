@@ -1,10 +1,8 @@
 # Block identity without the signer set
 
-**Status: PLAN, approved 2026-11-24, being built for v0.1.3; candidate for v0.1.3 beside
-`chain_rescue_plan.md`.** Source: public issue #10, part 1 (a 2-of-3
-republic; counts and shapes only). Part 2 of the issue (the stale accept
-window) is fixed in v0.1.2, `docs_archive/transport/delivery_guarantee.md`
-§11; §9 records what v0.1.2 did not take from it. Code cited on master.
+**Status: EXECUTED (v0.1.3, 2026-11-24).** The shipping spec is
+`persistent_chain.md` §5.1; this is the plan it was built from. Source:
+public issue #10, part 1 (a 2-of-3 republic; counts and shapes only).
 
 ## 1. The diagnosis
 

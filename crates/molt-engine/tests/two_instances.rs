@@ -1607,7 +1607,7 @@ async fn founding_governs_over_the_direct_mesh() {
         payload: payload.clone(),
     };
     // the first post-genesis block is height 1
-    let bytes = molt_core::approval_bytes(&sealed.republic_id, 1, &change);
+    let bytes = common::signed_on_head(&a, &sealed.republic_id, 1, &change).await;
     let b_sig = molt_storage::identity_sign(&b_sk, &bytes);
     let approval = EventEnvelope { prev_seq: 0,
         seq: 2,
@@ -1823,7 +1823,7 @@ async fn a_reopened_member_recovers_open_proposals_from_the_mesh() {
         surface: Surface::Memory,
         payload: payload.clone(),
     };
-    let bytes = molt_core::approval_bytes(&sealed.republic_id, 1, &change);
+    let bytes = common::signed_on_head(&a, &sealed.republic_id, 1, &change).await;
     let b_sig = molt_storage::identity_sign(&b_sk, &bytes);
     member_feed.push(EventEnvelope { prev_seq: 0,
         seq: 3,

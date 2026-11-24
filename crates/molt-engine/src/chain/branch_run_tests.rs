@@ -166,8 +166,7 @@ fn a_split_is_repaired_by_two_seats_and_the_third_rejoins() {
         relays: Vec::new(),
         consent: Some(consent_for(&x, "c", &npk)),
     };
-    let mut block = x.seal(4, restore, &["a"]);
-    block.prev = head.hash.clone();
+    let block = x.seal_on(4, &head.hash, restore, &["a"]);
     a.receive_block_from("b", block.clone());
     b.receive_block_from("a", block.clone());
     chain.push(block);

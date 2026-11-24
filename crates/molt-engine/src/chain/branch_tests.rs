@@ -53,9 +53,7 @@ fn with(x: &Builder, change: ChainChange, signers: &[&str]) -> Vec<ChainBlock> {
 /// `x`'s first `len` blocks plus `change` sealed on top of them.
 pub(super) fn on_prefix(x: &Builder, len: usize, change: ChainChange, signers: &[&str]) -> Vec<ChainBlock> {
     let mut chain = x.blocks[..len].to_vec();
-    let mut block = x.seal(u64::try_from(len).expect("small"), change, signers);
-    block.prev = hash(x, len - 1);
-    chain.push(block);
+    chain.push(x.seal_on(u64::try_from(len).expect("small"), &hash(x, len - 1), change, signers));
     chain
 }
 

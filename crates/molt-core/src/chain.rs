@@ -32,10 +32,11 @@
 //!   founding attestations over [`roster_canonical_bytes`], so founding needs no
 //!   new signing path and a rejoiner verifies the constitution the same way
 //!   every member ratified it.
-//! * **`prev` is a structural link, not signed.** Each block records the hash of
-//!   the previous block's [`block_link_bytes`]; the chain verifier checks the
-//!   links form an unbroken line from the genesis. Swapping a block's signature
-//!   set breaks the link (the sigs are folded into the hashed bytes).
+//! * **`prev` links, and from the v2 activation it is signed.** Each block
+//!   records the previous block's identity ([`block_link_bytes`], from
+//!   [`BLOCK_V2_FEATURE`]'s activation [`block_id_bytes`]); the verifier checks
+//!   the links form an unbroken line from the genesis. From the activation the
+//!   members sign [`approval_bytes_v3`], which covers `prev`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -914,6 +915,25 @@ pub fn block_id_bytes(republic_id: &str, block: &ChainBlock) -> Vec<u8> {
     out
 }
 
+/// **What a member signs from the v2 activation on** (`molt-chain-change-v3`,
+/// `block_identity_plan.md` §3b): `republic_id ‖ height ‖ prev ‖ change`,
+/// the [`approval_bytes`] fields with the predecessor's identity after the
+/// height, so a signature is valid on one branch only. The genesis keeps
+/// its roster bytes.
+pub fn approval_bytes_v3(republic_id: &str, height: u64, prev: &str, change: &ChainChange) -> Vec<u8> {
+    const V2: &[u8] = b"molt-chain-change-v2\0";
+    let v2 = approval_bytes(republic_id, height, change);
+    if matches!(change, ChainChange::Genesis { .. }) {
+        return v2;
+    }
+    let fields = V2.len() + 4 + republic_id.len() + 8;
+    let mut out = b"molt-chain-change-v3\0".to_vec();
+    out.extend_from_slice(&v2[V2.len()..fields]);
+    put_bytes(&mut out, prev.as_bytes());
+    out.extend_from_slice(&v2[fields..]);
+    out
+}
+
 #[cfg(test)]
 mod branch_tests;
 
@@ -921,6 +941,20 @@ mod branch_tests;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn approval_bytes_v3_pin() {
+        let change = ChainChange::Checkpoint { upto: 6, state_hash: "cd".to_string() };
+        let mut want = b"molt-chain-change-v3\0".to_vec();
+        pin_put(&mut want, b"f00");
+        want.extend_from_slice(&7u64.to_le_bytes());
+        pin_put(&mut want, b"ab");
+        want.push(3);
+        want.extend_from_slice(&6u64.to_le_bytes());
+        pin_put(&mut want, b"cd");
+        assert_eq!(approval_bytes_v3("f00", 7, "ab", &change), want);
+        assert_ne!(approval_bytes_v3("f00", 7, "ac", &change), want, "another predecessor, another signature");
+    }
 
     fn ident(name: &str, pk: &str) -> MemberIdentity {
         MemberIdentity {

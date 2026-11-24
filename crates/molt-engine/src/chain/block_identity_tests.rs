@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Block identity v2 (`docs/chain/block_identity_plan.md`): the layout
+//! Block identity v2 (`docs_archive/chain/block_identity_plan.md`): the layout
 //! switch by activation height, its boundary, and the holder's duplicate
 //! rule.
 
@@ -34,10 +34,8 @@ fn plain(len: usize) -> Builder {
 
 /// `blocks[h]` re-attested by `signers`.
 fn reattested(b: &Builder, h: usize, signers: &[&str]) -> ChainBlock {
-    let mut v = b.blocks[h].clone();
-    let height = v.height;
-    v.sigs = b.seal(height, v.change.clone(), signers).sigs;
-    v
+    let v = &b.blocks[h];
+    b.seal_on(v.height, &v.prev, v.change.clone(), signers)
 }
 
 fn v2_id(b: &Builder, block: &ChainBlock) -> String {
@@ -108,9 +106,9 @@ fn the_identity_does_not_vouch_for_the_attestation() {
 fn an_older_build_applies_the_enabling_block_and_stops_after_it() {
     let b = enabled(4);
     let _older = OlderBuild::on();
-    verify_chain(&b.blocks[..3]).expect("the enabling block and H still link for it");
-    let err = verify_chain(&b.blocks).expect_err("H+1 links to a v2 identity");
-    assert_eq!(refusal_rule(&err), "link", "{err}");
+    verify_chain(&b.blocks[..2]).expect("the enabling block applies");
+    let err = verify_chain(&b.blocks[..3]).expect_err("H is signed over its prev");
+    assert_eq!(refusal_rule(&err), "threshold", "{err}");
 }
 
 #[test]
@@ -259,4 +257,108 @@ fn a_rejoiner_verifies_a_served_chain_after_the_activation() {
     let (anchored, _) = verify_served(Some(&state), &b.blocks[4..], Some(&b.republic_id)).expect("anchored");
     assert_eq!(full.hash, anchored.hash);
     assert_eq!(full.hash, v2_id(&b, &b.blocks[5]));
+}
+
+// --- S4: `prev` in the signed bytes ---------------------------------------
+
+/// `molt-chain-change-v3`: a signature made on one predecessor does not
+/// count on another, though the link holds.
+#[test]
+fn a_signature_on_one_predecessor_is_refused_on_another() {
+    let b = enabled(3);
+    let mut other = Builder::new(&SEATS3, 2);
+    other.commit_org(1, "set_features", &format!("memory {BLOCK_V2_FEATURE}"), &["walter", "dora"]);
+    let mut moved = b.blocks[2].clone();
+    moved.prev = other.head_hash.clone();
+    other.push(moved);
+    let err = verify_chain(&other.blocks).expect_err("the signatures name the other predecessor");
+    assert_eq!(refusal_rule(&err), "threshold", "{err}");
+    // counter: below the activation the same move verifies
+    let p = plain(3);
+    let mut q = Builder::new(&SEATS3, 2);
+    q.commit_applied(11, &["walter", "dora"]);
+    let mut moved = p.blocks[2].clone();
+    moved.prev = q.head_hash.clone();
+    q.push(moved);
+    verify_chain(&q.blocks).expect("a v2 signature does not cover prev");
+}
+
+/// A tip swap at the same height re-signs the standing approval on the
+/// new predecessor.
+#[test]
+fn a_standing_vote_re_signs_after_a_tip_swap_at_the_same_height() {
+    let mut b = enabled(2);
+    let change = |id: u64| ChainChange::Applied {
+        proposal_id: id,
+        surface: Surface::Memory,
+        payload: serde_json::json!({ "op": "add_note", "id": id }),
+    };
+    let mut tips = vec![b.seal(2, change(60), &["walter", "dora"]), b.seal(2, change(61), &["walter", "dora"])];
+    tips.sort_by_key(|t| v2_id(&b, t));
+    let high = tips.pop().expect("high");
+    let low = tips.pop().expect("low");
+    let mut held = b.blocks.clone();
+    held.push(high.clone());
+    let mut petra = genesis_seat("petra", &b, held);
+    let id = propose(&mut petra, Surface::Memory, serde_json::json!({ "op": "add_note", "title": "x" }));
+    let first = petra.chain.pending_sigs.get(&id).expect("signed").clone();
+    assert_eq!((first.height, first.prev.as_str()), (3, v2_id(&b, &high).as_str()));
+    wire(&mut petra, "dora", 10, WorkspaceEvent::Committed(low.clone()));
+    let head = petra.chain.head.clone().expect("head");
+    assert_eq!(head.hash, v2_id(&b, &low), "the lower identity holds the tip");
+    let now = petra.chain.pending_sigs.get(&id).expect("re-signed");
+    assert_eq!((now.height, now.prev.as_str()), (3, head.hash.as_str()));
+    let own = now.sigs.iter().find(|a| a.member == "petra").expect("own signature");
+    let change = petra.proposal_change(id).expect("change");
+    let bytes = molt_core::chain::approval_bytes_v3(&b.republic_id, 3, &head.hash, &change);
+    assert!(molt_storage::identity_verify(&b.pk("petra"), &bytes, &own.sig), "signed on the new tip");
+    b.push(low);
+}
+
+// --- S5: the keystone -----------------------------------------------------
+
+/// Every block of `n` sealed three times by different 2-of-3 subsets, each
+/// seat first adopting its own seal, then receiving the other two.
+/// Returns the fork decisions summed over the seats and their heads.
+fn three_seals_per_block(b0: &Builder, n: u64) -> (u64, Vec<String>) {
+    let mut b = b0.clone();
+    let mut seats: Vec<crate::State> = SEATS3.iter().map(|m| chain_peer_3(m, b0)).collect();
+    let mut seq = 100u64;
+    for i in 0..n {
+        let h = u64::try_from(b.blocks.len()).expect("small");
+        let change = ChainChange::Applied {
+            proposal_id: 200 + i,
+            surface: Surface::Memory,
+            payload: serde_json::json!({ "op": "add_note", "id": 200 + i }),
+        };
+        let subsets = [["petra", "walter"], ["petra", "dora"], ["walter", "dora"]];
+        let seals: Vec<ChainBlock> = subsets.iter().map(|s| b.seal(h, change.clone(), s)).collect();
+        for round in 0..3 {
+            for (k, seat) in seats.iter_mut().enumerate() {
+                let j = (k + round) % 3;
+                seq += 1;
+                wire(seat, subsets[j][0], seq, WorkspaceEvent::Committed(seals[j].clone()));
+            }
+        }
+        let tip = seats[0].chain.blocks.last().expect("tip").clone();
+        b.push(tip);
+    }
+    let forks = seats.iter().map(|s| s.chain.fork_decisions).sum();
+    (forks, seats.iter().map(|s| s.chain_sync().head_hash).collect())
+}
+
+/// S5 keystone: after the activation one decision sealed by different
+/// subsets on different seats is one block - zero fork decisions, one head.
+#[test]
+fn different_signer_subsets_never_fork_after_the_activation() {
+    let (forks, heads) = three_seals_per_block(&enabled(2), 6);
+    assert_eq!(forks, 0);
+    assert!(heads.iter().all(|h| *h == heads[0]), "{heads:?}");
+}
+
+/// Counter-test: the same run before the activation decides variants.
+#[test]
+fn different_signer_subsets_fork_before_the_activation() {
+    let (forks, _) = three_seals_per_block(&plain(2), 6);
+    assert!(forks > 0, "v1 variants are fork decisions");
 }

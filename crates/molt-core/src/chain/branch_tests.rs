@@ -47,6 +47,28 @@ fn branch_chosen_approval_bytes_pin() {
     assert_eq!(approval_bytes("f00", 7, &choice()), want);
 }
 
+/// `molt-chain-change-v3` over the choice: `prev` (the chosen tip) after
+/// the height.
+#[test]
+fn branch_chosen_approval_bytes_v3_pin() {
+    let mut want = b"molt-chain-change-v3\0".to_vec();
+    put(&mut want, b"f00");
+    want.extend_from_slice(&7u64.to_le_bytes());
+    put(&mut want, b"t6");
+    want.push(6);
+    want.extend_from_slice(&4u64.to_le_bytes());
+    put(&mut want, b"b4");
+    want.extend_from_slice(&6u64.to_le_bytes());
+    put(&mut want, b"t6");
+    put(&mut want, b"r5");
+    want.extend_from_slice(&1u64.to_le_bytes());
+    want.extend_from_slice(&5u64.to_le_bytes());
+    put(&mut want, b"x5");
+    want.extend_from_slice(&8u64.to_le_bytes());
+    put(&mut want, b"x8");
+    assert_eq!(super::approval_bytes_v3("f00", 7, "t6", &choice()), want);
+}
+
 /// Every field is signed: changing any one changes the bytes.
 #[test]
 fn every_branch_field_is_signed() {

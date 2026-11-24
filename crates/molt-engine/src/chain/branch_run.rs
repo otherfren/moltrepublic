@@ -241,11 +241,11 @@ impl State {
     /// chosen tip (never the own head: the choice may seal on another
     /// branch). The one signing site for sign and check alike.
     fn branch_signing_bytes(&self, change: &ChainChange) -> Vec<u8> {
-        let (height, _prev) = match change {
+        let (height, prev) = match change {
             ChainChange::BranchChosen { tip_height, tip_hash, .. } => (tip_height + 1, tip_hash.as_str()),
             _ => (0, ""),
         };
-        approval_bytes(&self.republic_id(), height, change)
+        signing_bytes(&self.republic_id(), height, prev, change, self.block_v2_from())
     }
 
     /// The identities of a run of another branch, each under ITS branch's
@@ -314,6 +314,8 @@ impl State {
             return Err(format!("run at {} does not link to this chain", first.height));
         }
         let ids = self.run_ids(run);
+        // the run's own activation, as in `run_ids`
+        let mut v2 = self.block_v2_from().filter(|h| *h <= first.height);
         let mut prev: Option<(&ChainBlock, &String)> = None;
         for (b, id) in run.iter().zip(&ids) {
             if let Some((p, pid)) = prev {
@@ -326,7 +328,8 @@ impl State {
             }
             check_shape(b)?;
             let need = if CutKind::of(&b.change).is_some() { head.identities.len() } else { usize::from(head.rule_m) };
-            let signers = block_signers(&rid, &head.identities, b)?;
+            let signers = block_signers(&rid, &head.identities, b, v2)?;
+            v2 = block_v2_after(v2, b);
             if signers.len() < need {
                 return Err(format!("block {} has {} valid approvals, threshold is {need}", b.height, signers.len()));
             }
@@ -987,7 +990,7 @@ impl State {
         let Some(head) = self.chain.head.clone() else {
             return false;
         };
-        let standalone = check_shape(block).and_then(|()| block_signers(&rid, &head.identities, block));
+        let standalone = check_shape(block).and_then(|()| block_signers(&rid, &head.identities, block, head.block_v2_from));
         if !standalone.is_ok_and(|s| s.len() >= usize::from(head.rule_m)) {
             let hash = self.note_refused(from, block, "branch");
             tracing::warn!(%from, %hash, "branch=choice_refused");
