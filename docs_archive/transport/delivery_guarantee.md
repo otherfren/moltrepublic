@@ -778,7 +778,10 @@ trusted: every later restore of that seat reaches it as a merge.
   block is applied in the same handler, before the re-key, and rides the
   same outbox ahead of it. Not re-sent: the Welcome - the reopened
   coordinator answers the device `link outdated`, and a restore by a new
-  link re-keys on top. That link mints only once the seat was silent for
+  link re-keys on top. The delivery of commit and Welcome starts again on
+  the relays this node may dial whenever that set moves, and ends with the
+  workspace (`a_rekey_delivery_moves_to_a_relay_allowed_after_its_own_were_withdrawn`).
+  That link mints only once the seat was silent for
   the window (120 s): before, the mint answers `seat still active`
   (`restore_gate`); the test sets the window to 0. Founding's `add_members` is written whole at the
   seal (the ritual's first disk write). Pins:
@@ -796,10 +799,10 @@ trusted: every later restore of that seat reaches it as a merge.
   K_C: with the lower digest every seat rewinds onto it (the second
   restore undone, the device locked out again); after two or more commits
   during the outage the others ignore K_C and C stays split. v0.1.1 had
-  the same (its log re-offered the commit too). Planned fix: remember the
-  first relay OK for an own commit durably; at the open an own commit
-  never published is rolled back to the prior slot (persisted with the
-  snapshot) instead of re-offered.
+  the same (its log re-offered the commit too). v0.1.3 keeps the re-offer;
+  a shelf built for it was reverted (it touched states older builds wrote
+  and could not replay a re-key of an earlier day). The plan:
+  `docs/transport/pending_rekey_plan.md`.
 - Pins: `mls::tests::the_evicted_leaf_cannot_speak_after_the_rekey` and
   the exporter-ring test (an old-epoch frame is refused after the merge),
   `mls::tests::a_merged_rekey_stays_listed_until_taken`,
@@ -963,14 +966,16 @@ under a millisecond later - the other seat held one or two until the
 stopped seat's next start. The outbox was parked on its wakeup when the
 stop came, and the stop won.
 
-**Rule.** A clean close (`CloseWorkspace`, a workspace switch, the
-service's SIGTERM/SIGINT - all run `persist_net_crypto_on_close`) closes
+**Rule.** A clean close (`CloseWorkspace`, a workspace switch, founding
+or joining another republic while one is open, the service's
+SIGTERM/SIGINT - all run `persist_net_crypto_on_close`) closes
 the group runtime with `GroupHandle::close`: the engine blocks in it, so
 it accepts nothing meanwhile, and the outbox, after its stop, reads the
 log once more from its cursor and offers every own envelope it finds,
 each to every relay ONCE. The pass ends at the first envelope no relay
-took (the cursor holds there for the next start) or at the end of the
-log; then the ratchet snapshot is taken, so it covers every frame the
+took (the cursor is persisted per published envelope, so a pass cut
+short keeps what went out) or at the end of the log; the gap answers stop
+at their next turn. Then the ratchet snapshot is taken, so it covers every frame the
 pass sealed. `outbox=closed sent= [held_at= error=]`. The pass calls
 nothing back into the engine, and every sink call of the outbox gives way
 to the stop - a blocked engine answers nothing.
@@ -983,9 +988,12 @@ bound - about connect + 2 x publish (120 s by default) - and the relays
 are asked concurrently. Every relay unreachable: the first envelope
 fails within that bound and the pass ends. One relay accepting while
 another hangs: each envelope waits the accepting relay plus the 2 s
-grace until the hung one trips its breaker. A second SIGTERM/SIGINT ends
-the process at once (`stop=forced`, exit 1, no durable close); SIGKILL
-always does.
+grace until the hung one trips its breaker. After a stop by signal, a
+second SIGTERM/SIGINT ends the process at once (`stop=forced`, exit 1, no
+durable close); a run that ended otherwise (the window closed, stdio
+closed) keeps its close. SIGKILL always ends it. The service unit's
+`TimeoutStopSec` (180) lies above the farewells' 15 s plus one attempt.
+The close shows no progress meanwhile, and MCP requests wait for it.
 
 **Not drained.** A withdrawal (`withdraw()`, a relay left the dialable
 set) closes the channel: the pass publishes nothing. A relay the dial gate
@@ -996,9 +1004,10 @@ covers it. A current-thread runtime (unit tests) cannot block in place
 and drops the handle instead.
 
 Pins: `group_runtime::tests::{a_clean_close_publishes_the_tail_the_outbox_never_read,
-a_plain_shutdown_takes_no_final_pass, a_withdrawn_close_publishes_nothing,
-a_gate_withdrawn_relay_ends_the_close_at_once,
-an_unanswering_relay_holds_the_close_for_one_attempt_only}`,
+a_publish_in_flight_at_the_close_is_finished_and_the_pass_sends_the_rest,
+a_plain_shutdown_takes_no_final_pass}`; bounds (they hold without the
+pass too): `a_withdrawn_close_publishes_nothing`,
+`a_gate_withdrawn_relay_ends_the_close_at_once`,
+`an_unanswering_relay_holds_the_close_for_one_attempt_only`;
 `crates/molt-engine/tests/nostr_clean_stop.rs`,
-`crates/molt-app/tests/service.rs`
-(`a_sigterm_right_after_sending_delivers_every_message`).
+`crates/molt-app/tests/service.rs` (`a_second_sigterm_ends_a_waiting_close`).
