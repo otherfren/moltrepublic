@@ -69,6 +69,10 @@ pub enum VaultRefusal {
     /// The founding bounds (spec §3).
     #[error("needs 2 <= m <= n-2")]
     Bounds,
+    /// A new founding under the majority rule needs
+    /// [`crate::majority::VAULT_MIN_SEATS`] seats.
+    #[error("needs 5 or more members")]
+    FewMembers,
     /// `set_features` cannot add the vault to a roster-v5 republic.
     #[error("needs a newer republic")]
     NeedsNewerRepublic,
@@ -1048,6 +1052,10 @@ mod tests {
     fn vault_refusal_text_is_pinned() {
         let cases = [
             (VaultRefusal::Bounds, "needs 2 <= m <= n-2"),
+            (
+                VaultRefusal::FewMembers,
+                &format!("needs {} or more members", crate::majority::VAULT_MIN_SEATS),
+            ),
             (VaultRefusal::NeedsNewerRepublic, "needs a newer republic"),
             (VaultRefusal::NeedsNewerVersion("b".to_string()), "needs a newer version: b"),
             (VaultRefusal::NotVerified, "not verified"),

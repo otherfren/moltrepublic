@@ -1644,6 +1644,8 @@ export component AppWindow inherits Window {
     // "recovery link" action only then (never keyed on the member's
     // presence: a recovery link is FOR an unreachable member)
     in property <bool> org-chain-governed: false;
+    // founded before the majority rule (2m <= n)
+    in property <bool> org-below-majority: false;
 
     // ---- actions: each becomes a Command on the shared WalletHandle ----
     callback navigate(AppScreen);
@@ -2148,7 +2150,8 @@ export component AppWindow inherits Window {
         && root.cw-threshold <= root.cw-members - 1;
     // vault spec §3: m >= 2 and m <= n-2; m and n are fixed at setup
     out property <bool> cw-vault-allowed: root.cw-threshold >= 2
-        && root.cw-threshold <= root.cw-members - 2;
+        && root.cw-threshold <= root.cw-members - 2
+        && root.cw-threshold * 2 > root.cw-members;
     // the proposed (signed) selection, mirrored from the engine session
     in property <bool> cw-prop-memory;
     in property <bool> cw-prop-quests;
@@ -3828,11 +3831,9 @@ export component AppWindow inherits Window {
                                 AppStepper {
                                     width: 120px;
                                     value <=> root.cw-threshold;
-                                    // never 1: a lone voice is no threshold,
-                                    // and m=1 breeds special cases in the
-                                    // decision logic (product decision
-                                    // 2026-08-08)
-                                    minimum: 2;
+                                    // the majority rule (2m > n): two deciding
+                                    // groups always share a seat
+                                    minimum: root.cw-rule-default;
                                     maximum: root.cw-members;
                                 }
                             }
@@ -3848,9 +3849,8 @@ export component AppWindow inherits Window {
                                     value <=> root.cw-members;
                                     minimum: 2;
                                     maximum: 13;
-                                    // changing n snaps m to its default — the
-                                    // simple majority (⌊n/2⌋+1); m stays freely
-                                    // adjustable within 1..=n afterwards
+                                    // changing n snaps m to its default and
+                                    // floor, the simple majority (⌊n/2⌋+1)
                                     changed(v) => {
                                         root.cw-threshold = root.cw-rule-default;
                                     }
@@ -3887,6 +3887,12 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                 }
+                                if root.cw-threshold <= root.cw-rule-default: Text {
+                                    text: Strings.cw-rule-majority;
+                                    color: Theme.faint;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
+                                }
                             }
                         }
                     }
@@ -3906,6 +3912,7 @@ export component AppWindow inherits Window {
                                 vault-ok: root.cw-vault-allowed;
                                 wallet-ok: root.cw-wallet-allowed;
                                 low: root.cw-threshold < 2;
+                                few: root.cw-members < 5;
                             }
                         }
                     }
@@ -4212,6 +4219,7 @@ export component AppWindow inherits Window {
                         vault-ok: root.cw-vault-allowed;
                         wallet-ok: root.cw-wallet-allowed;
                         low: root.cw-threshold < 2;
+                        few: root.cw-members < 5;
                     }
 
                     // P1: the member list IS the current step
@@ -4255,6 +4263,7 @@ export component AppWindow inherits Window {
                             vault-ok: root.cw-vault-allowed;
                             wallet-ok: root.cw-wallet-allowed;
                             low: root.cw-threshold < 2;
+                            few: root.cw-members < 5;
                         }
                     }
                     if phase != 1: FoldedStep {
@@ -6639,6 +6648,12 @@ export component AppWindow inherits Window {
                                             root.org-relays-modal-open = true;
                                         }
                                     }
+                                }
+                                if root.org-below-majority: Text {
+                                    text: "⚠ \{Strings.os-below-majority}";
+                                    color: Theme.warn;
+                                    font-size: Theme.fs-cap;
+                                    wrap: word-wrap;
                                 }
                                 DetailGroup {
                                     title: Strings.const-charter-title;
@@ -10917,7 +10932,7 @@ export component AppWindow inherits Window {
                     vertical-alignment: center;
                 }
                 Text {
-                    text: root.org-vault-enable == 2 ? Strings.vault-newer-republic : Strings.feat-vault-bounds;
+                    text: root.org-vault-enable == 2 ? Strings.vault-newer-republic : root.org-vault-enable == 4 ? Strings.feat-vault-members : Strings.feat-vault-bounds;
                     color: Theme.faint;
                     font-size: Theme.fs-cap;
                     vertical-alignment: center;

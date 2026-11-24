@@ -242,6 +242,11 @@ pub(crate) struct OrgStats {
     /// Whether a vote can switch the vault on (engine
     /// `StatusView.vault_enable`).
     pub(crate) vault_enable: molt_core::vault::VaultEnable,
+    /// The vault is out of reach for want of seats: a majority republic
+    /// below `VAULT_MIN_SEATS`.
+    pub(crate) vault_few_members: bool,
+    /// Engine `StatusView.below_majority`.
+    pub(crate) below_majority: bool,
     /// Decoded picture bytes a member picture may still carry here (engine
     /// `StatusView.image_budget`) - what the fit before proposing aims at.
     pub(crate) image_budget: u64,
@@ -1066,6 +1071,13 @@ pub(crate) async fn gather_surfaces(
                     .collect(),
                 features: s.features,
                 vault_enable: s.vault_enable,
+                vault_few_members: {
+                    let n = u8::try_from(s.members.len()).unwrap_or(u8::MAX);
+                    let m = u8::try_from(s.threshold).unwrap_or(u8::MAX);
+                    molt_core::majority::threshold_is_majority(m, n)
+                        && n < molt_core::majority::VAULT_MIN_SEATS
+                },
+                below_majority: s.below_majority,
                 image_budget: s.image_budget,
                 mirror_on: mirror.as_ref().map_or(true, |m| m.on),
                 mirror_quota: mirror.as_ref().map_or(molt_core::MIRROR_QUOTA_DEFAULT, |m| m.quota),

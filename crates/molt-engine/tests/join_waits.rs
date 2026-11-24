@@ -22,6 +22,7 @@ async fn a_join_nobody_answers_keeps_waiting() {
         invite_snd: invite_q.snd,
         invite_wrap: WrapKey::fresh().expect("wrap"),
         ticket: "ab".repeat(32),
+        minority_ok: false,
     };
     let phrase = molt_storage::generate_seed_phrase().expect("phrase");
     let join = tokio::spawn(molt_engine::run_ritual_member(

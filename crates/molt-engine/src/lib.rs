@@ -193,6 +193,7 @@ pub struct WalletHandle {
     backup_skew: std::sync::Arc<std::sync::atomic::AtomicU64>,
     drop_seam: std::sync::Arc<net::DropSeam>,
     seal_first: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    minority_seam: std::sync::Arc<std::sync::atomic::AtomicBool>,
     lock_seams: std::sync::Arc<chain::LockSeams>,
     farewells: Farewells,
 }
@@ -338,6 +339,14 @@ impl WalletHandle {
     #[doc(hidden)]
     pub fn __seal_first(&self, on: bool) {
         self.seal_first.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Test seam: this node founds and ratifies a threshold that is no
+    /// majority, as a build before the majority rule did - the fixture
+    /// for republics founded then.
+    #[doc(hidden)]
+    pub fn __allow_minority_threshold(&self, on: bool) {
+        self.minority_seam.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Test seam (vault plan S3c): this holder's receipts report a
@@ -721,6 +730,7 @@ fn spawn_actor(
     let backup_skew = state.backup_skew.clone();
     let drop_seam = state.drop_seam.clone();
     let seal_first = state.seal_first.clone();
+    let minority_seam = state.minority_seam.clone();
     let lock_seams = state.lock_seams.clone();
     if vault::receipts::lab_complain_at_spawn() {
         tracing::warn!("vault_lab=complain");
@@ -759,6 +769,7 @@ fn spawn_actor(
         backup_skew,
         drop_seam,
         seal_first,
+        minority_seam,
         lock_seams,
         farewells,
     }
@@ -1644,6 +1655,8 @@ pub(crate) struct State {
     /// B4 test seam: coordinate every recovery seal-first, as an older
     /// build does.
     pub(crate) seal_first: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Test seam: the majority rule off for this node's foundings.
+    pub(crate) minority_seam: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The sealing lock's test seams (never a `Command`).
     pub(crate) lock_seams: std::sync::Arc<chain::LockSeams>,
     /// Grant answers and asks of the open workspace (vault plan S4).
@@ -1977,6 +1990,7 @@ impl State {
             seat_active: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)),
             drop_seam: std::sync::Arc::default(),
             seal_first: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            minority_seam: std::sync::Arc::default(),
             lock_seams: std::sync::Arc::default(),
             vault_grants: vault::grant::GrantRuntime::default(),
             group_net: None,
@@ -2137,6 +2151,21 @@ impl State {
     #[cfg(test)]
     pub(crate) fn subscribe_events(&self) -> broadcast::Receiver<Event> {
         self.ev_tx.subscribe()
+    }
+
+    pub(crate) fn minority_ok(&self) -> bool {
+        self.minority_seam.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// A chain republic founded before the majority rule (2m <= n).
+    pub(crate) fn below_majority(&self) -> bool {
+        self.is_chain_governed()
+            && self.replica.as_ref().is_some_and(|r| {
+                !molt_core::majority::threshold_is_majority(
+                    r.rule_m,
+                    u8::try_from(self.roster().len()).unwrap_or(u8::MAX),
+                )
+            })
     }
 
     pub(crate) fn threshold(&self) -> usize {

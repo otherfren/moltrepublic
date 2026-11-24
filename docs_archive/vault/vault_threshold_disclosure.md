@@ -102,6 +102,14 @@ vote (D11); the republic's shape decides whether it can mean anything:
   holders — one fewer than governance. At m = n − 1 that is zero: in a
   2-of-3 republic a grant commits with one seat dead, and the read it
   grants is impossible. So n ≥ 4.
+- **With the majority rule (2m > n, v0.1.3) a NEW founding needs n ≥ 5**
+  (3-of-5 is the smallest). The wizard's vault row and
+  `cmd_create_propose` say `needs 5 or more members`
+  (`VaultRefusal::FewMembers`) for a majority founding under five seats;
+  the Organization row says the same for such a republic. A republic
+  founded before the rule (2-of-4) keeps its vault, and a prepared one
+  within the bounds can still vote it in: the majority rule binds new
+  foundings, not existing chains.
 
 Both are checked when the vault is chosen at founding (the wizard,
 `cmd_create_propose`, `verify_seal_proposal`) and when a `set_features`

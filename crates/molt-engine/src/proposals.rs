@@ -4844,6 +4844,7 @@ impl State {
             // "recovery link" action on this (never on the member's presence:
             // a recovery link is FOR an unreachable member)
             chain_governed: self.is_chain_governed(),
+            below_majority: self.below_majority(),
             chain_diverged: self.chain.diverged.values().cloned().collect(),
             // the nav renders this list: a prepared vault only once enabled
             features: {

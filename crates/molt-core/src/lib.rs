@@ -30,6 +30,7 @@ pub mod kanban_review;
 pub mod kanban_view;
 pub mod kanban_wake;
 pub mod log_tail;
+pub mod majority;
 pub mod operator;
 pub mod relay;
 pub mod vault;
@@ -8825,6 +8826,10 @@ pub struct StatusView {
     /// and pre-chain workspaces have no chain for a rejoiner to verify).
     #[serde(default)]
     pub chain_governed: bool,
+    /// The threshold is not a majority (2m <= n, founded before the
+    /// majority rule): a split cannot be repaired by vote.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub below_majority: bool,
     /// Peers whose chain parted from this node's (A2.1). Empty is the
     /// healthy state; an entry means this node and that peer will refuse
     /// each other's blocks until one re-bases.

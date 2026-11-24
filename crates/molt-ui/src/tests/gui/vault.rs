@@ -918,7 +918,7 @@ fn the_vault_nav_hides_until_the_enabling_block() {
 }
 
 /// Review LOW-2: an enable block outside `2 <= m <= n-2` enables nothing,
-/// so no nav row, and the modal names the bounds.
+/// so no nav row, and the modal names why (a majority 2-of-3: the seats).
 #[test]
 fn an_out_of_bounds_enable_block_shows_no_vault() {
     let tmp = tempfile::tempdir().expect("tmp");
@@ -929,7 +929,7 @@ fn an_out_of_bounds_enable_block_shows_no_vault() {
     assert!(surface_tab(&ui, "vault").is_none(), "no vault tab");
     assert!(!ui.get_vault_real());
     assert!(!ui.get_org_feat_vault());
-    assert_eq!(ui.get_org_vault_enable(), 3, "bounds");
+    assert_eq!(ui.get_org_vault_enable(), 4, "bounds, under five seats");
 }
 
 #[test]

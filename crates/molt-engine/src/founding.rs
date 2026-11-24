@@ -577,6 +577,7 @@ impl State {
                     invite_snd: invite_q.snd.clone(),
                     invite_wrap: invite_wrap.clone(),
                     ticket: ticket.clone(),
+                    minority_ok: self.minority_ok(),
                 };
                 if self.ritual_sim {
                     sim.push(spawn_sim_member(material)?);
@@ -945,6 +946,9 @@ pub struct InviteMaterial<T: molt_net::Transport = LoopbackTransport> {
     pub invite_wrap: WrapKey,
     /// The single-use ticket.
     pub ticket: String,
+    /// Test seam: the member ratifies a threshold that is no majority.
+    #[doc(hidden)]
+    pub minority_ok: bool,
 }
 
 /// A full founding-invite link: the [`molt_core::InviteInfo`] display preview
@@ -1732,6 +1736,7 @@ pub async fn run_ritual_member<T: molt_net::Transport>(
     cancel: Option<mpsc::Receiver<()>>,
 ) -> Result<JoinOutcome, String> {
     let mut seat = MemberSeat::derive(m.seat, &m.ticket, &phrase)?;
+    seat.minority_ok = m.minority_ok;
     // the loopback twin (tests) runs this build: it declares the lock
     seat.caps.push(molt_core::chain::CHAIN_LOCK_CAP.to_string());
     // subscribe BEFORE the JoinRequest advertises the queue
@@ -2751,7 +2756,13 @@ mod ritual_ops {
                 if features.iter().any(|f| f == crate::vault::VAULT)
                     && !crate::vault::bounds_ok(ritual.rule_m, ritual.rule_n)
                 {
-                    return Err(molt_core::MoltError::Vault(VaultRefusal::Bounds));
+                    let few = molt_core::majority::threshold_is_majority(ritual.rule_m, ritual.rule_n)
+                        && ritual.rule_n < molt_core::majority::VAULT_MIN_SEATS;
+                    return Err(molt_core::MoltError::Vault(if few {
+                        VaultRefusal::FewMembers
+                    } else {
+                        VaultRefusal::Bounds
+                    }));
                 }
             }
             // the final, ratified name feeds the republic id + canonical bytes;
@@ -4245,6 +4256,7 @@ mod tests {
                 invite_snd: invite_q.snd.clone(),
                 invite_wrap: invite_wrap.clone(),
                 ticket: ticket.clone(),
+                minority_ok: false,
             };
             let phrase = molt_storage::generate_seed_phrase().expect("phrase");
             let member_task = tokio::spawn(run_ritual_member(
@@ -4746,10 +4758,14 @@ mod tests {
         assert!(!st.net_ritual.as_ref().expect("ritual").charter_proposed, "nothing proposed");
     }
 
+    /// Under five seats a majority founding names the seats; above, the bounds.
     #[test]
     fn create_propose_refuses_vault_at_2_of_3() {
         let mut st = vault_ritual(2, 3, None);
         let err = propose_vault(&mut st).expect_err("2-of-3 is outside the bounds");
+        assert!(matches!(err, molt_core::MoltError::Vault(molt_core::vault::VaultRefusal::FewMembers)), "{err}");
+        let mut st = vault_ritual(4, 5, None);
+        let err = propose_vault(&mut st).expect_err("4-of-5 is outside the bounds");
         assert!(matches!(err, molt_core::MoltError::Vault(molt_core::vault::VaultRefusal::Bounds)), "{err}");
     }
 

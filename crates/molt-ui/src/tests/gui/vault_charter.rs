@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The vault (vault spec §3, D11): the wizard box is on by default where
-//! `2 <= m <= n-2` allows it, disabled elsewhere, the charter echo shows the signed selection,
+//! `2 <= m <= n-2` and the majority rule allow it, disabled elsewhere, the charter echo shows the signed selection,
 //! and the Organization modal offers it only where a vote can enable it.
 
 use super::*;
@@ -63,11 +63,13 @@ fn wizard_vault_box(ui: &AppWindow) -> Handle {
 #[test]
 fn the_vault_box_is_disabled_outside_2_to_n_minus_2() {
     i_slint_backend_testing::init_no_event_loop();
-    for (m, n, allowed) in [(2, 3, false), (2, 4, true), (3, 4, false), (1, 4, false), (3, 5, true)] {
+    let cases = [(2, 3, false), (2, 4, false), (3, 4, false), (1, 4, false), (3, 5, true), (4, 6, true), (5, 6, false)];
+    for (m, n, allowed) in cases {
         let (ui, _shown) = setup_form(m, n);
         let s = ui.global::<Strings>();
         let low = s.get_feat_vault_low().to_string();
         let high = s.get_feat_vault_high().to_string();
+        let few = s.get_feat_vault_members().to_string();
         let before = crate::actions::ritual::charter_features(&ui).contains(&"vault".to_string());
         assert_eq!(before, allowed, "{m}-of-{n}: ticked by default iff allowed");
         click(&ui, &wizard_vault_box(&ui));
@@ -75,7 +77,8 @@ fn the_vault_box_is_disabled_outside_2_to_n_minus_2() {
         assert!(!after, "{m}-of-{n}: a click unticks an allowed box, a disabled one stays off");
         let shown = |t: &str| Handle::find_by_accessible_label(&ui, t).next().is_some();
         assert_eq!(shown(&low), !allowed && m < 2, "{m}-of-{n}: the low line");
-        assert_eq!(shown(&high), !allowed && m >= 2, "{m}-of-{n}: the high line");
+        assert_eq!(shown(&few), !allowed && m >= 2 && n < 5, "{m}-of-{n}: the seats line");
+        assert_eq!(shown(&high), !allowed && m >= 2 && n >= 5, "{m}-of-{n}: the high line");
     }
 }
 
@@ -83,7 +86,7 @@ fn the_vault_box_is_disabled_outside_2_to_n_minus_2() {
 #[test]
 fn the_vault_reason_sits_beside_the_box() {
     i_slint_backend_testing::init_no_event_loop();
-    let (ui, _shown) = setup_form(3, 4);
+    let (ui, _shown) = setup_form(4, 5);
     let high = ui.global::<Strings>().get_feat_vault_high().to_string();
     let reason = Handle::find_by_accessible_label(&ui, &high).next().expect("reason shown");
     let check = wizard_vault_box(&ui);
@@ -99,7 +102,7 @@ fn the_vault_reason_sits_beside_the_box() {
 #[test]
 fn the_vault_box_is_on_by_default_where_allowed() {
     i_slint_backend_testing::init_no_event_loop();
-    let (ui, _shown) = setup_form(2, 4);
+    let (ui, _shown) = setup_form(3, 5);
     assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string(), "vault".to_string()]);
     drop(_shown);
     let (ui, _shown) = setup_form(2, 3);
@@ -109,7 +112,7 @@ fn the_vault_box_is_on_by_default_where_allowed() {
 #[test]
 fn an_unticked_vault_leaves_create_propose() {
     i_slint_backend_testing::init_no_event_loop();
-    let (ui, _shown) = setup_form(2, 4);
+    let (ui, _shown) = setup_form(3, 5);
     click(&ui, &wizard_vault_box(&ui));
     assert_eq!(crate::actions::ritual::charter_features(&ui), vec!["memory".to_string()]);
 }
@@ -166,6 +169,8 @@ const ON: i32 = 0;
 const OFFER: i32 = 1;
 const NEWER: i32 = 2;
 const BOUNDS: i32 = 3;
+/// `Bounds` in a majority republic under five seats.
+const FEW: i32 = 4;
 
 /// The Organization features modal over a republic whose vault switch
 /// reads `enable` (on: the vault is in the effective selection).
@@ -211,7 +216,7 @@ fn confirm(ui: &AppWindow) {
 /// offers no box.
 #[test]
 fn the_org_modal_names_why_the_vault_is_locked() {
-    for enable in [NEWER, BOUNDS] {
+    for enable in [NEWER, BOUNDS, FEW] {
         let (ui, _shown, got) = org_modal(enable);
         let s = ui.global::<Strings>();
         let dlg = modal(&ui);
@@ -220,7 +225,11 @@ fn the_org_modal_names_why_the_vault_is_locked() {
                 && checks_in(&dlg, &format!("{}{}{}", s.get_feat_vault(), s.get_feat_wip(), s.get_feat_mock())).is_empty(),
             "no vault checkbox in the dialog"
         );
-        let why = if enable == NEWER { s.get_vault_newer_republic() } else { s.get_feat_vault_bounds() };
+        let why = match enable {
+            NEWER => s.get_vault_newer_republic(),
+            FEW => s.get_feat_vault_members(),
+            _ => s.get_feat_vault_bounds(),
+        };
         assert!(has_text(&dlg, &why), "the vault row says {why}");
         confirm(&ui);
         assert!(got.borrow().is_empty(), "nothing to propose");
@@ -263,7 +272,7 @@ fn an_org_proposal_in_a_vault_republic_carries_no_vault() {
 #[test]
 fn a_ticked_kanban_reaches_create_propose() {
     i_slint_backend_testing::init_no_event_loop();
-    let (ui, _shown) = setup_form(2, 4);
+    let (ui, _shown) = setup_form(3, 5);
     let label = ui.global::<Strings>().get_feat_quests().to_string();
     let mut found = checks_in(&window_root(&ui), &label);
     assert_eq!(found.len(), 1, "one kanban box on the setup form");
@@ -282,7 +291,7 @@ fn a_ticked_kanban_reaches_create_propose() {
 fn the_feature_table_states_each_rows_status() {
     i_slint_backend_testing::init_no_event_loop();
     let count = |ui: &AppWindow, t: &str| Handle::find_by_accessible_label(ui, t).count();
-    let (ui, _shown) = setup_form(2, 4);
+    let (ui, _shown) = setup_form(3, 5);
     let s = ui.global::<Strings>();
     for locked in [s.get_feat_chat(), s.get_feat_files()] {
         let row = checks_in(&window_root(&ui), &locked);
@@ -297,7 +306,7 @@ fn the_feature_table_states_each_rows_status() {
     }
     drop(_shown);
     // 1-of-3: neither the vault nor the purse is possible
-    for (m, n) in [(2, 4), (1, 3)] {
+    for (m, n) in [(3, 5), (1, 3)] {
         let (ui, _shown) = setup_form(m, n);
         let s = ui.global::<Strings>();
         if m == 1 {

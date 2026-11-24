@@ -400,3 +400,19 @@ fn the_vault_founding_strings_are_compact() {
     assert_eq!(crate::i18n::localize_vault_refusal(0, &bounds), Lexicon::en().feat_vault_bounds);
     assert_eq!(crate::i18n::localize_vault_refusal(1, &bounds), Lexicon::de().feat_vault_bounds);
 }
+
+/// The majority rule's strings: one fact each, no em dash, both languages;
+/// the vault's seat count is the engine's.
+#[test]
+fn the_majority_strings_are_compact() {
+    for l in [Lexicon::en(), Lexicon::de()] {
+        for s in [l.cw_rule_majority, l.os_below_majority, l.feat_vault_members] {
+            assert!(!s.is_empty() && !s.contains('\u{2014}') && !s.contains("<="), "{s:?}");
+        }
+    }
+    let few = molt_core::vault::VaultRefusal::FewMembers;
+    assert_eq!(crate::i18n::localize_vault_refusal(0, &few), few.to_string());
+    assert_eq!(crate::i18n::localize_vault_refusal(1, &few), Lexicon::de().feat_vault_members);
+    let seats = molt_core::majority::VAULT_MIN_SEATS.to_string();
+    assert!(Lexicon::en().feat_vault_members.contains(&seats) && Lexicon::de().feat_vault_members.contains(&seats));
+}

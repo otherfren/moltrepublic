@@ -360,3 +360,77 @@ fn leaving_the_create_screen_keeps_an_in_flight_founding() {
         }
     });
 }
+
+fn start(m: u8, n: u8) -> Command {
+    Command::CreateStart {
+        name: "R".to_string(),
+        member: "petra".to_string(),
+        threshold: m,
+        members: n,
+        relays: Vec::new(),
+    }
+}
+
+/// A sim founder that writes its workspace under `root`.
+fn persisted_founder(root: &std::path::Path) -> WalletHandle {
+    let session = SessionView {
+        settings: SessionSettings { workspace_dir: root.display().to_string(), ..SessionSettings::default() },
+        ..SessionView::default()
+    };
+    __spawn_sim_founding(GroupConfig::demo(), session, true)
+}
+
+async fn found_and_enter(w: &WalletHandle, m: u8, n: u8) -> molt_core::StatusView {
+    w.execute(start(m, n)).await.expect("start");
+    await_founding(w).await;
+    w.execute(Command::CreateFinish).await.expect("finish");
+    match w.execute(Command::Status).await.expect("status") {
+        Reply::Status(st) => st,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// The majority rule (`chain_rescue_plan.md`): a threshold with 2m <= n
+/// is refused at the founder's door, naming the smallest allowed m.
+#[test]
+fn create_start_refuses_a_threshold_that_is_no_majority() {
+    rt().block_on(async {
+        let w = __spawn_sim_founding(GroupConfig::demo(), SessionView::default(), false);
+        for (m, n, min) in [(2u8, 4u8, 3u8), (2, 5, 3), (3, 6, 4)] {
+            let err = w.execute(start(m, n)).await.expect_err("no majority");
+            assert_eq!(
+                err.to_string(),
+                format!("create: needs a majority: at least {min} of {n}"),
+                "{m}-of-{n}"
+            );
+        }
+    });
+}
+
+/// 2-of-3, 3-of-4 and 3-of-5 found; none carries the notice.
+#[test]
+fn majority_thresholds_found_without_the_notice() {
+    rt().block_on(async {
+        for (m, n) in [(2u8, 3u8), (3, 4), (3, 5)] {
+            let tmp = tempfile::tempdir().expect("tmp");
+            let w = persisted_founder(tmp.path());
+            let st = found_and_enter(&w, m, n).await;
+            assert_eq!(st.threshold, usize::from(m));
+            assert!(!st.below_majority, "{m}-of-{n}");
+        }
+    });
+}
+
+/// The fixture seam founds the pre-rule shape (founder and its loopback
+/// members), and that republic carries the notice.
+#[test]
+fn a_republic_founded_below_majority_carries_the_notice() {
+    rt().block_on(async {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let w = persisted_founder(tmp.path());
+        w.__allow_minority_threshold(true);
+        let st = found_and_enter(&w, 2, 4).await;
+        assert!(st.chain_governed);
+        assert!(st.below_majority);
+    });
+}
