@@ -681,6 +681,7 @@ impl RelayRuntime {
                         );
                         Ok(ws)
                     }
+                    Ok(Err(NetError::Withdrawn)) => Err(format!("{url}: relay withdrawn")),
                     Ok(Err(e)) => {
                         tracing::warn!(relay = %url, via = %via, error = %e, "relay connect failed");
                         Err(format!("{url} via {via}: {}", relay_reason(&e.to_string())))
@@ -728,6 +729,9 @@ impl RelayRuntime {
             // finding, HIGH)
             for s in supervisors {
                 s.abort();
+            }
+            if self.urls.iter().all(|u| self.dialer.check_gate(u).is_err()) {
+                return Err(NetError::Withdrawn);
             }
             // the per-relay reasons are already on WARN above; this line ties
             // them together so the operator sees the verdict, not just N
@@ -884,6 +888,17 @@ async fn supervise(
                         // a fresh failure after a good session is loud again
                         last_reason = None;
                         ws
+                    }
+                    // parked until consent returns: no timer, no dial
+                    Ok(Err(NetError::Withdrawn)) => {
+                        shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
+                        tracing::info!(relay = %url, "relay withdrawn - parked");
+                        if !shared.dialer.until_any_allowed(std::slice::from_ref(&url)).await {
+                            return;
+                        }
+                        backoff = initial;
+                        last_reason = None;
+                        continue;
                     }
                     Ok(Err(e)) => {
                         shared.health.lock().await.insert(url.clone(), RelayHealth::Down);
@@ -1769,6 +1784,12 @@ impl PublishPool {
                 guard.healthy();
                 verdict
             }
+            // consent, not the relay, decides: no breaker, so consent given
+            // again dials at once
+            Err(NetError::Withdrawn) => {
+                guard.ws = None;
+                Err(NetError::Withdrawn)
+            }
             Err(e) => {
                 guard.tripped();
                 Err(e)
@@ -1894,6 +1915,7 @@ async fn gather_publish(
         })
         .collect();
     let mut report = PublishReport::default();
+    let mut withdrawn = 0usize;
     let mut grace_until: Option<tokio::time::Instant> = None;
     loop {
         let next = match grace_until {
@@ -1911,9 +1933,14 @@ async fn gather_publish(
             }
             Err(e) => {
                 warn_unless_refused(&url, &e);
+                withdrawn += usize::from(matches!(e, NetError::Withdrawn));
                 report.failed.push((url, e.to_string()));
             }
         }
+    }
+    // typed, so a retry loop waits for consent instead of a timer
+    if report.accepted.is_empty() && withdrawn > 0 && withdrawn == report.failed.len() {
+        return Err(NetError::Withdrawn);
     }
     if !pending.is_empty() {
         tracing::debug!(relays = pending.len(), "publish continues in the background");
@@ -1930,8 +1957,10 @@ async fn gather_publish(
 
 /// One relay's failed attempt; a refusal was logged where it was counted.
 fn warn_unless_refused(url: &str, e: &NetError) {
-    if !matches!(e, NetError::Refused { .. }) {
-        tracing::warn!(relay = %url, error = %e, "publish rejected");
+    match e {
+        NetError::Refused { .. } => {}
+        NetError::Withdrawn => tracing::debug!(relay = %url, "publish skipped: relay withdrawn"),
+        _ => tracing::warn!(relay = %url, error = %e, "publish rejected"),
     }
 }
 
@@ -2058,7 +2087,7 @@ mod tests {
             }
         });
         let pool = super::PublishPool::new(
-            crate::dial::Dialer::Direct,
+            crate::dial::Dialer::direct(),
             vec![live.clone(), hole.clone()],
         )
         .with_timeouts(crate::timeouts::RelayTimeouts {
@@ -2125,12 +2154,12 @@ mod tests {
             publish: Duration::from_millis(300),
         };
 
-        let pool = super::PublishPool::new(crate::dial::Dialer::Direct, vec![slow.clone()])
+        let pool = super::PublishPool::new(crate::dial::Dialer::direct(), vec![slow.clone()])
             .with_timeouts(timeouts);
         let report = pool.publish(&event).await.expect("the slow relay accepted (pool)");
         assert_eq!(report.accepted, vec![slow.clone()]);
 
-        let rt = super::RelayRuntime::new(crate::dial::Dialer::Direct, vec![slow.clone()])
+        let rt = super::RelayRuntime::new(crate::dial::Dialer::direct(), vec![slow.clone()])
             .with_timeouts(timeouts);
         let report = rt.publish(&event).await.expect("the slow relay accepted (one-shot)");
         assert_eq!(report.accepted, vec![slow]);
@@ -2152,7 +2181,7 @@ mod tests {
                 .sign_with_keys(&keys)
                 .expect("sign")
         };
-        let pool = super::PublishPool::new(crate::dial::Dialer::Direct, vec![live.clone(), slow.clone()])
+        let pool = super::PublishPool::new(crate::dial::Dialer::direct(), vec![live.clone(), slow.clone()])
             .with_timeouts(crate::timeouts::RelayTimeouts {
                 connect: Duration::from_secs(20),
                 publish: Duration::from_secs(5),
@@ -2206,7 +2235,7 @@ mod tests {
                 drop(sock);
             }
         });
-        let pool = super::PublishPool::new(crate::dial::Dialer::Direct, vec![url.clone()]).with_timeouts(
+        let pool = super::PublishPool::new(crate::dial::Dialer::direct(), vec![url.clone()]).with_timeouts(
             crate::timeouts::RelayTimeouts { connect: Duration::from_secs(5), publish: Duration::from_secs(5) },
         );
         let keys = nostr::Keys::generate();
@@ -2242,7 +2271,7 @@ mod tests {
         };
         let url = "wss://relay.invalid".to_string();
         for (dialer, via) in [
-            (crate::dial::Dialer::Direct, "via direct"),
+            (crate::dial::Dialer::direct(), "via direct"),
             (
                 crate::dial::Dialer::resolve("tor", "local", dead).expect("socks"),
                 "via socks5://127.0.0.1:",
@@ -2264,7 +2293,7 @@ mod tests {
     /// parks on a full channel instead of buffering a 1 GB replay.
     #[test]
     fn a_file_subscription_is_unbounded_but_backpressured() {
-        let rt = super::RelayRuntime::new(crate::dial::Dialer::Direct, vec![]);
+        let rt = super::RelayRuntime::new(crate::dial::Dialer::direct(), vec![]);
         assert_eq!(rt.channel_capacity(), super::MAX_STORED_EVENTS_PER_REQ + 64);
         let files = rt.without_history_bound().with_channel_capacity(super::FILE_SUB_CAPACITY);
         assert_eq!(files.history_bound, None);
@@ -2277,7 +2306,7 @@ mod tests {
     fn the_dedup_ring_covers_the_history_bound() {
         // the production bound: a full replay of it must stay remembered
         let bound = super::MAX_STORED_EVENTS_PER_REQ;
-        let rt = super::RelayRuntime::new(crate::dial::Dialer::Direct, vec![]);
+        let rt = super::RelayRuntime::new(crate::dial::Dialer::direct(), vec![]);
         let cap = rt.history_bound.unwrap_or(0).saturating_add(64).max(super::DEDUP_CAP);
         let ids: Vec<nostr::EventId> = (0..bound)
             .map(|i| {

@@ -16,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 
-use crate::dial::{DialStream, Dialer};
+use crate::dial::{DialStream, Dialer, RelayGate};
 use crate::NetError;
 
 /// TLS handshake bound (the dial itself has its own deadline).
@@ -145,7 +145,7 @@ pub(crate) fn relay_dial_coords(url: &str) -> Result<(String, u16, bool), NetErr
 
 pub(crate) fn dialer_for(dialer: &Dialer, url: &str) -> Dialer {
     if molt_core::relay::relay_kind(url) == molt_core::relay::RelayKind::Local {
-        return Dialer::Direct;
+        return Dialer { route: crate::dial::Route::Direct, gate: dialer.gate.clone() };
     }
     dialer.clone()
 }
@@ -161,6 +161,17 @@ pub(crate) async fn dial_maybe_tls(
     tls: bool,
 ) -> Result<MaybeTls, NetError> {
     let stream = dialer.dial_host(host, port).await?;
+    wrap_tls(dialer, stream, host, port, tls).await
+}
+
+/// The TLS half of [`dial_maybe_tls`], over an already dialed stream.
+async fn wrap_tls(
+    dialer: &Dialer,
+    stream: DialStream,
+    host: &str,
+    port: u16,
+    tls: bool,
+) -> Result<MaybeTls, NetError> {
     if !tls {
         return Ok(MaybeTls::Plain(stream));
     }
@@ -189,6 +200,9 @@ pub struct RelayWs {
     /// into the OS buffer on a half-dead flow forever, so a liveness
     /// verdict must never be armed by a send — see [`Self::idle_for`].
     last_rx: tokio::time::Instant,
+    /// The dialer's gate and this relay's URL: a withdrawal ends the socket
+    /// at its owner's next send or receive, and wakes a waiting receive.
+    gate: Option<(RelayGate, String)>,
 }
 
 impl RelayWs {
@@ -212,8 +226,14 @@ impl RelayWs {
     pub async fn connect(dialer: &Dialer, url: &str) -> Result<Self, NetError> {
         let (host, port, tls) = relay_dial_coords(url)?;
         let route = dialer_for(dialer, url);
+        // before any socket, and again after each step a withdrawal can
+        // overtake: a dial in flight then never sends its handshake
+        route.check_gate(url)?;
         tracing::debug!(relay = %url, host = %host, port, tls, via = %route.route(), "relay dial");
-        let stream = dial_maybe_tls(&route, &host, port, tls).await?;
+        let raw = route.dial_host(&host, port).await?;
+        route.check_gate(url)?;
+        let stream = wrap_tls(&route, raw, &host, port, tls).await?;
+        route.check_gate(url)?;
         // Bound what a hostile relay may make us allocate: tungstenite's
         // defaults are 64 MiB per message / 16 MiB per frame, ~500× beyond
         // anything this client exchanges (the publish budget is ≤128 KiB).
@@ -223,7 +243,15 @@ impl RelayWs {
         let (ws, _resp) = tokio_tungstenite::client_async_with_config(url, stream, Some(config))
             .await
             .map_err(|e| NetError::Unreachable(format!("ws upgrade {url}: {e}")))?;
-        Ok(Self { ws, sub_id: None, last_rx: tokio::time::Instant::now() })
+        let gate = route.gate.map(|g| (g, url.to_string()));
+        Ok(Self { ws, sub_id: None, last_rx: tokio::time::Instant::now(), gate })
+    }
+
+    fn check_gate(&self) -> Result<(), NetError> {
+        match &self.gate {
+            Some((gate, url)) if !gate.allows(url) => Err(NetError::Withdrawn),
+            _ => Ok(()),
+        }
     }
 
     /// How long the relay has sent NOTHING — no event, no pong, not a
@@ -240,6 +268,7 @@ impl RelayWs {
     /// Send a WebSocket Ping — the keepalive that makes a silently dropped
     /// flow (NAT/middlebox) surface in seconds instead of at the idle bound.
     pub async fn ping(&mut self) -> Result<(), NetError> {
+        self.check_gate()?;
         self.ws
             .send(Message::Ping(Vec::new().into()))
             .await
@@ -248,6 +277,7 @@ impl RelayWs {
 
     /// Send one typed client message.
     pub async fn send(&mut self, msg: ClientMessage<'_>) -> Result<(), NetError> {
+        self.check_gate()?;
         self.ws
             .send(Message::text(msg.as_json()))
             .await
@@ -260,8 +290,20 @@ impl RelayWs {
     /// The three failure kinds are SEPARATE on purpose — see [`RecvFail`].
     pub async fn recv(&mut self, timeout: Duration) -> Result<RelayMessage<'static>, RecvFail> {
         let deadline = tokio::time::Instant::now() + timeout;
+        let mut gate = self.gate.clone();
         loop {
-            let frame = match tokio::time::timeout_at(deadline, self.ws.next()).await {
+            let withdrawn = async {
+                match gate.as_mut() {
+                    Some((g, url)) => g.withdrawn(url).await,
+                    None => std::future::pending().await,
+                }
+            };
+            let next = tokio::select! {
+                biased;
+                () = withdrawn => return Err(RecvFail::Dead(NetError::Withdrawn)),
+                next = tokio::time::timeout_at(deadline, self.ws.next()) => next,
+            };
+            let frame = match next {
                 Err(_) => return Err(RecvFail::TimedOut),
                 Ok(None) => {
                     return Err(RecvFail::Dead(NetError::Unreachable(
@@ -295,6 +337,9 @@ impl RelayWs {
 
     /// Close the connection politely (best effort).
     pub async fn close(mut self) {
+        if self.check_gate().is_err() {
+            return;
+        }
         let _ = self.ws.close(None).await;
     }
 }
