@@ -288,7 +288,7 @@ async fn a_two_of_three_split_is_repaired_by_vote_and_link() {
     })
     .await;
     // a vote seals afterwards, on one head
-    let p3 = propose(&mara, "after.md").await;
+    let p3 = propose(&mara, &format!("{}.md", "after")).await;
     eventually("walter sees the next card", 120, || async { open_cards(&walter).await.contains(&p3) }).await;
     walter.execute(Command::Approve { proposal: molt_core::ProposalId(p3), note: None }).await.expect("approve");
     eventually("the next vote seals everywhere", 240, || async {
@@ -395,7 +395,7 @@ async fn a_three_of_five_split_is_repaired_by_vote_and_link() {
         same
     })
     .await;
-    let p3 = propose(&a, "after.md").await;
+    let p3 = propose(&a, &format!("{}.md", "after")).await;
     for w in [&b, &d] {
         eventually("the next card", 120, || async { open_cards(w).await.contains(&p3) }).await;
         w.execute(Command::Approve { proposal: molt_core::ProposalId(p3), note: None }).await.expect("approve");
