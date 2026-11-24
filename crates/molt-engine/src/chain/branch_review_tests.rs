@@ -15,7 +15,8 @@ fn arm() {
 }
 
 fn run(b: &Builder, from: usize, to: usize) -> DroppedRun {
-    DroppedRun { from_height: from as u64, first_hash: hash(b, from), head_height: to as u64, head_hash: hash(b, to) }
+    let h = |i: usize| u64::try_from(i).expect("small");
+    DroppedRun { from_height: h(from), first_hash: hash(b, from), head_height: h(to), head_hash: hash(b, to) }
 }
 
 fn sig_of(st: &State, id: u64, who: &str) -> String {
