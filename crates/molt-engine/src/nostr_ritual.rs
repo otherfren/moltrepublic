@@ -87,6 +87,8 @@ pub(crate) struct JoinCtx {
     pub generation: u64,
     /// This build runs the chain lock: the JoinRequest declares it.
     pub lock: bool,
+    /// Test seam: ratify a threshold that is no majority.
+    pub minority_ok: bool,
 }
 
 /// How many `Committed` frames the rejoiner buffers while it waits for a
@@ -2023,6 +2025,7 @@ async fn member_join(
 
     // the joiner's identity — derived exactly as the ritual anchors it
     let mut seat = MemberSeat::derive(h.seat, &h.ticket, &ctx.phrase)?;
+    seat.minority_ok = ctx.minority_ok;
     if ctx.lock {
         seat.caps.push(molt_core::chain::CHAIN_LOCK_CAP.to_string());
     }

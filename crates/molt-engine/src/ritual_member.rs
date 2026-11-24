@@ -68,6 +68,8 @@ pub(crate) struct MemberSeat {
     pub(crate) vault_pk: String,
     /// The capabilities the JoinRequest declares (the lock, where on).
     pub(crate) caps: Vec<String>,
+    /// Test seam: ratify a threshold that is no majority.
+    pub(crate) minority_ok: bool,
 }
 
 impl MemberSeat {
@@ -89,6 +91,7 @@ impl MemberSeat {
             nostr_pk,
             vault_pk,
             caps: Vec::new(),
+            minority_ok: false,
         })
     }
 }
@@ -295,6 +298,7 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
         nostr_pk,
         vault_pk,
         caps,
+        minority_ok,
     } = seat;
     // the MLS member, built from the *same* identity key (concept §3.3: one
     // identity anchors both the genesis table and the MLS credential). Its
@@ -369,6 +373,16 @@ pub(crate) async fn run_member_ladder<L: RitualLeg, R: Ratify>(
         .map_err(|e| format!("seal proposal rejected: {e}"))?;
     leg.vet_proposal(&proposal)
         .map_err(|e| format!("seal proposal rejected: {e}"))?;
+    // the majority rule binds a NEW founding only: it sits where we decide
+    // to sign, never in `verify_sealed_roster`, which existing republics pass
+    if !minority_ok
+        && !molt_core::majority::threshold_is_majority(proposal.rule_m, proposal.rule_n)
+    {
+        return Err(format!(
+            "seal proposal rejected: {}",
+            molt_core::majority::majority_refusal(proposal.rule_n)
+        ));
+    }
     // ❺ verify what we are about to ratify BEFORE we sign, and recompute the
     // exact bytes to sign from the shown proposal — so what we sign provably
     // equals the name + agenda + roster we ratify (including OUR derived
@@ -756,6 +770,70 @@ mod tests {
         };
         let err = failure(run_member_ladder(&mut leg, "bob", seat, None::<Ratifier>, true).await);
         assert!(err.contains("not the table we ratified"), "{err}");
+    }
+
+    /// `proposal_for` widened to an m-of-n table: bob plus n-1 other seats.
+    fn proposal_m_of_n(seat: &MemberSeat, m: u8, n: u8) -> SealedRoster {
+        let mut p = proposal_for(seat, "the pact");
+        for i in 2..n {
+            let name = format!("seat{i}");
+            let (_sk, pk) = molt_storage::derive_identity_key(&[i; 32], &name);
+            p.identities.push(MemberIdentity {
+                member: name.clone(),
+                identity_pk: pk,
+                nostr_pk: molt_net::nostr_identity(&[i; 32], "self").1,
+                vault_pk: String::new(),
+            });
+            p.roster.push(name);
+        }
+        p.rule_m = m;
+        p.rule_n = n;
+        p.republic_id = molt_storage::republic_id(&p.name, m, n, &p.identities);
+        p
+    }
+
+    /// The majority rule at the member's door: a table with 2m <= n is
+    /// refused before anything is signed; a majority table is signed; the
+    /// fixture seam signs the old shape.
+    #[tokio::test]
+    async fn a_member_refuses_to_ratify_a_threshold_that_is_no_majority() {
+        for (m, n, min) in [(2u8, 4u8, 3u8), (2, 5, 3), (3, 6, 4)] {
+            let seat = bob();
+            let p = proposal_m_of_n(&seat, m, n);
+            let mut leg = ScriptedLeg {
+                script: script(vec![RitualMsg::JoinAccepted { seat: 0 }, seal(&p), genesis(&p)]),
+                sent: Vec::new(),
+            };
+            let err = failure(run_member_ladder(&mut leg, "bob", seat, None::<Ratifier>, true).await);
+            assert!(err.contains(&format!("needs a majority: at least {min} of {n}")), "{m}-of-{n}: {err}");
+            assert!(
+                !leg.sent.iter().any(|x| matches!(x, RitualMsg::Signed(_))),
+                "{m}-of-{n}: nothing signed"
+            );
+        }
+        for (m, n) in [(2u8, 3u8), (3, 4), (3, 5)] {
+            let seat = bob();
+            let p = proposal_m_of_n(&seat, m, n);
+            let mut leg = ScriptedLeg {
+                script: script(vec![RitualMsg::JoinAccepted { seat: 0 }, seal(&p), genesis(&p)]),
+                sent: Vec::new(),
+            };
+            run_member_ladder(&mut leg, "bob", seat, None::<Ratifier>, true)
+                .await
+                .map(|_| ())
+                .unwrap_or_else(|e| panic!("{m}-of-{n} ratifies: {e}"));
+        }
+        let mut seat = bob();
+        seat.minority_ok = true;
+        let p = proposal_m_of_n(&seat, 2, 4);
+        let mut leg = ScriptedLeg {
+            script: script(vec![RitualMsg::JoinAccepted { seat: 0 }, seal(&p), genesis(&p)]),
+            sent: Vec::new(),
+        };
+        run_member_ladder(&mut leg, "bob", seat, None::<Ratifier>, true)
+            .await
+            .map(|_| ())
+            .unwrap_or_else(|e| panic!("the seam ratifies 2-of-4: {e}"));
     }
 
     /// A founder that stays silent for hours is waited for, and the join
