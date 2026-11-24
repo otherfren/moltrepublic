@@ -1010,6 +1010,54 @@ pub(crate) fn permanent_refusal(e: &crate::NetError) -> Option<String> {
     }
 }
 
+/// Test seam: members whose relay OK for an own commit is never recorded
+/// (a kill between the OK and its record).
+static LOSE_COMMIT_OK: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Test seam: lose (or record again) `member`'s commit OKs.
+#[doc(hidden)]
+pub fn __lose_commit_ok(member: &str, lose: bool) {
+    if let Ok(mut set) = LOSE_COMMIT_OK.lock() {
+        if lose {
+            set.insert(member.to_string());
+        } else {
+            set.remove(member);
+        }
+    }
+}
+
+/// A relay accepted `env`: when it is an own commit, remember its digest
+/// (delivery guarantee §11) - an own re-key not named here is shelved at
+/// the next open.
+pub async fn note_commit_ok<S: StateStore>(store: &S, me: &str, env: &EventEnvelope) {
+    let molt_core::WorkspaceEvent::MlsCommit { commit, .. } = &env.body else {
+        return;
+    };
+    if let Ok(bytes) = hex::decode(commit) {
+        record_commit_ok(store, me, env.seq, &bytes).await;
+    }
+}
+
+/// [`note_commit_ok`] for the raw commit bytes.
+pub async fn record_commit_ok<S: StateStore>(store: &S, me: &str, seq: u64, commit: &[u8]) {
+    if LOSE_COMMIT_OK.lock().is_ok_and(|set| set.contains(me)) {
+        return;
+    }
+    let digest = crate::mls::CommitKey::new(commit).digest;
+    store
+        .update(|state| {
+            let mut cur = state.group.unwrap_or_default();
+            if cur.commit_ok.is_some_and(|(at, _)| at >= seq) {
+                return false;
+            }
+            cur.commit_ok = Some((seq, digest));
+            state.group = Some(cur);
+            true
+        })
+        .await;
+}
+
 /// A sink call that gives way to the stop: a closing engine awaits the
 /// outbox and answers no command until it has ended.
 async fn tell(stop: &watch::Receiver<bool>, call: impl std::future::Future<Output = ()>) {
@@ -1457,6 +1505,11 @@ where
             *published_through = env.seq;
             continue;
         }
+        if mls.shelved(&env) {
+            tracing::debug!(seq = env.seq, "outbox skips the shelved re-key");
+            *published_through = env.seq;
+            continue;
+        }
         let Some(frame) = mls.group_frame(&env) else {
             // evicted: nothing this node frames can be read; hold the cursor
             if mls.evicted() {
@@ -1472,6 +1525,7 @@ where
         match publish_with_backoff(channel, &frame, cfg, stop).await {
             Ok(()) => {
                 tracing::debug!(me = %cfg.member, seq = env.seq, "group frame published");
+                note_commit_ok(store, &cfg.member, &env).await;
                 if held.published() {
                     // the backoff exit — the channel publishes again
                     tell(stop, sink.send_ok(&cfg.member)).await;
@@ -1567,7 +1621,7 @@ async fn final_pass<L: OutboxLog, S: StateStore>(
     let mut sent = 0u64;
     let mut held = None;
     for env in log.read_from(start + 1).await {
-        if env.by != cfg.member {
+        if env.by != cfg.member || mls.shelved(&env) {
             through = env.seq;
             continue;
         }
@@ -1580,6 +1634,7 @@ async fn final_pass<L: OutboxLog, S: StateStore>(
         };
         match publish_once(channel, &frame).await {
             Ok(()) => {
+                note_commit_ok(store, &cfg.member, &env).await;
                 through = env.seq;
                 sent += 1;
             }
@@ -3236,6 +3291,61 @@ mod tests {
             "the close waited {took:?} on one dead relay"
         );
         assert_eq!(cursor(&store).await, 0);
+    }
+
+    /// **The outbox records a commit's relay OK** (delivery guarantee §11),
+    /// and a shelved commit never leaves.
+    #[tokio::test]
+    async fn the_outbox_records_a_commits_ok_and_skips_a_shelved_one() {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let commit_env = |seq: u64, c: &[u8]| molt_core::EventEnvelope {
+            prev_seq: 0,
+            seq,
+            ts: 1_751_000_000,
+            by: "cara".to_string(),
+            body: molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(c), stamp: 0 },
+        };
+        let mut founder = MlsMember::new(&key(1), "founder").expect("founder");
+        let bob = MlsMember::new(&key(2), "bob").expect("bob");
+        let mut cara = MlsMember::new(&key(3), "cara").expect("cara");
+        founder.create_group().expect("group");
+        let welcome = founder
+            .add_members(&[bob.key_package().expect("kp"), cara.key_package().expect("kp")])
+            .expect("add")
+            .expect("welcome");
+        cara.join_from_welcome(&welcome).expect("cara joins");
+        let dev = MlsMember::new(&key(2), "bob").expect("device");
+        let (first, _w) = cara.restore_member("bob", &dev.key_package().expect("kp")).expect("re-key");
+        let dev = MlsMember::new(&key(2), "bob").expect("device");
+        let (second, _w) = cara.restore_member("bob", &dev.key_package().expect("kp")).expect("re-key");
+        cara.shelve_own_rekey().expect("shelve");
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let log = crate::MemLog::default();
+        log.push(commit_env(1, &first));
+        log.push(commit_env(2, &second));
+        let store = crate::MemStateStore::default();
+        let (_wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, _health) = watch::channel(GroupHealth::default());
+        let handle = spawn_group(
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![relay.url().await.to_string()], [7u8; 32]),
+            MlsChannel::new(cara),
+            GroupNetConfig::fast("cara".into(), vec!["founder".into()]),
+            log,
+            store.clone(),
+            NullSink,
+            wake_rx,
+            health_tx,
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while cursor(&store).await < 2 {
+            assert!(tokio::time::Instant::now() < deadline, "the outbox never passed both commits");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        handle.shutdown().await;
+        let cur = store.load().await.group.unwrap_or_default();
+        assert_eq!(cur.commit_ok, Some((1, crate::mls::CommitKey::new(&first).digest)), "the shelved commit went out");
     }
 
     /// **A fresh incarnation's claim sheet is EVIDENCE, even at floor 0.**

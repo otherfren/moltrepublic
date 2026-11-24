@@ -2963,11 +2963,6 @@ async fn a_coordinator_killed_right_after_its_rekey_reopens_at_the_new_epoch() {
     assert!(sees_batch_once(&a2, "after the kill", 3, 60).await, "the reopened coordinator cannot read the restored seat");
 }
 
-async fn petra_window(root: &std::path::Path, ws: &str) -> Option<molt_core::AcceptedWindow> {
-    let dir = molt_storage::find_workspace_dir(root, ws).expect("the seat's dir");
-    molt_storage::peek_transport_state(&dir).and_then(|ts| ts.accepted.get("petra").cloned())
-}
-
 async fn wait_epoch(w: &WalletHandle, want: u64, what: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
     loop {
@@ -2980,21 +2975,16 @@ async fn wait_epoch(w: &WalletHandle, want: u64, what: &str) {
     }
 }
 
-/// **Killed after the re-key persisted, before anything was published.**
-/// The coordinator reopens AHEAD of the group (the Restored block sealed,
-/// the commit and Welcome never sent). At the reopen its outbox publishes
-/// the logged commit: vera merges it and resets the restored seat's window;
-/// what vera sent at the old epoch meanwhile reaches the coordinator once;
-/// the unwelcomed device is refused as outdated, and a second restore by a
-/// new link works on top of the first re-key.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_coordinator_killed_before_its_rekey_went_out_publishes_it_at_the_reopen() {
-    let (_relay, url) = roomy_relay().await;
-    let tmp = tempfile::tempdir().expect("tmp");
-    let (a, b, v, petra_phrase) = found_three_as(tmp.path(), &url, 2, true).await;
+/// Walter re-keys petra's seat and is hard-killed after the commit and the
+/// ratchet reached his disk, before any relay took either: he holds K_C at
+/// `base + 1`, nobody else does, and the device has no Welcome. Returns
+/// walter's root and workspace, vera, the device, `base` and the phrase.
+async fn coordinator_killed_before_any_relay(
+    root: &std::path::Path,
+    url: &str,
+) -> (std::path::PathBuf, String, WalletHandle, WalletHandle, u64, String) {
+    let (a, b, v, petra_phrase) = found_three_as(root, url, 2, true).await;
     let a_ws = read_session(&a).await.workspaces[0].id.clone();
-    let v_ws = read_session(&v).await.workspaces[0].id.clone();
-    let v_root = tmp.path().join("joiner-vera");
     send_batch(&b, "old", 5).await;
     assert!(sees_batch_once(&v, "old", 5, 60).await, "the old device's batch");
     drop(b);
@@ -3002,8 +2992,8 @@ async fn a_coordinator_killed_before_its_rekey_went_out_publishes_it_at_the_reop
     a.__park_rekey_publish(true);
     let height = chain_len(&a).await;
     let link = mint_for_petra(&a).await;
-    let c = engine(&tmp.path().join("rejoiner"));
-    adopt_relay(&c, &url).await;
+    let c = engine(&root.join("rejoiner"));
+    adopt_relay(&c, url).await;
     c.execute(Command::RecoverStart { link, phrase: petra_phrase.clone(), relays: Vec::new() })
         .await
         .expect("recover start");
@@ -3013,61 +3003,132 @@ async fn a_coordinator_killed_before_its_rekey_went_out_publishes_it_at_the_reop
         assert!(tokio::time::Instant::now() < deadline, "the coordinator never applied the restore");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    // (e) the Restored block is sealed everywhere; the re-key reached no one
     let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     while chain_len(&v).await < chain_len(&a).await {
         assert!(tokio::time::Instant::now() < deadline, "vera never applied the restore");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    let before = petra_window(&v_root, &v_ws).await.expect("vera's window for the old device");
-    assert!(before.high > 0, "vera heard the old device: {before:?}");
-    let root_a = tmp.path().join("founder");
+    let root_a = root.join("founder");
     common::hard_kill(a, &root_a, &a_ws).await;
     assert_eq!(status_of(&v).await.mls_epoch, base, "the commit went out before the kill");
-    // (b) sent at the old epoch while the coordinator is down
-    send_batch(&v, "while down", 5).await;
-    let a2 = engine(&root_a);
-    a2.__seat_active_secs(0);
-    adopt_relay(&a2, &url).await;
-    a2.execute(Command::OpenWorkspace { id: a_ws }).await.expect("the coordinator reopens");
-    assert_eq!(status_of(&a2).await.mls_epoch, base + 1, "the coordinator reopened behind its own commit");
-    // (a) the logged commit goes out at the reopen
-    wait_epoch(&v, base + 1, "vera merging the re-published commit").await;
-    // (c) the late merge reset vera's window for the restored seat
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let w = petra_window(&v_root, &v_ws).await.unwrap_or_default();
-        if w.proof == molt_core::RestoreProof::Merge && w.high == 0 {
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline, "vera's window survived the late merge: {w:?}");
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    // (b) both sides of the reopen reach the coordinator once
-    send_batch(&v, "after", 5).await;
-    assert!(sees_batch_once(&a2, "after", 5, 60).await, "vera's new-epoch frames");
-    let early = read_chat_bodies(&a2).await.iter().filter(|m| m.starts_with("while down")).count();
-    eprintln!("outage_frames_read_before_resend={early}");
-    assert!(sees_batch_once(&a2, "while down", 5, 180).await, "vera's old-epoch frames from the outage");
-    // (d) no Welcome: the device never opens; the reopened coordinator
-    // answers its retried request as outdated
-    let s = wait_for_secs(&c, "the unwelcomed device to be refused", 120, |s| s.notice.starts_with("recover-failed:")).await;
-    assert!(s.notice.ends_with("link outdated") && s.screen != molt_core::Screen::Main, "{:?} {:?}", s.screen, s.notice);
-    drop(c);
-    let link = mint_for_petra(&a2).await;
-    let c2 = engine(&tmp.path().join("rejoiner2"));
-    adopt_relay(&c2, &url).await;
-    c2.execute(Command::RecoverStart { link, phrase: petra_phrase, relays: Vec::new() })
+    (root_a, a_ws, v, c, base, petra_phrase)
+}
+
+/// The device restored by a link minted on `on` (its own engine under
+/// `dir`), open on the main screen.
+async fn restore_by(on: &WalletHandle, root: &std::path::Path, dir: &str, url: &str, phrase: &str) -> WalletHandle {
+    let link = mint_for_petra(on).await;
+    let c = engine(&root.join(dir));
+    adopt_relay(&c, url).await;
+    c.execute(Command::RecoverStart { link, phrase: phrase.to_string(), relays: Vec::new() })
         .await
-        .expect("second recover start");
-    let s = wait_for_secs(&c2, "the second recovery to open", 150, |s| {
+        .expect("recover start");
+    let s = wait_for_secs(&c, "the recovery to open", 150, |s| {
         (s.screen == molt_core::Screen::Main && !s.workspaces.is_empty()) || s.notice.starts_with("recover-failed:")
     })
     .await;
-    assert!(!s.notice.starts_with("recover-failed:"), "second recovery: {:?}", s.notice);
+    assert!(!s.notice.starts_with("recover-failed:"), "recovery: {:?}", s.notice);
+    c
+}
+
+async fn reopen(root_a: &std::path::Path, a_ws: &str, url: &str) -> WalletHandle {
+    let a2 = engine(root_a);
+    a2.__seat_active_secs(0);
+    adopt_relay(&a2, url).await;
+    a2.execute(Command::OpenWorkspace { id: a_ws.to_string() }).await.expect("the coordinator reopens");
+    a2
+}
+
+/// **B1: a re-key no relay took yields to the second restore** (delivery
+/// guarantee §11). Vera restores the seat again while walter is down; at
+/// his reopen walter shelves his own commit and merges hers: the second
+/// device stays in, walter reads it, nobody is split.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rekey_lost_before_any_relay_yields_to_the_second_restore() {
+    let (_relay, url) = roomy_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (root_a, a_ws, v, c, base, phrase) = coordinator_killed_before_any_relay(tmp.path(), &url).await;
+    drop(c);
+    let c2 = restore_by(&v, tmp.path(), "rejoiner2", &url, &phrase).await;
+    wait_epoch(&v, base + 1, "vera at her own re-key").await;
+    let a2 = reopen(&root_a, &a_ws, &url).await;
+    wait_epoch(&a2, base + 1, "walter on the group's epoch").await;
+    send_batch(&c2, "second device", 3).await;
+    assert!(sees_batch_once(&v, "second device", 3, 60).await, "vera reads the second device");
+    assert!(sees_batch_once(&a2, "second device", 3, 60).await, "walter reads the second device");
+    send_batch(&a2, "walter back", 3).await;
+    assert!(sees_batch_once(&c2, "walter back", 3, 60).await, "the second device reads walter");
+    assert_eq!(status_of(&c2).await.mls_epoch, base + 1, "the second restore stands");
+}
+
+/// **Two commits during the outage** (the schedule a re-offer leaves split
+/// for good): walter merges both from the replay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_commits_during_the_outage_leave_the_shelved_coordinator_on_the_group_epoch() {
+    let (_relay, url) = roomy_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (root_a, a_ws, v, c, base, phrase) = coordinator_killed_before_any_relay(tmp.path(), &url).await;
+    drop(c);
+    let c2 = restore_by(&v, tmp.path(), "rejoiner2", &url, &phrase).await;
+    wait_epoch(&v, base + 1, "vera at the first re-key").await;
+    drop(c2);
+    let c3 = restore_by(&v, tmp.path(), "rejoiner3", &url, &phrase).await;
     wait_epoch(&v, base + 2, "vera at the second re-key").await;
-    wait_epoch(&a2, base + 2, "the coordinator at the second re-key").await;
+    let a2 = reopen(&root_a, &a_ws, &url).await;
+    wait_epoch(&a2, base + 2, "walter on the group's epoch").await;
+    send_batch(&c3, "third device", 3).await;
+    assert!(sees_batch_once(&a2, "third device", 3, 60).await, "walter reads the third device");
+    send_batch(&a2, "walter back", 3).await;
+    assert!(sees_batch_once(&v, "walter back", 3, 60).await, "vera reads walter");
+}
+
+/// **The lost OK**: a relay took walter's re-key and the group merged it,
+/// but his record of the OK never reached the disk. Shelved at the reopen,
+/// the commit comes back from the relay and walter takes it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rekey_whose_ok_was_lost_is_re_adopted_from_the_replay() {
+    let (_relay, url) = roomy_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (a, b, v, phrase) = found_three_as(tmp.path(), &url, 2, true).await;
+    let a_ws = read_session(&a).await.workspaces[0].id.clone();
+    drop(b);
+    let base = status_of(&v).await.mls_epoch;
+    molt_net::group_runtime::__lose_commit_ok("walter", true);
+    let c = restore_by(&a, tmp.path(), "rejoiner", &url, &phrase).await;
+    wait_epoch(&v, base + 1, "vera merged walter's re-key").await;
+    let root_a = tmp.path().join("founder");
+    common::hard_kill(a, &root_a, &a_ws).await;
+    molt_net::group_runtime::__lose_commit_ok("walter", false);
+    let a2 = reopen(&root_a, &a_ws, &url).await;
+    wait_epoch(&a2, base + 1, "walter re-adopted his own re-key").await;
+    send_batch(&c, "device", 3).await;
+    assert!(sees_batch_once(&a2, "device", 3, 60).await, "walter reads the restored seat");
+    send_batch(&a2, "walter back", 3).await;
+    assert!(sees_batch_once(&v, "walter back", 3, 60).await, "vera reads walter");
+}
+
+/// **No competitor: the shelved re-key's seat rejoins by a new link.**
+/// Walter reopens on the epoch he made the re-key on, with vera; what vera
+/// sent meanwhile reads at once; the unwelcomed device hears `link
+/// outdated`, and a new link minted by walter re-keys the seat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_shelved_rekey_seat_rejoins_by_a_new_link() {
+    let (_relay, url) = roomy_relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (root_a, a_ws, v, c, base, phrase) = coordinator_killed_before_any_relay(tmp.path(), &url).await;
+    send_batch(&v, "while down", 5).await;
+    let a2 = reopen(&root_a, &a_ws, &url).await;
+    assert_eq!(status_of(&a2).await.mls_epoch, base, "the unpublished re-key was shelved");
+    assert!(sees_batch_once(&a2, "while down", 5, 60).await, "vera's frames of the outage");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(status_of(&v).await.mls_epoch, base, "the shelved commit was published");
+    let s = wait_for_secs(&c, "the unwelcomed device to be refused", 120, |s| s.notice.starts_with("recover-failed:")).await;
+    assert!(s.notice.ends_with("link outdated") && s.screen != molt_core::Screen::Main, "{:?} {:?}", s.screen, s.notice);
+    drop(c);
+    let c2 = restore_by(&a2, tmp.path(), "rejoiner2", &url, &phrase).await;
+    wait_epoch(&v, base + 1, "vera at the new re-key").await;
+    wait_epoch(&a2, base + 1, "walter at the new re-key").await;
     send_batch(&c2, "second device", 5).await;
     assert!(sees_batch_once(&v, "second device", 5, 60).await, "vera reads the second device");
-    assert!(sees_batch_once(&a2, "second device", 5, 60).await, "the coordinator reads the second device");
+    assert!(sees_batch_once(&a2, "second device", 5, 60).await, "walter reads the second device");
 }

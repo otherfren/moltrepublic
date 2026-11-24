@@ -76,7 +76,7 @@ fn ratchet_window() -> SenderRatchetConfiguration {
 }
 
 /// The snapshot schema version (bumped on any incompatible blob layout).
-const SNAPSHOT_VERSION: u8 = 5;
+const SNAPSHOT_VERSION: u8 = 6;
 
 /// Everything that can go wrong inside the MLS layer. All variants are local
 /// bugs or corrupt/hostile wire input — never a transient network condition.
@@ -326,6 +326,11 @@ struct CommitKeyV4 {
 /// v4 slot).
 type PriorSlot = (u64, Vec<u8>, CommitKey, Vec<String>, String);
 
+/// An own re-key set aside at the open because no relay is known to hold
+/// it (delivery guarantee §11): the merged state, the commit's key, the
+/// seats it re-keyed, the epoch it was made at.
+type Shelf = (Vec<u8>, CommitKey, Vec<String>, u64);
+
 /// One node's live MLS membership: the provider (holding all secret state), the
 /// signer built from the node's identity key, the node's own handle, and — once
 /// created or joined — the group.
@@ -365,6 +370,8 @@ pub struct MlsMember {
     /// reset may not be on disk. The list, not a message in flight, is
     /// what the caller drains.
     rekeyed: Vec<String>,
+    /// See [`Shelf`]; re-adopted when the commit comes back from a relay.
+    shelf: Option<Shelf>,
 }
 
 /// The self-contained persistence blob: the provider's whole key-value map plus
@@ -390,6 +397,21 @@ struct MlsSnapshot {
     /// commit is refused instead of rewound onto): a silent fork among
     /// survivors (review 2026-08-25 M3). v5: the key is the digest alone,
     /// and the slot names its committer.
+    prior: Option<PriorSlot>,
+    /// v6: the shelved own re-key.
+    shelf: Option<Shelf>,
+}
+
+/// The v5 layout (no shelf).
+#[derive(Serialize, Deserialize)]
+struct MlsSnapshotV5 {
+    version: u8,
+    name: String,
+    signer_pub: Vec<u8>,
+    group_id: Vec<u8>,
+    storage: Vec<u8>,
+    exporter_ring: Vec<[u8; EXPORTER_LEN]>,
+    exporter_ring_epochs: Vec<u64>,
     prior: Option<PriorSlot>,
 }
 
@@ -472,6 +494,7 @@ impl MlsMember {
             exporter_ring: Vec::new(),
             exporter_ring_epochs: Vec::new(),
             rekeyed: Vec::new(),
+            shelf: None,
         })
     }
 
@@ -689,6 +712,9 @@ impl MlsMember {
             MlsMessageBodyIn::PublicMessage(m) => m.into(),
             other => return Err(MlsError::Wire(format!("not a group message: {other:?}"))),
         };
+        if self.shelf.as_ref().is_some_and(|s| s.1 == CommitKey::new(wire)) {
+            return self.unshelve();
+        }
         let group = self.group.as_mut().ok_or(MlsError::NoGroup)?;
         // a message claiming an epoch we have NOT reached yet is not an error —
         // its re-key commit is still in flight. Nothing is consumed; the caller
@@ -942,9 +968,87 @@ impl MlsMember {
         removed: Vec<String>,
     ) -> Result<(), MlsError> {
         let epoch = self.epoch();
+        // this merge leaves N+1 behind: the shelved commit can win nothing
+        if self.shelf.as_ref().is_some_and(|s| epoch > s.3) {
+            self.shelf = None;
+        }
         let snapshot = self.snapshot()?;
         self.prior = Some((epoch, snapshot, CommitKey::new(commit_bytes), removed, committer));
         Ok(())
+    }
+
+    /// The own re-key the prior slot holds, while the ratchet sits on the
+    /// epoch it moved to: its key and the seats it re-keyed.
+    #[must_use]
+    pub fn own_rekey(&self) -> Option<(CommitKey, Vec<String>)> {
+        let (epoch, _, key, removed, committer) = self.prior.as_ref()?;
+        (committer == &self.name && !removed.is_empty() && self.epoch() == epoch + 1)
+            .then(|| (*key, removed.clone()))
+    }
+
+    /// Return to the state the own re-key was made on and keep the merged
+    /// state aside (delivery guarantee §11). `Ok(None)` when the prior slot
+    /// holds no own re-key; else the epoch returned to.
+    pub fn shelve_own_rekey(&mut self) -> Result<Option<u64>, MlsError> {
+        let Some((key, removed)) = self.own_rekey() else {
+            return Ok(None);
+        };
+        let Some((epoch, before, ..)) = self.prior.clone() else {
+            return Ok(None);
+        };
+        let merged = self.snapshot()?;
+        self.adopt(MlsMember::restore(&before)?);
+        self.shelf = Some((merged, key, removed, epoch));
+        Ok(Some(epoch))
+    }
+
+    /// Whether `commit` is the shelved own re-key (never published).
+    #[must_use]
+    pub fn is_shelved(&self, commit: &[u8]) -> bool {
+        self.shelf.as_ref().is_some_and(|s| s.1 == CommitKey::new(commit))
+    }
+
+    /// The shelved commit came back from a relay: a group holds it. At its
+    /// epoch, take the merged state; one epoch on (a foreign commit of the
+    /// same epoch merged), decide as every bystander did.
+    fn unshelve(&mut self) -> Result<MlsIncoming, MlsError> {
+        let Some((merged, key, removed, epoch)) = self.shelf.take() else {
+            return Err(MlsError::NoGroup);
+        };
+        let ours_win = if self.epoch() == epoch {
+            true
+        } else {
+            match &self.prior {
+                Some((e, _, theirs, their_removed, committer)) if *e == epoch && self.epoch() == epoch + 1 => {
+                    match (their_removed.contains(&self.name), removed.contains(committer)) {
+                        (true, false) => false,
+                        (false, true) => true,
+                        _ => key < *theirs,
+                    }
+                }
+                _ => return Err(MlsError::Stale("past epoch")),
+            }
+        };
+        if !ours_win {
+            return Ok(MlsIncoming::CommitSuperseded);
+        }
+        let rewound = self.epoch() != epoch;
+        self.adopt(MlsMember::restore(&merged)?);
+        self.rekeyed.extend(removed.iter().cloned());
+        Ok(if rewound {
+            MlsIncoming::CommitRewound { readmitted: removed }
+        } else {
+            MlsIncoming::Commit { readmitted: removed }
+        })
+    }
+
+    /// Take `other`'s group state, ring and prior slot; keep the roster
+    /// authority and the re-key list.
+    fn adopt(&mut self, other: MlsMember) {
+        self.exporter_ring = other.exporter_ring.clone();
+        self.exporter_ring_epochs = other.exporter_ring_epochs.clone();
+        self.prior = other.prior.clone();
+        self.provider_swap(other);
     }
 
     /// Decide a race between our merged commit and a foreign one of the
@@ -1099,6 +1203,7 @@ impl MlsMember {
             exporter_ring: self.exporter_ring.clone(),
             exporter_ring_epochs: self.exporter_ring_epochs.clone(),
             prior: self.prior.clone(),
+            shelf: self.shelf.clone(),
         };
         bincode::serialize(&snap).map_err(|e| MlsError::Snapshot(format!("encoding snapshot: {e}")))
     }
@@ -1113,6 +1218,21 @@ impl MlsMember {
         let snap: MlsSnapshot = match blob.first() {
             Some(&SNAPSHOT_VERSION) => bincode::deserialize(blob)
                 .map_err(|e| MlsError::Snapshot(format!("decoding snapshot: {e}")))?,
+            Some(5) => {
+                let v5: MlsSnapshotV5 = bincode::deserialize(blob)
+                    .map_err(|e| MlsError::Snapshot(format!("decoding v5 snapshot: {e}")))?;
+                MlsSnapshot {
+                    version: SNAPSHOT_VERSION,
+                    name: v5.name,
+                    signer_pub: v5.signer_pub,
+                    group_id: v5.group_id,
+                    storage: v5.storage,
+                    exporter_ring: v5.exporter_ring,
+                    exporter_ring_epochs: v5.exporter_ring_epochs,
+                    prior: v5.prior,
+                    shelf: None,
+                }
+            }
             Some(4) => {
                 let v4: MlsSnapshotV4 = bincode::deserialize(blob)
                     .map_err(|e| MlsError::Snapshot(format!("decoding v4 snapshot: {e}")))?;
@@ -1127,6 +1247,7 @@ impl MlsMember {
                     prior: v4.prior.map(|(epoch, snap, key, removed)| {
                         (epoch, snap, CommitKey { digest: key.digest }, removed, String::new())
                     }),
+                    shelf: None,
                 }
             }
             Some(3) => {
@@ -1141,6 +1262,7 @@ impl MlsMember {
                     exporter_ring: v3.exporter_ring,
                     exporter_ring_epochs: v3.exporter_ring_epochs,
                     prior: None,
+                    shelf: None,
                 }
             }
             Some(2) => {
@@ -1155,6 +1277,7 @@ impl MlsMember {
                     exporter_ring: v2.exporter_ring,
                     exporter_ring_epochs: Vec::new(),
                     prior: None,
+                    shelf: None,
                 }
             }
             Some(1) => {
@@ -1169,6 +1292,7 @@ impl MlsMember {
                     exporter_ring: Vec::new(),
                     exporter_ring_epochs: Vec::new(),
                     prior: None,
+                    shelf: None,
                 }
             }
             other => {
@@ -1206,6 +1330,7 @@ impl MlsMember {
             exporter_ring: snap.exporter_ring,
             exporter_ring_epochs: snap.exporter_ring_epochs,
             rekeyed: Vec::new(),
+            shelf: snap.shelf,
         })
     }
 }
@@ -1684,7 +1809,7 @@ mod tests {
         assert!(old.prior.is_none());
         // a v4 blob keeps its slot; its stamp is dropped, the digest stays
         let v5: MlsSnapshot = bincode::deserialize(&blob).expect("v5");
-        assert_eq!(v5.version, 5);
+        assert_eq!(v5.version, 6);
         let v4 = MlsSnapshotV4 {
             version: 4,
             name: v5.name,
@@ -1857,6 +1982,109 @@ mod tests {
         bob.join_from_welcome(&welcome).expect("bob joins");
         cara.join_from_welcome(&welcome).expect("cara joins");
         (founder, bob, cara)
+    }
+
+    /// cara re-keys bob's seat onto a fresh device: the commit, the
+    /// founder having merged it (`merged`) or not.
+    fn cara_rekeys_bob(founder: &mut MlsMember, cara: &mut MlsMember, merged: bool) -> Vec<u8> {
+        let bob2 = MlsMember::new(&key(2), "bob").expect("bob's new device");
+        let (commit, _welcome) = cara.restore_member("bob", &bob2.key_package().expect("kp")).expect("re-key");
+        if merged {
+            assert!(matches!(founder.decrypt(&commit), Ok(MlsIncoming::Commit { .. })));
+        }
+        commit
+    }
+
+    /// **An own re-key no relay holds is shelved; its replay re-adopts it**
+    /// (delivery guarantee §11, the lost-OK schedule). cara returns to the
+    /// epoch she made it on and reads the group's traffic again the moment
+    /// her own commit comes back.
+    #[test]
+    fn an_unconfirmed_own_rekey_is_shelved_and_re_adopted_on_its_replay() {
+        let (mut founder, _bob, mut cara) = three_seats();
+        let before = cara.epoch();
+        let commit = cara_rekeys_bob(&mut founder, &mut cara, true);
+        assert_eq!(cara.own_rekey(), Some((CommitKey::new(&commit), vec!["bob".to_string()])));
+        assert_eq!(cara.shelve_own_rekey().expect("shelve"), Some(before));
+        assert_eq!(cara.epoch(), before, "back on the epoch the re-key was made on");
+        assert!(cara.is_shelved(&commit));
+        assert!(cara.own_rekey().is_none());
+        let hello = founder.encrypt(b"hello").expect("encrypt");
+        assert!(matches!(cara.decrypt(&hello), Ok(MlsIncoming::FutureEpoch)));
+        match cara.decrypt(&commit) {
+            Ok(MlsIncoming::Commit { readmitted }) => assert_eq!(readmitted, vec!["bob".to_string()]),
+            other => panic!("the replayed own commit must re-adopt the merged state, got {other:?}"),
+        }
+        assert!(!cara.is_shelved(&commit));
+        assert_app(cara.decrypt(&hello).expect("decrypt"), "founder", b"hello");
+    }
+
+    /// Counter-test: without a shelf the committer cannot take its own
+    /// commit from the relay - it stays behind the group.
+    #[test]
+    fn a_rolled_back_committer_without_the_shelf_cannot_merge_its_own_commit() {
+        let (mut founder, _bob, mut cara) = three_seats();
+        let commit = cara_rekeys_bob(&mut founder, &mut cara, true);
+        cara.shelve_own_rekey().expect("shelve");
+        cara.shelf = None;
+        assert!(!matches!(cara.decrypt(&commit), Ok(MlsIncoming::Commit { .. })));
+        let hello = founder.encrypt(b"hello").expect("encrypt");
+        assert!(matches!(cara.decrypt(&hello), Ok(MlsIncoming::FutureEpoch)));
+    }
+
+    /// **A shelved re-key meeting a foreign commit of its epoch decides
+    /// like a bystander** (the lost-OK schedule with a concurrent commit):
+    /// founder and cara end on the same winner in either digest order.
+    #[test]
+    fn a_shelved_rekey_contests_a_foreign_commit_like_a_bystander() {
+        for _ in 0..4 {
+            let (mut founder, _bob, mut cara) = three_seats();
+            let ours = cara_rekeys_bob(&mut founder, &mut cara, false);
+            cara.shelve_own_rekey().expect("shelve");
+            let bob3 = MlsMember::new(&key(2), "bob").expect("bob's other device");
+            let (theirs, _w) = founder.restore_member("bob", &bob3.key_package().expect("kp")).expect("re-key");
+            assert!(matches!(cara.decrypt(&theirs), Ok(MlsIncoming::Commit { .. })));
+            let ours_win = CommitKey::new(&ours) < CommitKey::new(&theirs);
+            let at_cara = cara.decrypt(&ours).expect("the replayed own commit");
+            let at_founder = founder.decrypt(&ours).expect("the founder meets it");
+            if ours_win {
+                assert!(matches!(at_cara, MlsIncoming::CommitRewound { .. }), "{at_cara:?}");
+                assert!(matches!(at_founder, MlsIncoming::CommitRewound { .. }), "{at_founder:?}");
+            } else {
+                assert!(matches!(at_cara, MlsIncoming::CommitSuperseded), "{at_cara:?}");
+                assert!(matches!(at_founder, MlsIncoming::CommitSuperseded), "{at_founder:?}");
+            }
+            assert_eq!(cara.epoch(), founder.epoch());
+            let hello = founder.encrypt(b"same branch").expect("encrypt");
+            assert_app(cara.decrypt(&hello).expect("decrypt"), "founder", b"same branch");
+        }
+    }
+
+    /// **The shelf rides the snapshot (v6)**, and a later merge past its
+    /// epoch drops it.
+    #[test]
+    fn the_shelf_survives_snapshot_and_restore() {
+        let (mut founder, _bob, mut cara) = three_seats();
+        let commit = cara_rekeys_bob(&mut founder, &mut cara, true);
+        cara.shelve_own_rekey().expect("shelve");
+        let mut restored = MlsMember::restore(&cara.snapshot().expect("snapshot")).expect("restore");
+        assert!(restored.is_shelved(&commit));
+        assert!(matches!(restored.decrypt(&commit), Ok(MlsIncoming::Commit { .. })));
+        let hello = founder.encrypt(b"hi").expect("encrypt");
+        assert_app(restored.decrypt(&hello).expect("decrypt"), "founder", b"hi");
+        // two commits by others while away: the shelf is dropped on the way
+        let (mut founder, _bob, mut cara) = three_seats();
+        let commit = cara_rekeys_bob(&mut founder, &mut cara, false);
+        cara.shelve_own_rekey().expect("shelve");
+        for _ in 0..2 {
+            let dev = MlsMember::new(&key(2), "bob").expect("device");
+            let (k, _w) = founder.restore_member("bob", &dev.key_package().expect("kp")).expect("re-key");
+            assert!(matches!(cara.decrypt(&k), Ok(MlsIncoming::Commit { .. })));
+        }
+        assert!(!cara.is_shelved(&commit), "two epochs on, the shelf is gone");
+        assert!(cara.decrypt(&commit).is_err(), "a dropped shelf takes nothing");
+        let hello = founder.encrypt(b"on").expect("encrypt");
+        assert_app(cara.decrypt(&hello).expect("decrypt"), "founder", b"on");
     }
 
     fn honest_roster() -> BTreeMap<String, Vec<u8>> {

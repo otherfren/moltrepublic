@@ -1369,7 +1369,9 @@ impl State {
             // the list; the build below dials it.
             self.adopt_pool_change();
             if let Some(blob) = transport_state.mls.as_deref() {
-                self.group_net = self.build_group_net(blob);
+                let commit_ok = transport_state.group.and_then(|g| g.commit_ok).map(|(_, digest)| digest);
+                let blob = self.shelve_unconfirmed_rekey(blob, commit_ok);
+                self.group_net = self.build_group_net(&blob);
             }
             // the standing seat inbox rides the same standup: a restored
             // seat elsewhere can announce itself (detached_reattach.md §2.1)
