@@ -45,14 +45,12 @@ fn run(ws: &Path, out: &Path) -> Result<(), String> {
     let (opened, loaded) = molt_storage::open_workspace(ws).map_err(|e| e.to_string())?;
 
     let (checkpoint, blocks) = opened.read_chain().map_err(|e| e.to_string())?;
-    let rid = match (&checkpoint, blocks.first().map(|b| &b.change)) {
-        (Some(c), _) => c.republic_id.clone(),
-        (None, Some(molt_core::ChainChange::Genesis { republic_id, .. })) => republic_id.clone(),
-        _ => return Err("no republic id: neither a checkpoint nor a genesis block".into()),
-    };
+    if !matches!((&checkpoint, blocks.first().map(|b| &b.change)), (Some(_), _) | (None, Some(molt_core::ChainChange::Genesis { .. }))) {
+        return Err("no republic id: neither a checkpoint nor a genesis block".into());
+    }
     let mut f = create(out, "chain.jsonl")?;
-    for b in &blocks {
-        let hash = molt_storage::content_hash(&molt_core::chain::block_link_bytes(&rid, b));
+    let ids = molt_engine::block_identities(checkpoint.as_ref(), &blocks);
+    for (b, hash) in blocks.iter().zip(ids) {
         let line = serde_json::json!({ "height": b.height, "hash": hash, "block": b });
         writeln!(f, "{line}").map_err(|e| e.to_string())?;
     }

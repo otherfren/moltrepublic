@@ -98,7 +98,7 @@ use std::path::PathBuf;
 
 pub use configstore::ConfigStoreHandle;
 #[doc(hidden)]
-pub use chain::{verify_chain, ChainHead};
+pub use chain::{block_identities, verify_chain, ChainHead};
 /// The public wiki-export verifier — the reference implementation an external
 /// reviewer runs (`cargo run -p molt-engine --example verify_wiki_export`).
 pub use chain::{verify_wiki_export, WikiExportReport};
@@ -1266,6 +1266,9 @@ pub(crate) struct ChainProjection {
     pub(crate) catchup_since: u64,
     /// Fork decisions since open (S1 diagnostics).
     pub(crate) fork_decisions: u64,
+    /// Test-only: every seat announced the v2 capability (or not).
+    #[cfg(test)]
+    pub(crate) block_v2_caps_override: Option<bool>,
     /// The latest fork decision (S1 diagnostics).
     pub(crate) last_fork: Option<molt_core::ForkDecision>,
     /// WP2: the head+1 at which each own standing signature was last
@@ -1665,6 +1668,10 @@ pub(crate) struct State {
     /// no clearnet packet leaves before the user acts again
     /// (`docs_archive/transport/relay_pool.md` §3). Onion relays are unaffected.
     pub(crate) clearnet_session: bool,
+    /// This engine's dialable relay set, carried by every dialer it hands
+    /// out (`dialer_for`); per engine, so engines sharing a process share
+    /// nothing.
+    pub(crate) relay_gate: molt_net::dial::RelayGateKeeper,
     /// Relay confirmations whose probe verdict has not landed yet
     /// (`cmd_relay_confirm` → async probe → `cmd_net_relay_probed`).
     /// Founding and joining REFUSE while this is non-empty: minting invites
@@ -2015,6 +2022,7 @@ impl State {
             // (ADR-0004 amendment): an operator who acknowledged clearnet
             // exposure is not asked again on every restart
             clearnet_session: session.settings.clearnet_relays_enabled,
+            relay_gate: molt_net::dial::RelayGateKeeper::default(),
             pending_relay_confirms: std::collections::HashSet::new(),
             seeds: std::collections::HashMap::new(),
             s3_list_gen: 0,

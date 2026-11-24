@@ -90,12 +90,103 @@ pub struct ChainHead {
     pub rule_m: u8,
     /// The live roster (name → identity key) after all membership blocks.
     pub identities: Vec<MemberIdentity>,
+    /// The first height whose identity is `molt-chain-block-v2`; `None`
+    /// while [`molt_core::chain::BLOCK_V2_FEATURE`] is off. A pruned holder
+    /// that cannot see the enabling block holds its anchor height.
+    pub block_v2_from: Option<u64>,
 }
 
-/// SHA-256 (hex) of a block's [`block_link_bytes`] — the value the next block's
-/// `prev` points at.
+#[cfg(test)]
+thread_local! {
+    /// Test-only: verify like a build that predates the v2 identity.
+    pub(crate) static OLDER_BUILD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// This build follows a [`molt_core::chain::BLOCK_V2_FEATURE`] chain.
+pub(crate) fn block_v2_known() -> bool {
+    #[cfg(test)]
+    if OLDER_BUILD.with(std::cell::Cell::get) {
+        return false;
+    }
+    true
+}
+
+/// An Organization `set_features` naming `key`.
+pub(crate) fn sets_feature(change: &ChainChange, key: &str) -> bool {
+    matches!(change, ChainChange::Applied { surface: Surface::Organization, payload, .. } if payload_sets_feature(payload, key))
+}
+
+/// A `set_features` payload naming `key`.
+pub(crate) fn payload_sets_feature(payload: &serde_json::Value, key: &str) -> bool {
+    payload.get("op").and_then(serde_json::Value::as_str) == Some("set_features")
+        && payload
+            .get("value")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|v| v.split_whitespace().any(|k| k == key))
+}
+
+/// The v2 activation after `block` on a chain where it was `from`.
+pub(crate) fn block_v2_after(from: Option<u64>, block: &ChainBlock) -> Option<u64> {
+    let key = molt_core::chain::BLOCK_V2_FEATURE;
+    if from.is_some() || !block_v2_known() {
+        return from;
+    }
+    match &block.change {
+        ChainChange::Genesis { features, .. } => {
+            features.as_ref().is_some_and(|f| f.iter().any(|k| k == key)).then_some(1)
+        }
+        change => sets_feature(change, key).then(|| block.height.saturating_add(1)),
+    }
+}
+
+/// A block's identity, the value the next block's `prev` points at: the
+/// SHA-256 of [`block_link_bytes`] below `v2_from`, of
+/// [`molt_core::chain::block_id_bytes`] from it on.
+pub(crate) fn block_id(republic_id: &str, block: &ChainBlock, v2_from: Option<u64>) -> String {
+    if v2_from.is_some_and(|h| block.height >= h) {
+        molt_storage::content_hash(&molt_core::chain::block_id_bytes(republic_id, block))
+    } else {
+        molt_storage::content_hash(&block_link_bytes(republic_id, block))
+    }
+}
+
+/// The v2 identity is on at a cut: the enabling block lies at or below
+/// `upto`, so its activation is at or below the anchor.
+fn blob_block_v2(blob: &molt_core::CheckpointState) -> bool {
+    let key = molt_core::chain::BLOCK_V2_FEATURE;
+    block_v2_known()
+        && (blob.founding_features.as_ref().is_some_and(|f| f.iter().any(|k| k == key))
+            || blob
+                .applied
+                .iter()
+                .filter(|(s, _)| *s == Surface::Organization)
+                .any(|(_, list)| list.iter().any(|(_, p)| payload_sets_feature(p, key))))
+}
+
+/// Every block's identity as a holder of `blocks` computes it, anchored
+/// on `checkpoint` when pruned (offline forensics).
+pub fn block_identities(checkpoint: Option<&molt_core::CheckpointState>, blocks: &[ChainBlock]) -> Vec<String> {
+    let rid = match (checkpoint, blocks.first().map(|b| &b.change)) {
+        (Some(c), _) => c.republic_id.clone(),
+        (None, Some(ChainChange::Genesis { republic_id, .. })) => republic_id.clone(),
+        _ => String::new(),
+    };
+    let mut v2 = match (checkpoint, blocks.first()) {
+        (Some(c), Some(anchor)) if blob_block_v2(c) => Some(anchor.height),
+        _ => None,
+    };
+    let mut out = Vec::with_capacity(blocks.len());
+    for b in blocks {
+        out.push(block_id(&rid, b, v2));
+        v2 = block_v2_after(v2, b);
+    }
+    out
+}
+
+/// [`block_id`] of a chain without the v2 identity.
+#[cfg(test)]
 pub(crate) fn block_hash(republic_id: &str, block: &ChainBlock) -> String {
-    molt_storage::content_hash(&block_link_bytes(republic_id, block))
+    block_id(republic_id, block, None)
 }
 
 /// One real chain block as the Chain-History display row
@@ -257,10 +348,11 @@ fn verify_genesis(block: &ChainBlock) -> Result<ChainHead, String> {
     }
     Ok(ChainHead {
         height: 0,
-        hash: block_hash(republic_id, block),
+        hash: block_id(republic_id, block, None),
         republic_id: republic_id.clone(),
         rule_m: *rule_m,
         identities: identities.clone(),
+        block_v2_from: block_v2_after(None, block),
     })
 }
 
@@ -501,10 +593,11 @@ fn verify_next(
     Ok((
         ChainHead {
             height: block.height,
-            hash: block_hash(&head.republic_id, block),
+            hash: block_id(&head.republic_id, block, head.block_v2_from),
             republic_id: head.republic_id.clone(),
             rule_m: head.rule_m,
             identities,
+            block_v2_from: block_v2_after(head.block_v2_from, block),
         },
         consumed,
     ))
@@ -628,7 +721,7 @@ impl ChainWalk {
             && self.floor == blob.map(|b| b.upto)
             && chain
                 .last()
-                .is_some_and(|b| block_hash(&self.head.republic_id, b) == self.head.hash)
+                .is_some_and(|b| block_id(&self.head.republic_id, b, self.head.block_v2_from) == self.head.hash)
     }
 }
 
@@ -1313,13 +1406,15 @@ pub(crate) fn walk_suffix_chain(
     // state-neutral). `seen` MUST come from the blob's consumed ids: the
     // blocks carrying the pre-cut proposal ids are gone, so the surviving
     // suffix cannot answer the double-apply question on its own.
+    let block_v2_from = blob_block_v2(blob).then_some(anchor.height);
     let mut walk = ChainWalk {
         head: ChainHead {
             height: anchor.height,
-            hash: block_hash(&blob.republic_id, anchor),
+            hash: block_id(&blob.republic_id, anchor, block_v2_from),
             republic_id: blob.republic_id.clone(),
             rule_m: blob.rule_m,
             identities: blob.roster.clone(),
+            block_v2_from,
         },
         seen: blob.consumed_ids.iter().copied().collect(),
         running: blob.clone(),

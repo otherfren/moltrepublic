@@ -16,7 +16,7 @@
 
 use std::time::{Duration, Instant};
 
-use molt_net::dial::Dialer;
+use molt_net::dial::{Dialer, Route};
 use molt_net::relay_ws::RelayWs;
 
 const BOOTSTRAP_AND_DIAL_MAX: Duration = Duration::from_secs(600);
@@ -30,7 +30,7 @@ async fn the_embedded_client_bootstraps_and_reaches_a_relay() {
     let url = std::env::var("MOLT_PROBE_RELAY").unwrap_or_else(|_| "wss://relay.damus.io".to_string());
     let dialer = Dialer::resolve("tor", "embedded", 0).expect("the embedded dialer resolves under the feature");
     assert!(
-        !matches!(dialer, Dialer::Direct),
+        !matches!(dialer.route, Route::Direct),
         "embedded must never resolve to a direct dial"
     );
 

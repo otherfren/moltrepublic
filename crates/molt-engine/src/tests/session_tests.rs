@@ -180,3 +180,32 @@ fn a_run_start_clears_the_stale_notice() {
         assert_eq!(read_session(&w).await.notice, "");
     });
 }
+
+/// `relay_pool.md` §3 rule 3: a dialer handed out BEFORE the withdrawal
+/// refuses the relay once the command returned (revoke and the non-onion
+/// switch alike), consent given again re-admits it, the probe of a relay
+/// being decided on runs ungated, and a second engine shares nothing.
+#[test]
+fn every_dialer_carries_its_engines_consent_at_once() {
+    let url = "wss://relay.example.org".to_string();
+    let consented = |st: &mut State| {
+        st.session.settings.relays =
+            vec![molt_core::relay::RelayEntry { url: url.clone(), confirmed: true }];
+        st.clearnet_session = true;
+    };
+    let mut a = plain_state();
+    consented(&mut a);
+    let b = plain_state();
+    let held = a.dialer_for().expect("dialer");
+    assert!(held.check_gate(&url).is_ok());
+    assert!(b.dialer_for().expect("dialer").check_gate(&url).is_err(), "b consented to nothing");
+
+    a.cmd_relay_clearnet_session(false).expect("switch off");
+    assert!(held.check_gate(&url).is_err(), "switched off, yet still dialable");
+    a.cmd_relay_clearnet_session(true).expect("switch on");
+    assert!(held.check_gate(&url).is_ok(), "switched on again");
+
+    a.cmd_relay_revoke(url.clone()).expect("revoke");
+    assert!(held.check_gate(&url).is_err(), "revoked, yet still dialable");
+    assert!(a.resolve_dialer().expect("dialer").ungated().check_gate(&url).is_ok());
+}

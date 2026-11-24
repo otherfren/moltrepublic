@@ -2467,7 +2467,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_locally_refused_frame_is_not_retried() {
         let channel = crate::ritual_net::GroupChannel::new(
-            crate::dial::Dialer::Direct,
+            crate::dial::Dialer::direct(),
             vec!["ws://127.0.0.1:1".to_string()],
             [7u8; 32],
         );
@@ -2503,7 +2503,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_pool_stays_a_transient_stall() {
         let channel = crate::ritual_net::GroupChannel::new(
-            crate::dial::Dialer::Direct,
+            crate::dial::Dialer::direct(),
             Vec::new(),
             [7u8; 32],
         );
@@ -2630,7 +2630,7 @@ mod tests {
         let url = relay.url().await.to_string();
         let seed = [7u8; 32];
         let alice_chan = crate::ritual_net::GroupChannel::new(
-            crate::dial::Dialer::Direct,
+            crate::dial::Dialer::direct(),
             vec![url.clone()],
             seed,
         );
@@ -2672,7 +2672,7 @@ mod tests {
         let (_wake, wake_rx) = watch::channel(0u64);
         let (health_tx, _health) = watch::channel(GroupHealth::default());
         let bob_chan =
-            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], seed);
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url], seed);
         let handle = spawn_group(
             bob_chan,
             MlsChannel::new(bob),
@@ -2756,7 +2756,7 @@ mod tests {
         let url = relay.url().await.to_string();
         let seed = [7u8; 32];
         let alice_chan =
-            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url.clone()], seed);
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url.clone()], seed);
 
         let bob_mls = MlsChannel::new(bob);
         let log = crate::MemLog::default();
@@ -2765,7 +2765,7 @@ mod tests {
         let (wake, wake_rx) = watch::channel(0u64);
         let (health_tx, _health) = watch::channel(GroupHealth::default());
         let handle = spawn_group(
-            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], seed),
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url], seed),
             bob_mls.clone(),
             GroupNetConfig::fast("bob".into(), vec!["alice".into()]),
             log.clone(),
@@ -2912,11 +2912,11 @@ mod tests {
         let url = relay.url().await.to_string();
         let seed = [8u8; 32];
         let pub_chan =
-            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url.clone()], seed);
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url.clone()], seed);
         let sink = Sink::default();
         let (_wake, wake_rx) = watch::channel(0u64);
         let (health_tx, _health) = watch::channel(GroupHealth::default());
-        let bob_chan = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], seed);
+        let bob_chan = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url], seed);
         let handle = spawn_group(
             bob_chan,
             MlsChannel::new(bob),
@@ -2972,7 +2972,7 @@ mod tests {
         let url = relay.url().await.to_string();
         let seed = [7u8; 32];
         let alice_chan = crate::ritual_net::GroupChannel::new(
-            crate::dial::Dialer::Direct,
+            crate::dial::Dialer::direct(),
             vec![url.clone()],
             seed,
         );
@@ -2997,7 +2997,7 @@ mod tests {
         let (_wake, wake_rx) = watch::channel(0u64);
         let (health_tx, mut health_rx) = watch::channel(GroupHealth::default());
         let bob_chan =
-            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], seed);
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url], seed);
         let handle = spawn_group(
             bob_chan,
             MlsChannel::new(bob),
@@ -3069,7 +3069,7 @@ mod tests {
         alice.create_group().expect("group");
         let (_wake, wake_rx) = watch::channel(0u64);
         let (health_tx, mut health_rx) = watch::channel(GroupHealth::default());
-        let chan = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], [7u8; 32]);
+        let chan = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url], [7u8; 32]);
         let handle = spawn_group(
             chan,
             MlsChannel::new(alice),
@@ -3111,7 +3111,7 @@ mod tests {
 
         let mls = MlsMember::new(&SigningKey::from_bytes(&[9u8; 32]), "walter").expect("mls");
         let channel = crate::ritual_net::GroupChannel::new(
-            crate::dial::Dialer::Direct,
+            crate::dial::Dialer::direct(),
             vec!["ws://127.0.0.1:1".to_string()],
             [7u8; 32],
         );
@@ -3154,7 +3154,7 @@ mod tests {
             }
         });
         let mls = MlsMember::new(&SigningKey::from_bytes(&[9u8; 32]), "walter").expect("mls");
-        let channel = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], [7u8; 32]);
+        let channel = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url], [7u8; 32]);
         let kept = channel.clone();
         let (_wake, wake_rx) = watch::channel(0u64);
         let (health_tx, _health) = watch::channel(GroupHealth::default());
@@ -3427,7 +3427,7 @@ mod tests {
         let url = relay.url().await.to_string();
         let seed = [7u8; 32];
         let chan = |u: &str| {
-            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![u.into()], seed)
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![u.into()], seed)
         };
 
         // walter: two own events already in the log, nobody has ever acked
@@ -4262,7 +4262,7 @@ mod tests {
         walter.create_group().expect("group");
         let (health_tx, _health) = watch::channel(GroupHealth::default());
         spawn_group(
-            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], [7u8; 32]),
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url], [7u8; 32]),
             MlsChannel::new(walter),
             GroupNetConfig::fast("walter".into(), vec!["petra".into()]),
             log,
@@ -4418,7 +4418,7 @@ mod tests {
         let url = relay.url().await.to_string();
         let seed = [7u8; 32];
         let alice_chan =
-            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url.clone()], seed);
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url.clone()], seed);
         let alice_mls = MlsChannel::new(alice);
         let ask = |by: &str, id: char| {
             VaultFrame::Ask(VaultAskFrame {
@@ -4431,7 +4431,7 @@ mod tests {
         let sink = Sink::default();
         let (_wake, wake_rx) = watch::channel(0u64);
         let (health_tx, _health) = watch::channel(GroupHealth::default());
-        let bob_chan = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url], seed);
+        let bob_chan = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url], seed);
         let handle = spawn_group(
             bob_chan,
             MlsChannel::new(bob),
@@ -4485,7 +4485,7 @@ mod tests {
         let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
         let url = relay.url().await.to_string();
         let chan = |u: &str| {
-            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![u.into()], [7u8; 32])
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![u.into()], [7u8; 32])
         };
 
         let log = crate::MemLog::default();
@@ -4646,7 +4646,7 @@ mod tests {
         ));
         relay.run().await.expect("relay");
         let url = relay.url().await.to_string();
-        let chan = || crate::ritual_net::GroupChannel::new(crate::dial::Dialer::Direct, vec![url.clone()], [7u8; 32]);
+        let chan = || crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url.clone()], [7u8; 32]);
 
         let log = crate::MemLog::default();
         log.push(walter_event(1));

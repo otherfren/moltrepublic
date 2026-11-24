@@ -48,7 +48,10 @@ const MIRROR_FETCHES_AT_ONCE: usize = 1;
 
 /// What this build knows and, with `lock`, announces in its declaration.
 fn own_caps(lock: bool) -> Vec<String> {
-    let mut caps = vec![molt_core::chain::RESTORE_CONSENT_V2_CAP.to_string()];
+    let mut caps = vec![
+        molt_core::chain::RESTORE_CONSENT_V2_CAP.to_string(),
+        molt_core::chain::BLOCK_V2_CAP.to_string(),
+    ];
     if lock {
         caps.push(molt_core::chain::CHAIN_LOCK_CAP.to_string());
     }

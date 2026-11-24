@@ -216,8 +216,8 @@ pub fn target_gap(relays: &[RelayEntry], clearnet_session: bool) -> TargetGap {
 /// (clearnet, or the embedded in-process client). Lets a caller show what is
 /// about to be probed before the probe finishes.
 pub fn proxy_of(dialer: &Dialer) -> String {
-    match dialer {
-        Dialer::Socks5 { proxy, .. } => proxy.clone(),
+    match &dialer.route {
+        crate::dial::Route::Socks5 { proxy, .. } => proxy.clone(),
         _ => String::new(),
     }
 }
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn only_a_socks_dialer_has_a_proxy_address() {
-        assert_eq!(proxy_of(&Dialer::Direct), "");
+        assert_eq!(proxy_of(&Dialer::direct()), "");
         assert_eq!(
             proxy_of(&Dialer::resolve("tor", "local", 9050).expect("tor+local")),
             "127.0.0.1:9050"
