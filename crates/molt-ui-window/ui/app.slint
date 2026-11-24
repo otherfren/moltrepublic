@@ -1686,6 +1686,7 @@ export component AppWindow inherits Window {
     in property <int> org-bv2-state;
     in property <string> org-bv2-text;
     in property <string> org-bv2-tip;
+    in property <string> org-bv2-who;
     in property <string> org-builds-note;
     in-out property <bool> org-bv2-modal-open;
     // the forks branch_status proves, one line each, and their tables;
@@ -12006,7 +12007,7 @@ export component AppWindow inherits Window {
                 { k: Strings.os-bv2-t-changes, v: Strings.os-bv2-changes },
                 { k: Strings.os-bv2-t-notice, v: Strings.os-bv2-notice },
                 { k: Strings.os-bv2-t-price, v: Strings.os-bv2-price },
-                { k: Strings.os-bv2-t-who, v: Strings.os-bv2-who },
+                { k: Strings.os-bv2-t-who, v: root.org-bv2-who != "" ? root.org-bv2-who : Strings.os-bv2-who },
             ]: Row {
                 Text {
                     text: row.k;

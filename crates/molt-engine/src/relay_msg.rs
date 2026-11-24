@@ -274,6 +274,7 @@ pub fn known_log_shapes() -> &'static [LogShape] {
         &["✗ invite ", ": the name ", " is already taken in this founding - refused"],
         &["✗ invite ", ": that transport key is already used by another seat - refused"],
         &["✗ invite ", ": ", " runs a build without the lock - refused"],
+        &["✗ invite ", ": ", "'s device runs an older build"],
         &["✗ invite ", ": no usable reply address in the request - refused"],
         &["✗ invite ", ": the key package does not match the identity in the request - refused"],
         &["· invite ", " re-activated by ", " - the earlier attempt is replaced"],

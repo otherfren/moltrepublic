@@ -267,6 +267,8 @@ pub(crate) struct OrgStats {
     pub(crate) bv2_state: i32,
     pub(crate) bv2_text: String,
     pub(crate) bv2_tip: String,
+    /// "Who decides" in the switch's table ("" = the generic line).
+    pub(crate) bv2_who: String,
     /// Raw `chain_sync` facts, rendered once the language is known.
     pub(crate) bv2_since: u64,
     pub(crate) bv2_wait: String,
@@ -380,6 +382,15 @@ fn block_v2_waiting(lang: i32, wait: &str) -> Option<(String, String)> {
         ("?", wait)
     };
     Some((seat.to_string(), format!("{seat} {why}")))
+}
+
+/// "Who decides" in the republic's own rule ("" = unknown).
+pub(crate) fn who_decides(lang: i32, m: usize, n: usize) -> String {
+    match (m, lang) {
+        (0, _) => String::new(),
+        (_, 1) => format!("{m} von {n} Mitgliedern müssen zustimmen."),
+        _ => format!("{m} of {n} members must agree."),
+    }
 }
 
 /// The block format row: `(state, text, tooltip)`; state 0 hidden, 1 new,
@@ -1162,6 +1173,7 @@ pub(crate) async fn gather_surfaces(
                 bv2_state: 0,
                 bv2_text: String::new(),
                 bv2_tip: String::new(),
+                bv2_who: format!("{}:{}", s.threshold, s.members.len()),
                 bv2_since: s.chain_sync.block_v2_since,
                 bv2_wait: s.chain_sync.block_v2_wait.clone(),
                 fork_lines: Vec::new(),
@@ -1394,6 +1406,11 @@ pub(crate) async fn gather_surfaces(
     org_stats.builds_mixed = builds_mixed(&seat_src.0);
     (org_stats.bv2_state, org_stats.bv2_text, org_stats.bv2_tip) =
         block_format_row(lang, org_stats.chain_governed, org_stats.bv2_since, &org_stats.bv2_wait);
+    org_stats.bv2_who = org_stats
+        .bv2_who
+        .split_once(':')
+        .and_then(|(m, n)| Some(who_decides(lang, m.parse().ok()?, n.parse().ok()?)))
+        .unwrap_or_default();
     org_stats.builds_note = builds_note(lang, org_stats.builds_mixed, org_stats.bv2_since, &org_stats.bv2_wait);
     if org_stats.chain_governed {
         if let Ok(Reply::Branches(b)) = wallet.execute(Command::BranchStatus).await {
