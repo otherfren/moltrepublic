@@ -270,7 +270,14 @@ state; a signature is only its expression at one head+1.
   chosen branch (`docs/chain/chain_rescue_plan.md`). Its `tip_hash` must
   equal the block's `prev`, so the signed bytes name one branch; the walk
   checks `base_hash` and `chosen_root` against its own chain, never below
-  its anchor, and refuses a choice that drops no second branch.
+  its anchor or its last cut (for full and pruned holders alike), refuses
+  a choice that drops no second branch, and requires 2m > n for this
+  change kind only.
+- "No reset without a second branch" is a signer-side rule: the verifier
+  sees only a different hash at base+1, and m colluding seats can always
+  decide anything.
+- Dark in this build (`BRANCH_CHOICE_AVAILABLE = false`): such a block is
+  refused in verification.
 - A seat holding the tip adopts it and drops what lies above; a seat on
   another branch stops (`status.chain_sync.abandoned`) and rejoins by link.
 - On a seat holding a choice, a block of another branch at or below it

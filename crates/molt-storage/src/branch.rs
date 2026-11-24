@@ -23,10 +23,13 @@ pub(crate) const BRANCH_SEGMENT: u64 = u64::MAX - 14;
 pub const BUNDLE_MAGIC: &[u8; 15] = b"molt-branch-v1\0";
 const SALT_LEN: usize = 32;
 const NONCE_LEN: usize = 24;
-const BUNDLE_MAX: u64 = 256 * 1024 * 1024;
-const BUNDLE_M_KIB_MAX: u32 = 1024 * 1024;
-const BUNDLE_T_MAX: u32 = 16;
-const BUNDLE_P_MAX: u32 = 8;
+/// A bundle carries at most the evidence store plus the own chain above
+/// the fork: one state frame's worth.
+pub const BUNDLE_MAX: u64 = 64 * 1024 * 1024;
+// a hostile header must not cost more than a few export-sized derivations
+const BUNDLE_M_KIB_MAX: u32 = 256 * 1024;
+const BUNDLE_T_MAX: u32 = 8;
+const BUNDLE_P_MAX: u32 = 4;
 
 fn branch_key(ws_key: &[u8; 32], id: &[u8; 32]) -> Zeroizing<[u8; 32]> {
     Zeroizing::new(hkdf32(ws_key, "molt-branch-state", id))
@@ -154,6 +157,22 @@ mod tests {
         params[BUNDLE_MAGIC.len() + SALT_LEN + 4] ^= 1;
         assert!(open_bundle(&params, "correct horse battery").is_err(), "the parameters are bound");
         assert!(seal_bundle(b"x", "short").is_err(), "the export's passphrase policy");
+    }
+
+    #[test]
+    fn hostile_kdf_parameters_and_sizes_are_refused() {
+        let sealed = seal_bundle(b"x", "correct horse battery").expect("seal");
+        for (word, value) in [(0usize, BUNDLE_M_KIB_MAX + 1), (1, BUNDLE_T_MAX + 1), (2, BUNDLE_P_MAX + 1)] {
+            let mut bad = sealed.clone();
+            let at = BUNDLE_MAGIC.len() + SALT_LEN + 4 * word;
+            bad[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            let e = open_bundle(&bad, "correct horse battery").expect_err("out of bounds");
+            assert!(e.to_string().contains("out of bounds"), "{e}");
+        }
+        let tmp = tempfile::tempdir().expect("tmp");
+        let big = tmp.path().join("big.bundle");
+        std::fs::File::create(&big).expect("create").set_len(BUNDLE_MAX + 1).expect("sparse");
+        assert!(read_bundle_file(&big, "correct horse battery").is_err(), "over the size cap");
     }
 
     #[test]

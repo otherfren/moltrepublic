@@ -576,7 +576,7 @@ fn verify_next(
                 ));
             }
         }
-        ChainChange::BranchChosen { .. } => super::branch::check_shape(block)?,
+        ChainChange::BranchChosen { .. } => super::branch::check_block(head, block)?,
     }
     let signers = block_signers(&head.republic_id, &head.identities, block)?;
     if signers.len() < usize::from(head.rule_m) {
@@ -646,6 +646,8 @@ pub(crate) struct ChainWalk {
     /// Link hash per height from the anchor up: a branch choice names
     /// blocks below its predecessor.
     pub(super) links: Vec<String>,
+    /// The height of the last cut this walk folded or anchors on.
+    pub(super) last_cut: u64,
 }
 
 impl ChainWalk {
@@ -669,7 +671,7 @@ impl ChainWalk {
     /// (round 3, D9).
     pub(super) fn step(&mut self, block: &ChainBlock, held: Held<'_>) -> Result<(), String> {
         let (head, consumed) = verify_next(&self.head, block, &self.seen)?;
-        super::branch::check_on_walk(&self.links, block)?;
+        super::branch::check_on_walk(&self.links, self.last_cut, block)?;
         consent_spends(&block.change, |m| walk_working_anchor(&self.running, m))
             .map_err(|why| format!("block {}: {why}", block.height))?;
         let cut = CutKind::of(&block.change);
@@ -710,6 +712,7 @@ impl ChainWalk {
                 ));
             }
             self.folded_cut = self.folded_cut || kind.wiki;
+            self.last_cut = block.height;
         }
         fold_one(&mut self.running, block, self.vault.as_ref())?;
         if let Some(id) = consumed {
@@ -1192,6 +1195,7 @@ pub(crate) fn walk_chain(blocks: &[ChainBlock]) -> Result<ChainWalk, String> {
         folded_cut: false,
         vault: crate::vault::ctx_from_founding(*rule_m, identities),
         links: Vec::new(),
+        last_cut: 0,
     };
     walk.links.push(walk.head.hash.clone());
     for block in rest {
@@ -1441,6 +1445,7 @@ pub(crate) fn walk_suffix_chain(
         // the anchor's own founding table (plan 1.3.8)
         vault: crate::vault::ctx_from_founding(blob.rule_m, &blob.founding_identities),
         links: Vec::new(),
+        last_cut: anchor.height,
     };
     walk.links.push(walk.head.hash.clone());
     for block in rest {
