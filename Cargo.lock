@@ -5092,6 +5092,7 @@ dependencies = [
  "molt-net",
  "molt-storage",
  "molt-ui",
+ "nostr-relay-builder",
  "serde_json",
  "slint",
  "tempfile",

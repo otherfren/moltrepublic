@@ -297,6 +297,22 @@ impl Mcp {
         }
     }
 
+    fn call(&mut self, name: &str, args: serde_json::Value) -> serde_json::Value {
+        self.tool(name, args).unwrap_or_else(|e| panic!("{name}: {e}"))
+    }
+
+    fn wait(&mut self, what: &str, pred: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+        let deadline = Instant::now() + Duration::from_secs(120);
+        loop {
+            let s = self.call("read_session", serde_json::json!({}));
+            if pred(&s) {
+                return s;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
     /// `Ok(value)` or the refusal text.
     fn tool(&mut self, name: &str, args: serde_json::Value) -> Result<serde_json::Value, String> {
         let r = self.rpc("tools/call", serde_json::json!({ "name": name, "arguments": args }));
@@ -351,36 +367,112 @@ fn relay_seat(dir: &Path, relay: &str) -> Node {
     Node { child, port, mcp_tcp, stderr }
 }
 
-/// **A second SIGTERM ends a close that waits.** The founding in flight
-/// talks to a relay that accepts and never answers, so the stop's farewell
-/// waits; the first SIGTERM leaves the node in its durable close, the
-/// second ends it at once with exit 1.
-#[test]
-fn a_second_sigterm_ends_a_waiting_close() {
-    let mute = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let url = format!("ws://{}", mute.local_addr().expect("addr"));
+/// A TCP proxy in front of `upstream`; once `swallow` is set it keeps
+/// every connection open and forwards nothing more, in either direction.
+fn freezable_proxy(upstream: String, swallow: Arc<std::sync::atomic::AtomicBool>) -> String {
+    use std::sync::atomic::Ordering;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("ws://{}", listener.local_addr().expect("addr"));
     std::thread::spawn(move || {
-        let mut held = Vec::new();
-        for sock in mute.incoming().flatten() {
-            held.push(sock);
+        for client in listener.incoming().flatten() {
+            let Ok(server) = TcpStream::connect(&upstream) else { continue };
+            for (mut from, mut to) in [
+                (client.try_clone().expect("clone"), server.try_clone().expect("clone")),
+                (server, client),
+            ] {
+                let swallow = swallow.clone();
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 16 * 1024];
+                    while let Ok(n) = from.read(&mut buf) {
+                        if n == 0 {
+                            break;
+                        }
+                        if !swallow.load(Ordering::SeqCst) && to.write_all(&buf[..n]).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
         }
     });
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut node = relay_seat(dir.path(), &url);
-    let mut mcp = Mcp::open(node.port);
+    url
+}
+
+/// Ada and ben found a 2-of-2 republic over `relay`, both entered.
+fn found_pair(ada: &mut Mcp, ben: &mut Mcp) {
     let deadline = Instant::now() + Duration::from_secs(60);
-    while let Err(e) = mcp.tool(
+    while let Err(e) = ada.tool(
         "create_start",
         serde_json::json!({ "name": "Club", "member": "ada", "threshold": 2, "members": 2 }),
     ) {
-        assert!(Instant::now() < deadline, "create_start: {e}\n{}", node.stderr());
+        assert!(Instant::now() < deadline, "create_start: {e}");
         std::thread::sleep(Duration::from_secs(1));
     }
-    drop(mcp);
-    node.sigterm();
-    std::thread::sleep(Duration::from_secs(1));
-    assert!(node.child.try_wait().expect("try_wait").is_none(), "the close did not wait\n{}", node.stderr());
-    node.sigterm();
-    assert_eq!(node.wait_exit(10), Some(1), "{}", node.stderr());
-    assert!(node.stderr().contains("stop=\"forced\""), "{}", node.stderr());
+    // the seat link becomes joinable once its transport details are in
+    let deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        let s = ada.call("read_session", serde_json::json!({}));
+        let link = s["create"]["seats"][0]["link"].as_str().unwrap_or("").to_string();
+        if !link.is_empty() && ben.tool("join_start", serde_json::json!({ "invite": link, "member": "ben" })).is_ok() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the invite never became joinable");
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    ada.wait("the join", |s| s["create"]["can_propose"] == serde_json::json!(true));
+    ada.call("create_propose", serde_json::json!({ "name": "Club", "agenda": "", "features": ["memory"] }));
+    let s = ada.wait("ada's phrase", |s| s["create"]["seed"].as_str().is_some_and(|p| !p.is_empty()));
+    ada.call("confirm_seed_backup", serde_json::json!({ "phrase": s["create"]["seed"] }));
+    ben.wait("the charter", |s| s["join"]["awaiting_ratify"] == serde_json::json!(true));
+    ben.call("join_confirm_charter", serde_json::json!({}));
+    let s = ben.wait("ben's phrase", |s| s["join"]["seed"].as_str().is_some_and(|p| !p.is_empty()));
+    ben.call("confirm_seed_backup", serde_json::json!({ "phrase": s["join"]["seed"] }));
+    let sealed = |side: &'static str| {
+        move |s: &serde_json::Value| {
+            s[side]["outcome"] == serde_json::json!(1) || s[side]["run"]["outcome"] == serde_json::json!(1)
+        }
+    };
+    ada.wait("ada's seal", sealed("create"));
+    ada.call("create_finish", serde_json::json!({}));
+    ben.wait("ben's seal", sealed("join"));
+    ben.call("join_finish", serde_json::json!({}));
+    let open = |s: &serde_json::Value| s["active_workspace"].as_str().is_some_and(|w| !w.is_empty());
+    ada.wait("ada's workspace", open);
+    ben.wait("ben's workspace", open);
+}
+
+/// **A second SIGTERM ends a close that waits.** Ada's republic is open
+/// over a relay that then freezes (it keeps the socket, answers nothing);
+/// a message she sends is unpublished at the stop, so the close waits on
+/// the relay. The first SIGTERM leaves her in the durable close, the
+/// second ends it at once with exit 1.
+#[test]
+fn a_second_sigterm_ends_a_waiting_close() {
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("runtime");
+    let relay = rt.block_on(nostr_relay_builder::MockRelay::run()).expect("relay");
+    let upstream = rt.block_on(relay.url()).to_string().trim_start_matches("ws://").trim_end_matches('/').to_string();
+    let swallow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let url = freezable_proxy(upstream, swallow.clone());
+    let (dir_a, dir_b) = (tempfile::tempdir().expect("tempdir"), tempfile::tempdir().expect("tempdir"));
+    let mut ada = relay_seat(dir_a.path(), &url);
+    let ben = relay_seat(dir_b.path(), &url);
+    let (mut a, mut b) = (Mcp::open(ada.port), Mcp::open(ben.port));
+    found_pair(&mut a, &mut b);
+
+    swallow.store(true, std::sync::atomic::Ordering::SeqCst);
+    a.call("chat_send", serde_json::json!({ "body": "into the freeze" }));
+    drop(a);
+    ada.sigterm();
+    std::thread::sleep(Duration::from_secs(3));
+    assert!(ada.child.try_wait().expect("try_wait").is_none(), "the close did not wait\n{}", ada.stderr());
+    let second = Instant::now();
+    ada.sigterm();
+    assert_eq!(ada.wait_exit(10), Some(1), "{}", ada.stderr());
+    assert!(second.elapsed() < Duration::from_secs(5), "the second SIGTERM did not end it at once");
+    // the pipe reader may still be draining what the process wrote last
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ada.stderr().contains("second stop signal - exiting without the durable close") {
+        assert!(Instant::now() < deadline, "no forced-stop line\n{}", ada.stderr());
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
