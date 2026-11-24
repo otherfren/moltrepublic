@@ -655,10 +655,10 @@ export component ChatRow inherits Rectangle {
     // between the repeater and the card loses the card's preferred height,
     // the card comes up short and the next one paints over the pills. So
     // the row is a transparent container and indents its card itself.
-    // Depth 0 = no quote; 1 and 2 alternate between neighboring quote
-    // groups of different targets (LogLine.quote-indent), so stacked
-    // replies to different questions stop lining up as one thread.
+    // Depth 0 = no quote; a reply sits one level deeper than what it
+    // answers, capped at 3 (LogLine.quote-indent, issue #14).
     in property <int> indent-level: 0;
+    property <length> indent: min(root.indent-level, 3) * 22px * Theme.ui-scale;
     // the card's height comes from a real padded layout (not from a
     // manually anchored crow + offset): preferred-height of an anchored,
     // width-bound layout mis-measures wrapped content by a few pixels —
@@ -669,8 +669,8 @@ export component ChatRow inherits Rectangle {
     // block (same member in a row = same tone), in a grey of its own —
     // NOT the panel tone the chat sits on
     card := Rectangle {
-    x: root.indent-level * 22px;
-    width: parent.width - root.indent-level * 22px;
+    x: root.indent;
+    width: parent.width - root.indent;
     height: parent.height;
     // a system line (UI-synthesized governance note in a patch channel)
     // renders quiet: no card chrome, no author, no actions

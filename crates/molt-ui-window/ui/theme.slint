@@ -47,7 +47,7 @@ export struct LogLine {
     system: bool, // a UI-synthesized governance line (patch channels): quiet, no author, no actions
     wake: bool, // a wake notice of this node: a system line that offers to hide its kind
     quote-label: string, // "author: body" teaser of the quoted message ("" = no quote; may be set with quote == -1 for a cross-channel quote)
-    quote-indent: int, // reply-indent depth: 0 = none, 1/2 alternate between neighboring quote groups of different targets
+    quote-indent: int, // reply depth: 0 = none, one deeper than the answered row, capped at 3
     deleted-by: string, // who deleted the message ("" = live)
     first: bool, // starts a new author block (shows the name + time header)
     own: bool, // the local member wrote it
