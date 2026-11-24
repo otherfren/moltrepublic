@@ -255,7 +255,7 @@ field asks for it (Q2).
 | Q5 | a founding with 2m ≤ n: refuse or warn? | refuse: a warning leaves a republic whose split no vote can repair; note that it also ends the vault for n ≤ 4 |
 | Q6 | retire Strict Order Mode formally? | not yet: keep it dark until this ships and the field shows whether forks still need prevention |
 | Q7 | no finality (issue #12): a late block with a lower hash displaces applied decisions down to the last cut. Delay irreversible effects until k blocks sit on top, until the next cut, or not at all? See §11a | decide after `block_identity_plan.md` ships and the fork counter shows how many real forks remain; if any: delay the vault answer by depth, k a charter value, default 1; the wallet keeps "final = below a cut"; never a clock |
-| Q8 | bind `prev` into the signed bytes (issue #11; `molt-chain-change-v3`)? See §11b | not in v0.1.3: decide with Q6 and Q7 from the measured fork counts |
+| Q8 | bind `prev` into the signed bytes (issue #11; `molt-chain-change-v3`)? See §11b | DECIDED 2026-11-24: yes, in the same activation as block identity v2 (`block_identity_plan.md` §3b), once the wait check there passes. A later, separate activation would cost a second vote of every seat and a second downgrade wall |
 
 ### 11a. Finality: what is irreversible today (`chain_issue_claims_check.md` 12-2..12-5)
 
@@ -283,7 +283,8 @@ seat leaves the depth unbounded.
 |---|---|
 | buys, once block identity v2 exists | a signature is valid on one branch only: no cross-branch reuse |
 | does NOT buy | protection against two changes on the SAME predecessor, the field shape (`chain_issue_claims_check.md` 11-4, 11-9). Only one vote per slot does that (Strict Order Mode or E0) |
-| costs | every re-base re-signs (already so); a relink must re-sign instead of re-link (dead after v2 anyway); a signature format change: `molt-chain-change-v3`, activated like v2 and possibly at the same height |
+| costs, the real one | signatures of seats on different predecessors no longer combine: nothing seals until m seats share one `prev`. Seconds while the fork rule settles; during a lasting split the vote stands still until the branch is chosen |
+| costs, minor | every re-base re-signs (already so); a relink must re-sign instead of re-link (dead after v2 anyway); a signature format change: `molt-chain-change-v3`, activated like v2 and possibly at the same height |
 | branch choice | none: `BranchChosen.tip_hash` already binds its branch |
 | standing votes | re-signed per head move as today |
 | Strict Order Mode | signs digests on a lineage, which is already prev-like; no conflict |

@@ -122,6 +122,34 @@ state do not depend on it. What differs per seat is the signer list
 Replacing it by "the lowest-named set" would buy byte-identical exports
 at the price of a rewrite path in a verified chain; not worth it.
 
+## 3b. `prev` in the signed bytes, same activation (decided 2026-11-24)
+
+Issue #11; argued in `chain_rescue_plan.md` §11b. With the v2 identity
+the member signature covers `republic_id ‖ height ‖ prev identity ‖
+change` under `molt-chain-change-v3`. One activation carries both
+layouts: the feature key of §4 switches link and signature at the same
+height.
+
+| | |
+|---|---|
+| buys | a signature attests the chain below it and is valid on one branch only; two branches with m signatures each then prove a seat signed on both; the precondition for one vote per slot |
+| does not buy | two changes sealed on the SAME predecessor stay possible |
+| genesis | unchanged: its signatures are the roster attestations, it has no `prev` |
+| restores, cuts | sign `prev` like any block; consent rules unchanged |
+| dead after activation | `relink_onto_variant` (it relies on an unsigned `prev`) |
+
+Gate before it is built, a measured run and not an argument: a 2-of-3
+republic with one seat lagging by one block, 50 proposals. Compare the
+time from propose to sealed with and without the binding. Pass = no
+wait beyond the fork rule settling; a seat behind already refuses to
+vote (`refused_lagging`), so none is expected. If it fails, v2 ships
+alone and Q8 reopens.
+
+Tests on top of §6: a signature made on one predecessor is rejected on
+another; byte pins for `molt-chain-change-v3`; standing votes re-sign
+after a tip change at the same height; an older build stops at the
+first v3 block.
+
 ## 4. Activation
 
 Every seat must switch at the same height, or they compute different
