@@ -113,6 +113,9 @@ impl State {
         // anchors on (WP4b 4c) — persisted next to the chain.
         full_chain: Option<Vec<molt_core::ChainBlock>>,
         checkpoint_blob: Option<molt_core::CheckpointState>,
+        // the coordinator's word that its chain runs block-v2: raises the
+        // wall when the served anchor lies below the switch
+        block_v2: bool,
         // a retired local copy of this seat whose keys records move over
         carry_keys: Option<&std::path::Path>,
         err: fn(String) -> MoltError,
@@ -221,7 +224,7 @@ impl State {
             // a pruned or block-v2 chain under an older manifest would let
             // an OLD binary open this fresh workspace chainless
             opened
-                .write_chain_walled(checkpoint_blob.as_ref(), &chain)
+                .write_chain_walled(checkpoint_blob.as_ref(), &chain, block_v2)
                 .map_err(|e| err(e.to_string()))?;
         }
         let id = opened.manifest.workspace.id.clone();
@@ -1119,6 +1122,7 @@ impl State {
                 Vec::new(),
                 None, // a founding's chain IS the genesis
                 None, // …rooted, never pruned at birth
+                false, // the charter says it
                 None,
                 MoltError::Create,
             )?;
@@ -1617,6 +1621,7 @@ impl State {
                 mesh,
                 None, // a join's chain IS the genesis
                 None, // …rooted, never pruned at birth
+                false, // the charter says it
                 None,
                 MoltError::Join,
             ) {
@@ -1873,6 +1878,7 @@ impl State {
         nostr_sk: String,
         rotation_seed: String,
         founded_ts: u64,
+        block_v2: bool,
         generation: Option<u64>,
     ) -> Result<Reply, MoltError> {
         // a cancelled/restarted recovery bumped the generation — drop stale results
@@ -2081,6 +2087,7 @@ impl State {
             mesh, // the re-established mesh (empty = option A, state only)
             Some(blocks),
             checkpoint_blob.clone(),
+            block_v2,
             retired.as_deref(),
             MoltError::Recover,
         ) {

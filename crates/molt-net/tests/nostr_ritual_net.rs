@@ -85,6 +85,7 @@ async fn a_welcome_round_trips_with_its_payload() {
         rotation_seed: [7u8; 32],
         relays: vec![url],
         founded_ts: 0,
+        block_v2: false,
     };
     founder
         .send_welcome(&joiner.pk_hex(), &payload)

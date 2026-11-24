@@ -818,7 +818,7 @@ mod tests {
     fn an_import_of_a_block_v2_chain_raises_the_manifest() {
         let tmp = tempfile::tempdir().expect("tmp");
         let (src_root, src_dir, _seed, _id) = make_ws(tmp.path());
-        let (ws, _) = crate::open_workspace(&src_dir).expect("open");
+        let (mut ws, _) = crate::open_workspace(&src_dir).expect("open");
         let enable = molt_core::ChainBlock {
             height: 1,
             prev: String::new(),
@@ -829,8 +829,10 @@ mod tests {
             },
             sigs: Vec::new(),
         };
-        ws.write_chain(None, &[enable]).expect("chain");
-        assert!(ws.manifest.version < molt_core::STORAGE_VERSION_BLOCK_V2);
+        ws.write_chain_walled(None, &[enable], false).expect("chain");
+        let mut older = ws.manifest.clone();
+        older.version = 1;
+        crate::write_manifest(&src_dir, &older).expect("an export from before the wall");
         drop(ws);
         let blob = blob_of(&src_root, &src_dir, &ExportKey::passphrase(PASS));
         let dest_root = tmp.path().join("dest-root");
@@ -857,10 +859,46 @@ mod tests {
             },
             sigs: Vec::new(),
         };
-        ws.write_chain_walled(None, &[]).expect("plain");
+        ws.write_chain_walled(None, &[], false).expect("plain");
         assert!(crate::read_manifest(&dir).expect("manifest").version < molt_core::STORAGE_VERSION_BLOCK_V2);
-        ws.write_chain_walled(None, &[enable]).expect("walled");
+        ws.write_chain_walled(None, &[enable], false).expect("walled");
         assert_eq!(crate::read_manifest(&dir).expect("manifest").version, molt_core::STORAGE_VERSION_BLOCK_V2);
+    }
+
+    /// The long-history shape: a rejoiner materializes at an anchor BELOW
+    /// the switch. The coordinator's word raises the wall before the first
+    /// write; a false word only raises it, the chain stays readable.
+    #[test]
+    fn a_claimed_switch_raises_the_wall_before_the_chain_proves_it() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (_root, dir, _seed, _id) = make_ws(tmp.path());
+        let (mut ws, _) = crate::open_workspace(&dir).expect("open");
+        ws.write_chain_walled(None, &[], true).expect("claimed");
+        assert_eq!(crate::read_manifest(&dir).expect("manifest").version, molt_core::STORAGE_VERSION_BLOCK_V2);
+        drop(ws);
+        let (ws, _) = crate::open_workspace(&dir).expect("this build opens it");
+        assert!(ws.read_chain().expect("readable").1.is_empty());
+    }
+
+    /// The general rule: no chain on disk carries the enabling block under
+    /// a manifest below 5 - a plain write of one is refused.
+    #[test]
+    fn a_plain_write_of_an_enabling_chain_under_an_old_manifest_is_refused() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (_root, dir, _seed, _id) = make_ws(tmp.path());
+        let (ws, _) = crate::open_workspace(&dir).expect("open");
+        let enable = molt_core::ChainBlock {
+            height: 1,
+            prev: String::new(),
+            change: molt_core::ChainChange::Applied {
+                proposal_id: 1,
+                surface: molt_core::Surface::Organization,
+                payload: serde_json::json!({ "op": "set_features", "value": molt_core::chain::BLOCK_V2_FEATURE }),
+            },
+            sigs: Vec::new(),
+        };
+        assert!(ws.write_chain(None, &[enable]).is_err());
+        assert!(ws.read_chain().expect("readable").1.is_empty(), "nothing reached the disk");
     }
 
     /// Stage + commit round-trips a passphrase blob into a FRESH root: the

@@ -1550,6 +1550,7 @@ impl State {
             rotation_seed,
             relays: ratified,
             founded_ts: self.replica.as_ref().map_or(0, |r| r.founded_ts),
+            block_v2: self.block_v2_from().is_some(),
         };
         // the commit goes into the LOG too (review M8): the delivery task
         // publishes it a few times now, the outbox re-offers it from here

@@ -134,6 +134,7 @@ fn recovery_materializes_the_workspace_from_the_full_verified_chain() {
             nostr_sk: String::new(),
             rotation_seed: String::new(),
             founded_ts: 0,
+            block_v2: false,
             generation: Some(999),
         })
         .await
@@ -150,6 +151,7 @@ fn recovery_materializes_the_workspace_from_the_full_verified_chain() {
             nostr_sk: String::new(),
             rotation_seed: String::new(),
             founded_ts: 1_700_000_000,
+            block_v2: false,
             generation: Some(1),
         })
         .await
@@ -188,6 +190,40 @@ fn recovery_materializes_the_workspace_from_the_full_verified_chain() {
         assert_eq!(mem.applied.len(), 1, "block 1 projected");
         assert_eq!(mem.applied[0]["title"], "survived the loss");
     });
+}
+
+/// The long-history shape: the served anchor lies BELOW the block-v2
+/// switch. The coordinator's word raises the wall at the first write,
+/// before any catch-up; without it (an older coordinator) the wall waits
+/// for the persist that applies the enabling block.
+#[test]
+fn a_rejoiner_raises_the_wall_on_the_coordinators_word() {
+    for claimed in [true, false] {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+        let ticket = "ab".repeat(8);
+        let entropy = molt_storage::seed_entropy(&phrase).expect("entropy");
+        let (new_sk, new_pk) = molt_net::nostr_identity(&entropy, &ticket);
+        let (chain, republic_id) =
+            recovered_chain_with(&phrase, vec!["wss://relay.one.example/".to_string()], Some(new_pk));
+        let mut st = recovering_state(&tmp, "bob", &republic_id, &phrase);
+        st.cmd_net_recover_sealed(
+            "bob".to_string(),
+            serde_json::to_string(&chain).expect("chain json"),
+            String::new(),
+            Vec::new(),
+            hex::encode(new_sk),
+            "5a".repeat(32),
+            0,
+            claimed,
+            Some(1),
+        )
+        .expect("the handler never errors");
+        assert_eq!(st.session.screen, Screen::Main, "{:?}", st.session.notice);
+        let dir = st.active.as_ref().expect("materialized").dir.clone();
+        let version = molt_storage::read_manifest(&dir).expect("manifest").version;
+        assert_eq!(version == molt_core::STORAGE_VERSION_BLOCK_V2, claimed, "claimed={claimed}: version {version}");
+    }
 }
 
 /// **N4b step 6d: a recovered workspace comes back as a NOSTR workspace.**
@@ -230,6 +266,7 @@ fn recovery_materializes_the_nostr_shape_and_the_new_anchor() {
         hex::encode(new_sk),
         "5a".repeat(32),
         0,
+        false,
         Some(1),
     )
     .expect("the handler never errors");
@@ -361,6 +398,7 @@ fn recovery_refuses_a_transport_secret_that_is_not_the_seats_own() {
         hex::encode(foreign_sk),
         "5a".repeat(32),
         0,
+        false,
         Some(1),
     )
     .expect("the handler never errors");
@@ -412,6 +450,7 @@ fn a_context_switch_abandons_an_in_flight_recovery() {
         String::new(),
         String::new(),
         0,
+        false,
         Some(1),
     )
     .expect("the handler never errors");
@@ -453,6 +492,7 @@ fn recovery_refuses_a_chain_that_re_anchors_the_seat_elsewhere() {
         hex::encode(ours),
         "5a".repeat(32),
         0,
+        false,
         Some(1),
     )
     .expect("the handler never errors");
@@ -492,6 +532,7 @@ fn recovery_hard_rejects_a_chain_that_does_not_anchor_the_phrase() {
             nostr_sk: String::new(),
             rotation_seed: String::new(),
             founded_ts: 0,
+            block_v2: false,
             generation: Some(1),
         })
         .await

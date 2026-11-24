@@ -6634,6 +6634,11 @@ pub enum Command {
         /// ([`SealedRoster::founded_ts`]); 0 = unknown.
         #[serde(default)]
         founded_ts: u64,
+        /// The coordinator's word that its chain runs block-v2. Unproven
+        /// until the catch-up passes the switch, so it only ever RAISES
+        /// the manifest wall; false from an older coordinator.
+        #[serde(default)]
+        block_v2: bool,
         /// Recovery incarnation (a superseded recovery drops stale results).
         #[serde(default)]
         generation: Option<u64>,

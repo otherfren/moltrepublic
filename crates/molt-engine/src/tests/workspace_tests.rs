@@ -875,6 +875,7 @@ fn a_read_cursor_survives_a_restart() {
         String::new(),
         String::new(),
         0,
+        false,
         Some(1),
     )
     .expect("materialize");

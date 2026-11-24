@@ -1745,15 +1745,18 @@ impl OpenedWorkspace {
 
     /// [`Self::write_chain`] behind the manifest walls its content needs,
     /// raised first: a crash in between only over-describes.
+    /// `block_v2` is a claim the chain cannot prove yet (a coordinator's
+    /// word at an anchor below the switch): it only ever raises the wall.
     pub fn write_chain_walled(
         &mut self,
         blob: Option<&molt_core::CheckpointState>,
         chain: &[molt_core::ChainBlock],
+        block_v2: bool,
     ) -> Result<(), StorageError> {
         if blob.is_some() {
             self.bump_pruned_version()?;
         }
-        if chain_runs_block_v2(blob, chain) {
+        if block_v2 || chain_runs_block_v2(blob, chain) {
             self.bump_block_v2_version()?;
         }
         self.write_chain(blob, chain)
@@ -1793,6 +1796,10 @@ impl OpenedWorkspace {
         blob: Option<&molt_core::CheckpointState>,
         chain: &[molt_core::ChainBlock],
     ) -> Result<(), StorageError> {
+        // an older binary must never open a chain it cannot verify
+        if self.manifest.version < molt_core::STORAGE_VERSION_BLOCK_V2 && chain_runs_block_v2(blob, chain) {
+            return Err(StorageError::Corrupt("a block-v2 chain under an older manifest".to_string()));
+        }
         let plaintext = match blob {
             // WP4b: a pruned holder persists the checkpoint blob next to
             // its suffix. A FULL chain keeps the bare-array layout, so
