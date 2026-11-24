@@ -9066,8 +9066,11 @@ pub struct ChainSync {
     /// founding; 0 = the chain has not enabled the lock).
     #[serde(default)]
     pub lock_since: u64,
-    /// The first height whose block identity is v2, or this pruned holder's
-    /// anchor when the enabling block lies below it (0 = not enabled).
+    /// The block format is new (`block-v2` on).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub block_v2: bool,
+    /// The first height of the new block format; 0 = off, or on but no
+    /// longer known here (a cut dropped the enabling block).
     #[serde(default)]
     pub block_v2_since: u64,
     /// Why `block-v2` cannot be enabled now ("" = it can, or it is on).

@@ -1213,6 +1213,7 @@ impl State {
         let (ahead_peer, ahead_height) = self.furthest_peer_ahead().unwrap_or_default();
         let (block_v2_since, block_v2_wait) = self.block_v2_status();
         molt_core::ChainSync {
+            block_v2: self.block_v2_from().is_some(),
             block_v2_since,
             block_v2_wait,
             ahead_peer,

@@ -43,7 +43,12 @@ impl State {
     /// `status.chain_sync`: the activation, and what holds it back.
     pub(crate) fn block_v2_status(&self) -> (u64, String) {
         match self.block_v2_from() {
-            Some(h) => (h, String::new()),
+            // the height only while the block that enabled it is held: a
+            // pruned holder knows the format is on, not since when
+            Some(h) => {
+                let held = self.chain.blocks.iter().any(|b| block_v2_after(None, b) == Some(h));
+                (if held { h } else { 0 }, String::new())
+            }
             None if self.is_chain_governed() => (0, self.block_v2_not_capable().unwrap_or_default()),
             None => (0, String::new()),
         }
