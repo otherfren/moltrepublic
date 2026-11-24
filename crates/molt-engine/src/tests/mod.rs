@@ -9,6 +9,7 @@ pub(crate) use support::{plain_state, reopen_chain_signer, stored_chain_signer, 
 
 mod chat_tests;
 mod download_tests;
+mod files_moot_tests;
 mod files_tests;
 mod founding_tests;
 mod governance_tests;

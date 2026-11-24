@@ -502,6 +502,24 @@ impl State {
         validate_files_payload(payload)
     }
 
+    /// Why THIS seat can never approve a files vote, when it cannot - the
+    /// lasting refusals of [`Self::check_files_vote`], none it could outgrow.
+    pub(crate) fn files_vote_moot(&self, payload: &Value) -> Option<&'static str> {
+        let id = parse_id(payload)?;
+        let states = self.files_state();
+        if matches!(states.get(&id), Some(FileState::Deleted(_))) {
+            return Some("deleted");
+        }
+        let gone = || self.share_identity_in(&states, &id).is_err();
+        match payload.get("op").and_then(Value::as_str)? {
+            "persist" if matches!(states.get(&id), Some(FileState::Persistent(_))) => Some("persistent"),
+            "persist" if gone() => Some("gone"),
+            "persist" => self.share_expired_in(&states, &id).then_some("expired"),
+            "delete" => gone().then_some("gone"),
+            _ => None,
+        }
+    }
+
     /// The approve door: a peer's proposal must name the file THIS seat
     /// knows under that id, and its stamp must be one this seat could have
     /// proposed - no signature for a foreign identity or a stamp that
@@ -521,7 +539,7 @@ impl State {
                     return Err(bad("already persistent"));
                 }
                 let (mine, available) =
-                    self.share_identity(&id).map_err(|_| bad("not a shared file here"))?;
+                    self.share_identity(&id).map_err(|_| MoltError::ShareGone)?;
                 if !available {
                     return Err(MoltError::FileUnavailable(id));
                 }
@@ -539,7 +557,7 @@ impl State {
                 // availability is not required: a withdrawn share is
                 // exactly what a delete cleans up
                 let (mine, _) =
-                    self.share_identity(&id).map_err(|_| bad("not a shared file here"))?;
+                    self.share_identity(&id).map_err(|_| MoltError::ShareGone)?;
                 if !mine.matches(&claimed) {
                     return Err(mine.mismatch(&claimed));
                 }

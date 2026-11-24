@@ -168,6 +168,7 @@ fn patch_title_and_state_survive_the_proposal_leaving_pending() {
         void: None,
         advisories: Vec::new(),
         rendered: Vec::new(),
+        moot: None,
     };
     let mut known = HashMap::new();
     // while pending: cached with title + progress
@@ -266,6 +267,7 @@ pub(super) fn view_of(id: u64, title: &str, state: ProposalState) -> ProposalVie
         void: None,
         advisories: Vec::new(),
         rendered: Vec::new(),
+        moot: None,
     }
 }
 
