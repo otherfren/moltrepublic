@@ -731,8 +731,10 @@ impl State {
         };
         let (mine, theirs) = (self.block_id_of(&ours_f), self.block_id_of(&suffix[0]));
         let ids = (applied_id(&ours_f), applied_id(&suffix[0]));
-        // a branch choice above the fork outranks the hash (rescue plan §9)
-        let chosen = self.chain.blocks.iter().any(|b| b.height >= f && matches!(b.change, ChainChange::BranchChosen { .. }));
+        // a branch choice above the fork outranks the hash (rescue plan §9);
+        // an attestation variant of the same decisions still relinks
+        let chosen = self.chain.blocks.iter().any(|b| b.height >= f && matches!(b.change, ChainChange::BranchChosen { .. }))
+            && !suffix.iter().all(|c| ours_at(self, c.height).map_or(true, |o| o.change == c.change));
         if mine <= theirs || chosen {
             // ours wins at the fork (R1): the peer re-bases, not this node
             self.note_fork(from, f, if chosen { "chosen" } else { "kept" }, &mine, &theirs, ids);

@@ -81,9 +81,16 @@ pub(crate) struct DropSeam {
     /// A re-key stops the group runtime before its commit is logged and
     /// publishes nothing: the node as killed right after the persist.
     pub(crate) park_rekey: std::sync::atomic::AtomicBool,
+    /// A partition: every inbound envelope of these seats is lost.
+    pub(crate) cut: Mutex<std::collections::HashSet<MemberId>>,
 }
 
 impl DropSeam {
+    /// Whether `from` is cut off from this node.
+    pub(crate) fn cuts(&self, from: &str) -> bool {
+        self.cut.lock().is_ok_and(|c| c.contains(from))
+    }
+
     pub(crate) fn keeps_window_on_rekey(&self) -> bool {
         self.skip_rekey_reset.load(std::sync::atomic::Ordering::SeqCst)
     }

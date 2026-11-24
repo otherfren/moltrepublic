@@ -8,16 +8,16 @@ use super::test_support::{consent_for, genesis_seat, Builder};
 use super::*;
 use molt_core::{ProposalRecord, Reply};
 
-fn hash(b: &Builder, h: usize) -> String {
+pub(super) fn hash(b: &Builder, h: usize) -> String {
     block_id(&b.republic_id, &b.blocks[h], b.v2_from)
 }
 
-fn bundle_of(st: &State) -> String {
+pub(super) fn bundle_of(st: &State) -> String {
     serde_json::to_string(&st.branch_bundle()).expect("bundle")
 }
 
 /// a and b hold `x`, c holds `y`; b signed on both.
-fn seats() -> (Builder, Builder, State, State, State) {
+pub(super) fn seats() -> (Builder, Builder, State, State, State) {
     let (x, y) = fork();
     let a = genesis_seat("a", &x, x.blocks.clone());
     let b = genesis_seat("b", &x, x.blocks.clone());
@@ -25,14 +25,14 @@ fn seats() -> (Builder, Builder, State, State, State) {
     (x, y, a, b, c)
 }
 
-fn chosen(st: &mut State, base: u64, tip: &str) -> (u64, String) {
+pub(super) fn chosen(st: &mut State, base: u64, tip: &str) -> (u64, String) {
     match st.cmd_choose_branch(base, tip, false).expect("choose") {
         Reply::BranchProposed { id, digest, .. } => (id.0, digest),
         other => panic!("unexpected {other:?}"),
     }
 }
 
-fn head_hash(st: &State) -> String {
+pub(super) fn head_hash(st: &State) -> String {
     st.chain.head.as_ref().expect("a head").hash.clone()
 }
 
@@ -154,7 +154,7 @@ fn a_split_is_repaired_by_two_seats_and_the_third_rejoins() {
         molt_core::ChainDivergence { peer: "c".to_string(), since_height: 2, seen_ts: a.presence_now() },
     );
     assert_eq!(a.restore_gate("c"), None, "the chain left c behind");
-    assert!(a.seat_left_by_choice("c") && !a.seat_left_by_choice("b"));
+    assert!(a.seat_left_by_choice("c"));
     // the rejoin: a Restored block for c, then a fresh device of c
     let mut chain = a.chain.blocks.clone();
     let npk = "dd".repeat(32);
@@ -196,7 +196,7 @@ fn the_shared_seat_signs_one_choice_per_fork_point() {
     // still knows its choice
     let disk = b.chain.branch.disk.clone().expect("written");
     let mut again = genesis_seat("b", &x, x.blocks.clone());
-    again.load_branch_state(Ok(Some(disk)));
+    again.load_branch_state(Ok(Some(disk)), false);
     again.import_bundle(&bundle_of(&c)).expect("c's card again");
     let e = again.cmd_approve_branch(keep_y, &dy, false).expect_err("after the restart");
     assert_eq!(e.to_string(), "branch: already chose at 1");

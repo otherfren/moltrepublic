@@ -14,11 +14,11 @@ pub(super) fn fork() -> (Builder, Builder) {
 }
 
 /// [`fork`] of an older founding (v1 identities throughout).
-fn fork_v1() -> (Builder, Builder) {
+pub(super) fn fork_v1() -> (Builder, Builder) {
     fork_from(Builder::new(&["a", "b", "c"], 2))
 }
 
-fn fork_from(mut base: Builder) -> (Builder, Builder) {
+pub(super) fn fork_from(mut base: Builder) -> (Builder, Builder) {
     base.commit_applied(100, &["a", "b"]);
     let mut x = base.clone();
     x.commit_applied(200, &["a", "b"]);
@@ -51,7 +51,7 @@ fn with(x: &Builder, change: ChainChange, signers: &[&str]) -> Vec<ChainBlock> {
 }
 
 /// `x`'s first `len` blocks plus `change` sealed on top of them.
-fn on_prefix(x: &Builder, len: usize, change: ChainChange, signers: &[&str]) -> Vec<ChainBlock> {
+pub(super) fn on_prefix(x: &Builder, len: usize, change: ChainChange, signers: &[&str]) -> Vec<ChainBlock> {
     let mut chain = x.blocks[..len].to_vec();
     let mut block = x.seal(u64::try_from(len).expect("small"), change, signers);
     block.prev = hash(x, len - 1);
@@ -102,14 +102,18 @@ fn a_choice_replayed_on_another_branch_is_refused() {
 fn a_choice_moved_to_another_base_does_not_verify() {
     super::branch::ARMED_HERE.with(|a| a.set(true));
     let (x, y) = fork();
-    let mut block = x.seal(4, keep_x(&x, &y), &["a", "b"]);
-    if let ChainChange::BranchChosen { base_height, .. } = &mut block.change {
-        *base_height = 0;
-    }
-    let mut chain = x.blocks.clone();
-    chain.push(block);
-    let e = verify_chain(&chain).expect_err("re-based");
-    assert!(["branch", "threshold"].contains(&super::refusal_rule(&e)), "{e}");
+    // re-signed at base 0 with block 1's hash: every block-local rule holds,
+    // only the walk sees that block 0 is something else
+    let moved = edit(&keep_x(&x, &y), |c| {
+        if let ChainChange::BranchChosen { base_height, chosen_root, dropped, .. } = c {
+            *base_height = 0;
+            *chosen_root = hash(&x, 1);
+            dropped[0].from_height = 1;
+            dropped[0].first_hash = hash(&y, 2);
+        }
+    });
+    let e = verify_chain(&with(&x, moved, &["a", "b"])).expect_err("re-based");
+    assert!(e.contains("base 0 is not on this chain"), "{e}");
 }
 
 #[test]
@@ -208,8 +212,8 @@ fn a_choice_below_the_anchor_is_refused() {
     let suffix = vec![x.blocks[4].clone(), block.clone()];
     let e = verify_suffix_chain(&blob, &suffix, &x.republic_id, None).expect_err("below the cut");
     assert_eq!(super::refusal_rule(&e), "below_cut", "{e}");
-    // the full holder verifies the same block: the rule is the anchor's
+    // a full holder refuses it alike: the rule is the last cut's
     let mut full = x.blocks.clone();
     full.push(block);
-    verify_chain(&full).expect("the full chain holds the base");
+    assert_eq!(super::refusal_rule(&verify_chain(&full).expect_err("below the cut")), "below_cut");
 }

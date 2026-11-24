@@ -659,7 +659,7 @@ impl State {
             tracing::debug!(%from, "dropping a delivery from a torn-down mesh");
             return Ok(Reply::Ack);
         }
-        if self.drop_seam.drops(&from, envelope.seq) || self.drop_seam.drops_chat(&envelope.body) {
+        if self.drop_seam.cuts(&from) || self.drop_seam.drops(&from, envelope.seq) || self.drop_seam.drops_chat(&envelope.body) {
             return Ok(Reply::Ack);
         }
         let known = match &self.net {

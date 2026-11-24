@@ -1648,7 +1648,8 @@ impl State {
         }
         let lock_marker = self.active.as_ref().is_some_and(|a| a.prefs.chain_lock);
         self.load_chain_lock(chain_lock, lock_marker);
-        self.load_branch_state(branch_state);
+        let imported = self.active.as_ref().is_some_and(|a| a.prefs.branch_unknown);
+        self.load_branch_state(branch_state, imported);
         // …and the tree behind the chain's own commitment. Checked against
         // it here: bytes that do not answer the commitment are deleted, and
         // the holder goes base-pending rather than reading a wrong wiki.
