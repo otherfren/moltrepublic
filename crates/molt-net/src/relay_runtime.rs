@@ -14,7 +14,7 @@ use nostr::{ClientMessage, Event, EventId, Filter, JsonUtil, RelayMessage, Subsc
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 
-use crate::dial::Dialer;
+use crate::dial::{Dialer, RelayGate};
 use crate::relay_ws::{dial_maybe_tls, RecvFail, RelayWs};
 // A (re)connect completes inside `RelayTimeouts::connect`: dial and TLS
 // carry their own deadlines, but the WS upgrade itself would otherwise wait
@@ -1476,6 +1476,19 @@ pub async fn probe_nip11_max_message(
     dialer: &Dialer,
     ws_url: &str,
 ) -> Result<Option<u64>, NetError> {
+    dialer.check_gate(ws_url)?;
+    match dialer.gate.clone() {
+        // like `RelayWs::connect`: a withdrawal drops the request in flight
+        Some(mut gate) => tokio::select! {
+            biased;
+            () = gate.withdrawn(ws_url) => Err(NetError::Withdrawn),
+            r = nip11_max_message(dialer, ws_url) => r,
+        },
+        None => nip11_max_message(dialer, ws_url).await,
+    }
+}
+
+async fn nip11_max_message(dialer: &Dialer, ws_url: &str) -> Result<Option<u64>, NetError> {
     let (host, port, tls) = crate::relay_ws::relay_dial_coords(ws_url)?;
     let mut stream = dial_maybe_tls(
         &crate::relay_ws::dialer_for(dialer, ws_url),
@@ -1550,7 +1563,7 @@ pub struct PublishPool {
     dialer: Dialer,
     /// (url, its connection slot) — urls are fixed at construction; a pool
     /// change builds a new channel and thereby a new pool.
-    conns: Arc<Vec<(String, tokio::sync::Mutex<PoolSlot>)>>,
+    conns: Arc<Vec<(String, Arc<tokio::sync::Mutex<PoolSlot>>)>>,
     size_budget: Option<u64>,
     /// The fresh dial's bound and the EVENT → OK bound, kept apart: one
     /// shared bound cut a slow onion dial off on every attempt.
@@ -1574,9 +1587,41 @@ struct PoolSlot {
     /// relay is live but busy, so this delays sends without the breaker.
     busy: u32,
     busy_until: Option<tokio::time::Instant>,
+    /// Closes the kept socket at a withdrawal: an idle one has no reader
+    /// that would notice.
+    watcher: Option<tokio::task::AbortHandle>,
+}
+
+impl Drop for PoolSlot {
+    fn drop(&mut self) {
+        if let Some(w) = self.watcher.take() {
+            w.abort();
+        }
+    }
 }
 
 impl PoolSlot {
+    /// Keep `ws`, closed by the gate's withdrawal of `url`.
+    fn keep(slot: &Arc<tokio::sync::Mutex<PoolSlot>>, guard: &mut PoolSlot, ws: RelayWs, gate: Option<RelayGate>, url: &str) {
+        guard.ws = Some(ws);
+        if let Some(w) = guard.watcher.take() {
+            w.abort();
+        }
+        let Some(mut gate) = gate else {
+            return;
+        };
+        let (weak, url) = (Arc::downgrade(slot), url.to_string());
+        guard.watcher = Some(
+            tokio::spawn(async move {
+                gate.withdrawn(&url).await;
+                if let Some(slot) = weak.upgrade() {
+                    slot.lock().await.ws = None;
+                }
+            })
+            .abort_handle(),
+        );
+    }
+
     /// Record a transport failure: drop the socket, back off exponentially
     /// (1 s … 60 s).
     fn tripped(&mut self) {
@@ -1621,7 +1666,7 @@ impl PublishPool {
             dialer,
             conns: Arc::new(
                 urls.into_iter()
-                    .map(|u| (u, tokio::sync::Mutex::new(PoolSlot::default())))
+                    .map(|u| (u, Arc::new(tokio::sync::Mutex::new(PoolSlot::default()))))
                     .collect(),
             ),
             size_budget: None,
@@ -1680,7 +1725,7 @@ impl PublishPool {
     async fn publish_pooled(
         dialer: &Dialer,
         url: &str,
-        slot: &tokio::sync::Mutex<PoolSlot>,
+        slot: &Arc<tokio::sync::Mutex<PoolSlot>>,
         event: &Event,
         timeouts: RelayTimeouts,
         closed: &std::sync::atomic::AtomicBool,
@@ -1727,7 +1772,7 @@ impl PublishPool {
     async fn publish_once(
         dialer: &Dialer,
         url: &str,
-        slot: &tokio::sync::Mutex<PoolSlot>,
+        slot: &Arc<tokio::sync::Mutex<PoolSlot>>,
         event: &Event,
         timeouts: RelayTimeouts,
         closed: &std::sync::atomic::AtomicBool,
@@ -1780,7 +1825,7 @@ impl PublishPool {
         match outcome {
             Ok((ws, verdict)) => {
                 // keep the live socket — a refusal verdict still proves it works
-                guard.ws = Some(ws);
+                PoolSlot::keep(slot, &mut guard, ws, dialer.gate.clone(), url);
                 guard.healthy();
                 verdict
             }

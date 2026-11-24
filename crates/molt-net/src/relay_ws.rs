@@ -226,23 +226,33 @@ impl RelayWs {
     pub async fn connect(dialer: &Dialer, url: &str) -> Result<Self, NetError> {
         let (host, port, tls) = relay_dial_coords(url)?;
         let route = dialer_for(dialer, url);
-        // before any socket, and again after each step a withdrawal can
-        // overtake: a dial in flight then never sends its handshake
         route.check_gate(url)?;
         tracing::debug!(relay = %url, host = %host, port, tls, via = %route.route(), "relay dial");
-        let raw = route.dial_host(&host, port).await?;
+        let dial = async {
+            let raw = route.dial_host(&host, port).await?;
+            let stream = wrap_tls(&route, raw, &host, port, tls).await?;
+            // Bound what a hostile relay may make us allocate: tungstenite's
+            // defaults are 64 MiB per message / 16 MiB per frame, ~500× beyond
+            // anything this client exchanges (the publish budget is ≤128 KiB).
+            let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+                .max_message_size(Some(MAX_WS_MESSAGE))
+                .max_frame_size(Some(MAX_WS_MESSAGE));
+            tokio_tungstenite::client_async_with_config(url, stream, Some(config))
+                .await
+                .map(|(ws, _resp)| ws)
+                .map_err(|e| NetError::Unreachable(format!("ws upgrade {url}: {e}")))
+        };
+        // a withdrawal drops the dial wherever it is (TCP/Tor connect, TLS,
+        // upgrade): the unfinished step completes nothing
+        let ws = match route.gate.clone() {
+            Some(mut gate) => tokio::select! {
+                biased;
+                () = gate.withdrawn(url) => return Err(NetError::Withdrawn),
+                ws = dial => ws?,
+            },
+            None => dial.await?,
+        };
         route.check_gate(url)?;
-        let stream = wrap_tls(&route, raw, &host, port, tls).await?;
-        route.check_gate(url)?;
-        // Bound what a hostile relay may make us allocate: tungstenite's
-        // defaults are 64 MiB per message / 16 MiB per frame, ~500× beyond
-        // anything this client exchanges (the publish budget is ≤128 KiB).
-        let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
-            .max_message_size(Some(MAX_WS_MESSAGE))
-            .max_frame_size(Some(MAX_WS_MESSAGE));
-        let (ws, _resp) = tokio_tungstenite::client_async_with_config(url, stream, Some(config))
-            .await
-            .map_err(|e| NetError::Unreachable(format!("ws upgrade {url}: {e}")))?;
         let gate = route.gate.map(|g| (g, url.to_string()));
         Ok(Self { ws, sub_id: None, last_rx: tokio::time::Instant::now(), gate })
     }

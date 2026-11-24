@@ -1672,6 +1672,9 @@ pub(crate) struct State {
     /// out (`dialer_for`); per engine, so engines sharing a process share
     /// nothing.
     pub(crate) relay_gate: molt_net::dial::RelayGateKeeper,
+    /// One keeper per relay probe in flight: a revoke, remove or switch-off
+    /// drops it, the probe stops dialing and its verdict confirms nothing.
+    pub(crate) probe_gates: Vec<(String, molt_net::dial::RelayGateKeeper)>,
     /// Relay confirmations whose probe verdict has not landed yet
     /// (`cmd_relay_confirm` → async probe → `cmd_net_relay_probed`).
     /// Founding and joining REFUSE while this is non-empty: minting invites
@@ -2023,6 +2026,7 @@ impl State {
             // exposure is not asked again on every restart
             clearnet_session: session.settings.clearnet_relays_enabled,
             relay_gate: molt_net::dial::RelayGateKeeper::default(),
+            probe_gates: Vec::new(),
             pending_relay_confirms: std::collections::HashSet::new(),
             seeds: std::collections::HashMap::new(),
             s3_list_gen: 0,

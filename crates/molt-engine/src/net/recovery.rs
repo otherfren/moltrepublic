@@ -922,7 +922,7 @@ impl State {
 
     /// This seat's gift-wrap endpoint over the group's dialable relays;
     /// `None` off Nostr (the loopback test transport has no side channel).
-    fn recover_net(&self) -> Option<molt_net::ritual_net::RitualNet> {
+    pub(crate) fn recover_net(&self) -> Option<molt_net::ritual_net::RitualNet> {
         if self.transport_kind != Some(molt_core::TransportKind::Nostr) {
             return None;
         }

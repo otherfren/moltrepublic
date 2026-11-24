@@ -207,6 +207,7 @@ impl State {
         if self.session.settings.relays.len() == before {
             return Err(MoltError::Settings(format!("{url} is not in the relay pool")));
         }
+        self.withdraw_probes(|u| u == url);
         self.dialable_relays_changed(&dialable);
         self.persist_settings(false);
         self.emit_session(SessionScope::Full);
@@ -310,13 +311,21 @@ impl State {
     /// Spawn the off-actor relay probe; its verdict returns as
     /// [`molt_core::Command::NetRelayProbed`].
     fn spawn_relay_probe(&mut self, url: String, confirm: bool) -> Result<Reply, MoltError> {
-        // the relay being decided on is not in the dialable set yet
-        let dialer = self.resolve_dialer().map_err(MoltError::Settings)?.ungated();
+        // the relay being decided on is not in the dialable set: the probe
+        // dials under its own keeper, which a withdrawal drops
+        let keeper = molt_net::dial::RelayGateKeeper::default();
+        keeper.set(std::slice::from_ref(&url));
+        let dialer = self
+            .resolve_dialer()
+            .map_err(MoltError::Settings)?
+            .ungated()
+            .with_gate(keeper.gate());
         self.session.notice = format!("relay-probing:{url}");
         self.emit_session(SessionScope::Full);
         let Some(cmd_tx) = self.cmd_tx.upgrade() else {
             return Ok(Reply::Ack);
         };
+        self.probe_gates.push((url.clone(), keeper));
         tokio::spawn(async move {
             let (error, unreachable) = match molt_net::relay_runtime::probe_relay(&dialer, &url)
                 .await
@@ -353,6 +362,15 @@ impl State {
         if confirm {
             self.pending_relay_confirms.remove(&url);
         }
+        // a probe whose relay was withdrawn meanwhile decides nothing
+        let Some(at) = self.probe_gates.iter().position(|(u, _)| *u == url) else {
+            if self.session.notice == format!("relay-probing:{url}") {
+                self.session.notice = String::new();
+                self.emit_session(SessionScope::Full);
+            }
+            return Ok(Reply::Ack);
+        };
+        self.probe_gates.remove(at);
         if !error.is_empty() && !unreachable {
             self.session.notice = format!("relay-refused:{url} - {error}");
             self.emit_session(SessionScope::Full);
@@ -394,6 +412,7 @@ impl State {
             .find(|r| r.url == url)
             .ok_or_else(|| MoltError::Settings(format!("{url} is not in the relay pool")))?;
         entry.confirmed = false;
+        self.withdraw_probes(|u| u == url);
         self.dialable_relays_changed(&dialable);
         self.persist_settings(false);
         self.note_if_invites_went_stale();
@@ -414,12 +433,22 @@ impl State {
         let dialable = self.dialable_group_relays();
         self.clearnet_session = unlock;
         self.session.settings.clearnet_relays_enabled = unlock;
+        if !unlock {
+            self.withdraw_probes(|u| molt_core::relay::relay_kind(u) != molt_core::relay::RelayKind::Onion);
+        }
         self.mark_restart_required();
         self.dialable_relays_changed(&dialable);
         self.persist_settings(false);
         self.note_if_invites_went_stale();
         self.emit_session(SessionScope::Full);
         Ok(Reply::Ack)
+    }
+
+    /// Stop the relay probes `withdrawn` names: their keeper goes (the probe
+    /// stops dialing at once) and so does any confirmation they would land.
+    fn withdraw_probes(&mut self, withdrawn: impl Fn(&str) -> bool) {
+        self.probe_gates.retain(|(u, _)| !withdrawn(u));
+        self.pending_relay_confirms.retain(|u| !withdrawn(u));
     }
 
     /// Change only the settings the payload names ([`Command::PatchSettings`]).
@@ -638,7 +667,13 @@ impl State {
         self.clearnet_session &= settings.clearnet_relays_enabled;
         let pool_moved = self.session.settings.relays != settings.relays
             || was_clearnet != self.clearnet_session;
-        self.session.settings = settings;
+        let old_pool = std::mem::replace(&mut self.session.settings, settings).relays;
+        let (pool, clearnet) = (self.session.settings.relays.clone(), self.clearnet_session);
+        // an edit that removed a relay, or dropped the switch
+        self.withdraw_probes(|u| {
+            (old_pool.iter().any(|r| r.url == u) && !pool.iter().any(|r| r.url == u))
+                || (!clearnet && molt_core::relay::relay_kind(u) != molt_core::relay::RelayKind::Onion)
+        });
         self.prune_backup_checks();
         self.session.language = language;
         self.session.theme = theme;
