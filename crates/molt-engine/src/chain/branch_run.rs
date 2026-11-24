@@ -259,7 +259,7 @@ impl State {
             let ids = self.run_ids(run);
             if let Some(i) = run.iter().zip(&ids).position(|(b, id)| b.height == tip_height && id == tip_hash) {
                 let fork = run.first().map_or(0, |f| f.height);
-                return run[..=i].iter().fold(self.block_v2_from().filter(|h| *h <= fork), |v2, b| block_v2_after(v2, b));
+                return run[..=i].iter().fold(self.block_v2_from().filter(|h| *h <= fork), block_v2_after);
             }
         }
         self.block_v2_from()

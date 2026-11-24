@@ -155,7 +155,7 @@ async fn a_request_claiming_a_transport_key_it_did_not_sign_with_is_refused() {
             key_package: mallory.key_package.clone(),
             relays: Vec::new(),
             vault_pk: molt_vault::vault_keypair(&[5u8; 32]).1,
-            caps: vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
+            caps: vec![molt_core::chain::BLOCK_V2_CAP.to_string(), molt_core::chain::CHAIN_LOCK_CAP.to_string()],
         }),
     )
     .await
@@ -198,7 +198,7 @@ async fn a_request_claiming_a_transport_key_it_did_not_sign_with_is_refused() {
             key_package: mallory.key_package.clone(),
             relays: Vec::new(),
             vault_pk: molt_vault::vault_keypair(&[5u8; 32]).1,
-            caps: vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
+            caps: vec![molt_core::chain::BLOCK_V2_CAP.to_string(), molt_core::chain::CHAIN_LOCK_CAP.to_string()],
         }),
     )
     .await

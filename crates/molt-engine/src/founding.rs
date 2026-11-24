@@ -3933,7 +3933,7 @@ mod tests {
                 String::new(),
                 vec!["wss://elsewhere".to_string()],
                 String::new(),
-                vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
+                vec![molt_core::chain::BLOCK_V2_CAP.to_string(), molt_core::chain::CHAIN_LOCK_CAP.to_string()],
                 None,
             )
             .expect("handler never errors");
@@ -4017,7 +4017,7 @@ mod tests {
                 kp.to_string(),
                 Vec::new(),
                 crate::vault::seat_vault_key(member.as_bytes(), npk, pk).1,
-                vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
+                vec![molt_core::chain::BLOCK_V2_CAP.to_string(), molt_core::chain::CHAIN_LOCK_CAP.to_string()],
                 None,
             )
             .expect("handler never errors");
@@ -4133,7 +4133,7 @@ mod tests {
                 kp,
                 Vec::new(),
                 crate::vault::seat_vault_key(member.as_bytes(), &npk, &pk).1,
-                vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
+                vec![molt_core::chain::BLOCK_V2_CAP.to_string(), molt_core::chain::CHAIN_LOCK_CAP.to_string()],
                 None,
             )
             .expect("handler never errors");
@@ -4906,7 +4906,7 @@ mod tests {
                 kp.clone(),
                 Vec::new(),
                 vpk.to_string(),
-                vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
+                vec![molt_core::chain::BLOCK_V2_CAP.to_string(), molt_core::chain::CHAIN_LOCK_CAP.to_string()],
                 None,
             )
             .expect("handler never errors");
@@ -4953,7 +4953,7 @@ mod tests {
             kp,
             Vec::new(),
             String::new(),
-            vec![molt_core::chain::CHAIN_LOCK_CAP.to_string()],
+            vec![molt_core::chain::BLOCK_V2_CAP.to_string(), molt_core::chain::CHAIN_LOCK_CAP.to_string()],
             None,
         )
         .expect("handler never errors");

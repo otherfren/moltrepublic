@@ -324,7 +324,7 @@ fn a_foreign_signature_on_the_old_tip_is_dropped_at_a_swap() {
         surface: Surface::Memory,
         payload: serde_json::json!({ "op": "add_note", "id": id }),
     };
-    let mut tips = vec![b.seal(2, change(60), &["walter", "dora"]), b.seal(2, change(61), &["walter", "dora"])];
+    let mut tips = [b.seal(2, change(60), &["walter", "dora"]), b.seal(2, change(61), &["walter", "dora"])];
     tips.sort_by_key(|t| v2_id(&b, t));
     let (high, low) = (tips[1].clone(), tips[0].clone());
     let mut held = b.blocks.clone();
