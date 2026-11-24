@@ -70,6 +70,16 @@ its grace for in-flight dials.
 - The NIP-11 probe and the relay probe of a relay being decided on run
   `ungated()`; S3 and the wallet daemon never consult the gate (they use
   `dial_host` / `dial_maybe_tls`, not `RelayWs::connect`).
-- Not converted: the ritual legs (founder inbox, `spawn_publish_frame`,
-  join/recovery inboxes) keep their timers. Every attempt is refused at
-  the gate, so they dial nothing; only the wake-ups remain.
+- The ritual inboxes (founder, join, recovery) wait for consent too.
+  `spawn_publish_frame` keeps its timers (its first outcome must be
+  reported) and the recovery member's asks keep theirs; both log a
+  withdrawal once (`OncePerWithdrawal`).
+- Review round (v0.1.3): a dial in flight is dropped at the withdrawal in
+  any stage (`select!` on `RelayGate::withdrawn`); an idle pooled publish
+  socket is closed by a watcher; the relay probe runs under its own
+  one-URL keeper; the NIP-11 probe asks the gate.
+- Known limit (L1, left to the re-key delivery work): a re-key delivery
+  waits on the relays captured at re-key
+  time. If all are withdrawn and a different relay is allowed, its
+  Welcome waits until one of the captured ones returns or the engine
+  ends; the commit still reaches the group over the outbox.

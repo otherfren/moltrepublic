@@ -851,6 +851,15 @@ pub(crate) struct GroupNet {
     pub(crate) unreadable: net::UnreadableEpisode,
 }
 
+/// One relay probe in flight (`State::probe_gates`).
+pub(crate) struct RelayProbe {
+    pub(crate) url: String,
+    pub(crate) confirm: bool,
+    /// Held by the probe task until its verdict is sent.
+    pub(crate) keeper: std::sync::Weak<molt_net::dial::RelayGateKeeper>,
+    pub(crate) withdrawn: bool,
+}
+
 /// This seat's live Nostr transport material for the open workspace.
 ///
 /// It exists because the sealed `transport.state` was being read at open and
@@ -1694,6 +1703,10 @@ pub(crate) struct State {
     /// out (`dialer_for`); per engine, so engines sharing a process share
     /// nothing.
     pub(crate) relay_gate: molt_net::dial::RelayGateKeeper,
+    /// The relay probes in flight, oldest first: a revoke, remove or
+    /// switch-off empties a probe's keeper, it stops dialing and its verdict
+    /// confirms nothing.
+    pub(crate) probe_gates: Vec<RelayProbe>,
     /// Relay confirmations whose probe verdict has not landed yet
     /// (`cmd_relay_confirm` → async probe → `cmd_net_relay_probed`).
     /// Founding and joining REFUSE while this is non-empty: minting invites
@@ -2046,6 +2059,7 @@ impl State {
             // exposure is not asked again on every restart
             clearnet_session: session.settings.clearnet_relays_enabled,
             relay_gate: molt_net::dial::RelayGateKeeper::default(),
+            probe_gates: Vec::new(),
             pending_relay_confirms: std::collections::HashSet::new(),
             seeds: std::collections::HashMap::new(),
             s3_list_gen: 0,

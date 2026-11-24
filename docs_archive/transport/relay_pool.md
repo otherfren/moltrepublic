@@ -206,16 +206,22 @@ than read the pool directly.
    `dial::RelayGateKeeper`, every dialer it hands out (`dialer_for`) carries
    a view of it, and the set is updated before the withdrawing command
    returns. `RelayWs::connect` refuses a relay outside the set before any
-   socket opens (`NetError::Withdrawn`) and again after the TCP/Tor connect
-   and after TLS, so a dial in flight sends no handshake. An established
-   socket ends at once: a waiting receive wakes on the gate, a send or ping
-   refuses. Retries do not run on a timer against a withdrawn relay: a
-   subscription's supervisor, the re-key delivery and the recovery frames
-   wait for consent and resume on it; a piece publish and a refused
-   publish end. A task over several relays loses only the withdrawn one.
-   Ungated by design: the probe of a relay the operator is deciding on, S3
-   and the wallet daemon (no relay). The Tor test is gated: its target is
-   a dialable relay, so the gate only stops a test racing a withdrawal.
+   socket opens (`NetError::Withdrawn`), and a dial in flight is dropped at
+   the withdrawal, whether in its TCP/Tor connect, TLS or WebSocket
+   handshake. An established socket ends at once: a waiting receive wakes
+   on the gate, an idle pooled publish socket is closed by its watcher, a
+   send or ping refuses. Retries do not run on a timer against a withdrawn relay: a
+   subscription's supervisor, the re-key delivery, the recovery frames and
+   the ritual inboxes wait for consent and resume on it; a piece publish
+   and a refused publish end; the ritual publish legs keep their timers but
+   log a withdrawal once. A task over several relays loses only the withdrawn one.
+   The probe of a relay the operator is deciding on runs under its own
+   one-URL keeper: a revoke, remove or switch-off drops it, the probe stops
+   at once and its verdict confirms nothing. S3 and the wallet daemon dial
+   no relay and are not gated. The Tor test is gated: its target is a
+   dialable relay, so the gate only stops a test racing a withdrawal.
+   Consent is per URL, not per host: `wss://h` revoked and `wss://h/x`
+   confirmed still dials host `h`.
 
 Tor does not waive rule 3. Routing a clearnet relay over Tor hides the node's
 IP from the relay operator, but it is still a clearnet endpoint with a
