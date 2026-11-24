@@ -338,6 +338,7 @@ impl State {
     }
 
     pub(crate) fn rekey_reset(&mut self, member: &str) {
+        self.note_rekey_merged(member);
         if self.drop_seam.keeps_window_on_rekey() {
             // the seam: the window an older build kept after losing the reset
             if let Some(w) = self.delivery.accepted.get_mut(member) {

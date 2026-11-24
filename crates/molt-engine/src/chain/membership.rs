@@ -1339,7 +1339,15 @@ impl State {
         if self.group_net.is_some() {
             if self.coordinator_rekey_nostr(member, &kp) {
                 self.note_rekeyed_run(member, &pending);
+            } else {
+                self.restore_interrupted(member, &pending);
             }
+            return;
+        }
+        // no live group (consent withdrawn before the seal): the request's
+        // KeyPackage goes with this call, so the device can never finish
+        if self.transport_kind == Some(molt_core::TransportKind::Nostr) {
+            self.restore_interrupted(member, &pending);
             return;
         }
         match self.net.as_ref().and_then(|n| n.restore_member_on_group(member, &kp)) {
