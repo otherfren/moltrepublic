@@ -104,17 +104,30 @@ pub(super) fn check_shape(block: &ChainBlock) -> Result<(), String> {
     Ok(())
 }
 
+/// [`check_shape`] plus the majority rule, for this change kind only: a
+/// minority republic's other blocks keep verifying.
+pub(super) fn check_block(head: &ChainHead, block: &ChainBlock) -> Result<(), String> {
+    check_shape(block)?;
+    let n = head.identities.len();
+    if !molt_core::majority::threshold_is_majority(head.rule_m, u8::try_from(n).unwrap_or(u8::MAX)) {
+        return Err(format!("branch choice at {}: {} of {n} is not a majority", block.height, head.rule_m));
+    }
+    Ok(())
+}
+
 /// The walk half (§3): the base and the chosen root are blocks of this
-/// chain, at or above its anchor. `links` holds the link hash per height
-/// from the anchor to the block's predecessor.
-pub(super) fn check_on_walk(links: &[String], block: &ChainBlock) -> Result<(), String> {
+/// chain, at or above its anchor and its last cut, for every holder alike.
+/// `links` holds the link hash per height from the anchor to the block's
+/// predecessor.
+pub(super) fn check_on_walk(links: &[String], last_cut: u64, block: &ChainBlock) -> Result<(), String> {
     let ChainChange::BranchChosen { base_height, base_hash, tip_height, chosen_root, .. } = &block.change
     else {
         return Ok(());
     };
     let anchor = block.height.saturating_sub(u64::try_from(links.len()).unwrap_or(u64::MAX));
-    if *base_height < anchor {
-        return Err(format!("branch choice base {base_height} lies below the anchor {anchor}"));
+    let floor = anchor.max(last_cut);
+    if *base_height < floor {
+        return Err(format!("branch choice base {base_height} lies below the anchor {floor}"));
     }
     let at = |height: u64| usize::try_from(height - anchor).ok().and_then(|i| links.get(i));
     if at(*base_height) != Some(base_hash) {

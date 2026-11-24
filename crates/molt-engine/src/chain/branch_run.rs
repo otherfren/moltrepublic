@@ -21,6 +21,8 @@ use super::*;
 const CARDS_MAX: usize = 16;
 /// Other branches held as evidence.
 const EVIDENCE_MAX: usize = 16;
+/// The evidence's serialized size, all runs together.
+const EVIDENCE_BYTES_MAX: usize = 32 * 1024 * 1024;
 /// Signatures that arrived before their card.
 const PARKED_MAX: usize = 64;
 /// The bundle's format tag.
@@ -33,6 +35,7 @@ pub(crate) const BELOW_CUT: &str = "below a cut";
 pub(crate) const AMNESIAC: &str = "amnesiac: this device was restored above the fork point";
 pub(crate) const DIGEST_DIFFERS: &str = "dropped list differs";
 pub(crate) const DROPPED_UNKNOWN: &str = "dropped blocks not held here";
+pub(crate) const STALE: &str = "stale: the chain moved above the tip";
 
 /// One open choice card.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,11 +47,18 @@ pub(crate) struct BranchCard {
     pub(crate) sigs: BTreeMap<MemberId, String>,
 }
 
-/// This seat's one choice at a fork point.
+/// This seat's one choice at a fork point: the whole change it signed,
+/// and the blocks that change keeps and drops.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Choice {
     pub(crate) base_hash: String,
     pub(crate) tip_hash: String,
+    #[serde(default)]
+    pub(crate) digest: String,
+    #[serde(default)]
+    pub(crate) kept: Vec<String>,
+    #[serde(default)]
+    pub(crate) dropped: Vec<String>,
 }
 
 /// `branch.state`: written blocking before an own signature leaves.
@@ -63,6 +73,9 @@ pub(crate) struct BranchFile {
     pub(crate) evidence: BTreeMap<String, Vec<ChainBlock>>,
     #[serde(default)]
     pub(crate) cards: BTreeMap<u64, BranchCard>,
+    /// The head an imported workspace opened at: its incarnation.
+    #[serde(default)]
+    pub(crate) imported_at: u64,
 }
 
 /// The branch choice's runtime on the open workspace.
@@ -70,6 +83,8 @@ pub(crate) struct BranchFile {
 pub(crate) struct BranchRuntime {
     pub(crate) file: BranchFile,
     pub(crate) parked: Vec<(u64, MemberId, String)>,
+    /// The abandoned mark did not reach the disk yet.
+    pub(crate) unsaved: bool,
     #[cfg(test)]
     pub(crate) disk: Option<Vec<u8>>,
     #[cfg(test)]
@@ -161,7 +176,9 @@ impl State {
     }
 
     /// Adopt `branch.state` at open; an unreadable file counts as none.
-    pub(crate) fn load_branch_state(&mut self, stored: Result<Option<Vec<u8>>, String>) {
+    /// `imported` = the workspace came from an export: the choices its old
+    /// device signed are unknown, the head now is a new incarnation.
+    pub(crate) fn load_branch_state(&mut self, stored: Result<Option<Vec<u8>>, String>, imported: bool) {
         self.chain.branch.parked.clear();
         self.chain.branch.file = match stored {
             Ok(Some(bytes)) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
@@ -174,6 +191,16 @@ impl State {
                 BranchFile::default()
             }
         };
+        if imported {
+            let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+            self.chain.branch.file.imported_at = self.chain.branch.file.imported_at.max(head);
+            if self.persist_branch() {
+                if let Some(a) = self.active.as_mut() {
+                    a.prefs.branch_unknown = false;
+                    a.handle.set_prefs(a.prefs.clone());
+                }
+            }
+        }
     }
 
     /// Write `branch.state`; `false` = it did not reach the disk.
@@ -197,7 +224,7 @@ impl State {
     }
 
     /// The height this device's incarnation began at: its last own
-    /// `Restored` block (0 = the founding device).
+    /// `Restored` block or its import (0 = the founding device).
     pub(crate) fn incarnation_height(&self) -> u64 {
         let me = self.member();
         self.chain
@@ -207,6 +234,34 @@ impl State {
             .map(|b| b.height)
             .max()
             .unwrap_or(0)
+            .max(self.chain.branch.file.imported_at)
+    }
+
+    /// What a seat signs for a choice, at height tip + 1 over prev = the
+    /// chosen tip (never the own head: the choice may seal on another
+    /// branch). The one signing site for sign and check alike.
+    fn branch_signing_bytes(&self, change: &ChainChange) -> Vec<u8> {
+        let (height, prev) = match change {
+            ChainChange::BranchChosen { tip_height, tip_hash, .. } => (tip_height + 1, tip_hash.as_str()),
+            _ => (0, ""),
+        };
+        signing_bytes(&self.republic_id(), height, prev, change, self.block_v2_from())
+    }
+
+    /// The identities of a run of another branch, each under ITS branch's
+    /// block-v2 activation: the own one up to the fork, then whatever the
+    /// run itself enables.
+    fn run_ids(&self, run: &[ChainBlock]) -> Vec<String> {
+        let rid = self.republic_id();
+        let fork = run.first().map_or(0, |f| f.height);
+        let mut v2 = self.block_v2_from().filter(|h| *h <= fork);
+        run.iter()
+            .map(|b| {
+                let id = block_id(&rid, b, v2);
+                v2 = block_v2_after(v2, b);
+                id
+            })
+            .collect()
     }
 
     fn own_hash(&self, height: u64) -> Option<String> {
@@ -258,10 +313,13 @@ impl State {
         if self.own_hash(base).as_deref() != Some(first.prev.as_str()) {
             return Err(format!("run at {} does not link to this chain", first.height));
         }
-        let mut prev: Option<&ChainBlock> = None;
-        for b in run {
-            if let Some(p) = prev {
-                if b.height != p.height + 1 || b.prev != self.block_id_of(p) {
+        let ids = self.run_ids(run);
+        // the run's own activation, as in `run_ids`
+        let mut v2 = self.block_v2_from().filter(|h| *h <= first.height);
+        let mut prev: Option<(&ChainBlock, &String)> = None;
+        for (b, id) in run.iter().zip(&ids) {
+            if let Some((p, pid)) = prev {
+                if b.height != p.height + 1 || b.prev != *pid {
                     return Err(format!("run breaks at {}", b.height));
                 }
             }
@@ -270,11 +328,12 @@ impl State {
             }
             check_shape(b)?;
             let need = if CutKind::of(&b.change).is_some() { head.identities.len() } else { usize::from(head.rule_m) };
-            let signers = block_signers(&rid, &head.identities, b, head.block_v2_from)?;
+            let signers = block_signers(&rid, &head.identities, b, v2)?;
+            v2 = block_v2_after(v2, b);
             if signers.len() < need {
                 return Err(format!("block {} has {} valid approvals, threshold is {need}", b.height, signers.len()));
             }
-            prev = Some(b);
+            prev = Some((b, id));
         }
         Ok(())
     }
@@ -286,12 +345,16 @@ impl State {
             return Ok(false);
         };
         self.verify_run(rest)?;
-        let root = self.block_id_of(first);
+        let _ = first;
+        let root = self.run_ids(rest).swap_remove(0);
         let held = self.chain.branch.file.evidence.get(&root).map(Vec::len);
         if held.is_some_and(|n| n >= rest.len()) {
             return Ok(false);
         }
-        if held.is_none() && self.chain.branch.file.evidence.len() >= EVIDENCE_MAX {
+        let size = |runs: &mut dyn Iterator<Item = &Vec<ChainBlock>>| runs.map(|r| serde_json::to_vec(r).map_or(0, |v| v.len())).sum::<usize>();
+        let others = size(&mut self.chain.branch.file.evidence.iter().filter(|(k, _)| **k != root).map(|(_, v)| v));
+        let full = held.is_none() && self.chain.branch.file.evidence.len() >= EVIDENCE_MAX;
+        if full || others + size(&mut std::iter::once(&rest.to_vec())) > EVIDENCE_BYTES_MAX {
             return Err("evidence store full".to_string());
         }
         self.chain.branch.file.evidence.insert(root, rest.to_vec());
@@ -346,21 +409,94 @@ impl State {
             .collect()
     }
 
-    /// The blocks a dropped run names, from this chain or the evidence.
-    fn run_blocks(&self, run: &molt_core::chain::DroppedRun) -> Option<Vec<ChainBlock>> {
-        let blocks: Vec<ChainBlock> = if self.own_hash(run.from_height).as_deref() == Some(run.first_hash.as_str()) {
-            self.chain.blocks.iter().filter(|b| b.height >= run.from_height && b.height <= run.head_height).cloned().collect()
+    /// The blocks a dropped run names with their identities, from this
+    /// chain or the start of an evidence run, linked to `link` (the base
+    /// for another branch, the tip for the chosen branch's tail).
+    fn run_blocks(&self, run: &molt_core::chain::DroppedRun, link: &str) -> Option<Vec<(ChainBlock, String)>> {
+        let own = self.own_hash(run.from_height).as_deref() == Some(run.first_hash.as_str());
+        let blocks: Vec<(ChainBlock, String)> = if own {
+            self.chain
+                .blocks
+                .iter()
+                .filter(|b| b.height >= run.from_height && b.height <= run.head_height)
+                .map(|b| (b.clone(), self.block_id_of(b)))
+                .collect()
         } else {
             self.chain.branch.file.evidence.values().find_map(|e| {
-                let i = e.iter().position(|b| b.height == run.from_height && self.block_id_of(b) == run.first_hash)?;
-                Some(e[i..].iter().filter(|b| b.height <= run.head_height).cloned().collect::<Vec<_>>())
+                let ids = self.run_ids(e);
+                let starts = e.first().is_some_and(|f| f.height == run.from_height) && ids.first() == Some(&run.first_hash);
+                starts.then(|| e.iter().cloned().zip(ids).filter(|(b, _)| b.height <= run.head_height).collect())
             })?
         };
-        let last = blocks.last()?;
-        let whole = last.height == run.head_height
-            && self.block_id_of(last) == run.head_hash
+        let (first, _) = blocks.first()?;
+        let (last, last_id) = blocks.last()?;
+        let whole = first.prev == link
+            && last.height == run.head_height
+            && *last_id == run.head_hash
             && u64::try_from(blocks.len()).ok() == Some(run.head_height - run.from_height + 1);
         whole.then_some(blocks)
+    }
+
+    /// Every dropped block with its identity; `None` = not all held here,
+    /// or a run that does not start where the choice says.
+    fn dropped_blocks(&self, change: &ChainChange) -> Option<Vec<(ChainBlock, String)>> {
+        let ChainChange::BranchChosen { base_height, base_hash, tip_height, tip_hash, dropped, .. } = change else {
+            return None;
+        };
+        let mut out = Vec::new();
+        for run in dropped {
+            let link = if run.from_height == base_height + 1 { base_hash } else { tip_hash };
+            if run.from_height != base_height + 1 && run.from_height != tip_height + 1 {
+                return None;
+            }
+            out.extend(self.run_blocks(run, link)?);
+        }
+        Some(out)
+    }
+
+    /// The chosen branch's identities from the fork to the tip, as far as
+    /// this node holds them (own chain or evidence).
+    fn kept_ids(&self, change: &ChainChange) -> Vec<String> {
+        let ChainChange::BranchChosen { base_height, tip_height, tip_hash, chosen_root, .. } = change else {
+            return Vec::new();
+        };
+        if self.holds_block(*tip_height, tip_hash) {
+            return self
+                .chain
+                .blocks
+                .iter()
+                .filter(|b| b.height > *base_height && b.height <= *tip_height)
+                .map(|b| self.block_id_of(b))
+                .collect();
+        }
+        self.chain
+            .branch
+            .file
+            .evidence
+            .values()
+            .map(|e| self.run_ids(e).into_iter().zip(e).filter(|(_, b)| b.height <= *tip_height).map(|(id, _)| id).collect::<Vec<_>>())
+            .find(|ids| ids.first() == Some(chosen_root) && ids.last() == Some(tip_hash))
+            .unwrap_or_default()
+    }
+
+    /// F1: the own blocks above the tip are exactly a run the choice drops
+    /// (none at all is fine).
+    pub(crate) fn own_tail_listed(&self, change: &ChainChange) -> bool {
+        let ChainChange::BranchChosen { base_height, tip_height, chosen_root, dropped, .. } = change else {
+            return false;
+        };
+        // on the chosen branch the own blocks above the tip drop; on another
+        // branch every own block above the fork
+        let on_chosen = !chosen_root.is_empty() && self.own_hash(base_height + 1).as_ref() == Some(chosen_root);
+        let from = if on_chosen { *tip_height } else { *base_height };
+        let tail: Vec<&ChainBlock> = self.chain.blocks.iter().filter(|b| b.height > from).collect();
+        let (Some(first), Some(last)) = (tail.first(), tail.last()) else {
+            return true;
+        };
+        let (first_id, last_id) = (self.block_id_of(first), self.block_id_of(last));
+        dropped.iter().any(|r| {
+            r.from_height == first.height && r.first_hash == first_id && r.head_height == last.height && r.head_hash == last_id
+        })
     }
 
     /// What a choice drops, as this node sees it; `None` = not all held.
@@ -368,11 +504,8 @@ impl State {
         let ChainChange::BranchChosen { dropped, .. } = change else {
             return None;
         };
-        let mut rows = Vec::new();
-        for run in dropped {
-            rows.extend(self.run_blocks(run)?.iter().map(|b| block_row(self.block_id_of(b), b)));
-        }
-        Some(rows)
+        let _ = dropped;
+        Some(self.dropped_blocks(change)?.into_iter().map(|(b, id)| block_row(id, &b)).collect())
     }
 
     /// `branch_status`.
@@ -382,7 +515,8 @@ impl State {
     }
 
     fn branch_view(&self, blocks: &[ChainBlock], own: bool) -> BranchView {
-        let rows: Vec<BranchBlockRow> = blocks.iter().map(|b| block_row(self.block_id_of(b), b)).collect();
+        let ids: Vec<String> = if own { blocks.iter().map(|b| self.block_id_of(b)).collect() } else { self.run_ids(blocks) };
+        let rows: Vec<BranchBlockRow> = blocks.iter().zip(ids).map(|(b, id)| block_row(id, b)).collect();
         let mut counts = BTreeMap::new();
         let mut signers: BTreeSet<MemberId> = BTreeSet::new();
         for r in &rows {
@@ -451,6 +585,7 @@ impl State {
                     digest: rows.as_ref().map(|r| dropped_digest(&rid, &card.change, r)).unwrap_or_default(),
                     dropped: rows.unwrap_or_default(),
                     approved_by_me: card.sigs.contains_key(&me),
+                    stale: !self.own_tail_listed(&card.change),
                 }
             })
             .collect();
@@ -485,15 +620,17 @@ impl State {
         if others.is_empty() {
             return Err(err(NO_SECOND_BRANCH));
         }
-        let mut branches = vec![self.chain.blocks.iter().filter(|b| b.height > base_height).cloned().collect::<Vec<_>>()];
-        branches.extend(others);
-        let run_of = |blocks: &[ChainBlock]| -> Option<molt_core::chain::DroppedRun> {
-            let (f, l) = (blocks.first()?, blocks.last()?);
+        let own: Vec<ChainBlock> = self.chain.blocks.iter().filter(|b| b.height > base_height).cloned().collect();
+        let own_ids: Vec<String> = own.iter().map(|b| self.block_id_of(b)).collect();
+        let mut branches: Vec<Vec<(ChainBlock, String)>> = vec![own.into_iter().zip(own_ids).collect()];
+        branches.extend(others.iter().map(|r| r.iter().cloned().zip(self.run_ids(r)).collect()));
+        let run_of = |blocks: &[(ChainBlock, String)]| -> Option<molt_core::chain::DroppedRun> {
+            let ((f, fid), (l, lid)) = (blocks.first()?, blocks.last()?);
             Some(molt_core::chain::DroppedRun {
                 from_height: f.height,
-                first_hash: self.block_id_of(f),
+                first_hash: fid.clone(),
                 head_height: l.height,
-                head_hash: self.block_id_of(l),
+                head_hash: lid.clone(),
             })
         };
         let (tip_height, chosen) = if tip_hash == base_hash {
@@ -502,7 +639,7 @@ impl State {
             let found = branches
                 .iter()
                 .enumerate()
-                .find_map(|(i, br)| br.iter().find(|b| self.block_id_of(b) == tip_hash).map(|b| (b.height, i)));
+                .find_map(|(i, br)| br.iter().find(|(_, id)| id == tip_hash).map(|(b, _)| (b.height, i)));
             let (h, i) = found.ok_or_else(|| err("tip not on a branch of this fork"))?;
             (h, Some(i))
         };
@@ -510,8 +647,8 @@ impl State {
         let mut chosen_root = String::new();
         for (i, br) in branches.iter().enumerate() {
             if Some(i) == chosen {
-                chosen_root = br.first().map(|b| self.block_id_of(b)).unwrap_or_default();
-                let tail: Vec<ChainBlock> = br.iter().filter(|b| b.height > tip_height).cloned().collect();
+                chosen_root = br.first().map(|(_, id)| id.clone()).unwrap_or_default();
+                let tail: Vec<(ChainBlock, String)> = br.iter().filter(|(b, _)| b.height > tip_height).cloned().collect();
                 dropped.extend(run_of(&tail));
             } else {
                 dropped.extend(run_of(br));
@@ -575,17 +712,34 @@ impl State {
         if dropped_digest(&rid, &card.change, &rows) != digest {
             return Err(err(DIGEST_DIFFERS));
         }
+        if !self.own_tail_listed(&card.change) {
+            return Err(err(STALE));
+        }
+        let change_digest = molt_storage::content_hash(&self.branch_signing_bytes(&card.change));
         let recorded = self.chain.branch.file.choices.get(&base_height);
         let other_sealed = self.chain.blocks.iter().any(|b| {
-            matches!(&b.change, ChainChange::BranchChosen { base_height: h, tip_hash: t, .. } if *h == base_height && *t != tip_hash)
+            matches!(&b.change, ChainChange::BranchChosen { base_height: h, .. } if *h == base_height && b.change != card.change)
         });
-        if other_sealed || recorded.is_some_and(|c| c.tip_hash != tip_hash || c.base_hash != base_hash) {
+        if other_sealed || recorded.is_some_and(|c| c.digest != change_digest) {
             return Err(err(format!("already chose at {base_height}")));
+        }
+        let kept = self.kept_ids(&card.change);
+        let dropped: Vec<String> = self.dropped_blocks(&card.change).unwrap_or_default().into_iter().map(|(_, id)| id).collect();
+        let conflict = self.chain.branch.file.choices.iter().find(|(h, c)| {
+            **h != base_height && (c.kept.iter().any(|k| dropped.contains(k)) || c.dropped.iter().any(|d| kept.contains(d)))
+        });
+        if let Some((h, _)) = conflict {
+            return Err(err(format!("conflicts with the choice at {h}")));
         }
         let Some(sk) = self.identity_sk.clone() else {
             return Err(err("no signing key on this seat"));
         };
-        let had = self.chain.branch.file.choices.insert(base_height, Choice { base_hash, tip_hash: tip_hash.clone() });
+        let had = self
+            .chain
+            .branch
+            .file
+            .choices
+            .insert(base_height, Choice { base_hash, tip_hash, digest: change_digest, kept, dropped });
         if !self.persist_branch() {
             match had {
                 Some(c) => self.chain.branch.file.choices.insert(base_height, c),
@@ -593,7 +747,8 @@ impl State {
             };
             return Err(err("choice not saved"));
         }
-        let sig = molt_storage::identity_sign(&sk, &signing_bytes(&rid, tip_height + 1, &tip_hash, &card.change, self.block_v2_from()));
+        let _ = tip_height;
+        let sig = molt_storage::identity_sign(&sk, &self.branch_signing_bytes(&card.change));
         let me = self.member();
         if let Some(c) = self.chain.branch.file.cards.get_mut(&id) {
             c.sigs.insert(me.clone(), sig.clone());
@@ -671,15 +826,13 @@ impl State {
     }
 
     fn add_branch_sig(&mut self, id: u64, by: &str, sig: &str) -> bool {
-        let rid = self.republic_id();
         let Some(card) = self.chain.branch.file.cards.get(&id) else {
             return false;
         };
-        let ChainChange::BranchChosen { tip_height, tip_hash, .. } = &card.change else {
+        if !matches!(card.change, ChainChange::BranchChosen { .. }) {
             return false;
-        };
-        // sealed at tip+1 of the chosen branch: its `prev` is the tip
-        let bytes = signing_bytes(&rid, tip_height + 1, tip_hash, &card.change, self.block_v2_from());
+        }
+        let bytes = self.branch_signing_bytes(&card.change);
         let ok = self.chain.head.as_ref().is_some_and(|h| {
             h.identities.iter().any(|i| i.member == by && molt_storage::identity_verify(&i.identity_pk, &bytes, sig))
         });
@@ -703,6 +856,10 @@ impl State {
         if card.sigs.len() < m || !self.holds_block(*tip_height, tip_hash) || self.branch_abandoned() {
             return;
         }
+        if !self.own_tail_listed(&card.change) {
+            tracing::warn!(id, reason = STALE, "branch=not_sealed");
+            return;
+        }
         let sigs: Vec<RosterAttestation> =
             card.sigs.iter().take(m).map(|(member, sig)| RosterAttestation { member: member.clone(), sig: sig.clone() }).collect();
         let block = ChainBlock { height: tip_height + 1, prev: tip_hash.clone(), change: card.change.clone(), sigs };
@@ -722,6 +879,20 @@ impl State {
             return false;
         };
         let (base_height, tip_height) = (*base_height, *tip_height);
+        if !self.own_tail_listed(&block.change) {
+            let hash = self.note_refused(from, &block, "branch");
+            tracing::warn!(%from, %hash, reason = STALE, "branch=choice_refused");
+            self.session.notice = format!("branch-stale:{base_height}");
+            self.emit_session(crate::SessionScope::Full);
+            return false;
+        }
+        let other: Vec<ChainBlock> = self
+            .dropped_blocks(&block.change)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(b, id)| !self.holds_block(b.height, id))
+            .map(|(b, _)| b)
+            .collect();
         let mut candidate: Vec<ChainBlock> = self.chain.blocks.iter().filter(|b| b.height <= tip_height).cloned().collect();
         candidate.push(block.clone());
         if let Err(e) = self.walk_own(&candidate) {
@@ -735,12 +906,27 @@ impl State {
             self.forget_wiki_stamps();
         }
         self.adopt_chain(candidate);
-        for b in &dropped {
+        let applied_now: BTreeSet<u64> = self
+            .chain
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.change {
+                ChainChange::Applied { proposal_id, .. } => Some(*proposal_id),
+                _ => None,
+            })
+            .collect();
+        for b in dropped.iter().chain(&other) {
             if let ChainChange::Applied { proposal_id, .. } = &b.change {
-                self.reopen_dropped_card(*proposal_id, base_height);
+                if !applied_now.contains(proposal_id) {
+                    self.reopen_dropped_card(*proposal_id, base_height);
+                }
             }
         }
-        self.vault_displaced(&dropped, &BTreeSet::new());
+        self.vault_displaced(&dropped, &applied_now);
+        let me = self.member();
+        let own_restore_dropped = dropped
+            .iter()
+            .any(|b| matches!(&b.change, ChainChange::Membership { op: MembershipOp::Restored, member, .. } if *member == me));
         let parked = std::mem::take(&mut self.chain.parked_approvals);
         self.in_block_batch(|st| {
             st.after_block_applied(&block);
@@ -758,6 +944,10 @@ impl State {
         self.persist_branch();
         tracing::warn!(%from, base = base_height, height = block.height, dropped = dropped.len(), "branch=chosen");
         self.emit_session(crate::SessionScope::Full);
+        // §4: this device's own re-admission was dropped - it is out again
+        if own_restore_dropped {
+            self.enter_abandoned(&block);
+        }
         true
     }
 
@@ -785,9 +975,12 @@ impl State {
     /// stops a seat on another branch, and otherwise rides the normal path.
     pub(crate) fn branch_intercepts(&mut self, from: &str, block: &ChainBlock) -> bool {
         if self.branch_abandoned() {
+            if self.chain.branch.unsaved && self.persist_branch() {
+                self.chain.branch.unsaved = false;
+            }
             return true;
         }
-        let ChainChange::BranchChosen { base_height, base_hash, tip_height, tip_hash, chosen_root, .. } = &block.change else {
+        let ChainChange::BranchChosen { base_height, base_hash, tip_height, tip_hash, chosen_root, dropped } = &block.change else {
             return false;
         };
         let rid = self.republic_id();
@@ -803,13 +996,31 @@ impl State {
             tracing::warn!(%from, %hash, "branch=choice_refused");
             return true;
         }
+        // one decision per fork point: the same change under another
+        // attestation list is a variant for the tie-break, anything else a
+        // second choice
+        let decided = self.chain.blocks.iter().find(|b| {
+            matches!(&b.change, ChainChange::BranchChosen { base_height: h, .. } if h == base_height)
+        });
+        if let Some(held) = decided {
+            if held.change == block.change {
+                return false;
+            }
+            let hash = self.note_refused(from, block, "branch");
+            tracing::warn!(%from, %hash, base = base_height, "branch=already_decided");
+            return true;
+        }
         if self.holds_block(*tip_height, tip_hash) {
             self.apply_branch_choice(from, block.clone());
             return true;
         }
         if self.holds_block(*base_height, base_hash) {
-            let on_chosen = self.own_hash(base_height + 1).map_or(true, |own| !chosen_root.is_empty() && own == *chosen_root);
-            if !on_chosen {
+            // stopped only when the own branch is one the choice drops: on a
+            // v1 chain an attestation variant of the chosen root differs in
+            // identity, not in what it decided
+            let own_root = self.own_hash(base_height + 1);
+            let listed = own_root.as_ref().is_some_and(|r| *r != *chosen_root && dropped.iter().any(|d| d.from_height == base_height + 1 && d.first_hash == *r));
+            if listed {
                 self.enter_abandoned(block);
                 return true;
             }
@@ -827,22 +1038,20 @@ impl State {
         self.chain.branch.file.abandoned = Some(BranchAbandoned { base_height, by: by.clone(), height: block.height });
         self.chain.branch.file.cards.clear();
         self.chain.branch.parked.clear();
-        self.persist_branch();
+        // the stop holds in memory; the write is retried on the next block
+        self.chain.branch.unsaved = !self.persist_branch();
         let names = by.join(", ");
-        tracing::warn!(base = base_height, by = %names, "branch=abandoned");
+        tracing::warn!(base = base_height, by = %names, saved = !self.chain.branch.unsaved, "branch=abandoned");
         self.wake_trigger(molt_core::kanban_wake::CHAIN_STUCK_REASON, "");
-        let me = self.member();
-        let line = format!("branch abandoned at {base_height} by {names} - rejoin with a link");
-        if let Err(e) = self.post_message(me, line, None, molt_core::ChannelRef::Group) {
-            tracing::warn!(error = %e, "branch=abandoned chat=failed");
-        }
         self.session.notice = format!("branch-abandoned:{base_height}:{}", by.join(","));
         self.emit_session(crate::SessionScope::Full);
     }
 
-    /// §6/§7: a seat the last choice left behind - not among its signers
-    /// and not seen on this branch since. Its restore needs no silence and
-    /// ignores the divergence the choice left.
+    /// §6/§7: a seat not shown on this branch since the last choice - no
+    /// block above it carries its signature or its re-admission, and no
+    /// frame of it showed it here. Its restore needs no silence and ignores
+    /// the divergence the choice left; the exemption ends with the first
+    /// such block, so it survives a restart.
     pub(crate) fn seat_left_by_choice(&self, member: &str) -> bool {
         if member == self.member() {
             return false;
@@ -850,9 +1059,12 @@ impl State {
         let Some(choice) = self.chain.blocks.iter().rev().find(|b| matches!(b.change, ChainChange::BranchChosen { .. })) else {
             return false;
         };
-        let signed = choice.sigs.iter().any(|a| a.member == member);
-        let seen = self.chain.peer_on_branch.get(member).is_some_and(|(_, h, _)| *h >= choice.height);
-        !signed && !seen
+        let back = self.chain.blocks.iter().filter(|b| b.height > choice.height).any(|b| {
+            b.sigs.iter().any(|a| a.member == member)
+                || matches!(&b.change, ChainChange::Membership { op: MembershipOp::Restored, member: m, .. } if m == member)
+        });
+        let seen = self.chain.peer_on_branch.get(member).is_some_and(|(_, h, _)| *h > choice.height);
+        !back && !seen
     }
 
     /// [`State::chain_unsettled_besides`] that also ignores every seat the
@@ -1023,7 +1235,8 @@ impl State {
         }
         let mut cards = 0;
         for (id, card) in bundle.cards {
-            self.receive_branch_card(&card.by, id, card.change.clone());
+            // a file names no authenticated proposer
+            self.receive_branch_card("", id, card.change.clone());
             for (by, sig) in &card.sigs {
                 self.receive_branch_sig(id, by, sig);
             }

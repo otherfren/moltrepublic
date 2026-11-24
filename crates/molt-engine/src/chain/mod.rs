@@ -53,6 +53,8 @@ mod branch_tests;
 #[cfg(test)]
 mod branch_run_tests;
 #[cfg(test)]
+mod branch_review_tests;
+#[cfg(test)]
 mod checkpoint_tests;
 #[cfg(test)]
 mod governance_tests;

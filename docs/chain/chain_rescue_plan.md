@@ -12,6 +12,25 @@ It ships DARK (`BRANCH_CHOICE_AVAILABLE = false`, review 2026-11-24):
 choose/approve are refused, cards and signatures ignored, and a
 `BranchChosen` block is refused in verification; status, export and
 import stay as diagnostics.**
+
+Review 2026-11-24, as built:
+
+| rule | where |
+|---|---|
+| a seal or adoption drops only the own blocks the card lists; otherwise the card is `stale` (`branch_status.cards[].stale`, approve refused `stale: the chain moved above the tip`, a received choice refused, notice `branch-stale:<f>`). Governance on the kept branch does NOT pause while a card is open: a block sealed meanwhile makes the card stale and a new card is needed | `branch_run.rs` `own_tail_listed` |
+| the seat's record is the whole change (digest) plus the blocks it keeps and drops; a second change at one fork point, or one dropping what a recorded choice keeps (or the reverse, across fork points), is refused | `cmd_approve_branch` |
+| a second choice block for a decided fork point is refused; the same change under other signers is an attestation variant for the tie-break | `branch_intercepts`, `sync.rs` `try_reorg` |
+| every dropped run starts where the choice says (`prev` = base, or tip for the own tail) and at the start of a held run | `run_blocks` |
+| an imported workspace records its head as an incarnation (prefs `branch_unknown`) | `load_branch_state` |
+| verification: 2m > n for this change kind; base never below the walk's last cut | `branch.rs` `check_block`, `check_on_walk` |
+| a seat stops only when its own branch is listed as dropped (a v1 attestation variant of the chosen root is not) | `branch_intercepts` |
+| the restore exemption holds until the seat signs, or is re-admitted, above the choice | `seat_left_by_choice` |
+| evidence identities follow the other branch's own block-v2 activation | `run_ids` |
+| a dropped own `Restored` stops the device; the dropped branch's decisions return to the vote on the kept seats | `apply_branch_choice` |
+
+Not built: `amnesia_ack` is not inside the signed bytes (the block's
+signatures cover the change every signer shares); a relay keystone at
+3-of-5 and with forks at two heights.
 Built as decided (Q1-Q4): no reset without a second branch; the bundle
 file is the channel; dropped wiki/quests cards return as open proposals
 with stances cleared; the wake skill denies every branch tool and approval

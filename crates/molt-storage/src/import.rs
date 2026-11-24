@@ -549,6 +549,11 @@ impl ImportStaging {
             prefs.lock_unknown = true;
             changed = true;
         }
+        // its branch choices stay home (rescue plan §2)
+        if !prefs.branch_unknown {
+            prefs.branch_unknown = true;
+            changed = true;
+        }
         if changed {
             crate::write_prefs(&self.dir, &prefs)?;
         }
@@ -844,6 +849,7 @@ mod tests {
             assert!(!dir.join(crate::CHAIN_LOCK_FILE).exists(), "the lock file never travels");
             assert_eq!(crate::read_prefs(&dir).chain_lock, locked, "the marker where the chain runs the lock");
             assert!(crate::read_prefs(&dir).lock_unknown, "item 2: every import's lock state is unknown");
+            assert!(crate::read_prefs(&dir).branch_unknown, "an import does not know its branch choices");
         }
     }
 

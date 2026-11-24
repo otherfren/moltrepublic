@@ -1985,6 +1985,10 @@ pub struct WorkspacePrefs {
     /// Strict Order Mode, until the others' answers clear it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lock_unknown: bool,
+    /// An import: the branch choices the device it came from signed are
+    /// unknown; the open records the import height as an incarnation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub branch_unknown: bool,
 }
 
 /// The record of a confirmed backup upload (`backup_restore_design.md` §6.4a).
@@ -2020,6 +2024,7 @@ impl Default for WorkspacePrefs {
             mirror_dir: String::new(),
             chain_lock: false,
             lock_unknown: false,
+            branch_unknown: false,
         }
     }
 }

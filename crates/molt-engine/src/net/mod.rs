@@ -83,9 +83,16 @@ pub(crate) struct DropSeam {
     pub(crate) park_rekey: std::sync::atomic::AtomicBool,
     /// Every inbound frame reaches the engine this many ms late.
     pub(crate) delay_ms: std::sync::atomic::AtomicU64,
+    /// A partition: every inbound envelope of these seats is lost.
+    pub(crate) cut: Mutex<std::collections::HashSet<MemberId>>,
 }
 
 impl DropSeam {
+    /// Whether `from` is cut off from this node.
+    pub(crate) fn cuts(&self, from: &str) -> bool {
+        self.cut.lock().is_ok_and(|c| c.contains(from))
+    }
+
     pub(crate) fn keeps_window_on_rekey(&self) -> bool {
         self.skip_rekey_reset.load(std::sync::atomic::Ordering::SeqCst)
     }

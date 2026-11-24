@@ -89,6 +89,10 @@ pub struct BranchCardView {
     pub digest: String,
     /// This seat signed it.
     pub approved_by_me: bool,
+    /// The own chain moved above the tip: the card drops a block nobody
+    /// saw; a new card is needed.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 /// This seat's recorded choice at one fork point.

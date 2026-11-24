@@ -457,6 +457,15 @@ impl WalletHandle {
         self.drop_seam.dropped.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Test seam: a partition - every inbound envelope of `peers` is lost
+    /// on this node until the next call (empty heals it).
+    #[doc(hidden)]
+    pub fn __cut_off(&self, peers: &[&str]) {
+        if let Ok(mut cut) = self.drop_seam.cut.lock() {
+            *cut = peers.iter().map(|p| (*p).to_string()).collect();
+        }
+    }
+
     /// Test seam: the branch choice armed in this PROCESS although the
     /// build ships it dark (`true`), or the build default (`false`).
     #[doc(hidden)]
