@@ -1422,6 +1422,15 @@ pub(crate) struct RecoveryState {
     /// B4: `(seat, new anchor)` restored anchor-first - its rejoiner holds
     /// the anchor, so nothing re-pushes it over the group.
     pub(crate) anchor_first_seats: std::collections::HashSet<(String, String)>,
+    /// Seats whose newest `Restored` block applied here with no re-key
+    /// merged for it yet (`SeatSync::restore_unfinished`). Persisted.
+    pub(crate) unfinished: std::collections::BTreeSet<String>,
+    /// Seats whose re-key merged here before their `Restored` block did.
+    /// Persisted.
+    pub(crate) rekey_ahead: std::collections::BTreeSet<String>,
+    /// Seat -> the anchor of the `Restored` block this coordinator could not
+    /// re-key for (`recover-interrupted:`). Persisted.
+    pub(crate) interrupted: std::collections::BTreeMap<String, String>,
     /// Recoveries whose card the sweep dropped as dead, one per seat: not
     /// in flight (R3), but a reorg can still seal the card.
     pub(crate) swept: HashMap<String, chain::PendingRecovery>,
@@ -2072,6 +2081,9 @@ impl State {
                 anchor_first: HashMap::new(),
                 spent_tickets: std::collections::HashSet::new(),
                 anchor_first_seats: std::collections::HashSet::new(),
+                unfinished: std::collections::BTreeSet::new(),
+                rekey_ahead: std::collections::BTreeSet::new(),
+                interrupted: std::collections::BTreeMap::new(),
                 swept: HashMap::new(),
                 withdrawn: std::collections::VecDeque::new(),
                 rekeyed: std::collections::VecDeque::new(),

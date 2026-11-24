@@ -660,6 +660,9 @@ impl State {
                 v
             },
             minted_tickets: self.recovery.attempts.minted.iter().cloned().collect(),
+            restore_unfinished: self.recovery.unfinished.iter().cloned().collect(),
+            rekey_ahead: self.recovery.rekey_ahead.iter().cloned().collect(),
+            restore_interrupted: self.recovery.interrupted.iter().map(|(m, a)| (m.clone(), a.clone())).collect(),
             seal_first_seats: {
                 let mut v: Vec<(String, String)> = self.recovery.seal_first_seats.iter().cloned().collect();
                 v.sort();
@@ -813,6 +816,9 @@ impl State {
         self.restore_heal_loops(&dump.heal_loops);
         self.recovery.anchor_first_seats.extend(dump.anchor_first_seats.iter().cloned());
         self.recovery.seal_first_seats.extend(dump.seal_first_seats.iter().cloned());
+        self.recovery.unfinished.extend(dump.restore_unfinished.iter().cloned());
+        self.recovery.rekey_ahead.extend(dump.rekey_ahead.iter().cloned());
+        self.recovery.interrupted.extend(dump.restore_interrupted.iter().cloned());
         for (m, a, n) in &dump.anchor_repushes {
             self.recovery.repushes.insert((m.clone(), a.clone()), (*n, 0));
         }
@@ -1025,6 +1031,9 @@ impl State {
         }
         self.recovery.spent_tickets.clear();
         self.recovery.anchor_first_seats.clear();
+        self.recovery.unfinished.clear();
+        self.recovery.rekey_ahead.clear();
+        self.recovery.interrupted.clear();
         self.recovery.swept.clear();
         self.recovery.withdrawn.clear();
         self.recovery.links.clear();

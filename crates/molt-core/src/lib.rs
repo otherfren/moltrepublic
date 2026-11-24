@@ -3843,6 +3843,17 @@ pub struct EngineStateDump {
     /// the re-push count survives a restart.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub anchor_repushes: Vec<(MemberId, String, u32)>,
+    /// Seats whose newest `Restored` block this node applied with no
+    /// re-key merged for it yet ([`SeatSync::restore_unfinished`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restore_unfinished: Vec<MemberId>,
+    /// Seats whose re-key this node merged before their `Restored` block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rekey_ahead: Vec<MemberId>,
+    /// `(seat, anchor)` whose re-key this coordinator could not run: the
+    /// device waiting on that anchor is answered `link outdated`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restore_interrupted: Vec<(MemberId, String)>,
     /// B7: the standing unsigned approve intents (`sig` empty; `height`
     /// the head+1 an own intent was cast at, 0 for a peer's), covered by
     /// the snapshot like [`Self::votes`]. Additive; empty skips.
@@ -8945,6 +8956,11 @@ pub struct SeatSync {
     /// ([`StatusView::chain_diverged`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub diverged: bool,
+    /// The seat's newest `Restored` block holds, but no re-key for it was
+    /// merged here: its new device was never welcomed. The re-key of a new
+    /// link's restore clears it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub restore_unfinished: bool,
 }
 
 /// Whether an own envelope stays out of the delivery guarantee and the G7
@@ -9066,8 +9082,11 @@ pub struct ChainSync {
     /// founding; 0 = the chain has not enabled the lock).
     #[serde(default)]
     pub lock_since: u64,
-    /// The first height whose block identity is v2, or this pruned holder's
-    /// anchor when the enabling block lies below it (0 = not enabled).
+    /// The block format is new (`block-v2` on).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub block_v2: bool,
+    /// The first height of the new block format; 0 = off, or on but no
+    /// longer known here (a cut dropped the enabling block).
     #[serde(default)]
     pub block_v2_since: u64,
     /// Why `block-v2` cannot be enabled now ("" = it can, or it is on).
