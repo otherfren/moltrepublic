@@ -499,9 +499,7 @@ pub(crate) fn spawn_recover_frames(
 ///   split, with nothing in the product to heal it.
 ///
 /// One landed relay is enough to be durable: relays store the frame, so a
-/// survivor that was offline picks the commit up on its catch-up. The
-/// first OK is recorded in `store` (delivery guarantee §11).
-#[allow(clippy::too_many_arguments)] // one re-key's wiring, not a bag
+/// survivor that was offline picks the commit up on its catch-up.
 pub(crate) fn spawn_rekey_delivery(
     channel: GroupChannel,
     net: RitualNet,
@@ -510,9 +508,6 @@ pub(crate) fn spawn_rekey_delivery(
     payload: molt_net::welcome::WelcomePayload,
     member: String,
     tx: mpsc::WeakSender<Envelope>,
-    store: Option<crate::net::FileStateStore>,
-    me: String,
-    seq: u64,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut wait = PUBLISH_RETRY_INITIAL;
@@ -522,9 +517,6 @@ pub(crate) fn spawn_rekey_delivery(
             match channel.publish_frame_at(&rekey.prev_exporter, &rekey.commit, rekey.stamp).await {
                 Ok((stamp, report)) => {
                     tracing::info!(%member, stamp, relays = report.accepted.len(), "rekey_commit=published");
-                    if let (Some(store), false) = (&store, report.accepted.is_empty()) {
-                        molt_net::group_runtime::record_commit_ok(store, &me, seq, &rekey.commit).await;
-                    }
                     break;
                 }
                 Err(e) => {
