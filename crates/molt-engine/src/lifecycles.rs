@@ -218,14 +218,11 @@ impl State {
         // the genesis chain block goes to its own file, durably, before the
         // writer takes over — same reasoning as the MLS blob above
         if !chain.is_empty() {
+            // a pruned or block-v2 chain under an older manifest would let
+            // an OLD binary open this fresh workspace chainless
             opened
-                .write_chain(checkpoint_blob.as_ref(), &chain)
+                .write_chain_walled(checkpoint_blob.as_ref(), &chain)
                 .map_err(|e| err(e.to_string()))?;
-            // a pruned chain under a v1 manifest would let an OLD binary
-            // open this fresh workspace chainless — raise the gate now
-            if checkpoint_blob.is_some() {
-                opened.bump_pruned_version().map_err(|e| err(e.to_string()))?;
-            }
         }
         let id = opened.manifest.workspace.id.clone();
         let dir = opened.dir().to_path_buf();

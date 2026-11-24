@@ -1743,6 +1743,22 @@ impl OpenedWorkspace {
         Ok(())
     }
 
+    /// [`Self::write_chain`] behind the manifest walls its content needs,
+    /// raised first: a crash in between only over-describes.
+    pub fn write_chain_walled(
+        &mut self,
+        blob: Option<&molt_core::CheckpointState>,
+        chain: &[molt_core::ChainBlock],
+    ) -> Result<(), StorageError> {
+        if blob.is_some() {
+            self.bump_pruned_version()?;
+        }
+        if chain_runs_block_v2(blob, chain) {
+            self.bump_block_v2_version()?;
+        }
+        self.write_chain(blob, chain)
+    }
+
     /// Raise the manifest to [`molt_core::STORAGE_VERSION_BLOCK_V2`] once,
     /// before a chain that enables the v2 identity reaches the disk.
     /// Idempotent.

@@ -557,6 +557,16 @@ impl ImportStaging {
         if changed {
             crate::write_prefs(&self.dir, &prefs)?;
         }
+        // the v2 identity's wall travels with the chain, not with the
+        // exporter's manifest (an export made before the activation)
+        if self.manifest.version < molt_core::STORAGE_VERSION_BLOCK_V2
+            && crate::chain_runs_block_v2(self.checkpoint.as_ref(), &self.chain)
+        {
+            let mut raised = self.manifest.clone();
+            raised.version = molt_core::STORAGE_VERSION_BLOCK_V2;
+            crate::write_manifest(&self.dir, &raised)?;
+            self.manifest = raised;
+        }
 
         // key material per the at-rest state (a phrase-sealed blob commits
         // WITHOUT keys — S6 semantics survive the round trip)
@@ -800,6 +810,57 @@ mod tests {
         let staging = import_stage(&dest_root, &blob, PASS).expect("stage");
         let dir = staging.commit(&dest_root, false, None).expect("commit");
         assert_eq!(crate::read_prefs(&dir).backup_mark, None);
+    }
+
+    /// The v2 identity's wall at the import: an export taken before the
+    /// raise (manifest < 5) of a chain that enables it lands at 5.
+    #[test]
+    fn an_import_of_a_block_v2_chain_raises_the_manifest() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (src_root, src_dir, _seed, _id) = make_ws(tmp.path());
+        let (ws, _) = crate::open_workspace(&src_dir).expect("open");
+        let enable = molt_core::ChainBlock {
+            height: 1,
+            prev: String::new(),
+            change: molt_core::ChainChange::Applied {
+                proposal_id: 1,
+                surface: molt_core::Surface::Organization,
+                payload: serde_json::json!({ "op": "set_features", "value": molt_core::chain::BLOCK_V2_FEATURE }),
+            },
+            sigs: Vec::new(),
+        };
+        ws.write_chain(None, &[enable]).expect("chain");
+        assert!(ws.manifest.version < molt_core::STORAGE_VERSION_BLOCK_V2);
+        drop(ws);
+        let blob = blob_of(&src_root, &src_dir, &ExportKey::passphrase(PASS));
+        let dest_root = tmp.path().join("dest-root");
+        std::fs::create_dir_all(&dest_root).expect("dest root");
+        let staging = import_stage(&dest_root, &blob, PASS).expect("stage");
+        let dir = staging.commit(&dest_root, false, None).expect("commit");
+        assert_eq!(crate::read_manifest(&dir).expect("manifest").version, molt_core::STORAGE_VERSION_BLOCK_V2);
+    }
+
+    /// The same wall at materialization: `write_chain_walled` raises it
+    /// before the chain reaches the disk.
+    #[test]
+    fn a_walled_chain_write_raises_the_manifest_first() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let (_root, dir, _seed, _id) = make_ws(tmp.path());
+        let (mut ws, _) = crate::open_workspace(&dir).expect("open");
+        let enable = molt_core::ChainBlock {
+            height: 0,
+            prev: String::new(),
+            change: molt_core::ChainChange::Applied {
+                proposal_id: 1,
+                surface: molt_core::Surface::Organization,
+                payload: serde_json::json!({ "op": "set_features", "value": molt_core::chain::BLOCK_V2_FEATURE }),
+            },
+            sigs: Vec::new(),
+        };
+        ws.write_chain_walled(None, &[]).expect("plain");
+        assert!(crate::read_manifest(&dir).expect("manifest").version < molt_core::STORAGE_VERSION_BLOCK_V2);
+        ws.write_chain_walled(None, &[enable]).expect("walled");
+        assert_eq!(crate::read_manifest(&dir).expect("manifest").version, molt_core::STORAGE_VERSION_BLOCK_V2);
     }
 
     /// Stage + commit round-trips a passphrase blob into a FRESH root: the
