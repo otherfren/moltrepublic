@@ -92,10 +92,14 @@ pub(crate) fn localize_vault_refusal(lang: i32, r: &molt_core::vault::VaultRefus
         if matches!(r, R::Bounds) {
             return Lexicon::en().feat_vault_bounds.to_string();
         }
+        if matches!(r, R::FewMembers) {
+            return Lexicon::en().feat_vault_members.to_string();
+        }
         return r.to_string();
     }
     match r {
         R::Bounds => Lexicon::de().feat_vault_bounds.to_string(),
+        R::FewMembers => Lexicon::de().feat_vault_members.to_string(),
         R::NeedsNewerRepublic => "braucht eine neuere Republik".to_string(),
         R::NeedsNewerVersion(seat) => format!("braucht eine neuere Version: {seat}"),
         R::NotVerified => "nicht geprüft".to_string(),
@@ -971,6 +975,7 @@ lexicon! {
     cw_grp_rule: "Approval Rules", "Zustimmungsregeln";
     cw_rule_hint: "Gated changes apply only once enough members approve.", "Geschützte Änderungen gelten erst, wenn genug Mitglieder zustimmen.";
     cw_rule_warn: "not recommended", "nicht empfohlen";
+    cw_rule_majority: "more than half must agree", "mehr als die Hälfte muss zustimmen";
     cw_rule_a: "Every gated change needs", "Jede geschützte Änderung braucht";
     cw_rule_b: "of", "von";
     cw_rule_c: "approvals.", "Stimmen.";
@@ -1048,6 +1053,7 @@ lexicon! {
     feat_vault_bounds: "needs a threshold of 2 or more and 2 more members than that", "braucht Schwelle ab 2 und 2 Mitglieder mehr als die Schwelle";
     feat_vault_low: "needs a threshold of 2 or more", "braucht Schwelle ab 2";
     feat_vault_high: "needs 2 more members than the threshold", "braucht 2 Mitglieder mehr als die Schwelle";
+    feat_vault_members: "needs 5 or more members", "braucht 5 oder mehr Mitglieder";
     vault_newer_republic: "needs a newer republic", "braucht eine neuere Republik";
     jw_back_to_start: "Back to start", "Zurück zum Start";
     jw_ratify_title: "Ratify the social contract", "Gesellschaftsvertrag ratifizieren";
@@ -1159,6 +1165,7 @@ lexicon! {
     os_founded: "Founded", "Gegründet";
     os_utc: "UTC time", "UTC-Zeit";
     os_consensus: "Consensus", "Konsens";
+    os_below_majority: "half or fewer decide - a split cannot be repaired by vote", "die Hälfte oder weniger entscheidet - eine Spaltung ist per Abstimmung nicht reparierbar";
     cv_shrink: "Shrink", "Verkleinern";
     ocs_title: "Settings", "Einstellungen";
     ocs_chat_retention: "Delete chat after", "Chat löschen nach";

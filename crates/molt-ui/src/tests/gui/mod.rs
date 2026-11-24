@@ -30,6 +30,8 @@ mod link_relays;
 mod log_tab;
 #[cfg(feature = "live-preview")]
 mod logo;
+#[cfg(feature = "live-preview")]
+mod majority;
 mod mirror;
 #[cfg(feature = "live-preview")]
 mod modals;

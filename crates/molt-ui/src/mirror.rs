@@ -1716,6 +1716,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
     ui.set_org_thread_retention(b.org_stats.thread_retention_days);
     // the Members table offers "recovery link" only where recovery exists
     ui.set_org_chain_governed(b.org_stats.chain_governed);
+    ui.set_org_below_majority(b.org_stats.below_majority);
     let feat_on = |key: &str| b.org_stats.features.iter().any(|f| f == key);
     ui.set_org_feat_memory(feat_on("memory"));
     ui.set_org_feat_quests(feat_on("quests"));
@@ -1724,6 +1725,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         molt_core::vault::VaultEnable::On => 0,
         molt_core::vault::VaultEnable::Offer => 1,
         molt_core::vault::VaultEnable::NeedsNewerRepublic => 2,
+        molt_core::vault::VaultEnable::Bounds if b.org_stats.vault_few_members => 4,
         molt_core::vault::VaultEnable::Bounds => 3,
     });
     ui.set_org_feat_wallet(feat_on("wallet"));

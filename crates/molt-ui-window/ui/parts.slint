@@ -2400,6 +2400,8 @@ export component FeatureTable inherits Rectangle {
     in property <bool> wallet-ok: true;
     // m < 2: the shared reason both bounded rows give
     in property <bool> low: false;
+    // n < 5 under the majority rule: the vault's own reason
+    in property <bool> few: false;
     background: Theme.panel-2;
     border-radius: Theme.win95 ? 0px : 8px;
     border-width: Theme.border-w;
@@ -2455,7 +2457,7 @@ export component FeatureTable inherits Rectangle {
                     label-size: Theme.fs-cap;
                 }
                 Text {
-                    text: root.vault-ok ? Strings.feat-d-vault : (root.low ? Strings.feat-vault-low : Strings.feat-vault-high);
+                    text: root.vault-ok ? Strings.feat-d-vault : (root.low ? Strings.feat-vault-low : (root.few ? Strings.feat-vault-members : Strings.feat-vault-high));
                     color: root.vault-ok ? Theme.dim : Theme.faint;
                     font-size: Theme.fs-cap;
                     vertical-alignment: center;
@@ -2508,6 +2510,7 @@ export component CharterView inherits Rectangle {
     in property <bool> vault-ok: true;
     in property <bool> wallet-ok: true;
     in property <bool> low: false;
+    in property <bool> few: false;
     in property <bool> accent: false;
     border-radius: Theme.win95 ? 0px : 8px;
     background: Theme.panel;
@@ -2574,6 +2577,7 @@ export component CharterView inherits Rectangle {
                 vault-ok: root.vault-ok || root.feat-vault;
                 wallet-ok: root.wallet-ok || root.feat-wallet;
                 low: root.low;
+                few: root.few;
             }
         }
     }
