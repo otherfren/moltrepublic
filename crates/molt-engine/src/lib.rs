@@ -412,6 +412,13 @@ impl WalletHandle {
         self.drop_seam.skip_rekey_reset.store(skip, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: this seat asks no sender for gaps or listings, as during
+    /// a long relay replay. No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __hold_gap_wants(&self, on: bool) {
+        self.drop_seam.hold_wants.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam: the live ratchet persist debounce in seconds (`None` = the
     /// constant). No `Command` reaches it.
     #[doc(hidden)]
@@ -963,6 +970,10 @@ pub(crate) struct DeliveryState {
     /// envelopes waiting behind them (`net/delivery.rs`). Runtime-only,
     /// workspace scope.
     pub(crate) inbound: std::collections::HashMap<MemberId, net::SenderHold>,
+    /// Senders probed for a tail above the frontier this session.
+    pub(crate) probed: std::collections::BTreeSet<MemberId>,
+    /// Senders this seat is known to be behind on (health surface).
+    pub(crate) behind: Vec<MemberId>,
     /// Per sender: repeats a legacy window drops (`net/delivery.rs`).
     /// Runtime-only.
     pub(crate) dups: std::collections::HashMap<MemberId, net::DupEpisode>,

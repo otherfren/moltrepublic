@@ -1115,13 +1115,18 @@ async fn persist_cursor<S: StateStore>(store: &S, start: u64, published_through:
         .await;
 }
 
+/// The own seat's send-failure reason while the hourly resend budget holds
+/// a tail some peers are owed; the peers follow it.
+pub const BUDGET_SPENT: &str = "resend budget spent";
+
 /// The stall clock's verdict on one fired round.
 #[derive(Debug)]
 enum StallRound {
     /// No floor is proven any more — nothing to re-offer.
     NoFloor,
-    /// The hourly budget is spent and no heal evidence buys a round.
-    Spent(u64),
+    /// The hourly budget is spent and no heal evidence buys a round; the
+    /// floor and the peers owed the tail.
+    Spent(u64, Vec<MemberId>),
     /// Nobody owed the tail can be reached.
     Quiet(Quiet),
     /// A round was granted (`heal` = the evidence-driven one) and the
@@ -1152,7 +1157,14 @@ fn plan_round(
         // since the last round) buys the one heal round
         true
     } else {
-        return StallRound::Spent(f);
+        let cursor = cur.log_seq;
+        let owed = cfg
+            .members
+            .iter()
+            .filter(|m| state.outbound.get(*m).is_some_and(|c| c.ack_seen && c.acked_floor < cursor))
+            .cloned()
+            .collect();
+        return StallRound::Spent(f, owed);
     };
     state.group = Some(cur); // the consumed budget
     for c in state.outbound.values_mut().filter(|c| c.ack_ahead) {
@@ -1271,6 +1283,8 @@ struct StallClock {
     granted: u32,
     /// The last round was skipped: nobody owed can be reached.
     quiet: Option<Quiet>,
+    /// The spent budget was reported on the health surface.
+    spent_told: bool,
 }
 
 /// Why a round was skipped.
@@ -1306,6 +1320,7 @@ impl StallClock {
             since: None,
             granted: 0,
             quiet: None,
+            spent_told: false,
         }
     }
 
@@ -1753,6 +1768,9 @@ where
             .await;
         let f = match round {
             StallRound::NoFloor => {
+                if std::mem::take(&mut stall.spent_told) {
+                    tell(&stop, sink.send_ok(&cfg.member)).await;
+                }
                 stall.disarm();
                 continue;
             }
@@ -1774,15 +1792,23 @@ where
                 stall.escalate(tokio::time::Instant::now());
                 continue;
             }
-            StallRound::Spent(f) => {
+            StallRound::Spent(f, owed) => {
                 tracing::warn!(
                     floor = f,
                     "the resend budget for this hour is spent — holding the tail"
                 );
+                if !stall.spent_told && !owed.is_empty() {
+                    stall.spent_told = true;
+                    let reason = format!("{BUDGET_SPENT}, owed: {}", owed.join(", "));
+                    tell(&stop, sink.send_failed(&cfg.member, &reason)).await;
+                }
                 stall.escalate(tokio::time::Instant::now());
                 continue;
             }
             StallRound::Granted { floor, heal } => {
+                if std::mem::take(&mut stall.spent_told) {
+                    tell(&stop, sink.send_ok(&cfg.member)).await;
+                }
                 if let Some(q) = stall.quiet.take() {
                     tracing::info!(me = %cfg.member, was = q.reason(), floor, "outbox=resumed");
                 }
@@ -3880,6 +3906,27 @@ mod tests {
         // the clock does
         assert!(consume_resend_round(&mut reloaded, t0 + 3_600));
         assert_eq!(reloaded.resend_rounds, 1, "a fresh window starts at one");
+    }
+
+    /// A spent budget names the peers still owed the tail, for the
+    /// operator's health surface.
+    #[tokio::test]
+    async fn a_spent_budget_names_the_peers_owed_the_tail() {
+        let log = crate::MemLog::default();
+        for seq in 1..=10u64 {
+            log.push(walter_event(seq));
+        }
+        let envs = log.read_from(1).await;
+        let cfg = GroupNetConfig::fast("walter".into(), vec!["petra".into(), "vera".into()]);
+        let mut st = TransportState::default();
+        let t0 = 1_700_000_000;
+        let mut cur = molt_core::GroupCursor { log_seq: 10, ..Default::default() };
+        while consume_resend_round(&mut cur, t0) {}
+        st.group = Some(cur);
+        st.outbound.insert("petra".into(), molt_core::OutboundCursor { acked_floor: 4, ack_seen: true, ..Default::default() });
+        st.outbound.insert("vera".into(), molt_core::OutboundCursor { acked_floor: 10, ack_seen: true, ..Default::default() });
+        let planned = plan_round(&mut st, &cfg, &envs, &OutboxReach::default(), true, t0 + 60);
+        assert!(matches!(&planned, StallRound::Spent(4, owed) if owed == &vec!["petra".to_string()]), "{planned:?}");
     }
 
     /// **Evidence of a lagging listener grants ONE heal round past a spent
