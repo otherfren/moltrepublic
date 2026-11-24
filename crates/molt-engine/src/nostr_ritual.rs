@@ -500,6 +500,33 @@ pub(crate) fn spawn_recover_frames(
 ///
 /// One landed relay is enough to be durable: relays store the frame, so a
 /// survivor that was offline picks the commit up on its catch-up.
+/// A re-key whose commit and Welcome are owed, with what a restart on
+/// another relay set needs.
+pub(crate) struct RekeyDelivery {
+    pub(crate) member: String,
+    pub(crate) to: String,
+    pub(crate) rekey: crate::chain::NostrRekey,
+    pub(crate) payload: molt_net::welcome::WelcomePayload,
+    /// `None` while no relay is dialable.
+    pub(crate) task: Option<tokio::task::JoinHandle<()>>,
+}
+
+/// Test seam: rejoiner anchors whose re-key delivery waits before its
+/// first publish.
+static HOLD_REKEY: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Test seam: hold (or release) the re-key delivery to anchor `to`.
+pub(crate) fn hold_rekey_delivery(to: &str, hold: bool) {
+    if let Ok(mut set) = HOLD_REKEY.lock() {
+        if hold {
+            set.insert(to.to_string());
+        } else {
+            set.remove(to);
+        }
+    }
+}
+
 pub(crate) fn spawn_rekey_delivery(
     channel: GroupChannel,
     net: RitualNet,
@@ -510,6 +537,9 @@ pub(crate) fn spawn_rekey_delivery(
     tx: mpsc::WeakSender<Envelope>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        while HOLD_REKEY.lock().is_ok_and(|set| set.contains(&to_npub)) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let mut wait = PUBLISH_RETRY_INITIAL;
         let mut attempt = 0u32;
         loop {

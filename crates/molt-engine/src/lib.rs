@@ -404,6 +404,13 @@ impl WalletHandle {
         self.drop_seam.park_rekey.store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: a re-key delivery to anchor `to` waits before its first
+    /// publish while held (process-wide). No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __hold_rekey_delivery(to: &str, hold: bool) {
+        crate::nostr_ritual::hold_rekey_delivery(to, hold);
+    }
+
     /// Test seam: the head beacon (a `ChainRequest`) goes out on the next
     /// beat. No `Command` reaches it.
     #[doc(hidden)]
@@ -1348,6 +1355,10 @@ pub(crate) struct RecoveryState {
     /// workspace's own-anchor 1059 subscription. Since B3 it only answers an
     /// older build's link-less request with a refusal. Torn down with the net.
     pub(crate) seat_inbox: Option<tokio::task::JoinHandle<()>>,
+    /// Re-keys whose commit or Welcome may still be owed: restarted on the
+    /// relays this node may dial whenever that set moves, aborted with the
+    /// workspace.
+    pub(crate) rekey_deliveries: Vec<crate::nostr_ritual::RekeyDelivery>,
     /// `(member, new_anchor) → unix stamp` of the last refusal sent to a
     /// link-less request: relays replay 1059 wraps on every resubscribe,
     /// and each replay is answered at most once per window.
@@ -2019,6 +2030,7 @@ impl State {
             recovery: RecoveryState {
                 inboxes: Vec::new(),
                 seat_inbox: None,
+                rekey_deliveries: Vec::new(),
                 unsolicited_cooldown: std::collections::HashMap::new(),
                 held_approvals: std::collections::BTreeSet::new(),
                 held_seals: std::collections::BTreeSet::new(),

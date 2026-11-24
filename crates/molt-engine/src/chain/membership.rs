@@ -179,6 +179,7 @@ pub(crate) const RECOVER_PART_MAX: usize = 24 * 1024;
 
 /// What a Nostr re-key produced — everything the wire needs, keyed at the
 /// stamp the commit was made with.
+#[derive(Clone)]
 pub(crate) struct NostrRekey {
     /// The raw MLS commit. It ships RAW inside the 445, never wrapped in an
     /// application ciphertext: a recipient needs it to REACH the new epoch.
@@ -1409,6 +1410,41 @@ impl State {
         }
     }
 
+    /// The relays this node may dial moved: every owed re-key delivery
+    /// starts again on them (the old task may wait for consent to a relay
+    /// that never returns). None dialable: it waits for the next move.
+    pub(crate) fn restart_rekey_deliveries(&mut self) {
+        self.recovery.rekey_deliveries.retain(|d| !d.task.as_ref().is_some_and(tokio::task::JoinHandle::is_finished));
+        if self.recovery.rekey_deliveries.is_empty() {
+            return;
+        }
+        let relays = self.dialable_group_relays();
+        let wire = self.dialer_for().ok().zip(self.nostr.as_ref()).and_then(|(dialer, nostr)| {
+            let net = molt_net::ritual_net::RitualNet::new(dialer.clone(), relays.clone(), &nostr.sk).ok()?;
+            let channel = molt_net::ritual_net::GroupChannel::new(dialer, relays.clone(), nostr.rotation_seed)
+                .with_group_expiry();
+            Some((channel, net))
+        });
+        for d in &mut self.recovery.rekey_deliveries {
+            if let Some(task) = d.task.take() {
+                task.abort();
+            }
+            let Some((channel, net)) = wire.clone().filter(|_| !relays.is_empty()) else {
+                continue;
+            };
+            tracing::info!(member = %d.member, relays = relays.len(), "rekey_delivery=restarted");
+            d.task = Some(crate::nostr_ritual::spawn_rekey_delivery(
+                channel,
+                net,
+                d.to.clone(),
+                d.rekey.clone(),
+                d.payload.clone(),
+                d.member.clone(),
+                self.cmd_tx.clone(),
+            ));
+        }
+    }
+
     /// **The Nostr coordinator's re-key** (N4b step 6c).
     ///
     /// Everything the mesh arm does through a `NetRuntime` and a reply queue,
@@ -1535,15 +1571,22 @@ impl State {
             tracing::warn!(%member, "rekey_persist=unconfirmed");
         }
         if !parked {
-            crate::nostr_ritual::spawn_rekey_delivery(
+            let task = crate::nostr_ritual::spawn_rekey_delivery(
                 channel,
                 net,
-                to,
-                rekey,
-                payload,
+                to.clone(),
+                rekey.clone(),
+                payload.clone(),
                 member.to_string(),
                 self.cmd_tx.clone(),
             );
+            self.recovery.rekey_deliveries.push(crate::nostr_ritual::RekeyDelivery {
+                member: member.to_string(),
+                to,
+                rekey,
+                payload,
+                task: Some(task),
+            });
         }
         // the rejoiner's trust root, over the same 445 channel it just
         // joined - unless it verified the anchor before the seal (B4)
