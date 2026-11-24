@@ -620,6 +620,10 @@ async fn gap_loop<L: OutboxLog, S: StateStore>(
     let mut minute: (Instant, usize) = (Instant::now(), 0);
     let mut last: Option<MemberId> = None;
     loop {
+        // a close awaits this task: a long queue must not hold it
+        if *stop.borrow() {
+            return;
+        }
         let next = asks.pending.lock().ok().and_then(|mut p| {
             let key = last
                 .as_ref()
@@ -1580,6 +1584,8 @@ async fn final_pass<L: OutboxLog, S: StateStore>(
         };
         match publish_once(channel, &frame).await {
             Ok(()) => {
+                // per envelope: a pass cut short keeps what went out
+                persist_cursor(store, through, env.seq).await;
                 through = env.seq;
                 sent += 1;
             }
@@ -3196,7 +3202,78 @@ mod tests {
         assert_eq!(cursor(&store).await, 0);
     }
 
-    /// **A withdrawn channel's close dials nothing.**
+    /// **A publish in flight at the close, then the final pass.** The first
+    /// envelope's publish is stuck in the relay's handshake when four more
+    /// are recorded and the close begins; the outbox finishes that publish
+    /// and the pass sends the four.
+    #[tokio::test]
+    async fn a_publish_in_flight_at_the_close_is_finished_and_the_pass_sends_the_rest() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let upstream = relay.url().await.to_string().trim_start_matches("ws://").trim_end_matches('/').to_string();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("ws://{}", listener.local_addr().expect("addr"));
+        let (open, dialed) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicUsize::new(0)));
+        let (gate, count) = (open.clone(), dialed.clone());
+        tokio::spawn(async move {
+            while let Ok((mut client, _)) = listener.accept().await {
+                count.fetch_add(1, Ordering::SeqCst);
+                let (gate, upstream) = (gate.clone(), upstream.clone());
+                tokio::spawn(async move {
+                    while !gate.load(Ordering::SeqCst) {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                    if let Ok(mut server) = tokio::net::TcpStream::connect(&upstream).await {
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                    }
+                });
+            }
+        });
+        let mut m = MlsMember::new(&SigningKey::from_bytes(&[5u8; 32]), "wotan").expect("mls");
+        m.create_group().expect("group");
+        let log = crate::MemLog::default();
+        let mine = |seq: u64| {
+            let mut env = walter_event(seq);
+            env.by = "wotan".to_string();
+            env
+        };
+        log.push(mine(1));
+        let store = crate::MemStateStore::default();
+        let (wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, _health) = watch::channel(GroupHealth::default());
+        let handle = spawn_group(
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url], [7u8; 32]),
+            MlsChannel::new(m),
+            GroupNetConfig::fast("wotan".into(), vec!["petra".into()]),
+            log.clone(),
+            store.clone(),
+            NullSink,
+            wake_rx,
+            health_tx,
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while dialed.load(Ordering::SeqCst) == 0 {
+            assert!(tokio::time::Instant::now() < deadline, "the first publish never dialed");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // from here the outbox reads nothing more on its own
+        __hold_outbox("wotan", true);
+        for seq in 2..=5 {
+            log.push(mine(seq));
+        }
+        let _ = wake.send(5);
+        let closing = tokio::spawn(handle.close());
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        open.store(true, Ordering::SeqCst);
+        closing.await.expect("close");
+        assert_eq!(cursor(&store).await, 5, "the in-flight publish or the pass after it was lost");
+    }
+
+    /// **A withdrawn channel's close dials nothing.** A bound, not the
+    /// pass: it holds without the final pass too.
     #[tokio::test]
     async fn a_withdrawn_close_publishes_nothing() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3217,7 +3294,8 @@ mod tests {
         assert_eq!(cursor(&store).await, 0);
     }
 
-    /// **A relay withdrawn at the gate counts as refused**: the close
+    /// **A relay withdrawn at the gate counts as refused** (a bound; it
+    /// holds without the final pass too): the close
     /// waits for no consent, publishes nothing and keeps the cursor.
     #[tokio::test]
     async fn a_gate_withdrawn_relay_ends_the_close_at_once() {
@@ -3230,7 +3308,8 @@ mod tests {
         assert_eq!(cursor(&store).await, 0);
     }
 
-    /// **A relay that never answers holds the close for the transport
+    /// A bound (it holds without the final pass too): **a relay that never
+    /// answers holds the close for the transport
     /// bounds of ONE attempt, not longer.** The first envelope no relay
     /// took ends the pass; the cursor stays for the next start.
     #[tokio::test(start_paused = true)]

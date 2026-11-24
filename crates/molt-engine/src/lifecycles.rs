@@ -232,7 +232,9 @@ impl State {
 
         // a previously open workspace closes cleanly before the new one
         // takes over the actor state; a demo mesh belongs to the old
-        // context and tears down with it
+        // context and tears down with it; its outbox's last pass and its
+        // ratchet need the writer the storage close ends
+        self.persist_net_crypto_on_close();
         self.teardown_net();
         self.close_active_storage();
         self.reset_workspace_state();
