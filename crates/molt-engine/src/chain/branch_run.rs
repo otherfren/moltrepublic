@@ -218,8 +218,8 @@ impl State {
     fn majority(&self) -> (bool, u8, usize) {
         let m = self.chain.head.as_ref().map_or(0, |h| h.rule_m);
         let n = self.chain.head.as_ref().map_or(0, |h| h.identities.len());
-        // TODO(majority-rule): the molt-core helper replaces this once it lands
-        (2 * usize::from(m) > n, m, n)
+        let seats = u8::try_from(n).unwrap_or(u8::MAX);
+        (molt_core::majority::threshold_is_majority(m, seats), m, n)
     }
 
     fn branch_gate(&self) -> Result<(), MoltError> {
