@@ -30,6 +30,7 @@ use crate::State;
 pub(crate) mod blob_parts;
 mod block_v2;
 pub(crate) use block_v2::older_device;
+pub(crate) use verify::block_v2_after;
 pub(crate) mod branch;
 mod branch_run;
 mod checkpoint;

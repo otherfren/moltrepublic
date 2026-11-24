@@ -1085,21 +1085,23 @@ pub fn verify_wiki_export(
     let mut payloads: Vec<serde_json::Value> = Vec::new();
     let mut seen: BTreeSet<u64> = BTreeSet::new();
     let mut last_height = 0u64;
+    let mut v2 = block_v2_after(None, &bundle.genesis);
     for block in &bundle.blocks {
         if block.height <= last_height {
             return Err(format!("block {}: heights must ascend", block.height));
         }
         last_height = block.height;
         let membership = matches!(block.change, ChainChange::Membership { .. });
-        if !membership && !crate::wiki_export::is_wiki_patch(&block.change) {
+        let patch = crate::wiki_export::is_wiki_patch(&block.change);
+        let enabling = v2.is_none() && block_v2_after(None, block).is_some();
+        if !membership && !patch && !enabling {
             return Err(format!(
                 "block {}: only membership blocks and wiki patches are exported",
                 block.height
             ));
         }
-        // the bundle omits the enabling block: either layout attests
-        let mut signers = block_signers(&head.republic_id, &identities, block, None)?;
-        signers.extend(block_signers(&head.republic_id, &identities, block, Some(0))?);
+        // one layout per block: the shipped enabling block decides
+        let signers = block_signers(&head.republic_id, &identities, block, v2)?;
         // §7e rule 3 over the shipped membership blocks: every re-anchor
         // rides the bundle, so the working anchors fold exactly
         consent_spends(&block.change, |m| {
@@ -1143,10 +1145,13 @@ pub fn verify_wiki_export(
                         block.height
                     ));
                 }
-                payloads.push(payload.clone());
+                if patch {
+                    payloads.push(payload.clone());
+                }
             }
             _ => unreachable!("admission above accepts only membership and applied blocks"),
         }
+        v2 = block_v2_after(v2, block);
     }
 
     // 4. the fold IS the tree — same function the republic runs on its own state

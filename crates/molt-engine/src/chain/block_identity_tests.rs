@@ -363,6 +363,40 @@ fn different_signer_subsets_fork_before_the_activation() {
     assert!(forks > 0, "v1 variants are fork decisions");
 }
 
+// --- review L1: one layout per block in a wiki export ---------------------
+
+const PAGE_A: &str = "diff --git a/a.md b/a.md\nnew file mode 100644\n--- /dev/null\n+++ b/a.md\n@@ -0,0 +1,1 @@\n+one\n";
+
+fn page_tree() -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::from([("a.md".to_string(), "one\n".to_string())])
+}
+
+fn wiki_change(id: u64) -> ChainChange {
+    ChainChange::Applied { proposal_id: id, surface: Surface::Memory, payload: serde_json::json!({ "op": "wiki_patch", "value": PAGE_A }) }
+}
+
+fn export_of(blocks: &[ChainBlock]) -> String {
+    serde_json::to_string(&crate::wiki_export::bundle_from_chain(blocks).expect("genesis")).expect("json")
+}
+
+/// An export of an activated republic verifies, and its patch must carry
+/// m signatures of ONE layout: a v2 and a v3 signature do not add up.
+#[test]
+fn a_wiki_export_counts_one_layout_per_block() {
+    let mut b = enabled(2);
+    let page = b.seal(2, wiki_change(30), &["petra", "walter"]);
+    b.push(page);
+    verify_wiki_export(&export_of(&b.blocks), &page_tree()).expect("an honest export verifies");
+    let mut mixed = b.blocks.clone();
+    let v2 = approval_bytes(&b.republic_id, 2, &wiki_change(30));
+    mixed[2].sigs = vec![
+        mixed[2].sigs.iter().find(|a| a.member == "petra").expect("petra").clone(),
+        RosterAttestation { member: "walter".to_string(), sig: molt_storage::identity_sign(b.key("walter"), &v2) },
+    ];
+    let err = verify_wiki_export(&export_of(&mixed), &page_tree()).expect_err("one v2 and one v3 signature");
+    assert!(err.contains("valid approvals"), "{err}");
+}
+
 // --- review M3: an older device does not rejoin an activated republic ---
 
 fn recover_request(coord: &mut crate::State, b: &Builder, caps: Vec<String>) {
