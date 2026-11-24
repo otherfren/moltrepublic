@@ -51,11 +51,11 @@ async fn founding_seals_a_verifiable_roster_on_disk() {
     // the real two-instance path over loopback)
     let w = molt_engine::__spawn_sim_founding(molt_core::GroupConfig::demo(), session, true);
 
-    // found a 2-of-4 republic: founder + 3 simulated members
+    // found a 3-of-4 republic: founder + 3 simulated members
     w.execute(Command::CreateStart {
         name: "Sealed Club".to_string(),
         member: "petra".to_string(),
-        threshold: 2,
+        threshold: 3,
         members: 4,
         relays: Vec::new(),
     })
@@ -104,7 +104,7 @@ async fn founding_seals_a_verifiable_roster_on_disk() {
     else {
         panic!("first event is not Founded");
     };
-    assert_eq!(*rule_m, 2);
+    assert_eq!(*rule_m, 3);
     assert_eq!(*rule_n, 4);
     assert_eq!(roster.len(), 4, "founder + 3 members");
     assert_eq!(identities.len(), 4, "one identity key per member");

@@ -4757,10 +4757,14 @@ mod tests {
         assert!(!st.net_ritual.as_ref().expect("ritual").charter_proposed, "nothing proposed");
     }
 
+    /// Under five seats a majority founding names the seats; above, the bounds.
     #[test]
     fn create_propose_refuses_vault_at_2_of_3() {
         let mut st = vault_ritual(2, 3, None);
         let err = propose_vault(&mut st).expect_err("2-of-3 is outside the bounds");
+        assert!(matches!(err, molt_core::MoltError::Vault(molt_core::vault::VaultRefusal::FewMembers)), "{err}");
+        let mut st = vault_ritual(4, 5, None);
+        let err = propose_vault(&mut st).expect_err("4-of-5 is outside the bounds");
         assert!(matches!(err, molt_core::MoltError::Vault(molt_core::vault::VaultRefusal::Bounds)), "{err}");
     }
 
