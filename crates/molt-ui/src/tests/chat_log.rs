@@ -242,32 +242,52 @@ fn system_lines_interleave_by_time_and_tolerate_unknown_proposals() {
     );
 }
 
+/// `n` rows, each replying to the one before it.
+pub(super) fn reply_chain(n: u8) -> Vec<LogLineData> {
+    let mut log: Vec<LogLineData> = (0..n)
+        .map(|i| {
+            let mut l = line(&format!("m{i}"), &format!("level {i}"));
+            l.id = hex_id(i + 1);
+            if i > 0 {
+                l.quote_id = hex_id(i);
+            }
+            l
+        })
+        .collect();
+    let quotes: HashMap<String, QuoteSrc> =
+        (0..n).map(|i| (hex_id(i + 1), qsrc(&format!("m{i}"), &format!("level {i}"), false))).collect();
+    annotate_chat_log(&mut log, &quotes);
+    log
+}
+
+/// Issue #14: a reply sits one level deeper than what it answers, up to
+/// three levels, and never shallower than its parent.
 #[test]
-fn quote_indent_groups_by_target_and_alternates_between_neighbors() {
+fn a_reply_chain_indents_by_depth_and_caps_at_three() {
+    let depths: Vec<i32> = reply_chain(7).iter().map(|l| l.quote_indent).collect();
+    assert_eq!(depths, [0, 1, 2, 3, 3, 3, 3]);
+}
+
+#[test]
+fn replies_to_one_target_share_a_depth_and_an_unseen_target_counts_as_one() {
     let mut log = vec![
         line("a", "question 1"),
         line("b", "reply 1"),
         line("c", "reply 2"),
-        line("d", "reply to something else"),
+        line("d", "reply to something not in view"),
         line("e", "plain"),
-        line("f", "late reply"),
     ];
+    log[0].id = hex_id(1);
     log[1].quote_id = hex_id(1);
     log[2].quote_id = hex_id(1);
-    log[3].quote_id = hex_id(2);
-    log[5].quote_id = hex_id(3);
+    log[3].quote_id = hex_id(9);
     let quotes = HashMap::from([
         (hex_id(1), qsrc("a", "question 1", false)),
-        (hex_id(2), qsrc("x", "question 2", false)),
-        (hex_id(3), qsrc("y", "question 3", false)),
+        (hex_id(9), qsrc("x", "elsewhere", false)),
     ]);
     annotate_chat_log(&mut log, &quotes);
-    assert_eq!(log[0].quote_indent, 0, "no quote, no indent");
-    assert_eq!(log[1].quote_indent, 1, "a fresh reply group starts at depth 1");
-    assert_eq!(log[2].quote_indent, 1, "same target keeps the depth");
-    assert_eq!(log[3].quote_indent, 2, "a neighboring different target alternates");
-    assert_eq!(log[4].quote_indent, 0, "plain rows sit flush and end the run");
-    assert_eq!(log[5].quote_indent, 1, "after a break the next group restarts at 1");
+    let depths: Vec<i32> = log.iter().map(|l| l.quote_indent).collect();
+    assert_eq!(depths, [0, 1, 1, 1, 0], "siblings share a depth; a target out of view still renders as a reply");
 }
 
 /// A post in vote `vote`'s discussion.

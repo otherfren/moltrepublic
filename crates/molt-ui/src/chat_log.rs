@@ -288,42 +288,24 @@ pub(crate) fn annotate_chat_log(log: &mut [LogLineData], quotes: &HashMap<String
             }
         }
     }
-    // the reply indent: consecutive quote rows of the SAME target share one
-    // depth, a neighbor quoting a DIFFERENT target takes the other — so
-    // stacked replies to different questions stop reading as one thread. A
-    // non-quoting row ends the run (the next group starts at depth 1).
-    // Runs AFTER the teaser pass: only rows whose quote actually renders
-    // (quote_label set) may indent.
-    let mut depth = 0;
+    // the reply indent (issue #14): one level deeper than the row it
+    // answers, capped, so a chain never steps back left. A target out of
+    // view counts as level 0. Runs AFTER the teaser pass: only rows whose
+    // quote actually renders (quote_label set) indent.
     for i in 0..log.len() {
         if log[i].quote_label.is_empty() {
-            depth = 0;
             continue;
         }
-        if i == 0 || !same_quote_target(&log[i - 1], &log[i]) {
-            depth = if depth == 1 { 2 } else { 1 };
-        }
-        log[i].quote_indent = depth;
+        let parent = usize::try_from(log[i].quote)
+            .ok()
+            .filter(|&r| r < i)
+            .map_or(0, |r| log[r].quote_indent);
+        log[i].quote_indent = (parent + 1).min(REPLY_DEPTH_MAX);
     }
 }
 
-/// Whether two displayed rows quote the SAME target — the grouping relation
-/// behind the alternating reply indent. Precedence: the resolved target row
-/// (set for both id and legacy quotes whose target is in view — so the two
-/// addressing styles agree on a shared target), then the stable id, then the
-/// teaser text as the last resort for unresolvable cross-channel quotes.
-fn same_quote_target(a: &LogLineData, b: &LogLineData) -> bool {
-    if a.quote_label.is_empty() || b.quote_label.is_empty() {
-        return false;
-    }
-    if a.quote >= 0 && b.quote >= 0 {
-        return a.quote == b.quote;
-    }
-    if !a.quote_id.is_empty() || !b.quote_id.is_empty() {
-        return a.quote_id == b.quote_id;
-    }
-    a.quote_label == b.quote_label
-}
+/// The deepest reply indent; deeper replies stay at it.
+pub(crate) const REPLY_DEPTH_MAX: i32 = 3;
 
 /// Quote-teaser sources over the FULL chat log, keyed by hex message id.
 pub(crate) fn quote_sources(msgs: &[ChatMessage]) -> HashMap<String, QuoteSrc> {

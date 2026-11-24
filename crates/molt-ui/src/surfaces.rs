@@ -271,6 +271,7 @@ pub(crate) struct OrgStats {
     pub(crate) bv2_who: String,
     /// Raw `chain_sync` facts, rendered once the language is known.
     pub(crate) bv2_since: u64,
+    pub(crate) bv2_on: bool,
     pub(crate) bv2_wait: String,
     /// The forks `branch_status` proves, one line each, and their tables.
     pub(crate) fork_lines: Vec<String>,
@@ -306,6 +307,36 @@ pub(crate) struct SeatRowData {
     pub(crate) dropped: bool,
     /// A resync of it is under way: its history is owed from the start.
     pub(crate) fetching: bool,
+}
+
+/// Seats whose restore stayed unfinished for [`UNFINISHED_AFTER_SECS`]:
+/// the flag is on for a few seconds in every normal restore. `since`
+/// remembers when each flag was first seen.
+pub(crate) fn settle_unfinished(
+    since: &mut HashMap<String, u64>,
+    flagged: &[String],
+    now: u64,
+) -> std::collections::BTreeSet<String> {
+    since.retain(|m, _| flagged.contains(m));
+    for m in flagged {
+        since.entry(m.clone()).or_insert(now);
+    }
+    since
+        .iter()
+        .filter(|(_, at)| now.saturating_sub(**at) > UNFINISHED_AFTER_SECS)
+        .map(|(m, _)| m.clone())
+        .collect()
+}
+
+/// How long an unfinished restore is normal.
+pub(crate) const UNFINISHED_AFTER_SECS: u64 = 10;
+
+/// Add the unfinished-restore hint to the rows `shown` names.
+pub(crate) fn mark_unfinished(rows: &mut [SeatRowData], lang: i32, shown: &std::collections::BTreeSet<String>) {
+    let hint = Lexicon::of(lang).os_restore_unfinished;
+    for r in rows.iter_mut().filter(|r| shown.contains(&r.member)) {
+        r.note = if r.note.is_empty() { hint.to_string() } else { format!("{} · {hint}", r.note) };
+    }
 }
 
 /// Mark the seats whose history this node waits for from the start.
@@ -395,10 +426,15 @@ pub(crate) fn who_decides(lang: i32, m: usize, n: usize) -> String {
 
 /// The block format row: `(state, text, tooltip)`; state 0 hidden, 1 new,
 /// 2 waiting for a seat, 3 ready to switch.
-pub(crate) fn block_format_row(lang: i32, governed: bool, since: u64, wait: &str) -> (i32, String, String) {
+pub(crate) fn block_format_row(lang: i32, governed: bool, on: bool, since: u64, wait: &str) -> (i32, String, String) {
     let de = lang == 1;
-    if since > 0 {
-        let text = if de { format!("neu (seit Block {since})") } else { format!("new (since block {since})") };
+    if on {
+        let text = match (since, de) {
+            (0, true) => "neu".to_string(),
+            (0, false) => "new".to_string(),
+            (h, true) => format!("neu (seit Block {h})"),
+            (h, false) => format!("new (since block {h})"),
+        };
         return (1, text, String::new());
     }
     if !governed {
@@ -676,6 +712,9 @@ pub(crate) struct ChatUiState {
     /// ([`ChatUiState::clamp_surface_pages`]); a workspace switch resets
     /// it with the rest of this state.
     pub(crate) list_pages: HashMap<String, usize>,
+    /// Seat -> when this window first saw its restore unfinished
+    /// ([`settle_unfinished`]).
+    pub(crate) unfinished_since: HashMap<String, u64>,
 }
 
 impl ChatUiState {
@@ -1175,6 +1214,7 @@ pub(crate) async fn gather_surfaces(
                 bv2_tip: String::new(),
                 bv2_who: format!("{}:{}", s.threshold, s.members.len()),
                 bv2_since: s.chain_sync.block_v2_since,
+                bv2_on: s.chain_sync.block_v2,
                 bv2_wait: s.chain_sync.block_v2_wait.clone(),
                 fork_lines: Vec::new(),
                 branch_rows: Vec::new(),
@@ -1403,15 +1443,26 @@ pub(crate) async fn gather_surfaces(
         chain_rows.iter().filter(|b| !b.hash.is_empty()).map(|b| (b.height, b.hash.clone())).collect();
     org_stats.seats = seat_rows(&seat_src.0, seat_src.1, &member, lang, unix_now(), &local_heads);
     mark_fetching(&mut org_stats.seats, &seat_src.2);
+    let flagged: Vec<String> = seat_src.0.iter().filter(|s| s.restore_unfinished).map(|s| s.member.clone()).collect();
+    let shown = chat_ui
+        .lock()
+        .map(|mut st| settle_unfinished(&mut st.unfinished_since, &flagged, unix_now()))
+        .unwrap_or_default();
+    mark_unfinished(&mut org_stats.seats, lang, &shown);
     org_stats.builds_mixed = builds_mixed(&seat_src.0);
     (org_stats.bv2_state, org_stats.bv2_text, org_stats.bv2_tip) =
-        block_format_row(lang, org_stats.chain_governed, org_stats.bv2_since, &org_stats.bv2_wait);
+        block_format_row(lang, org_stats.chain_governed, org_stats.bv2_on, org_stats.bv2_since, &org_stats.bv2_wait);
     org_stats.bv2_who = org_stats
         .bv2_who
         .split_once(':')
         .and_then(|(m, n)| Some(who_decides(lang, m.parse().ok()?, n.parse().ok()?)))
         .unwrap_or_default();
-    org_stats.builds_note = builds_note(lang, org_stats.builds_mixed, org_stats.bv2_since, &org_stats.bv2_wait);
+    org_stats.builds_note = builds_note(
+        lang,
+        org_stats.builds_mixed,
+        u64::from(org_stats.bv2_on).max(org_stats.bv2_since),
+        &org_stats.bv2_wait,
+    );
     if org_stats.chain_governed {
         if let Ok(Reply::Branches(b)) = wallet.execute(Command::BranchStatus).await {
             org_stats.fork_lines = crate::branches::fork_lines(lang, &b);

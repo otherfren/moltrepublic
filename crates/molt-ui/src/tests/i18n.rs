@@ -440,6 +440,12 @@ fn an_older_device_is_named_in_both_languages() {
     assert_eq!(crate::labels::recover_refused_copy(1, "bob:no relay in common"), "bob:no relay in common", "others as before");
 }
 
+#[test]
+fn an_interrupted_restore_is_told_in_both_languages() {
+    assert_eq!(crate::labels::recover_interrupted_copy(0, "bo"), "Restore of bo interrupted - create a new link");
+    assert_eq!(crate::labels::recover_interrupted_copy(1, "bo"), "Wiederherstellung von bo unterbrochen - neuen Link erstellen");
+}
+
 /// The branch reasons and notices the dark build can produce, and the
 /// block-v2 gate, in German; compact, no em dash.
 #[test]

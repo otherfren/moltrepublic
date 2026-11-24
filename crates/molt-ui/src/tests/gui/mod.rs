@@ -17,6 +17,8 @@ mod agent_tab;
 mod chain_surface;
 mod chat;
 #[cfg(feature = "live-preview")]
+mod chat_replies;
+#[cfg(feature = "live-preview")]
 mod chat_scroll;
 mod discussion;
 mod discussion_groups;

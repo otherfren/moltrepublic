@@ -1137,6 +1137,7 @@ lexicon! {
     os_give_up: "Stop waiting", "Nicht länger warten";
     os_give_up_ask_pre: "Stop waiting for ", "Nicht länger auf den Verlauf von ";
     os_give_up_ask_post: "'s history? Messages not fetched yet stay missing.", " warten? Noch nicht geholte Nachrichten bleiben verloren.";
+    os_restore_unfinished: "restore unfinished - create a new link", "Wiederherstellung unvollständig - neuen Link erstellen";
     os_dropped_tip: "Likely a restore this node missed", "Vermutlich eine verpasste Wiederherstellung";
     oa_col_surface: "Surface", "Bereich";
     oa_pending: "Pending", "Offen";

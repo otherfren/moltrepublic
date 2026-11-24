@@ -1150,24 +1150,62 @@ fn mixed_builds_need_two_known_versions_or_an_unknown_beside_a_known_one() {
 #[test]
 fn the_block_format_row_names_its_state_and_who_holds_it_back() {
     use crate::surfaces::{block_format_row, builds_note};
-    assert_eq!(block_format_row(0, true, 12, ""), (1, "new (since block 12)".to_string(), String::new()));
-    assert_eq!(block_format_row(1, true, 12, ""), (1, "neu (seit Block 12)".to_string(), String::new()));
+    assert_eq!(block_format_row(0, true, true, 12, ""), (1, "new (since block 12)".to_string(), String::new()));
+    assert_eq!(block_format_row(1, true, true, 12, ""), (1, "neu (seit Block 12)".to_string(), String::new()));
     assert_eq!(
-        block_format_row(0, true, 0, "bo runs an older build"),
+        block_format_row(0, true, false, 0, "bo runs an older build"),
         (2, "old - waiting for bo".to_string(), "bo runs an older build".to_string())
     );
     assert_eq!(
-        block_format_row(1, true, 0, "bo has not announced"),
+        block_format_row(1, true, false, 0, "bo has not announced"),
         (2, "alt - wartet auf bo".to_string(), "bo hat sich noch nicht gemeldet".to_string())
     );
-    assert_eq!(block_format_row(0, true, 0, "").0, 3);
-    assert_eq!(block_format_row(0, false, 0, "").0, 0);
+    assert_eq!(block_format_row(0, true, false, 0, "").0, 3);
+    assert_eq!(block_format_row(0, false, false, 0, "").0, 0);
     assert_eq!(
         builds_note(0, true, 0, "bo runs an older build"),
         "Seats run different versions - bo holds back the new block format"
     );
     assert_eq!(builds_note(0, true, 5, ""), "", "on: the plain line");
     assert_eq!(builds_note(0, false, 0, "bo runs an older build"), "", "no mixed builds, no line");
+}
+
+/// On but the enabling block cut away: plain "new"; off: old, whatever
+/// the height says.
+#[test]
+fn the_block_format_row_reads_the_on_flag() {
+    use crate::surfaces::block_format_row;
+    assert_eq!(block_format_row(0, true, true, 0, ""), (1, "new".to_string(), String::new()));
+    assert_eq!(block_format_row(1, true, true, 0, ""), (1, "neu".to_string(), String::new()));
+    assert_eq!(block_format_row(0, true, true, 1, "").1, "new (since block 1)");
+    assert_eq!(block_format_row(0, true, false, 0, "bo runs an older build").1, "old - waiting for bo");
+}
+
+/// A seat whose restore stays unfinished past the normal few seconds is
+/// marked; a flag that just came on is not.
+#[test]
+fn an_unfinished_restore_is_marked_once_it_lasts() {
+    use crate::surfaces::{mark_unfinished, seat_rows, settle_unfinished};
+    let mut since = HashMap::new();
+    let flagged = vec!["bo".to_string()];
+    assert!(settle_unfinished(&mut since, &flagged, 100).is_empty(), "just on: quiet");
+    assert!(settle_unfinished(&mut since, &flagged, 105).is_empty());
+    assert_eq!(settle_unfinished(&mut since, &flagged, 111), ["bo".to_string()].into_iter().collect());
+    assert!(settle_unfinished(&mut since, &[], 112).is_empty(), "cleared: gone");
+    assert!(settle_unfinished(&mut since, &flagged, 113).is_empty(), "a new episode waits again");
+
+    let seats = vec![
+        molt_core::SeatSync { member: "ana".into(), ..molt_core::SeatSync::default() },
+        molt_core::SeatSync { member: "bo".into(), dup_streak: 2, ..molt_core::SeatSync::default() },
+    ];
+    let shown = ["bo".to_string()].into_iter().collect();
+    let mut rows = seat_rows(&seats, 0, "ana", 0, 0, &HashMap::new());
+    mark_unfinished(&mut rows, 0, &shown);
+    assert_eq!(rows[0].note, "");
+    assert!(rows[1].note.ends_with(" · restore unfinished - create a new link"), "{}", rows[1].note);
+    let mut de = seat_rows(&seats[..1], 0, "ana", 1, 0, &HashMap::new());
+    mark_unfinished(&mut de, 1, &["ana".to_string()].into_iter().collect());
+    assert_eq!(de[0].note, "Wiederherstellung unvollständig - neuen Link erstellen");
 }
 
 /// "Who decides" names the republic's own rule.

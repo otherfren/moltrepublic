@@ -50,11 +50,11 @@ fn the_block_format_row_reads_new_waiting_or_ready() {
     let (ui, _shown) = status_window();
     assert!(shown(&ui, "Block format").is_none(), "no row outside a chain republic");
 
-    set_row(&ui, crate::surfaces::block_format_row(0, true, 12, ""));
+    set_row(&ui, crate::surfaces::block_format_row(0, true, true, 12, ""));
     assert!(shown(&ui, "new (since block 12)").is_some());
     assert!(shown(&ui, "Switch block format").is_none());
 
-    set_row(&ui, crate::surfaces::block_format_row(0, true, 0, "bo runs an older build"));
+    set_row(&ui, crate::surfaces::block_format_row(0, true, false, 0, "bo runs an older build"));
     let waiting = shown(&ui, "old - waiting for bo").expect("the waiting row");
     let at = slint::LogicalPosition::new(
         waiting.absolute_position().x + waiting.size().width / 2.0,
@@ -64,7 +64,7 @@ fn the_block_format_row_reads_new_waiting_or_ready() {
     assert_eq!(ui.global::<HintTip>().get_label(), "bo runs an older build");
     assert!(shown(&ui, "Switch block format").is_none(), "no switch while a seat cannot follow");
 
-    set_row(&ui, crate::surfaces::block_format_row(0, true, 0, ""));
+    set_row(&ui, crate::surfaces::block_format_row(0, true, false, 0, ""));
     assert!(shown(&ui, "old - ready to switch").is_some());
     assert!(shown(&ui, "Switch block format").is_some(), "one action once every seat is ready");
 }
@@ -76,7 +76,7 @@ fn the_switch_explains_its_price_and_proposes_the_feature_vote() {
     i_slint_backend_testing::init_no_event_loop();
     let (ui, _shown) = status_window();
     ui.set_org_feat_memory(true);
-    set_row(&ui, crate::surfaces::block_format_row(0, true, 0, ""));
+    set_row(&ui, crate::surfaces::block_format_row(0, true, false, 0, ""));
     let proposed = Rc::new(RefCell::new(Vec::new()));
     let p = proposed.clone();
     ui.on_org_propose(move |op, value| p.borrow_mut().push((op.to_string(), value.to_string())));
