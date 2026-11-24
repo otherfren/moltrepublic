@@ -2693,11 +2693,8 @@ fn a_bystander_flags_a_restore_until_its_rekey_merges() {
     assert!(!unfinished(&walter, "dora"), "a re-key ahead of its block counts");
 }
 
-/// A restore whose block loses its height to another decision returns to
-/// the vote on the seat that had applied it, with its change registered
-/// again, and seals at the next height (lock off).
-#[test]
-fn a_restore_displaced_by_a_tip_swap_returns_to_the_vote() {
+/// Walter holds dora's restore sealed at height 1 (petra + walter).
+fn sealed_restore() -> (Builder, crate::State, u64) {
     use molt_core::{ProposalId, ProposalState, WorkspaceEvent};
     let b = Builder::new(&["petra", "walter", "dora"], 2);
     let mut coord = chain_signer("petra", &b, b.blocks.clone());
@@ -2726,15 +2723,31 @@ fn a_restore_displaced_by_a_tip_swap_returns_to_the_vote() {
     walter.receive_approval(id, "petra", 1, &petra_sig);
     walter.cmd_approve(ProposalId(id), None).expect("approves");
     assert_eq!(walter.proposals[&id].state, ProposalState::Applied, "the restore sealed at 1");
-    let restored = walter.chain.blocks[1].clone();
-    // another decision at 1 with a lower hash takes the tip
-    let other = (0..20u64)
+    (b, walter, id)
+}
+
+/// A decision at height 1 sealed by petra and dora with a lower hash than
+/// `than`.
+fn lower_contender(b: &Builder, than: &ChainBlock) -> ChainBlock {
+    (0..20u64)
         .map(|i| {
             let change = ChainChange::Applied { proposal_id: 900 + i, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": i }) };
             b.seal(1, change, &["petra", "dora"])
         })
-        .find(|c| block_hash(&b.republic_id, c) < block_hash(&b.republic_id, &restored))
-        .expect("a lower contender");
+        .find(|c| block_hash(&b.republic_id, c) < block_hash(&b.republic_id, than))
+        .expect("a lower contender")
+}
+
+/// A restore whose block loses its height to another decision returns to
+/// the vote on the seat that had applied it, with its change registered
+/// again, and seals at the next height (lock off).
+#[test]
+fn a_restore_displaced_by_a_tip_swap_returns_to_the_vote() {
+    use molt_core::{ProposalId, ProposalState, WorkspaceEvent};
+    let (b, mut walter, id) = sealed_restore();
+    let restored = walter.chain.blocks[1].clone();
+    // another decision at 1 with a lower hash takes the tip
+    let other = lower_contender(&b, &restored);
     wire(&mut walter, "dora", 50, WorkspaceEvent::Committed(other));
     assert_ne!(walter.chain.blocks[1].change, restored.change, "the restore lost its height");
     assert_eq!(walter.proposals[&id].state, ProposalState::Proposed, "back to the vote");
@@ -2748,4 +2761,27 @@ fn a_restore_displaced_by_a_tip_swap_returns_to_the_vote() {
     assert_eq!(walter.chain.head.as_ref().expect("head").height, 2, "re-sealed at 2");
     assert_eq!(walter.proposals[&id].state, ProposalState::Applied);
     verify_chain(&walter.chain.blocks).expect("verifies");
+}
+
+
+/// The same below the tip: a re-base onto another branch drops the
+/// restore and a later block; the restore returns to the vote.
+#[test]
+fn a_restore_dropped_by_a_rebase_returns_to_the_vote() {
+    use molt_core::{ProposalState, WorkspaceEvent};
+    let (b, mut walter, id) = sealed_restore();
+    let restored = walter.chain.blocks[1].clone();
+    let mut ours = b.clone();
+    ours.push(restored.clone());
+    let later = ours.commit(
+        ChainChange::Applied { proposal_id: 800, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": 800 }) },
+        &["petra", "dora"],
+    );
+    wire(&mut walter, "petra", 40, WorkspaceEvent::Committed(later));
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 2);
+    let other = lower_contender(&b, &restored);
+    wire(&mut walter, "dora", 50, WorkspaceEvent::Committed(other));
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, 1, "re-based onto the other branch");
+    assert_eq!(walter.proposals[&id].state, ProposalState::Proposed, "back to the vote");
+    assert!(walter.chain.proposal_changes.contains_key(&id), "its change is registered again");
 }
