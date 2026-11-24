@@ -202,6 +202,7 @@ pub(crate) fn localize_error(lang: i32, e: &molt_core::MoltError) -> String {
         E::FileUnavailable(id) => format!("Die geteilte Datei an {id} ist nicht mehr verfügbar"),
         E::FileExpired(id) => format!("Die geteilte Datei an {id} ist aus dem Aufbewahrungsfenster gealtert"),
         E::FileDeleted(id) => format!("Die geteilte Datei an {id} wurde per Abstimmung gelöscht"),
+        E::ShareGone => "Die Datei fehlt hier - Abstimmung ablehnen oder zurückziehen".to_string(),
         E::NotYourFile(_) => "Nur wer die Datei geteilt hat, kann sie entfernen".to_string(),
         E::NotYourMessage(_) => "Nur wer die Nachricht geschrieben hat, kann sie löschen".to_string(),
         E::Restore(t) => format!("Restore: {t}"),
