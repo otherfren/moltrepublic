@@ -517,3 +517,26 @@ fn seals_released_in_descending_identity_order_converge() {
         assert!(petra.own_signature_stands(*id), "{id} stands on the final tip");
     }
 }
+
+/// Field finding: `block_v2_since` names the switch only while the
+/// enabling block is held; after a cut drops it the height is unknown,
+/// never the anchor's.
+#[test]
+fn the_switch_height_is_reported_only_while_it_is_known() {
+    let mut b = enabled(4);
+    let mut walter = chain_peer_3("walter", &plain(1));
+    for blk in &b.blocks[1..] {
+        walter.receive_block(blk.clone());
+    }
+    let s = walter.chain_sync();
+    assert_eq!((s.block_v2, s.block_v2_since), (true, 2));
+    let state = checkpoint_state(&b.blocks, 3).expect("state");
+    let cut = b.seal(4, ChainChange::Checkpoint { upto: 3, state_hash: checkpoint_state_hash(&state) }, &SEATS3);
+    b.push(cut.clone());
+    walter.receive_block(cut);
+    assert!(walter.chain.checkpoint_blob.is_some(), "pruned to the cut");
+    let s = walter.chain_sync();
+    assert_eq!((s.block_v2, s.block_v2_since), (true, 0), "on, the switch height no longer known");
+    let s = chain_peer_3("dora", &plain(1)).chain_sync();
+    assert_eq!((s.block_v2, s.block_v2_since), (false, 0));
+}
