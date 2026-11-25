@@ -190,7 +190,7 @@ async fn a_seat_restored_after_a_folded_cut_signs_the_next_cut() {
     eprintln!("probe restored_after_cut base_arrived={base} wiki={:?}", wiki(&c).await);
     ratify(&a, &v, &format!("{}.md", "c")).await;
     // every seat at the same head before the cut (a stale proposer's cut is ignored)
-    assert!(within(60, || async { wiki(&a).await.0 == 3 && wiki(&v).await.0 == 3 && wiki(&c).await.0 == 3 }).await, "c.md everywhere");
+    assert!(within(60, || async { wiki(&a).await.0 == 3 && wiki(&v).await.0 == 3 && wiki(&c).await.0 == 3 }).await, "the third page everywhere");
     a.execute(Command::ProposeCheckpoint).await.expect("second cut");
     let sealed = within(120, || async { cuts(&a).await == 1 && head(&a).await > 0 && {
         // the second cut prunes to itself: one checkpoint row, a higher anchor
