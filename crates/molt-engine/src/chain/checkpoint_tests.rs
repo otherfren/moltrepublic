@@ -1311,3 +1311,86 @@ fn no_cut_while_a_peer_is_diverged() {
     walter.receive_checkpoint_proposal(9, upto, &hash, false);
     assert!(walter.own_signature_stands(9), "co-signed once healed");
 }
+
+/// Investigation (rejoin plan): a cut proposed while this seat's folded
+/// base is missing is refused, and NOT signed once the base arrives - the
+/// proposer must offer it again.
+#[test]
+#[ignore = "rejoin plan: red, documents the hole until it is fixed"]
+fn a_cut_refused_while_the_base_is_pending_is_signed_once_it_arrives() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    b.commit_wiki(2, "notes/b.md", "B", &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let hash = checkpoint_state_hash(&walter.own_checkpoint_state(2, true).expect("folded"));
+    walter.receive_checkpoint_proposal(40, 2, &hash, true);
+    let change = ChainChange::CheckpointFolded { upto: 2, state_hash: hash };
+    let petra_sig = identity_sign(b.key("petra"), &approval_bytes(&b.republic_id, 3, &change));
+    walter.receive_approval(40, "petra", 3, &petra_sig);
+    let held = walter.chain.wiki_base.take().expect("the cut kept the tree");
+    b.push(walter.chain.blocks[0].clone());
+    // the next cut, proposed while walter's base is missing
+    b.commit_wiki(3, "c.md", "C", &["petra", "walter"]);
+    walter.receive_block(b.blocks.last().cloned().expect("block"));
+    let head = walter.chain.head.as_ref().expect("head").height;
+    // the honest hash of the next cut, as a seat holding the base computes it
+    let next_hash = {
+        walter.chain.wiki_base = Some(held.clone());
+        let h = checkpoint_state_hash(&walter.own_checkpoint_state(head, true).expect("folded"));
+        walter.chain.wiki_base = None;
+        h
+    };
+    walter.receive_checkpoint_proposal(41, head, &next_hash, true);
+    assert!(!walter.chain.proposal_changes.contains_key(&41), "refused while pending, not even registered");
+    walter.adopt_wiki_base(Some(molt_core::wiki_fold::wiki_base_canonical_bytes(&held)));
+    assert!(walter.chain.wiki_base.is_some(), "the base arrived");
+    assert!(walter.own_signature_stands(41), "the arrived base lets the seat sign the open cut");
+}
+
+/// Investigation (rejoin plan): a cut and an ordinary card sealed at the
+/// SAME height on different seats. Walter applies the cut first and
+/// prunes to it; the card block has the lower identity. Do all seats end
+/// on one chain?
+#[test]
+#[ignore = "rejoin plan: red, documents the hole until it is fixed"]
+fn a_cut_and_a_card_at_one_height_end_on_one_chain() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "walter"]);
+    b.commit_applied(2, &["petra", "walter"]);
+    let state = checkpoint_state(&b.blocks, 2).expect("state");
+    let cut = b.seal(3, ChainChange::Checkpoint { upto: 2, state_hash: checkpoint_state_hash(&state) }, &["petra", "walter", "dora"]);
+    let card = (0..40u64)
+        .map(|i| {
+            let change = ChainChange::Applied { proposal_id: 50 + i, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": i }) };
+            b.seal(3, change, &["petra", "dora"])
+        })
+        .find(|c| block_hash(&b.republic_id, c) < block_hash(&b.republic_id, &cut))
+        .expect("a lower card block");
+    // walter: the cut first (prunes), then the lower card block
+    let mut walter = chain_peer_3("walter", &b);
+    wire(&mut walter, "petra", 10, WorkspaceEvent::Committed(cut.clone()));
+    assert!(walter.chain.checkpoint_blob.is_some(), "walter pruned to the cut");
+    wire(&mut walter, "dora", 11, WorkspaceEvent::Committed(card.clone()));
+    // petra: the card first, then the cut
+    let mut petra = chain_peer_3("petra", &b);
+    wire(&mut petra, "dora", 10, WorkspaceEvent::Committed(card.clone()));
+    wire(&mut petra, "walter", 11, WorkspaceEvent::Committed(cut.clone()));
+    // the card branch grows by one block
+    let mut on_card = b.clone();
+    on_card.push(card.clone());
+    let next = on_card.commit(
+        ChainChange::Applied { proposal_id: 99, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": 99 }) },
+        &["petra", "dora"],
+    );
+    wire(&mut walter, "dora", 12, WorkspaceEvent::Committed(next.clone()));
+    wire(&mut petra, "dora", 12, WorkspaceEvent::Committed(next));
+    let tip = |st: &crate::State| st.chain.head.as_ref().map(|h| (h.height, h.hash.clone())).expect("head");
+    eprintln!(
+        "probe cut_vs_card walter={:?} pruned={} petra={:?} walter_diverged={:?}",
+        tip(&walter),
+        walter.chain.checkpoint_blob.is_some(),
+        tip(&petra),
+        walter.chain.diverged.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(tip(&walter), tip(&petra), "one chain");
+}
