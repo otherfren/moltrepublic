@@ -412,6 +412,13 @@ impl WalletHandle {
         self.drop_seam.skip_rekey_reset.store(skip, std::sync::atomic::Ordering::SeqCst);
     }
 
+    /// Test seam: the open probe runs on this seat although the release
+    /// switch is off. No `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __force_open_probe(&self, on: bool) {
+        self.drop_seam.force_probe.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
     /// Test seam: the next `n` listing asks of this seat are lost on the
     /// way. No `Command` reaches it.
     #[doc(hidden)]

@@ -512,3 +512,57 @@ fn a_lying_or_stale_listing_changes_nothing() {
     st.cmd_net_gap_listed(&bob, &ada, 1, 200, vec![2, 3]);
     assert_eq!(st.listing_through_for_test("bob"), Some(400), "the stale page did not replace the newer one");
 }
+
+/// With the probe off (v0.1.3), a listed hole settles at the 60 s order
+/// bound exactly as in v0.1.2; with it on, a listed hole holds - but a
+/// parked (declined) one never holds its sender's stream.
+#[test]
+fn the_switch_off_keeps_v0_1_2_gap_timing_and_a_parked_seq_never_holds() {
+    let listed_hole = |force: bool, park: bool| {
+        let mut st = presence_fixture();
+        st.drop_seam.force_probe.store(force, std::sync::atomic::Ordering::SeqCst);
+        land(&mut st, chat_env(1, 0, "base"));
+        land(&mut st, chat_env(3, 2, "held"));
+        let (bob, ada) = ("bob".to_string(), "ada".to_string());
+        st.cmd_net_gap_listed(&bob, &ada, 1, 3, vec![2, 3]);
+        if park {
+            st.park_for_test("bob", 2);
+        }
+        at(&mut st, crate::net::GAP_FALLBACK_SECS - 1);
+        st.cmd_net_delivery_tick().expect("tick");
+        assert_eq!(bodies(&st), ["base"], "held before the bound");
+        at(&mut st, crate::net::GAP_FALLBACK_SECS);
+        st.cmd_net_delivery_tick().expect("tick");
+        bodies(&st)
+    };
+    assert_eq!(listed_hole(false, false), ["base", "held"], "off: settled at the bound");
+    assert_eq!(listed_hole(true, false), ["base"], "on: a listed hole holds");
+    assert_eq!(listed_hole(true, true), ["base", "held"], "a parked seq does not hold");
+}
+
+/// H1, the asker's side against an older sender: a `gone` for a seq
+/// outside `(frontier, cap]` is no answer - the seq stays owed.
+#[test]
+fn a_gone_outside_the_asked_window_is_ignored() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, chat_env(3, 2, "held"));
+    let far = 2 + molt_core::ACCEPT_WINDOW_BITS + 500;
+    land(&mut st, chat_env(far + 1, far, "far"));
+    let missing = |st: &crate::State| st.inbound_held_view().iter().map(|h| h.missing).sum::<u32>();
+    assert_eq!(missing(&st), 2, "2 and the far prev");
+    st.cmd_net_gap_answered("bob".to_string(), "ada".to_string(), Vec::new(), vec![2, far]);
+    assert_eq!(bodies(&st), ["base", "held"], "the asked seq is settled");
+    assert_eq!(missing(&st), 1, "the far one stays owed");
+}
+
+/// A runtime rebuild drops a spent-budget note: the new outbox reports
+/// afresh.
+#[test]
+fn a_rebuild_drops_the_held_resend_note() {
+    let mut st = presence_fixture();
+    st.cmd_net_resend_held(vec!["bob".to_string()], None).expect("ack");
+    assert!(st.delivery.resend_held.is_some());
+    st.rebuild_group_net_for_test();
+    assert!(st.delivery.resend_held.is_none());
+}

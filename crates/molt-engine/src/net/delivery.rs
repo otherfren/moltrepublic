@@ -56,7 +56,7 @@ const SESSION_MAX: usize = 65_536;
 const LISTED_TRIES: u8 = 3;
 
 /// The open probe (§13): one switch, independent of the `behind` signal.
-pub(crate) const OPEN_PROBE: bool = true;
+pub(crate) const OPEN_PROBE: bool = false;
 
 /// The probe's re-ask interval grows from [`GAP_ASK_EVERY_SECS`] to this.
 const PROBE_EVERY_MAX_SECS: u64 = 600;
@@ -208,12 +208,22 @@ impl SenderHold {
     /// Known to be behind: a listed own seq not here, or held content or
     /// an owed gap older than [`BEHIND_AFTER_SECS`] (a declined seq is
     /// parked, not owed).
-    fn behind(&self, window: &molt_core::AcceptedWindow, now: u64) -> bool {
+    fn behind(&self, window: &molt_core::AcceptedWindow, now: u64, probe_on: bool) -> bool {
         let old = |since: u64| now.saturating_sub(since) >= BEHIND_AFTER_SECS;
-        let listed = self.probe_more || self.listing.as_ref().is_some_and(|l| l.own.iter().any(|s| !window.is_accepted(*s)));
+        let listed = probe_on
+            && (self.probe_more || self.listing.as_ref().is_some_and(|l| l.own.iter().any(|s| !window.is_accepted(*s))));
         let held = !self.held.is_empty() && self.since.is_some_and(old);
         let owed = self.missing.iter().any(|(s, g)| !self.refused.contains(s) && old(g.since));
         listed || held || owed
+    }
+
+    /// Whether a missing seq is asked for now. Only inside `(frontier,
+    /// cap]`: a sender reads one window below the highest seq named, and an
+    /// older one answers `gone` for anything under that read (§13).
+    fn askable(&self, seq: u64, gap: &Gap, now: u64) -> bool {
+        seq <= self.cap()
+            && now.saturating_sub(gap.since) >= GAP_ASK_AFTER_SECS
+            && gap.asked_at.map_or(true, |t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
     }
 
     /// Whether the open probe asks now. Re-asks on a growing interval
@@ -928,7 +938,8 @@ impl State {
             let h = g.health.borrow();
             h.subscribed && !h.catching_up
         });
-        if OPEN_PROBE && caught_up && !replaying {
+        let probe_on = self.open_probe();
+        if probe_on && caught_up && !replaying {
             self.open_probes(&me);
         }
         let members: Vec<MemberId> = self.delivery.inbound.keys().cloned().collect();
@@ -989,12 +1000,9 @@ impl State {
                 let listed = hold.listing.as_ref().is_some_and(|l| l.own.contains(&seq));
                 if !refused && !listed && gap.settle_at.is_some_and(|t| now >= t) {
                     settle.push((seq, "resend_passed"));
-                } else if !listed && now.saturating_sub(gap.since) >= GAP_FALLBACK_SECS {
+                } else if (!probe_on || !listed || refused) && now.saturating_sub(gap.since) >= GAP_FALLBACK_SECS {
                     settle.push((seq, "fallback"));
-                } else if !refused
-                    && now.saturating_sub(gap.since) >= GAP_ASK_AFTER_SECS
-                    && gap.asked_at.map_or(true, |t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
-                {
+                } else if !refused && hold.askable(seq, gap, now) {
                     ask.push(seq);
                 }
             }
@@ -1019,12 +1027,13 @@ impl State {
             if let Some(group) = self.group_net.as_ref().filter(|_| !replaying) {
                 if list_due {
                     let want = molt_net::gap::GapWant::range(me.clone(), m.clone(), hold.frontier, hold.cap());
-                    if !self.drop_seam.drops_listing_ask() && group.handle.publish_control(want.to_frame()) {
+                    // the seam loses the frame on the wire: it went out
+                    if self.drop_seam.drops_listing_ask() || group.handle.publish_control(want.to_frame()) {
                         tracing::debug!(member = %m, after = hold.frontier, probe = probing, "gap_list_ask");
-                    }
-                    hold.listing_asked_at = Some(now);
-                    if probing {
-                        hold.probe_asks = hold.probe_asks.saturating_add(1);
+                        hold.listing_asked_at = Some(now);
+                        if probing {
+                            hold.probe_asks = hold.probe_asks.saturating_add(1);
+                        }
                     }
                 }
                 if !ask.is_empty() {
@@ -1101,7 +1110,14 @@ impl State {
                 g.settle_at.get_or_insert(now + GAP_PASS_GRACE_SECS);
             }
         }
-        for s in gone {
+        // a `gone` outside what this seat asked is no answer: an older
+        // sender says it for seqs it never read (§13)
+        let asked = |h: &SenderHold, s: u64| s > h.frontier && s <= h.cap();
+        let (valid, stray): (Vec<u64>, Vec<u64>) = gone.into_iter().partition(|s| asked(hold, *s));
+        if !stray.is_empty() {
+            tracing::debug!(%from, count = stray.len(), first = stray[0], "gap_gone_ignored");
+        }
+        for s in valid {
             if let Some(l) = self.delivery.inbound.get_mut(&from).and_then(|h| h.listing.as_mut()) {
                 l.own.remove(&s);
             }
@@ -1179,15 +1195,29 @@ impl State {
     pub(crate) fn behind_peers(&self) -> Vec<MemberId> {
         let now = self.presence_now();
         let empty = molt_core::AcceptedWindow::default();
+        let probe_on = self.open_probe();
         let mut peers: Vec<MemberId> = self
             .delivery
             .inbound
             .iter()
-            .filter(|(m, h)| h.behind(self.delivery.accepted.get(*m).unwrap_or(&empty), now))
+            .filter(|(m, h)| h.behind(self.delivery.accepted.get(*m).unwrap_or(&empty), now, probe_on))
             .map(|(m, _)| m.clone())
             .collect();
         peers.sort();
         peers
+    }
+
+    /// The open probe: the release switch, or a test forcing it on.
+    pub(crate) fn open_probe(&self) -> bool {
+        OPEN_PROBE || self.drop_seam.forces_probe()
+    }
+
+    /// A seq of `member` delivered but left unaccepted (the D7 park).
+    #[cfg(test)]
+    pub(crate) fn park_for_test(&mut self, member: &str, seq: u64) {
+        if let Some(h) = self.delivery.inbound.get_mut(member) {
+            h.refused.insert(seq);
+        }
     }
 
     /// The own outbox holds a tail these seats are owed: its hourly budget
@@ -1533,13 +1563,26 @@ mod probe_tests {
         let mut w = molt_core::AcceptedWindow::default();
         assert!(w.accept(10));
         h.listing = Some(Listing { through: 12, own: [11, 12].into_iter().collect(), tries: Default::default() });
-        assert!(h.behind(&w, 0), "listed and not here");
+        assert!(h.behind(&w, 0, true), "listed and not here");
         assert!(w.accept(11));
-        assert!(h.behind(&w, 0));
+        assert!(h.behind(&w, 0, true));
         assert!(w.accept(12));
-        assert!(!h.behind(&w, 0), "level");
+        assert!(!h.behind(&w, 0, true), "level");
         h.probe_more = true;
-        assert!(h.behind(&w, 0), "a full page promised more");
+        assert!(h.behind(&w, 0, true), "a full page promised more");
+        assert!(!h.behind(&w, 0, false), "with the probe off a listing shows nothing");
+    }
+
+    /// H1: a named ask never reaches past the cap, however far above it a
+    /// missing seq sits (the prev of a far-ahead frame, a shed one), so no
+    /// sender's read window can leave a low seq unread.
+    #[test]
+    fn a_named_ask_stays_inside_the_cap() {
+        let mut h = hold(false);
+        h.note_missing(11, 0);
+        h.note_missing(10 + molt_core::ACCEPT_WINDOW_BITS + 500, 0);
+        let ask: Vec<u64> = h.missing.iter().filter(|(s, g)| h.askable(**s, g, 100)).map(|(s, _)| *s).collect();
+        assert_eq!(ask, vec![11]);
     }
 
     /// A gap shorter than the behind delay, or a declined (parked) seq, is
@@ -1549,9 +1592,9 @@ mod probe_tests {
         let mut h = hold(false);
         let w = molt_core::AcceptedWindow::default();
         h.note_missing(11, 100);
-        assert!(!h.behind(&w, 100 + BEHIND_AFTER_SECS - 1));
-        assert!(h.behind(&w, 100 + BEHIND_AFTER_SECS));
+        assert!(!h.behind(&w, 100 + BEHIND_AFTER_SECS - 1, true));
+        assert!(h.behind(&w, 100 + BEHIND_AFTER_SECS, true));
         h.refused.insert(11);
-        assert!(!h.behind(&w, 1_000), "parked, not owed");
+        assert!(!h.behind(&w, 1_000, true), "parked, not owed");
     }
 }

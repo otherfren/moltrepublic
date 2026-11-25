@@ -1023,53 +1023,70 @@ consumed), so nothing above the frontier is visible and the seat asks
 nothing, while the sender's hourly budget for blind rounds may be spent.
 Result: a seat many envelopes short with every surface green.
 
-- **Open probe** (`OPEN_PROBE`, one switch; the visibility below does not
-  depend on it). After the first replay of a session was read through, a
-  seat asks every sender it holds history with for the listing of
-  `(frontier, frontier + 1024]`, and asks again while a listing comes back
-  full (a page of `GAP_LIST_MAX`, or the range's width). The probe ends on
-  a short page or on a level answer: a sender with nothing above the
-  asker's frontier answers an empty listing with `through == after` (new
-  in v0.1.3; a v0.1.1/v0.1.2 receiver drops it as malformed, and never
-  asks in that state anyway). A fresh frame does not end it - a frame
-  re-published for another asker looks the same. Nothing ends it by time: an unanswered ask is judged only when the next one is due, and
-  a sender known to answer listings (it answered one, or it reported a
-  build - v0.1.2 and later) is asked again on 10 s doubling to 600 s until
-  it answers. A sender not known to answer gets one ask, then silence until
-  it is known. A runtime rebuild keeps the holds and the probe state.
-- **Listed seqs are owed.** A listed seq is never settled by the 60 s order
-  bound: the listing proves it exists, so it is asked for until it arrives,
-  the sender answers `gone`, or three re-publications that did not land
-  (`LISTED_TRIES`) give it up as lost, loudly. A listing wider than one
-  window is refused, and a page never replaces a newer one held.
-- **The gap path is not the hourly budget.** A want or a listing is
-  answered under its own bound - 64 frames per asker per 10 s, 384 per
-  minute over all askers, one listing per asker per 5 s, a re-published seq
-  refused to the same asker for 60 s. Neither is the regression rewind of a
-  heard peer's lower sheet. Over a slow relay or two askers a 256-seq page
-  takes longer than a minute; nothing depends on it being faster.
-- **Visible.** `status.behind` and `net_health` (`behind: <seat>`) name a
-  sender this seat is short on: a listed own seq not here, or a full page
-  not yet followed by a short one (at once); held content or an owed gap
-  older than 10 s (a declined, parked seq is not owed). It clears only
-  when the window has the listed tail and the last page was short. A sender
-  whose spent budget holds a tail reports it in its own field:
-  `status.resend_held` (the owed seats) and `resend_held_since`, and in
-  `net_health` as `resend budget spent, owed: <seats>`; a granted round or
-  a settled floor clears it. It is not a send failure and never counts
-  toward the locked-out verdict.
-- **v0.1.4 note.** A sender before v0.1.1 answers no listing: its tail
-  still waits for its next frame or round. The held frames are memory-only,
-  so a restart fetches them a second time. A sheet field carrying the
-  sender's log end (additive) would show the gap without a probe, for every
-  build that writes it.
+**v0.1.3 ships the visibility; the open probe is built and switched off**
+(`OPEN_PROBE = false`). With it off, gap handling is v0.1.2's, plus the
+visibility and the two fixes below.
 
-Pins: `nostr_inbound_gap.rs`
+- **Visible.** `status.behind` and `net_health` (`behind: <seat>`) name a
+  sender this seat is short on: held content or an owed gap older than
+  10 s (a declined, parked seq is not owed). A sender whose spent budget
+  holds a tail reports it in its own field: `status.resend_held` (the owed
+  seats) and `resend_held_since`, and in `net_health` as `resend budget
+  spent, owed: <seats>`; a granted round, a settled floor or a runtime
+  rebuild clears it. It is not a send failure and never counts toward the
+  locked-out verdict.
+- **A `gone` only for what was read** (H1, in v0.1.2 too: a silent
+  permanent loss). A sender answering a named ask reads one window below
+  the highest seq named; it answered `gone` for every named seq under that
+  read, and the asker settled them and walked its frontier past them. Now
+  the sender answers only for seqs inside its read; the asker names only
+  seqs inside `(frontier, cap]` and ignores a `gone` outside that span. The
+  asker's bound alone protects a new seat against a v0.1.2 sender: every
+  seq still missing lies above the frontier and every ask below `frontier +
+  1024`, so the union of what is pending at the sender never spans more
+  than its read.
+- **Ask timestamps** move only when the listing ask was published.
+
+**The probe** (built, tested with the switch forced on by a test seam):
+after the first replay of a session, a seat asks every sender it holds
+history with for the listing of `(frontier, frontier + 1024]`, page by
+page, until a short page or an empty "nothing above" listing (`through ==
+after`, which this build sends and reads; a v0.1.1/v0.1.2 receiver drops
+it). An unanswered ask is judged when the next is due; a sender known to
+answer listings is asked again on 10 s doubling to 600 s; one not known
+gets one ask. With the probe on, listed seqs are exempt from the 60 s
+order bound (never a parked one), and a listing or a full page not yet
+followed by a short one shows as behind. A want or a listing is never
+charged to the hourly budget (its own bound: 64 frames per asker per 10 s,
+384 per minute, one listing per asker per 5 s).
+
+Why it is off: (1) the fallback exemption holds a stream without bound
+when a listed seq is never delivered - a sender that answered and then
+went offline keeps its stream held for as long as it is gone; (2) the
+three-tries give-up (`LISTED_TRIES`), unreachable in v0.1.2, becomes
+reachable through the exemption and gives seqs up as lost; (3) a parked
+seq held its sender's stream (fixed, `|| refused`, kept for its return).
+
+**v0.1.4, before it is switched on:** a bound for the exemption tied to the
+sender being heard (a sender silent for the order bound releases the
+order, as today); `probe_more` (a full page shows as behind) only for
+senders known to send the empty listing; a field run over real relays and
+Tor. Also: a sender before v0.1.1 answers no listing; the held frames are
+memory-only, so a restart fetches them a second time; a sheet field
+carrying the sender's log end (additive) would show the gap without a
+probe.
+
+Pins: `net::delivery_tests`
+(`the_switch_off_keeps_v0_1_2_gap_timing_and_a_parked_seq_never_holds`,
+`a_gone_outside_the_asked_window_is_ignored`,
+`a_rebuild_drops_the_held_resend_note`,
+`a_held_resend_is_its_own_note_and_never_a_lockout`,
+`a_lying_or_stale_listing_changes_nothing`),
+`net::delivery::probe_tests` (`a_named_ask_stays_inside_the_cap` and the
+probe's own), `group_runtime::tests::{a_seq_below_the_read_window_is_never_answered_gone,
+a_spent_budget_names_the_peers_owed_the_tail}`,
+`gap::tests::a_gap_want_is_bounded_and_never_names_seq_zero` (the empty
+listing); with the probe forced on: `nostr_inbound_gap.rs`
 (`a_restart_that_lost_a_far_ahead_hold_shows_it_is_behind_and_fetches_the_tail`,
 `a_lost_probe_ask_is_asked_again`,
-`two_seats_probing_one_sender_both_get_the_tail`), `nostr_open_probe.rs`
-(`a_slow_sender_still_brings_the_whole_tail_and_behind_shows_until_it_has`),
-`net::delivery::probe_tests`, `gap::tests::a_gap_want_is_bounded_and_never_names_seq_zero` (the level listing), `net::delivery_tests`
-(`a_held_resend_is_its_own_note_and_never_a_lockout`,
-`a_lying_or_stale_listing_changes_nothing`),
-`group_runtime::tests::a_spent_budget_names_the_peers_owed_the_tail`.
+`two_seats_probing_one_sender_both_get_the_tail`), `nostr_open_probe.rs`.

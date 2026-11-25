@@ -87,6 +87,8 @@ pub(crate) struct DropSeam {
     pub(crate) cut: Mutex<std::collections::HashSet<MemberId>>,
     /// No gap want or listing ask leaves, and no gap is settled.
     pub(crate) hold_wants: std::sync::atomic::AtomicBool,
+    /// The open probe runs although the release switch is off.
+    pub(crate) force_probe: std::sync::atomic::AtomicBool,
     /// This many listing asks are lost on the way.
     pub(crate) drop_list_asks: std::sync::atomic::AtomicU64,
 }
@@ -108,6 +110,10 @@ impl DropSeam {
     pub(crate) fn drops_listing_ask(&self) -> bool {
         use std::sync::atomic::Ordering::SeqCst;
         self.drop_list_asks.fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1)).is_ok()
+    }
+
+    pub(crate) fn forces_probe(&self) -> bool {
+        self.force_probe.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     pub(crate) fn holds_wants(&self) -> bool {
@@ -953,10 +959,17 @@ impl State {
 
     /// Restart the group runtime on the current dialable set, or park its
     /// ratchet while there is none.
+    #[cfg(test)]
+    pub(crate) fn rebuild_group_net_for_test(&mut self) {
+        self.rebuild_group_net(false);
+    }
+
     fn rebuild_group_net(&mut self, withdrawn: bool) {
         if self.drop_seam.parks_rekey() && self.group_net.is_none() {
             return;
         }
+        // the new outbox reports a spent budget afresh
+        self.delivery.resend_held = None;
         let mls = match self.group_net.take() {
             // the drop latches the stop; the old outbox ends at its next
             // poll and drains its in-flight publish unless a relay went away
