@@ -1925,6 +1925,7 @@ impl State {
                 voter: voter.to_string(),
                 height,
                 head,
+                reason: String::new(),
             },
         );
         self.record(env);

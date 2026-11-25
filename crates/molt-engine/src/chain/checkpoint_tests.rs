@@ -1311,3 +1311,271 @@ fn no_cut_while_a_peer_is_diverged() {
     walter.receive_checkpoint_proposal(9, upto, &hash, false);
     assert!(walter.own_signature_stands(9), "co-signed once healed");
 }
+
+/// A cut proposed while this seat's folded base is missing is refused,
+/// and signed once the base arrives - without the proposer offering it again.
+#[test]
+fn a_cut_refused_while_the_base_is_pending_is_signed_once_it_arrives() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    b.commit_wiki(2, "notes/b.md", "B", &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let hash = checkpoint_state_hash(&walter.own_checkpoint_state(2, true).expect("folded"));
+    walter.receive_checkpoint_proposal(40, 2, &hash, true);
+    let change = ChainChange::CheckpointFolded { upto: 2, state_hash: hash };
+    let petra_sig = identity_sign(b.key("petra"), &approval_bytes(&b.republic_id, 3, &change));
+    walter.receive_approval(40, "petra", 3, &petra_sig);
+    let held = walter.chain.wiki_base.take().expect("the cut kept the tree");
+    b.push(walter.chain.blocks[0].clone());
+    // the next cut, proposed while walter's base is missing
+    b.commit_wiki(3, "c.md", "C", &["petra", "walter"]);
+    walter.receive_block(b.blocks.last().cloned().expect("block"));
+    let head = walter.chain.head.as_ref().expect("head").height;
+    // the honest hash of the next cut, as a seat holding the base computes it
+    let next_hash = {
+        walter.chain.wiki_base = Some(held.clone());
+        let h = checkpoint_state_hash(&walter.own_checkpoint_state(head, true).expect("folded"));
+        walter.chain.wiki_base = None;
+        h
+    };
+    walter.receive_checkpoint_proposal_from("petra", 41, head, &next_hash, true);
+    assert!(!walter.chain.proposal_changes.contains_key(&41), "refused while pending, not even registered");
+    assert!(walter.chain.cut_waiting.contains_key("petra"), "it waits for the base");
+    walter.adopt_wiki_base(Some(molt_core::wiki_fold::wiki_base_canonical_bytes(&held)));
+    assert!(walter.chain.wiki_base.is_some(), "the base arrived");
+    assert!(walter.own_signature_stands(41), "the arrived base lets the seat sign the open cut");
+}
+
+/// Walter after one folded cut with its wiki base taken away, and the
+/// honest hash of the next cut at its head.
+fn walter_missing_the_base() -> (Builder, crate::State, WikiTree, u64, String) {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    b.commit_wiki(2, "notes/b.md", "B", &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let hash = checkpoint_state_hash(&walter.own_checkpoint_state(2, true).expect("folded"));
+    walter.receive_checkpoint_proposal(40, 2, &hash, true);
+    let change = ChainChange::CheckpointFolded { upto: 2, state_hash: hash };
+    let petra_sig = identity_sign(b.key("petra"), &approval_bytes(&b.republic_id, 3, &change));
+    walter.receive_approval(40, "petra", 3, &petra_sig);
+    let held = walter.chain.wiki_base.take().expect("the cut kept the tree");
+    b.push(walter.chain.blocks[0].clone());
+    b.commit_wiki(3, "c.md", "C", &["petra", "walter"]);
+    walter.receive_block(b.blocks.last().cloned().expect("block"));
+    let head = walter.chain.head.as_ref().expect("head").height;
+    walter.chain.wiki_base = Some(held.clone());
+    let next_hash = checkpoint_state_hash(&walter.own_checkpoint_state(head, true).expect("folded"));
+    walter.chain.wiki_base = None;
+    (b, walter, held, head, next_hash)
+}
+
+/// The refusal frame goes out once per cut and reason, not per re-serve.
+#[test]
+fn a_waiting_cut_is_refused_once_per_cut() {
+    let (_, mut walter, _, head, next_hash) = walter_missing_the_base();
+    let before = walter.next_seq;
+    walter.receive_checkpoint_proposal_from("petra", 41, head, &next_hash, true);
+    assert_eq!(walter.next_seq, before + 1, "one refusal");
+    walter.receive_checkpoint_proposal_from("petra", 41, head, &next_hash, true);
+    walter.receive_checkpoint_proposal_from("petra", 41, head, &next_hash, true);
+    assert_eq!(walter.next_seq, before + 1, "a re-serve sends nothing new");
+}
+
+/// A head that moved while the base loaded stales the waiting cut: it is
+/// dropped, not signed, and nothing new is proposed in its place.
+#[test]
+fn a_waiting_cut_whose_head_moved_is_dropped() {
+    let (mut b, mut walter, held, head, next_hash) = walter_missing_the_base();
+    walter.receive_checkpoint_proposal_from("petra", 41, head, &next_hash, true);
+    assert!(walter.chain.cut_waiting.contains_key("petra"));
+    b.commit_applied(60, &["petra", "walter"]);
+    walter.receive_block(b.blocks.last().cloned().expect("block"));
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, head + 1, "the head moved");
+    walter.adopt_wiki_base(Some(molt_core::wiki_fold::wiki_base_canonical_bytes(&held)));
+    assert!(walter.chain.wiki_base.is_some(), "the base arrived");
+    assert!(!walter.own_signature_stands(41), "a stale cut is not signed");
+    assert!(walter.chain.cut_waiting.is_empty(), "and no longer waits");
+    assert_eq!(pending_cut(&walter), None, "nothing proposed in its place");
+}
+
+/// A base arriving judges the cuts that waited for it; it never proposes
+/// one itself, even on the seat that auto-proposes.
+#[test]
+fn an_arriving_base_proposes_no_cut() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    for i in 1..=u64::try_from(AUTO_CHECKPOINT_MIN_LEN).expect("small") {
+        b.commit_applied(i, &["petra", "walter"]);
+    }
+    let mut petra = chain_signer("petra", &b, b.blocks.clone());
+    assert!(petra.chain.blocks.len() >= AUTO_CHECKPOINT_MIN_LEN);
+    petra.rejudge_waiting_cuts();
+    assert_eq!(pending_cut(&petra), None);
+}
+
+/// A peer's reason is one of a fixed few words; anything else reads `unknown`.
+#[test]
+fn a_peer_refusal_reason_is_bounded() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut petra = chain_signer("petra", &b, b.blocks.clone());
+    let Ok(molt_core::Reply::Proposed { id, .. }) = petra.cmd_propose_checkpoint() else {
+        panic!("proposed");
+    };
+    for (seq, (sent, reads)) in (5..).zip([("base loading", "base loading"), ("base\nloading", "unknown"), ("anything", "unknown"), ("base loading\u{7}", "unknown")]) {
+        wire(&mut petra, "walter", seq, WorkspaceEvent::VoteRefused { id, voter: "walter".to_string(), height: 1, head: 0, reason: sent.to_string() });
+        let rows = petra.chain_sync().cut_wait;
+        let row = rows.iter().find(|r| r.seat == "walter").expect("walter waits");
+        assert_eq!(row.reason, reads, "{sent:?}");
+        assert!(!row.reason.chars().any(char::is_control));
+    }
+}
+
+/// A workspace change forgets the waiting cuts and the refusals heard.
+#[test]
+fn a_workspace_reset_forgets_the_cut_waits() {
+    let (_, mut walter, _, head, next_hash) = walter_missing_the_base();
+    walter.receive_checkpoint_proposal_from("petra", 41, head, &next_hash, true);
+    walter.chain.cut_refusals.insert((41, "petra".to_string()), "base loading".to_string());
+    walter.files.base_fetch_logged = Some("vault".to_string());
+    walter.reset_workspace_state();
+    assert!(walter.chain.cut_waiting.is_empty());
+    assert!(walter.chain.cut_refusals.is_empty());
+    assert!(walter.chain.cut_refused_sent.is_empty());
+    assert!(walter.chain.sealed_restores.is_empty());
+    assert_eq!(walter.files.base_fetch_logged, None);
+}
+
+/// Investigation (rejoin plan): a cut and an ordinary card sealed at the
+/// SAME height on different seats. Walter applies the cut first and
+/// prunes to it; the card block has the lower identity. Do all seats end
+/// on one chain?
+#[test]
+#[ignore = "red until the user decides the deterministic cut-versus-card rule at one height"]
+fn a_cut_and_a_card_at_one_height_end_on_one_chain() {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "walter"]);
+    b.commit_applied(2, &["petra", "walter"]);
+    let state = checkpoint_state(&b.blocks, 2).expect("state");
+    let cut = b.seal(3, ChainChange::Checkpoint { upto: 2, state_hash: checkpoint_state_hash(&state) }, &["petra", "walter", "dora"]);
+    let card = (0..40u64)
+        .map(|i| {
+            let change = ChainChange::Applied { proposal_id: 50 + i, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": i }) };
+            b.seal(3, change, &["petra", "dora"])
+        })
+        .find(|c| block_hash(&b.republic_id, c) < block_hash(&b.republic_id, &cut))
+        .expect("a lower card block");
+    // walter: the cut first (prunes), then the lower card block
+    let mut walter = chain_peer_3("walter", &b);
+    wire(&mut walter, "petra", 10, WorkspaceEvent::Committed(cut.clone()));
+    assert!(walter.chain.checkpoint_blob.is_some(), "walter pruned to the cut");
+    wire(&mut walter, "dora", 11, WorkspaceEvent::Committed(card.clone()));
+    // petra: the card first, then the cut
+    let mut petra = chain_peer_3("petra", &b);
+    wire(&mut petra, "dora", 10, WorkspaceEvent::Committed(card.clone()));
+    wire(&mut petra, "walter", 11, WorkspaceEvent::Committed(cut.clone()));
+    // the card branch grows by one block
+    let mut on_card = b.clone();
+    on_card.push(card.clone());
+    let next = on_card.commit(
+        ChainChange::Applied { proposal_id: 99, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": 99 }) },
+        &["petra", "dora"],
+    );
+    wire(&mut walter, "dora", 12, WorkspaceEvent::Committed(next.clone()));
+    wire(&mut petra, "dora", 12, WorkspaceEvent::Committed(next));
+    let tip = |st: &crate::State| st.chain.head.as_ref().map(|h| (h.height, h.hash.clone())).expect("head");
+    eprintln!(
+        "probe cut_vs_card walter={:?} pruned={} petra={:?} walter_diverged={:?}",
+        tip(&walter),
+        walter.chain.checkpoint_blob.is_some(),
+        tip(&petra),
+        walter.chain.diverged.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(tip(&walter), tip(&petra), "one chain");
+}
+
+/// Builder at height 2, a cut at 3 and a card at 3 whose identity is
+/// lower (`card_lower`) or higher than the cut's.
+fn cut_and_card(card_lower: bool) -> (Builder, ChainBlock, ChainBlock) {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "walter"]);
+    b.commit_applied(2, &["petra", "walter"]);
+    let state = checkpoint_state(&b.blocks, 2).expect("state");
+    let cut = b.seal(3, ChainChange::Checkpoint { upto: 2, state_hash: checkpoint_state_hash(&state) }, &["petra", "walter", "dora"]);
+    let card = (0..40u64)
+        .map(|i| {
+            let change = ChainChange::Applied { proposal_id: 50 + i, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": i }) };
+            b.seal(3, change, &["petra", "dora"])
+        })
+        .find(|c| (block_hash(&b.republic_id, c) < block_hash(&b.republic_id, &cut)) == card_lower)
+        .expect("a card block on the wanted side");
+    (b, cut, card)
+}
+
+fn tip_of(st: &crate::State) -> (u64, String) {
+    st.chain.head.as_ref().map(|h| (h.height, h.hash.clone())).expect("head")
+}
+
+/// Mirrored: the cut has the lower identity. Both arrival orders end on
+/// the cut, and the card returns to the vote where it had applied.
+#[test]
+fn a_lower_cut_wins_its_height_in_either_order() {
+    let (b, cut, card) = cut_and_card(false);
+    let mut walter = chain_peer_3("walter", &b);
+    wire(&mut walter, "dora", 10, WorkspaceEvent::Committed(card.clone()));
+    wire(&mut walter, "petra", 11, WorkspaceEvent::Committed(cut.clone()));
+    let mut petra = chain_peer_3("petra", &b);
+    wire(&mut petra, "walter", 10, WorkspaceEvent::Committed(cut.clone()));
+    wire(&mut petra, "dora", 11, WorkspaceEvent::Committed(card));
+    assert_eq!(tip_of(&walter), tip_of(&petra));
+    assert!(walter.chain.checkpoint_blob.is_some() && petra.chain.checkpoint_blob.is_some(), "both pruned to the cut");
+}
+
+/// Today's behaviour: a seat that pruned to the cut cannot take the lower
+/// card; the other two converge and it stays apart until it rejoins.
+#[test]
+fn a_seat_pruned_without_the_dropped_period_stays_apart() {
+    let (b, cut, card) = cut_and_card(true);
+    let mut old = chain_peer_3("walter", &b);
+    wire(&mut old, "petra", 10, WorkspaceEvent::Committed(cut.clone()));
+    let mut petra = chain_peer_3("petra", &b);
+    wire(&mut petra, "dora", 10, WorkspaceEvent::Committed(card.clone()));
+    wire(&mut petra, "walter", 11, WorkspaceEvent::Committed(cut));
+    let mut dora = chain_peer_3("dora", &b);
+    wire(&mut dora, "petra", 10, WorkspaceEvent::Committed(card.clone()));
+    wire(&mut old, "dora", 11, WorkspaceEvent::Committed(card));
+    assert_eq!(tip_of(&petra), tip_of(&dora), "the two that can decide agree");
+    assert_ne!(tip_of(&old), tip_of(&petra), "the seat without the period stays on the cut");
+}
+
+/// The open cut names the seats it waits for and why: the own seat while
+/// its base loads, a peer that said so, an unheard one as offline.
+#[test]
+fn an_open_cut_names_who_it_waits_for() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut petra = chain_signer("petra", &b, b.blocks.clone());
+    let Ok(molt_core::Reply::Proposed { id, .. }) = petra.cmd_propose_checkpoint() else {
+        panic!("proposed");
+    };
+    let rows = petra.chain_sync().cut_wait;
+    let seats: Vec<&str> = rows.iter().map(|r| r.seat.as_str()).collect();
+    assert_eq!(seats, ["walter", "dora"], "petra signed, the others not yet");
+    assert!(rows.iter().all(|r| r.reason == "offline"), "{rows:?}");
+    // walter says why
+    wire(&mut petra, "walter", 5, WorkspaceEvent::VoteRefused {
+        id,
+        voter: "walter".to_string(),
+        height: 1,
+        head: 0,
+        reason: "base loading".to_string(),
+    });
+    let rows = petra.chain_sync().cut_wait;
+    assert!(rows.iter().any(|r| r.seat == "walter" && r.reason == "base loading"), "{rows:?}");
+    // a refusal naming another seat than its sender is not a reason
+    wire(&mut petra, "walter", 6, WorkspaceEvent::VoteRefused {
+        id,
+        voter: "dora".to_string(),
+        height: 1,
+        head: 0,
+        reason: "base loading".to_string(),
+    });
+    assert!(petra.chain_sync().cut_wait.iter().any(|r| r.seat == "dora" && r.reason == "offline"));
+}

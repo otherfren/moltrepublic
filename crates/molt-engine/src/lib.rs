@@ -1144,6 +1144,9 @@ pub(crate) struct FilePlane {
     /// left running for the old one would wait forever for bytes nobody
     /// has any more.
     pub(crate) wiki_base_fetching: Option<String>,
+    /// The last base fetch outcome logged at info (`wiki:<reason>` /
+    /// `vault`), so a repeating one is not logged every attempt.
+    pub(crate) base_fetch_logged: Option<String>,
     /// Vault S3a: the payloads this seat holds and the fetches after the
     /// ones it must hold.
     pub(crate) vault: crate::net::vault_payload::VaultPlane,
@@ -1360,6 +1363,13 @@ pub(crate) struct ChainProjection {
     pub(crate) catchup_since: u64,
     /// Fork decisions since open (S1 diagnostics).
     pub(crate) fork_decisions: u64,
+    /// Cuts refused while a base was missing: the newest per proposer,
+    /// `(id, upto, state_hash, folded)`, judged again when it arrives.
+    pub(crate) cut_waiting: BTreeMap<String, (u64, u64, String, bool)>,
+    /// Why a seat said it cannot sign a cut: `(cut id, seat)` -> reason.
+    pub(crate) cut_refusals: BTreeMap<(u64, String), String>,
+    /// The `(cut id, reason)` this seat already told its proposer.
+    pub(crate) cut_refused_sent: std::collections::BTreeSet<(u64, String)>,
     /// The restore cards a sealed `Restored` block closed by its own
     /// change, newest last: a displaced block reopens exactly these.
     /// Runtime only; bounded.
@@ -2030,6 +2040,7 @@ impl State {
                 wiki_base_fetch: None,
                 wiki_base_next_try: 0,
                 wiki_base_fetching: None,
+                base_fetch_logged: None,
                 vault: crate::net::vault_payload::VaultPlane::default(),
                 vault_base: crate::net::vault_base::VaultBasePlane::default(),
                 share_paths: HashMap::new(),

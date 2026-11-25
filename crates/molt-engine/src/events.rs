@@ -996,6 +996,11 @@ impl State {
         self.files.mirror_pages.clear();
         self.files.mirror_failed.clear();
         self.chain.proposal_changes.clear();
+        self.chain.cut_waiting.clear();
+        self.chain.cut_refusals.clear();
+        self.chain.cut_refused_sent.clear();
+        self.chain.sealed_restores.clear();
+        self.files.base_fetch_logged = None;
         self.chain.pending_blocks.clear();
         self.chain.catchup_from = None;
         self.chain.catchup_since = 0;

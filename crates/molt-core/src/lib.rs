@@ -3250,6 +3250,10 @@ pub enum WorkspaceEvent {
         /// This node's head - what a counting signature must build on.
         #[serde(default)]
         head: u64,
+        /// Set when the sender refused to SIGN `id` itself (`voter` is the
+        /// sender), e.g. `base loading` for a cut. Absent on an older wire.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        reason: String,
     },
     /// A pending proposal was declined.
     Declined {
@@ -9121,6 +9125,9 @@ pub struct ChainSync {
     /// Why `block-v2` cannot be enabled now ("" = it can, or it is on).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub block_v2_wait: String,
+    /// The seats an open cut still waits for, and why if known.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cut_wait: Vec<CutWait>,
     /// A6: the furthest peer ahead of this node on its branch ("" = level).
     #[serde(default)]
     pub ahead_peer: MemberId,
@@ -9137,6 +9144,15 @@ pub struct ChainSync {
     /// link (`chain_rescue_plan.md` §6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub abandoned: Option<branch::BranchAbandoned>,
+}
+
+/// One seat an open cut waits for ([`ChainSync::cut_wait`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CutWait {
+    /// The seat.
+    pub seat: MemberId,
+    /// `base loading`, `offline` or `unknown`.
+    pub reason: String,
 }
 
 /// One delivered block this node refused ([`ChainSync::refused`]).

@@ -659,6 +659,10 @@ impl State {
             }
             // A6: a peer dropped a vote of OURS - only that (a frame naming
             // another member's vote is that member's business, never ours)
+            // a peer cannot sign a cut itself, and says why
+            WorkspaceEvent::VoteRefused { id, voter, reason, .. } if !reason.is_empty() && voter == from => {
+                self.note_cut_refusal(id.0, &from, &reason);
+            }
             WorkspaceEvent::VoteRefused { id, voter, head, .. }
                 if self.is_chain_governed() && voter == self.member() =>
             {
@@ -775,7 +779,7 @@ impl State {
                 if self.is_chain_governed() =>
             {
                 self.note_peer_claim(&from, upto, Some(envelope.seq), crate::chain::PeerClaim::Holds);
-                self.receive_checkpoint_proposal(id.0, upto, &state_hash, folded);
+                self.receive_checkpoint_proposal_from(&from, id.0, upto, &state_hash, folded);
             }
             // WP4b: a pruned peer served its blob ahead of the anchor —
             // stash it; the adopt happens hard-verified once the anchor
