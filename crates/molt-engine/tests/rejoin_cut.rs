@@ -179,8 +179,8 @@ async fn a_seat_restored_after_a_folded_cut_signs_the_next_cut() {
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
     let (a, b, v, phrase) = found_three(tmp.path(), &url).await;
-    ratify(&a, &v, "a.md").await;
-    ratify(&a, &v, "b.md").await;
+    ratify(&a, &v, &format!("{}.md", "a")).await;
+    ratify(&a, &v, &format!("{}.md", "b")).await;
     assert!(within(60, || async { wiki(&a).await.0 == 2 && wiki(&b).await.0 == 2 && wiki(&v).await.0 == 2 }).await, "every seat holds both pages");
     a.execute(Command::ProposeCheckpoint).await.expect("cut");
     assert!(within(90, || async { cuts(&a).await == 1 && cuts(&b).await == 1 && cuts(&v).await == 1 }).await, "the first cut seals");
@@ -188,7 +188,7 @@ async fn a_seat_restored_after_a_folded_cut_signs_the_next_cut() {
     let c = restore_petra(&a, tmp.path(), &url, phrase).await;
     let base = within(180, || async { wiki(&c).await == (2, false) }).await;
     eprintln!("probe restored_after_cut base_arrived={base} wiki={:?}", wiki(&c).await);
-    ratify(&a, &v, "c.md").await;
+    ratify(&a, &v, &format!("{}.md", "c")).await;
     // every seat at the same head before the cut (a stale proposer's cut is ignored)
     assert!(within(60, || async { wiki(&a).await.0 == 3 && wiki(&v).await.0 == 3 && wiki(&c).await.0 == 3 }).await, "c.md everywhere");
     a.execute(Command::ProposeCheckpoint).await.expect("second cut");
@@ -211,8 +211,8 @@ async fn a_seat_restored_without_a_cut_signs_the_first_cut() {
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
     let (a, b, v, phrase) = found_three(tmp.path(), &url).await;
-    ratify(&a, &v, "a.md").await;
-    ratify(&a, &v, "b.md").await;
+    ratify(&a, &v, &format!("{}.md", "a")).await;
+    ratify(&a, &v, &format!("{}.md", "b")).await;
     assert!(within(60, || async { wiki(&b).await.0 == 2 }).await, "petra holds both pages");
     drop(b);
     let c = restore_petra(&a, tmp.path(), &url, phrase).await;
@@ -236,8 +236,8 @@ async fn a_seat_restored_far_above_its_anchor_gets_the_base_and_cuts() {
     let url = relay.url().await.to_string();
     let tmp = tempfile::tempdir().expect("tmp");
     let (a, b, v, phrase) = found_three(tmp.path(), &url).await;
-    ratify(&a, &v, "a.md").await;
-    ratify(&a, &v, "b.md").await;
+    ratify(&a, &v, &format!("{}.md", "a")).await;
+    ratify(&a, &v, &format!("{}.md", "b")).await;
     assert!(within(60, || async { wiki(&a).await.0 == 2 && wiki(&b).await.0 == 2 && wiki(&v).await.0 == 2 }).await, "every seat holds both pages");
     a.execute(Command::ProposeCheckpoint).await.expect("cut");
     assert!(within(90, || async { cuts(&a).await == 1 && cuts(&b).await == 1 && cuts(&v).await == 1 }).await, "the first cut seals");
