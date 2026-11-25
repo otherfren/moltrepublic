@@ -17,19 +17,6 @@ use super::*;
 #[cfg(feature = "measure")]
 pub(crate) static RESIGNS: std::sync::Mutex<Option<std::collections::BTreeMap<u64, u64>>> = std::sync::Mutex::new(None);
 
-/// The history the newest cut dropped: the anchor material below it and
-/// the blocks between, so a contender at the cut's height can still win
-/// by the fork rule on a seat that already pruned.
-#[derive(Debug, Clone)]
-pub(crate) struct PreCut {
-    /// The height of the cut that dropped them.
-    pub(crate) cut_height: u64,
-    pub(crate) blob: Option<molt_core::CheckpointState>,
-    pub(crate) blocks: Vec<ChainBlock>,
-    pub(crate) wiki_base: Option<WikiTree>,
-    pub(crate) vault_base: Option<molt_core::vault::VaultBase>,
-}
-
 /// Restore cards remembered with the change that sealed them.
 const SEALED_RESTORES_KEPT: usize = 64;
 
@@ -1362,13 +1349,6 @@ impl State {
                         tracing::error!(wiki_restored = wiki_back, "vault_base=not_persisted action=keep_history");
                     }
                     Ok((blob, folded)) => {
-                        self.chain.pre_cut = Some(PreCut {
-                            cut_height: anchor_height,
-                            blob: self.chain.checkpoint_blob.clone(),
-                            blocks: self.chain.blocks.iter().filter(|b| b.height < anchor_height).cloned().collect(),
-                            wiki_base: self.chain.wiki_base.clone(),
-                            vault_base: self.chain.vault_base.clone(),
-                        });
                         if let Some(tree) = folded.tree {
                             self.chain.wiki_base = Some(tree);
                         }

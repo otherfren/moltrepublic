@@ -687,19 +687,6 @@ impl State {
             }
         }
         let Some(f) = fork else {
-            // a run that starts AT our anchor links into the dropped period
-            if let Some(lowest) = self.chain.fork_candidates.keys().next().copied().filter(|h| *h == anchor) {
-                let mut run = Vec::new();
-                let mut h = lowest;
-                while let Some(c) = self.chain.fork_candidates.get(&h) {
-                    run.push(c.clone());
-                    h = h.saturating_add(1);
-                }
-                if self.reorg_across_cut(from, run) {
-                    self.chain.fork_candidates.clear();
-                    return;
-                }
-            }
             // nothing links yet: ask for the run below the lowest candidate
             if let Some((lowest, cand)) = self.chain.fork_candidates.iter().next().map(|(h, c)| (*h, c.clone())) {
                 if lowest > anchor.saturating_add(1) {
@@ -993,89 +980,6 @@ impl State {
     /// WP2: the seal consumed this seat's signature and the head move
     /// pruned its stance; the displaced block or the stashed voters prove
     /// it, so the approval stands again and re-signs at the new head.
-    /// The fork rule at our anchor: `run` starts at the height of the cut
-    /// we pruned to and has the lower identity there. Rebuild the chain
-    /// from the period that cut dropped plus `run`, verify it whole, and
-    /// adopt it; the displaced cut is re-proposed by the usual rule, the
-    /// displaced cards return to the vote. `false` = nothing changed.
-    fn reorg_across_cut(&mut self, from: &str, mut run: Vec<ChainBlock>) -> bool {
-        let Some(pre) = self.chain.pre_cut.clone() else { return false };
-        // the stashed blocks of that branch above the run ride along
-        while let Some(next) = run.last().and_then(|l| self.chain.fork_candidates.get(&(l.height + 1))).cloned() {
-            run.push(next);
-        }
-        let (Some(anchor), Some(first)) = (self.chain.blocks.first().cloned(), run.first().cloned()) else {
-            return false;
-        };
-        if anchor.height != pre.cut_height || first.height != anchor.height || CutKind::of(&anchor.change).is_none() {
-            return false;
-        }
-        let (mine, theirs) = (self.block_id_of(&anchor), self.block_id_of(&first));
-        if theirs >= mine {
-            return false;
-        }
-        let mut candidate = pre.blocks.clone();
-        candidate.extend(run.iter().cloned());
-        let held = Held { wiki: pre.wiki_base.as_ref(), vault: pre.vault_base.as_ref() };
-        let walk = match &pre.blob {
-            None => walk_chain(&candidate),
-            Some(blob) => walk_suffix_chain(blob, &candidate, &self.republic_id(), held),
-        };
-        let walk = match walk {
-            Ok(w) => w,
-            Err(e) => {
-                tracing::warn!(%from, height = first.height, error = %e, "the other branch at the cut does not verify");
-                return false;
-            }
-        };
-        let ids = (applied_id(&anchor), applied_id(&first));
-        let dropped = std::mem::take(&mut self.chain.blocks);
-        let kept: BTreeSet<u64> = run
-            .iter()
-            .filter_map(|b| match &b.change {
-                ChainChange::Applied { proposal_id, .. } => Some(*proposal_id),
-                _ => None,
-            })
-            .collect();
-        tracing::warn!(%from, fork = first.height, dropped = dropped.len(), adopted = run.len(), "re-basing across the cut onto the other branch");
-        self.note_fork(from, first.height, "rebased", &mine, &theirs, ids);
-        self.chain.pre_cut = None;
-        self.chain.fork_candidates.clear();
-        self.set_checkpoint_blob(pre.blob.clone());
-        if self.persist_wiki_base(pre.wiki_base.as_ref()) {
-            self.chain.wiki_base = pre.wiki_base.clone();
-        }
-        if self.persist_vault_base(pre.vault_base.as_ref()) {
-            self.set_vault_base(pre.vault_base.clone());
-        }
-        self.chain.blocks = candidate;
-        self.chain.head = Some(walk.head.clone());
-        self.chain.walk = Some(walk);
-        self.chain.head_moved_at = self.presence_now();
-        self.forget_wiki_stamps();
-        self.apply_chain_to_state();
-        for b in dropped.iter().rev() {
-            if let ChainChange::Applied { proposal_id, .. } = &b.change {
-                if !kept.contains(proposal_id) {
-                    self.return_displaced_card(*proposal_id, b);
-                }
-            } else if !run.iter().any(|r| r.change == b.change) {
-                self.return_displaced_restore(b);
-            }
-        }
-        self.vault_displaced(&dropped, &kept);
-        self.in_block_batch(|st| {
-            for b in &run {
-                st.after_block_applied(b);
-            }
-            st.chain.pending_sigs.clear();
-            st.chain.diverged.remove(from);
-        });
-        self.persist_chain_now();
-        self.emit_session(crate::SessionScope::Full);
-        true
-    }
-
     /// A displaced `Restored` block goes back to the vote like an applied
     /// card: its card reopens (the newest one this seat settled for the
     /// seat) with the block's change registered again, consent included,
@@ -1141,10 +1045,10 @@ impl State {
     /// smaller hash wins the single branch, so adopt it and re-base the
     /// displaced proposal. A deeper conflict is logged (deep reorg is Phase 3).
     fn tie_break(&mut self, from: &str, seq: Option<u64>, block: ChainBlock) {
-        let Some(existing) = self.chain.blocks.iter().find(|b| b.height == block.height).cloned() else {
+        let Some(existing) = self.chain.blocks.iter().find(|b| b.height == block.height) else {
             return;
         };
-        let (incoming, current) = (self.block_id_of(&block), self.block_id_of(&existing));
+        let (incoming, current) = (self.block_id_of(&block), self.block_id_of(existing));
         if incoming == current {
             // the block we hold, or another attestation of it (v2): the
             // sender holds our history at this height; the first one stays
@@ -1157,7 +1061,7 @@ impl State {
             return;
         }
         let rid = self.republic_id();
-        let existing_id = applied_id(&existing);
+        let existing_id = applied_id(existing);
         let existing_chosen = matches!(existing.change, ChainChange::BranchChosen { .. });
         let is_tip = self.chain.blocks.last().is_some_and(|b| b.height == block.height);
         // A2.1: a contender on a foreign `prev`, or one below the tip, is
@@ -1177,12 +1081,6 @@ impl State {
             block_signers(&rid, &h.identities, &block, h.block_v2_from)
                 .is_ok_and(|signers| signers.len() >= usize::from(h.rule_m))
         });
-        // the contest is AT our anchor, a cut we pruned to: the dropped
-        // period still decides it by the fork rule
-        let at_anchor = self.chain.blocks.first().is_some_and(|b| b.height == block.height);
-        if at_anchor && !existing_chosen && incoming < current && signed && self.reorg_across_cut(from, vec![block.clone()]) {
-            return;
-        }
         if shared_prev && existing.change == block.change {
             // the same decision under another attestation list: not a fork
             if incoming < current && signed {
