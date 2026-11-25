@@ -164,7 +164,7 @@ pub(crate) fn is_base_entry_op(payload: &serde_json::Value) -> bool {
         Some(wiki_base::WIKI_BASE_OP | vault_base::VAULT_BASE_OP)
     )
 }
-pub(crate) use governance::{ParkedApproval, PendingApproval, RELAYS_WAIT};
+pub(crate) use governance::{ParkedApproval, PendingApproval, PreCut, RELAYS_WAIT};
 pub(crate) use membership::{AnchorFirst, AttemptBook, NostrRekey, MINTED_TICKETS, RecoverSendCounts, PendingRecovery, RecoverProgressReport, REJOIN_NEEDS_A_LINK};
 #[cfg(test)]
 pub(crate) use membership::RECOVER_PART_MAX;

@@ -1352,7 +1352,6 @@ fn a_cut_refused_while_the_base_is_pending_is_signed_once_it_arrives() {
 /// prunes to it; the card block has the lower identity. Do all seats end
 /// on one chain?
 #[test]
-#[ignore = "rejoin plan: red, documents the hole until it is fixed"]
 fn a_cut_and_a_card_at_one_height_end_on_one_chain() {
     let mut b = Builder::new(&["petra", "walter", "dora"], 2);
     b.commit_applied(1, &["petra", "walter"]);
@@ -1393,4 +1392,81 @@ fn a_cut_and_a_card_at_one_height_end_on_one_chain() {
         walter.chain.diverged.keys().collect::<Vec<_>>()
     );
     assert_eq!(tip(&walter), tip(&petra), "one chain");
+}
+
+/// Builder at height 2, a cut at 3 and a card at 3 whose identity is
+/// lower (`card_lower`) or higher than the cut's.
+fn cut_and_card(card_lower: bool) -> (Builder, ChainBlock, ChainBlock) {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "walter"]);
+    b.commit_applied(2, &["petra", "walter"]);
+    let state = checkpoint_state(&b.blocks, 2).expect("state");
+    let cut = b.seal(3, ChainChange::Checkpoint { upto: 2, state_hash: checkpoint_state_hash(&state) }, &["petra", "walter", "dora"]);
+    let card = (0..40u64)
+        .map(|i| {
+            let change = ChainChange::Applied { proposal_id: 50 + i, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": i }) };
+            b.seal(3, change, &["petra", "dora"])
+        })
+        .find(|c| (block_hash(&b.republic_id, c) < block_hash(&b.republic_id, &cut)) == card_lower)
+        .expect("a card block on the wanted side");
+    (b, cut, card)
+}
+
+fn tip_of(st: &crate::State) -> (u64, String) {
+    st.chain.head.as_ref().map(|h| (h.height, h.hash.clone())).expect("head")
+}
+
+/// Mirrored: the cut has the lower identity. Both arrival orders end on
+/// the cut, and the card returns to the vote where it had applied.
+#[test]
+fn a_lower_cut_wins_its_height_in_either_order() {
+    let (b, cut, card) = cut_and_card(false);
+    let mut walter = chain_peer_3("walter", &b);
+    wire(&mut walter, "dora", 10, WorkspaceEvent::Committed(card.clone()));
+    wire(&mut walter, "petra", 11, WorkspaceEvent::Committed(cut.clone()));
+    let mut petra = chain_peer_3("petra", &b);
+    wire(&mut petra, "walter", 10, WorkspaceEvent::Committed(cut.clone()));
+    wire(&mut petra, "dora", 11, WorkspaceEvent::Committed(card));
+    assert_eq!(tip_of(&walter), tip_of(&petra));
+    assert!(walter.chain.checkpoint_blob.is_some() && petra.chain.checkpoint_blob.is_some(), "both pruned to the cut");
+}
+
+/// The card wins below a successor: walter pruned to the cut and already
+/// holds a block on top of it when the card branch (card + next) arrives.
+#[test]
+fn a_lower_card_branch_wins_over_a_cut_with_a_successor() {
+    let (b, cut, card) = cut_and_card(true);
+    let mut on_cut = b.clone();
+    on_cut.push(cut.clone());
+    let above = on_cut.commit(ChainChange::Applied { proposal_id: 98, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": 98 }) }, &["walter", "dora"]);
+    let mut on_card = b.clone();
+    on_card.push(card.clone());
+    let next = on_card.commit(ChainChange::Applied { proposal_id: 99, surface: Surface::Memory, payload: json!({ "op": "add_note", "id": 99 }) }, &["petra", "dora"]);
+    let mut walter = chain_peer_3("walter", &b);
+    wire(&mut walter, "petra", 10, WorkspaceEvent::Committed(cut));
+    wire(&mut walter, "dora", 11, WorkspaceEvent::Committed(above));
+    wire(&mut walter, "dora", 12, WorkspaceEvent::Committed(next.clone()));
+    wire(&mut walter, "dora", 13, WorkspaceEvent::Committed(card));
+    assert_eq!(tip_of(&walter), (4, block_hash(&b.republic_id, &next)), "on the card branch");
+    assert!(walter.chain.checkpoint_blob.is_none(), "re-anchored below the displaced cut");
+    assert!(walter.proposals.get(&98).map_or(true, |p| p.state != ProposalState::Applied), "the block above the cut is displaced");
+}
+
+/// Known limit: a seat that pruned WITHOUT the dropped period (an older
+/// build, or a restart after the prune) cannot take part; the other two
+/// converge and it stays apart until it rejoins.
+#[test]
+fn a_seat_pruned_without_the_dropped_period_stays_apart() {
+    let (b, cut, card) = cut_and_card(true);
+    let mut old = chain_peer_3("walter", &b);
+    wire(&mut old, "petra", 10, WorkspaceEvent::Committed(cut.clone()));
+    old.chain.pre_cut = None;
+    let mut petra = chain_peer_3("petra", &b);
+    wire(&mut petra, "dora", 10, WorkspaceEvent::Committed(card.clone()));
+    wire(&mut petra, "walter", 11, WorkspaceEvent::Committed(cut));
+    let mut dora = chain_peer_3("dora", &b);
+    wire(&mut dora, "petra", 10, WorkspaceEvent::Committed(card.clone()));
+    wire(&mut old, "dora", 11, WorkspaceEvent::Committed(card));
+    assert_eq!(tip_of(&petra), tip_of(&dora), "the two that can decide agree");
+    assert_ne!(tip_of(&old), tip_of(&petra), "the seat without the period stays on the cut");
 }

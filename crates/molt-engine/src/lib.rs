@@ -1360,6 +1360,9 @@ pub(crate) struct ChainProjection {
     pub(crate) catchup_since: u64,
     /// Fork decisions since open (S1 diagnostics).
     pub(crate) fork_decisions: u64,
+    /// What the newest cut dropped, kept until the next one so the fork
+    /// rule can still replace that cut. Runtime only.
+    pub(crate) pre_cut: Option<chain::PreCut>,
     /// The restore cards a sealed `Restored` block closed by its own
     /// change, newest last: a displaced block reopens exactly these.
     /// Runtime only; bounded.
