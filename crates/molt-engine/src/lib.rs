@@ -1368,6 +1368,8 @@ pub(crate) struct ChainProjection {
     pub(crate) cut_waiting: BTreeMap<String, (u64, u64, String, bool)>,
     /// Why a seat said it cannot sign a cut: `(cut id, seat)` -> reason.
     pub(crate) cut_refusals: BTreeMap<(u64, String), String>,
+    /// The `(cut id, reason)` this seat already told its proposer.
+    pub(crate) cut_refused_sent: std::collections::BTreeSet<(u64, String)>,
     /// The restore cards a sealed `Restored` block closed by its own
     /// change, newest last: a displaced block reopens exactly these.
     /// Runtime only; bounded.

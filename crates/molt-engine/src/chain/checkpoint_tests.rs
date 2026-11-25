@@ -1346,6 +1346,104 @@ fn a_cut_refused_while_the_base_is_pending_is_signed_once_it_arrives() {
     assert!(walter.own_signature_stands(41), "the arrived base lets the seat sign the open cut");
 }
 
+/// Walter after one folded cut with its wiki base taken away, and the
+/// honest hash of the next cut at its head.
+fn walter_missing_the_base() -> (Builder, crate::State, WikiTree, u64, String) {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
+    b.commit_wiki(2, "notes/b.md", "B", &["petra", "walter"]);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let hash = checkpoint_state_hash(&walter.own_checkpoint_state(2, true).expect("folded"));
+    walter.receive_checkpoint_proposal(40, 2, &hash, true);
+    let change = ChainChange::CheckpointFolded { upto: 2, state_hash: hash };
+    let petra_sig = identity_sign(b.key("petra"), &approval_bytes(&b.republic_id, 3, &change));
+    walter.receive_approval(40, "petra", 3, &petra_sig);
+    let held = walter.chain.wiki_base.take().expect("the cut kept the tree");
+    b.push(walter.chain.blocks[0].clone());
+    b.commit_wiki(3, "c.md", "C", &["petra", "walter"]);
+    walter.receive_block(b.blocks.last().cloned().expect("block"));
+    let head = walter.chain.head.as_ref().expect("head").height;
+    walter.chain.wiki_base = Some(held.clone());
+    let next_hash = checkpoint_state_hash(&walter.own_checkpoint_state(head, true).expect("folded"));
+    walter.chain.wiki_base = None;
+    (b, walter, held, head, next_hash)
+}
+
+/// The refusal frame goes out once per cut and reason, not per re-serve.
+#[test]
+fn a_waiting_cut_is_refused_once_per_cut() {
+    let (_, mut walter, _, head, next_hash) = walter_missing_the_base();
+    let before = walter.next_seq;
+    walter.receive_checkpoint_proposal_from("petra", 41, head, &next_hash, true);
+    assert_eq!(walter.next_seq, before + 1, "one refusal");
+    walter.receive_checkpoint_proposal_from("petra", 41, head, &next_hash, true);
+    walter.receive_checkpoint_proposal_from("petra", 41, head, &next_hash, true);
+    assert_eq!(walter.next_seq, before + 1, "a re-serve sends nothing new");
+}
+
+/// A head that moved while the base loaded stales the waiting cut: it is
+/// dropped, not signed, and nothing new is proposed in its place.
+#[test]
+fn a_waiting_cut_whose_head_moved_is_dropped() {
+    let (mut b, mut walter, held, head, next_hash) = walter_missing_the_base();
+    walter.receive_checkpoint_proposal_from("petra", 41, head, &next_hash, true);
+    assert!(walter.chain.cut_waiting.contains_key("petra"));
+    b.commit_applied(60, &["petra", "walter"]);
+    walter.receive_block(b.blocks.last().cloned().expect("block"));
+    assert_eq!(walter.chain.head.as_ref().expect("head").height, head + 1, "the head moved");
+    walter.adopt_wiki_base(Some(molt_core::wiki_fold::wiki_base_canonical_bytes(&held)));
+    assert!(walter.chain.wiki_base.is_some(), "the base arrived");
+    assert!(!walter.own_signature_stands(41), "a stale cut is not signed");
+    assert!(walter.chain.cut_waiting.is_empty(), "and no longer waits");
+    assert_eq!(pending_cut(&walter), None, "nothing proposed in its place");
+}
+
+/// A base arriving judges the cuts that waited for it; it never proposes
+/// one itself, even on the seat that auto-proposes.
+#[test]
+fn an_arriving_base_proposes_no_cut() {
+    let mut b = Builder::new(&["petra", "walter"], 2);
+    for i in 1..=u64::try_from(AUTO_CHECKPOINT_MIN_LEN).expect("small") {
+        b.commit_applied(i, &["petra", "walter"]);
+    }
+    let mut petra = chain_signer("petra", &b, b.blocks.clone());
+    assert!(petra.chain.blocks.len() >= AUTO_CHECKPOINT_MIN_LEN);
+    petra.rejudge_waiting_cuts();
+    assert_eq!(pending_cut(&petra), None);
+}
+
+/// A peer's reason is one of a fixed few words; anything else reads `unknown`.
+#[test]
+fn a_peer_refusal_reason_is_bounded() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut petra = chain_signer("petra", &b, b.blocks.clone());
+    let Ok(molt_core::Reply::Proposed { id, .. }) = petra.cmd_propose_checkpoint() else {
+        panic!("proposed");
+    };
+    for (seq, (sent, reads)) in (5..).zip([("base loading", "base loading"), ("base\nloading", "unknown"), ("anything", "unknown"), ("base loading\u{7}", "unknown")]) {
+        wire(&mut petra, "walter", seq, WorkspaceEvent::VoteRefused { id, voter: "walter".to_string(), height: 1, head: 0, reason: sent.to_string() });
+        let rows = petra.chain_sync().cut_wait;
+        let row = rows.iter().find(|r| r.seat == "walter").expect("walter waits");
+        assert_eq!(row.reason, reads, "{sent:?}");
+        assert!(!row.reason.chars().any(char::is_control));
+    }
+}
+
+/// A workspace change forgets the waiting cuts and the refusals heard.
+#[test]
+fn a_workspace_reset_forgets_the_cut_waits() {
+    let (_, mut walter, _, head, next_hash) = walter_missing_the_base();
+    walter.receive_checkpoint_proposal_from("petra", 41, head, &next_hash, true);
+    walter.chain.cut_refusals.insert((41, "petra".to_string()), "base loading".to_string());
+    walter.files.base_fetch_logged = Some("vault".to_string());
+    walter.reset_workspace_state();
+    assert!(walter.chain.cut_waiting.is_empty());
+    assert!(walter.chain.cut_refusals.is_empty());
+    assert!(walter.chain.cut_refused_sent.is_empty());
+    assert!(walter.chain.sealed_restores.is_empty());
+    assert_eq!(walter.files.base_fetch_logged, None);
+}
+
 /// Investigation (rejoin plan): a cut and an ordinary card sealed at the
 /// SAME height on different seats. Walter applies the cut first and
 /// prunes to it; the card block has the lower identity. Do all seats end

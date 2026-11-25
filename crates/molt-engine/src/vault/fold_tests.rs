@@ -476,6 +476,23 @@ fn a_replaced_payload_retires_once_a_pending_base_arrives() {
     assert!(st.vault_payload_held(&s2), "the current one stays");
 }
 
+/// A cut refused while the vault base was missing is signed once it arrives.
+#[test]
+fn a_cut_waiting_for_the_vault_base_is_signed_once_it_arrives() {
+    let rt = runtime();
+    let _g = rt.enter();
+    let (b, holder, _) = two_versions_cut();
+    let mut st = seat_on("c", &b, holder.chain.checkpoint_blob.clone(), holder.chain.blocks.clone());
+    assert!(st.vault_base_pending());
+    let upto = holder.chain.head.as_ref().expect("head").height;
+    let hash = holder.own_cut_hash(upto, holder.cut_kind(false)).expect("own projection");
+    st.receive_checkpoint_proposal_from("a", 77, upto, &hash, false);
+    assert!(st.chain.cut_waiting.contains_key("a"), "it waits for the base");
+    st.cmd_net_vault_base_fetched(base_bytes(&holder)).expect("ack");
+    assert!(st.own_signature_stands(77), "the arrived base lets the seat sign");
+    assert!(st.chain.cut_waiting.is_empty());
+}
+
 #[test]
 fn holder_x_coordinates_survive_a_cut_and_a_recovery() {
     let rt = runtime();

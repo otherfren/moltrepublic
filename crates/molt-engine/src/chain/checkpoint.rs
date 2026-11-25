@@ -200,11 +200,9 @@ impl State {
         let kind = self.cut_kind(folded);
         let ours = match self.own_cut_hash(upto, kind) {
             Ok(hash) => hash,
-            Err(e) if self.wiki_base_pending() || self.vault_base_pending() => {
-                tracing::info!(%id, upto, proposer = from, "cut=waiting reason=base_loading");
+            Err(_) if self.wiki_base_pending() || self.vault_base_pending() => {
                 self.chain.cut_waiting.insert(from.to_string(), (id, upto, state_hash.to_string(), folded));
                 self.tell_the_proposer_why(id, upto, CUT_BASE_LOADING);
-                let _ = e;
                 return;
             }
             Err(e) => {
@@ -257,21 +255,23 @@ impl State {
         }
         let head = self.chain.head.as_ref().map_or(0, |h| h.height);
         let waiting = std::mem::take(&mut self.chain.cut_waiting);
-        let mut judged = false;
+        self.chain.cut_refused_sent.clear();
         for (from, (id, upto, hash, folded)) in waiting {
             if upto == head {
-                judged = true;
                 self.receive_checkpoint_proposal_from(&from, id, upto, &hash, folded);
             }
-        }
-        if !judged {
-            self.maybe_auto_checkpoint();
         }
     }
 
     /// Tell the proposer this seat cannot sign cut `id` and why: a
     /// `VoteRefused` naming this seat, which an older build ignores.
     fn tell_the_proposer_why(&mut self, id: u64, upto: u64, reason: &str) {
+        let waiting: std::collections::BTreeSet<u64> = self.chain.cut_waiting.values().map(|w| w.0).collect();
+        self.chain.cut_refused_sent.retain(|(i, _)| waiting.contains(i));
+        if !self.chain.cut_refused_sent.insert((id, reason.to_string())) {
+            return;
+        }
+        tracing::info!(%id, upto, reason, "cut=waiting");
         let me = self.member();
         let head = self.chain.head.as_ref().map_or(0, |h| h.height);
         let env = self.make_env(
@@ -284,9 +284,10 @@ impl State {
     /// A peer said why it cannot sign cut `id`.
     pub(crate) fn note_cut_refusal(&mut self, id: u64, seat: &str, reason: &str) {
         let open = self.chain.proposal_changes.get(&id).is_some_and(|c| CutKind::of(c).is_some());
-        if !open || reason.len() > 32 {
+        if !open {
             return;
         }
+        let reason = if reason == CUT_BASE_LOADING { CUT_BASE_LOADING } else { "unknown" };
         self.chain.cut_refusals.retain(|(i, _), _| self.chain.proposal_changes.contains_key(i));
         self.chain.cut_refusals.insert((id, seat.to_string()), reason.to_string());
     }
