@@ -274,7 +274,7 @@ fn request(height: u64) -> WorkspaceEvent {
 }
 
 fn refusal(height: u64) -> WorkspaceEvent {
-    WorkspaceEvent::VoteRefused { id: ProposalId(7), voter: "walter".to_string(), head: height, height }
+    WorkspaceEvent::VoteRefused { id: ProposalId(7), voter: "walter".to_string(), head: height, height, reason: String::new() }
 }
 
 /// (4) After a merge reset and after an operator resync, history delivered

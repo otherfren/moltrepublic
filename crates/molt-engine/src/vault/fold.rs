@@ -237,11 +237,15 @@ impl crate::State {
         }
         tracing::info!(deposits = self.chain.vault_base.as_ref().map_or(0, |b| b.deposits.len()), "vault_base=adopted");
         self.after_vault_base_adopted();
+        self.rejudge_waiting_cuts();
         Ok(Reply::Ack)
     }
 
     pub(crate) fn cmd_net_vault_base_failed(&mut self) -> Result<Reply, MoltError> {
-        tracing::debug!("vault_base=fetch_incomplete");
+        if self.files.base_fetch_logged.as_deref() != Some("vault") {
+            tracing::info!("vault_base=fetch_incomplete");
+            self.files.base_fetch_logged = Some("vault".to_string());
+        }
         Ok(Reply::Ack)
     }
 }

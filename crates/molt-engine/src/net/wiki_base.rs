@@ -128,6 +128,7 @@ impl crate::State {
         &mut self,
         bytes: Vec<u8>,
     ) -> Result<Reply, MoltError> {
+        self.files.base_fetch_logged = None;
         self.adopt_wiki_base(Some(bytes));
         let Some(tree) = self.chain.wiki_base.clone() else {
             tracing::warn!("shared memory base: the fetched bytes are not the committed base");
@@ -148,7 +149,12 @@ impl crate::State {
     /// beat starts the next one, and the surface keeps showing the
     /// pending state rather than an empty wiki.
     pub(crate) fn cmd_net_wiki_base_failed(&mut self, reason: &str) -> Result<Reply, MoltError> {
-        tracing::debug!(reason, "shared memory base: fetch did not complete");
+        let state = format!("wiki:{reason}");
+        if self.files.base_fetch_logged.as_deref() != Some(state.as_str()) {
+            let hash = self.wiki_base_committed().map(|(h, _)| h).unwrap_or_default();
+            tracing::info!(reason, %hash, retry_secs = RETRY_EVERY_SECS, "wiki_base=fetch_incomplete");
+            self.files.base_fetch_logged = Some(state);
+        }
         Ok(Reply::Ack)
     }
 

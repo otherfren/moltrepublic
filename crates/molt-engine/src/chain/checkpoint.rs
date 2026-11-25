@@ -10,6 +10,9 @@
 
 use super::*;
 
+/// Why a seat cannot sign a cut yet.
+pub(crate) const CUT_BASE_LOADING: &str = "base loading";
+
 /// WP4b automation: the chain length (blocks held locally, anchor
 /// included) at which the lowest-named member auto-proposes the next
 /// compaction cut. Blocks are governance decisions — rare — so this is
@@ -158,8 +161,16 @@ impl State {
     /// lagging node simply misses this cut (v1 liveness limit, stage-5
     /// pin in `docs_archive/chain/log_compaction.md`) — the proposer re-proposes
     /// at the then-current head; a stale cut dies on re-base anyway.
-    pub(crate) fn receive_checkpoint_proposal(
+    pub(crate) fn receive_checkpoint_proposal(&mut self, id: u64, upto: u64, state_hash: &str, folded: bool) {
+        self.receive_checkpoint_proposal_from("", id, upto, state_hash, folded);
+    }
+
+    /// [`Self::receive_checkpoint_proposal`] with the proposer: a cut this
+    /// seat cannot recompute for a missing base waits for it (the newest
+    /// per proposer) and the proposer is told why.
+    pub(crate) fn receive_checkpoint_proposal_from(
         &mut self,
+        from: &str,
         id: u64,
         upto: u64,
         state_hash: &str,
@@ -189,6 +200,13 @@ impl State {
         let kind = self.cut_kind(folded);
         let ours = match self.own_cut_hash(upto, kind) {
             Ok(hash) => hash,
+            Err(e) if self.wiki_base_pending() || self.vault_base_pending() => {
+                tracing::info!(%id, upto, proposer = from, "cut=waiting reason=base_loading");
+                self.chain.cut_waiting.insert(from.to_string(), (id, upto, state_hash.to_string(), folded));
+                self.tell_the_proposer_why(id, upto, CUT_BASE_LOADING);
+                let _ = e;
+                return;
+            }
             Err(e) => {
                 tracing::warn!(%id, error = %e, "cannot recompute the proposed checkpoint state");
                 return;
@@ -230,6 +248,75 @@ impl State {
         self.chain_sign_and_gossip_approval(id);
     }
 
+    /// A missing base arrived: judge again each cut that waited for it at
+    /// the head it was proposed for; a stale one gives way to a fresh cut
+    /// by the usual rule.
+    pub(crate) fn rejudge_waiting_cuts(&mut self) {
+        if self.wiki_base_pending() || self.vault_base_pending() {
+            return;
+        }
+        let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        let waiting = std::mem::take(&mut self.chain.cut_waiting);
+        let mut judged = false;
+        for (from, (id, upto, hash, folded)) in waiting {
+            if upto == head {
+                judged = true;
+                self.receive_checkpoint_proposal_from(&from, id, upto, &hash, folded);
+            }
+        }
+        if !judged {
+            self.maybe_auto_checkpoint();
+        }
+    }
+
+    /// Tell the proposer this seat cannot sign cut `id` and why: a
+    /// `VoteRefused` naming this seat, which an older build ignores.
+    fn tell_the_proposer_why(&mut self, id: u64, upto: u64, reason: &str) {
+        let me = self.member();
+        let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        let env = self.make_env(
+            me.clone(),
+            WorkspaceEvent::VoteRefused { id: ProposalId(id), voter: me, height: upto + 1, head, reason: reason.to_string() },
+        );
+        self.record(env);
+    }
+
+    /// A peer said why it cannot sign cut `id`.
+    pub(crate) fn note_cut_refusal(&mut self, id: u64, seat: &str, reason: &str) {
+        let open = self.chain.proposal_changes.get(&id).is_some_and(|c| CutKind::of(c).is_some());
+        if !open || reason.len() > 32 {
+            return;
+        }
+        self.chain.cut_refusals.retain(|(i, _), _| self.chain.proposal_changes.contains_key(i));
+        self.chain.cut_refusals.insert((id, seat.to_string()), reason.to_string());
+    }
+
+    /// `status.chain_sync.cut_wait`: the seats the open cut waits for.
+    pub(crate) fn cut_wait(&self) -> Vec<molt_core::CutWait> {
+        let Some(id) = self.chain.proposal_changes.iter().find(|(_, c)| CutKind::of(c).is_some()).map(|(id, _)| *id) else {
+            return Vec::new();
+        };
+        let me = self.member();
+        let signed = self.chain.pending_sigs.get(&id).map(|p| p.verified.clone()).unwrap_or_default();
+        let unseen = self.unseen_seats();
+        self.roster()
+            .into_iter()
+            .filter(|m| !signed.contains(m))
+            .map(|m| {
+                let reason = if m == me {
+                    if self.wiki_base_pending() || self.vault_base_pending() { CUT_BASE_LOADING } else { "unknown" }.to_string()
+                } else if let Some(r) = self.chain.cut_refusals.get(&(id, m.clone())) {
+                    r.clone()
+                } else if unseen.contains(&m) {
+                    "offline".to_string()
+                } else {
+                    "unknown".to_string()
+                };
+                molt_core::CutWait { seat: m, reason }
+            })
+            .collect()
+    }
+
     /// K6: take the bytes read from `wiki_base.bin` as this holder's
     /// folded base - only if they answer the commitment the chain carries.
     /// Anything else is deleted: the tree is a cache of threshold-signed
@@ -246,7 +333,10 @@ impl State {
         let have = molt_storage::content_hash(&bytes);
         let tree = molt_core::wiki_fold::wiki_base_from_canonical_bytes(&bytes);
         match tree {
-            Ok(tree) if have == want => self.chain.wiki_base = Some(tree),
+            Ok(tree) if have == want => {
+                self.chain.wiki_base = Some(tree);
+                self.rejudge_waiting_cuts();
+            }
             Ok(_) => {
                 tracing::warn!(%have, %want, "the stored wiki base is not the committed one - dropping it");
                 self.persist_wiki_base(None);

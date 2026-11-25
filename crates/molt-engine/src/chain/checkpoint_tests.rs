@@ -1316,7 +1316,6 @@ fn no_cut_while_a_peer_is_diverged() {
 /// base is missing is refused, and NOT signed once the base arrives - the
 /// proposer must offer it again.
 #[test]
-#[ignore = "rejoin plan: red, documents the hole until it is fixed"]
 fn a_cut_refused_while_the_base_is_pending_is_signed_once_it_arrives() {
     let mut b = Builder::new(&["petra", "walter"], 2);
     b.commit_wiki(1, "a.md", "A", &["petra", "walter"]);
@@ -1340,8 +1339,9 @@ fn a_cut_refused_while_the_base_is_pending_is_signed_once_it_arrives() {
         walter.chain.wiki_base = None;
         h
     };
-    walter.receive_checkpoint_proposal(41, head, &next_hash, true);
+    walter.receive_checkpoint_proposal_from("petra", 41, head, &next_hash, true);
     assert!(!walter.chain.proposal_changes.contains_key(&41), "refused while pending, not even registered");
+    assert!(walter.chain.cut_waiting.contains_key("petra"), "it waits for the base");
     walter.adopt_wiki_base(Some(molt_core::wiki_fold::wiki_base_canonical_bytes(&held)));
     assert!(walter.chain.wiki_base.is_some(), "the base arrived");
     assert!(walter.own_signature_stands(41), "the arrived base lets the seat sign the open cut");
@@ -1469,4 +1469,38 @@ fn a_seat_pruned_without_the_dropped_period_stays_apart() {
     wire(&mut old, "dora", 11, WorkspaceEvent::Committed(card));
     assert_eq!(tip_of(&petra), tip_of(&dora), "the two that can decide agree");
     assert_ne!(tip_of(&old), tip_of(&petra), "the seat without the period stays on the cut");
+}
+
+/// The open cut names the seats it waits for and why: the own seat while
+/// its base loads, a peer that said so, an unheard one as offline.
+#[test]
+fn an_open_cut_names_who_it_waits_for() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut petra = chain_signer("petra", &b, b.blocks.clone());
+    let Ok(molt_core::Reply::Proposed { id, .. }) = petra.cmd_propose_checkpoint() else {
+        panic!("proposed");
+    };
+    let rows = petra.chain_sync().cut_wait;
+    let seats: Vec<&str> = rows.iter().map(|r| r.seat.as_str()).collect();
+    assert_eq!(seats, ["walter", "dora"], "petra signed, the others not yet");
+    assert!(rows.iter().all(|r| r.reason == "offline"), "{rows:?}");
+    // walter says why
+    wire(&mut petra, "walter", 5, WorkspaceEvent::VoteRefused {
+        id,
+        voter: "walter".to_string(),
+        height: 1,
+        head: 0,
+        reason: "base loading".to_string(),
+    });
+    let rows = petra.chain_sync().cut_wait;
+    assert!(rows.iter().any(|r| r.seat == "walter" && r.reason == "base loading"), "{rows:?}");
+    // a refusal naming another seat than its sender is not a reason
+    wire(&mut petra, "walter", 6, WorkspaceEvent::VoteRefused {
+        id,
+        voter: "dora".to_string(),
+        height: 1,
+        head: 0,
+        reason: "base loading".to_string(),
+    });
+    assert!(petra.chain_sync().cut_wait.iter().any(|r| r.seat == "dora" && r.reason == "offline"));
 }
