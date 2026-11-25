@@ -717,9 +717,12 @@ async fn gap_loop<L: OutboxLog, S: StateStore>(
             asks.wake.notify_one();
         }
         let (Some(&lo), Some(&hi)) = (now_seqs.first(), now_seqs.last()) else { continue };
-        let envs = log.read_range(lo.max(hi.saturating_sub(crate::gap::GAP_RANGE_MAX)), hi).await;
+        let start = lo.max(hi.saturating_sub(crate::gap::GAP_RANGE_MAX));
+        let envs = log.read_range(start, hi).await;
         let (mut resent, mut gone) = (Vec::new(), Vec::new());
-        for seq in now_seqs {
+        // `gone` only for a seq the read covered: one below it is unknown
+        // here, not absent - the asker asks again
+        for seq in now_seqs.into_iter().filter(|s| *s >= start) {
             let env = envs
                 .binary_search_by_key(&seq, |e| e.seq)
                 .ok()
@@ -4662,6 +4665,106 @@ mod tests {
         assert!(count(&sink) >= opening() + 8, "the heard peer's resends stopped: {}", count(&sink));
         walter.shutdown().await;
         petra.shutdown().await;
+    }
+
+    /// H1: a named ask wider than one window. The sender reads one window
+    /// below its highest seq; a seq under that read is unknown to it, not
+    /// absent - it is neither resent nor answered `gone` (it was, and the
+    /// asker gave the seq up for good).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_seq_below_the_read_window_is_never_answered_gone() {
+        use crate::gap::{GapAnswer, GapFrame};
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+
+        #[derive(Clone, Default)]
+        struct Cap(std::sync::Arc<std::sync::Mutex<(Vec<u64>, Vec<GapAnswer>)>>);
+        impl EngineSink for Cap {
+            async fn deliver(&self, _f: &MemberId, env: molt_core::EventEnvelope) -> Result<(), crate::NetError> {
+                self.0.lock().expect("cap").0.push(env.seq);
+                Ok(())
+            }
+            async fn peer_seen(&self, _m: &MemberId) {}
+            async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+            async fn gap_frame(&self, _m: &MemberId, frame: &GapFrame) {
+                if let GapFrame::Answer(a) = frame {
+                    self.0.lock().expect("cap").1.push(a.clone());
+                }
+            }
+        }
+
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut walter = MlsMember::new(&key(1), "walter").expect("walter");
+        let petra = MlsMember::new(&key(2), "petra").expect("petra");
+        walter.create_group().expect("group");
+        let welcome = walter.add_members(&[petra.key_package().expect("kp")]).expect("add").expect("welcome");
+        let mut petra = petra;
+        petra.join_from_welcome(&welcome).expect("petra joins");
+        // without the 60-notes-per-minute default: a hundred frames here
+        let relay = nostr_relay_builder::LocalRelay::new(nostr_relay_builder::RelayBuilder::default().rate_limit(
+            nostr_relay_builder::builder::RateLimit { max_reqs: 500, notes_per_minute: 1_000_000 },
+        ));
+        relay.run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let chan = || crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url.clone()], [7u8; 32]);
+
+        let log = crate::MemLog::default();
+        for seq in 1..=1_100 {
+            log.push(walter_event(seq));
+        }
+        let (_ww, wake_w) = watch::channel(0u64);
+        let (hw, _hw) = watch::channel(GroupHealth::default());
+        let walter = spawn_group(
+            chan(),
+            MlsChannel::new(walter),
+            GroupNetConfig::fast("walter".into(), vec!["petra".into()])
+                .with_resend(Duration::from_secs(600), Duration::from_secs(600)),
+            log,
+            crate::MemStateStore::default(),
+            NullSink,
+            wake_w,
+            hw,
+        );
+        let cap = Cap::default();
+        let (_wp, wake_p) = watch::channel(0u64);
+        let (hp, _hp) = watch::channel(GroupHealth::default());
+        let petra = spawn_group(
+            chan(),
+            MlsChannel::new(petra),
+            GroupNetConfig::fast("petra".into(), vec!["walter".into()]),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            cap.clone(),
+            wake_p,
+            hp,
+        );
+        let wait = |n_seqs: usize, n_answers: usize| {
+            let cap = cap.clone();
+            async move {
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                loop {
+                    let (s, a) = cap.0.lock().expect("cap").clone();
+                    if s.len() >= n_seqs && a.len() >= n_answers {
+                        return (s, a);
+                    }
+                    assert!(tokio::time::Instant::now() < deadline, "got {s:?} {a:?}");
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            }
+        };
+        // the outbox's first pass is not what this test reads
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while cap.0.lock().expect("cap").0.len() < 1_100 {
+            assert!(tokio::time::Instant::now() < deadline, "the first pass never landed");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(walter.answer_gap("petra".into(), vec![5, 1_100], None));
+        let (_, answers) = wait(0, 1).await;
+        assert_eq!(answers[0].resent, vec![1_100], "the seq in the read is resent");
+        assert!(answers[0].gone.is_empty(), "a seq below the read is not gone: {:?}", answers[0].gone);
+        walter.shutdown().await;
+        petra.shutdown().await;
+        drop(relay);
     }
 
     /// A gap want is answered with exactly the missing own frames, fresh,

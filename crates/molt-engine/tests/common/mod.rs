@@ -692,6 +692,8 @@ pub async fn hold_tail_and_reopen(
     propose: bool,
 ) -> std::time::Instant {
     for b in askers {
+        // the probe is off in v0.1.3; its tests keep it running
+        b.__force_open_probe(true);
         b.__hold_gap_wants(true);
         b.__drop_inbound_chat("t0");
     }
