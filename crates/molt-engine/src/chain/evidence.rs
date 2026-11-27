@@ -380,9 +380,9 @@ impl State {
     /// already counted.
     fn take_evidence(&mut self, member: &str, offer: &str, payload: String, again: bool) {
         let head = self.chain.head.as_ref().map(|h| h.hash.clone()).unwrap_or_default();
-        let counted = self.chain.evidence.judged.get(member) == Some(&head);
-        let outcome = if counted && !again { Err(ONE_PER_HEAD.to_string()) } else { self.judge_evidence(member, offer, &payload) };
-        if !(counted && !again) {
+        let budget_spent = self.chain.evidence.judged.get(member) == Some(&head) && !again;
+        let outcome = if budget_spent { Err(ONE_PER_HEAD.to_string()) } else { self.judge_evidence(member, offer, &payload) };
+        if !budget_spent {
             self.chain.evidence.judged.insert(member.to_string(), head.clone());
         }
         let entry = self.chain.evidence.inbound.entry(member.to_string()).or_default();
@@ -608,7 +608,7 @@ impl State {
             .into_iter()
             .filter(|m| *m != me && stuck.contains(m.as_str()) && !self.chain.diverged.contains_key(m))
             .filter(|m| {
-                self.chain.evidence.auto_top.get(m).is_none_or(|top| self.chain.peer_heights.get(m).is_some_and(|h| h >= top))
+                self.chain.evidence.auto_top.get(m).map_or(true, |top| self.chain.peer_heights.get(m).is_some_and(|h| h >= top))
             })
             .collect()
     }
