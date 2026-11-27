@@ -197,6 +197,27 @@ Recommendation: (b) first, and it is the first shippable step (S1). A
 pure fork needs no file: the in-group path works. (a) later, only if the
 field asks for it (Q2).
 
+### 5a. The automatic exchange (v0.1.4, user decision 2026-11-27)
+
+The field asked: operators moved bundles by hand, and one import was the
+only thing that moved a stuck seat. Decided: seats exchange the evidence
+themselves, no passphrase; the seat table shows it per seat; adopting
+needs one confirmation. The branch choice itself stays dark.
+
+| point | design | code |
+|---|---|---|
+| channel | (a): the ritual's gift wrap, NOT the 445 group (a split or stuck seat may sit at another epoch). New `RitualMsg` variants `EvidencePart {republic_id, offer, index, total, data}` and `EvidenceWant {republic_id, offer, missing}`, sent with `RitualNet::send_ritual` (NIP-59 `EventBuilder::gift_wrap` over a kind-446 rumor, `molt-net/src/ritual_wrap.rs`), received by the standing seat inbox every open Nostr workspace already runs (`spawn_seat_inbox`, `nostr_ritual.rs`). The relay dial gate applies: only `dialable_group_relays` | `molt-net/src/invite.rs`, `chain/evidence.rs` |
+| address | the peer's WORKING anchor (`working_nostr_pk`, the last `Restored` block on this chain). A device restored on the other branch is not addressable from here (§5 table, weak point of (a)); the file stays the fallback | |
+| authenticity | the NIP-59 peel proves the sender holds the key it seals with; the sender must be a roster seat's working anchor, else the parts are dropped. That is confidentiality and a sender filter, NOT authority: the anchor has no proof of possession at founding and is not MLS-bound. Authority comes only from the blocks' own m-of-n signatures, checked exactly as `branch_import` checks them; a forged bundle is refused whole | `verify_run`, `receive_block_at` |
+| size | the payload is the JSON of one run of blocks, cut into 24 KiB parts (`RECOVER_PART_MAX`, the recovery anchor's piece size) and reassembled by `offer` = sha256 of the payload. Bounded: only the blocks from the fork point (`diverged.since_height`) or from the peer's reported head + 1, at most 4 MiB per offer and one offer in flight per peer; larger is refused with `too large: use the file`. Paced one part per 200 ms in its own task, outside the group outbox | |
+| when offered | automatically to a peer that is diverged from this seat, or whose catch-up this seat served repeatedly without progress (a server-side heal loop, the field case), or that is abandoned; never on plain lag. Once per (peer, own head, peer's reported head): a re-offer only when either moves, or by `evidence_offer {member}` | `chain_heal_tick` |
+| receiving | parts of a roster sender only, one offer per sender, 4 MiB; a gap is asked once per tick with `EvidenceWant` (bounded rounds). On completion it is verified like a file import and HELD: (i) it extends this chain (same branch, this seat was stuck): `ready, extends` - adopting is the catch-up path fed from this channel, nothing drops; (ii) another branch: kept as evidence in `branch.state` (sealed with the workspace key) and shown in `branch_status`; nothing is adopted - the choice that could is dark, so `evidence_adopt` refuses it | `chain/evidence.rs` |
+| confirmation | (i) needs one `evidence_adopt {member}` (the user's "shown and confirmed"). It is a catch-up, so it could be automatic later; that waits for the field analysis of why the group catch-up stalled. If that turns out to be a refusal by rule, the bundle is refused for the same rule and the bug belongs in the catch-up path | |
+| status | `status.seats[].evidence {out, out_parts, out_total, in, in_parts, in_total, blocks, from_height, kind, drops, reason}` | `molt-core` `SeatEvidence` |
+| commands | `evidence_offer`, `evidence_adopt`, `evidence_dismiss` (tools); `net_evidence_part`, `net_evidence_want`, `net_evidence_sent` (INTERNAL). `branch_export`/`branch_import` stay as the offline fallback, with their passphrase | |
+| privacy | a relay sees: a 1059 wrap to a seat's anchor from an ephemeral key, its size and time - the same as a recovery leg. Content and sender are inside the NIP-44 layers | |
+| mixed versions | a v0.1.3 peer fails to parse the variant and drops the wrap; nothing breaks, the file still works | |
+
 ## 6. The other n - m seats
 
 | case | what the seat does | code |
