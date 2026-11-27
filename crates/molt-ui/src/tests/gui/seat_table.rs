@@ -88,9 +88,10 @@ fn differing_builds_raise_one_line_above_the_table() {
 }
 
 #[test]
-fn a_seat_on_another_branch_or_dropped_says_so_under_its_row() {
+fn a_seat_on_another_branch_or_dropped_says_so_in_its_notes_cell() {
     i_slint_backend_testing::init_no_event_loop();
     let (ui, _shown) = status_window();
+    ui.set_org_seat_notes(true);
     let fork = SeatRow { hash: "cccccc".into(), fork: true, note: "other branch at 5".into(), ..seat("bo", "0.1.2") };
     let dup = SeatRow {
         note: "many repeats from this seat - fetch its history again if messages are missing".into(),
@@ -100,7 +101,8 @@ fn a_seat_on_another_branch_or_dropped_says_so_under_its_row() {
     ui.set_org_seats(ModelRc::new(VecModel::from(vec![seat("ana", "0.1.2"), fork, dup])));
     let hash = shown_text(&ui, "cccccc").expect("the reported head's hash");
     let note = shown_text(&ui, "other branch at 5").expect("the branch note");
-    assert!(note.1 > hash.1, "under the row");
+    assert!(note.0 > hash.0 + hash.2, "right of the row's cells, not under them");
+    assert!((note.1 - hash.1).abs() < hash.3.max(note.3), "on the row's own line");
     let dropped = shown_text(&ui, "many repeats from this seat - fetch its history again if messages are missing").expect("the dup note");
     hover(&ui, dropped);
     assert!(ui.global::<HintTip>().get_label().contains("restore this node missed"));
@@ -181,10 +183,15 @@ fn every_other_seat_offers_to_fetch_its_history_again() {
         seat("bo", "0.1.2"),
         dropped,
     ])));
+    ui.set_org_seat_notes(true);
     let inline = visible(&ui, RESYNC);
     assert_eq!(inline.len(), 1, "one button, on the dropped seat's fault line");
     let note = visible(&ui, "many repeats from this seat - fetch its history again if messages are missing")[0];
-    assert!((inline[0].1 + inline[0].3 / 2.0 - (note.1 + note.3 / 2.0)).abs() < note.3, "beside the fault line");
+    // the button's label sits inside the button's own padding
+    assert!(
+        inline[0].0 >= note.0 && inline[0].0 < note.0 + note.2 && inline[0].1 > note.1,
+        "in the hint's cell, under its text: {inline:?} {note:?}"
+    );
 
     let menus: Vec<_> = Handle::find_by_element_id(&ui, "AppWindow::os-seat-menu").collect();
     assert_eq!(menus.len(), 3, "one menu area per row");
@@ -249,6 +256,7 @@ fn a_seat_whose_history_is_fetched_says_so_instead_of_offering_it() {
         ..seat("ed", "?")
     };
     ui.set_org_seats(ModelRc::new(VecModel::from(vec![SeatRow { me: true, ..seat("ana", "0.1.2") }, fetching])));
+    ui.set_org_seat_notes(true);
     assert_eq!(visible(&ui, "fetching history").len(), 1);
     assert!(visible(&ui, RESYNC).is_empty(), "no second request while one runs");
 }
@@ -267,10 +275,11 @@ fn stop_waiting_is_offered_only_while_fetching() {
         seat("bo", "0.1.2"),
         SeatRow { fetching: true, ..seat("ed", "0.1.2") },
     ])));
+    ui.set_org_seat_notes(true);
     let beside = visible(&ui, GIVE_UP);
     assert_eq!(beside.len(), 1, "one button, beside the status text");
     let status = visible(&ui, "fetching history")[0];
-    assert!((beside[0].1 + beside[0].3 / 2.0 - (status.1 + status.3 / 2.0)).abs() < status.3.max(beside[0].3));
+    assert!((beside[0].1 + beside[0].3 / 2.0 - (status.1 + status.3 / 2.0)).abs() < status.3.max(beside[0].3), "beside the status text");
 
     let menus: Vec<_> = Handle::find_by_element_id(&ui, "AppWindow::os-seat-menu").collect();
     right_click(&ui, &menus[1], 0.5);
@@ -291,6 +300,7 @@ fn a_confirmed_stop_waiting_gives_up_and_the_row_returns_to_normal() {
     let (ui, _shown) = status_window();
     let fetching = SeatRow { fetching: true, ..seat("ed", "0.1.2") };
     ui.set_org_seats(ModelRc::new(VecModel::from(vec![SeatRow { me: true, ..seat("ana", "0.1.2") }, fetching])));
+    ui.set_org_seat_notes(true);
     let sent = Rc::new(RefCell::new(Vec::new()));
     let rec = sent.clone();
     ui.on_resync_seat(move |member, give_up| rec.borrow_mut().push((member.to_string(), give_up)));
@@ -311,4 +321,61 @@ fn a_confirmed_stop_waiting_gives_up_and_the_row_returns_to_normal() {
 
     ui.set_org_seats(ModelRc::new(VecModel::from(vec![SeatRow { me: true, ..seat("ana", "0.1.2") }, seat("ed", "0.1.2")])));
     assert!(visible(&ui, "fetching history").is_empty() && visible(&ui, GIVE_UP).is_empty(), "back to normal");
+}
+
+/// No hints: no notes column, the table as before.
+#[test]
+fn without_hints_there_is_no_notes_column() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = status_window();
+    ui.set_org_seats(ModelRc::new(VecModel::from(vec![seat("ana", "0.1.2"), seat("bo", "0.1.2")])));
+    assert!(by_id(&ui, "AppWindow::os-h-notes").is_none());
+    assert!(by_id(&ui, "AppWindow::os-c-notes").is_none());
+}
+
+/// Hints have their own column: header and cells line up at both scales,
+/// a seat without hints keeps an empty cell, two hints stack.
+#[test]
+fn hints_sit_in_their_own_column_aligned_at_both_scales() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = status_window();
+    ui.set_org_seats(ModelRc::new(VecModel::from(vec![
+        seat("ana", "0.1.2"),
+        SeatRow { fork: true, note: "other branch at 5".into(), ..seat("bo", "0.1.2") },
+        SeatRow { note: "other branch at 5\nrestore unfinished - create a new link".into(), ..seat("cy", "?") },
+    ])));
+    ui.set_org_seat_notes(true);
+    for font in [14.0_f32, 21.0] {
+        ui.global::<Theme>().set_fs_app(font);
+        rail_settled();
+        let header = by_id(&ui, "AppWindow::os-h-notes").expect("the notes header");
+        let cells: Vec<Rect> = Handle::find_by_element_id(&ui, "AppWindow::os-c-notes")
+            .map(|e| rect(&e))
+            .filter(|r| r.2 > 0.0)
+            .collect();
+        assert_eq!(cells.len(), 3, "font {font}: a cell per row");
+        for c in &cells {
+            assert!((c.0 - header.0).abs() < 0.5 && (c.2 - header.2).abs() < 0.5, "font {font}: {header:?} over {c:?}");
+        }
+        let member = by_id(&ui, "AppWindow::os-c-member").expect("the member cell");
+        assert!(header.0 > member.0 + member.2, "font {font}: right of the name");
+        let stacked = shown_text(&ui, "other branch at 5\nrestore unfinished - create a new link").expect("two hints");
+        assert!(stacked.3 > 1.5 * ui.global::<Theme>().get_fs_cap(), "font {font}: the two hints stack");
+    }
+}
+
+/// A long hint wraps inside its column instead of widening the table.
+#[test]
+fn a_long_hint_wraps_inside_its_column() {
+    i_slint_backend_testing::init_no_event_loop();
+    let (ui, _shown) = status_window();
+    let long = "many repeats from this seat - fetch its history again if messages are missing";
+    ui.set_org_seats(ModelRc::new(VecModel::from(vec![SeatRow { note: long.into(), ..seat("bo", "0.1.2") }])));
+    ui.set_org_seat_notes(true);
+    let cell = by_id(&ui, "AppWindow::os-c-notes").expect("the notes cell");
+    let text = shown_text(&ui, long).expect("the hint");
+    assert!(text.0 >= cell.0 - 0.5 && text.0 + text.2 <= cell.0 + cell.2 + 0.5, "{text:?} inside {cell:?}");
+    let pane = Handle::find_by_element_type_name(&ui, "OrgBanner").map(|e| rect(&e)).find(|r| r.2 > 0.0).expect("the banner");
+    let group = by_id(&ui, "AppWindow::os-seats").expect("the seats group");
+    assert!(group.0 + group.2 <= pane.0 + pane.2 + 0.5, "the table stays in the pane: {group:?} {pane:?}");
 }

@@ -403,7 +403,7 @@ pub(crate) fn build_ui_snapshot(ui: &AppWindow) -> molt_core::UiSnapshot {
                 line.push_str(" fetching");
             }
             if !s.note.is_empty() {
-                line.push_str(&format!(" note={}", s.note));
+                line.push_str(&format!(" note={}", s.note.replace('\n', " · ")));
             }
             line
         })
@@ -1768,6 +1768,7 @@ pub(crate) fn apply_surfaces(ui: &AppWindow, b: &SurfacesBundle) {
         })
         .collect();
     crate::models::sync_rows(&ui.get_org_seats(), seats, |m| ui.set_org_seats(m));
+    ui.set_org_seat_notes(b.org_stats.seats.iter().any(|s| !s.note.is_empty() || s.fetching));
     ui.set_org_builds_mixed(b.org_stats.builds_mixed);
     ui.set_org_builds_note(b.org_stats.builds_note.as_str().into());
     ui.set_org_bv2_state(b.org_stats.bv2_state);

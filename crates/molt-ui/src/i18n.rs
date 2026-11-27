@@ -1110,12 +1110,14 @@ lexicon! {
     os_col_signed: "Signed", "Signiert";
     os_col_files: "Files held", "Dateien gehalten";
     os_col_build: "Build", "Build";
+    os_col_notes: "Notes", "Hinweise";
     os_build_unknown_tip: "Older than 0.1.2 or not heard yet", "Älter als 0.1.2 oder noch nicht gehört";
     os_builds_mixed: "Seats run different versions", "Sitze laufen mit unterschiedlichen Versionen";
-    feat_block_v2: "One block per decision", "Ein Block pro Entscheidung";
+    feat_block_v2: "One block per decision (v2)", "Ein Block pro Entscheidung (v2)";
     feat_d_block_v2: "The same decision is one block, whoever signed", "Dieselbe Entscheidung ist ein Block, egal wer unterschrieb";
     os_bv2_label: "Block format", "Blockformat";
-    os_bv2_switch: "Switch block format", "Blockformat wechseln";
+    os_bv2_switch: "Switch to block format v2", "Zu Blockformat v2 wechseln";
+    os_bv2_title: "Block format v2", "Blockformat v2";
     os_bv2_t_changes: "What changes", "Was sich ändert";
     os_bv2_changes: "The same decision sealed by different members is one block. Every signature names the block before it.", "Dieselbe Entscheidung, von verschiedenen Mitgliedern besiegelt, ist ein Block. Jede Unterschrift nennt den Block davor.";
     os_bv2_t_notice: "What you notice", "Was du merkst";
@@ -1124,7 +1126,7 @@ lexicon! {
     os_bv2_price: "Every seat needs 0.1.3 or newer. Afterwards older versions cannot open this republic. There is no way back.", "Jeder Sitz braucht 0.1.3 oder neuer. Danach können ältere Versionen diese Republik nicht mehr öffnen. Es gibt keinen Weg zurück.";
     os_bv2_t_who: "Who decides", "Wer entscheidet";
     os_bv2_who: "A vote with the usual approvals.", "Eine Abstimmung mit den üblichen Zustimmungen.";
-    os_bv2_card: "Turn on the new block format: blocks sealed by different members count as one, and every signature names the block before it.", "Neues Blockformat einschalten: von verschiedenen Mitgliedern besiegelte Blöcke zählen als einer, und jede Unterschrift nennt den Block davor.";
+    os_bv2_card: "Turn on block format v2: blocks sealed by different members count as one, and every signature names the block before it.", "Blockformat v2 einschalten: von verschiedenen Mitgliedern besiegelte Blöcke zählen als einer, und jede Unterschrift nennt den Block davor.";
     ob_title: "Branches", "Zweige";
     ob_details: "Details", "Details";
     ob_export: "Export evidence…", "Beweise exportieren…";
