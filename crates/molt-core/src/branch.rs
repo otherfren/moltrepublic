@@ -151,6 +151,10 @@ pub struct SeatEvidence {
     /// Why it was refused ("" = it was not).
     #[serde(default)]
     pub reason: String,
+    /// The seat is on another branch: a restore there may have moved its
+    /// key, so nothing is offered by itself.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub anchor_outdated: bool,
 }
 
 impl SeatEvidence {

@@ -7,28 +7,41 @@
 //! confirmation adopts what extends its chain. Another branch is only
 //! shown - the choice that could adopt it is dark.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, VecDeque};
 
 use molt_core::branch::SeatEvidence;
 use molt_core::{MemberId, MoltError, Reply};
 
 use super::*;
 
-/// One part's payload: the recovery anchor's piece size.
+/// One part's ENCODED size: the recovery anchor's piece size.
 pub(crate) const PART_BYTES: usize = super::membership::RECOVER_PART_MAX;
 /// The most one offer carries; a larger run goes by file.
 pub(crate) const OFFER_MAX: usize = 4 * 1024 * 1024;
-/// Re-asks for missing parts per offer.
+/// Re-asks for missing parts per offer, on either side.
 const WANT_ROUNDS: u32 = 3;
-/// Between two re-asks (presence clock).
+/// A gap this long without a part is asked for again (presence clock).
 const WANT_EVERY_SECS: u64 = 30;
 /// Between two parts on the wire.
 const PART_PACE_MS: u64 = 200;
+/// What one offer may put on the wire, resends included, per payload byte.
+const BYTES_FACTOR: usize = 3;
+/// Finished offers remembered against relay replays.
+const FINISHED_MAX: usize = 256;
 
 /// Refusals a human reads.
 pub(crate) const TOO_LARGE: &str = "too large: use the file";
 pub(crate) const NOTHING_TO_ADOPT: &str = "nothing to adopt";
 pub(crate) const OTHER_BRANCH: &str = "another branch: the branch choice decides";
+pub(crate) const STALE: &str = "stale: the chain moved";
+const NO_LINK: &str = "does not link to this chain";
+const ONE_PER_HEAD: &str = "one bundle per head";
+const INCOMPLETE: &str = "incomplete";
+
+/// A refusal that may pass once the chain or the store changes.
+fn transient(reason: &str) -> bool {
+    matches!(reason, NO_LINK | ONE_PER_HEAD | "evidence store full")
+}
 
 /// What this seat sends one peer.
 #[derive(Debug, Clone, Default)]
@@ -38,6 +51,10 @@ pub(crate) struct Outgoing {
     pub(crate) sent: u32,
     pub(crate) state: &'static str,
     pub(crate) reason: String,
+    /// Bytes handed to the wire for this offer, resends included.
+    pub(crate) bytes: usize,
+    /// Wants answered for this offer.
+    pub(crate) wants: u32,
 }
 
 /// What one peer sent this seat.
@@ -47,7 +64,9 @@ pub(crate) struct Incoming {
     pub(crate) total: u32,
     pub(crate) parts: BTreeMap<u32, String>,
     pub(crate) state: &'static str,
-    /// The blocks that extend this chain, held until adopted.
+    /// The complete payload, kept to judge it again.
+    pub(crate) payload: String,
+    /// The blocks to adopt (another branch: shown only).
     pub(crate) blocks: Vec<ChainBlock>,
     pub(crate) from_height: u64,
     pub(crate) kind: &'static str,
@@ -56,6 +75,8 @@ pub(crate) struct Incoming {
     pub(crate) asked: u32,
     /// The last part or re-ask (presence clock).
     pub(crate) last_at: u64,
+    /// The head this payload was last judged at.
+    pub(crate) judged_head: String,
 }
 
 /// The exchange's runtime (memory only; another branch is kept in
@@ -64,24 +85,58 @@ pub(crate) struct Incoming {
 pub(crate) struct EvidenceRuntime {
     pub(crate) out: BTreeMap<MemberId, Outgoing>,
     pub(crate) inbound: BTreeMap<MemberId, Incoming>,
-    /// Auto-offer key per peer: (own head, the peer's reported head).
-    pub(crate) offered: BTreeMap<MemberId, (String, u64)>,
-    /// Offers adopted or dismissed: a relay replay does not bring them back.
-    pub(crate) finished: BTreeSet<String>,
+    /// Per peer, this seat's head height at its last automatic offer: no
+    /// new one until the peer's own head passed it.
+    pub(crate) auto_top: BTreeMap<MemberId, u64>,
+    /// Per sender, the head its last bundle was judged at.
+    pub(crate) judged: BTreeMap<MemberId, String>,
+    /// Offers adopted or dismissed, oldest first: a relay replay does not
+    /// bring them back.
+    pub(crate) finished: VecDeque<String>,
+    /// One send task per peer; a new send replaces it.
+    pub(crate) tasks: BTreeMap<MemberId, tokio::task::JoinHandle<()>>,
     /// Tests: no relay channel even where a transport exists.
     #[cfg(test)]
     pub(crate) no_net: bool,
 }
 
-/// Cut `payload` into parts of at most [`PART_BYTES`], on char boundaries.
+impl EvidenceRuntime {
+    fn is_finished(&self, offer: &str) -> bool {
+        self.finished.iter().any(|f| f == offer)
+    }
+
+    fn finish(&mut self, offer: &str) {
+        if !self.is_finished(offer) {
+            self.finished.push_back(offer.to_string());
+            while self.finished.len() > FINISHED_MAX {
+                self.finished.pop_front();
+            }
+        }
+    }
+}
+
+/// What one char takes inside a JSON string.
+fn encoded_len(ch: char) -> usize {
+    match ch {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        '\u{0}'..='\u{1f}' => 6,
+        _ => ch.len_utf8(),
+    }
+}
+
+/// Cut `payload` into parts whose JSON-encoded size is at most
+/// [`PART_BYTES`], on char boundaries.
 pub(crate) fn split_parts(payload: &str) -> Vec<String> {
     let mut parts = Vec::new();
-    let mut cur = String::new();
+    let (mut cur, mut size) = (String::new(), 0);
     for ch in payload.chars() {
-        if cur.len() + ch.len_utf8() > PART_BYTES {
+        let n = encoded_len(ch);
+        if size + n > PART_BYTES {
             parts.push(std::mem::take(&mut cur));
+            size = 0;
         }
         cur.push(ch);
+        size += n;
     }
     if !cur.is_empty() || parts.is_empty() {
         parts.push(cur);
@@ -131,9 +186,10 @@ impl State {
         let to = self.working_nostr_pk(member);
         let total = u32::try_from(parts.len()).unwrap_or(u32::MAX);
         tracing::info!(peer = %member, from, parts = total, "evidence=offered");
+        let bytes = parts.iter().map(String::len).sum();
         self.chain.evidence.out.insert(
             member.to_string(),
-            Outgoing { offer: offer.clone(), parts: parts.clone(), sent: 0, state: "offered", reason: String::new() },
+            Outgoing { offer: offer.clone(), parts: parts.clone(), state: "offered", bytes, ..Outgoing::default() },
         );
         let all: Vec<u32> = (0..total).collect();
         self.send_evidence_parts(member, &to, &offer, &parts, &all);
@@ -141,7 +197,8 @@ impl State {
         Ok(Reply::Ack)
     }
 
-    /// Publish `which` parts off the actor, paced; progress comes back as
+    /// Publish `which` parts off the actor, paced, in this peer's ONE send
+    /// task (a running one is replaced); progress comes back as
     /// `NetEvidenceSent`. Without a relay channel the offer is refused.
     fn send_evidence_parts(&mut self, member: &str, to: &str, offer: &str, parts: &[String], which: &[u32]) {
         let net = self.evidence_net();
@@ -152,11 +209,14 @@ impl State {
             }
             return;
         };
-        let (member, to, offer, rid) = (member.to_string(), to.to_string(), offer.to_string(), self.republic_id());
+        if let Some(task) = self.chain.evidence.tasks.remove(member) {
+            task.abort();
+        }
+        let (peer, to, offer, rid) = (member.to_string(), to.to_string(), offer.to_string(), self.republic_id());
         let total = u32::try_from(parts.len()).unwrap_or(u32::MAX);
         let parts: Vec<(u32, String)> =
             which.iter().filter_map(|i| parts.get(usize::try_from(*i).ok()?).map(|p| (*i, p.clone()))).collect();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut sent = 0u32;
             let mut error = String::new();
             for (index, data) in parts {
@@ -174,9 +234,10 @@ impl State {
                 sent += 1;
                 tokio::time::sleep(std::time::Duration::from_millis(PART_PACE_MS)).await;
             }
-            let cmd = molt_core::Command::NetEvidenceSent { member, offer, sent, total, error };
+            let cmd = molt_core::Command::NetEvidenceSent { member: peer, offer, sent, total, error };
             crate::send_internal(&cmd_tx, cmd).await;
         });
+        self.chain.evidence.tasks.insert(member.to_string(), task);
     }
 
     /// The seat's own wrapped channel: its anchor key over the consented
@@ -208,11 +269,13 @@ impl State {
                 tracing::warn!(peer = %member, sent, total, %error, "evidence=send_failed");
             }
         }
+        self.chain.evidence.tasks.remove(member);
         self.emit_session(crate::SessionScope::Full);
         Ok(Reply::Ack)
     }
 
-    /// A peer asks for parts again.
+    /// A peer asks for parts again: deduplicated, within the offer, a few
+    /// times per offer and within a byte budget.
     pub(crate) fn cmd_net_evidence_want(&mut self, sender: &str, rid: &str, offer: &str, missing: &[u32]) -> Result<Reply, MoltError> {
         if rid != self.republic_id() {
             return Ok(Reply::Ack);
@@ -223,15 +286,31 @@ impl State {
         let Some(out) = self.chain.evidence.out.get(&member).filter(|o| o.offer == offer).cloned() else {
             return Ok(Reply::Ack);
         };
+        let wanted: std::collections::BTreeSet<u32> =
+            missing.iter().copied().filter(|i| usize::try_from(*i).is_ok_and(|i| i < out.parts.len())).collect();
+        if wanted.is_empty() {
+            return Ok(Reply::Ack);
+        }
+        let add: usize = wanted.iter().filter_map(|i| out.parts.get(usize::try_from(*i).ok()?)).map(String::len).sum();
+        let payload: usize = out.parts.iter().map(String::len).sum();
+        if out.wants >= WANT_ROUNDS || out.bytes + add > BYTES_FACTOR * payload {
+            tracing::info!(peer = %member, wants = out.wants, "evidence=want_refused");
+            return Ok(Reply::Ack);
+        }
+        if let Some(o) = self.chain.evidence.out.get_mut(&member) {
+            o.wants += 1;
+            o.bytes += add;
+        }
         let to = self.working_nostr_pk(&member);
-        let missing: Vec<u32> = missing.iter().copied().filter(|i| usize::try_from(*i).is_ok_and(|i| i < out.parts.len())).collect();
-        tracing::info!(peer = %member, missing = missing.len(), "evidence=resend");
-        self.send_evidence_parts(&member, &to, offer, &out.parts, &missing);
+        let which: Vec<u32> = wanted.into_iter().collect();
+        tracing::info!(peer = %member, missing = which.len(), "evidence=resend");
+        self.send_evidence_parts(&member, &to, offer, &out.parts, &which);
         Ok(Reply::Ack)
     }
 
     /// One part from the seat inbox: only a roster seat's working anchor,
-    /// one offer per sender, bounded; complete -> verified and held.
+    /// one offer per sender, bounded; complete -> verified and held. A new
+    /// pass (part 0) of an offer that was refused or incomplete reopens it.
     pub(crate) fn cmd_net_evidence_part(
         &mut self,
         sender: &str,
@@ -247,15 +326,32 @@ impl State {
             tracing::warn!(reason = "not_a_seat", "evidence=refused");
             return Ok(Reply::Ack);
         };
-        if self.chain.evidence.finished.contains(offer) {
+        if self.chain.evidence.is_finished(offer) {
             return Ok(Reply::Ack);
         }
-        let max_parts = u32::try_from(OFFER_MAX.div_ceil(PART_BYTES)).unwrap_or(u32::MAX);
         let now = self.presence_now();
+        let max_parts = u32::try_from(OFFER_MAX.div_ceil(PART_BYTES / 6)).unwrap_or(u32::MAX);
         let entry = self.chain.evidence.inbound.entry(member.clone()).or_default();
         if entry.offer != offer {
-            *entry = Incoming { offer: offer.to_string(), total, state: "receiving", ..Incoming::default() };
+            *entry = Incoming { offer: offer.to_string(), total, state: "receiving", last_at: now, ..Incoming::default() };
+        } else if entry.state == "refused" && index == 0 {
+            // a new pass: what was missing may come now, what did not link
+            // may link now
+            entry.state = "receiving";
+            entry.asked = 0;
+            entry.last_at = now;
+            if entry.reason != INCOMPLETE {
+                entry.parts.clear();
+            }
+            entry.reason.clear();
+            if !entry.payload.is_empty() {
+                let payload = std::mem::take(&mut entry.payload);
+                self.take_evidence(&member, offer, payload, true);
+                self.emit_session(crate::SessionScope::Full);
+                return Ok(Reply::Ack);
+            }
         }
+        let entry = self.chain.evidence.inbound.entry(member.clone()).or_default();
         if total == 0 || total > max_parts || index >= total || data.len() > PART_BYTES || entry.total != total {
             entry.state = "refused";
             entry.reason = TOO_LARGE.to_string();
@@ -271,59 +367,96 @@ impl State {
         entry.last_at = now;
         if entry.parts.len() == usize::try_from(total).unwrap_or(usize::MAX) {
             let payload: String = entry.parts.values().map(String::as_str).collect();
-            self.take_evidence(&member, offer, &payload);
+            entry.parts.clear();
+            self.take_evidence(&member, offer, payload, false);
         }
         self.emit_session(crate::SessionScope::Full);
         Ok(Reply::Ack)
     }
 
-    /// A complete payload: verify it as strictly as a file import, then
-    /// hold it - a run that extends this chain, or another branch.
-    fn take_evidence(&mut self, member: &str, offer: &str, payload: &str) {
-        let outcome = self.judge_evidence(offer, payload);
+    /// A complete payload: one judged bundle per sender and head, then
+    /// verified as strictly as a file import and held - a run that extends
+    /// this chain, or another branch. `again` = a re-judge of a payload
+    /// already counted.
+    fn take_evidence(&mut self, member: &str, offer: &str, payload: String, again: bool) {
+        let head = self.chain.head.as_ref().map(|h| h.hash.clone()).unwrap_or_default();
+        let counted = self.chain.evidence.judged.get(member) == Some(&head);
+        let outcome = if counted && !again { Err(ONE_PER_HEAD.to_string()) } else { self.judge_evidence(member, offer, &payload) };
+        if !(counted && !again) {
+            self.chain.evidence.judged.insert(member.to_string(), head.clone());
+        }
         let entry = self.chain.evidence.inbound.entry(member.to_string()).or_default();
-        entry.parts.clear();
+        entry.judged_head = head;
         match outcome {
             Ok(None) => {
                 *entry = Incoming::default();
-                self.chain.evidence.finished.insert(offer.to_string());
+                self.chain.evidence.finish(offer);
             }
             Ok(Some((kind, blocks, from_height, drops))) => {
                 entry.state = "ready";
+                entry.reason.clear();
                 entry.kind = kind;
                 entry.from_height = from_height;
                 entry.drops = drops;
+                entry.payload = payload;
                 tracing::info!(peer = %member, kind, blocks = blocks.len(), from = from_height, "evidence=ready");
                 entry.blocks = blocks;
             }
             Err(why) => {
                 tracing::warn!(peer = %member, reason = %why, "evidence=refused");
                 entry.state = "refused";
+                // kept to judge again once the chain or the store moved
+                if transient(&why) {
+                    entry.payload = payload;
+                }
                 entry.reason = why;
             }
         }
     }
 
-    /// `(kind, blocks to adopt, first new height, applied blocks a fork
-    /// would drop)`; `None` = nothing new.
+    /// The new part of a run of another seat, linked onto this chain: the
+    /// leading blocks whose DECISION this chain holds at their height are
+    /// held - a signature variant (on a v1 chain its identity differs) is
+    /// the same block, never a fork. What follows such a variant is
+    /// re-linked onto this chain's own blocks (`prev` is not signed).
+    /// `None` = nothing new; `Err` = it does not link.
+    pub(crate) fn new_part(&self, run: &[ChainBlock]) -> Result<Option<Vec<ChainBlock>>, String> {
+        let first = self.chain.blocks.first().map_or(0, |b| b.height);
+        let own = |h: u64| usize::try_from(h.checked_sub(first)?).ok().and_then(|i| self.chain.blocks.get(i));
+        let held = run.iter().take_while(|b| own(b.height).is_some_and(|o| o.change == b.change)).count();
+        let mut rest = run[held..].to_vec();
+        let Some(head) = rest.first().map(|b| b.height) else {
+            return Ok(None);
+        };
+        let base = head.checked_sub(1).ok_or(NO_LINK)?;
+        let link = self.own_hash(base).ok_or(NO_LINK)?;
+        if rest[0].prev != link {
+            if held == 0 {
+                return Err(NO_LINK.to_string());
+            }
+            rest[0].prev = link;
+            for i in 1..rest.len() {
+                rest[i].prev = self.block_id_of(&rest[i - 1]);
+            }
+        }
+        Ok(Some(rest))
+    }
+
+    /// `(kind, blocks, first new height, applied blocks a fork would
+    /// drop)`; `None` = nothing new.
     #[allow(clippy::type_complexity)] // one verdict, named in the doc
-    fn judge_evidence(&mut self, offer: &str, payload: &str) -> Result<Option<(&'static str, Vec<ChainBlock>, u64, u32)>, String> {
+    fn judge_evidence(&mut self, member: &str, offer: &str, payload: &str) -> Result<Option<(&'static str, Vec<ChainBlock>, u64, u32)>, String> {
         if molt_storage::content_hash(payload.as_bytes()) != offer {
             return Err("damaged".to_string());
         }
         let run: Vec<ChainBlock> = serde_json::from_str(payload).map_err(|_| "not blocks".to_string())?;
-        let rest = self.unheld(&run).to_vec();
-        let Some(first) = rest.first() else {
+        let Some(rest) = self.new_part(&run)? else {
             return Ok(None);
         };
-        let base = first.height.checked_sub(1).ok_or("does not link to this chain")?;
-        if self.own_hash(base).as_deref() != Some(first.prev.as_str()) {
-            return Err("does not link to this chain".to_string());
-        }
         self.verify_run(&rest).map_err(|e| refusal_rule(&e).to_string())?;
-        let from = first.height;
+        let from = rest[0].height;
         let head = self.chain.head.as_ref().map_or(0, |h| h.height);
-        if base == head {
+        if from == head + 1 {
             return Ok(Some(("extends", rest, from, 0)));
         }
         let drops = self
@@ -332,13 +465,24 @@ impl State {
             .iter()
             .filter(|b| b.height >= from && matches!(b.change, ChainChange::Applied { .. }))
             .count();
-        self.keep_evidence(&rest)?;
-        self.persist_branch();
+        if self.keep_verified_evidence(&rest, &format!("seat:{member}"))? {
+            self.persist_branch();
+        }
         Ok(Some(("other-branch", rest, from, u32::try_from(drops).unwrap_or(u32::MAX))))
     }
 
-    /// `evidence_adopt`: what extends this chain takes the catch-up path.
+    /// `evidence_adopt`: what extends this chain takes the catch-up path,
+    /// re-checked against the head NOW; the ingest gates hold here too.
     pub(crate) fn cmd_evidence_adopt(&mut self, member: &str) -> Result<Reply, MoltError> {
+        if self.delivery.evicted {
+            return Err(MoltError::SeatEvicted);
+        }
+        if self.branch_abandoned() {
+            return Err(err(super::branch::ABANDONED));
+        }
+        if self.chain.head.is_none() {
+            return Err(err("no chain yet"));
+        }
         let Some(entry) = self.chain.evidence.inbound.get(member).cloned() else {
             return Err(err(NOTHING_TO_ADOPT));
         };
@@ -348,16 +492,33 @@ impl State {
         if entry.kind != "extends" {
             return Err(err(OTHER_BRANCH));
         }
-        let before = self.chain.head.as_ref().map_or(0, |h| h.height);
-        for b in entry.blocks {
+        let head = self.chain.head.as_ref().map_or(0, |h| h.height);
+        let fresh = self.new_part(&entry.blocks);
+        let blocks = match fresh {
+            Ok(Some(rest)) if rest[0].height == head + 1 => rest,
+            Ok(None) => {
+                self.chain.evidence.inbound.remove(member);
+                self.chain.evidence.finish(&entry.offer);
+                self.emit_session(crate::SessionScope::Full);
+                return Err(err(NOTHING_TO_ADOPT));
+            }
+            _ => {
+                // the head moved: what this bundle is NOW decides
+                self.take_evidence(member, &entry.offer, entry.payload.clone(), true);
+                self.emit_session(crate::SessionScope::Full);
+                return Err(err(STALE));
+            }
+        };
+        for b in blocks {
             self.receive_block_at(member, None, b);
         }
         let after = self.chain.head.as_ref().map_or(0, |h| h.height);
-        tracing::info!(peer = %member, from = before, to = after, "evidence=adopted");
-        self.chain.evidence.finished.insert(entry.offer.clone());
+        tracing::info!(peer = %member, from = head, to = after, "evidence=adopted");
+        self.chain.evidence.finish(&entry.offer);
         if let Some(e) = self.chain.evidence.inbound.get_mut(member) {
             e.state = "adopted";
             e.blocks.clear();
+            e.payload.clear();
         }
         self.emit_session(crate::SessionScope::Full);
         Ok(Reply::Ack)
@@ -368,18 +529,15 @@ impl State {
         let Some(entry) = self.chain.evidence.inbound.remove(member) else {
             return Err(err(NOTHING_TO_ADOPT));
         };
-        self.chain.evidence.finished.insert(entry.offer);
+        self.chain.evidence.finish(&entry.offer);
         self.emit_session(crate::SessionScope::Full);
         Ok(Reply::Ack)
     }
 
-    /// On the heal tick: re-ask missing parts (bounded), and offer to a
-    /// peer the normal path is not fixing - diverged from this seat, or
-    /// one whose catch-up this seat served without progress. Once per
-    /// (own head, peer's reported head).
+    /// On the heal tick: re-ask a gap (bounded), judge again what was
+    /// refused for a reason the moved head may have cured, and offer to a
+    /// peer the normal path is not fixing.
     pub(crate) fn evidence_tick(&mut self, now: u64) {
-        // a gap a quiet half minute long is asked for again, a bounded
-        // number of times
         let wants: Vec<(MemberId, String, Vec<u32>)> = self
             .chain
             .evidence
@@ -388,9 +546,9 @@ impl State {
             .filter(|(_, e)| e.state == "receiving" && now.saturating_sub(e.last_at) >= WANT_EVERY_SECS)
             .filter_map(|(m, e)| {
                 if e.asked >= WANT_ROUNDS {
+                    // the parts stay: a new pass completes them
                     e.state = "refused";
-                    e.reason = "incomplete".to_string();
-                    e.parts.clear();
+                    e.reason = INCOMPLETE.to_string();
                     return None;
                 }
                 e.asked += 1;
@@ -402,38 +560,56 @@ impl State {
         for (member, offer, missing) in wants {
             self.send_evidence_want(&member, &offer, missing);
         }
+        let head = self.chain.head.as_ref().map(|h| h.hash.clone()).unwrap_or_default();
+        let again: Vec<(MemberId, String, String)> = self
+            .chain
+            .evidence
+            .inbound
+            .iter()
+            .filter(|(_, e)| e.state == "refused" && transient(&e.reason) && !e.payload.is_empty() && e.judged_head != head)
+            .map(|(m, e)| (m.clone(), e.offer.clone(), e.payload.clone()))
+            .collect();
+        for (member, offer, payload) in again {
+            self.take_evidence(&member, &offer, payload, true);
+        }
         if self.nostr.is_none() || self.branch_abandoned() {
             return;
         }
-        for (peer, key) in self.evidence_due() {
-            self.chain.evidence.offered.insert(peer.clone(), key);
+        for peer in self.evidence_due() {
+            self.note_auto_offer(&peer);
             if let Err(e) = self.cmd_evidence_offer(&peer) {
                 tracing::info!(peer = %peer, reason = %e, "evidence=not_offered");
             }
         }
     }
 
-    /// The peers an automatic offer is due to, with their offer key: on
-    /// another branch than this seat, or stuck in a catch-up this seat
-    /// serves without progress - never plain lag; once per key.
-    pub(crate) fn evidence_due(&self) -> Vec<(MemberId, (String, u64))> {
-        let head = self.chain.head.as_ref().map(|h| h.hash.clone()).unwrap_or_default();
-        let stuck: BTreeSet<&str> = self
+    /// Remember an automatic offer to `peer`: the next waits until the
+    /// peer's own head passed this seat's head now.
+    pub(crate) fn note_auto_offer(&mut self, peer: &str) {
+        let top = self.chain.head.as_ref().map_or(0, |h| h.height);
+        self.chain.evidence.auto_top.insert(peer.to_string(), top);
+    }
+
+    /// The peers an automatic offer is due to: stuck in a catch-up this
+    /// seat serves without progress - never plain lag, never a diverged
+    /// peer (a restore on its branch may have moved its key: the manual
+    /// offer only), and not again until the peer's head passed the last
+    /// offer's range.
+    pub(crate) fn evidence_due(&self) -> Vec<MemberId> {
+        let me = self.member();
+        let stuck: std::collections::BTreeSet<&str> = self
             .chain
             .heal_loops
             .iter()
             .filter(|l| !l.asker && l.rounds >= super::sync::HEAL_LOOP_ROUNDS)
             .map(|l| l.peer.as_str())
             .collect();
-        let me = self.member();
         self.roster()
             .into_iter()
-            .filter(|m| *m != me && (self.chain.diverged.contains_key(m) || stuck.contains(m.as_str())))
-            .map(|m| {
-                let key = (head.clone(), self.chain.peer_heights.get(&m).copied().unwrap_or(0));
-                (m, key)
+            .filter(|m| *m != me && stuck.contains(m.as_str()) && !self.chain.diverged.contains_key(m))
+            .filter(|m| {
+                self.chain.evidence.auto_top.get(m).is_none_or(|top| self.chain.peer_heights.get(m).is_some_and(|h| h >= top))
             })
-            .filter(|(m, key)| self.chain.evidence.offered.get(m) != Some(key))
             .collect()
     }
 
@@ -452,7 +628,7 @@ impl State {
 
     /// The seat table's column for `member`.
     pub(crate) fn seat_evidence(&self, member: &str) -> SeatEvidence {
-        let mut v = SeatEvidence::default();
+        let mut v = SeatEvidence { anchor_outdated: self.chain.diverged.contains_key(member), ..SeatEvidence::default() };
         if let Some(o) = self.chain.evidence.out.get(member) {
             v.out = if o.state == "offered" && o.sent > 0 { "sending" } else { o.state }.to_string();
             v.out_parts = o.sent;

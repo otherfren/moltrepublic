@@ -471,3 +471,29 @@ async fn a_split_shows_both_branches_and_adopts_nothing() {
     assert_eq!(head(&mara).await, mara_head);
     assert_eq!(head(&dora).await, dora_head);
 }
+
+/// The automatic offer end to end: walter's catch-up requests reach mara,
+/// her answers never reach walter; after the stuck rounds mara offers by
+/// herself, walter confirms once and is level - no manual offer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stuck_seat_gets_the_offer_by_itself() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (seats, _) = found(tmp.path(), &url, &["mara", "walter", "dora"], 2).await;
+    let [mara, walter, dora]: [WalletHandle; 3] = seats.try_into().unwrap_or_else(|_| panic!("three seats"));
+    walter.__cut_off(&["mara", "dora"]);
+    let p = propose(&mara, &format!("{}.md", "auto")).await;
+    eventually("dora sees the card", 60, || async { open_cards(&dora).await.contains(&p) }).await;
+    dora.execute(Command::Approve { proposal: molt_core::ProposalId(p), note: None }).await.expect("approve");
+    eventually("sealed without walter", 180, || async { !open_cards(&mara).await.contains(&p) }).await;
+    // walter keeps asking; every answer is lost on the way back
+    eventually("the offer arrives by itself", 300, || async {
+        walter.__beacon_now();
+        let e = evidence_from(&walter, "mara").await;
+        e.inbound == "ready" && e.kind == "extends"
+    })
+    .await;
+    walter.execute(Command::EvidenceAdopt { member: "mara".to_string() }).await.expect("adopt");
+    eventually("walter is level", 60, || async { head(&walter).await == head(&mara).await }).await;
+}
