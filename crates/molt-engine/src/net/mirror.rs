@@ -546,16 +546,14 @@ impl State {
         let Some(group) = self.group_net.as_ref() else {
             return Vec::new();
         };
-        let mut out: Vec<(String, u32, u32, String)> = group
-            .trickle
-            .status()
-            .into_iter()
-            .filter(|(_, v)| v.published < v.of)
-            .map(|(series, v)| (series, v.published, v.of, v.gate))
-            .collect();
-        out.sort();
-        out.truncate(molt_net::mirror_gossip::MIRROR_STATUS_MAX_SERVING);
-        out
+        let bases: Vec<String> = [
+            self.wiki_base_series().map(|s| s.id.to_string()),
+            self.vault_base_series().map(|s| s.id.to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        serving_series(&group.trickle.status(), &bases)
     }
 
     /// `read_uploads`' `serving`: this seat publishing the share now.
@@ -870,5 +868,47 @@ impl State {
             members,
             files,
         }
+    }
+}
+
+/// The series this seat publishes now, for the serving gossip: shares
+/// only. A base series is no share; it travels in `status.bases`.
+fn serving_series(
+    status: &HashMap<String, molt_core::ServeView>,
+    bases: &[String],
+) -> Vec<(String, u32, u32, String)> {
+    let mut out: Vec<(String, u32, u32, String)> = status
+        .iter()
+        .filter(|(series, v)| v.published < v.of && !bases.contains(series))
+        .map(|(series, v)| (series.clone(), v.published, v.of, v.gate.clone()))
+        .collect();
+    out.sort();
+    out.truncate(molt_net::mirror_gossip::MIRROR_STATUS_MAX_SERVING);
+    out
+}
+
+#[cfg(test)]
+mod serving_tests {
+    use super::serving_series;
+    use molt_core::ServeView;
+    use std::collections::HashMap;
+
+    /// A base series the trickle reports is no share: the serving gossip
+    /// lists shares only, and a base never crowds a share out of the page.
+    #[test]
+    fn a_base_series_is_no_share_in_the_serving_gossip() {
+        let view = |published: u32, of: u32, gate: &str| ServeView {
+            published,
+            of,
+            gate: gate.to_string(),
+            ..Default::default()
+        };
+        let mut status = HashMap::new();
+        status.insert("share-a".to_string(), view(1, 10, ""));
+        status.insert("base-wiki".to_string(), view(0, 120, "outbox"));
+        status.insert("share-done".to_string(), view(10, 10, ""));
+        let bases = vec!["base-wiki".to_string()];
+        let out = serving_series(&status, &bases);
+        assert_eq!(out, vec![("share-a".to_string(), 1, 10, String::new())]);
     }
 }

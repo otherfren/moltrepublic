@@ -4883,6 +4883,7 @@ impl State {
             open_proposals,
             open_proposals_max,
             behind: self.delivery.behind.clone(),
+            bases: Box::new(molt_core::BaseStatus { serving: self.base_serving_view(), fetch: self.base_fetch_view() }),
             resend_held: self.delivery.resend_held.as_ref().map(|(o, _)| o.clone()).unwrap_or_default(),
             resend_held_since: self.delivery.resend_held.as_ref().map_or(0, |(_, s)| *s),
         }

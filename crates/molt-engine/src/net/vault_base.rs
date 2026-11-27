@@ -52,6 +52,8 @@ impl crate::State {
                 h.abort();
             }
             self.files.vault_base.fetching = None;
+            // the wait is over; a later one is a new episode
+            self.files.base_progress.remove("vault");
             return;
         }
         let want = self.vault_base_committed().map(|(hash, _)| hash);
@@ -61,6 +63,8 @@ impl crate::State {
             }
             self.files.vault_base.fetching = None;
             self.files.vault_base.next_try = 0;
+            // the new commitment starts a new episode
+            self.files.base_progress.remove("vault");
         }
         if self.files.vault_base.fetch.as_ref().is_some_and(|h| !h.is_finished()) {
             return;
@@ -79,6 +83,8 @@ impl crate::State {
         };
         tracing::info!(hash = %series.hash, size = series.size, "vault_base=fetching");
         let from = crate::now_secs().saturating_sub(24 * 60 * 60);
+        let progress = self.base_progress_start("vault");
+        self.files.base_progress.insert("vault", progress.clone());
         self.files.vault_base.fetch = Some(crate::transfer::spawn_vault_base_fetch(
             channel,
             series.id,
@@ -92,12 +98,13 @@ impl crate::State {
             },
             self.net_scope,
             cmd_tx,
+            progress,
         ));
     }
 
     /// A peer wants pieces of the vault base: every holder answers.
     /// Returns whether `id` is the base series at all.
-    pub(crate) fn serve_vault_base_pieces(&mut self, id: MessageId, ranges: &[(u32, u32)]) -> bool {
+    pub(crate) fn serve_vault_base_pieces(&mut self, from: &str, id: MessageId, ranges: &[(u32, u32)]) -> bool {
         let Some(series) = self.vault_base_series() else {
             return false;
         };
@@ -112,6 +119,7 @@ impl crate::State {
         };
         let ranges = crate::net::files::bounded_want_ranges(ranges, layout.top);
         if !ranges.is_empty() {
+            self.note_base_wanted("vault", &id, from);
             tracing::debug!(%id, ranges = ranges.len(), "vault_base=wanted");
             self.enqueue_vault_base_publish(&series, ranges);
         }
