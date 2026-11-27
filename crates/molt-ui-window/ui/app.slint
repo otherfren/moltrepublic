@@ -1682,6 +1682,8 @@ export component AppWindow inherits Window {
     in property <[SeatRow]> org-seats;
     // the seats' known builds differ, or an unknown sits beside a known one
     in property <bool> org-builds-mixed;
+    // some seat has a hint: the seat table shows its notes column
+    in property <bool> org-seat-notes;
     // the block format row and its switch (block_identity_plan.md §4)
     in property <int> org-bv2-state;
     in property <string> org-bv2-text;
@@ -6608,7 +6610,7 @@ export component AppWindow inherits Window {
                         // Organization → Status: the republic's identity, the
                         // ratified charter, and the live per-surface counts
                         if s.key == "organization" && root.selected-view == "status": Flickable {
-                            viewport-width: self.width;
+                            viewport-width: max(self.width, os-col.min-width);
                             viewport-height: os-col.preferred-height;
                             os-col := VerticalLayout {
                                 width: 100%;
@@ -6976,7 +6978,7 @@ export component AppWindow inherits Window {
                                 // header and the rows, sized to fit the
                                 // minimum window at ui-scale 1.5.
                                 if root.org-seats.length > 0: HorizontalLayout {
-                                    alignment: start;
+                                    alignment: root.org-seat-notes ? LayoutAlignment.stretch : LayoutAlignment.start;
                                     os-seats := DetailGroup {
                                         title: Strings.os-seats;
                                         if root.org-builds-mixed: Text {
@@ -7046,6 +7048,16 @@ export component AppWindow inherits Window {
                                                 font-size: Theme.fs-cap;
                                                 width: 70px * Theme.ui-scale;
                                                 horizontal-alignment: right;
+                                                overflow: elide;
+                                            }
+                                            // stretches with the same rules as its cells
+                                            if root.org-seat-notes: os-h-notes := Text {
+                                                text: Strings.os-col-notes;
+                                                color: Theme.faint;
+                                                font-size: Theme.fs-cap;
+                                                horizontal-stretch: 1;
+                                                preferred-width: 0px;
+                                                min-width: 120px * Theme.ui-scale;
                                                 overflow: elide;
                                             }
                                         }
@@ -7158,60 +7170,70 @@ export component AppWindow inherits Window {
                                                     horizontal-alignment: right;
                                                     vertical-alignment: center;
                                                 }
-                                            }
-                                            }
-                                            if seat.note != "" || seat.fetching: HorizontalLayout {
-                                                padding-left: 14px;
-                                                spacing: 8px;
-                                                Rectangle {
+                                                // the seat's hints, most severe first; stretches
+                                                // like its header, wraps instead of widening
+                                                if root.org-seat-notes: os-c-notes := VerticalLayout {
                                                     horizontal-stretch: 1;
-                                                    height: os-note.preferred-height;
-                                                    os-note := Text {
-                                                        width: 100%;
-                                                        text: seat.note != "" ? "⚠ " + seat.note : "";
-                                                        accessible-label: seat.note;
-                                                        color: seat.fork ? Theme.bad : Theme.warn;
-                                                        font-size: Theme.fs-cap;
-                                                        wrap: word-wrap;
+                                                    preferred-width: 0px;
+                                                    min-width: 120px * Theme.ui-scale;
+                                                    spacing: 2px;
+                                                    alignment: center;
+                                                    if seat.note != "": Rectangle {
+                                                        height: os-note.preferred-height;
+                                                        os-note := Text {
+                                                            width: 100%;
+                                                            text: seat.note;
+                                                            color: seat.fork ? Theme.bad : Theme.warn;
+                                                            font-size: Theme.fs-cap;
+                                                            wrap: word-wrap;
+                                                        }
+                                                        if seat.note-tip != "": TouchArea {
+                                                            property <int> tip-gen;
+                                                            changed has-hover => {
+                                                                if (self.has-hover) {
+                                                                    self.tip-gen = HintTip.show(seat.note-tip,
+                                                                        parent.absolute-position.x,
+                                                                        parent.absolute-position.y + parent.height + 4px);
+                                                                } else {
+                                                                    HintTip.hide(self.tip-gen);
+                                                                }
+                                                            }
+                                                        }
                                                     }
-                                                    if seat.note-tip != "": TouchArea {
-                                                        property <int> tip-gen;
-                                                        changed has-hover => {
-                                                            if (self.has-hover) {
-                                                                self.tip-gen = HintTip.show(seat.note-tip,
-                                                                    parent.absolute-position.x,
-                                                                    parent.absolute-position.y + parent.height + 4px);
-                                                            } else {
-                                                                HintTip.hide(self.tip-gen);
+                                                    // the remedy under the fault it is for
+                                                    if seat.dropped && !seat.fetching && !seat.me: HorizontalLayout {
+                                                        alignment: start;
+                                                        AppButton {
+                                                            label: Strings.os-resync;
+                                                            height: 22px * Theme.ui-scale;
+                                                            pad: 8px * Theme.ui-scale;
+                                                            clicked => {
+                                                                root.os-resync-give-up = false;
+                                                                root.os-resync-member = seat.member;
+                                                            }
+                                                        }
+                                                    }
+                                                    if seat.fetching: HorizontalLayout {
+                                                        spacing: 8px;
+                                                        alignment: start;
+                                                        Text {
+                                                            text: Strings.os-fetching;
+                                                            color: Theme.faint;
+                                                            font-size: Theme.fs-cap;
+                                                            vertical-alignment: center;
+                                                        }
+                                                        if !seat.me: AppButton {
+                                                            label: Strings.os-give-up;
+                                                            height: 22px * Theme.ui-scale;
+                                                            pad: 8px * Theme.ui-scale;
+                                                            clicked => {
+                                                                root.os-resync-give-up = true;
+                                                                root.os-resync-member = seat.member;
                                                             }
                                                         }
                                                     }
                                                 }
-                                                // the remedy beside the fault it is for
-                                                if seat.dropped && !seat.fetching && !seat.me: AppButton {
-                                                    label: Strings.os-resync;
-                                                    height: 22px * Theme.ui-scale;
-                                                    pad: 8px * Theme.ui-scale;
-                                                    clicked => {
-                                                        root.os-resync-give-up = false;
-                                                        root.os-resync-member = seat.member;
-                                                    }
-                                                }
-                                                if seat.fetching: Text {
-                                                    text: Strings.os-fetching;
-                                                    color: Theme.faint;
-                                                    font-size: Theme.fs-cap;
-                                                    vertical-alignment: center;
-                                                }
-                                                if seat.fetching && !seat.me: AppButton {
-                                                    label: Strings.os-give-up;
-                                                    height: 22px * Theme.ui-scale;
-                                                    pad: 8px * Theme.ui-scale;
-                                                    clicked => {
-                                                        root.os-resync-give-up = true;
-                                                        root.os-resync-member = seat.member;
-                                                    }
-                                                }
+                                            }
                                             }
                                         }
                                     }
@@ -12520,7 +12542,7 @@ export component AppWindow inherits Window {
     // Toast: brief bottom-center feedback bubble (e.g. "copied"), auto-
     // dismissed by toast-timer; drawn above everything.
     // =================================================================
-    if root.toast-open: Rectangle {
+    if root.toast-open: toast-box := Rectangle {
             x: (parent.width - self.width) / 2;
             y: parent.height - self.height - 30px;
             // Short toasts ("copied") keep the one-line pill. A long one — an
