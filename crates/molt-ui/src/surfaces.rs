@@ -335,7 +335,9 @@ pub(crate) const UNFINISHED_AFTER_SECS: u64 = 10;
 pub(crate) fn mark_unfinished(rows: &mut [SeatRowData], lang: i32, shown: &std::collections::BTreeSet<String>) {
     let hint = Lexicon::of(lang).os_restore_unfinished;
     for r in rows.iter_mut().filter(|r| shown.contains(&r.member)) {
-        r.note = if r.note.is_empty() { hint.to_string() } else { format!("{} · {hint}", r.note) };
+        let mut lines: Vec<&str> = r.note.lines().collect();
+        lines.insert(usize::from(r.fork).min(lines.len()), hint);
+        r.note = lines.join("\n");
     }
 }
 
@@ -344,7 +346,7 @@ pub(crate) fn mark_unfinished(rows: &mut [SeatRowData], lang: i32, shown: &std::
 pub(crate) fn mark_behind(rows: &mut [SeatRowData], lang: i32, behind: &[String]) {
     let hint = Lexicon::of(lang).os_behind;
     for r in rows.iter_mut().filter(|r| !r.fetching && behind.contains(&r.member)) {
-        r.note = if r.note.is_empty() { hint.to_string() } else { format!("{} · {hint}", r.note) };
+        r.note = if r.note.is_empty() { hint.to_string() } else { format!("{}\n{hint}", r.note) };
     }
 }
 
@@ -401,7 +403,7 @@ pub(crate) fn seat_rows(
                     .map(|(_, hash)| hash.chars().take(6).collect())
                     .unwrap_or_default(),
                 fork: other_at.is_some() || s.diverged,
-                note: notes.join(" · "),
+                note: notes.join("\n"),
                 note_tip: if s.dup_streak > 0 { lex.os_dropped_tip.to_string() } else { String::new() },
                 dropped: s.dup_streak > 0,
                 fetching: false,
@@ -439,10 +441,9 @@ pub(crate) fn block_format_row(lang: i32, governed: bool, on: bool, since: u64, 
     let de = lang == 1;
     if on {
         let text = match (since, de) {
-            (0, true) => "neu".to_string(),
-            (0, false) => "new".to_string(),
-            (h, true) => format!("neu (seit Block {h})"),
-            (h, false) => format!("new (since block {h})"),
+            (0, _) => "v2".to_string(),
+            (h, true) => format!("v2 (seit Block {h})"),
+            (h, false) => format!("v2 (since block {h})"),
         };
         return (1, text, String::new());
     }
@@ -451,10 +452,10 @@ pub(crate) fn block_format_row(lang: i32, governed: bool, on: bool, since: u64, 
     }
     match block_v2_waiting(lang, wait) {
         Some((seat, why)) => {
-            let text = if de { format!("alt - wartet auf {seat}") } else { format!("old - waiting for {seat}") };
+            let text = if de { format!("v1 - wartet auf {seat}") } else { format!("v1 - waiting for {seat}") };
             (2, text, why)
         }
-        None => (3, if de { "alt - bereit zum Wechsel" } else { "old - ready to switch" }.to_string(), String::new()),
+        None => (3, if de { "v1 - bereit zum Wechsel" } else { "v1 - ready to switch" }.to_string(), String::new()),
     }
 }
 
@@ -467,9 +468,9 @@ pub(crate) fn builds_note(lang: i32, mixed: bool, since: u64, wait: &str) -> Str
     let Some((seat, _)) = block_v2_waiting(lang, wait) else { return String::new() };
     let lex = Lexicon::of(lang);
     if lang == 1 {
-        format!("{} - {seat} hält das neue Blockformat auf", lex.os_builds_mixed)
+        format!("{} - {seat} hält Blockformat v2 auf", lex.os_builds_mixed)
     } else {
-        format!("{} - {seat} holds back the new block format", lex.os_builds_mixed)
+        format!("{} - {seat} holds back block format v2", lex.os_builds_mixed)
     }
 }
 
@@ -2356,7 +2357,7 @@ pub(crate) fn display_title(lang: i32, v: &serde_json::Value) -> String {
         };
     }
     if enables_block_v2(v) {
-        return Lexicon::of(lang).os_bv2_label.to_string();
+        return Lexicon::of(lang).os_bv2_title.to_string();
     }
     if let Some(t) = vault_title(lang, v, &VaultView::default(), false) {
         return t;

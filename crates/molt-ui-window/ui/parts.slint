@@ -3021,8 +3021,9 @@ export component BusyModal inherits Rectangle {
     background: #0000008c;
     // swallow clicks so the dimmed screen behind really is inert
     TouchArea {}
-    Rectangle {
-        width: root.dialog-width;
+    bm-card := Rectangle {
+        // scaled with the fonts, never wider than the window
+        width: min(root.dialog-width * Theme.ui-scale, root.width - 48px);
         height: card.preferred-height;
         background: Theme.panel;
         border-radius: Theme.win95 ? 0px : 12px;
@@ -3044,7 +3045,10 @@ export component BusyModal inherits Rectangle {
                     font-weight: 700;
                     vertical-alignment: center;
                     horizontal-stretch: 1;
-                    overflow: elide;
+                    // wraps at the card's width: a cut caption hid what
+                    // the wait is for (field report v0.1.3)
+                    wrap: word-wrap;
+                    preferred-width: 0px;
                 }
             }
             if root.detail != "": Text {

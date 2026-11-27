@@ -43,6 +43,8 @@ mod poke;
 mod recovery_backup;
 mod ritual_log;
 #[cfg(feature = "live-preview")]
+mod overlays;
+#[cfg(feature = "live-preview")]
 mod s3_plaintext;
 #[cfg(feature = "live-preview")]
 mod seat_table;

@@ -51,22 +51,22 @@ fn the_block_format_row_reads_new_waiting_or_ready() {
     assert!(shown(&ui, "Block format").is_none(), "no row outside a chain republic");
 
     set_row(&ui, crate::surfaces::block_format_row(0, true, true, 12, ""));
-    assert!(shown(&ui, "new (since block 12)").is_some());
-    assert!(shown(&ui, "Switch block format").is_none());
+    assert!(shown(&ui, "v2 (since block 12)").is_some());
+    assert!(shown(&ui, "Switch to block format v2").is_none());
 
     set_row(&ui, crate::surfaces::block_format_row(0, true, false, 0, "bo runs an older build"));
-    let waiting = shown(&ui, "old - waiting for bo").expect("the waiting row");
+    let waiting = shown(&ui, "v1 - waiting for bo").expect("the waiting row");
     let at = slint::LogicalPosition::new(
         waiting.absolute_position().x + waiting.size().width / 2.0,
         waiting.absolute_position().y + waiting.size().height / 2.0,
     );
     ui.window().dispatch_event(slint::platform::WindowEvent::PointerMoved { position: at });
     assert_eq!(ui.global::<HintTip>().get_label(), "bo runs an older build");
-    assert!(shown(&ui, "Switch block format").is_none(), "no switch while a seat cannot follow");
+    assert!(shown(&ui, "Switch to block format v2").is_none(), "no switch while a seat cannot follow");
 
     set_row(&ui, crate::surfaces::block_format_row(0, true, false, 0, ""));
-    assert!(shown(&ui, "old - ready to switch").is_some());
-    assert!(shown(&ui, "Switch block format").is_some(), "one action once every seat is ready");
+    assert!(shown(&ui, "v1 - ready to switch").is_some());
+    assert!(shown(&ui, "Switch to block format v2").is_some(), "one action once every seat is ready");
 }
 
 /// The switch explains itself in a table and proposes the feature vote,
@@ -80,7 +80,7 @@ fn the_switch_explains_its_price_and_proposes_the_feature_vote() {
     let proposed = Rc::new(RefCell::new(Vec::new()));
     let p = proposed.clone();
     ui.on_org_propose(move |op, value| p.borrow_mut().push((op.to_string(), value.to_string())));
-    click(&ui, &shown(&ui, "Switch block format").expect("the switch"));
+    click(&ui, &shown(&ui, "Switch to block format v2").expect("the switch"));
     for label in ["What changes", "What you notice", "The price", "Who decides"] {
         assert!(shown(&ui, label).is_some(), "the table names {label}");
     }
@@ -104,7 +104,7 @@ fn the_founding_lists_the_block_format_as_fixed() {
     ui.set_cw_can_propose(true);
     apply_strings(&ui, 0);
     let _shown = show_headless(&ui);
-    let row = shown(&ui, "One block per decision").expect("the fixed row");
+    let row = shown(&ui, "One block per decision (v2)").expect("the fixed row");
     click(&ui, &row);
     assert!(
         !crate::actions::ritual::charter_features(&ui).iter().any(|k| k == "block-v2"),

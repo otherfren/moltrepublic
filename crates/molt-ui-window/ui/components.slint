@@ -819,7 +819,7 @@ export component ConfirmModal inherits Rectangle {
             root.dismissed();
         }
     }
-    Rectangle {
+    cm-card := Rectangle {
         // never narrower than the content wants: a third button or a larger
         // app font must widen the dialog, not poke out of it
         width: min(max(root.dialog-width, dlg.preferred-width), root.width - 48px);
