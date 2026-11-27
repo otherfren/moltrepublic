@@ -439,10 +439,9 @@ pub(crate) fn block_format_row(lang: i32, governed: bool, on: bool, since: u64, 
     let de = lang == 1;
     if on {
         let text = match (since, de) {
-            (0, true) => "neu".to_string(),
-            (0, false) => "new".to_string(),
-            (h, true) => format!("neu (seit Block {h})"),
-            (h, false) => format!("new (since block {h})"),
+            (0, _) => "v2".to_string(),
+            (h, true) => format!("v2 (seit Block {h})"),
+            (h, false) => format!("v2 (since block {h})"),
         };
         return (1, text, String::new());
     }
@@ -451,10 +450,10 @@ pub(crate) fn block_format_row(lang: i32, governed: bool, on: bool, since: u64, 
     }
     match block_v2_waiting(lang, wait) {
         Some((seat, why)) => {
-            let text = if de { format!("alt - wartet auf {seat}") } else { format!("old - waiting for {seat}") };
+            let text = if de { format!("v1 - wartet auf {seat}") } else { format!("v1 - waiting for {seat}") };
             (2, text, why)
         }
-        None => (3, if de { "alt - bereit zum Wechsel" } else { "old - ready to switch" }.to_string(), String::new()),
+        None => (3, if de { "v1 - bereit zum Wechsel" } else { "v1 - ready to switch" }.to_string(), String::new()),
     }
 }
 
@@ -467,9 +466,9 @@ pub(crate) fn builds_note(lang: i32, mixed: bool, since: u64, wait: &str) -> Str
     let Some((seat, _)) = block_v2_waiting(lang, wait) else { return String::new() };
     let lex = Lexicon::of(lang);
     if lang == 1 {
-        format!("{} - {seat} hält das neue Blockformat auf", lex.os_builds_mixed)
+        format!("{} - {seat} hält Blockformat v2 auf", lex.os_builds_mixed)
     } else {
-        format!("{} - {seat} holds back the new block format", lex.os_builds_mixed)
+        format!("{} - {seat} holds back block format v2", lex.os_builds_mixed)
     }
 }
 
@@ -2356,7 +2355,7 @@ pub(crate) fn display_title(lang: i32, v: &serde_json::Value) -> String {
         };
     }
     if enables_block_v2(v) {
-        return Lexicon::of(lang).os_bv2_label.to_string();
+        return Lexicon::of(lang).os_bv2_title.to_string();
     }
     if let Some(t) = vault_title(lang, v, &VaultView::default(), false) {
         return t;

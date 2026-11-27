@@ -12520,7 +12520,7 @@ export component AppWindow inherits Window {
     // Toast: brief bottom-center feedback bubble (e.g. "copied"), auto-
     // dismissed by toast-timer; drawn above everything.
     // =================================================================
-    if root.toast-open: Rectangle {
+    if root.toast-open: toast-box := Rectangle {
             x: (parent.width - self.width) / 2;
             y: parent.height - self.height - 30px;
             // Short toasts ("copied") keep the one-line pill. A long one — an
