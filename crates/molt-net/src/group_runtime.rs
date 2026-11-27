@@ -166,6 +166,48 @@ fn outbox_held(member: &str) -> bool {
     HOLD_OUTBOX.lock().is_ok_and(|h| h.contains(member))
 }
 
+/// A round publishes at most this many envelopes between two cursor saves:
+/// a hard kill re-offers no more than these at the next start.
+pub const CURSOR_SAVE_EVERY: u64 = 32;
+
+/// The close publishes at most this many never-offered envelopes; the rest
+/// is owed from the saved cursor at the next start (§12).
+pub const CLOSE_FIRST_OFFERS_MAX: u64 = 64;
+
+/// Test seams: per member, ms before each outbox publish, and the count of
+/// envelopes its outbox published (round or close).
+static OUTBOX_DELAY_MS: std::sync::Mutex<std::collections::BTreeMap<String, u64>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+static OUTBOX_PUBLISHED: std::sync::Mutex<std::collections::BTreeMap<String, u64>> =
+    std::sync::Mutex::new(std::collections::BTreeMap::new());
+
+/// Test seam: `member`'s outbox waits `ms` before each publish.
+#[doc(hidden)]
+pub fn __set_outbox_delay(member: &str, ms: u64) {
+    if let Ok(mut m) = OUTBOX_DELAY_MS.lock() {
+        m.insert(member.to_string(), ms);
+    }
+}
+
+/// Test seam: envelopes `member`'s outbox published in this process.
+#[doc(hidden)]
+pub fn __outbox_published(member: &str) -> u64 {
+    OUTBOX_PUBLISHED.lock().map_or(0, |m| m.get(member).copied().unwrap_or(0))
+}
+
+async fn outbox_seam_delay(member: &str) {
+    let ms = OUTBOX_DELAY_MS.lock().map_or(0, |m| m.get(member).copied().unwrap_or(0));
+    if ms > 0 {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
+}
+
+fn count_published(member: &str) {
+    if let Ok(mut m) = OUTBOX_PUBLISHED.lock() {
+        *m.entry(member.to_string()).or_insert(0) += 1;
+    }
+}
+
 fn resend_backoff() -> (Duration, Duration) {
     match RESEND_BACKOFF_MS.load(std::sync::atomic::Ordering::SeqCst) {
         0 => (Duration::from_secs(RESEND_AFTER_SECS), Duration::from_secs(RESEND_MAX_BACKOFF_SECS)),
@@ -466,6 +508,7 @@ pub(crate) fn rewind_group(state: &mut TransportState, cfg: &GroupNetConfig) {
 fn rewind_group_to(state: &mut TransportState, floor: u64) {
     let mut cur = state.group.unwrap_or_default();
     if floor < cur.log_seq {
+        cur.offered = cur.offered.max(cur.log_seq);
         cur.log_seq = floor;
         state.group = Some(cur);
     }
@@ -1138,6 +1181,7 @@ async fn persist_cursor<S: StateStore>(store: &S, start: u64, published_through:
             let mut cur = state.group.unwrap_or_default();
             if published_through > cur.log_seq {
                 cur.log_seq = published_through;
+                cur.offered = cur.offered.max(published_through);
                 state.group = Some(cur);
                 true
             } else {
@@ -1494,7 +1538,15 @@ where
     S: StateStore,
     K: EngineSink,
 {
+    let mut saved = start;
+    let mut since_save = 0u64;
     for env in batch {
+        // a stop ends the round between envelopes: the close must not wait
+        // for a backlog (§12)
+        if *stop.borrow() {
+            persist_cursor(store, start, *published_through).await;
+            return PassOutcome::Stopped;
+        }
         // AUTHOR, not `crosses_wire` — the same filter the queue outbox
         // uses. It matters more than it looks: the genesis `Founded` is
         // self-authored on every node, so seq 1 must ride the wire or the
@@ -1516,14 +1568,22 @@ where
             *published_through = env.seq;
             continue;
         };
+        outbox_seam_delay(&cfg.member).await;
         match publish_with_backoff(channel, &frame, cfg, stop).await {
             Ok(()) => {
                 tracing::debug!(me = %cfg.member, seq = env.seq, "group frame published");
+                count_published(&cfg.member);
                 if held.published() {
                     // the backoff exit — the channel publishes again
                     tell(stop, sink.send_ok(&cfg.member)).await;
                 }
                 *published_through = env.seq;
+                since_save += 1;
+                if since_save >= CURSOR_SAVE_EVERY {
+                    persist_cursor(store, saved, *published_through).await;
+                    saved = *published_through;
+                    since_save = 0;
+                }
             }
             // hold the cursor exactly here in EVERY failure case: nothing
             // recovers a skipped envelope, so advancing past an
@@ -1595,10 +1655,12 @@ async fn outbox_loop<L, S, K>(
     }
 }
 
-/// The close's last pass (delivery guarantee §12): every own envelope from the cursor, each
-/// offered to every relay ONCE; it ends at the first one no relay took
-/// (the cursor holds there for the next start). No sink call: the engine
-/// awaits this task and answers nothing meanwhile.
+/// The close's last pass (delivery guarantee §12): the own envelopes above
+/// the cursor that no round ever offered, at most
+/// [`CLOSE_FIRST_OFFERS_MAX`] of them, each to every relay once; it ends at
+/// the first one no relay took. A resend round's remainder is not
+/// re-offered here: it is owed from the saved cursor at the next start. No
+/// sink call: the engine awaits this task and answers nothing meanwhile.
 async fn final_pass<L: OutboxLog, S: StateStore>(
     channel: &GroupChannel,
     mls: &MlsChannel,
@@ -1609,40 +1671,76 @@ async fn final_pass<L: OutboxLog, S: StateStore>(
     if mls.evicted() {
         return;
     }
-    let start = store.load().await.group.unwrap_or_default().log_seq;
+    let cur = store.load().await.group.unwrap_or_default();
+    let start = cur.log_seq;
+    let offered = cur.offered.max(start);
+    // the cursor moves only while nothing owed lies behind it
     let mut through = start;
-    let mut sent = 0u64;
+    let mut contiguous = true;
+    let (mut sent, mut left) = (0u64, 0u64);
     let mut held = None;
     for env in log.read_from(start + 1).await {
         if env.by != cfg.member {
-            through = env.seq;
+            if contiguous {
+                through = env.seq;
+            }
+            continue;
+        }
+        if env.seq <= offered || sent >= CLOSE_FIRST_OFFERS_MAX || held.is_some() {
+            contiguous = false;
+            left += 1;
             continue;
         }
         let Some(frame) = mls.group_frame(&env) else {
             if mls.evicted() {
                 break;
             }
-            through = env.seq;
+            if contiguous {
+                through = env.seq;
+            }
             continue;
         };
+        outbox_seam_delay(&cfg.member).await;
         match publish_once(channel, &frame).await {
             Ok(()) => {
-                // per envelope: a pass cut short keeps what went out
-                persist_cursor(store, through, env.seq).await;
-                through = env.seq;
+                count_published(&cfg.member);
                 sent += 1;
+                if contiguous {
+                    // per envelope: a pass cut short keeps what went out
+                    persist_cursor(store, through, env.seq).await;
+                    through = env.seq;
+                } else {
+                    persist_offered(store, env.seq).await;
+                }
             }
             Err(why) => {
                 held = Some((env.seq, why));
-                break;
+                contiguous = false;
+                left += 1;
             }
         }
     }
     persist_cursor(store, start, through).await;
     match held {
-        Some((seq, why)) => tracing::warn!(me = %cfg.member, sent, held_at = seq, error = %why, "outbox=closed"),
-        None => tracing::info!(me = %cfg.member, sent, "outbox=closed"),
+        Some((seq, why)) => tracing::warn!(me = %cfg.member, sent, left, held_at = seq, error = %why, "outbox=closed"),
+        None => tracing::info!(me = %cfg.member, sent, left, "outbox=closed"),
     }
+}
+
+/// Raise the never-offered mark alone (a first offer above an owed gap).
+async fn persist_offered<S: StateStore>(store: &S, seq: u64) {
+    store
+        .update(|state| {
+            let mut cur = state.group.unwrap_or_default();
+            if seq > cur.offered.max(cur.log_seq) {
+                cur.offered = seq;
+                state.group = Some(cur);
+                true
+            } else {
+                false
+            }
+        })
+        .await;
 }
 
 /// The publish loop; `true` when it ended on the stop signal.
@@ -3232,6 +3330,134 @@ mod tests {
 
     async fn cursor(store: &crate::MemStateStore) -> u64 {
         store.load().await.group.unwrap_or_default().log_seq
+    }
+
+    /// `who`'s running runtime over `url`, `n` own events in the log, the
+    /// cursor seeded from `store`.
+    fn seat_on_store(who: &str, url: String, n: u64, store: crate::MemStateStore) -> (GroupHandle, crate::MemLog) {
+        use crate::mls::MlsMember;
+        use ed25519_dalek::SigningKey;
+        let mut m = MlsMember::new(&SigningKey::from_bytes(&[5u8; 32]), who).expect("mls");
+        m.create_group().expect("group");
+        let log = crate::MemLog::default();
+        for seq in 1..=n {
+            let mut env = walter_event(seq);
+            env.by = who.to_string();
+            log.push(env);
+        }
+        let (_wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, _health) = watch::channel(GroupHealth::default());
+        let handle = spawn_group(
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url], [7u8; 32]),
+            MlsChannel::new(m),
+            GroupNetConfig::fast(who.into(), vec!["petra".into()]),
+            log.clone(),
+            store,
+            NullSink,
+            wake_rx,
+            health_tx,
+        );
+        (handle, log)
+    }
+
+    /// A relay without the 60-notes-per-minute default.
+    async fn roomy_relay() -> (nostr_relay_builder::LocalRelay, String) {
+        let relay = nostr_relay_builder::LocalRelay::new(nostr_relay_builder::RelayBuilder::default().rate_limit(
+            nostr_relay_builder::builder::RateLimit { max_reqs: 500, notes_per_minute: 1_000_000 },
+        ));
+        relay.run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        (relay, url)
+    }
+
+    async fn published_reaches(who: &str, n: u64) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        while __outbox_published(who) < n {
+            assert!(tokio::time::Instant::now() < deadline, "{who} published {}", __outbox_published(who));
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// F1: **the close does not wait for a backlog.** A round over thousands
+    /// of own envelopes is running when the close begins: it ends within
+    /// the envelope in flight plus the bounded first-offer tail, the cursor
+    /// on disk covers every envelope that went out, and the next start
+    /// publishes only the rest - nothing twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_close_mid_backlog_returns_after_the_bounded_tail_and_the_restart_republishes_nothing() {
+        const N: u64 = 3_000;
+        let (_relay, url) = roomy_relay().await;
+        __set_outbox_delay("bruno", 5);
+        let store = crate::MemStateStore::default();
+        let (handle, _log) = seat_on_store("bruno", url.clone(), N, store.clone());
+        published_reaches("bruno", 40).await;
+        let at_close = __outbox_published("bruno");
+        handle.close().await;
+        let closed = __outbox_published("bruno");
+        assert!(closed < N, "the close waited for the whole backlog");
+        assert!(closed - at_close <= 2 + CLOSE_FIRST_OFFERS_MAX, "the close sent {} past its start", closed - at_close);
+        assert_eq!(cursor(&store).await, closed, "the cursor misses envelopes that went out");
+        __set_outbox_delay("bruno", 0);
+        let (again, _log) = seat_on_store("bruno", url, N, store.clone());
+        published_reaches("bruno", N).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(__outbox_published("bruno"), N, "the restart republished what had gone out");
+        again.shutdown().await;
+    }
+
+    /// F1: **a hard kill loses at most a save interval.** While a round runs,
+    /// the saved cursor never lags the published envelopes by more than
+    /// [`CURSOR_SAVE_EVERY`].
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_cursor_on_disk_trails_a_running_round_by_at_most_the_save_interval() {
+        let (_relay, url) = roomy_relay().await;
+        __set_outbox_delay("berta", 2);
+        let store = crate::MemStateStore::default();
+        let (handle, _log) = seat_on_store("berta", url, 600, store.clone());
+        let mut looks = 0;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+        while __outbox_published("berta") < 500 {
+            assert!(tokio::time::Instant::now() < deadline, "the round stalled at {}", __outbox_published("berta"));
+            let published = __outbox_published("berta");
+            let saved = cursor(&store).await;
+            assert!(published.saturating_sub(saved) <= CURSOR_SAVE_EVERY, "published {published}, saved {saved}");
+            looks += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(7)).await;
+        }
+        assert!(looks > 10);
+        handle.shutdown().await;
+    }
+
+    /// F1: **a resend round's remainder is not the close's.** The cursor was
+    /// rewound below envelopes already offered: the close publishes only
+    /// the ones never offered and leaves the cursor where the owed gap
+    /// starts.
+    #[tokio::test]
+    async fn the_close_offers_only_what_was_never_offered() {
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let store = crate::MemStateStore::default();
+        store
+            .update(|s| {
+                s.group = Some(molt_core::GroupCursor { log_seq: 10, offered: 50, ..Default::default() });
+                true
+            })
+            .await;
+        __hold_outbox("bodo", true);
+        let (handle, _log) = seat_on_store("bodo", relay.url().await.to_string(), 53, store.clone());
+        handle.close().await;
+        assert_eq!(__outbox_published("bodo"), 3, "the rewound remainder went out at the close");
+        let cur = store.load().await.group.unwrap_or_default();
+        assert_eq!((cur.log_seq, cur.offered), (10, 53));
+    }
+
+    /// F1: **the close's first-offer tail is bounded by a count.**
+    #[tokio::test]
+    async fn the_close_offers_at_most_its_bound() {
+        let (_relay, url) = roomy_relay().await;
+        let (handle, store) = held_seat("bella", url, 200);
+        handle.close().await;
+        assert_eq!(__outbox_published("bella"), CLOSE_FIRST_OFFERS_MAX);
+        assert_eq!(cursor(&store).await, CLOSE_FIRST_OFFERS_MAX, "the rest is owed from the cursor");
     }
 
     /// **A clean close publishes what was recorded before it.** The outbox

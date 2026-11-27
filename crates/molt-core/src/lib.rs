@@ -2776,6 +2776,10 @@ pub struct GroupCursor {
     /// resets with the window).
     #[serde(default)]
     pub heal_rounds: u32,
+    /// Highest log seq ever published; a rewind lowers `log_seq`, never
+    /// this. Above it an own envelope was never offered.
+    #[serde(default)]
+    pub offered: u64,
 }
 
 /// One event in a workspace's append-only history: the envelope every log
