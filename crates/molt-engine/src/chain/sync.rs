@@ -462,6 +462,7 @@ impl State {
             self.chain.repush_check_at = now.saturating_add(60);
             self.repush_unfinished_restores(now);
         }
+        self.evidence_tick(now);
         self.refresh_sync_feedback(now);
     }
 
@@ -1575,6 +1576,7 @@ impl State {
                     files: u32::try_from(files).unwrap_or(u32::MAX),
                     dup_streak: self.dup_streak(&member),
                     restore_unfinished: self.recovery.unfinished.contains(&member),
+                    evidence: self.seat_evidence(&member),
                     member,
                     ..Default::default()
                 }

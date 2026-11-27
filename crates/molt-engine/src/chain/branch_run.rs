@@ -281,7 +281,7 @@ impl State {
             .collect()
     }
 
-    fn own_hash(&self, height: u64) -> Option<String> {
+    pub(super) fn own_hash(&self, height: u64) -> Option<String> {
         let first = self.chain.blocks.first()?.height;
         let i = usize::try_from(height.checked_sub(first)?).ok()?;
         self.chain.blocks.get(i).filter(|b| b.height == height).map(|b| self.block_id_of(b))
@@ -322,7 +322,7 @@ impl State {
     /// Verify a run of another branch standalone: contiguous, linked from a
     /// block this chain holds at or above its anchor, every block carrying
     /// its threshold against the roster (whose identity keys never move).
-    fn verify_run(&self, run: &[ChainBlock]) -> Result<(), String> {
+    pub(super) fn verify_run(&self, run: &[ChainBlock]) -> Result<(), String> {
         let rid = self.republic_id();
         let head = self.chain.head.as_ref().ok_or("no chain")?;
         let first = run.first().ok_or("empty run")?;
@@ -357,7 +357,7 @@ impl State {
 
     /// Keep a verified run of another branch: the blocks above the last
     /// one this chain shares. `Ok(false)` = nothing new.
-    fn keep_evidence(&mut self, rest: &[ChainBlock]) -> Result<bool, String> {
+    pub(super) fn keep_evidence(&mut self, rest: &[ChainBlock]) -> Result<bool, String> {
         let Some(first) = rest.first() else {
             return Ok(false);
         };
@@ -379,7 +379,7 @@ impl State {
     }
 
     /// The part of `run` this chain does not hold.
-    fn unheld<'a>(&self, run: &'a [ChainBlock]) -> &'a [ChainBlock] {
+    pub(super) fn unheld<'a>(&self, run: &'a [ChainBlock]) -> &'a [ChainBlock] {
         let split = run.iter().position(|b| !self.holds_block(b.height, &self.block_id_of(b))).unwrap_or(run.len());
         &run[split..]
     }

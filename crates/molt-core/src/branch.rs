@@ -115,6 +115,52 @@ pub struct BranchAbandoned {
     pub height: u64,
 }
 
+/// The evidence exchange with one seat (`status.seats[].evidence`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeatEvidence {
+    /// What this seat sends: "" | `offered` | `sending` | `sent` | `refused`.
+    #[serde(default)]
+    pub out: String,
+    /// Parts sent so far.
+    #[serde(default)]
+    pub out_parts: u32,
+    /// Parts in the offer.
+    #[serde(default)]
+    pub out_total: u32,
+    /// What arrived: "" | `receiving` | `ready` | `adopted` | `refused`.
+    #[serde(default, rename = "in")]
+    pub inbound: String,
+    /// Parts received.
+    #[serde(default)]
+    pub in_parts: u32,
+    /// Parts expected.
+    #[serde(default)]
+    pub in_total: u32,
+    /// New blocks in what arrived.
+    #[serde(default)]
+    pub blocks: u32,
+    /// Its first new height.
+    #[serde(default)]
+    pub from_height: u64,
+    /// `extends` (this chain, a catch-up) | `other-branch` (a fork).
+    #[serde(default)]
+    pub kind: String,
+    /// Applied blocks of this chain the other branch does not hold.
+    #[serde(default)]
+    pub drops: u32,
+    /// Why it was refused ("" = it was not).
+    #[serde(default)]
+    pub reason: String,
+}
+
+impl SeatEvidence {
+    /// Nothing exchanged with this seat.
+    #[must_use]
+    pub fn is_idle(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// `branch_status`: everything a seat needs to decide.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchStatusView {

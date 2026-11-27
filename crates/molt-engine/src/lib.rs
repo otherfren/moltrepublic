@@ -1407,6 +1407,8 @@ pub(crate) struct ChainProjection {
     pub(crate) lock: chain::LockRuntime,
     /// The branch choice (`chain/branch_run.rs`).
     pub(crate) branch: chain::BranchRuntime,
+    /// The evidence exchange (`chain/evidence.rs`).
+    pub(crate) evidence: chain::EvidenceRuntime,
 }
 
 /// Recovery on both sides of the open workspace: what this seat coordinates
@@ -2619,6 +2621,18 @@ impl State {
             Command::UiAction { action } => self.cmd_ui_action(action),
             Command::ReadChain => self.cmd_read_chain(),
             Command::BranchStatus => self.cmd_branch_status(),
+            Command::EvidenceOffer { member } => self.cmd_evidence_offer(&member),
+            Command::EvidenceAdopt { member } => self.cmd_evidence_adopt(&member),
+            Command::EvidenceDismiss { member } => self.cmd_evidence_dismiss(&member),
+            Command::NetEvidencePart { sender, republic_id, offer, index, total, data } => {
+                self.cmd_net_evidence_part(&sender, &republic_id, &offer, (index, total), data)
+            }
+            Command::NetEvidenceWant { sender, republic_id, offer, missing } => {
+                self.cmd_net_evidence_want(&sender, &republic_id, &offer, &missing)
+            }
+            Command::NetEvidenceSent { member, offer, sent, total, error } => {
+                self.cmd_net_evidence_sent(&member, &offer, sent, total, &error)
+            }
             Command::BranchExport { dest, passphrase } => self.cmd_branch_export(&dest, passphrase),
             Command::BranchImport { path, passphrase } => self.cmd_branch_import(&path, passphrase),
             Command::ChooseBranch { base_height, tip_hash, amnesia_ack } => {
