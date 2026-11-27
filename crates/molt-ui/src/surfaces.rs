@@ -335,7 +335,9 @@ pub(crate) const UNFINISHED_AFTER_SECS: u64 = 10;
 pub(crate) fn mark_unfinished(rows: &mut [SeatRowData], lang: i32, shown: &std::collections::BTreeSet<String>) {
     let hint = Lexicon::of(lang).os_restore_unfinished;
     for r in rows.iter_mut().filter(|r| shown.contains(&r.member)) {
-        r.note = if r.note.is_empty() { hint.to_string() } else { format!("{} · {hint}", r.note) };
+        let mut lines: Vec<&str> = r.note.lines().collect();
+        lines.insert(usize::from(r.fork).min(lines.len()), hint);
+        r.note = lines.join("\n");
     }
 }
 
@@ -344,7 +346,7 @@ pub(crate) fn mark_unfinished(rows: &mut [SeatRowData], lang: i32, shown: &std::
 pub(crate) fn mark_behind(rows: &mut [SeatRowData], lang: i32, behind: &[String]) {
     let hint = Lexicon::of(lang).os_behind;
     for r in rows.iter_mut().filter(|r| !r.fetching && behind.contains(&r.member)) {
-        r.note = if r.note.is_empty() { hint.to_string() } else { format!("{} · {hint}", r.note) };
+        r.note = if r.note.is_empty() { hint.to_string() } else { format!("{}\n{hint}", r.note) };
     }
 }
 
@@ -401,7 +403,7 @@ pub(crate) fn seat_rows(
                     .map(|(_, hash)| hash.chars().take(6).collect())
                     .unwrap_or_default(),
                 fork: other_at.is_some() || s.diverged,
-                note: notes.join(" · "),
+                note: notes.join("\n"),
                 note_tip: if s.dup_streak > 0 { lex.os_dropped_tip.to_string() } else { String::new() },
                 dropped: s.dup_streak > 0,
                 fetching: false,

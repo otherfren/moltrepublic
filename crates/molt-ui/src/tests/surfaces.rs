@@ -1206,7 +1206,11 @@ fn an_unfinished_restore_is_marked_once_it_lasts() {
     let mut rows = seat_rows(&seats, 0, "ana", 0, 0, &HashMap::new());
     mark_unfinished(&mut rows, 0, &shown);
     assert_eq!(rows[0].note, "");
-    assert!(rows[1].note.ends_with(" · restore unfinished - create a new link"), "{}", rows[1].note);
+    assert_eq!(
+        rows[1].note,
+        "restore unfinished - create a new link\nmany repeats from this seat - fetch its history again if messages are missing",
+        "the restore before the repeats"
+    );
     let mut de = seat_rows(&seats[..1], 0, "ana", 1, 0, &HashMap::new());
     mark_unfinished(&mut de, 1, &["ana".to_string()].into_iter().collect());
     assert_eq!(de[0].note, "Wiederherstellung unvollständig - neuen Link erstellen");
@@ -1308,4 +1312,28 @@ fn fork_lines_and_rows_render_both_languages() {
     assert_eq!(rows.len(), 3);
     assert_eq!((rows[1].text.as_str(), rows[1].flag.as_str()), ("8 · Mitgliedschaft restore", "prüfen"));
     assert!(rows[0].heading && rows[2].heading);
+}
+
+/// Several hints for one seat stack, most severe first: another branch,
+/// an unfinished restore, repeats, behind.
+#[test]
+fn a_seats_hints_stack_most_severe_first() {
+    use crate::surfaces::{mark_behind, mark_unfinished, seat_rows};
+    let seats = vec![
+        molt_core::SeatSync { member: "ana".into(), ..molt_core::SeatSync::default() },
+        molt_core::SeatSync { member: "bo".into(), dup_streak: 2, diverged: true, ..molt_core::SeatSync::default() },
+    ];
+    let mut rows = seat_rows(&seats, 0, "ana", 0, 0, &HashMap::new());
+    mark_unfinished(&mut rows, 0, &["bo".to_string()].into_iter().collect());
+    mark_behind(&mut rows, 0, &["bo".to_string()]);
+    let lines: Vec<&str> = rows[1].note.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            "other branch",
+            "restore unfinished - create a new link",
+            "many repeats from this seat - fetch its history again if messages are missing",
+            "behind - fetch its history again if it stays",
+        ]
+    );
 }

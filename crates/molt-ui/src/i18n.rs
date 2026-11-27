@@ -1110,6 +1110,7 @@ lexicon! {
     os_col_signed: "Signed", "Signiert";
     os_col_files: "Files held", "Dateien gehalten";
     os_col_build: "Build", "Build";
+    os_col_notes: "Notes", "Hinweise";
     os_build_unknown_tip: "Older than 0.1.2 or not heard yet", "Älter als 0.1.2 oder noch nicht gehört";
     os_builds_mixed: "Seats run different versions", "Sitze laufen mit unterschiedlichen Versionen";
     feat_block_v2: "One block per decision (v2)", "Ein Block pro Entscheidung (v2)";
