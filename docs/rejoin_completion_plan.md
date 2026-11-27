@@ -8,7 +8,8 @@ release: forks below the threshold stay possible, are healed and made
 visible, and are counted in the field. Built on master: 5a, 5b, 5c
 (engine side). Built on side branches on 2026-11-27, not merged: the
 evidence exchange (§C.8), the base trickle and the close drain (5d, 20),
-the lag guard (§C.9).
+the lag guard (§C.9). Field evidence from a second seat's dump of the
+same day: §A3 (gaps 25 to 29, questions Q11 and Q12).
 "Rejoin" means three ways a seat comes back:
 - R: restored on a new device by link;
 - O: reopened after downtime;
@@ -101,6 +102,26 @@ Severity terms: "does not finish by itself" = a new link heals it; no
 case in the field lost a seat. 5f stays the severest by construction
 (a permanent split), but it was not reproduced in the field.
 
+## A3. Field evidence from the second seat's dump (2026-11-27)
+
+A 2-of-3 republic on v0.1.3, logs of 11-25 to 11-27 (3.9 M lines), read
+against the first seat's dump. Counts and shapes only; the analysis
+rests outside the tree.
+
+| observation | counts and times (UTC) | gap |
+|---|---|---|
+| A seat stuck at head 439 for 2.9 h: 148 catch-up requests; the serving seat's log shows 15 serves; none reached the stuck seat until a bundle was imported by hand (level in 4 min; a second import level in 3 min). Not a rule refusal, not an MLS epoch, not a missing request: the serve envelopes did not arrive on the sender's stalled outbox path while other frames from the same sender did | 11-26 13:29 to 16:27 | 10, 11, C.5, C.8, 25 |
+| The same class at a third seat: 5 serves of 209 blocks each in 30 min without an adoption | 11-26 17:26 to 17:56 | 16, 25 |
+| Forks: 29 heights with two blocks in two days, 27 with different proposals; the longest unresolved 19.4 h, then a rebase that dropped 36 decisions; a 5.2 h race at heights 458 to 468, after block-v2 was active from 442 | 11-25, 11-26 | 14 (C.6), C.9 |
+| A `Restored` block lost against an ordinary card at one height; the re-key into the group had already run; the device stayed in the group for 17 h, signed nothing from the next height on, and so blocked every cut | 11-26 17:26 to 18:12 | 3, 21; Q11, Q12 |
+| No cut for 224 blocks; the anchor stayed at 233 | three days | 5e, C.4 |
+| The holder of a base served no piece for 20 min: 96 waits behind the outbox | 11-26 18:02 to 18:12 | 5d |
+| All three seats polled for a block nobody held for 13.3 h: 253 `beyond_head` answers in one seat's last log | 11-26 19:51 to 11-27 09:06 | 16, 28 |
+| `withdraw_received ... outcome=Ignored`: 31,511 lines in one day, 99.93 % ignored (the first seat's dump: 92,538) | 11-26 | 26 |
+| MCP sessions initialized: 388,221 and 203,897 lines on two days | 11-26, 11-27 | 27 |
+| No clean stop at the second seat either: SIGTERM, no `workspace closed` for 90 s | 11-26 18:22 | 20 |
+| A decision line from the other branch is logged `forged`; 208 blocks carry one `applied_at` | 11-26 | 29 |
+
 ## B. Inventory
 
 Size in agent-hours. "Off/hint" means built but switched off, or only a hint.
@@ -109,7 +130,7 @@ Size in agent-hours. "Off/hint" means built but switched off, or only a hint.
 |---|---|---|---|---|---|---|---|---|
 | 1 | coordinator dies after the persist, before the Welcome leaves: the Welcome is never re-sent; the delivery task is memory-only | `nostr_ritual.rs:505, 530-586`; `membership.rs:1575-1580`; `delivery_guarantee.md` §11 (:779); `pending_rekey_plan.md` §1-§3 (shelf reverted: cut off v0.1.0-v0.1.2 seats at upgrade) | device: `link outdated`; coordinator: `rekey_commit=unsent` | does not finish by itself (a new link: 6-8 s) | plan only | C.1: durable pending re-key | 20 | no |
 | 2 | restore sealed while the coordinator cannot reach the group (consent off, no relay, no route): the request and KeyPackage are consumed | `membership.rs:1331, 1339-1351, 1484-1492`; `net/recovery.rs:885-901` | toast "Restore of {seat} interrupted - create a new link", status `restore_unfinished` | does not finish by itself (field R6; a new link: 6 s) | hint | C.2: keep the request, re-key when the group is reachable again | 10 | yes, by itself (Q3) |
-| 3 | a displaced restore reopens, then fails: the new device stays in the MLS group, the chain keeps the old anchor | `sync.rs:989-1026` `return_displaced_restore`; `docs_archive/chain/persistent_chain.md` §7.3 (second §7.3, :339-350) | `restore=displaced` (log) | degrades (a reader the chain does not anchor) | planned, not built | C.3: status flag + eviction re-key | 12 | yes, on command (Q2) |
+| 3 | a displaced restore reopens, then fails: the new device stays in the MLS group, the chain keeps the old anchor | `sync.rs:989-1026` `return_displaced_restore`; `docs_archive/chain/persistent_chain.md` §7.3 (second §7.3, :339-350) | `restore=displaced` (log) | degrades (a reader the chain does not anchor) | planned, not built | C.3: status flag + eviction re-key; field 2026-11-27 (§A3): a `Restored` block lost against a card at one height, the device stayed in the group 17 h signing nothing and blocked every cut | 12 | yes, on command (Q2); Q11, Q12 |
 | 4 | an own commit that never left races a later one and can undo a second restore | `delivery_guarantee.md` §11 (:796-805); `pending_rekey_plan.md` §1 (B1) | nothing until the device is deaf | blocks | plan only | with C.1 | (in 1) | no |
 | 5a | KNOWN (`crates/molt-engine/tests/rejoin_cut.rs`, branch commit `abc53f80`, three green tests at small scale): a restored seat DOES sign the next cut once its base is in. Covered: restored after a folded cut; restored far above its anchor (42 pages back 46 s after the restore); restored with no cut at all | `rejoin_cut.rs:176, 208, 233` | - | - | built | keep the tests | 0 | no |
 | 5b | DONE on master (`9659d9fd`), except its GUI strings: a cut refused while the base is pending waits and is judged again when the base arrives (wiki and vault); a head that moved meanwhile drops it; an arriving base proposes no cut. Pinned by `a_cut_refused_while_the_base_is_pending_is_signed_once_it_arrives` (`chain/checkpoint_tests.rs:1318`, green) | `chain/checkpoint.rs`, `net/wiki_base.rs`, `net/vault_base.rs` | - | - | built | GUI strings only | 1 | no |
@@ -136,6 +157,11 @@ Size in agent-hours. "Off/hint" means built but switched off, or only a hint.
 | 22 | a restored device shows `N new messages unreadable` (9 to 9,260 in the field) in `net_health` FOREVER: the pre-restore traffic it can never decrypt is counted as a fault | field R1, R10; `net/presence.rs` health | net_health degraded, never clears | degrades (misleads every restored seat) | - | count frames from epochs before this device's join as `before this device`, not as unreadable; health stays ok | 4 | no |
 | 23 | stale `restore_unfinished`: one survivor kept it for a seat after later successful restores | field; `chain/sync.rs:1576`; `net/recovery.rs:865-875` (the clear) | `restore_unfinished` after the seat is level | cosmetic | - | clear it on any sealed and merged restore of that seat; a test with two restores and the flag on a third seat | 3 | no |
 | 24 | a persisted share whose uploader was restored (old device off) reported `shared file ... is no longer available` while every seat lists it as persisted [INFERRED by the tester: with no mirror the bytes lived only on the old device] | field A2; `files_state.rs:301-304`; mirroring worker | `persisted` in every list, download fails | degrades ("persistent" promises a second holder it does not have) | - | status per share `held by N seats`; a persisted share with N = 1 shows `only on <seat>`; a restore warns when the seat is the only holder | 5 | no |
+| 25 | catch-up serves do not arrive while the sender's outbox to that peer is stalled: the acknowledged floor does not advance, the tail is re-offered for hours, and an envelope published meanwhile waits behind it | `crates/molt-net/src/group_runtime.rs` (the rewind, `publish_batch`), `net/delivery.rs` (acks); root cause being traced from both seats' logs | `re-offering the tail`, `not acknowledging deliveries`; the stuck seat sees nothing | does not finish by itself (a bundle by hand: 3 to 4 min) | - | the smallest fix the trace names; a catch-up answer must not wait behind a stalled tail | not estimated | no |
+| 26 | a withdraw flood: the same withdrawals re-sent tens of thousands of times, 99.93 % ignored; a volume source behind 25 | `proposals.rs`, `net/ingest.rs`; being traced | log noise, publish budget | degrades | - | stop the trigger or acknowledge ignored duplicates | not estimated | no |
+| 27 | every call of one client opens an MCP session and logs three INFO lines | `molt-mcp` default log filter | 388,221 lines in one day | cosmetic (the log) | - | `rmcp` at WARN in the default filter; tell the client's author | 1 | no |
+| 28 | a stale "ahead" claim keeps every seat polling for a block nobody holds | `chain/sync.rs` (`request_catchup`, `beyond_head`), the peer heights | 13.3 h of polls | degrades (noise, budget) | - | a `beyond_head` answer retires that peer's claimed height; the status says nobody holds it | 3 | no |
+| 29 | texts: a decision line from another branch is logged `forged`; a replayed range carries one `applied_at` | `net/ingest.rs`, the block stamps | misleading | cosmetic | - | `from another branch`; the stamp of the local apply | 2 | no |
 
 ## C. Designs
 
@@ -282,6 +308,16 @@ Open with it:
   catch-up, the bundle is refused for the same rule and the defect belongs
   in the catch-up path.
 
+Field answer (2026-11-27, §A3): it was none of the three. The stuck
+seat asked 148 times and the sender's log shows 15 serves; the serve
+envelopes did not arrive on the sender's stalled outbox path while other
+frames from the same sender did. The hand imports made it level in 4 and
+3 minutes. The stall's mechanism is being traced (gap 25). The automatic
+offer's trigger, "served repeatedly without progress", is this field
+case; the review of 2026-11-27 found and is fixing three defects that
+would have broken it there (an unbounded re-judge, a budget spent by a
+refused bundle, a latch set before anything was sent).
+
 **C.9 The lag guard (a plan item since 2026-11-27; merge only on the
 user's word).** A seat behind a heard peer neither signs at its head nor
 seals, and a signature for a height its signer left does not seal;
@@ -334,12 +370,12 @@ gate. "After" names what must be merged first.
 | 3 C.7 and the rejoiner | 21, 6, 7, 8, 13 | `lifecycles.rs`, `nostr_ritual.rs` rejoiner half, `net/recovery.rs` attempts, `files_state.rs`/`proposals.rs` moot | 2 | cut lane |
 | 4 v2 consent only | 18 | `chain/verify.rs` consent rule, `chain/membership.rs` mint gate | 2 | cut lane |
 | 5 C.2 re-key when reachable | 2 | `chain/membership.rs`, `net/recovery.rs` | 3, 4 | cut lane |
-| 6 C.3 and N1 as display | 3, 15, N1 | `molt-net/src/mls.rs`, `chain/membership.rs`, `chain/sync.rs` (`return_displaced_restore`), status | 5 | cut lane |
+| 6 C.3 and N1 as display | 3, 15, N1 | `molt-net/src/mls.rs`, `chain/membership.rs`, `chain/sync.rs` (`return_displaced_restore`), status | 5; its status flag and the line naming a seat that stopped signing start at once (field 2026-11-27) | cut lane |
 | 7 C.6 branch choice live, with the evidence column | 14, evidence | `chain/branch*.rs`, `molt-ui` | 3, 6; its capability gate, `amnesia_ack`, pause rule and keystones start at once | - |
 | 8 cut lane: 5d (merge), 5e, the 5b/5c strings, 17, then 5f (§C.4c) | 5b-5f, 17 | `chain/checkpoint.rs`, `net/wiki_base.rs`, `net/vault_base.rs`, `chain/sync.rs` `tie_break` / `try_reorg`, `molt-ui` strings | 5f after its design review | serial lane |
-| 9 delivery lane: C.5 and 11 | 10, 11 | `net/delivery.rs`, `molt-net` ack sheet | - | serial lane |
+| 9 delivery lane: C.5 and 11, then 25, 26 and 28 once traced | 10, 11, 25, 26, 28 | `net/delivery.rs`, `molt-net` ack sheet and outbox, `proposals.rs` | 25 to 28 after their root-cause analyses | serial lane |
 | 10 catch-up | 16 | a field run over Tor measures first; batching only if the publish rate dominates | 6 | - |
-| 11 smaller | 19, 22, 23, 24 | docs, test; `net/presence.rs` health; `net/recovery.rs` flag; `files_state.rs`, mirroring worker, status | 22 and 23 after 1 | any |
+| 11 smaller | 19, 22, 23, 24, 27, 29 | docs, test; `net/presence.rs` health; `net/recovery.rs` flag; `files_state.rs`, mirroring worker, status; the log filter and two texts | 22 and 23 after 1 | any |
 | 12 lag guard | - | its own plan and review; merge on the user's word | - | - |
 | 13 acceptance | all | `tests/` keystones, field script, fork count from the seat dumps | 1-11 | - |
 
@@ -387,6 +423,8 @@ Calendar: about 10 to 14 working days with three lanes; the serial lane
 | Q8 | v2 restore consent required once every seat announced it | yes (also a no-split prerequisite) |
 | Q9 | the cut-versus-card rule at one height (§C.4b): "at one height a checkpoint cut with n distinct roster signatures outranks a non-cut block, otherwise the lower identity wins; activated with the no-split plan's activation height, not as a plain fix"; and does a cut outrank a `BranchChosen` at the same height? | yes, and cut over chosen. Decided 2026-11-27: with its own chain-recorded activation (§C.4c), one vote, one downgrade wall. Until it is active the race stays open and rare; the way out is a restore by link. Not the signing lock: it freezes cards behind any cut a single seat cannot sign |
 | Q10 | a rejoiner that dies before its Welcome (C.7): A seal only after a fresh "still here", B persist the request state on the device, C the link stays valid until the Welcome is acknowledged | A + C; not B (it breaks the ritual's ephemerality) |
+| Q11 | a `Restored` block that a fork displaces (field 2026-11-27: the card won at one height, the device sat in the group unanchored): re-proposed and re-sealed without a new link (the device is in the group and signs its consent again at the new height), or the device evicted and restored again by link? | re-propose and re-seal: the threshold admitted the seat, the link costs the operator; eviction (C.3) stays for what that fails to heal |
+| Q12 | the re-key into the group runs before the `Restored` block is final (field: re-key at 17:26, the block displaced at 18:12): keep that order and repair by Q11, or re-key only once the block is final? | keep the order (the device needs the group for its base and to sign again); repair by Q11 and C.3 |
 
 Decided 2026-11-27: the user approved every recommendation above. One
 change followed from the rejected no-split plan: Q9's rule gets its own
