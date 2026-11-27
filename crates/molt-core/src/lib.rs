@@ -8666,6 +8666,11 @@ pub struct BaseFetchView {
     /// Unix seconds the last new piece was seen (0 = none yet).
     #[serde(default)]
     pub at: u64,
+    /// Unix seconds this wait began - the episode runs from the first
+    /// fetch attempt until the base arrives or the commitment moves
+    /// (0 = unknown).
+    #[serde(default)]
+    pub since: u64,
 }
 
 /// One file shared into the chat (Shared Files → Uploads). Only metadata

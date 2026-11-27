@@ -60,18 +60,22 @@ impl crate::State {
     pub(crate) fn wiki_base_tick(&mut self) {
         if self.chain.wiki_base.is_some() {
             self.files.wiki_base_fetching = None;
+            // the wait is over; a later one is a new episode
+            self.files.base_progress.remove("wiki");
             return;
         }
         let want = self.wiki_base_committed().map(|(hash, _)| hash);
         // a SECOND cut moved the commitment: the running fetch is after
         // bytes no holder keeps any more (each keeps the current tree
-        // only), so it is abandoned rather than left to wait forever
+        // only), so it is abandoned rather than left to wait forever -
+        // the new commitment starts a new episode
         if self.files.wiki_base_fetching != want {
             if let Some(h) = self.files.wiki_base_fetch.take() {
                 h.abort();
             }
             self.files.wiki_base_fetching = None;
             self.files.wiki_base_next_try = 0;
+            self.files.base_progress.remove("wiki");
         }
         if self
             .files
@@ -103,7 +107,7 @@ impl crate::State {
         // pieces for another fetcher minutes ago, and the catch-up window
         // set is bounded either way
         let from = crate::now_secs().saturating_sub(24 * 60 * 60);
-        let progress = crate::transfer::BaseProgress::default();
+        let progress = self.base_progress_start("wiki");
         self.files.base_progress.insert("wiki", progress.clone());
         self.files.wiki_base_fetch = Some(crate::transfer::spawn_wiki_base_fetch(
             channel,
@@ -220,11 +224,23 @@ impl crate::State {
 }
 
 impl crate::State {
-    /// A seat asked for a base this node holds: INFO once per seat.
+    /// A fresh progress view for an episode that began at `since` - a
+    /// still-running episode carries its start across fetch retries.
+    pub(crate) fn base_progress_start(&self, kind: &str) -> crate::transfer::BaseProgress {
+        let since = self
+            .files
+            .base_progress
+            .get(kind)
+            .and_then(|p| p.lock().ok().map(|v| v.since).filter(|s| *s > 0))
+            .unwrap_or_else(crate::now_secs);
+        crate::transfer::base_progress(since)
+    }
+
+    /// A seat asked for a base this node holds: one WARN per seat.
     pub(crate) fn note_base_wanted(&mut self, kind: &str, id: &MessageId, from: &str) {
         let new = self.files.base_wanted_by.entry(id.to_string()).or_default().insert(from.to_string());
         if new {
-            tracing::info!(kind, from, "base=wanted");
+            tracing::warn!(kind, from, "base=wanted");
         }
     }
 

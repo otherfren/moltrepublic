@@ -1651,6 +1651,15 @@ pub(crate) fn failure_code(reason: &str) -> &'static str {
 /// A running base fetch's progress, for the status view.
 pub(crate) type BaseProgress = std::sync::Arc<std::sync::Mutex<molt_core::BaseFetchView>>;
 
+/// A fresh progress view whose wait began at `since`.
+pub(crate) fn base_progress(since: u64) -> BaseProgress {
+    let p = BaseProgress::default();
+    if let Ok(mut v) = p.lock() {
+        v.since = since;
+    }
+    p
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_wiki_base_fetch(
     channel: molt_net::ritual_net::GroupChannel,

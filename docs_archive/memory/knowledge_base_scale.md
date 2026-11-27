@@ -672,12 +672,14 @@ from `molt-vault-base-series-v1`, every holder answers.
   headroom and the daily byte cap still gate every piece. Field, v0.1.3: a
   restored seat waited 101 minutes for a 5.2 MB base behind a re-send
   backlog, and nothing on the holder said so.
-- **What both sides see.** Holder: INFO `base=wanted kind= from=` once per
+- **What both sides see.** Holder: WARN `base=wanted kind= from=` once per
   seat, `base=serving kind= series= pieces= of=`, `base=waiting kind=
   series= gate=` and `base=served kind= series= pieces=` once per state
   change; `status.bases.serving` (kind, to, published, of, gate, at).
-  Requester: `status.bases.fetch` (kind, have, of, at - pieces, and when the
-  last new one was seen), beside the memory surface's `wiki_base_pending`.
+  Requester: `status.bases.fetch` (kind, have, of, at, since - pieces,
+  when the last new one was seen, and when this wait began; the episode
+  runs until the base arrives or the commitment moves), beside the memory
+  surface's `wiki_base_pending`.
 
 #### 4.9.8 The wedge this also closes
 
