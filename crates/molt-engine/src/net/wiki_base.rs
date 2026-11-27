@@ -60,18 +60,22 @@ impl crate::State {
     pub(crate) fn wiki_base_tick(&mut self) {
         if self.chain.wiki_base.is_some() {
             self.files.wiki_base_fetching = None;
+            // the wait is over; a later one is a new episode
+            self.files.base_progress.remove("wiki");
             return;
         }
         let want = self.wiki_base_committed().map(|(hash, _)| hash);
         // a SECOND cut moved the commitment: the running fetch is after
         // bytes no holder keeps any more (each keeps the current tree
-        // only), so it is abandoned rather than left to wait forever
+        // only), so it is abandoned rather than left to wait forever -
+        // the new commitment starts a new episode
         if self.files.wiki_base_fetching != want {
             if let Some(h) = self.files.wiki_base_fetch.take() {
                 h.abort();
             }
             self.files.wiki_base_fetching = None;
             self.files.wiki_base_next_try = 0;
+            self.files.base_progress.remove("wiki");
         }
         if self
             .files
@@ -103,6 +107,8 @@ impl crate::State {
         // pieces for another fetcher minutes ago, and the catch-up window
         // set is bounded either way
         let from = crate::now_secs().saturating_sub(24 * 60 * 60);
+        let progress = self.base_progress_start("wiki");
+        self.files.base_progress.insert("wiki", progress.clone());
         self.files.wiki_base_fetch = Some(crate::transfer::spawn_wiki_base_fetch(
             channel,
             series.id,
@@ -119,6 +125,7 @@ impl crate::State {
             },
             self.net_scope,
             cmd_tx,
+            progress,
         ));
     }
 
@@ -163,7 +170,7 @@ impl crate::State {
     /// node that answers what it holds is strictly better than an elected
     /// one that turns out to be base-pending itself. Returns whether this
     /// was a base request at all.
-    pub(crate) fn serve_wiki_base_pieces(&mut self, id: MessageId, ranges: &[(u32, u32)]) -> bool {
+    pub(crate) fn serve_wiki_base_pieces(&mut self, from: &str, id: MessageId, ranges: &[(u32, u32)]) -> bool {
         let Some(series) = self.wiki_base_series() else {
             return false;
         };
@@ -180,6 +187,7 @@ impl crate::State {
         if ranges.is_empty() {
             return true;
         }
+        self.note_base_wanted("wiki", &id, from);
         tracing::debug!(%id, ranges = ranges.len(), "shared memory base: pieces wanted");
         self.enqueue_wiki_base_publish(&series, ranges);
         true
@@ -212,5 +220,66 @@ impl crate::State {
             expires_at: None,
         };
         self.spawn_enqueue_publish(job);
+    }
+}
+
+impl crate::State {
+    /// A fresh progress view for an episode that began at `since` - a
+    /// still-running episode carries its start across fetch retries.
+    pub(crate) fn base_progress_start(&self, kind: &str) -> crate::transfer::BaseProgress {
+        let since = self
+            .files
+            .base_progress
+            .get(kind)
+            .and_then(|p| p.lock().ok().map(|v| v.since).filter(|s| *s > 0))
+            .unwrap_or_else(crate::now_secs);
+        crate::transfer::base_progress(since)
+    }
+
+    /// A seat asked for a base this node holds: one WARN per seat.
+    pub(crate) fn note_base_wanted(&mut self, kind: &str, id: &MessageId, from: &str) {
+        let new = self.files.base_wanted_by.entry(id.to_string()).or_default().insert(from.to_string());
+        if new {
+            tracing::warn!(kind, from, "base=wanted");
+        }
+    }
+
+    /// The bases this node serves, as its trickle reports them.
+    pub(crate) fn base_serving_view(&self) -> Vec<molt_core::BaseServeView> {
+        let Some(status) = self.group_net.as_ref().map(|g| g.trickle.status()) else {
+            return Vec::new();
+        };
+        let series = [
+            ("wiki", self.wiki_base_series().map(|s| s.id.to_string())),
+            ("vault", self.vault_base_series().map(|s| s.id.to_string())),
+        ];
+        series
+            .into_iter()
+            .filter_map(|(kind, id)| {
+                let id = id?;
+                let v = status.get(&id)?;
+                Some(molt_core::BaseServeView {
+                    kind: kind.to_string(),
+                    to: self.files.base_wanted_by.get(&id).map(|s| s.iter().cloned().collect()).unwrap_or_default(),
+                    published: v.published,
+                    of: v.of,
+                    gate: v.gate.clone(),
+                    at: v.at,
+                })
+            })
+            .collect()
+    }
+
+    /// The bases this node waits for, with what the running fetch holds.
+    pub(crate) fn base_fetch_view(&self) -> Vec<molt_core::BaseFetchView> {
+        let pending = [("wiki", self.wiki_base_pending()), ("vault", self.vault_base_pending())];
+        pending
+            .into_iter()
+            .filter(|(_, p)| *p)
+            .map(|(kind, _)| {
+                let p = self.files.base_progress.get(kind).and_then(|p| p.lock().ok().map(|v| v.clone()));
+                molt_core::BaseFetchView { kind: kind.to_string(), ..p.unwrap_or_default() }
+            })
+            .collect()
     }
 }

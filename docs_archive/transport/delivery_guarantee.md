@@ -959,7 +959,13 @@ a_rewind_reads_the_last_explicit_bit_as_unacked}`,
 `crates/molt-engine/tests/nostr_delivery_guarantee.rs`
 (`a_receiver_whose_window_regressed_gets_the_tail_again_and_applies_it_once`).
 
-## 12. A clean close publishes what was recorded (v0.1.3)
+## 12. A clean close publishes what was recorded (v0.1.3, bounded in v0.1.4)
+
+Field, v0.1.3: not one clean close in two days. The close waited for the
+round in flight, which never checked the stop, over a backlog of ~5,800
+own envelopes at 60-100 a minute; every forced stop then threw the round's
+progress away (the cursor was saved at the round's end only), so the next
+start re-published the same backlog. v0.1.4 bounds both.
 
 Measured on v0.1.1 and v0.1.2: five `chat_send` answered `ok`, SIGTERM
 under a millisecond later - the other seat held one or two until the
@@ -970,15 +976,26 @@ stop came, and the stop won.
 or joining another republic while one is open, the service's
 SIGTERM/SIGINT - all run `persist_net_crypto_on_close`) closes
 the group runtime with `GroupHandle::close`: the engine blocks in it, so
-it accepts nothing meanwhile, and the outbox, after its stop, reads the
-log once more from its cursor and offers every own envelope it finds,
-each to every relay ONCE. The pass ends at the first envelope no relay
-took (the cursor is persisted per published envelope, so a pass cut
-short keeps what went out) or at the end of the log; the gap answers stop
-at their next turn. Then the ratchet snapshot is taken, so it covers every frame the
-pass sealed. `outbox=closed sent= [held_at= error=]`. The pass calls
+it accepts nothing meanwhile. A round in flight ends after the envelope
+it is publishing (the stop is checked before every envelope). Then the
+outbox offers the own envelopes that no round ever offered - above
+`GroupCursor.offered`, the highest seq ever published, which a rewind
+never lowers - at most `CLOSE_FIRST_OFFERS_MAX` (64) of them, each to
+every relay ONCE, ending at the first one no relay took. A resend round's
+remainder (rewound, below `offered`) is not re-offered at the close; it
+and anything past the bound are owed from the saved cursor at the next
+start. The cursor is saved before every stop and every
+`CURSOR_SAVE_EVERY` (32) envelopes of a round, so a hard kill re-offers
+at most that many. The gap answers stop at their next turn. Then the ratchet snapshot is taken, so it covers every frame the
+pass sealed. `outbox=closed sent= left= [held_at= error=]`. The pass calls
 nothing back into the engine, and every sink call of the outbox gives way
 to the stop - a blocked engine answers nothing.
+
+**Re-offers (v0.1.4).** A rewound round (below `offered`) skips served
+checkpoint parts: each answered one request and is owed to nobody. A
+commit is still re-offered (a laggard needs it); the dark lock frames keep
+their own rules. A relay's open breaker logs the publishes it skipped once,
+when it closes (`relay=resumed skipped=`), not one WARN per publish.
 
 **No clock decides the drain.** What bounds it is the transport's
 per-publish bounds (`[transport.nostr] connect_timeout_secs` 60,
@@ -1003,7 +1020,10 @@ at once as before. A hard kill is unchanged - the at-least-once resend
 covers it. A current-thread runtime (unit tests) cannot block in place
 and drops the handle instead.
 
-Pins: `group_runtime::tests::{a_clean_close_publishes_the_tail_the_outbox_never_read,
+Pins: `group_runtime::tests::{a_close_mid_backlog_returns_after_the_bounded_tail_and_the_restart_republishes_nothing,
+the_cursor_on_disk_trails_a_running_round_by_at_most_the_save_interval,
+the_close_offers_only_what_was_never_offered, the_close_offers_at_most_its_bound,
+a_clean_close_publishes_the_tail_the_outbox_never_read,
 a_publish_in_flight_at_the_close_is_finished_and_the_pass_sends_the_rest,
 a_plain_shutdown_takes_no_final_pass}`; bounds (they hold without the
 pass too): `a_withdrawn_close_publishes_nothing`,

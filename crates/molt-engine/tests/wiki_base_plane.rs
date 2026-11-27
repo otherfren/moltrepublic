@@ -171,8 +171,39 @@ async fn a_folded_cut_survives_a_lost_base_over_the_relay() {
 
     // it is honest about it…
     wait_wiki(&b, "the base-pending state", 30, |docs, p| docs == 0 && p.is_some()).await;
+    // …and its status names the wait (§4.9.9): which base, how many
+    // pieces, and when the wait began
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let fetching = loop {
+        match b.execute(Command::Status).await.expect("status") {
+            Reply::Status(s) => {
+                if let Some(f) = s.bases.fetch.iter().find(|f| f.kind == "wiki") {
+                    if f.since > 0 && f.of >= 1 {
+                        break f.clone();
+                    }
+                }
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the status never named the pending base");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert!(fetching.have <= fetching.of, "pieces held exceed the series: {fetching:?}");
     // …and gets it back off the plane, from the seat that still holds it
     wait_wiki(&b, "the base to arrive over the relay", 120, |docs, p| docs == 2 && p.is_none()).await;
+    // the wait is over, so the status stops naming it
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let named = match b.execute(Command::Status).await.expect("status") {
+            Reply::Status(s) => s.bases.fetch.iter().any(|f| f.kind == "wiki"),
+            other => panic!("unexpected: {other:?}"),
+        };
+        if !named {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the status still names a base it holds");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     assert!(base.exists(), "the fetched base is kept for the next open");
 }
 

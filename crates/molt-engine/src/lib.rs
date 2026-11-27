@@ -1147,6 +1147,10 @@ pub(crate) struct FilePlane {
     /// The last base fetch outcome logged at info (`wiki:<reason>` /
     /// `vault`), so a repeating one is not logged every attempt.
     pub(crate) base_fetch_logged: Option<String>,
+    /// The running base fetches' progress, by kind (`wiki`, `vault`).
+    pub(crate) base_progress: HashMap<&'static str, crate::transfer::BaseProgress>,
+    /// Per base series served: the seats that asked this session.
+    pub(crate) base_wanted_by: HashMap<String, std::collections::BTreeSet<MemberId>>,
     /// Vault S3a: the payloads this seat holds and the fetches after the
     /// ones it must hold.
     pub(crate) vault: crate::net::vault_payload::VaultPlane,
@@ -2043,6 +2047,8 @@ impl State {
                 wiki_base_next_try: 0,
                 wiki_base_fetching: None,
                 base_fetch_logged: None,
+                base_progress: HashMap::new(),
+                base_wanted_by: HashMap::new(),
                 vault: crate::net::vault_payload::VaultPlane::default(),
                 vault_base: crate::net::vault_base::VaultBasePlane::default(),
                 share_paths: HashMap::new(),
