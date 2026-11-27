@@ -1590,6 +1590,9 @@ struct PoolSlot {
     /// Closes the kept socket at a withdrawal: an idle one has no reader
     /// that would notice.
     watcher: Option<tokio::task::AbortHandle>,
+    /// Publishes skipped while the breaker was open, logged once when it
+    /// closes.
+    skipped: u32,
 }
 
 impl Drop for PoolSlot {
@@ -1630,9 +1633,11 @@ impl PoolSlot {
         self.down_until = Some(tokio::time::Instant::now() + breaker_delay(self.failures));
     }
 
-    fn healthy(&mut self) {
+    /// The breaker closes: the publishes it skipped meanwhile.
+    fn healthy(&mut self) -> u32 {
         self.failures = 0;
         self.down_until = None;
+        std::mem::take(&mut self.skipped)
     }
 }
 
@@ -1785,13 +1790,14 @@ impl PublishPool {
         }
         if let Some(until) = guard.down_until {
             if tokio::time::Instant::now() < until {
-                return Err(NetError::Unreachable("backing off".into()));
+                guard.skipped = guard.skipped.saturating_add(1);
+                return Err(NetError::Unreachable(BACKING_OFF.into()));
             }
         }
         if let Some(ws) = guard.ws.as_mut() {
             match send_and_await_ok(ws, event, timeouts.publish).await {
                 Ok(verdict) => {
-                    guard.healthy();
+                    resumed(url, guard.healthy());
                     return verdict;
                 }
                 // the OK never came: a relay that holds a live socket and
@@ -1826,7 +1832,7 @@ impl PublishPool {
             Ok((ws, verdict)) => {
                 // keep the live socket — a refusal verdict still proves it works
                 PoolSlot::keep(slot, &mut guard, ws, dialer.gate.clone(), url);
-                guard.healthy();
+                resumed(url, guard.healthy());
                 verdict
             }
             // consent, not the relay, decides: no breaker, so consent given
@@ -2000,10 +2006,21 @@ async fn gather_publish(
     finish_publish_report(report)
 }
 
+/// A publish the open breaker skipped: counted, logged when it closes.
+const BACKING_OFF: &str = "backing off";
+
+/// The breaker closed after skipping publishes: one line for the episode.
+fn resumed(url: &str, skipped: u32) {
+    if skipped > 0 {
+        tracing::info!(relay = %url, skipped, "relay=resumed");
+    }
+}
+
 /// One relay's failed attempt; a refusal was logged where it was counted.
 fn warn_unless_refused(url: &str, e: &NetError) {
     match e {
         NetError::Refused { .. } => {}
+        NetError::Unreachable(m) if m == BACKING_OFF => tracing::debug!(relay = %url, "publish skipped: backing off"),
         NetError::Withdrawn => tracing::debug!(relay = %url, "publish skipped: relay withdrawn"),
         _ => tracing::warn!(relay = %url, error = %e, "publish rejected"),
     }
@@ -2097,6 +2114,18 @@ async fn publish_one(
 
 #[cfg(test)]
 mod tests {
+    /// F4: an open breaker counts the publishes it skips and hands the
+    /// count over once, when it closes - one line per episode, not one per
+    /// publish (the field: 1,313 WARN lines for hourly stalls).
+    #[test]
+    fn a_breaker_episode_reports_its_skips_once() {
+        let mut slot = super::PoolSlot::default();
+        slot.tripped();
+        slot.skipped = 3;
+        assert_eq!(slot.healthy(), 3);
+        assert_eq!(slot.healthy(), 0, "the next episode starts at zero");
+    }
+
     /// A relay's reason never forges a log line or bloats an error.
     #[test]
     fn a_relay_reason_is_flat_and_bounded() {

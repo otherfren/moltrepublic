@@ -1518,7 +1518,8 @@ where
     // offered before - a resend round is background (F2) - lowered at
     // every exit
     let _ = busy.send_replace(batch.iter().any(|e| e.by == cfg.member && e.seq > offered));
-    let outcome = publish_batch(channel, mls, cfg, store, sink, held, stop, start, batch, &mut published_through).await;
+    let outcome =
+        publish_batch(channel, mls, cfg, store, sink, held, stop, start, offered, batch, &mut published_through).await;
     let _ = busy.send_replace(false);
     outcome
 }
@@ -1534,6 +1535,7 @@ async fn publish_batch<S, K>(
     held: &mut HeldFrame,
     stop: &mut watch::Receiver<bool>,
     start: u64,
+    offered: u64,
     batch: Vec<EventEnvelope>,
     published_through: &mut u64,
 ) -> PassOutcome
@@ -1555,7 +1557,7 @@ where
         // self-authored on every node, so seq 1 must ride the wire or the
         // receiver never accepts it and every later own event parks on
         // `prev_seq = 1` until the give-up timer.
-        if env.by != cfg.member {
+        if env.by != cfg.member || resend_skips(&env, offered) {
             *published_through = env.seq;
             continue;
         }
@@ -1744,6 +1746,13 @@ async fn persist_offered<S: StateStore>(store: &S, seq: u64) {
             }
         })
         .await;
+}
+
+/// A rewound round re-offers only what a peer is owed: a served checkpoint
+/// part was an answer to one request (F3). A commit is re-offered - a
+/// laggard needs it - and the dark lock frames keep their own rules.
+fn resend_skips(env: &EventEnvelope, offered: u64) -> bool {
+    env.seq <= offered && matches!(env.body, molt_core::WorkspaceEvent::CheckpointServedPart { .. })
 }
 
 /// The publish loop; `true` when it ended on the stop signal.
@@ -3428,6 +3437,25 @@ mod tests {
             assert_eq!(*handle.busy.borrow(), busy, "{who}: offered {offered}");
             handle.shutdown().await;
         }
+    }
+
+    /// F3: **a rewind does not replay a served checkpoint part**: it was an
+    /// answer to one request, not an owed envelope. A first offer still
+    /// publishes it.
+    #[test]
+    fn a_resend_round_skips_served_parts_and_a_first_offer_does_not() {
+        let part = molt_core::EventEnvelope {
+            body: molt_core::WorkspaceEvent::CheckpointServedPart { blob_hash: "aa".into(), index: 0, total: 1, data: String::new() },
+            ..walter_event(5)
+        };
+        assert!(resend_skips(&part, 9), "rewound: skipped");
+        assert!(!resend_skips(&part, 4), "never offered: published");
+        let commit = molt_core::EventEnvelope {
+            body: molt_core::WorkspaceEvent::MlsCommit { commit: "00".into(), stamp: 0 },
+            ..walter_event(5)
+        };
+        assert!(!resend_skips(&commit, 9), "a commit is re-offered");
+        assert!(!resend_skips(&walter_event(5), 9), "chat is owed");
     }
 
     /// F1: **a hard kill loses at most a save interval.** While a round runs,

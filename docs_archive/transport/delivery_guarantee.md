@@ -991,6 +991,12 @@ pass sealed. `outbox=closed sent= left= [held_at= error=]`. The pass calls
 nothing back into the engine, and every sink call of the outbox gives way
 to the stop - a blocked engine answers nothing.
 
+**Re-offers (v0.1.4).** A rewound round (below `offered`) skips served
+checkpoint parts: each answered one request and is owed to nobody. A
+commit is still re-offered (a laggard needs it); the dark lock frames keep
+their own rules. A relay's open breaker logs the publishes it skipped once,
+when it closes (`relay=resumed skipped=`), not one WARN per publish.
+
 **No clock decides the drain.** What bounds it is the transport's
 per-publish bounds (`[transport.nostr] connect_timeout_secs` 60,
 `publish_timeout_secs` 30): a relay costs at most a dial plus one OK
