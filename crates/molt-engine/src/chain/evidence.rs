@@ -28,6 +28,11 @@ const PART_PACE_MS: u64 = 200;
 const BYTES_FACTOR: usize = 3;
 /// Finished offers remembered against relay replays.
 const FINISHED_MAX: usize = 256;
+/// The most content evaluations (hash + JSON parse) of one sender's
+/// offers per chain head; a head that moved refills the count.
+const JUDGE_MAX_PER_HEAD: u32 = 3;
+/// Between two automatic-offer attempts at one peer.
+const AUTO_RETRY_SECS: u64 = 30;
 
 /// Refusals a human reads.
 pub(crate) const TOO_LARGE: &str = "too large: use the file";
@@ -44,7 +49,7 @@ fn transient(reason: &str) -> bool {
 }
 
 /// What this seat sends one peer.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Outgoing {
     pub(crate) offer: String,
     pub(crate) parts: Vec<String>,
@@ -77,6 +82,20 @@ pub(crate) struct Incoming {
     pub(crate) last_at: u64,
     /// The head this payload was last judged at.
     pub(crate) judged_head: String,
+    /// The distinct parts held (`total` once the payload is complete -
+    /// the parts map is cleared then).
+    pub(crate) have: u32,
+    /// The decoded bytes held in `parts` (`max_parts` alone assumes the
+    /// worst-case escaping; this is the bound the offer cap needs).
+    pub(crate) bytes: usize,
+}
+
+/// What was spent judging one sender's bundles at one chain head.
+#[derive(Debug, Clone)]
+pub(crate) struct JudgedHead {
+    pub(crate) head: String,
+    pub(crate) offer: String,
+    pub(crate) count: u32,
 }
 
 /// The exchange's runtime (memory only; another branch is kept in
@@ -88,8 +107,12 @@ pub(crate) struct EvidenceRuntime {
     /// Per peer, this seat's head height at its last automatic offer: no
     /// new one until the peer's own head passed it.
     pub(crate) auto_top: BTreeMap<MemberId, u64>,
-    /// Per sender, the head its last bundle was judged at.
-    pub(crate) judged: BTreeMap<MemberId, String>,
+    /// Per peer, the last tick an automatic offer was ATTEMPTED: the gap
+    /// keeps a peer without a relay channel from a build every tick.
+    pub(crate) auto_tried: BTreeMap<MemberId, u64>,
+    /// Per sender, what was judged at the current head: one evaluation
+    /// per offer and head, at most [`JUDGE_MAX_PER_HEAD`] of any offers.
+    pub(crate) judged: BTreeMap<MemberId, JudgedHead>,
     /// Offers adopted or dismissed, oldest first: a relay replay does not
     /// bring them back.
     pub(crate) finished: VecDeque<String>,
@@ -179,10 +202,24 @@ impl State {
 
     /// `evidence_offer`, and the automatic offer: build, remember, send.
     pub(crate) fn cmd_evidence_offer(&mut self, member: &str) -> Result<Reply, MoltError> {
+        self.offer_evidence(member)?;
+        Ok(Reply::Ack)
+    }
+
+    /// The body of `evidence_offer`; `true` = the send task started (the
+    /// offer is on its way), `false` = no relay channel (the out entry
+    /// says so).
+    pub(crate) fn offer_evidence(&mut self, member: &str) -> Result<bool, MoltError> {
         if !self.roster().iter().any(|m| m == member) || member == self.member() {
             return Err(err(format!("not a seat: {member}")));
         }
-        let (offer, parts, from) = self.evidence_for(member).map_err(err)?;
+        let (offer, parts, from) = match self.evidence_for(member) {
+            Ok(v) => v,
+            Err(why) => {
+                self.set_out_refused(member, &why);
+                return Err(err(why));
+            }
+        };
         let to = self.working_nostr_pk(member);
         let total = u32::try_from(parts.len()).unwrap_or(u32::MAX);
         tracing::info!(peer = %member, from, parts = total, "evidence=offered");
@@ -192,22 +229,35 @@ impl State {
             Outgoing { offer: offer.clone(), parts: parts.clone(), state: "offered", bytes, ..Outgoing::default() },
         );
         let all: Vec<u32> = (0..total).collect();
-        self.send_evidence_parts(member, &to, &offer, &parts, &all);
+        let started = self.send_evidence_parts(member, &to, &offer, &parts, &all);
         self.emit_session(crate::SessionScope::Full);
-        Ok(Reply::Ack)
+        Ok(started)
+    }
+
+    /// Record on the out entry that nothing went out, and say so once.
+    fn set_out_refused(&mut self, member: &str, why: &str) {
+        let fresh = Outgoing { state: "refused", reason: why.to_string(), ..Outgoing::default() };
+        if self.chain.evidence.out.get(member) != Some(&fresh) {
+            self.chain.evidence.out.insert(member.to_string(), fresh);
+            self.emit_session(crate::SessionScope::Full);
+        }
     }
 
     /// Publish `which` parts off the actor, paced, in this peer's ONE send
     /// task (a running one is replaced); progress comes back as
-    /// `NetEvidenceSent`. Without a relay channel the offer is refused.
-    fn send_evidence_parts(&mut self, member: &str, to: &str, offer: &str, parts: &[String], which: &[u32]) {
+    /// `NetEvidenceSent`. `true` = the task started. Without a relay
+    /// channel an UNSENT offer is refused - an answered want must not
+    /// reset one already `sent`.
+    fn send_evidence_parts(&mut self, member: &str, to: &str, offer: &str, parts: &[String], which: &[u32]) -> bool {
         let net = self.evidence_net();
         let Some((net, cmd_tx)) = net else {
             if let Some(o) = self.chain.evidence.out.get_mut(member) {
-                o.state = "refused";
-                o.reason = "no relay channel".to_string();
+                if o.state == "offered" {
+                    o.state = "refused";
+                    o.reason = "no relay channel".to_string();
+                }
             }
-            return;
+            return false;
         };
         if let Some(task) = self.chain.evidence.tasks.remove(member) {
             task.abort();
@@ -238,6 +288,7 @@ impl State {
             crate::send_internal(&cmd_tx, cmd).await;
         });
         self.chain.evidence.tasks.insert(member.to_string(), task);
+        true
     }
 
     /// The seat's own wrapped channel: its anchor key over the consented
@@ -334,14 +385,18 @@ impl State {
         let entry = self.chain.evidence.inbound.entry(member.clone()).or_default();
         if entry.offer != offer {
             *entry = Incoming { offer: offer.to_string(), total, state: "receiving", last_at: now, ..Incoming::default() };
+            self.emit_session(crate::SessionScope::Full);
         } else if entry.state == "refused" && index == 0 {
             // a new pass: what was missing may come now, what did not link
-            // may link now
+            // may link now - the re-judge counts against the per-head
+            // budget
             entry.state = "receiving";
             entry.asked = 0;
             entry.last_at = now;
             if entry.reason != INCOMPLETE {
                 entry.parts.clear();
+                entry.bytes = 0;
+                entry.have = 0;
             }
             entry.reason.clear();
             if !entry.payload.is_empty() {
@@ -350,12 +405,15 @@ impl State {
                 self.emit_session(crate::SessionScope::Full);
                 return Ok(Reply::Ack);
             }
+            self.emit_session(crate::SessionScope::Full);
         }
         let entry = self.chain.evidence.inbound.entry(member.clone()).or_default();
         if total == 0 || total > max_parts || index >= total || data.len() > PART_BYTES || entry.total != total {
             entry.state = "refused";
             entry.reason = TOO_LARGE.to_string();
             entry.parts.clear();
+            entry.bytes = 0;
+            entry.have = 0;
             tracing::warn!(peer = %member, total, reason = "bounds", "evidence=refused");
             self.emit_session(crate::SessionScope::Full);
             return Ok(Reply::Ack);
@@ -363,27 +421,57 @@ impl State {
         if entry.state != "receiving" {
             return Ok(Reply::Ack);
         }
+        let add = data.len() - entry.parts.get(&index).map_or(0, String::len);
+        if entry.bytes.saturating_add(add) > OFFER_MAX {
+            entry.state = "refused";
+            entry.reason = TOO_LARGE.to_string();
+            entry.parts.clear();
+            entry.bytes = 0;
+            entry.have = 0;
+            tracing::warn!(peer = %member, total, reason = "bounds", "evidence=refused");
+            self.emit_session(crate::SessionScope::Full);
+            return Ok(Reply::Ack);
+        }
         entry.parts.insert(index, data);
+        entry.bytes += add;
+        entry.have = u32::try_from(entry.parts.len()).unwrap_or(u32::MAX);
         entry.last_at = now;
-        if entry.parts.len() == usize::try_from(total).unwrap_or(usize::MAX) {
+        if entry.have == total {
             let payload: String = entry.parts.values().map(String::as_str).collect();
             entry.parts.clear();
+            entry.bytes = 0;
+            entry.have = total;
             self.take_evidence(&member, offer, payload, false);
+            self.emit_session(crate::SessionScope::Full);
         }
-        self.emit_session(crate::SessionScope::Full);
         Ok(Reply::Ack)
     }
 
-    /// A complete payload: one judged bundle per sender and head, then
-    /// verified as strictly as a file import and held - a run that extends
-    /// this chain, or another branch. `again` = a re-judge of a payload
-    /// already counted.
+    /// A complete payload: verified as strictly as a file import and
+    /// held (a run that extends this chain, or another branch); `again`
+    /// = a re-judge of a payload already counted.
+    ///
+    /// The budget is per sender and head: one evaluation per offer and
+    /// head, at most [`JUDGE_MAX_PER_HEAD`] evaluations of ANY offers per
+    /// head - network input cannot run hash + parse over 4 MiB
+    /// unboundedly, and a corrected offer still gets its evaluation; a
+    /// head that moved refills the count.
     fn take_evidence(&mut self, member: &str, offer: &str, payload: String, again: bool) {
         let head = self.chain.head.as_ref().map(|h| h.hash.clone()).unwrap_or_default();
-        let budget_spent = self.chain.evidence.judged.get(member) == Some(&head) && !again;
-        let outcome = if budget_spent { Err(ONE_PER_HEAD.to_string()) } else { self.judge_evidence(member, offer, &payload) };
-        if !budget_spent {
-            self.chain.evidence.judged.insert(member.to_string(), head.clone());
+        let spent = match self.chain.evidence.judged.get(member) {
+            Some(j) if j.head == head => j.count >= JUDGE_MAX_PER_HEAD || (j.offer == offer && !again),
+            _ => false,
+        };
+        let outcome = if spent { Err(ONE_PER_HEAD.to_string()) } else { self.judge_evidence(member, offer, &payload) };
+        if !spent {
+            let count = self
+                .chain
+                .evidence
+                .judged
+                .get(member)
+                .filter(|j| j.head == head)
+                .map_or(1, |j| j.count.saturating_add(1));
+            self.chain.evidence.judged.insert(member.to_string(), JudgedHead { head: head.clone(), offer: offer.to_string(), count });
         }
         let entry = self.chain.evidence.inbound.entry(member.to_string()).or_default();
         entry.judged_head = head;
@@ -399,6 +487,7 @@ impl State {
                 entry.from_height = from_height;
                 entry.drops = drops;
                 entry.payload = payload;
+                entry.have = entry.total;
                 tracing::info!(peer = %member, kind, blocks = blocks.len(), from = from_height, "evidence=ready");
                 entry.blocks = blocks;
             }
@@ -569,16 +658,27 @@ impl State {
             .filter(|(_, e)| e.state == "refused" && transient(&e.reason) && !e.payload.is_empty() && e.judged_head != head)
             .map(|(m, e)| (m.clone(), e.offer.clone(), e.payload.clone()))
             .collect();
+        let rejudged = again.len();
         for (member, offer, payload) in again {
             self.take_evidence(&member, &offer, payload, true);
         }
-        if self.nostr.is_none() || self.branch_abandoned() {
+        if rejudged > 0 {
+            self.emit_session(crate::SessionScope::Full);
+        }
+        if self.branch_abandoned() {
             return;
         }
         for peer in self.evidence_due() {
-            self.note_auto_offer(&peer);
-            if let Err(e) = self.cmd_evidence_offer(&peer) {
-                tracing::info!(peer = %peer, reason = %e, "evidence=not_offered");
+            if self.chain.evidence.auto_tried.get(&peer).is_some_and(|at| now.saturating_sub(*at) < AUTO_RETRY_SECS) {
+                continue;
+            }
+            self.chain.evidence.auto_tried.insert(peer.clone(), now);
+            match self.offer_evidence(&peer) {
+                // the latch waits for the send: a tick without a relay
+                // channel must not switch the automatic path off
+                Ok(true) => self.note_auto_offer(&peer),
+                Ok(false) => tracing::info!(peer = %peer, reason = "no relay channel", "evidence=not_offered"),
+                Err(e) => tracing::info!(peer = %peer, reason = %e, "evidence=not_offered"),
             }
         }
     }
@@ -637,7 +737,7 @@ impl State {
         }
         if let Some(e) = self.chain.evidence.inbound.get(member) {
             v.inbound = e.state.to_string();
-            v.in_parts = u32::try_from(e.parts.len()).unwrap_or(u32::MAX);
+            v.in_parts = e.have.min(e.total);
             v.in_total = e.total;
             v.blocks = u32::try_from(e.blocks.len()).unwrap_or(u32::MAX);
             v.from_height = e.from_height;

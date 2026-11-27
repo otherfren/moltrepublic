@@ -306,8 +306,9 @@ fn a_missing_part_is_asked_then_a_new_pass_completes() {
     assert_eq!(b.seat_evidence("a").inbound, "ready", "the kept part plus the new pass");
 }
 
-/// M3: evidence already held is not written again; one judged bundle per
-/// sender and head.
+/// M3, after the fix round: evidence already held is not written again -
+/// a different offer at the same head IS judged (the corrected bundle
+/// cures), but a run this seat holds is not written twice.
 #[test]
 fn judging_is_bounded_per_sender_and_head() {
     let (x, y) = fork();
@@ -322,7 +323,231 @@ fn judging_is_bounded_per_sender_and_head() {
     a.chain.peer_heights.insert("c".to_string(), 0);
     deliver(&a, &mut c, "c");
     assert!(c.chain.branch.disk.is_none(), "nothing new, nothing written");
-    assert_eq!(c.seat_evidence("a").reason, "one bundle per head", "the second judged bundle waits");
+    assert_eq!(c.seat_evidence("a").kind, "other-branch", "judged again, nothing new to write");
+}
+
+/// Finding 2 of the fix round: a non-transient refusal (the payload is
+/// dropped) does not spend the head - the corrected offer from the same
+/// sender is judged at the same head, and only a later offer past the
+/// per-head budget is refused.
+#[test]
+fn a_corrected_offer_is_judged_at_the_same_head() {
+    let (x, _) = fork();
+    let mut b = genesis_seat("b", &x, x.blocks[..2].to_vec());
+    keyed(&mut b);
+    let rid = b.republic_id();
+    let from = &pk("a");
+    // a forged run: refused whole (the payload is dropped)
+    let mut run = x.blocks[2..].to_vec();
+    run[1].sigs[0].sig = "00".repeat(64);
+    let forged = serde_json::to_string(&run).expect("json");
+    let o1 = molt_storage::content_hash(forged.as_bytes());
+    b.cmd_net_evidence_part(from, &rid, &o1, (0, 1), forged).expect("ack");
+    assert_eq!(b.seat_evidence("a").reason, "threshold");
+    // the corrected bundle, same head: judged
+    let good = serde_json::to_string(&x.blocks[2..].to_vec()).expect("json");
+    let o2 = molt_storage::content_hash(good.as_bytes());
+    b.cmd_net_evidence_part(from, &rid, &o2, (0, 1), good).expect("ack");
+    assert_eq!(b.seat_evidence("a").inbound, "ready", "the corrected bundle is judged");
+    // a third distinct offer is still within the per-head budget
+    let single = serde_json::to_string(&vec![x.blocks[2].clone()]).expect("json");
+    let o3 = molt_storage::content_hash(single.as_bytes());
+    b.cmd_net_evidence_part(from, &rid, &o3, (0, 1), single).expect("ack");
+    assert_eq!(b.seat_evidence("a").kind, "extends");
+    // past the budget, the same head spends nothing
+    let another = serde_json::to_string(&vec![x.blocks[3].clone()]).expect("json");
+    let o4 = molt_storage::content_hash(another.as_bytes());
+    b.cmd_net_evidence_part(from, &rid, &o4, (0, 1), another).expect("ack");
+    assert_eq!(b.seat_evidence("a").reason, "one bundle per head");
+}
+
+/// Finding 1 of the fix round: a kept payload (`does not link` kept its
+/// bytes) is re-judged at most a bounded number of times per head - part-0
+/// spam cannot run hash + JSON parse over 4 MiB on every arrival.
+#[test]
+fn rejudging_a_kept_payload_is_bounded() {
+    let (x, _) = fork();
+    let mut a = genesis_seat("a", &x, x.blocks.clone());
+    let mut b = genesis_seat("b", &x, x.blocks[..2].to_vec());
+    // a believes b is further than it is: the run does not link, the
+    // payload is kept for a cure
+    a.chain.peer_heights.insert("b".to_string(), 2);
+    keyed(&mut a);
+    keyed(&mut b);
+    let offer = deliver(&a, &mut b, "b");
+    assert_eq!(b.seat_evidence("a").reason, "does not link to this chain");
+    let rid = b.republic_id();
+    let from = &pk("a");
+    // the first re-judges are within the budget, the refusal stays honest
+    for _ in 0..2 {
+        b.cmd_net_evidence_part(from, &rid, &offer, (0, 1), String::new()).expect("ack");
+        assert_eq!(b.seat_evidence("a").reason, "does not link to this chain");
+    }
+    // then the re-judge itself is refused
+    b.cmd_net_evidence_part(from, &rid, &offer, (0, 1), String::new()).expect("ack");
+    assert_eq!(b.seat_evidence("a").reason, "one bundle per head");
+    b.cmd_net_evidence_part(from, &rid, &offer, (0, 1), String::new()).expect("ack");
+    assert_eq!(b.seat_evidence("a").reason, "one bundle per head", "stays spent");
+}
+
+/// Finding 4 of the fix round: `max_parts` assumes the worst-case JSON
+/// escaping; the bound that holds is the sum of the parts' DECODED
+/// lengths against the offer cap - a hostile seat stores 4 MiB, not ~6x
+/// that.
+#[test]
+fn storing_parts_is_bounded_by_the_offer_cap() {
+    let (x, _) = fork();
+    let mut b = genesis_seat("b", &x, x.blocks.clone());
+    keyed(&mut b);
+    let rid = b.republic_id();
+    let total = 200u32; // within the part-count bound
+    let part = "x".repeat(evidence::PART_BYTES);
+    for i in 0..total {
+        b.cmd_net_evidence_part(&pk("a"), &rid, "o", (i, total), part.clone()).expect("ack");
+        if b.seat_evidence("a").inbound != "receiving" {
+            break;
+        }
+    }
+    let seen = b.seat_evidence("a");
+    assert_eq!((seen.inbound.as_str(), seen.reason.as_str()), ("refused", "too large: use the file"));
+    assert_eq!(seen.in_parts, 0, "the stored parts are dropped");
+}
+
+/// Finding 5 of the fix round: `in_parts` counts what arrived - a held
+/// bundle reads `total` of `total`, not 0 of `total`.
+#[test]
+fn the_seat_table_counts_arrived_parts() {
+    let (x, _) = fork();
+    let mut a = genesis_seat("a", &x, x.blocks.clone());
+    let mut b = genesis_seat("b", &x, x.blocks[..2].to_vec());
+    a.chain.peer_heights.insert("b".to_string(), 1);
+    keyed(&mut a);
+    keyed(&mut b);
+    let payload: String = serde_json::to_string(&x.blocks[2..].to_vec()).expect("json");
+    let offer = molt_storage::content_hash(payload.as_bytes());
+    let (one, two) = payload.split_at(payload.len() / 2);
+    let rid = b.republic_id();
+    b.cmd_net_evidence_part(&pk("a"), &rid, &offer, (0, 2), one.to_string()).expect("ack");
+    let seen = b.seat_evidence("a");
+    assert_eq!((seen.inbound.as_str(), seen.in_parts, seen.in_total), ("receiving", 1, 2));
+    b.cmd_net_evidence_part(&pk("a"), &rid, &offer, (1, 2), two.to_string()).expect("ack");
+    let seen = b.seat_evidence("a");
+    assert_eq!((seen.inbound.as_str(), seen.in_parts, seen.in_total, seen.kind.as_str()), ("ready", 2, 2, "extends"));
+}
+
+/// Finding 5 of the fix round: one session event per offer state change -
+/// the first part opens the entry, the last closes it, a duplicate is
+/// silent.
+#[test]
+fn one_emission_per_offer_state_change() {
+    let (x, _) = fork();
+    let mut b = genesis_seat("b", &x, x.blocks.clone());
+    keyed(&mut b);
+    let payload = "x".repeat(100_000);
+    let offer = molt_storage::content_hash(payload.as_bytes());
+    let parts = evidence::split_parts(&payload);
+    assert!(parts.len() >= 4, "a few parts");
+    let total = u32::try_from(parts.len()).expect("few");
+    let rid = b.republic_id();
+    let mut ev = b.subscribe_events();
+    for (i, data) in parts.iter().enumerate() {
+        let index = u32::try_from(i).expect("few");
+        b.cmd_net_evidence_part(&pk("a"), &rid, &offer, (index, total), data.clone()).expect("ack");
+    }
+    // a repeated part that is not part 0 changes nothing (part 0 would
+    // reopen the refused entry: a state change of its own)
+    b.cmd_net_evidence_part(&pk("a"), &rid, &offer, (1, total), parts[1].clone()).expect("ack");
+    assert_eq!(session_changed(&mut ev), 2, "first part opens, last part closes");
+}
+
+/// Finding 5 of the fix round: answering a want without a relay channel
+/// does not reset an offer that was already `sent`.
+#[test]
+fn a_want_without_a_channel_leaves_a_sent_offer_alone() {
+    let (x, _) = fork();
+    let mut a = genesis_seat("a", &x, x.blocks.clone());
+    keyed(&mut a);
+    a.chain.evidence.no_net = true;
+    a.chain.evidence.out.insert(
+        "b".to_string(),
+        evidence::Outgoing { offer: "o".to_string(), parts: vec!["p".to_string()], state: "sent", ..Default::default() },
+    );
+    a.cmd_net_evidence_want(&pk("b"), &a.republic_id(), "o", &[0]).expect("ack");
+    assert_eq!(a.seat_evidence("b").out, "sent");
+}
+
+/// Finding 3 of the fix round: the automatic offer latches only once the
+/// send task started - a tick without a relay channel leaves the peer
+/// due, says why in the seat table, and retries after a gap, not on
+/// every tick.
+#[test]
+fn an_automatic_offer_latches_only_when_it_went_out() {
+    let (x, _) = fork();
+    let mut a = genesis_seat("a", &x, x.blocks.clone());
+    a.chain.peer_heights.insert("b".to_string(), 1);
+    a.chain.heal_loops.push(HealLoop {
+        peer: "b".to_string(),
+        asker: false,
+        height: 2,
+        key: "k".to_string(),
+        rounds: super::sync::HEAL_LOOP_ROUNDS,
+        since: 1,
+        rule: String::new(),
+        loud: false,
+    });
+    keyed(&mut a);
+    a.chain.evidence.no_net = true;
+    let mut ev = a.subscribe_events();
+    a.evidence_tick(1_000);
+    assert_eq!(a.evidence_due(), vec!["b".to_string()], "no relay channel: nothing latched");
+    assert!(a.chain.evidence.auto_top.is_empty(), "the latch waits for the send");
+    assert_eq!(
+        (a.seat_evidence("b").out.as_str(), a.seat_evidence("b").reason.as_str()),
+        ("refused", "no relay channel"),
+        "the seat table says why"
+    );
+    a.evidence_tick(1_005);
+    assert_eq!(session_changed(&mut ev), 1, "one attempt, retried later");
+    a.evidence_tick(1_030);
+    assert_eq!(session_changed(&mut ev), 1, "past the retry gap it tried again");
+}
+
+/// Finding 3 of the fix round: a peer the automatic offer is due to but
+/// nothing can be built for - the seat table carries the refusal.
+#[test]
+fn the_status_says_why_no_offer_went_out() {
+    let (x, _) = fork();
+    let mut a = genesis_seat("a", &x, x.blocks.clone());
+    // b reports our own head: nothing to offer
+    a.chain.peer_heights.insert("b".to_string(), 3);
+    a.chain.heal_loops.push(HealLoop {
+        peer: "b".to_string(),
+        asker: false,
+        height: 3,
+        key: "k".to_string(),
+        rounds: super::sync::HEAL_LOOP_ROUNDS,
+        since: 1,
+        rule: String::new(),
+        loud: false,
+    });
+    keyed(&mut a);
+    a.evidence_tick(1_000);
+    assert_eq!(
+        (a.seat_evidence("b").out.as_str(), a.seat_evidence("b").reason.as_str()),
+        ("refused", "nothing to offer")
+    );
+    assert!(a.chain.evidence.auto_top.is_empty(), "nothing latched");
+}
+
+/// The `SessionChanged` events a test observed so far.
+fn session_changed(ev: &mut tokio::sync::broadcast::Receiver<crate::Event>) -> usize {
+    let mut n = 0;
+    while let Ok(e) = ev.try_recv() {
+        if matches!(e, crate::Event::SessionChanged { .. }) {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// L1 test: the founding anchor of a restored seat is not its address.
