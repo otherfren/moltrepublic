@@ -110,6 +110,9 @@ pub(crate) struct EvidenceRuntime {
     /// Per peer, the last tick an automatic offer was ATTEMPTED: the gap
     /// keeps a peer without a relay channel from a build every tick.
     pub(crate) auto_tried: BTreeMap<MemberId, u64>,
+    /// Per peer, the head at which an automatic offer failed to BUILD
+    /// (`nothing to offer`, `too large`): no rebuild until the head moves.
+    pub(crate) auto_failed: BTreeMap<MemberId, (String, String)>,
     /// Per sender, what was judged at the current head: one evaluation
     /// per offer and head, at most [`JUDGE_MAX_PER_HEAD`] of any offers.
     pub(crate) judged: BTreeMap<MemberId, JudgedHead>,
@@ -389,7 +392,7 @@ impl State {
         } else if entry.state == "refused" && index == 0 {
             // a new pass: what was missing may come now, what did not link
             // may link now - the re-judge counts against the per-head
-            // budget
+            // budget, and the frame passes the same bounds as a first part
             entry.state = "receiving";
             entry.asked = 0;
             entry.last_at = now;
@@ -399,12 +402,6 @@ impl State {
                 entry.have = 0;
             }
             entry.reason.clear();
-            if !entry.payload.is_empty() {
-                let payload = std::mem::take(&mut entry.payload);
-                self.take_evidence(&member, offer, payload, true);
-                self.emit_session(crate::SessionScope::Full);
-                return Ok(Reply::Ack);
-            }
             self.emit_session(crate::SessionScope::Full);
         }
         let entry = self.chain.evidence.inbound.entry(member.clone()).or_default();
@@ -421,7 +418,11 @@ impl State {
         if entry.state != "receiving" {
             return Ok(Reply::Ack);
         }
-        let add = data.len() - entry.parts.get(&index).map_or(0, String::len);
+        let Some(add) = data.len().checked_sub(entry.parts.get(&index).map_or(0, String::len)) else {
+            // a shorter replacement part: dropped, the stored bytes stand
+            tracing::warn!(peer = %member, index, reason = "bounds", "evidence=refused");
+            return Ok(Reply::Ack);
+        };
         if entry.bytes.saturating_add(add) > OFFER_MAX {
             entry.state = "refused";
             entry.reason = TOO_LARGE.to_string();
@@ -429,6 +430,14 @@ impl State {
             entry.bytes = 0;
             entry.have = 0;
             tracing::warn!(peer = %member, total, reason = "bounds", "evidence=refused");
+            self.emit_session(crate::SessionScope::Full);
+            return Ok(Reply::Ack);
+        }
+        if !entry.payload.is_empty() {
+            // a well-formed new pass of a bundle already held: judge the
+            // kept payload, nothing is stored beside it
+            let payload = std::mem::take(&mut entry.payload);
+            self.take_evidence(&member, offer, payload, true);
             self.emit_session(crate::SessionScope::Full);
             return Ok(Reply::Ack);
         }
@@ -672,13 +681,26 @@ impl State {
             if self.chain.evidence.auto_tried.get(&peer).is_some_and(|at| now.saturating_sub(*at) < AUTO_RETRY_SECS) {
                 continue;
             }
+            if self.chain.evidence.auto_failed.get(&peer).is_some_and(|(h, _)| *h == head) {
+                continue;
+            }
             self.chain.evidence.auto_tried.insert(peer.clone(), now);
             match self.offer_evidence(&peer) {
                 // the latch waits for the send: a tick without a relay
-                // channel must not switch the automatic path off
-                Ok(true) => self.note_auto_offer(&peer),
-                Ok(false) => tracing::info!(peer = %peer, reason = "no relay channel", "evidence=not_offered"),
-                Err(e) => tracing::info!(peer = %peer, reason = %e, "evidence=not_offered"),
+                // channel must not switch the automatic path off; a build
+                // refusal holds until the head moves
+                Ok(true) => {
+                    self.chain.evidence.auto_failed.remove(&peer);
+                    self.note_auto_offer(&peer);
+                }
+                Ok(false) => {
+                    self.chain.evidence.auto_failed.remove(&peer);
+                    tracing::info!(peer = %peer, reason = "no relay channel", "evidence=not_offered");
+                }
+                Err(why) => {
+                    self.chain.evidence.auto_failed.insert(peer.clone(), (head.clone(), why.to_string()));
+                    tracing::info!(peer = %peer, reason = %why, "evidence=not_offered");
+                }
             }
         }
     }

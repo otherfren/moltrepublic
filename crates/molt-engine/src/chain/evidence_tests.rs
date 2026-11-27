@@ -561,6 +561,79 @@ fn an_old_anchor_after_a_known_restore_is_refused() {
     assert!(b.chain.evidence.inbound.is_empty(), "the replaced device");
 }
 
+/// A replacement part shorter than the stored one is dropped, not
+/// subtracted: no panic, `bytes` stays what is really stored.
+#[test]
+fn a_shorter_replacement_part_is_dropped() {
+    let (x, _) = fork();
+    let mut b = genesis_seat("b", &x, x.blocks.clone());
+    keyed(&mut b);
+    let rid = b.republic_id();
+    b.cmd_net_evidence_part(&pk("a"), &rid, "o", (0, 2), "x".repeat(1000)).expect("ack");
+    b.cmd_net_evidence_part(&pk("a"), &rid, "o", (0, 2), "y".to_string()).expect("ack");
+    let seen = b.seat_evidence("a");
+    assert_eq!((seen.inbound.as_str(), seen.in_parts), ("receiving", 1));
+    assert_eq!(b.chain.evidence.inbound["a"].bytes, 1000, "what is really stored");
+    // an identical resend is a duplicate and stores nothing twice
+    b.cmd_net_evidence_part(&pk("a"), &rid, "o", (0, 2), "x".repeat(1000)).expect("ack");
+    assert_eq!(b.chain.evidence.inbound["a"].bytes, 1000);
+}
+
+/// The reopen pass passes the same part bounds as a first part: a
+/// malformed part 0 refuses instead of re-judging the kept payload.
+#[test]
+fn the_reopen_pass_is_bounded_too() {
+    let (x, _) = fork();
+    let mut a = genesis_seat("a", &x, x.blocks.clone());
+    let mut b = genesis_seat("b", &x, x.blocks[..2].to_vec());
+    // a believes b is further than it is: the run does not link, the
+    // payload is kept
+    a.chain.peer_heights.insert("b".to_string(), 2);
+    keyed(&mut a);
+    keyed(&mut b);
+    let offer = deliver(&a, &mut b, "b");
+    assert_eq!(b.seat_evidence("a").reason, "does not link to this chain");
+    // a malformed part 0: refused by the part bounds, the kept payload
+    // waits for a well-formed pass
+    b.cmd_net_evidence_part(&pk("a"), &b.republic_id(), &offer, (0, 0), String::new()).expect("ack");
+    assert_eq!(b.seat_evidence("a").reason, "too large: use the file");
+    // a well-formed part 0 still re-judges
+    b.cmd_net_evidence_part(&pk("a"), &b.republic_id(), &offer, (0, 1), String::new()).expect("ack");
+    assert_eq!(b.seat_evidence("a").reason, "does not link to this chain");
+}
+
+/// An automatic offer that cannot be built is not rebuilt on every retry
+/// gap: the refusal holds until the head moves.
+#[test]
+fn an_unbuildable_offer_waits_for_a_new_head() {
+    let (x, _) = fork();
+    let mut a = genesis_seat("a", &x, x.blocks[..3].to_vec());
+    // b reports our own head: nothing to offer
+    a.chain.peer_heights.insert("b".to_string(), 2);
+    a.chain.heal_loops.push(HealLoop {
+        peer: "b".to_string(),
+        asker: false,
+        height: 2,
+        key: "k".to_string(),
+        rounds: super::sync::HEAL_LOOP_ROUNDS,
+        since: 1,
+        rule: String::new(),
+        loud: false,
+    });
+    keyed(&mut a);
+    a.chain.evidence.no_net = true;
+    a.evidence_tick(1_000);
+    assert_eq!(a.seat_evidence("b").reason, "nothing to offer");
+    // buildable now, but the head has not moved: no rebuild
+    a.chain.peer_heights.insert("b".to_string(), 0);
+    a.evidence_tick(1_060);
+    assert_eq!(a.seat_evidence("b").reason, "nothing to offer", "no rebuild at the same head");
+    // the head moves: the offer is built again
+    a.receive_block_from("c", x.blocks[3].clone());
+    a.evidence_tick(1_120);
+    assert_eq!(a.seat_evidence("b").reason, "no relay channel");
+}
+
 /// Bounds of a part: an index past the total, a zero total, a duplicate.
 #[test]
 fn malformed_parts_are_refused_and_duplicates_count_once() {
