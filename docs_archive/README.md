@@ -70,6 +70,13 @@ them stay LIVE (see the top of this file); the executed plans are records.
 - Live specification: `vault/vault_threshold_disclosure.md`
 - Executed plan: `vault/vault_build_plan.md`
 
+**Rejected design, 2026-11-27.** Never built; kept for the analysis of
+how forks arise today and of the design space.
+
+- `chain/no_split_plan.md` — Strict Order Mode in a smaller form; the user
+  rejected its restore cost, the follow-up is
+  `docs/rejoin_completion_plan.md`
+
 ## Rules
 
 - **Do not implement NEW work from a historical record in here.** If
