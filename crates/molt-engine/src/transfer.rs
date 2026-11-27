@@ -1648,6 +1648,10 @@ pub(crate) fn failure_code(reason: &str) -> &'static str {
 /// would be the whole knowledge base in plaintext on disk for as long as
 /// the fetch runs. The assembled bytes are checked against the chain's
 /// commitment on the actor, so nothing here has to be trusted.
+/// A running base fetch's progress, for the status view.
+pub(crate) type BaseProgress = std::sync::Arc<std::sync::Mutex<molt_core::BaseFetchView>>;
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_wiki_base_fetch(
     channel: molt_net::ritual_net::GroupChannel,
     id: MessageId,
@@ -1656,8 +1660,9 @@ pub(crate) fn spawn_wiki_base_fetch(
     expect: molt_net::file_plane::SeriesExpect,
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
+    progress: BaseProgress,
 ) -> tokio::task::AbortHandle {
-    spawn_derived_series_fetch(channel, id, key, from, expect, scope, cmd_tx, move |done| match done {
+    spawn_derived_series_fetch(channel, id, key, from, expect, scope, cmd_tx, progress, move |done| match done {
         Ok(bytes) => Command::NetWikiBaseFetched { bytes, generation: Some(scope) },
         Err(reason) => Command::NetWikiBaseFailed { reason, generation: Some(scope) },
     })
@@ -1665,6 +1670,7 @@ pub(crate) fn spawn_wiki_base_fetch(
 
 /// Fetch the folded vault base series (vault S5); the engine checks the
 /// bytes against the commitment and re-verifies them.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_vault_base_fetch(
     channel: molt_net::ritual_net::GroupChannel,
     id: MessageId,
@@ -1673,8 +1679,9 @@ pub(crate) fn spawn_vault_base_fetch(
     expect: molt_net::file_plane::SeriesExpect,
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
+    progress: BaseProgress,
 ) -> tokio::task::AbortHandle {
-    spawn_derived_series_fetch(channel, id, key, from, expect, scope, cmd_tx, move |done| match done {
+    spawn_derived_series_fetch(channel, id, key, from, expect, scope, cmd_tx, progress, move |done| match done {
         Ok(bytes) => Command::NetVaultBaseFetched { bytes, generation: Some(scope) },
         Err(_) => Command::NetVaultBaseFailed { generation: Some(scope) },
     })
@@ -1693,7 +1700,8 @@ pub(crate) fn spawn_vault_payload_fetch(
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
 ) -> tokio::task::AbortHandle {
-    spawn_derived_series_fetch(channel, id, key, from, expect, scope, cmd_tx, move |done| match done {
+    let progress = BaseProgress::default();
+    spawn_derived_series_fetch(channel, id, key, from, expect, scope, cmd_tx, progress, move |done| match done {
         Ok(bytes) => Command::NetVaultPayloadFetched { hash, bytes, generation: Some(scope) },
         Err(_) => Command::NetVaultPayloadFailed { hash, generation: Some(scope) },
     })
@@ -1711,11 +1719,25 @@ fn spawn_derived_series_fetch(
     expect: molt_net::file_plane::SeriesExpect,
     scope: u64,
     cmd_tx: mpsc::Sender<Envelope>,
+    progress: BaseProgress,
     done: impl FnOnce(Result<Vec<u8>, String>) -> Command + Send + 'static,
 ) -> tokio::task::AbortHandle {
+    let of = molt_net::file_plane::Manifest::layout_for(expect.count).map_or(0, |l| l.top.saturating_add(1));
     tokio::spawn(async move {
         let mut sink: Vec<u8> = Vec::new();
-        let mut on_quiet = piece_asker(id, scope, cmd_tx.clone(), || WIKI_BASE_WANT_AFTER, WIKI_BASE_WANT_REPEAT);
+        let mut ask = piece_asker(id, scope, cmd_tx.clone(), || WIKI_BASE_WANT_AFTER, WIKI_BASE_WANT_REPEAT);
+        let mut on_quiet = move |missing: Vec<(u32, u32)>| {
+            let left: u32 = missing.iter().map(|(a, b)| b.saturating_sub(*a).saturating_add(1)).sum();
+            if let Ok(mut p) = progress.lock() {
+                let have = of.saturating_sub(left);
+                if have > p.have {
+                    p.at = crate::now_secs();
+                }
+                p.have = have;
+                p.of = of;
+            }
+            ask(missing)
+        };
         let opts = molt_net::file_plane::FetchOpts {
             quiet: molt_net::file_plane::FETCH_QUIET,
             ceiling: None,

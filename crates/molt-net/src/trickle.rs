@@ -179,7 +179,29 @@ pub fn enqueue_publish(state: &mut TransportState, job: PublishJob) -> bool {
     true
 }
 
-/// Start the sender. `busy` is the group outbox's pending flag.
+/// A seat waits for this job to do anything at all: a wanted range of the
+/// folded wiki base or of a vault payload or base.
+fn priority(job: &PublishJob) -> bool {
+    !is_whole(job) && (job.wiki_base || job.vault.is_some())
+}
+
+/// While a first-offer round holds the outbox, a waiting priority job still
+/// publishes on every this-many-th tick.
+pub const PRIORITY_SHARE_EVERY: u32 = 2;
+
+/// A priority job with the outbox idle goes at this fraction of the
+/// interval (the budget and the daily cap still apply per piece).
+pub const PRIORITY_PACE_DIV: u32 = 5;
+
+fn kind_of(job: &PublishJob) -> &'static str {
+    if job.wiki_base {
+        "wiki"
+    } else {
+        "vault"
+    }
+}
+
+/// Start the sender. `busy` is the group outbox's first-offer flag.
 pub fn spawn_trickle<S: StateStore>(
     chan: GroupChannel,
     store: S,
@@ -216,8 +238,12 @@ async fn trickle_loop<S: StateStore>(
     let mut idle = false;
     let mut backoff = 0u32;
     let mut last: Option<String> = None;
+    let mut turn = Turn::default();
     loop {
-        let delay = cfg.interval.saturating_mul(1u32 << backoff.min(6));
+        let mut delay = cfg.interval.saturating_mul(1u32 << backoff.min(6));
+        if turn.fast && backoff == 0 {
+            delay = cfg.interval / PRIORITY_PACE_DIV;
+        }
         tokio::select! {
             _ = stop.changed() => return,
             () = wake.notified() => {}
@@ -226,12 +252,15 @@ async fn trickle_loop<S: StateStore>(
         if *stop.borrow() {
             return;
         }
-        match tick(&chan, &store, &busy, &cfg, &mut manifests, &mut last, &status).await {
+        match tick(&chan, &store, &busy, &cfg, &mut manifests, &mut last, &status, &mut turn).await {
             Ok(()) => {
                 idle = false;
                 backoff = 0;
             }
-            Err(Hold::Idle) => idle = true,
+            Err(Hold::Idle) => {
+                idle = true;
+                turn.fast = false;
+            }
             Err(Hold::Gated) => idle = false,
             Err(Hold::Failed) => {
                 idle = false;
@@ -241,16 +270,27 @@ async fn trickle_loop<S: StateStore>(
     }
 }
 
-/// Which unfinished job the tick serves: a range job (someone waits for
-/// exactly those pieces) before any whole-series job, and within a group
-/// the one after `last` - round-robin, so one large series never starves
-/// the rest.
+/// The loop's memory between ticks: the share counter, the pace, and the
+/// last state logged per priority series.
+#[derive(Default)]
+struct Turn {
+    gated: u32,
+    fast: bool,
+    logged: HashMap<String, String>,
+}
+
+/// Which unfinished job the tick serves: a wanted base or vault range
+/// first, then any other range job (someone waits for exactly those
+/// pieces), then whole-series jobs; within a group the one after `last` -
+/// round-robin, so one large series never starves the rest.
 fn pick_job(jobs: &[PublishJob], last: Option<&str>) -> Option<PublishJob> {
     let open: Vec<&PublishJob> = jobs
         .iter()
         .filter(|j| u64::from(j.next) < job_total(&j.ranges))
         .collect();
-    let group: Vec<&PublishJob> = if open.iter().any(|j| !is_whole(j)) {
+    let group: Vec<&PublishJob> = if open.iter().any(|j| priority(j)) {
+        open.iter().copied().filter(|j| priority(j)).collect()
+    } else if open.iter().any(|j| !is_whole(j)) {
         open.iter().copied().filter(|j| !is_whole(j)).collect()
     } else {
         open
@@ -266,6 +306,7 @@ fn pick_job(jobs: &[PublishJob], last: Option<&str>) -> Option<PublishJob> {
 
 /// One tick: publish the next piece of the job the round-robin names, or
 /// say why not.
+#[allow(clippy::too_many_arguments)]
 async fn tick<S: StateStore>(
     chan: &GroupChannel,
     store: &S,
@@ -274,6 +315,7 @@ async fn tick<S: StateStore>(
     manifests: &mut HashMap<String, Manifest>,
     last: &mut Option<String>,
     status: &TrickleStatus,
+    turn: &mut Turn,
 ) -> Result<(), Hold> {
     let state = store.load().await;
     note_status(status, &state.file_jobs.publish);
@@ -281,7 +323,15 @@ async fn tick<S: StateStore>(
         return Err(Hold::Idle);
     };
     *last = Some(job.series.clone());
-    let out = tick_job(chan, store, busy, cfg, manifests, &state, job.clone()).await;
+    let first = priority(&job);
+    // a first-offer round has the outbox, but a waiting seat gets its turn
+    let share = first && turn.gated + 1 >= PRIORITY_SHARE_EVERY;
+    let out = tick_job(chan, store, busy, cfg, manifests, &state, job.clone(), share).await;
+    if first {
+        note_turn(turn, &job, &out, &state, busy, cfg);
+    } else {
+        turn.fast = false;
+    }
     if let Ok(mut map) = status.lock() {
         if let Some(v) = map.get_mut(&job.series) {
             match &out {
@@ -298,14 +348,61 @@ async fn tick<S: StateStore>(
     out
 }
 
-/// The snapshot of the share series queued (held sources are no share).
+/// A priority job's tick: the share counter, the pace, and one INFO line
+/// per state change (`base=serving|waiting|served`).
+fn note_turn(
+    turn: &mut Turn,
+    job: &PublishJob,
+    out: &Result<(), Hold>,
+    state: &TransportState,
+    busy: &watch::Receiver<bool>,
+    cfg: &TrickleConfig,
+) {
+    let of = job_total(&job.ranges);
+    let now_state = match out {
+        Ok(()) => {
+            turn.gated = 0;
+            turn.fast = !*busy.borrow();
+            if u64::from(job.next) + 1 >= of {
+                "served".to_string()
+            } else {
+                "serving".to_string()
+            }
+        }
+        Err(Hold::Gated) => {
+            turn.gated = turn.gated.saturating_add(1);
+            turn.fast = false;
+            format!("waiting gate={}", gate_of(job, state, busy, cfg))
+        }
+        Err(_) => {
+            turn.fast = false;
+            return;
+        }
+    };
+    if turn.logged.get(&job.series) == Some(&now_state) {
+        return;
+    }
+    let kind = kind_of(job);
+    match now_state.as_str() {
+        "served" => {
+            tracing::info!(kind, series = %job.series, pieces = of, "base=served");
+            turn.logged.remove(&job.series);
+            return;
+        }
+        "serving" => tracing::info!(kind, series = %job.series, pieces = job.next + 1, of, "base=serving"),
+        _ => tracing::info!(kind, series = %job.series, gate = gate_of(job, state, busy, cfg), "base=waiting"),
+    }
+    turn.logged.insert(job.series.clone(), now_state);
+}
+
+/// The snapshot of the series queued: shares, and the held bases and
+/// vault payloads a seat waits for.
 fn note_status(status: &TrickleStatus, jobs: &[PublishJob]) {
     let Ok(mut map) = status.lock() else {
         return;
     };
-    let shares: Vec<&PublishJob> = jobs.iter().filter(|j| !j.wiki_base && j.vault.is_none()).collect();
-    map.retain(|series, _| shares.iter().any(|j| &j.series == series));
-    for j in shares {
+    map.retain(|series, _| jobs.iter().any(|j| &j.series == series));
+    for j in jobs {
         let v = map.entry(j.series.clone()).or_default();
         v.published = j.next;
         v.of = u32::try_from(job_total(&j.ranges)).unwrap_or(u32::MAX);
@@ -325,7 +422,9 @@ fn gate_of(job: &PublishJob, state: &TransportState, busy: &watch::Receiver<bool
     "daily"
 }
 
-/// [`tick`] for the job the round-robin picked.
+/// [`tick`] for the job the round-robin picked; `share`: its turn past a
+/// first-offer round.
+#[allow(clippy::too_many_arguments)]
 async fn tick_job<S: StateStore>(
     chan: &GroupChannel,
     store: &S,
@@ -334,6 +433,7 @@ async fn tick_job<S: StateStore>(
     manifests: &mut HashMap<String, Manifest>,
     state: &TransportState,
     job: PublishJob,
+    share: bool,
 ) -> Result<(), Hold> {
     // a temporary share's pieces carry its deadline to the relays (§8.1);
     // past it nobody serves or accepts the download, and a relay would
@@ -350,7 +450,7 @@ async fn tick_job<S: StateStore>(
         }
         None => chan,
     };
-    if *busy.borrow() {
+    if *busy.borrow() && !share {
         tracing::debug!(series = %job.series, gate = "outbox", "file trickle: waiting");
         return Err(Hold::Gated);
     }
@@ -713,6 +813,10 @@ mod tests {
         assert_eq!(pick_job(&wholes, Some("a")).map(|j| j.series), Some("c".into()));
         assert_eq!(pick_job(&wholes, Some("c")).map(|j| j.series), Some("a".into()), "round-robin");
         assert!(pick_job(&[], None).is_none());
+        // F2: a wanted base range goes ahead of a mirrored file's range
+        let base = PublishJob { wiki_base: true, ..job("d", vec![(0, 0)]) };
+        let ranged = vec![job("b", vec![(1, 1)]), base];
+        assert_eq!(pick_job(&ranged, Some("d")).map(|j| j.series), Some("d".into()), "the base first");
     }
 
     /// The range walk: positions map onto indices in range order.

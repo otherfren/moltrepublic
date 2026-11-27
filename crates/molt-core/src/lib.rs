@@ -8623,6 +8623,51 @@ pub struct ServeView {
     pub at: u64,
 }
 
+/// The folded wiki and vault bases in transit at this node.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseStatus {
+    /// The bases it serves to seats waiting for them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serving: Vec<BaseServeView>,
+    /// The bases it waits for.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fetch: Vec<BaseFetchView>,
+}
+
+/// A folded base this node publishes for waiting seats.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseServeView {
+    /// `wiki` or `vault`.
+    pub kind: String,
+    /// The seats that asked for its pieces this session.
+    #[serde(default)]
+    pub to: Vec<MemberId>,
+    /// Pieces published of the queued range.
+    pub published: u32,
+    /// Pieces the queued range holds.
+    pub of: u32,
+    /// What holds the next piece (`outbox`, `budget`, `daily`; "" = none).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub gate: String,
+    /// Unix seconds of the last report.
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// A folded base this node waits for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BaseFetchView {
+    /// `wiki` or `vault`.
+    pub kind: String,
+    /// Pieces held.
+    pub have: u32,
+    /// Pieces the series holds.
+    pub of: u32,
+    /// Unix seconds the last new piece was seen (0 = none yet).
+    #[serde(default)]
+    pub at: u64,
+}
+
 /// One file shared into the chat (Shared Files → Uploads). Only metadata
 /// travels in the chat — the bytes stay on the sharer's disk and move
 /// user-to-user over a dedicated encrypted queue when a member downloads
@@ -8908,6 +8953,9 @@ pub struct StatusView {
     /// Peers whose inbound stream is held behind a missing envelope.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inbound_held: Vec<InboundHeld>,
+    /// The folded bases this node serves and waits for.
+    #[serde(default)]
+    pub bases: Box<BaseStatus>,
     /// Seats this node knows it is behind on (a held stream, an owed gap,
     /// a listed tail not here).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

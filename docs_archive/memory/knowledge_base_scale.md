@@ -661,6 +661,23 @@ from `molt-vault-base-series-v1`, every holder answers.
 - **Pace.** 100 MiB is ~2 387 pieces; at the shipped 15 s trickle
   interval that is ~10 hours per fetching node, on a plane deliberately
   paced behind chat and governance. See §8.5.
+- **Serving a waiting seat (v0.1.4).** A wanted range of the wiki base or
+  of a vault payload or base is the trickle's first job, ahead of every
+  mirrored file. It yields only to a FIRST-OFFER outbox round (own
+  envelopes never published before); a resend round is background and
+  holds nothing back. While a first-offer round runs, the range still
+  publishes on every second tick (`PRIORITY_SHARE_EVERY`); with the outbox
+  idle it goes at a fifth of the interval (`PRIORITY_PACE_DIV`: 3 s at the
+  shipped 15 s, a 5 MB base in ~6 minutes instead of ~30). The hourly
+  headroom and the daily byte cap still gate every piece. Field, v0.1.3: a
+  restored seat waited 101 minutes for a 5.2 MB base behind a re-send
+  backlog, and nothing on the holder said so.
+- **What both sides see.** Holder: INFO `base=wanted kind= from=` once per
+  seat, `base=serving kind= series= pieces= of=`, `base=waiting kind=
+  series= gate=` and `base=served kind= series= pieces=` once per state
+  change; `status.bases.serving` (kind, to, published, of, gate, at).
+  Requester: `status.bases.fetch` (kind, have, of, at - pieces, and when the
+  last new one was seen), beside the memory surface's `wiki_base_pending`.
 
 #### 4.9.8 The wedge this also closes
 

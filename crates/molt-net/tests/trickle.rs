@@ -462,3 +462,80 @@ async fn a_temporary_share_tells_the_relays_its_deadline() {
     assert_eq!(raw_pieces(&url, Duration::from_secs(1)).await.len(), 5, "nothing more was published");
     handle.shutdown().await;
 }
+
+fn vault_base_range(bytes: &[u8], ranges: Vec<(u32, u32)>) -> molt_core::PublishJob {
+    use sha2::Digest as _;
+    let (m, _) = manifest_of_reader(bytes).expect("manifest");
+    molt_core::PublishJob {
+        path: String::new(),
+        root: String::new(),
+        vault: Some(hex::encode(sha2::Sha256::digest(bytes))),
+        ..job(std::path::Path::new(""), &m, ranges)
+    }
+}
+
+async fn arrivals_owned(url: String, budget: Duration) -> Vec<(u32, tokio::time::Instant)> {
+    arrivals(&url, budget).await
+}
+
+/// F2: **a wanted base range gets its share while first-offer rounds keep
+/// the outbox busy without a pause** (the field: 101 minutes of nothing).
+/// Every second tick is its turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wanted_base_range_gets_its_share_while_the_outbox_never_idles() {
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let bytes = pattern(2 * PIECE_PAYLOAD_LEN + 9);
+    let store = VaultBaseStore { inner: MemStateStore::new(), bytes: Arc::new(bytes.clone()) };
+    store.update(|s| enqueue_publish(s, vault_base_range(&bytes, vec![(0, 2)]))).await;
+    let chan = GroupChannel::new(dialer(), vec![url.clone()], SEED);
+    let (_busy_tx, busy) = tokio::sync::watch::channel(true);
+    let clock = Arc::new(AtomicU64::new(unix_now()));
+    let handle = spawn_trickle(chan, store.clone(), busy, config(Duration::from_millis(20), clock));
+    handle.wake();
+    let seen = arrivals(&url, Duration::from_secs(3)).await;
+    let indices: Vec<u32> = seen.iter().map(|(i, _)| *i).collect();
+    assert_eq!(indices, vec![0, 1, 2], "the range went out past the busy outbox");
+    assert!(store.load().await.file_jobs.publish.is_empty());
+    handle.shutdown().await;
+}
+
+/// F2: **a waiting seat's base goes faster while the outbox is idle** -
+/// at a fifth of the interval; a mirrored file keeps the interval.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_wanted_base_range_goes_at_the_faster_pace_and_a_file_does_not() {
+    let interval = Duration::from_millis(500);
+    let spread = |seen: &[(u32, tokio::time::Instant)]| seen.last().expect("last").1 - seen.first().expect("first").1;
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let bytes = pattern(3 * PIECE_PAYLOAD_LEN);
+    let store = VaultBaseStore { inner: MemStateStore::new(), bytes: Arc::new(bytes.clone()) };
+    store.update(|s| enqueue_publish(s, vault_base_range(&bytes, vec![(0, 2)]))).await;
+    let watching = tokio::spawn(arrivals_owned(url.clone(), Duration::from_secs(4)));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (_busy_tx, busy) = tokio::sync::watch::channel(false);
+    let clock = Arc::new(AtomicU64::new(unix_now()));
+    let handle = spawn_trickle(GroupChannel::new(dialer(), vec![url], SEED), store, busy, config(interval, clock));
+    handle.wake();
+    let seen = watching.await.expect("watch");
+    assert_eq!(seen.len(), 3);
+    assert!(spread(&seen) < interval, "the base went at the file pace: {:?}", spread(&seen));
+    handle.shutdown().await;
+
+    let relay = MockRelay::run().await.expect("relay");
+    let url = relay.url().await.to_string();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (path, m) = three_pieces(&tmp);
+    let store = MemStateStore::new();
+    store.update(|s| enqueue_publish(s, job(&path, &m, vec![(0, 2)]))).await;
+    let watching = tokio::spawn(arrivals_owned(url.clone(), Duration::from_secs(4)));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (_busy_tx, busy) = tokio::sync::watch::channel(false);
+    let clock = Arc::new(AtomicU64::new(unix_now()));
+    let handle = spawn_trickle(GroupChannel::new(dialer(), vec![url], SEED), store, busy, config(interval, clock));
+    handle.wake();
+    let seen = watching.await.expect("watch");
+    assert_eq!(seen.len(), 3);
+    assert!(spread(&seen) >= interval, "a file left its pace: {:?}", spread(&seen));
+    handle.shutdown().await;
+}

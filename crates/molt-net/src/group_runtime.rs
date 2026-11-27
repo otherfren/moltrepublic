@@ -1509,12 +1509,15 @@ where
     K: EngineSink,
 {
     let state = store.load().await;
-    let start = state.group.unwrap_or_default().log_seq;
+    let cur = state.group.unwrap_or_default();
+    let start = cur.log_seq;
+    let offered = cur.offered.max(start);
     let batch = log.read_from(start + 1).await;
     let mut published_through = start;
-    // the pending flag the file trickle yields to: raised for the pass's
-    // own frames, lowered at every exit
-    let _ = busy.send_replace(batch.iter().any(|e| e.by == cfg.member));
+    // the flag the file trickle yields to: a round with own envelopes never
+    // offered before - a resend round is background (F2) - lowered at
+    // every exit
+    let _ = busy.send_replace(batch.iter().any(|e| e.by == cfg.member && e.seq > offered));
     let outcome = publish_batch(channel, mls, cfg, store, sink, held, stop, start, batch, &mut published_through).await;
     let _ = busy.send_replace(false);
     outcome
@@ -3403,6 +3406,28 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         assert_eq!(__outbox_published("bruno"), N, "the restart republished what had gone out");
         again.shutdown().await;
+    }
+
+    /// F2: **a resend round is background.** The trickle yields only to a
+    /// round with own envelopes never offered; a rewound remainder below
+    /// `offered` keeps the flag down.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn only_a_first_offer_round_raises_the_busy_flag() {
+        for (who, offered, busy) in [("rena", 400u64, false), ("rudi", 0, true)] {
+            let (_relay, url) = roomy_relay().await;
+            __set_outbox_delay(who, 5);
+            let store = crate::MemStateStore::default();
+            store
+                .update(|s| {
+                    s.group = Some(molt_core::GroupCursor { offered, ..Default::default() });
+                    true
+                })
+                .await;
+            let (handle, _log) = seat_on_store(who, url, 300, store);
+            published_reaches(who, 20).await;
+            assert_eq!(*handle.busy.borrow(), busy, "{who}: offered {offered}");
+            handle.shutdown().await;
+        }
     }
 
     /// F1: **a hard kill loses at most a save interval.** While a round runs,
