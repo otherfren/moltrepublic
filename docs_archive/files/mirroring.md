@@ -272,7 +272,9 @@ version boundary, authenticated by the MLS credential like the poke, and
   persisted share that loses its only whole holder that way logs a WARN
   at every other seat.
 - `MirrorWho` (`\x00molt-mwho-v1`) - sent ONCE per runtime start; every
-  holder answers with its status, at most once an hour.
+  seat answers with its status, empty included (since 2026-11-28), at
+  most once an hour; a status from a seat outside the roster counts for
+  nothing.
 
 All three are gossip, never chain state; a seat that was offline learns
 them from the next periodic send or its own ask at start. The status and

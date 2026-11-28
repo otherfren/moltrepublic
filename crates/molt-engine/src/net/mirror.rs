@@ -33,6 +33,14 @@ const PAGES_STALE_SECS: u64 = 600;
 /// A `FileWanted` the worker sent for a series' stamp is asked again
 /// after this if no announcement came.
 const PENDING_RETRY_SECS: u64 = 600;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: run the gossip tick without a group runtime.
+    pub(crate) static GOSSIP_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only: status sends attempted on this thread.
+    pub(crate) static STATUS_SENDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
 /// A non-elected holder answers a `PieceWanted` repeated after this (the
 /// requester repeats every 30 minutes).
 const PIECE_FALLBACK_SECS: u64 = 15 * 60;
@@ -521,6 +529,8 @@ impl State {
     }
 
     fn send_mirror_status(&mut self, now: u64) {
+        #[cfg(test)]
+        STATUS_SENDS.with(|c| c.set(c.get() + 1));
         let holds = self.own_mirror_holds();
         let wire: Vec<(String, u32, u32)> = holds
             .iter()
@@ -578,7 +588,11 @@ impl State {
     /// start and every six hours, the status when it changed (at most
     /// once a minute) and unchanged every five minutes, ONE ask at start.
     pub(crate) fn mirror_gossip_tick(&mut self, now: u64) {
-        if self.group_net.is_none() {
+        #[cfg(test)]
+        let up = self.group_net.is_some() || GOSSIP_UP.with(std::cell::Cell::get);
+        #[cfg(not(test))]
+        let up = self.group_net.is_some();
+        if !up {
             return;
         }
         let holds = self.own_mirror_holds();
@@ -776,7 +790,8 @@ impl State {
         };
         if let Some(holds) = complete {
             for id in self.sole_holds_dropped(from, &holds) {
-                tracing::warn!(seat = %from, share = %id, holders = 0, "persisted share lost its only holder");
+                let relay_held = self.files.series.contains_key(&id);
+                tracing::warn!(seat = %from, share = %id, relay_held, "persisted share lost its only holder");
             }
             self.files.mirror.status.insert(from.clone(), holds);
             self.persist_mirror();
@@ -794,9 +809,9 @@ impl State {
         // the last declaration)
         self.files.mirror_decl_due = true;
         let now = crate::now_secs();
-        if now.saturating_sub(self.files.mirror_who_answered) >= WHO_ANSWER_SECS
-            && !self.own_mirror_holds().is_empty()
-        {
+        // an empty status answers too: it replaces a restored seat's old
+        // device's claim if the first beat's publish was lost
+        if now.saturating_sub(self.files.mirror_who_answered) >= WHO_ANSWER_SECS {
             self.files.mirror_who_answered = now;
             self.send_mirror_status(now);
         }
@@ -813,7 +828,9 @@ impl State {
                 out.entry(hold.id).or_default().push(self.member());
             }
         }
-        for (member, holds) in &self.files.mirror.status {
+        // a seat that left the roster keeps its stored status: it holds nothing here
+        let roster = self.roster();
+        for (member, holds) in self.files.mirror.status.iter().filter(|(m, _)| roster.contains(m)) {
             for hold in holds {
                 if hold.held == hold.of && hold.of > 0 {
                     let holders = out.entry(hold.id).or_default();

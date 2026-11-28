@@ -573,6 +573,109 @@ fn a_sole_holder_dropping_a_persisted_share_is_reported() {
     assert!(st.sole_holds_dropped(&b, &[]).is_empty(), "a still holds it");
 }
 
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().expect("lock").extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn captured<T>(f: impl FnOnce() -> T) -> (T, String) {
+    let cap = Captured::default();
+    let sink = cap.clone();
+    let subscriber = tracing_subscriber::fmt().with_writer(move || sink.clone()).finish();
+    let out = tracing::subscriber::with_default(subscriber, f);
+    let text = String::from_utf8(cap.0.lock().expect("lock").clone()).expect("utf8");
+    (out, text)
+}
+
+/// Gap 24 review: the replacing status itself raises the WARN - the drop
+/// is judged against the status it replaces.
+#[test]
+fn a_replacing_status_that_drops_the_only_hold_warns() {
+    let mut st = plain_state();
+    let a = st.roster().into_iter().find(|m| *m != st.member()).expect("a peer");
+    let id = persisted(&mut st, 24, &a);
+    st.cmd_net_mirror_status(&a, vec![whole(id)], 1, 0, 1).expect("status");
+    let (_, log) = captured(|| st.cmd_net_mirror_status(&a, Vec::new(), 2, 0, 1).expect("empty status"));
+    assert!(log.contains("persisted share lost its only holder"), "{log}");
+    assert!(log.contains(&id.to_string()), "{log}");
+}
+
+/// Gap 24 review: a temporary share with one holder names nobody.
+#[test]
+fn a_temporary_share_with_one_holder_names_nobody() {
+    let mut st = plain_state();
+    let a = st.roster().into_iter().find(|m| *m != st.member()).expect("a peer");
+    let id = molt_core::MessageId([25u8; 16]);
+    let mut msg = molt_core::ChatMessage::text(id, &a, "a share", now_secs());
+    msg.file = Some(molt_core::FileMeta {
+        name: "t.bin".to_string(),
+        size: 5,
+        kind: "BIN".to_string(),
+        modified: 100,
+        available: true,
+        checksum: "ab".repeat(32),
+        key_b64: base64_key(),
+        pieces: 1,
+        root: "cd".repeat(32),
+    });
+    let env = st.make_env(a.clone(), molt_core::WorkspaceEvent::Chat(msg));
+    st.apply(&env);
+    st.cmd_net_mirror_status(&a, vec![whole(id)], 1, 0, 1).expect("status");
+    let row = st.uploads_view().into_iter().find(|u| u.id == id).expect("the row");
+    assert_eq!((row.persistent, row.mirrors, row.only_on.as_str()), (false, 1, ""));
+}
+
+/// Gap 24 review: a hold reported by a seat that left the roster counts
+/// for nothing (the stored statuses are never pruned).
+#[test]
+fn a_holder_outside_the_roster_is_no_holder() {
+    let mut st = plain_state();
+    let a = st.roster().into_iter().find(|m| *m != st.member()).expect("a peer");
+    let id = persisted(&mut st, 26, &a);
+    st.files.mirror.status.insert("gone".to_string(), vec![whole(id)]);
+    assert!(!st.mirror_holders().contains_key(&id), "{:?}", st.mirror_holders());
+    let row = st.uploads_view().into_iter().find(|u| u.id == id).expect("the row");
+    assert_eq!((row.mirrors, row.only_on.as_str()), (0, ""));
+}
+
+/// Gap 24 review: the first gossip tick of a runtime sends the status
+/// although this seat holds nothing; an unchanged empty one stays quiet.
+#[test]
+fn the_first_tick_sends_an_empty_status() {
+    use crate::net::mirror::{GOSSIP_UP, STATUS_SENDS};
+    let mut st = plain_state();
+    assert!(st.own_mirror_holds().is_empty());
+    GOSSIP_UP.with(|c| c.set(true));
+    STATUS_SENDS.with(|c| c.set(0));
+    st.mirror_gossip_tick(now_secs());
+    let first = STATUS_SENDS.with(std::cell::Cell::get);
+    st.files.mirror_status_sent = now_secs();
+    st.mirror_gossip_tick(now_secs() + 3_600);
+    let later = STATUS_SENDS.with(std::cell::Cell::get);
+    GOSSIP_UP.with(|c| c.set(false));
+    assert_eq!((first, later), (1, 1));
+}
+
+/// Gap 24 review: a seat holding nothing still answers `MirrorWho`, so a
+/// starting peer replaces a stale claim even if the first empty status
+/// was lost.
+#[test]
+fn a_seat_holding_nothing_answers_a_mirror_who() {
+    let mut st = plain_state();
+    let a = st.roster().into_iter().find(|m| *m != st.member()).expect("a peer");
+    assert!(st.own_mirror_holds().is_empty());
+    st.cmd_net_mirror_who(&a).expect("who");
+    assert_ne!(st.files.mirror_who_answered, 0, "answered");
+}
+
 /// A mirror job still fetching is not a holder - not even in this seat's
 /// own view (the field showed a seat listing itself at 0 of 3).
 #[test]
