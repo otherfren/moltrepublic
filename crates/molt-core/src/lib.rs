@@ -8798,6 +8798,10 @@ pub struct UploadView {
     /// The series' data piece count (0 = a legacy share).
     #[serde(default)]
     pub mirror_of: u32,
+    /// A persisted share with exactly one known whole holder: that seat
+    /// ("" otherwise; `mirrors` is the count). Additive.
+    #[serde(default)]
+    pub only_on: String,
     /// The open `files` vote on this share, if one is up. Additive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vote: Option<UploadVote>,

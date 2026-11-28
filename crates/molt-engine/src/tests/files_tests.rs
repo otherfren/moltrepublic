@@ -524,6 +524,55 @@ fn a_paged_mirror_status_replaces_the_copy_only_when_complete() {
     assert!(st.files.mirror_pages.is_empty());
 }
 
+/// A persisted share pinned by a block, shared by `by`.
+fn persisted(st: &mut State, n: u8, by: &str) -> molt_core::MessageId {
+    let id = molt_core::MessageId([n; 16]);
+    let payload = json!({
+        "op": "persist", "id": id.to_string(), "by": by, "name": "a.bin", "kind": "BIN",
+        "size": 5, "checksum": "ab".repeat(32), "shared_ts": now_secs(),
+        "key_b64": base64_key(), "pieces": 1, "root": "cd".repeat(32)
+    });
+    st.applied.entry(Surface::Files).or_default().push((None, payload));
+    id
+}
+
+fn whole(id: molt_core::MessageId) -> molt_core::MirrorHold {
+    molt_core::MirrorHold { id, held: 1, of: 1 }
+}
+
+/// Gap 24: a persisted share one seat alone holds names that seat; a
+/// second holder clears it.
+#[test]
+fn a_persisted_share_with_one_holder_names_it() {
+    let mut st = plain_state();
+    let peers: Vec<MemberId> = st.roster().into_iter().filter(|m| *m != st.member()).collect();
+    let (a, b) = (peers[0].clone(), peers[1].clone());
+    let id = persisted(&mut st, 21, &a);
+    let row = |st: &State| st.uploads_view().into_iter().find(|u| u.id == id).expect("the row");
+    assert_eq!((row(&st).mirrors, row(&st).only_on.as_str()), (0, ""), "no holder known");
+    st.cmd_net_mirror_status(&a, vec![whole(id)], 1, 0, 1).expect("status");
+    assert_eq!((row(&st).mirrors, row(&st).only_on.clone()), (1, a.clone()));
+    st.cmd_net_mirror_status(&b, vec![whole(id)], 1, 0, 1).expect("status");
+    assert_eq!((row(&st).mirrors, row(&st).only_on.as_str()), (2, ""));
+}
+
+/// Gap 24: the holder that drops a persisted share it alone held is
+/// reported (a restored seat's new device holds nothing); a share another
+/// seat still holds is not.
+#[test]
+fn a_sole_holder_dropping_a_persisted_share_is_reported() {
+    let mut st = plain_state();
+    let peers: Vec<MemberId> = st.roster().into_iter().filter(|m| *m != st.member()).collect();
+    let (a, b) = (peers[0].clone(), peers[1].clone());
+    let alone = persisted(&mut st, 22, &a);
+    let backed = persisted(&mut st, 23, &a);
+    st.cmd_net_mirror_status(&a, vec![whole(alone), whole(backed)], 1, 0, 1).expect("status");
+    st.cmd_net_mirror_status(&b, vec![whole(backed)], 1, 0, 1).expect("status");
+    assert_eq!(st.sole_holds_dropped(&a, &[]), vec![alone]);
+    assert!(st.sole_holds_dropped(&a, &[whole(alone)]).is_empty(), "still held");
+    assert!(st.sole_holds_dropped(&b, &[]).is_empty(), "a still holds it");
+}
+
 /// A mirror job still fetching is not a holder - not even in this seat's
 /// own view (the field showed a seat listing itself at 0 of 3).
 #[test]
