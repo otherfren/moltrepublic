@@ -920,7 +920,7 @@ fn renderer_selection(
 /// color-scheme query at startup, the file picker. A user cannot act on
 /// it and nothing is broken, so it does not belong in their terminal.
 /// `RUST_LOG` overrides the filter for debugging - except that a value
-/// which does not mention openmls keeps it off (round 3: `RUST_LOG=info`
+/// which does not mention openmls (or rmcp) keeps it quiet (round 3: `RUST_LOG=info`
 /// on a headless node printed 182 openmls ERROR lines for the resends a
 /// restart provokes, which the engine already classifies as stale).
 fn init_tracing(log_dir: Option<&Path>) -> Option<WorkerGuard> {
@@ -994,13 +994,19 @@ impl<'writer> tracing_subscriber::fmt::FormatFields<'writer> for PlainFields {
 }
 
 /// The filter to install: the default, or `RUST_LOG` with `openmls=off`
-/// appended unless it names openmls itself.
+/// and `rmcp=error` appended unless it names that crate itself.
 fn effective_log_filter(env: Option<&str>) -> String {
-    match env.map(str::trim).filter(|v| !v.is_empty()) {
-        None => DEFAULT_LOG_FILTER.to_string(),
-        Some(v) if v.contains("openmls") => v.to_string(),
-        Some(v) => format!("{v},openmls=off"),
+    let Some(v) = env.map(str::trim).filter(|v| !v.is_empty()) else {
+        return DEFAULT_LOG_FILTER.to_string();
+    };
+    let mut out = v.to_string();
+    for (krate, quiet) in [("openmls", "openmls=off"), ("rmcp", "rmcp=error")] {
+        if !v.contains(krate) {
+            out.push(',');
+            out.push_str(quiet);
+        }
     }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1028,9 +1034,19 @@ mod tests {
     fn a_rust_log_that_forgets_openmls_gets_it_appended() {
         assert_eq!(effective_log_filter(None), DEFAULT_LOG_FILTER);
         assert_eq!(effective_log_filter(Some("")), DEFAULT_LOG_FILTER);
-        assert_eq!(effective_log_filter(Some("info")), "info,openmls=off");
-        assert_eq!(effective_log_filter(Some("molt_net=debug")), "molt_net=debug,openmls=off");
-        assert_eq!(effective_log_filter(Some("debug,openmls=info")), "debug,openmls=info");
+        assert_eq!(effective_log_filter(Some("molt_net=debug,rmcp=warn")), "molt_net=debug,rmcp=warn,openmls=off");
+        assert_eq!(effective_log_filter(Some("debug,openmls=info,rmcp=info")), "debug,openmls=info,rmcp=info");
+        assert!(EnvFilter::try_new(effective_log_filter(Some("info"))).is_ok());
+    }
+
+    /// Field 2026-11: a `RUST_LOG=info` node logged rmcp's three INFO lines
+    /// per MCP call (388k a day); naming rmcp still raises it.
+    #[test]
+    fn a_rust_log_that_forgets_rmcp_keeps_it_quiet() {
+        assert_eq!(effective_log_filter(Some("info")), "info,openmls=off,rmcp=error");
+        assert_eq!(effective_log_filter(Some("info,openmls=info")), "info,openmls=info,rmcp=error");
+        assert_eq!(effective_log_filter(Some("info,rmcp=info")), "info,rmcp=info,openmls=off");
+        assert_eq!(effective_log_filter(Some("openmls=info,rmcp=debug")), "openmls=info,rmcp=debug");
         assert!(EnvFilter::try_new(effective_log_filter(Some("info"))).is_ok());
     }
 

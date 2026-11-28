@@ -259,6 +259,22 @@ fn a_rejoiner_verifies_a_served_chain_after_the_activation() {
     assert_eq!(full.hash, v2_id(&b, &b.blocks[5]));
 }
 
+/// Gap 19: an older-build rejoiner refuses the same served chain, full or
+/// anchored above the activation, so it materializes nothing.
+#[test]
+fn an_older_build_rejoiner_refuses_a_served_chain_after_the_activation() {
+    let mut b = enabled(4);
+    let state = checkpoint_state(&b.blocks, 3).expect("state");
+    let cut = b.seal(4, ChainChange::Checkpoint { upto: 3, state_hash: checkpoint_state_hash(&state) }, &SEATS3);
+    b.push(cut);
+    b.commit_applied(40, &["walter", "dora"]);
+    let _older = OlderBuild::on();
+    let err = verify_served(None, &b.blocks, Some(&b.republic_id)).expect_err("full");
+    assert_eq!(refusal_rule(&err), "threshold", "{err}");
+    let err = verify_served(Some(&state), &b.blocks[4..], Some(&b.republic_id)).expect_err("anchored");
+    assert_eq!(refusal_rule(&err), "threshold", "{err}");
+}
+
 // --- S4: `prev` in the signed bytes ---------------------------------------
 
 /// `molt-chain-change-v3`: a signature made on one predecessor does not

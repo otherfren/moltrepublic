@@ -40,7 +40,7 @@ pub(crate) use delivery::{DupEpisode, SenderHold};
 use delivery::ACK_DEBOUNCE_SECS;
 mod demo_mesh;
 pub(crate) mod files;
-mod mirror;
+pub(crate) mod mirror;
 mod wiki_base;
 mod ingest;
 mod presence;

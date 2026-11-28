@@ -33,6 +33,14 @@ const PAGES_STALE_SECS: u64 = 600;
 /// A `FileWanted` the worker sent for a series' stamp is asked again
 /// after this if no announcement came.
 const PENDING_RETRY_SECS: u64 = 600;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: run the gossip tick without a group runtime.
+    pub(crate) static GOSSIP_UP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Test-only: status sends attempted on this thread.
+    pub(crate) static STATUS_SENDS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
 /// A non-elected holder answers a `PieceWanted` repeated after this (the
 /// requester repeats every 30 minutes).
 const PIECE_FALLBACK_SECS: u64 = 15 * 60;
@@ -521,6 +529,8 @@ impl State {
     }
 
     fn send_mirror_status(&mut self, now: u64) {
+        #[cfg(test)]
+        STATUS_SENDS.with(|c| c.set(c.get() + 1));
         let holds = self.own_mirror_holds();
         let wire: Vec<(String, u32, u32)> = holds
             .iter()
@@ -578,14 +588,18 @@ impl State {
     /// start and every six hours, the status when it changed (at most
     /// once a minute) and unchanged every five minutes, ONE ask at start.
     pub(crate) fn mirror_gossip_tick(&mut self, now: u64) {
-        if self.group_net.is_none() {
+        #[cfg(test)]
+        let up = self.group_net.is_some() || GOSSIP_UP.with(std::cell::Cell::get);
+        #[cfg(not(test))]
+        let up = self.group_net.is_some();
+        if !up {
             return;
         }
         let holds = self.own_mirror_holds();
         let since = now.saturating_sub(self.files.mirror_status_sent);
         // serving progress: at most once a minute, like a holds change
         let changed = holds != self.files.mirror_status_last || self.own_serving() != self.files.serving_sent;
-        if (changed && since >= STATUS_MIN_SECS) || (!holds.is_empty() && since >= STATUS_REPEAT_SECS) {
+        if status_due(self.files.mirror_status_sent == 0, changed, !holds.is_empty(), since) {
             self.send_mirror_status(now);
         }
         if !self.files.mirror_who_asked {
@@ -775,6 +789,10 @@ impl State {
             }
         };
         if let Some(holds) = complete {
+            for id in self.sole_holds_dropped(from, &holds) {
+                let relay_held = self.files.series.contains_key(&id);
+                tracing::warn!(seat = %from, share = %id, relay_held, "persisted share lost its only holder");
+            }
             self.files.mirror.status.insert(from.clone(), holds);
             self.persist_mirror();
         }
@@ -791,9 +809,9 @@ impl State {
         // the last declaration)
         self.files.mirror_decl_due = true;
         let now = crate::now_secs();
-        if now.saturating_sub(self.files.mirror_who_answered) >= WHO_ANSWER_SECS
-            && !self.own_mirror_holds().is_empty()
-        {
+        // an empty status answers too: it replaces a restored seat's old
+        // device's claim if the first beat's publish was lost
+        if now.saturating_sub(self.files.mirror_who_answered) >= WHO_ANSWER_SECS {
             self.files.mirror_who_answered = now;
             self.send_mirror_status(now);
         }
@@ -810,7 +828,9 @@ impl State {
                 out.entry(hold.id).or_default().push(self.member());
             }
         }
-        for (member, holds) in &self.files.mirror.status {
+        // a seat that left the roster keeps its stored status: it holds nothing here
+        let roster = self.roster();
+        for (member, holds) in self.files.mirror.status.iter().filter(|(m, _)| roster.contains(m)) {
             for hold in holds {
                 if hold.held == hold.of && hold.of > 0 {
                     let holders = out.entry(hold.id).or_default();
@@ -823,6 +843,34 @@ impl State {
         for holders in out.values_mut() {
             holders.sort_unstable();
         }
+        out
+    }
+
+    /// The persisted shares `member` alone held whole that `holds` (its
+    /// replacing status) no longer holds.
+    pub(crate) fn sole_holds_dropped(&self, member: &MemberId, holds: &[MirrorHold]) -> Vec<MessageId> {
+        let whole = |h: &MirrorHold| h.held == h.of && h.of > 0;
+        let Some(before) = self.files.mirror.status.get(member) else {
+            return Vec::new();
+        };
+        let kept: std::collections::HashSet<MessageId> = holds.iter().filter(|h| whole(h)).map(|h| h.id).collect();
+        let dropped: Vec<MessageId> = before
+            .iter()
+            .filter(|h| whole(h) && !kept.contains(&h.id))
+            .map(|h| h.id)
+            .collect();
+        if dropped.is_empty() {
+            return dropped;
+        }
+        let holders = self.mirror_holders();
+        let states = self.files_state();
+        let mut out: Vec<MessageId> = dropped
+            .into_iter()
+            .filter(|id| holders.get(id).is_some_and(|hs| hs.as_slice() == std::slice::from_ref(member)))
+            .filter(|id| matches!(states.get(id), Some(FileState::Persistent(_))))
+            .collect();
+        out.sort_unstable_by_key(ToString::to_string);
+        out.dedup();
         out
     }
 
@@ -871,6 +919,13 @@ impl State {
     }
 }
 
+/// The status beat: once per runtime even when empty (a restored seat's
+/// new device must replace its old device's claim), a change at most
+/// once a minute, a non-empty list every five minutes.
+fn status_due(never_sent: bool, changed: bool, has_holds: bool, since: u64) -> bool {
+    never_sent || (changed && since >= STATUS_MIN_SECS) || (has_holds && since >= STATUS_REPEAT_SECS)
+}
+
 /// The series this seat publishes now, for the serving gossip: shares
 /// only. A base series is no share; it travels in `status.bases`.
 fn serving_series(
@@ -910,5 +965,21 @@ mod serving_tests {
         let bases = vec!["base-wiki".to_string()];
         let out = serving_series(&status, &bases);
         assert_eq!(out, vec![("share-a".to_string(), 1, 10, String::new())]);
+    }
+}
+
+#[cfg(test)]
+mod status_due_tests {
+    use super::{status_due, STATUS_MIN_SECS, STATUS_REPEAT_SECS};
+
+    /// Gap 24: the first beat of a runtime speaks even with nothing held,
+    /// so a restored seat's new device replaces its old device's claim.
+    #[test]
+    fn the_first_status_of_a_runtime_goes_out_even_when_empty() {
+        assert!(status_due(true, false, false, 0), "never sent, nothing held");
+        assert!(!status_due(false, false, false, STATUS_REPEAT_SECS * 10), "empty and unchanged stays quiet");
+        assert!(!status_due(false, true, false, STATUS_MIN_SECS - 1), "a change waits the minute");
+        assert!(status_due(false, true, false, STATUS_MIN_SECS));
+        assert!(status_due(false, false, true, STATUS_REPEAT_SECS));
     }
 }

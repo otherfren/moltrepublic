@@ -4689,6 +4689,10 @@ impl State {
                 mirrors: u32::try_from(holders.get(&id).map_or(0, Vec::len)).unwrap_or(u32::MAX),
                 mirror_held: self.mirror_held_of(&id, mine, pieces).0,
                 mirror_of: self.mirror_held_of(&id, mine, pieces).1,
+                only_on: match holders.get(&id).map(Vec::as_slice) {
+                    Some([one]) if persistent => one.clone(),
+                    _ => String::new(),
+                },
                 local: String::new(),
                 vote: votes.get(&id.to_string()).cloned(),
                 serving: self.serving_view(&id),
@@ -5125,6 +5129,7 @@ mod upload_ref_state_tests {
             mirrors: 0,
             mirror_held: 0,
             mirror_of: 0,
+            only_on: String::new(),
             serving: None,
             vote: None,
         }
