@@ -300,6 +300,39 @@ fn recovery_materializes_the_nostr_shape_and_the_new_anchor() {
     );
 }
 
+/// Gap 22: an anchor-first restore holds no own `Restored` block yet, and
+/// its group runtime is already built as a restored one; the join time
+/// survives a reopen unchanged.
+#[test]
+fn an_anchor_first_restore_runs_its_group_as_restored_from_the_start() {
+    let tmp = tempfile::tempdir().expect("tmp");
+    let phrase = molt_storage::generate_seed_phrase().expect("phrase");
+    let ticket = "ab".repeat(8);
+    let entropy = molt_storage::seed_entropy(&phrase).expect("entropy");
+    let (new_sk, _) = molt_net::nostr_identity(&entropy, &ticket);
+    let (chain, republic_id) = recovered_chain_with(&phrase, vec!["wss://relay.one.example/".to_string()], None);
+    let mut st = recovering_state(&tmp, "bob", &republic_id, &phrase);
+    st.cmd_net_recover_sealed(
+        "bob".to_string(),
+        serde_json::to_string(&chain).expect("chain json"),
+        String::new(),
+        Vec::new(),
+        hex::encode(new_sk),
+        "5a".repeat(32),
+        0,
+        false,
+        Some(1),
+    )
+    .expect("the handler never errors");
+    assert_eq!(st.session.screen, Screen::Main, "{:?}", st.session.notice);
+    assert_eq!(st.incarnation_height(), 0, "no own Restored block yet");
+    let joined = st.group_joined_at();
+    assert_ne!(joined, 0, "the runtime is built as a restored one");
+    let dir = st.active.as_ref().expect("materialized").dir.clone();
+    drop(st);
+    assert_eq!(reopen(&dir).prefs.joined_at, joined, "the join time survives a reopen");
+}
+
 /// The rejoiner's status line (`NetRecoverNote`): a live incarnation's
 /// note reaches the notice channel; a stale one says nothing (a
 /// restarted recovery must not have the old task talking over it).

@@ -990,6 +990,8 @@ pub(crate) struct DeliveryState {
     pub(crate) behind: Vec<MemberId>,
     /// The own outbox's spent budget holds a tail: the owed seats, since.
     pub(crate) resend_held: Option<(Vec<MemberId>, u64)>,
+    /// The group runtime's `before_join` (gap 22). Runtime-only.
+    pub(crate) before_join: u64,
     /// Per sender: repeats a legacy window drops (`net/delivery.rs`).
     /// Runtime-only.
     pub(crate) dups: std::collections::HashMap<MemberId, net::DupEpisode>,
@@ -1475,6 +1477,13 @@ pub(crate) struct RecoveryState {
     /// Seats whose re-key merged here before their `Restored` block did.
     /// Persisted.
     pub(crate) rekey_ahead: std::collections::BTreeSet<String>,
+    /// Re-keys merged while that restore's card was open, by `(seat,
+    /// anchor)`; `true` = it also cleared an older flag. Persisted.
+    pub(crate) rekey_ahead_for: std::collections::BTreeMap<(String, String), bool>,
+    /// Seats whose newest block a hedged re-key matched. Persisted.
+    pub(crate) rekey_provisional: std::collections::BTreeSet<String>,
+    /// Gap 22: the Welcome time of the restore being materialized.
+    pub(crate) welcomed_at: Option<u64>,
     /// Seat -> the anchor of the `Restored` block this coordinator could not
     /// re-key for (`recover-interrupted:`). Persisted.
     pub(crate) interrupted: std::collections::BTreeMap<String, String>,
@@ -2126,6 +2135,7 @@ impl State {
                 unsolicited_cooldown: std::collections::HashMap::new(),
                 held_approvals: std::collections::BTreeSet::new(),
                 held_seals: std::collections::BTreeSet::new(),
+                welcomed_at: None,
                 pending: HashMap::new(),
                 rejoiner_caps: std::collections::VecDeque::new(),
                 anchor_first: HashMap::new(),
@@ -2133,6 +2143,8 @@ impl State {
                 anchor_first_seats: std::collections::HashSet::new(),
                 unfinished: std::collections::BTreeSet::new(),
                 rekey_ahead: std::collections::BTreeSet::new(),
+                rekey_ahead_for: std::collections::BTreeMap::new(),
+                rekey_provisional: std::collections::BTreeSet::new(),
                 interrupted: std::collections::BTreeMap::new(),
                 swept: HashMap::new(),
                 withdrawn: std::collections::VecDeque::new(),

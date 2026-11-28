@@ -120,6 +120,7 @@ impl State {
         carry_keys: Option<&std::path::Path>,
         err: fn(String) -> MoltError,
     ) -> Result<WorkspaceId, MoltError> {
+        let joined_at = self.recovery.welcomed_at.take();
         // captured before `shape` is consumed into the TransportState below
         let nostr_shape = shape.kind == Some(molt_core::TransportKind::Nostr);
         let entropy = molt_storage::seed_entropy(seed_phrase).map_err(|e| err(e.to_string()))?;
@@ -258,7 +259,10 @@ impl State {
             &adopt_relays,
             adopt_seed.as_deref(),
         );
-        let prefs = opened.prefs.clone();
+        let mut prefs = opened.prefs.clone();
+        if let Some(at) = joined_at {
+            prefs.joined_at = at;
+        }
         // NOTE the order: the runtime start below needs `self.active`, so it
         // cannot sit up with the other adoptions.
         self.active = Some(ActiveStorage {
@@ -267,6 +271,9 @@ impl State {
             prefs,
             handle: molt_storage::start_writer(opened),
         });
+        if let (Some(_), Some(a)) = (joined_at, self.active.as_ref()) {
+            a.handle.set_prefs(a.prefs.clone());
+        }
         // The FIRST session must be as honest as a reopen. `net_health` was
         // written on the open path only, so a freshly founded or joined Nostr
         // workspace kept the serde default (`Ok`) and showed a green pill for
@@ -1861,6 +1868,11 @@ impl State {
         Ok(Reply::Ack)
     }
 
+    /// When this device joined its group by a restore's Welcome; 0 = never.
+    pub(crate) fn group_joined_at(&self) -> u64 {
+        self.active.as_ref().map_or(0, |a| a.prefs.joined_at)
+    }
+
     /// The off-actor rejoin task finished: the seat is back inside the MLS
     /// group and holds the coordinator-served chain, verified from its
     /// genesis. The actor **re-verifies everything** before materializing
@@ -2068,6 +2080,8 @@ impl State {
         // keep copies to stand the queue-mesh supervisor up after
         // materialising (the Nostr group runtime is materialize's own job)
         let net_seed = (mls_blob.clone(), mesh.clone());
+        // gap 22: the runtime materialize builds dates pre-join frames by this
+        self.recovery.welcomed_at = Some(self.presence_now());
         let id = match self.materialize_workspace(
             &sealed.name,
             &member,

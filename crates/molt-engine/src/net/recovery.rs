@@ -856,6 +856,21 @@ impl State {
         if member == self.member() {
             self.recovery.unfinished.clear();
             self.recovery.rekey_ahead.clear();
+            self.recovery.rekey_ahead_for.clear();
+            self.recovery.rekey_provisional.clear();
+            return;
+        }
+        self.recovery.rekey_provisional.remove(member);
+        let anchor = self.chain.blocks.iter().rev().find_map(|b| match &b.change {
+            molt_core::ChainChange::Membership { op: molt_core::MembershipOp::Restored, member: m, nostr_pk, .. }
+                if m == member => Some(nostr_pk.clone().unwrap_or_default()),
+            _ => None,
+        });
+        // gap 23: a token keyed by this restore's anchor is its own re-key
+        if let Some(hedged) = anchor.and_then(|a| self.recovery.rekey_ahead_for.remove(&(member.to_string(), a))) {
+            if hedged {
+                self.recovery.rekey_provisional.insert(member.to_string());
+            }
         } else if !self.recovery.rekey_ahead.remove(member) {
             self.recovery.unfinished.insert(member.to_string());
         }
@@ -863,8 +878,27 @@ impl State {
 
     /// A merged commit re-keyed `member`'s seat.
     pub(crate) fn note_rekey_merged(&mut self, member: &str) {
-        if !self.recovery.unfinished.remove(member) {
+        // gap 23: the re-key names no restore; an open card of the seat may
+        // be the one it belongs to, so it is keyed by that card's anchor
+        let open: Vec<String> = self
+            .chain
+            .proposal_changes
+            .values()
+            .filter_map(|c| match c {
+                molt_core::ChainChange::Membership { op: molt_core::MembershipOp::Restored, member: m, nostr_pk, .. }
+                    if m == member => Some(nostr_pk.clone().unwrap_or_default()),
+                _ => None,
+            })
+            .collect();
+        let cleared = self.recovery.unfinished.remove(member);
+        if !cleared && self.recovery.rekey_provisional.remove(member) {
+            // the own re-key of the block a hedged token matched
+        } else if !cleared && open.is_empty() {
             self.recovery.rekey_ahead.insert(member.to_string());
+        } else {
+            for a in open {
+                self.recovery.rekey_ahead_for.insert((member.to_string(), a), cleared);
+            }
         }
         if self.recovery.interrupted.remove(member).is_some()
             && self.session.notice == format!("{RECOVER_INTERRUPTED}{member}")

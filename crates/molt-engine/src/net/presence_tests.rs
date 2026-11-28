@@ -161,6 +161,7 @@ fn group_channel_health_names_relays_live_losses_and_catch_up() {
             deaf: deaf.map(|s| s.to_string()),
             opaque_frames: opaque,
             live_opaque: live,
+            before_join: 0,
             catching_up,
             replaying: catching_up,
         }

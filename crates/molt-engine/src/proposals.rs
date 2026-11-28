@@ -4876,6 +4876,7 @@ impl State {
             chain_lag: self.chain_lag(),
             chain_sync: Box::new(self.chain_sync()),
             inbound_held: self.inbound_held_view(),
+            before_this_device: self.delivery.before_join,
             seats: {
                 let mut seats = self.seat_syncs(&persistent);
                 self.fill_seat_reports(&mut seats);

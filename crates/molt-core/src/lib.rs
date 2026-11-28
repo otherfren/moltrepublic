@@ -1989,6 +1989,10 @@ pub struct WorkspacePrefs {
     /// unknown; the open records the import height as an incarnation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub branch_unknown: bool,
+    /// Unix seconds this device joined its group by a restore's Welcome
+    /// (gap 22); 0 = founded, joined at the founding, or imported.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub joined_at: u64,
 }
 
 /// The record of a confirmed backup upload (`backup_restore_design.md` §6.4a).
@@ -2025,6 +2029,7 @@ impl Default for WorkspacePrefs {
             chain_lock: false,
             lock_unknown: false,
             branch_unknown: false,
+            joined_at: 0,
         }
     }
 }
@@ -3858,6 +3863,14 @@ pub struct EngineStateDump {
     /// Seats whose re-key this node merged before their `Restored` block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rekey_ahead: Vec<MemberId>,
+    /// `(seat, anchor, hedged)`: a re-key merged here while that restore's
+    /// card was open; `hedged` = it also cleared an older flag.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rekey_ahead_for: Vec<(MemberId, String, bool)>,
+    /// Seats whose newest `Restored` block a hedged re-key matched: the
+    /// next re-key of the seat is that block's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rekey_provisional: Vec<MemberId>,
     /// `(seat, anchor)` whose re-key this coordinator could not run: the
     /// device waiting on that anchor is answered `link outdated`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -9018,6 +9031,10 @@ pub struct StatusView {
     /// Peers whose inbound stream is held behind a missing envelope.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inbound_held: Vec<InboundHeld>,
+    /// Group frames since start this restored device dates before its own
+    /// join: never its keys, so no fault (0 = none).
+    #[serde(default)]
+    pub before_this_device: u64,
     /// The folded bases this node serves and waits for.
     #[serde(default)]
     pub bases: Box<BaseStatus>,

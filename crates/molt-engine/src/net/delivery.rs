@@ -423,6 +423,8 @@ impl State {
         } else {
             self.reset_after_rekey(member);
         }
+        // gap 23: an older snapshot would revive a cleared flag or lose a token
+        self.snapshot_to_disk();
     }
 
     /// The ratchet to persist: none until every re-key it holds is drained
