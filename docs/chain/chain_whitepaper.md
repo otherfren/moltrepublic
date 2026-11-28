@@ -448,7 +448,11 @@ it in four places; the table above carries the corrected text
 | one new signed layout, an explicit "depends on" field | three layouts and a storage wall; no such field |
 
 Its estimate: B about 293 agent-hours, against 164 for A and about 24
-for D alone.
+for D alone. An adversarial review of that pass the same day judged the
+design not sound as written but fixable, and put B at 450 to 700
+agent-hours: one sealer could backdate a decision and void ones applied
+long ago, and could push the height alone; "settled" without a cut is
+neither safe nor live [INFERRED, from that review].
 
 ## Appendix A. Code references (master 2239e162)
 
