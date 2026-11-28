@@ -352,6 +352,23 @@ review round P1b), not merged. Before any merge: its own plan document
 (the rule, liveness under a false or stale "ahead" claim, mixed versions,
 the tests), then an independent review.
 
+Review of 2026-11-28: fix first. By my recommendation the lane stays
+parked in this release; the user decides.
+- HIGH: rule R5 filters the valid signatures of a proposal by locally
+  inferred peer claims before the seal truncates them, so two seats can
+  seal different signature sets for one proposal at one height. Where
+  block identity v2 is active that is another attestation of one block;
+  below its activation it is a competitor fork.
+- MEDIUM: the replay gate suppresses the recording of claims, so a seal
+  waits for the signer's next beacon; the hold also stops a cut's
+  co-signature, and compaction stands still for the hold.
+- The benefit in the field is narrow: it closes the re-seal loop after
+  tip swaps and the returning seat's competitor seal, and changes nothing
+  in the two large field shapes (the stuck catch-up is gap 25, the
+  thirteen-hour poll is gap 28).
+- Kept from it: rule R10 (a `beyond_head` answer retires the claimant's
+  claimed height) belongs to gap 28.
+
 ## C2. What the rejected no-split plan needed from the rejoin
 
 The no-split plan is rejected (2026-11-27). Of this section only N3
