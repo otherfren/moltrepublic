@@ -1,7 +1,8 @@
 # Finishing the rejoin
 
 **Status: PLAN, STARTED; release v0.1.4, BEFORE Robo-Scrum (user
-decision 2026-11-25).** Inventory taken on tag v0.1.3 (`3ad6790d`);
+decision 2026-11-25); v0.1.4 CUT on 2026-11-28 to §D3, the rest waits
+for the decisions on the chain whitepaper.** Inventory taken on tag v0.1.3 (`3ad6790d`);
 re-baselined 2026-11-27 on master `4e4256a1`, after the user decided
 every question in §F. Fork prevention is REJECTED and not part of this
 release: forks below the threshold stay possible, are healed and made
@@ -175,7 +176,7 @@ Size in agent-hours. "Off/hint" means built but switched off, or only a hint.
 | 27 | every call of one client opens an MCP session and logs three INFO lines | `molt-mcp` default log filter | 388,221 lines in one day | cosmetic (the log) | - | `rmcp` at WARN in the default filter; tell the client's author. Built 2026-11-28: the default already had `rmcp=error` (since v0.0.10); the leak was a `RUST_LOG` without rmcp, which now gets `rmcp=error` appended like `openmls=off`; open: telling the client's author | 1 | no |
 | 28 | a stale "ahead" claim keeps every seat polling for a block nobody holds | `chain/sync.rs` (`request_catchup`, `beyond_head`), the peer heights | 13.3 h of polls | degrades (noise, budget) | - | a `beyond_head` answer retires that peer's claimed height; the status says nobody holds it | 3 | no |
 | 29 | texts: a decision line from another branch is logged `forged`; a replayed range carries one `applied_at` | `net/ingest.rs`, the block stamps | misleading | cosmetic | - | `from another branch`; the stamp of the local apply | 2 | no |
-| 30 | the `answers` flag of a hold latches at the first listing or gap answer and is never reset; from then on repeats of a re-offer arm no evidence and the §10(c) frontier jump is skipped, so a cap-held tail waits for a listing: the second half of the field stall (review of gap 25, 2026-11-28) | `crates/molt-engine/src/net/delivery.rs` (`SenderHold::answers`, `passed`, `inbound_gap_tick`) | nothing until a listing raises the frontier | does not finish by itself | - | let an answer age out, or let re-offer repeats arm evidence regardless of `answers`; red test: a sender whose hold has answered still self-heals a cap-held tail | 6 | no |
+| 30 | the `answers` flag of a hold latches at the first listing or gap answer and is never reset; from then on repeats of a re-offer arm no evidence and the §10(c) frontier jump is skipped, so a cap-held tail waits for a listing: the second half of the field stall (review of gap 25, 2026-11-28) | `crates/molt-engine/src/net/delivery.rs` (`SenderHold::answers`, `passed`, `inbound_gap_tick`) | nothing until a listing raises the frontier | does not finish by itself | - | built 2026-11-28: an answer ages out after 3 unanswered listing asks per episode, never inside the sender's 60 s refusal window | 6 | no |
 
 ## C. Designs
 
@@ -489,6 +490,30 @@ GUI (step 7); C.5 with gap 11 (step 9); gap 28 with the lag guard's rule
 R10; the small lane (step 11). `docs_archive/transport/delivery_guarantee.md`
 is still German: translate it once gaps 25 and C.1 are merged, since
 both change it.
+
+## D3. v0.1.4 as cut (user, 2026-11-28)
+
+The release is cut to the delivery and re-key fixes. Everything that
+depends on the chain's design waits for the user's decisions on
+`docs/chain/chain_whitepaper.md`.
+
+| in v0.1.4 | state |
+|---|---|
+| 25 | merged (`2239e162`) |
+| C.1 with 9 and 12 (1, 4) | review: fix first, two critical and four high claims; fix round running |
+| 26 | review: merge after cleanups; fix round next (a peer that stays behind is served once per claim; the tests pin the rule) |
+| 30 | being built |
+| 19, 24, 27 | being built |
+| 22, 23 | after C.1 |
+| 28, 29 | after 26 |
+| acceptance | the full gate on master, then the release build |
+
+Moved out, to be planned again after the whitepaper's decisions: N3,
+C.7 with C.10 (21, 6, 7, 8, 13), 18, C.2, C.3 with 15 and N1, the branch
+choice (14; its lane stays unmerged and dark, the fix items and the
+approver's withdrawal unbuilt), 5e, 5f, 17, the 5b/5c strings, C.5 with
+11, 16, the lag guard, the field runs over Tor. Known and shipped open:
+a rejoiner that dies before its Welcome still needs a new link (21).
 
 ## E. Out of scope
 

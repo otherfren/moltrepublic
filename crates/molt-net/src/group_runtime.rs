@@ -67,7 +67,7 @@ const OPEN_ROUNDS: u32 = 2;
 const GAP_ANSWER_EVERY: Duration = Duration::from_secs(10);
 
 /// How long a seq re-published to one asker is not re-published to it again.
-const GAP_RESEND_REFUSE: Duration = Duration::from_secs(60);
+pub const GAP_RESEND_REFUSE: Duration = Duration::from_secs(60);
 
 /// Per asker: one range listing per this long.
 const GAP_LIST_EVERY: Duration = Duration::from_secs(5);
