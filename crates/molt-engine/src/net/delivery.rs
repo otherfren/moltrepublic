@@ -55,8 +55,10 @@ const SESSION_MAX: usize = 65_536;
 /// Re-publications of a listed seq that never landed before it is given up.
 const LISTED_TRIES: u8 = 3;
 
-/// Ask rounds of ours a sender leaves unanswered before its repeats count
-/// as resend rounds again (§10(c)): it is no longer filling our gap.
+/// Listing asks of ours a sender leaves unanswered before its repeats count
+/// as resend rounds again (§10(c)): it answers every listing ask, so it is
+/// no longer filling our gap. Named asks never count - a refused or
+/// budget-cut one gets no answer at all.
 const ANSWER_AGES_AFTER_ASKS: u32 = 3;
 
 /// The open probe (§13): one switch, independent of the `behind` signal.
@@ -150,10 +152,12 @@ pub(crate) struct SenderHold {
     lost: u32,
     /// The sender answers gap wants: its duplicates are targeted resends
     /// for other askers, never evidence about our gaps - until it leaves
-    /// [`ANSWER_AGES_AFTER_ASKS`] of our ask rounds unanswered.
+    /// [`ANSWER_AGES_AFTER_ASKS`] of our listing asks unanswered.
     answers: bool,
-    /// Our ask rounds published since the sender last answered us.
+    /// Our listing asks published this episode since the sender last
+    /// answered us, and when it last did.
     unanswered: u32,
+    answered_at: Option<u64>,
     /// A window reset for a restore: owed from seq 0.
     from_start: bool,
     /// Since this session opened, nothing proves the sender has no more:
@@ -1053,6 +1057,9 @@ impl State {
             }
             // anything known above the frontier: ask for the listing of it
             let above = !hold.ahead.is_empty() || !hold.held.is_empty() || !hold.missing.is_empty();
+            if !above && hold.listing.is_none() {
+                hold.unanswered = 0;
+            }
             let probing = !above && hold.listing.is_none() && hold.probe_due(now, capable);
             let list_due = probing
                 || (above
@@ -1082,7 +1089,6 @@ impl State {
                     let want = molt_net::gap::GapWant::new(me.clone(), m.clone(), ask.clone());
                     if group.handle.publish_control(want.to_frame()) {
                         tracing::debug!(member = %m, seqs = ?ask, "gap_want");
-                        asked = true;
                         for s in &ask {
                             if let Some(g) = hold.missing.get_mut(s) {
                                 g.asked_at = Some(now);
@@ -1093,7 +1099,11 @@ impl State {
             }
             if asked && hold.answers {
                 hold.unanswered = hold.unanswered.saturating_add(1);
-                if hold.unanswered >= ANSWER_AGES_AFTER_ASKS {
+                // never inside the sender's own refusal window: a seq it
+                // re-published to us may still be coming
+                let refuse = molt_net::group_runtime::GAP_RESEND_REFUSE.as_secs();
+                let quiet = hold.answered_at.map_or(true, |t| now.saturating_sub(t) >= refuse);
+                if hold.unanswered >= ANSWER_AGES_AFTER_ASKS && quiet {
                     hold.answers = false;
                     tracing::debug!(member = %m, asks = hold.unanswered, "gap_answers_aged");
                 }
@@ -1155,6 +1165,7 @@ impl State {
         let Some(hold) = self.delivery.inbound.get_mut(&from) else { return };
         hold.answers = true;
         hold.unanswered = 0;
+        hold.answered_at = Some(now);
         hold.passed_at = None;
         for s in &resent {
             if let Some(g) = hold.missing.get_mut(s) {
@@ -1187,6 +1198,7 @@ impl State {
         let Some(hold) = self.delivery.inbound.get_mut(from) else { return };
         hold.answers = true;
         hold.unanswered = 0;
+        hold.answered_at = Some(now);
         hold.passed_at = None;
         // too wide, or a stale page beside a newer one held: changes nothing
         if through > after.saturating_add(molt_net::gap::GAP_RANGE_MAX)
