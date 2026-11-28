@@ -4991,6 +4991,62 @@ pub enum Command {
         /// Its passphrase.
         passphrase: String,
     },
+    /// Offer this seat's evidence to `member` now, over the seats' own
+    /// wrapped channel (`chain_rescue_plan.md` §5a).
+    EvidenceOffer {
+        /// The seat to offer to.
+        member: MemberId,
+    },
+    /// Adopt the evidence `member` sent: the blocks that extend this
+    /// chain are taken in like a catch-up. Another branch is refused.
+    EvidenceAdopt {
+        /// The sender.
+        member: MemberId,
+    },
+    /// Drop the evidence `member` sent, unadopted.
+    EvidenceDismiss {
+        /// The sender.
+        member: MemberId,
+    },
+    /// One evidence part arrived on the seat inbox (engine-internal).
+    NetEvidencePart {
+        /// The proven sender's nostr key.
+        sender: String,
+        /// The republic.
+        republic_id: String,
+        /// The offer.
+        offer: String,
+        /// Position.
+        index: u32,
+        /// Parts.
+        total: u32,
+        /// The part.
+        data: String,
+    },
+    /// A peer asked for parts again (engine-internal).
+    NetEvidenceWant {
+        /// The proven sender's nostr key.
+        sender: String,
+        /// The republic.
+        republic_id: String,
+        /// The offer.
+        offer: String,
+        /// Indexes missing.
+        missing: Vec<u32>,
+    },
+    /// The send task's progress (engine-internal).
+    NetEvidenceSent {
+        /// The peer.
+        member: MemberId,
+        /// The offer.
+        offer: String,
+        /// Parts accepted by a relay so far.
+        sent: u32,
+        /// Parts in the offer.
+        total: u32,
+        /// "" or why it stopped.
+        error: String,
+    },
     /// Propose keeping the branch whose block `tip_hash` is the tip, at the
     /// fork point `base_height`. Answers the dropped list and its digest.
     ChooseBranch {
@@ -9051,6 +9107,9 @@ pub struct SeatSync {
     /// link's restore clears it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub restore_unfinished: bool,
+    /// The evidence exchange with this seat (`chain_rescue_plan.md` §5a).
+    #[serde(default, skip_serializing_if = "branch::SeatEvidence::is_idle")]
+    pub evidence: branch::SeatEvidence,
 }
 
 /// Whether an own envelope stays out of the delivery guarantee and the G7

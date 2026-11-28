@@ -73,6 +73,9 @@ pub(crate) struct BranchFile {
     pub(crate) evidence: BTreeMap<String, Vec<ChainBlock>>,
     #[serde(default)]
     pub(crate) cards: BTreeMap<u64, BranchCard>,
+    /// How each evidence run arrived, by its root.
+    #[serde(default)]
+    pub(crate) provenance: BTreeMap<String, String>,
     /// The head an imported workspace opened at: its incarnation.
     #[serde(default)]
     pub(crate) imported_at: u64,
@@ -281,7 +284,7 @@ impl State {
             .collect()
     }
 
-    fn own_hash(&self, height: u64) -> Option<String> {
+    pub(super) fn own_hash(&self, height: u64) -> Option<String> {
         let first = self.chain.blocks.first()?.height;
         let i = usize::try_from(height.checked_sub(first)?).ok()?;
         self.chain.blocks.get(i).filter(|b| b.height == height).map(|b| self.block_id_of(b))
@@ -322,7 +325,7 @@ impl State {
     /// Verify a run of another branch standalone: contiguous, linked from a
     /// block this chain holds at or above its anchor, every block carrying
     /// its threshold against the roster (whose identity keys never move).
-    fn verify_run(&self, run: &[ChainBlock]) -> Result<(), String> {
+    pub(super) fn verify_run(&self, run: &[ChainBlock]) -> Result<(), String> {
         let rid = self.republic_id();
         let head = self.chain.head.as_ref().ok_or("no chain")?;
         let first = run.first().ok_or("empty run")?;
@@ -355,14 +358,22 @@ impl State {
         Ok(())
     }
 
-    /// Keep a verified run of another branch: the blocks above the last
-    /// one this chain shares. `Ok(false)` = nothing new.
-    fn keep_evidence(&mut self, rest: &[ChainBlock]) -> Result<bool, String> {
-        let Some(first) = rest.first() else {
+    /// Keep a run of another branch: the blocks above the last one this
+    /// chain shares, verified here. `Ok(false)` = nothing new.
+    pub(super) fn keep_evidence(&mut self, rest: &[ChainBlock], how: &str) -> Result<bool, String> {
+        if rest.is_empty() {
             return Ok(false);
-        };
+        }
         self.verify_run(rest)?;
-        let _ = first;
+        self.keep_verified_evidence(rest, how)
+    }
+
+    /// [`Self::keep_evidence`] for a run the caller just verified; `how`
+    /// records where it came from (`file`, `harvest`, `seat:<member>`).
+    pub(super) fn keep_verified_evidence(&mut self, rest: &[ChainBlock], how: &str) -> Result<bool, String> {
+        if rest.is_empty() {
+            return Ok(false);
+        }
         let root = self.run_ids(rest).swap_remove(0);
         let held = self.chain.branch.file.evidence.get(&root).map(Vec::len);
         if held.is_some_and(|n| n >= rest.len()) {
@@ -374,14 +385,9 @@ impl State {
         if full || others + size(&mut std::iter::once(&rest.to_vec())) > EVIDENCE_BYTES_MAX {
             return Err("evidence store full".to_string());
         }
+        self.chain.branch.file.provenance.insert(root.clone(), how.to_string());
         self.chain.branch.file.evidence.insert(root, rest.to_vec());
         Ok(true)
-    }
-
-    /// The part of `run` this chain does not hold.
-    fn unheld<'a>(&self, run: &'a [ChainBlock]) -> &'a [ChainBlock] {
-        let split = run.iter().position(|b| !self.holds_block(b.height, &self.block_id_of(b))).unwrap_or(run.len());
-        &run[split..]
     }
 
     /// Retain the fork candidates that link into this chain as evidence:
@@ -401,10 +407,12 @@ impl State {
         }
         let mut changed = false;
         for run in runs {
-            let rest = self.unheld(&run).to_vec();
-            let linked = rest.first().is_some_and(|f| f.height > 0 && self.own_hash(f.height - 1).as_deref() == Some(f.prev.as_str()));
-            if linked && self.keep_evidence(&rest).unwrap_or(false) {
-                changed = true;
+            // a signature variant of an own block is no fork (same rule as
+            // the seat exchange)
+            if let Ok(Some(rest)) = self.new_part(&run) {
+                if self.keep_evidence(&rest, "harvest").unwrap_or(false) {
+                    changed = true;
+                }
             }
         }
         if changed {
@@ -1218,30 +1226,29 @@ impl State {
         if self.branch_abandoned() {
             return Err(ABANDONED.to_string());
         }
-        let extends = |st: &Self, rest: &[ChainBlock]| {
-            rest.first().is_some_and(|f| f.height == head.height + 1 && st.own_hash(head.height).as_deref() == Some(f.prev.as_str()))
-        };
+        let extends = |rest: &[ChainBlock]| rest.first().is_some_and(|f| f.height == head.height + 1);
+        // a signature variant of an own block is held, not a fork (the seat
+        // exchange's rule); what follows it is linked onto this chain
+        let mut fresh = Vec::new();
         for run in &bundle.runs {
-            let rest = self.unheld(run);
-            if !rest.is_empty() && !extends(self, rest) {
-                self.verify_run(rest)?;
+            if let Some(rest) = self.new_part(run)? {
+                if !extends(&rest) {
+                    self.verify_run(&rest)?;
+                }
+                fresh.push(rest);
             }
         }
         let from = bundle.from.clone();
         let mut kept = 0;
         let mut choices = Vec::new();
-        for run in &bundle.runs {
-            let rest = self.unheld(run).to_vec();
-            if rest.is_empty() {
-                continue;
-            }
-            if extends(self, &rest) {
+        for rest in fresh {
+            if extends(&rest) {
                 for b in rest {
                     self.receive_block_at(&from, None, b);
                 }
                 continue;
             }
-            if self.keep_evidence(&rest).is_ok() {
+            if self.keep_verified_evidence(&rest, "file").is_ok() {
                 kept += 1;
             }
             choices.extend(rest.into_iter().filter(|b| matches!(b.change, ChainChange::BranchChosen { .. })));

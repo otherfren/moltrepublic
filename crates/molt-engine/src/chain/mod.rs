@@ -33,6 +33,7 @@ pub(crate) use block_v2::older_device;
 pub(crate) use verify::block_v2_after;
 pub(crate) mod branch;
 mod branch_run;
+mod evidence;
 mod checkpoint;
 mod governance;
 mod lock;
@@ -56,6 +57,8 @@ mod branch_tests;
 mod branch_run_tests;
 #[cfg(test)]
 mod branch_review_tests;
+#[cfg(test)]
+mod evidence_tests;
 #[cfg(test)]
 mod checkpoint_tests;
 #[cfg(test)]
@@ -175,6 +178,7 @@ pub(crate) use governance::RESIGNS;
 #[cfg(feature = "measure")]
 pub(crate) use verify::PREV_UNBOUND;
 pub(crate) use branch_run::BranchRuntime;
+pub(crate) use evidence::EvidenceRuntime;
 
 use verify::*;
 

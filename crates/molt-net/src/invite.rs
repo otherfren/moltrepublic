@@ -740,6 +740,30 @@ pub enum RitualMsg {
         /// Signature hex over the attestation bytes.
         sig: String,
     },
+    /// seat -> seat, outside the group: one part of an evidence bundle
+    /// (`chain_rescue_plan.md` §5a). Opaque here; the receiver reassembles
+    /// by `offer` and verifies every block against the roster.
+    EvidencePart {
+        /// The republic the blocks belong to.
+        republic_id: String,
+        /// sha256 (hex) of the whole payload.
+        offer: String,
+        /// Position, 0-based.
+        index: u32,
+        /// Parts in the payload.
+        total: u32,
+        /// This part of the payload.
+        data: String,
+    },
+    /// seat -> seat: re-send these parts of an offer.
+    EvidenceWant {
+        /// The republic.
+        republic_id: String,
+        /// The offer asked about.
+        offer: String,
+        /// Indexes not received.
+        missing: Vec<u32>,
+    },
 }
 
 #[cfg(test)]
@@ -907,10 +931,26 @@ mod tests {
             RitualMsg::RecoverReady { member: "petra".into(), ticket: "ab".into(), attempt: "a1".into() },
             RitualMsg::RecoverWant { member: "petra".into(), ticket: "ab".into(), missing: vec![0], attempt: "a1".into() },
             RitualMsg::RecoverAnchor { member: "petra".into(), index: 0, total: 1, event: "{}".into(), attempt: "a1".into() },
+            RitualMsg::EvidencePart { republic_id: "r".into(), offer: "ab".into(), index: 0, total: 1, data: "x".into() },
+            RitualMsg::EvidenceWant { republic_id: "r".into(), offer: "ab".into(), missing: vec![0] },
         ] {
             let json = serde_json::to_string(&msg).expect("json");
             assert!(serde_json::from_str::<OlderRitualMsg>(&json).is_err(), "{json}");
         }
+    }
+
+    #[test]
+    fn the_evidence_frames_have_a_pinned_shape() {
+        let part = RitualMsg::EvidencePart { republic_id: "r".into(), offer: "ab".into(), index: 1, total: 2, data: "x".into() };
+        assert_eq!(
+            serde_json::to_string(&part).expect("json"),
+            r#"{"kind":"evidence_part","republic_id":"r","offer":"ab","index":1,"total":2,"data":"x"}"#
+        );
+        let want = RitualMsg::EvidenceWant { republic_id: "r".into(), offer: "ab".into(), missing: vec![0] };
+        assert_eq!(
+            serde_json::to_string(&want).expect("json"),
+            r#"{"kind":"evidence_want","republic_id":"r","offer":"ab","missing":[0]}"#
+        );
     }
 
     // ---- invite handover v2 (N4a step 3, nostr_n4_plan.md §3) -------------

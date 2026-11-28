@@ -245,7 +245,8 @@ DENY_TOOLS=(propose withdraw wiki_edit quests_propose propose_checkpoint poke
             recover_invite_start recover_start recover_cancel confirm_seed_backup resync_seat
             join_start join_confirm_charter join_decline_charter join_finish join_cancel
             wiki_draft_save wiki_draft_load quests_draft_save quests_draft_load
-            branch_status branch_export branch_import choose_branch approve_branch)
+            branch_status branch_export branch_import choose_branch approve_branch
+            evidence_offer evidence_adopt evidence_dismiss)
 [[ "$VOTING" == "yes" ]] || DENY_TOOLS+=(approve decline)
 
 ALLOWED=(); for t in "${READ_TOOLS[@]}"; do ALLOWED+=("$PREFIX$t"); done

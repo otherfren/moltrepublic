@@ -410,3 +410,90 @@ async fn a_three_of_five_split_is_repaired_by_vote_and_link() {
     })
     .await;
 }
+
+async fn evidence_from(w: &WalletHandle, from: &str) -> molt_core::branch::SeatEvidence {
+    status(w).await.seats.into_iter().find(|s| s.member == from).map(|s| s.evidence).unwrap_or_default()
+}
+
+/// The evidence exchange (`chain_rescue_plan.md` §5a), 2-of-3: walter
+/// reads nothing of the group, mara offers her blocks over the seats' own
+/// wrapped channel, walter confirms once and is level. Nothing needs a
+/// file or a passphrase.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stuck_seat_catches_up_from_offered_evidence() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (seats, _) = found(tmp.path(), &url, &["mara", "walter", "dora"], 2).await;
+    let [mara, walter, dora]: [WalletHandle; 3] = seats.try_into().unwrap_or_else(|_| panic!("three seats"));
+    walter.__cut_off(&["mara", "dora"]);
+    let p = propose(&mara, &format!("{}.md", "stuck")).await;
+    eventually("dora sees the card", 60, || async { open_cards(&dora).await.contains(&p) }).await;
+    dora.execute(Command::Approve { proposal: molt_core::ProposalId(p), note: None }).await.expect("approve");
+    eventually("sealed without walter", 180, || async { !open_cards(&mara).await.contains(&p) }).await;
+    assert_ne!(head(&walter).await, head(&mara).await, "walter is stuck");
+    mara.execute(Command::EvidenceOffer { member: "walter".to_string() }).await.expect("offer");
+    eventually("walter holds the evidence", 180, || async {
+        let e = evidence_from(&walter, "mara").await;
+        e.inbound == "ready" && e.kind == "extends"
+    })
+    .await;
+    assert_ne!(head(&walter).await, head(&mara).await, "held, not adopted");
+    walter.execute(Command::EvidenceAdopt { member: "mara".to_string() }).await.expect("adopt");
+    eventually("walter is level", 60, || async { head(&walter).await == head(&mara).await }).await;
+    eventually("mara saw it sent", 60, || async { evidence_from(&mara, "walter").await.out == "sent" }).await;
+}
+
+/// A real split: the evidence crosses both ways and shows the other
+/// branch on each side; nothing is adopted while the choice is dark.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_split_shows_both_branches_and_adopts_nothing() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (seats, _) = found(tmp.path(), &url, &["mara", "walter", "dora"], 2).await;
+    let [mara, walter, dora]: [WalletHandle; 3] = seats.try_into().unwrap_or_else(|_| panic!("three seats"));
+    split(&[&mara], &[&dora], &[&walter], (&["mara"], &["dora"], &["walter"]), "s2").await;
+    let (mara_head, dora_head) = (head(&mara).await, head(&dora).await);
+    assert_ne!(mara_head, dora_head);
+    mara.execute(Command::EvidenceOffer { member: "dora".to_string() }).await.expect("offer");
+    dora.execute(Command::EvidenceOffer { member: "mara".to_string() }).await.expect("offer");
+    for (w, from) in [(&dora, "mara"), (&mara, "dora")] {
+        eventually("the other branch arrives", 180, || async {
+            let e = evidence_from(w, from).await;
+            e.inbound == "ready" && e.kind == "other-branch"
+        })
+        .await;
+        let refused = w.execute(Command::EvidenceAdopt { member: from.to_string() }).await;
+        assert!(refused.is_err(), "another branch is never adopted here");
+        assert_eq!(branches(w).await.forks.len(), 1, "both branches shown");
+    }
+    assert_eq!(head(&mara).await, mara_head);
+    assert_eq!(head(&dora).await, dora_head);
+}
+
+/// The automatic offer end to end: walter's catch-up requests reach mara,
+/// her answers never reach walter; after the stuck rounds mara offers by
+/// herself, walter confirms once and is level - no manual offer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stuck_seat_gets_the_offer_by_itself() {
+    trace();
+    let (_relay, url) = relay().await;
+    let tmp = tempfile::tempdir().expect("tmp");
+    let (seats, _) = found(tmp.path(), &url, &["mara", "walter", "dora"], 2).await;
+    let [mara, walter, dora]: [WalletHandle; 3] = seats.try_into().unwrap_or_else(|_| panic!("three seats"));
+    walter.__cut_off(&["mara", "dora"]);
+    let p = propose(&mara, &format!("{}.md", "auto")).await;
+    eventually("dora sees the card", 60, || async { open_cards(&dora).await.contains(&p) }).await;
+    dora.execute(Command::Approve { proposal: molt_core::ProposalId(p), note: None }).await.expect("approve");
+    eventually("sealed without walter", 180, || async { !open_cards(&mara).await.contains(&p) }).await;
+    // walter keeps asking; every answer is lost on the way back
+    eventually("the offer arrives by itself", 300, || async {
+        walter.__beacon_now();
+        let e = evidence_from(&walter, "mara").await;
+        e.inbound == "ready" && e.kind == "extends"
+    })
+    .await;
+    walter.execute(Command::EvidenceAdopt { member: "mara".to_string() }).await.expect("adopt");
+    eventually("walter is level", 60, || async { head(&walter).await == head(&mara).await }).await;
+}

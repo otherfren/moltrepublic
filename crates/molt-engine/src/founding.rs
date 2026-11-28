@@ -829,6 +829,8 @@ fn spawn_founder_recv(
                 | invite::RitualMsg::RecoverFailed { .. }
                 | invite::RitualMsg::RecoverAnchor { .. }
                 | invite::RitualMsg::RecoverWant { .. }
+                | invite::RitualMsg::EvidencePart { .. }
+                | invite::RitualMsg::EvidenceWant { .. }
                 | invite::RitualMsg::RecoverReady { .. }
                 | invite::RitualMsg::Welcome { .. } => continue,
             };
