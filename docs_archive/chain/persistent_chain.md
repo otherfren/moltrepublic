@@ -174,8 +174,8 @@ From the activation height H the two layouts change together:
   cover `prev`), so it stops extending. An older-build rejoiner after H is
   refused by the coordinator (no `molt-block-identity-v2` capability in its
   recover request); were a chain served to it anyway, `verify_served`
-  refuses it, full or anchored on a cut above H (`threshold`), before any
-  write.
+  refuses it, full or anchored on a cut above H (`threshold`), before it
+  materializes anything.
 
 ## 6. Verification — every check is hard-reject
 

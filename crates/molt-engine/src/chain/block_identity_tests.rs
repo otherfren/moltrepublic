@@ -260,7 +260,7 @@ fn a_rejoiner_verifies_a_served_chain_after_the_activation() {
 }
 
 /// Gap 19: an older-build rejoiner refuses the same served chain, full or
-/// anchored above the activation, so it adopts nothing and writes nothing.
+/// anchored above the activation, so it materializes nothing.
 #[test]
 fn an_older_build_rejoiner_refuses_a_served_chain_after_the_activation() {
     let mut b = enabled(4);
