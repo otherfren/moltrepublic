@@ -8,7 +8,7 @@ release: forks below the threshold stay possible, are healed and made
 visible, and are counted in the field. Built on master: 5a, 5b, 5c
 (engine side). Merged 2026-11-28 (`cc9febf1`): the base trickle and the
 close drain (5d, 20). Built on side branches, not merged: the evidence
-exchange (§C.8, in its third review), the lag guard (§C.9). Questions Q11
+exchange (§C.8). Built on side branches, not merged: the branch choice's capability gate, `amnesia_ack`, pause rule and keystones (step 7, in review), the lag guard (§C.9). Questions Q11
 and Q12 decided 2026-11-28: a displaced restore is proposed again
 (§C.10). Field evidence from a second seat's dump of the
 same day: §A3 (gaps 25 to 29, questions Q11 and Q12).
@@ -325,24 +325,21 @@ and pinned by a red test.
 Seats exchange the evidence of a second branch themselves, without a
 passphrase; the seat table shows it per seat; adopting needs one
 confirmation. Design: `docs/chain/chain_rescue_plan.md` §5a. Built on a
-side branch on 2026-11-27 (security review and clippy done), not merged.
-Open with it:
-- the per-seat column in Organization > Status > Seats and its
-  confirmation control;
-- why the group catch-up stalled in the field (the import was the only
-  thing that un-stuck a seat), from the seat dumps: if a rule refused the
-  catch-up, the bundle is refused for the same rule and the defect belongs
-  in the catch-up path.
+side branch on 2026-11-27 and merged 2026-11-28 (`d2fb9442`) after four
+review passes. Open with it: the per-seat column in Organization > Status
+> Seats and its confirmation control (step 7).
 
 Field answer (2026-11-27, §A3): it was none of the three. The stuck
-seat asked 148 times and the sender's log shows 15 serves; the serve
-envelopes did not arrive on the sender's stalled outbox path while other
-frames from the same sender did. The hand imports made it level in 4 and
-3 minutes. The stall's mechanism is being traced (gap 25). The automatic
-offer's trigger, "served repeatedly without progress", is this field
-case; the review of 2026-11-27 found and is fixing three defects that
-would have broken it there (an unbounded re-judge, a budget spent by a
-refused bundle, a latch set before anything was sent).
+seat asked 148 times and the sender's log shows 15 serves; every serve
+reached the stuck seat and was held there by its accepted window (gap 25,
+traced on 2026-11-28). The hand imports made it level in 4 and 3 minutes
+because the bundle travels outside that window. The automatic offer's
+trigger, "served repeatedly without progress", is this field case; the
+four review passes of 2026-11-27 and 2026-11-28 found and fixed eight
+defects that would have broken it there (an unbounded re-judge, a budget
+spent by a refused bundle, a latch set before anything was sent, a
+size bound that trusted the worst case, a hold that ignored a corrected
+claim).
 
 **C.9 The lag guard (a plan item since 2026-11-27; merge only on the
 user's word).** A seat behind a heard peer neither signs at its head nor
