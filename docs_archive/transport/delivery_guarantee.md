@@ -646,7 +646,9 @@ unseen owed seq loses it silently.
   `prev_seq` is at or below C (then on through the stored links); (b) the
   sender's listing of its own seqs above C, up to the first listed seq
   that is neither accepted nor held; (c) for a sender that never answers a
-  want: its resend round passed - a second arrival, in this session, of a
+  want, or has left our last 3 ask rounds unanswered (an answering sender
+  is filling the gap: its repeats may be resends for other askers, so they
+  count only once its answers age out, 2026-11-28): its resend round passed - a second arrival, in this session, of a
   seq above C (MLS opens a consumed frame only once, so a relay re-delivery
   cannot fake it; a frame re-read after a restart is from an earlier
   session and does not count) - then 5 s later C jumps to just below the
@@ -737,6 +739,9 @@ Pins: `net::delivery_tests` (`a_newest_first_replay_past_the_window_loses_nothin
 `a_far_envelope_without_an_accepted_prev_stays_held`,
 `a_long_hold_warns_again_at_a_bounded_rate` (2026-11-27: the cap's chain
 link, its pins and the bounded hold warning),
+`a_sender_whose_hold_has_answered_still_self_heals_a_cap_held_tail`,
+`an_answering_sender_in_progress_never_lets_a_repeat_jump_the_frontier`
+(2026-11-28: the answer flag ages out),
 `net::delivery::tests::a_listing_ask_also_runs_while_a_replay_is_coming_in`),
 and the loopback keystone `an_envelope_chained_to_an_accepted_prev_crosses_a_log_flood_without_a_re_offer` in
 `crates/molt-engine/tests/delivery_guarantee.rs`,

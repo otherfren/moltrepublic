@@ -55,6 +55,10 @@ const SESSION_MAX: usize = 65_536;
 /// Re-publications of a listed seq that never landed before it is given up.
 const LISTED_TRIES: u8 = 3;
 
+/// Ask rounds of ours a sender leaves unanswered before its repeats count
+/// as resend rounds again (§10(c)): it is no longer filling our gap.
+const ANSWER_AGES_AFTER_ASKS: u32 = 3;
+
 /// The open probe (§13): one switch, independent of the `behind` signal.
 pub(crate) const OPEN_PROBE: bool = false;
 
@@ -145,8 +149,11 @@ pub(crate) struct SenderHold {
     shed: u32,
     lost: u32,
     /// The sender answers gap wants: its duplicates are targeted resends
-    /// for other askers, never evidence about our gaps.
+    /// for other askers, never evidence about our gaps - until it leaves
+    /// [`ANSWER_AGES_AFTER_ASKS`] of our ask rounds unanswered.
     answers: bool,
+    /// Our ask rounds published since the sender last answered us.
+    unanswered: u32,
     /// A window reset for a restore: owed from seq 0.
     from_start: bool,
     /// Since this session opened, nothing proves the sender has no more:
@@ -1053,6 +1060,7 @@ impl State {
                     && hold.listing_asked_at.map_or(true, |t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
                     && hold.since.map_or(true, |s| now.saturating_sub(s) >= GAP_ASK_AFTER_SECS));
             ask.truncate(molt_net::gap::GAP_MAX_SEQS);
+            let mut asked = false;
             if let Some(group) = self.group_net.as_ref() {
                 // the LISTING ask runs even while a replay is still coming
                 // in: it re-publishes nothing, and a flood between two owed
@@ -1064,6 +1072,7 @@ impl State {
                     if self.drop_seam.drops_listing_ask() || group.handle.publish_control(want.to_frame()) {
                         tracing::debug!(member = %m, after = hold.frontier, probe = probing, "gap_list_ask");
                         hold.listing_asked_at = Some(now);
+                        asked = true;
                         if probing {
                             hold.probe_asks = hold.probe_asks.saturating_add(1);
                         }
@@ -1073,12 +1082,20 @@ impl State {
                     let want = molt_net::gap::GapWant::new(me.clone(), m.clone(), ask.clone());
                     if group.handle.publish_control(want.to_frame()) {
                         tracing::debug!(member = %m, seqs = ?ask, "gap_want");
+                        asked = true;
                         for s in &ask {
                             if let Some(g) = hold.missing.get_mut(s) {
                                 g.asked_at = Some(now);
                             }
                         }
                     }
+                }
+            }
+            if asked && hold.answers {
+                hold.unanswered = hold.unanswered.saturating_add(1);
+                if hold.unanswered >= ANSWER_AGES_AFTER_ASKS {
+                    hold.answers = false;
+                    tracing::debug!(member = %m, asks = hold.unanswered, "gap_answers_aged");
                 }
             }
             for seq in given_up {
@@ -1137,6 +1154,7 @@ impl State {
         let now = self.presence_now();
         let Some(hold) = self.delivery.inbound.get_mut(&from) else { return };
         hold.answers = true;
+        hold.unanswered = 0;
         hold.passed_at = None;
         for s in &resent {
             if let Some(g) = hold.missing.get_mut(s) {
@@ -1168,6 +1186,7 @@ impl State {
         let window = self.delivery.accepted.get(from).cloned().unwrap_or_default();
         let Some(hold) = self.delivery.inbound.get_mut(from) else { return };
         hold.answers = true;
+        hold.unanswered = 0;
         hold.passed_at = None;
         // too wide, or a stale page beside a newer one held: changes nothing
         if through > after.saturating_add(molt_net::gap::GAP_RANGE_MAX)
@@ -1652,16 +1671,6 @@ mod tests {
         st.cmd_net_delivered("bob".to_string(), env, None).expect("delivery");
     }
 
-    #[derive(Clone, Default)]
-    struct AskSink;
-    impl molt_net::EngineSink for AskSink {
-        async fn deliver(&self, _from: &MemberId, _env: EventEnvelope) -> Result<(), molt_net::NetError> {
-            Ok(())
-        }
-        async fn peer_seen(&self, _m: &MemberId) {}
-        async fn send_failed(&self, _m: &MemberId, _r: &str) {}
-    }
-
     /// The 2026-11-27 deadlock's second half: while a stored replay is
     /// still coming in, the LISTING ask (it re-publishes nothing) still
     /// goes, at most once per the ask interval; only the named asks stay
@@ -1675,49 +1684,7 @@ mod tests {
         land(&mut st, chat(5, 4, "hole")); // missing 4, held 5
         let far = 2 + molt_core::ACCEPT_WINDOW_BITS + 500;
         land(&mut st, chat(far, far - 1, "far")); // missing far-1, held far
-        let (health_tx, health_rx) = tokio::sync::watch::channel(molt_net::group_runtime::GroupHealth {
-            subscribed: true,
-            replaying: true,
-            ..molt_net::group_runtime::GroupHealth::default()
-        });
-        let mls = std::sync::Arc::new(std::sync::Mutex::new({
-            let mut m = molt_net::MlsMember::new(&molt_storage::SigningKey::from_bytes(&[9u8; 32]), "ada")
-                .expect("mls");
-            m.create_group().expect("group");
-            m
-        }));
-        // a dead relay (bound, then dropped - never a service port); the
-        // runtime's tasks never run, only the control queue is observed
-        let dead = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-        let url = format!("ws://127.0.0.1:{}", dead.local_addr().expect("addr").port());
-        drop(dead);
-        let channel = molt_net::ritual_net::GroupChannel::new(molt_net::dial::Dialer::direct(), vec![url], [7u8; 32]);
-        let (wake, wake_rx) = tokio::sync::watch::channel(0u64);
-        let handle = molt_net::group_runtime::spawn_group(
-            channel.clone(),
-            molt_net::supervisor::MlsChannel::from_shared(mls.clone()),
-            molt_net::group_runtime::GroupNetConfig::fast("ada".to_string(), vec!["bob".to_string()]),
-            molt_net::supervisor::MemLog::new(),
-            molt_net::supervisor::MemStateStore::new(),
-            AskSink,
-            wake_rx,
-            health_tx,
-        );
-        let trickle = molt_net::trickle::spawn_trickle(
-            channel,
-            molt_net::supervisor::MemStateStore::new(),
-            handle.outbox_busy(),
-            molt_net::trickle::TrickleConfig::new(3600, 1),
-        );
-        st.group_net = Some(crate::GroupNet {
-            handle,
-            mls,
-            wakeup: wake,
-            health: health_rx,
-            trickle,
-            lockout: crate::net::LockOut::default(),
-            unreadable: crate::net::UnreadableEpisode::default(),
-        });
+        crate::net::delivery_tests::attach_dead_group(&mut st, true);
         at(&mut st, GAP_ASK_AFTER_SECS);
         st.cmd_net_delivery_tick().expect("tick");
         let hold = st.delivery.inbound.get("bob").expect("hold");
