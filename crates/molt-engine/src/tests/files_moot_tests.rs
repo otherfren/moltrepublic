@@ -68,11 +68,13 @@ fn restored_proposer() -> Field {
     let share = MessageId([5u8; 16]);
     let path = dir.path().join("a.pdf");
     std::fs::write(&path, b"minutes").expect("write");
-    let env = c_old.make_env("c".to_string(), WorkspaceEvent::Chat(share_msg(share, "c")));
+    // One message for all seats: its stamp is part of the share identity.
+    let msg = share_msg(share, "c");
+    let env = c_old.make_env("c".to_string(), WorkspaceEvent::Chat(msg.clone()));
     c_old.apply(&env);
     c_old.files.share_paths.insert(share, path);
     for peer in [&mut a, &mut b] {
-        seqs.send(peer, "c", WorkspaceEvent::Chat(share_msg(share, "c")));
+        seqs.send(peer, "c", WorkspaceEvent::Chat(msg.clone()));
     }
     let pid = ProposalId(propose(&mut c_old, Surface::Files, json!({"op": "persist", "id": share.to_string()})));
     let payload = c_old.proposals[&pid.0].payload.clone();
@@ -136,7 +138,9 @@ fn the_other_seats_answer_as_before() {
     assert!(matches!(f.a.cmd_withdraw(f.pid, None), Err(MoltError::NotTheProposer(_))));
     assert!(matches!(f.b.cmd_decline(f.pid, None), Err(MoltError::AlreadyDeclined(_))));
     assert!(matches!(f.b.cmd_withdraw(f.pid, None), Err(MoltError::NotTheProposer(_))));
-    assert!(f.b.cmd_approve(f.pid, None).is_ok(), "b's approve replaces its decline");
+    if let Err(e) = f.b.cmd_approve(f.pid, None) {
+        panic!("b's approve replaces its decline: {e:?}");
+    }
 }
 
 /// Withdraw on the restored proposer: the card turns terminal everywhere.
