@@ -1,6 +1,7 @@
 # The chain: how it agrees, why honest seats split
 
-**Status: ANALYSIS for discussion, 2026-11-28; describes master 2239e162.**
+**Status: ANALYSIS for discussion, 2026-11-28; describes master 2239e162.
+§13.6 corrected the same day (§13.7).**
 
 Every claim carries one tag: **[VERIFIED in code]** (read in the source on
 that commit, see Appendix A), **[FROM SPEC]** (a document says so, code not
@@ -419,7 +420,7 @@ round trip per block, about 164 agent-hours. It was rejected on
 | design | how, in brief | what it costs |
 |---|---|---|
 | A. One vote per height with ballots (Paxos) | the rejected plan above | restores need a survivor majority; durable vote record; extra round trip |
-| B. Merge, do not rebase | sign the decision, not the position: (republic, proposal id, change, the base it builds on). A block is a batch of decisions; two blocks at one height **both** apply, in id order. A fork becomes a reorder, never a re-vote; nothing applied is undone except a change that conflicts with its base, which each surface already resolves deterministically (wiki supersede, last-write-wins slots) | one new signed layout; every surface must state its merge rule; membership and wallet ops need an explicit "depends on" field; a cut still needs all seats to agree on a set. One-survivor restores stay possible [INFERRED] |
+| B. Merge, do not rebase | sign the decision, not the position: (republic, proposal id, change, the base it builds on). A block is a batch of decisions; two blocks at one height **both** apply, in id order. A fork becomes a reorder, never a re-vote. When two concurrent decisions touch one object, the later one in the merged order is voided, and that can be the one a seat applied first. A block's position is signed by its one sealer, not by m seats | three new signed layouts and a storage wall; every surface must state its merge rule; one base block id plus the references payloads already carry cover the dependencies; irreversible effects must still wait until final, so B needs D; a cut still needs all seats to agree on a set. One-survivor restores stay possible [INFERRED] |
 | C. One fixed sequencer, changed only by a block | only the lowest seat seals; nobody else ever seals; a sequencer change is itself a card | liveness hangs on one seat; the change card can still race the old sequencer's last block, so this narrows forks to rare handovers, it does not remove them [INFERRED] |
 | D. Keep the race, add finality | external effects (vault answer, wallet, wakes) fire only when their block is k blocks deep or below a cut | cheapest; forks stay, but stop causing irreversible harm; a quiet republic waits for the next block [FROM SPEC, rescue plan §11a] |
 
@@ -428,9 +429,26 @@ the seats online, so 2 of 3 halts with one seat away [FROM SPEC].
 
 My verdict [INFERRED]: given the decision to keep cheap restores, **B**
 attacks the actual damage (rollback of decisions) at its source, and
-**D** is the minimum to ship meanwhile. Continuing to add timers, marks
+**D** is the minimum to ship meanwhile and a part of B, not a
+substitute B makes unnecessary. Continuing to add timers, marks
 and rescue votes on the current race model will keep producing new
 special cases, because the race itself is the specification.
+
+### 13.7 Corrections to 13.6 (2026-11-28)
+
+A design pass on B the same day corrected this paper's first sketch of
+it in four places; the table above carries the corrected text
+[INFERRED, from that pass; its own review is open]:
+
+| first sketch | corrected |
+|---|---|
+| nothing applied is undone | the later of two conflicting decisions is voided, also when a seat applied it first |
+| B replaces D | B needs D: wallet, file delete, vault answer and restore re-key still wait until final |
+| m seats sign the position | one sealer signs a block's position; m seats sign only the decision |
+| one new signed layout, an explicit "depends on" field | three layouts and a storage wall; no such field |
+
+Its estimate: B about 293 agent-hours, against 164 for A and about 24
+for D alone.
 
 ## Appendix A. Code references (master 2239e162)
 
