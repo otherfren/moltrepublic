@@ -863,8 +863,18 @@ impl State {
 
     /// A merged commit re-keyed `member`'s seat.
     pub(crate) fn note_rekey_merged(&mut self, member: &str) {
-        if !self.recovery.unfinished.remove(member) {
+        // gap 23: with a newer restore of the seat open here, this re-key may
+        // be its own, ahead of its block; an older flag must not swallow it
+        let newer = self.chain.proposal_changes.values().any(|c| {
+            matches!(c, molt_core::ChainChange::Membership { op: molt_core::MembershipOp::Restored, member: m, .. } if m == member)
+        });
+        let cleared = self.recovery.unfinished.remove(member);
+        if !cleared || newer {
             self.recovery.rekey_ahead.insert(member.to_string());
+        }
+        if cleared {
+            // a snapshot written while the flag stood would revive it
+            self.snapshot_to_disk();
         }
         if self.recovery.interrupted.remove(member).is_some()
             && self.session.notice == format!("{RECOVER_INTERRUPTED}{member}")

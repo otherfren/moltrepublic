@@ -2693,6 +2693,97 @@ fn a_bystander_flags_a_restore_until_its_rekey_merges() {
     assert!(!unfinished(&walter, "dora"), "a re-key ahead of its block counts");
 }
 
+fn dora_restore(b: &Builder, anchor: &str) -> ChainChange {
+    ChainChange::Membership {
+        op: MembershipOp::Restored,
+        member: "dora".to_string(),
+        identity_pk: b.pk("dora"),
+        nostr_pk: Some(anchor.to_string()),
+        relays: Vec::new(),
+        consent: None,
+    }
+}
+
+/// Dora's restore card `id` reaches walter as an open vote.
+fn open_restore_vote(walter: &mut crate::State, b: &Builder, id: u64, anchor: &str) {
+    wire(
+        walter,
+        "petra",
+        id,
+        molt_core::WorkspaceEvent::MembershipProposed {
+            id: molt_core::ProposalId(id),
+            op: MembershipOp::Restored,
+            member: "dora".to_string(),
+            identity_pk: b.pk("dora"),
+            nostr_pk: Some(anchor.to_string()),
+            relays: Vec::new(),
+            consent: None,
+        },
+    );
+    assert!(walter.chain.proposal_changes.contains_key(&id), "the vote is open on walter");
+}
+
+/// Gap 23: the first restore never re-keyed (its flag stays on walter, a
+/// third seat); the second's re-key merges ahead of its block. Once both
+/// are here the flag is gone.
+#[test]
+fn a_later_restore_clears_a_flag_an_unfinished_one_left() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let first = b.commit(dora_restore(&b, &"aa".repeat(32)), &["petra", "walter"]);
+    assert!(walter.append_committed_block(first.clone()));
+    walter.after_block_applied(&first);
+    assert!(unfinished(&walter, "dora"), "the first restore never re-keyed");
+
+    open_restore_vote(&mut walter, &b, 40, &"bb".repeat(32));
+    walter.rekey_reset("dora");
+    let second = b.commit(dora_restore(&b, &"bb".repeat(32)), &["petra", "walter"]);
+    assert!(walter.append_committed_block(second.clone()));
+    walter.after_block_applied(&second);
+    assert!(!unfinished(&walter, "dora"), "the second restore is sealed and merged");
+}
+
+/// A restore that finished, then one that genuinely never re-keyed: the
+/// flag shows for the second.
+#[test]
+fn a_restore_after_a_finished_one_still_shows_unfinished() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let first = b.commit(dora_restore(&b, &"aa".repeat(32)), &["petra", "walter"]);
+    assert!(walter.append_committed_block(first.clone()));
+    walter.after_block_applied(&first);
+    walter.rekey_reset("dora");
+    assert!(!unfinished(&walter, "dora"));
+
+    open_restore_vote(&mut walter, &b, 41, &"bb".repeat(32));
+    let second = b.commit(dora_restore(&b, &"bb".repeat(32)), &["petra", "walter"]);
+    assert!(walter.append_committed_block(second.clone()));
+    walter.after_block_applied(&second);
+    assert!(unfinished(&walter, "dora"), "no re-key merged for the second");
+}
+
+/// The cleared flag survives a hard kill: a snapshot written while it
+/// stood must not bring it back.
+#[test]
+fn a_cleared_restore_flag_survives_a_hard_kill() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let (mut walter, _tmp, dir) = crate::tests::stored_chain_signer(&b, "walter", &["petra", "walter", "dora"]);
+    let first = b.commit(dora_restore(&b, &"aa".repeat(32)), &["petra", "walter"]);
+    assert!(walter.append_committed_block(first.clone()));
+    walter.after_block_applied(&first);
+    walter.snapshot_to_disk();
+    walter.rekey_reset("dora");
+    assert!(!unfinished(&walter, "dora"));
+    let back = crate::tests::reopen_chain_signer(walter, &dir, &b, "walter", false);
+    assert!(!unfinished(&back, "dora"), "the clear was persisted");
+}
+
 /// Walter holds dora's restore sealed at height 1 (petra + walter).
 fn sealed_restore() -> (Builder, crate::State, u64) {
     use molt_core::{ProposalId, ProposalState, WorkspaceEvent};
