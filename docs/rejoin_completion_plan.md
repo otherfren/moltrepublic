@@ -290,6 +290,7 @@ Tests:
 - Close the capability gate, put `amnesia_ack` into the signed bytes (pin), build the GUI rows.
 - Keystones: MLS-split with three branches over a relay; 3-of-5 with forks at two heights; a vault grant on a dropped branch.
 - Pause rule (Q6): seats that approved an open choice seal nothing else until it seals or fails, so a stale-card race cannot void it.
+- The exit (decided 2026-11-28): an approver withdraws its own approval, on command, no clock; its pause ends. The signature it already sent cannot be recalled, so the card may still seal; once the withdrawer seals something else the card is `stale` and a new card is needed. No decline vote and no expiry in this release.
 - Field run: copies of a split republic chose a branch, rejoined by link, one head, a vote seals.
 
 **C.7 A restore nobody can use** (gap 21). Options for the user (Q10):
@@ -357,8 +358,8 @@ review round P1b), not merged. Before any merge: its own plan document
 (the rule, liveness under a false or stale "ahead" claim, mixed versions,
 the tests), then an independent review.
 
-Review of 2026-11-28: fix first. By my recommendation the lane stays
-parked in this release; the user decides.
+Review of 2026-11-28: fix first. PARKED for this release by the user's
+decision of 2026-11-28; the branch stays, nothing of it merges.
 - HIGH: rule R5 filters the valid signatures of a proposal by locally
   inferred peer claims before the seal truncates them, so two seats can
   seal different signature sets for one proposal at one height. Where
@@ -455,8 +456,8 @@ green gate on master.
 | accepted window's cap deadlock (25) | `worktree-agent-a9f0851128a72e486` | `743bd999` | built and green; reviewed 2026-11-28: merge, on condition that the full suite is green (it was still running at the cut) | rerun the gate in that worktree (`net::delivery`, the nine guarantee tests, the engine library, `molt-net`, clippy, the doc checker), then merge. The review's findings: MEDIUM, the `answers` flag latches for a hold's lifetime and silences the §10(c) self-heal, the second half of the field case (gap 30); LOW, the exception rests on the sender's honesty, so the spec must name that premise; the argument `high <= frontier + ACCEPT_WINDOW_BITS` is not an invariant, keep it out of the spec. `prev_seq` was confirmed to name the sender's previous own ackable event |
 | durable pending re-key, C.1 (1, 4, 12, 9) | `worktree-agent-a0607100893122088` | `f3cea226`, `d34f9273`, `ad6e8e8b`, `ee563ea1`, `43661cda` | built; `molt-net` 292, the engine library 1320, `nostr_recovery` 43 green | not run: the 16 remaining integration suites, `molt-mcp`, clippy; then an independent review, then merge. Open in it: no engine keystone with disjoint link and group relays (gap 9); the runtime detector of `mls_behind` has no red test of its own; the GUI line for `status.mls_behind` |
 | governance gossip flood (26) | `worktree-agent-aab3c91af45368f0c` | `ff2aef6b`, `703a09d9`, `0d690be1` (both wip) | rules 1, 2, 3 and 5 built and green; the keystone of rule 4 showed the serve reaching a reopened seat that is behind; its last failure was the test's own race, fixed by polling (not rerun since) | rerun `--test governance_serve_keystone` once; settle whether the new rule ("only a peer behind or joining") leaves a seat without its open cards that was offline while cards were proposed and is level afterwards (the keystone covers only a seat that is behind; on master the 300 s beacon served everyone): red test first, then the rule or the keystone; then review, then merge |
-| branch choice gate, `amnesia_ack`, pause rule, keystones (14, step 7) | `worktree-agent-a405fe84b36ff8783` | `9d7dcb6d` to `8703e249` | built and green; reviewed 2026-11-28: fix first | (1) the keystone fixtures' literal page names fail `scripts/check-doc-refs.py`; (2) the pause does not recall signatures an approver made before it approved the card, so a card can still go stale: pin it and correct the claim in the rescue plan's status line; (3) a branch card has no withdraw, decline or expiry, so the plan's "or fails" needs an exit or must say there is none (the user decides); (4) one `chain_lock` test failed in the loaded batch and must be shown flaky or old; (5) the capability gate with a seat that truly did not announce. Then merge dark |
-| lag guard (§C.9) | `worktree-agent-a9076529ed30a58c4` | `faa970b9` to `fd07abf0` | reviewed 2026-11-28: fix first | parked by recommendation; the user decides |
+| branch choice gate, `amnesia_ack`, pause rule, keystones (14, step 7) | `worktree-agent-a405fe84b36ff8783` | `9d7dcb6d` to `8703e249` | built and green; reviewed 2026-11-28: fix first | (1) the keystone fixtures' literal page names fail `scripts/check-doc-refs.py`; (2) the pause does not recall signatures an approver made before it approved the card, so a card can still go stale: pin it and correct the claim in the rescue plan's status line; (3) a branch card has no withdraw, decline or expiry, so the plan's "or fails" needs an exit: decided 2026-11-28, an approver withdraws its own approval (§C.6); (4) one `chain_lock` test failed in the loaded batch and must be shown flaky or old; (5) the capability gate with a seat that truly did not announce. Then merge dark |
+| lag guard (§C.9) | `worktree-agent-a9076529ed30a58c4` | `faa970b9` to `fd07abf0` | reviewed 2026-11-28: fix first | parked for v0.1.4 (user, 2026-11-28) |
 
 Still to start from §D: N3 (step 2) after C.1; C.7 and the rejoiner with
 C.10 (step 3); the evidence column of the seat table and the choice's
