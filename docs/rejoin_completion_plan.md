@@ -1,7 +1,8 @@
 # Finishing the rejoin
 
 **Status: PLAN, STARTED; release v0.1.4, BEFORE Robo-Scrum (user
-decision 2026-11-25).** Inventory taken on tag v0.1.3 (`3ad6790d`);
+decision 2026-11-25); v0.1.4 CUT on 2026-11-28 to §D3, the rest waits
+for the decisions on the chain whitepaper.** Inventory taken on tag v0.1.3 (`3ad6790d`);
 re-baselined 2026-11-27 on master `4e4256a1`, after the user decided
 every question in §F. Fork prevention is REJECTED and not part of this
 release: forks below the threshold stay possible, are healed and made
@@ -489,6 +490,30 @@ GUI (step 7); C.5 with gap 11 (step 9); gap 28 with the lag guard's rule
 R10; the small lane (step 11). `docs_archive/transport/delivery_guarantee.md`
 is still German: translate it once gaps 25 and C.1 are merged, since
 both change it.
+
+## D3. v0.1.4 as cut (user, 2026-11-28)
+
+The release is cut to the delivery and re-key fixes. Everything that
+depends on the chain's design waits for the user's decisions on
+`docs/chain/chain_whitepaper.md`.
+
+| in v0.1.4 | state |
+|---|---|
+| 25 | merged (`2239e162`) |
+| C.1 with 9 and 12 (1, 4) | review: fix first, two critical and four high claims; fix round running |
+| 26 | review: merge after cleanups; fix round next (a peer that stays behind is served once per claim; the tests pin the rule) |
+| 30 | being built |
+| 19, 24, 27 | being built |
+| 22, 23 | after C.1 |
+| 28, 29 | after 26 |
+| acceptance | the full gate on master, then the release build |
+
+Moved out, to be planned again after the whitepaper's decisions: N3,
+C.7 with C.10 (21, 6, 7, 8, 13), 18, C.2, C.3 with 15 and N1, the branch
+choice (14; its lane stays unmerged and dark, the fix items and the
+approver's withdrawal unbuilt), 5e, 5f, 17, the 5b/5c strings, C.5 with
+11, 16, the lag guard, the field runs over Tor. Known and shipped open:
+a rejoiner that dies before its Welcome still needs a new link (21).
 
 ## E. Out of scope
 
