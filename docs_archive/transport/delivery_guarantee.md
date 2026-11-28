@@ -605,6 +605,19 @@ verschickt wurde."* Umsetzung (Branch delivery-followups):
   `a_heard_slow_peer_keeps_its_resends_beside_a_silent_one`,
   `a_locked_out_seat_re_offers_nothing`,
   `crates/molt-engine/tests/nostr_outbox_quiet.rs`.
+- **A resend round skips served checkpoint parts (v0.1.4).** A rewound
+  round (below `GroupCursor.offered`) does not re-offer an own
+  `CheckpointServedPart`: a part goes out again only as a freshly recorded
+  part - on a new chain request, or by the anchor re-push for a returner
+  that cannot ask (`ANCHOR_REPUSH_SECS` 600, at most `ANCHOR_REPUSH_MAX`
+  12, `molt-engine/src/chain/sync.rs`). A commit is still re-offered (a
+  laggard needs it); the dark lock frames keep their own rules. A relay's
+  open publish breaker counts the publishes it skips and logs them once,
+  when it closes (`relay_resumed relay= skipped=`), not one WARN per
+  publish. Pins: `group_runtime::tests::{a_resend_round_skips_served_parts_and_a_first_offer_does_not,
+  a_rewound_pass_publishes_past_a_served_part_and_moves_the_cursor_over_it}`,
+  `relay_runtime::tests::{a_breaker_episode_reports_its_skips_once,
+  an_open_breaker_counts_its_skips_and_a_success_takes_the_count}`.
 
 ## 10. G7 by need: a frontier per sender, a buffer, the gap asked for (v0.1.1)
 
@@ -1030,12 +1043,6 @@ at most that many. The gap answers stop at their next turn. Then the ratchet sna
 pass sealed. `outbox=closed sent= left= [held_at= error=]`. The pass calls
 nothing back into the engine, and every sink call of the outbox gives way
 to the stop - a blocked engine answers nothing.
-
-**Re-offers (v0.1.4).** A rewound round (below `offered`) skips served
-checkpoint parts: each answered one request and is owed to nobody. A
-commit is still re-offered (a laggard needs it); the dark lock frames keep
-their own rules. A relay's open breaker logs the publishes it skipped once,
-when it closes (`relay=resumed skipped=`), not one WARN per publish.
 
 **No clock decides the drain.** What bounds it is the transport's
 per-publish bounds (`[transport.nostr] connect_timeout_secs` 60,

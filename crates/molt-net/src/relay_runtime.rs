@@ -2012,7 +2012,7 @@ const BACKING_OFF: &str = "backing off";
 /// The breaker closed after skipping publishes: one line for the episode.
 fn resumed(url: &str, skipped: u32) {
     if skipped > 0 {
-        tracing::info!(relay = %url, skipped, "relay=resumed");
+        tracing::info!(relay = %url, skipped, "relay_resumed");
     }
 }
 
@@ -2124,6 +2124,48 @@ mod tests {
         slot.skipped = 3;
         assert_eq!(slot.healthy(), 3);
         assert_eq!(slot.healthy(), 0, "the next episode starts at zero");
+    }
+
+    /// F4 through `publish_once`: a failed dial trips the breaker, each
+    /// publish while it is open counts, and the success that closes it takes
+    /// the count.
+    #[tokio::test]
+    async fn an_open_breaker_counts_its_skips_and_a_success_takes_the_count() {
+        use futures_util::{SinkExt, StreamExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let url = format!("ws://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            // the first dial is dropped: the breaker trips
+            let Ok((sock, _)) = listener.accept().await else { return };
+            drop(sock);
+            let Ok((sock, _)) = listener.accept().await else { return };
+            let mut ws = tokio_tungstenite::accept_async(sock).await.expect("ws");
+            while let Some(Ok(msg)) = ws.next().await {
+                let v: serde_json::Value = serde_json::from_str(msg.to_text().expect("text")).expect("json");
+                let id = v[1]["id"].as_str().expect("event id").to_string();
+                let ok = serde_json::json!(["OK", id, true, ""]).to_string();
+                ws.send(tokio_tungstenite::tungstenite::Message::text(ok)).await.expect("ok");
+            }
+        });
+        let pool = super::PublishPool::new(crate::dial::Dialer::direct(), vec![url.clone()]);
+        let timeouts = crate::timeouts::RelayTimeouts { connect: Duration::from_secs(5), publish: Duration::from_secs(5) };
+        let keys = nostr::Keys::generate();
+        let event = nostr::EventBuilder::new(nostr::Kind::Custom(crate::kinds::KIND_GROUP), "a")
+            .sign_with_keys(&keys)
+            .expect("sign");
+        let slot = &pool.conns[0].1;
+        let closed = std::sync::atomic::AtomicBool::new(false);
+        let once = || super::PublishPool::publish_once(&pool.dialer, &url, slot, &event, timeouts, &closed);
+        assert!(once().await.is_err(), "the dropped dial fails");
+        tokio::time::pause();
+        for _ in 0..2 {
+            assert!(matches!(once().await, Err(NetError::Unreachable(m)) if m == super::BACKING_OFF));
+        }
+        assert_eq!(slot.lock().await.skipped, 2);
+        tokio::time::advance(super::breaker_delay(1) + Duration::from_millis(1)).await;
+        tokio::time::resume();
+        once().await.expect("the breaker closed on a success");
+        assert_eq!(slot.lock().await.skipped, 0, "the next episode starts at zero");
     }
 
     /// A relay's reason never forges a log line or bloats an error.

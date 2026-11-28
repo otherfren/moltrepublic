@@ -1778,8 +1778,8 @@ async fn persist_offered<S: StateStore>(store: &S, seq: u64) {
 }
 
 /// A rewound round re-offers only what a peer is owed: a served checkpoint
-/// part was an answer to one request (F3). A commit is re-offered - a
-/// laggard needs it - and the dark lock frames keep their own rules.
+/// part goes out again only when recorded afresh (F3). A commit is
+/// re-offered - a laggard needs it - and the dark lock frames keep their own rules.
 fn resend_skips(env: &EventEnvelope, offered: u64) -> bool {
     env.seq <= offered && matches!(env.body, molt_core::WorkspaceEvent::CheckpointServedPart { .. })
 }
@@ -3577,9 +3577,8 @@ mod tests {
         }
     }
 
-    /// F3: **a rewind does not replay a served checkpoint part**: it was an
-    /// answer to one request, not an owed envelope. A first offer still
-    /// publishes it.
+    /// F3: **a rewind does not replay a served checkpoint part**: it is
+    /// re-sent only when recorded afresh. A first offer still publishes it.
     #[test]
     fn a_resend_round_skips_served_parts_and_a_first_offer_does_not() {
         let part = molt_core::EventEnvelope {
@@ -3594,6 +3593,68 @@ mod tests {
         };
         assert!(!resend_skips(&commit, 9), "a commit is re-offered");
         assert!(!resend_skips(&walter_event(5), 9), "chat is owed");
+    }
+
+    /// F3 through the real pass: a rewound round (`log_seq` 4, `offered` 9)
+    /// skips the served part it offered before and publishes the one above.
+    #[tokio::test]
+    async fn a_rewound_pass_publishes_past_a_served_part_and_moves_the_cursor_over_it() {
+        use crate::mls::{MlsIncoming, MlsMember};
+        use ed25519_dalek::SigningKey;
+        let key = |s: u8| SigningKey::from_bytes(&[s; 32]);
+        let mut walter = MlsMember::new(&key(1), "walter").expect("walter");
+        let mut petra = MlsMember::new(&key(2), "petra").expect("petra");
+        walter.create_group().expect("group");
+        let welcome = walter.add_members(&[petra.key_package().expect("kp")]).expect("add").expect("a welcome");
+        petra.join_from_welcome(&welcome).expect("petra joins");
+        let relay = nostr_relay_builder::MockRelay::run().await.expect("relay");
+        let part = |seq: u64| molt_core::EventEnvelope {
+            body: molt_core::WorkspaceEvent::CheckpointServedPart { blob_hash: "aa".into(), index: 0, total: 1, data: String::new() },
+            ..walter_event(seq)
+        };
+        let log = crate::MemLog::default();
+        for seq in 1..=10u64 {
+            let mut env = match seq {
+                5 | 10 => part(seq),
+                _ => walter_event(seq),
+            };
+            if !matches!(seq, 5 | 6 | 10) {
+                env.by = "petra".into();
+            }
+            log.push(env);
+        }
+        let store = crate::MemStateStore::default();
+        store
+            .update(|s| {
+                s.group = Some(molt_core::GroupCursor { log_seq: 4, offered: 9, ..Default::default() });
+                true
+            })
+            .await;
+        let channel =
+            crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![relay.url().await.to_string()], [7u8; 32]);
+        let cfg = GroupNetConfig::fast("walter".into(), vec!["petra".into()]);
+        let (busy, _busy_rx) = watch::channel(false);
+        let (_stop_tx, mut stop) = watch::channel(false);
+        let mut held = HeldFrame::new();
+        let outcome =
+            publish_pass(&channel, &MlsChannel::new(walter), &cfg, &log, &store, &NullSink, &mut held, &busy, &mut stop).await;
+        assert!(matches!(outcome, PassOutcome::Done), "{outcome:?}");
+        assert_eq!(cursor(&store).await, 10);
+        // what reached the relay, read back as petra
+        let mut sub = channel.subscribe().await.expect("subscribe");
+        let secret = petra.exporter_secret().expect("exporter");
+        let mut published = Vec::new();
+        while let GroupRecv::Frame { content, .. } = sub.recv(std::time::Duration::from_secs(1)).await {
+            let wire = crate::envelope::open_outer(&[secret], &content).expect("outer");
+            let MlsIncoming::Application { plaintext, .. } = petra.decrypt(&wire).expect("decrypt") else {
+                panic!("not an application frame");
+            };
+            let env: molt_core::EventEnvelope = serde_json::from_slice(&plaintext).expect("envelope");
+            published.push(env.seq);
+        }
+        // the relay serves in its own order
+        published.sort_unstable();
+        assert_eq!(published, [6, 10]);
     }
 
     /// F1: **a hard kill loses at most a save interval.** While a round runs,
