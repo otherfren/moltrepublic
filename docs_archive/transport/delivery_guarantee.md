@@ -632,7 +632,16 @@ unseen owed seq loses it silently.
   window (`AcceptedWindow.frontier`, and `links` - the `(prev_seq, seq)`
   pairs accepted above it - both receiver-local, stripped from every ack
   sheet; `0` = legacy, read as `high`). **Nothing is accepted above C +
-  1024**, so no owed seq ever ages out unseen and the sender's floor never
+  1024 without a chain link over an accepted prev**: an envelope whose
+  `prev_seq` is an accepted seq of that sender passes at any height - its
+  `prev_seq` names the sender's previous OWN ackable event, so nothing
+  owed hides between prev and seq and C rises straight to it (2026-11-27:
+  ~1,700 log entries that never cross the wire sat between two owed
+  envelopes of a flooded sender; the second owed one was held by the cap,
+  the receiver's sheet froze, the sender's floor stalled and its tail
+  re-offered forever). Anything else above C + 1024 - a `prev_seq` of 0,
+  or one the window never accepted - is held as before, so no owed seq
+  ever ages out unseen and the sender's floor never
   passes one. C rises only on proof: (a) an accepted envelope whose
   `prev_seq` is at or below C (then on through the stored links); (b) the
   sender's listing of its own seqs above C, up to the first listed seq
@@ -670,14 +679,18 @@ unseen owed seq loses it silently.
   park.
 - **Ask.** `GapWant` (`\x00molt-gapwant-v1`): named seqs (≤ 64, a seq
   missing for 2 s, re-asked every 10 s), or `range (after, upto]` (≤ 1024)
-  whenever something is known above C. No want goes out while a stored
-  replay is coming in (`GroupHealth.replaying`): a relay's replay is open
+  whenever something is known above C. No NAMED want goes out while a
+  stored replay is coming in (`GroupHealth.replaying`) - the relay's
+  replay fills those itself; the LISTING ask does go out while a replay
+  runs: it re-publishes nothing, and a flood between two owed envelopes
+  needs it to move C (2026-11-27: the gated ask left a seat 4 hours
+  behind a replay flag). A replay is open
   from its REQ until its final EOSE (all pages and the tail), until it is
   given up as stuck (3 rounds), or until its session dies (a reconnect
   opens it again), and it counts as in until the consumer has read every
-  frame queued up to that end; then 2 s. Asking earlier made the sender
-  re-publish what the relay was about to deliver: an EOSE arrives while
-  the last page is still queued unread. What a finished replay still
+  frame queued up to that end; then 2 s. Asking a NAMED want earlier made
+  the sender re-publish what the relay was about to deliver: an EOSE
+  arrives while the last page is still queued unread. What a finished replay still
   lacks is a real hole - among them the rest of a second that held more
   stored frames than one page (`relay replay skipped one second`). The sender re-publishes named own
   envelopes as fresh frames and answers `GapAnswer` (`\x00molt-gapans-v1`)
@@ -687,7 +700,10 @@ unseen owed seq loses it silently.
   per 10 s, one listing per 5 s; 384 re-published frames per minute in
   all; askers served round-robin, each read bounded to the asked span.
 - **Visibility.** `inbound_held member= missing_seq= held= frontier=
-  since_s=` once per episode (after 2 s); `inbound_held_cleared member=
+  since_s=` once per episode (after 2 s); a hold stuck for minutes repeats
+  `inbound_held_stuck member= held= frontier= since_s=` (WARN, first at
+  120 s, then at most once per 600 s) - one INFO line followed by silence
+  hid the 2026-11-27 deadlock for four hours; `inbound_held_cleared member=
   since_s= via= unordered= shed= lost=`; `inbound_gap_skipped` per seq
   settled for order (WARN for the 60 s); `inbound_hold_shed` once per
   episode. `StatusView.inbound_held`: per sender `frontier`, `missing_seq`,
@@ -716,7 +732,14 @@ Pins: `net::delivery_tests` (`a_newest_first_replay_past_the_window_loses_nothin
 `a_resend_round_passing_the_gap_settles_it`,
 `a_flood_behind_a_gap_loses_nothing`,
 `an_answering_senders_duplicates_are_no_evidence`,
-`a_gap_want_is_ours_only_from_the_roster_for_our_stream`),
+`a_gap_want_is_ours_only_from_the_roster_for_our_stream`,
+`an_envelope_chained_to_an_accepted_prev_passes_the_cap`,
+`a_far_envelope_without_an_accepted_prev_stays_held`,
+`a_long_hold_warns_again_at_a_bounded_rate` (2026-11-27: the cap's chain
+link, its pins and the bounded hold warning),
+`net::delivery::tests::a_listing_ask_also_runs_while_a_replay_is_coming_in`),
+and the loopback keystone `an_envelope_chained_to_an_accepted_prev_crosses_a_log_flood_without_a_re_offer` in
+`crates/molt-engine/tests/delivery_guarantee.rs`,
 `group_runtime::tests::a_gap_want_is_answered_with_exactly_the_missing_frames`,
 `chain::membership_tests::a_restore_keeps_settling_while_the_coordinators_stream_has_a_gap`,
 `crates/molt-engine/tests/nostr_inbound_gap.rs`,

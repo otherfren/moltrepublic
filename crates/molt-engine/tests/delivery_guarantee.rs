@@ -22,9 +22,9 @@ mod common;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use common::{found_with_mesh, hard_kill, CaptureSink};
+use common::{found_with_mesh, hard_kill, read_chat, CaptureSink};
 use molt_core::{Command, SessionSettings, SessionView, WorkspaceEvent};
-use molt_net::supervisor::{self, send_framed, MemLog, MemStateStore, NetConfig};
+use molt_net::supervisor::{self, send_framed, MemLog, MemStateStore, NetConfig, StateStore};
 use molt_net::{MlsChannel, MlsMember, MsgId, PeerLink};
 use tokio::sync::watch;
 
@@ -297,4 +297,129 @@ async fn a_chat_lost_in_a_deaf_window_survives_a_hard_kill() {
     await_resend(&dw.member_sink, "zwei", 45).await;
     // the post-persist chat rides the same rewound tail
     await_resend(&dw.member_sink, "drei", 15).await;
+}
+
+/// The 2026-11-27 field deadlock (gap 25), end to end over the loopback
+/// hub with the member supervisor as the sender and the founder engine as
+/// the receiver. The sender's log fills with ~1,700 entries that never
+/// cross the wire (a gossip flood of re-recorded peer traffic), so its
+/// next owed envelope arrives far above the receiver's accept cap - with
+/// a `prev_seq` that IS an accepted seq. The receiver accepts it (the
+/// prev chain proves nothing owed hides between), the sheet's high rises,
+/// the sender's floor follows: no re-offer round. Red before the fix: the
+/// envelope sat held behind the cap, the floor stuck at the first
+/// envelope, and the stall ladder re-offered the tail on its 10 s rung.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_envelope_chained_to_an_accepted_prev_crosses_a_log_flood_without_a_re_offer() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .try_init();
+    let tmp = tempfile::tempdir().expect("tmp");
+    let root_a = tmp.path().join("founder");
+    let (a, hub, member_mesh, member_mls, _id) = found_with_mesh(&root_a).await;
+    a.execute(Command::CreateFinish).await.expect("enter");
+    let link = member_mesh
+        .iter()
+        .filter_map(PeerLink::from_mesh)
+        .next()
+        .expect("the member's link to the founder");
+    let member_group =
+        Arc::new(Mutex::new(MlsMember::restore(&member_mls).expect("restore member MLS")));
+
+    // the sender's log: one owed envelope, the flood of entries that never
+    // cross the wire, then the next owed one - its prev_seq on the first
+    let first = 1_000_000u64;
+    let flood: u64 = 1_700;
+    let second = first + flood + 1;
+    // stamped "now": an old stamp would fall outside the chat-retention
+    // read window and the applied read would hide the message
+    let ts: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let own_chat = |seq: u64, prev: u64, body: &str| molt_core::EventEnvelope {
+        seq,
+        ts,
+        prev_seq: prev,
+        by: "member-b".to_string(),
+        body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+            common::test_msg_id(seq),
+            "member-b",
+            body,
+            ts,
+        )),
+    };
+    let foreign = |seq: u64| molt_core::EventEnvelope {
+        seq,
+        ts,
+        prev_seq: 0,
+        by: "member-c".to_string(),
+        body: molt_core::WorkspaceEvent::Chat(molt_core::ChatMessage::text(
+            common::test_msg_id(seq),
+            "member-c",
+            "noise",
+            ts,
+        )),
+    };
+    let log = MemLog::new();
+    log.push(own_chat(first, 0, "eins"));
+    for seq in first + 1..second {
+        log.push(foreign(seq));
+    }
+    log.push(own_chat(second, first, "zwei"));
+
+    let sink = CaptureSink::default();
+    let store = MemStateStore::new();
+    let (_wake, wake_rx) = watch::channel(0u64);
+    let _member_sup = supervisor::spawn(
+        hub.clone(),
+        NetConfig::fast("member-b".to_string(), vec![link.clone()], 21),
+        log,
+        store.clone(),
+        sink.clone(),
+        wake_rx,
+        Some(MlsChannel::from_shared(member_group.clone())),
+    );
+
+    // the baseline envelope crosses and is accepted (first contact)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    while !read_chat(&a).await.iter().any(|m| m.get("body").and_then(|v| v.as_str()) == Some("eins")) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the baseline envelope never crossed"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // the flooded envelope: accepted, the sheet's high rises, the sender's
+    // floor moves past the whole flood
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    let member_cursor = || async {
+        store.load().await.outbound.get("founder-a").map(|c| c.acked_floor).unwrap_or(0)
+    };
+    let mut floor = member_cursor().await;
+    while floor < second {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the sender's floor never passed the flood (stuck at {floor})"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        floor = member_cursor().await;
+    }
+    assert_eq!(floor, second, "the floor sits past the flood");
+
+    // one stall rung (10 s) passes with no re-offer round: the cursor never
+    // rewound (resend epoch 0) and the floor stayed at the flood's end
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let cur = store.load().await.outbound.get("founder-a").copied().unwrap_or_default();
+    assert_eq!(cur.resend_epoch, 0, "a re-offer round ran");
+    assert!(cur.acked_floor >= second, "the floor regressed");
+    // and the receiver really applied it
+    assert!(
+        read_chat(&a).await.iter().any(|m| m.get("body").and_then(|v| v.as_str()) == Some("zwei")),
+        "the flooded envelope was applied"
+    );
 }

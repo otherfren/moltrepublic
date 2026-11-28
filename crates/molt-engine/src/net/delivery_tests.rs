@@ -556,6 +556,97 @@ fn a_gone_outside_the_asked_window_is_ignored() {
     assert_eq!(missing(&st), 1, "the far one stays owed");
 }
 
+/// The 2026-11-27 flood deadlock (gap 25): ~1,700 entries of the sender's
+/// log sit between two envelopes owed to this seat - entries that never
+/// cross the wire (re-recorded peer traffic). The next owed one arrives
+/// ~1,700 positions above the accept cap, but its `prev_seq` IS an accepted
+/// seq. The prev chain proves nothing owed hides between prev and seq, so
+/// the envelope is accepted, the frontier moves to it, nothing between is
+/// marked missing, the ack sheet's high rises and the sender's acknowledged
+/// floor follows - no re-offer round (the keystone over the loopback hub
+/// pins that last part end to end).
+#[test]
+fn an_envelope_chained_to_an_accepted_prev_passes_the_cap() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, chat_env(2, 1, "second"));
+    let far = 2 + 1700;
+    land(&mut st, chat_env(far, 2, "after the flood"));
+    let w = st.delivery.accepted["bob"].clone();
+    assert!(w.is_accepted(far), "accepted although above frontier + window");
+    assert_eq!(w.high, far, "the ack sheet's high rises");
+    assert_eq!(w.frontier, far, "the frontier moved to it");
+    assert!(st.inbound_held_view().is_empty(), "nothing held, nothing missing");
+    // the sheet's high is what the sender's floor reads (§4.4): that it
+    // follows past the flood's unowed span is the keystone's assertion
+    // (`an_envelope_chained_to_an_accepted_prev_crosses_a_log_flood_
+    // without_a_re_offer`)
+}
+
+/// The protection stays pinned: without an accepted prev (`prev_seq == 0`,
+/// or a prev the window never took) an envelope above the cap is held as
+/// before, and a duplicate or already-held one is refused without a second
+/// delivery. Everything else about the hold is untouched - the byte shed
+/// (`a_shed_envelope_stays_owed_and_is_recovered`) and the session ring
+/// (`SESSION_MAX`) among it.
+#[test]
+fn a_far_envelope_without_an_accepted_prev_stays_held() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, chat_env(2, 1, "second"));
+    let far = 2 + molt_core::ACCEPT_WINDOW_BITS + 500;
+    land(&mut st, chat_env(far, 0, "no chain"));
+    assert!(!accepted(&st, far), "prev_seq 0 is never proof");
+    assert!(st.inbound_held_has("bob", far));
+    land(&mut st, chat_env(far + 1, 500, "chained into the void"));
+    assert!(!accepted(&st, far + 1), "an unaccepted prev is no proof");
+    assert!(st.inbound_held_has("bob", far + 1));
+    land(&mut st, chat_env(far, 0, "no chain"));
+    assert_eq!(bodies(&st), ["base", "second"], "the duplicate is refused again");
+}
+
+/// Visibility (the 2026-11-27 deadlock ran silent for 4 hours behind one
+/// INFO line): a hold stuck for minutes repeats a WARN at a bounded rate -
+/// first at 120 s, then every 600 s - naming held, frontier and how long.
+#[test]
+fn a_long_hold_warns_again_at_a_bounded_rate() {
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Captured {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if let Ok(mut b) = self.0.lock() {
+                b.extend_from_slice(buf);
+            }
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let captured = Captured::default();
+    let sink = captured.clone();
+    let subscriber = tracing_subscriber::fmt().with_ansi(false).with_writer(move || sink.clone()).finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let mut st = presence_fixture();
+        land(&mut st, chat_env(1, 0, "base"));
+        land(&mut st, chat_env(2, 1, "second"));
+        land(&mut st, chat_env(2000, 1999, "held"));
+        for secs in [119, 120, 121, 719, 720] {
+            at(&mut st, secs);
+            st.cmd_net_delivery_tick().expect("tick");
+        }
+    });
+    let logs = String::from_utf8(captured.0.lock().expect("lock").clone()).expect("utf8");
+    let warns: Vec<&str> = logs.lines().filter(|l| l.contains("inbound_held_stuck")).collect();
+    assert_eq!(warns.len(), 2, "{logs}");
+    assert!(
+        warns[0].contains("held=1") && warns[0].contains("frontier=2") && warns[0].contains("since_s=120"),
+        "{}",
+        warns[0]
+    );
+    assert!(warns[1].contains("since_s=720"), "{}", warns[1]);
+}
+
 /// A runtime rebuild drops a spent-budget note: the new outbox reports
 /// afresh.
 #[test]

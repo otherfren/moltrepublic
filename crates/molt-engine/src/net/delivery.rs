@@ -67,6 +67,14 @@ const BEHIND_AFTER_SECS: u64 = 10;
 /// Repeats from one seat that make a hint.
 const DUP_EPISODE_MIN: u32 = 32;
 
+/// A hold warns first after this long, then at most once per
+/// [`HOLD_WARN_EVERY_SECS`] - one INFO line followed by silence hid the
+/// 2026-11-27 deadlock for four hours.
+pub(crate) const HOLD_WARN_AFTER_SECS: u64 = 120;
+
+/// The floor of the gap between two hold warnings.
+pub(crate) const HOLD_WARN_EVERY_SECS: u64 = 600;
+
 /// One seat's run of frames a legacy window drops as already seen, while
 /// nothing of that seat was accepted this session.
 #[derive(Debug, Default)]
@@ -131,6 +139,8 @@ pub(crate) struct SenderHold {
     /// shed, given up.
     since: Option<u64>,
     logged: bool,
+    /// The last `inbound_held_stuck` warning of this episode.
+    warned_at: Option<u64>,
     unordered: u32,
     shed: u32,
     lost: u32,
@@ -729,8 +739,18 @@ impl State {
         if prev_missing {
             hold.note_missing(envelope.prev_seq, now);
         }
-        // `prev_seq == 0`: a pre-G7 sender or a chain start, unordered as ever
-        let wait = envelope.seq > hold.cap()
+        // Above the cap only a chain link over an accepted prev passes: the
+        // prev_seq names the sender's previous OWN ackable event, so an
+        // accepted prev proves every seq between it and this one unowed -
+        // the frontier skips them and nothing this receiver is owed can
+        // age out unseen. Without that proof the hold stays (2026-11-27: a
+        // flood of never-sent log entries between two owed envelopes
+        // otherwise deadlocked the receiver behind the cap, its ack sheet
+        // frozen, the sender's tail re-offered forever).
+        // `prev_seq == 0`: a pre-G7 sender or a chain start, unordered as
+        // ever - and never proof.
+        let linked = envelope.prev_seq != 0 && !prev_missing;
+        let wait = (envelope.seq > hold.cap() && !linked)
             || (envelope.prev_seq != 0 && order_sensitive(&envelope.body) && hold.blocks(envelope.seq));
         if wait {
             self.hold_envelope(&from, envelope, now);
@@ -852,6 +872,7 @@ impl State {
             }
         }
         hold.logged = false;
+        hold.warned_at = None;
         hold.unordered = 0;
         hold.shed = 0;
         hold.lost = 0;
@@ -1006,12 +1027,20 @@ impl State {
                     ask.push(seq);
                 }
             }
-            if !hold.held.is_empty() && !hold.logged {
+            if !hold.held.is_empty() {
                 if let Some(since) = hold.since {
-                    if now.saturating_sub(since) >= GAP_ASK_AFTER_SECS {
+                    if !hold.logged && now.saturating_sub(since) >= GAP_ASK_AFTER_SECS {
                         hold.logged = true;
                         let missing_seq = hold.missing.keys().next().copied().unwrap_or(hold.frontier + 1);
                         tracing::info!(member = %m, missing_seq, held = hold.held.len(), frontier = hold.frontier, since_s = now - since, "inbound_held");
+                    }
+                    let warn_due = hold.warned_at.map_or(
+                        now.saturating_sub(since) >= HOLD_WARN_AFTER_SECS,
+                        |t| now.saturating_sub(t) >= HOLD_WARN_EVERY_SECS,
+                    );
+                    if warn_due {
+                        hold.warned_at = Some(now);
+                        tracing::warn!(member = %m, held = hold.held.len(), frontier = hold.frontier, since_s = now - since, "inbound_held_stuck");
                     }
                 }
             }
@@ -1024,7 +1053,11 @@ impl State {
                     && hold.listing_asked_at.map_or(true, |t| now.saturating_sub(t) >= GAP_ASK_EVERY_SECS)
                     && hold.since.map_or(true, |s| now.saturating_sub(s) >= GAP_ASK_AFTER_SECS));
             ask.truncate(molt_net::gap::GAP_MAX_SEQS);
-            if let Some(group) = self.group_net.as_ref().filter(|_| !replaying) {
+            if let Some(group) = self.group_net.as_ref() {
+                // the LISTING ask runs even while a replay is still coming
+                // in: it re-publishes nothing, and a flood between two owed
+                // envelopes needs it to move the frontier (2026-11-27); the
+                // named asks stay paused - the replay fills those itself
                 if list_due {
                     let want = molt_net::gap::GapWant::range(me.clone(), m.clone(), hold.frontier, hold.cap());
                     // the seam loses the frame on the wire: it went out
@@ -1036,7 +1069,7 @@ impl State {
                         }
                     }
                 }
-                if !ask.is_empty() {
+                if !ask.is_empty() && !replaying {
                     let want = molt_net::gap::GapWant::new(me.clone(), m.clone(), ask.clone());
                     if group.handle.publish_control(want.to_frame()) {
                         tracing::debug!(member = %m, seqs = ?ask, "gap_want");
@@ -1596,5 +1629,120 @@ mod probe_tests {
         assert!(h.behind(&w, 100 + BEHIND_AFTER_SECS, true));
         h.refused.insert(11);
         assert!(!h.behind(&w, 1_000, true), "parked, not owed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::net::test_support::{T, id, presence_fixture};
+
+    fn chat(seq: u64, prev: u64, body: &str) -> EventEnvelope {
+        let n = usize::try_from(seq).expect("small");
+        EventEnvelope {
+            seq,
+            ts: T,
+            by: "bob".to_string(),
+            body: WorkspaceEvent::Chat(molt_core::ChatMessage::text(id(n), "bob", body, T)),
+            prev_seq: prev,
+        }
+    }
+
+    fn land(st: &mut State, env: EventEnvelope) {
+        st.cmd_net_delivered("bob".to_string(), env, None).expect("delivery");
+    }
+
+    #[derive(Clone, Default)]
+    struct AskSink;
+    impl molt_net::EngineSink for AskSink {
+        async fn deliver(&self, _from: &MemberId, _env: EventEnvelope) -> Result<(), molt_net::NetError> {
+            Ok(())
+        }
+        async fn peer_seen(&self, _m: &MemberId) {}
+        async fn send_failed(&self, _m: &MemberId, _r: &str) {}
+    }
+
+    /// The 2026-11-27 deadlock's second half: while a stored replay is
+    /// still coming in, the LISTING ask (it re-publishes nothing) still
+    /// goes, at most once per the ask interval; only the named asks stay
+    /// paused - the replay fills those itself. After the listing's answer
+    /// the frontier jumps.
+    #[tokio::test]
+    async fn a_listing_ask_also_runs_while_a_replay_is_coming_in() {
+        let mut st = presence_fixture();
+        land(&mut st, chat(1, 0, "base"));
+        land(&mut st, chat(2, 1, "second"));
+        land(&mut st, chat(5, 4, "hole")); // missing 4, held 5
+        let far = 2 + molt_core::ACCEPT_WINDOW_BITS + 500;
+        land(&mut st, chat(far, far - 1, "far")); // missing far-1, held far
+        let (health_tx, health_rx) = tokio::sync::watch::channel(molt_net::group_runtime::GroupHealth {
+            subscribed: true,
+            replaying: true,
+            ..molt_net::group_runtime::GroupHealth::default()
+        });
+        let mls = std::sync::Arc::new(std::sync::Mutex::new({
+            let mut m = molt_net::MlsMember::new(&molt_storage::SigningKey::from_bytes(&[9u8; 32]), "ada")
+                .expect("mls");
+            m.create_group().expect("group");
+            m
+        }));
+        // a dead relay (bound, then dropped - never a service port); the
+        // runtime's tasks never run, only the control queue is observed
+        let dead = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let url = format!("ws://127.0.0.1:{}", dead.local_addr().expect("addr").port());
+        drop(dead);
+        let channel = molt_net::ritual_net::GroupChannel::new(molt_net::dial::Dialer::direct(), vec![url], [7u8; 32]);
+        let (wake, wake_rx) = tokio::sync::watch::channel(0u64);
+        let handle = molt_net::group_runtime::spawn_group(
+            channel.clone(),
+            molt_net::supervisor::MlsChannel::from_shared(mls.clone()),
+            molt_net::group_runtime::GroupNetConfig::fast("ada".to_string(), vec!["bob".to_string()]),
+            molt_net::supervisor::MemLog::new(),
+            molt_net::supervisor::MemStateStore::new(),
+            AskSink,
+            wake_rx,
+            health_tx,
+        );
+        let trickle = molt_net::trickle::spawn_trickle(
+            channel,
+            molt_net::supervisor::MemStateStore::new(),
+            handle.outbox_busy(),
+            molt_net::trickle::TrickleConfig::new(3600, 1),
+        );
+        st.group_net = Some(crate::GroupNet {
+            handle,
+            mls,
+            wakeup: wake,
+            health: health_rx,
+            trickle,
+            lockout: crate::net::LockOut::default(),
+            unreadable: crate::net::UnreadableEpisode::default(),
+        });
+        at(&mut st, GAP_ASK_AFTER_SECS);
+        st.cmd_net_delivery_tick().expect("tick");
+        let hold = st.delivery.inbound.get("bob").expect("hold");
+        assert_eq!(
+            hold.listing_asked_at,
+            Some(T + GAP_ASK_AFTER_SECS),
+            "the listing ask went out despite the replay"
+        );
+        assert_eq!(
+            hold.missing.get(&4).and_then(|g| g.asked_at),
+            None,
+            "no named ask while the replay runs"
+        );
+        // the listing's answer (a range cannot reach the held far one) lets
+        // the frontier jump
+        let top = 2 + molt_core::ACCEPT_WINDOW_BITS;
+        st.cmd_net_gap_listed(&"bob".to_string(), &"ada".to_string(), 2, top, vec![top]);
+        assert_eq!(
+            st.delivery.accepted["bob"].frontier,
+            top - 1,
+            "the listing raised the frontier while the replay ran"
+        );
+    }
+
+    fn at(st: &mut State, secs: u64) {
+        st.presence.clock_override = Some(T + secs);
     }
 }
