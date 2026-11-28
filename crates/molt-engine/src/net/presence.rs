@@ -420,6 +420,7 @@ impl State {
     /// one `Down` this fold owns — a dead subscription — really is terminal
     /// (the inbox loop returned; nothing re-subscribes until reopen).
     pub(crate) fn apply_group_health(&mut self, h: molt_net::group_runtime::GroupHealth) {
+        self.delivery.before_join = h.before_join;
         let health = if !h.subscribed {
             molt_core::NetHealth::Down {
                 reason: h.deaf.unwrap_or_else(|| "no 445 subscription".to_string()),

@@ -259,6 +259,8 @@ pub struct GroupNetConfig {
     pub resend_after: Duration,
     /// Ceiling of the stall backoff.
     pub resend_cap: Duration,
+    /// This device joined a running group by a restore's Welcome.
+    pub restored: bool,
 }
 
 impl GroupNetConfig {
@@ -273,7 +275,15 @@ impl GroupNetConfig {
             retry_cap: Duration::from_secs(120),
             resend_after,
             resend_cap,
+            restored: false,
         }
+    }
+
+    /// The same, for a device restored into the group.
+    #[must_use]
+    pub fn restored(mut self, restored: bool) -> Self {
+        self.restored = restored;
+        self
     }
 
     /// Millisecond publish retries for tests (the stall backoff stays).
@@ -311,6 +321,9 @@ pub struct GroupHealth {
     /// traffic this seat cannot read. Older ones are history it never held
     /// keys for (a rejoiner's day window), not a loss.
     pub live_opaque: u64,
+    /// Of `opaque_frames`, those a restored device dates before its own
+    /// join: never its keys, not a loss (gap 22).
+    pub before_join: u64,
     /// The subscription's first stored-events replay has not finished.
     pub catching_up: bool,
     /// A stored replay - the first or a reconnect's - is still coming in
@@ -654,6 +667,7 @@ where
         log2,
         store2,
         cfg.member.clone(),
+        cfg.restored,
         sink,
         health,
         ack_wake,
@@ -2381,6 +2395,14 @@ impl<L: OutboxLog, S: StateStore, K: EngineSink> crate::epoch_hold::HeldIngest<(
     }
 }
 
+/// Gap 22: a frame still opaque after an advance predates this restored
+/// device's join when the ring still holds every epoch since the Welcome
+/// (so the frame is older than all of them) and it was stamped before the
+/// advancing commit by more than the skew (so it is not from a newer epoch).
+fn before_join(restored: bool, ring_whole: bool, at: u64, advanced_at: u64) -> bool {
+    restored && ring_whole && at.saturating_add(LIVE_SKEW_SECS) < advanced_at
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
     channel: GroupChannel,
@@ -2388,6 +2410,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
     log: L,
     store: S,
     me: MemberId,
+    restored: bool,
     sink: K,
     health: watch::Sender<GroupHealth>,
     ack_wake: std::sync::Arc<tokio::sync::Notify>,
@@ -2405,6 +2428,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                 deaf: Some(e.to_string()),
                 opaque_frames: 0,
                 live_opaque: 0,
+                before_join: 0,
                 catching_up: false,
                 replaying: false,
             });
@@ -2419,6 +2443,7 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
         deaf: None,
         opaque_frames: 0,
         live_opaque: 0,
+        before_join: 0,
         catching_up: true,
         replaying: true,
     };
@@ -2492,8 +2517,11 @@ async fn inbox_loop<L: OutboxLog, S: StateStore, K: EngineSink>(
                             Ok(lost) if lost.is_empty() => {}
                             Ok(lost) => {
                                 let n = |k: usize| u64::try_from(k).unwrap_or(u64::MAX);
+                                let ring_whole = mls.exporter_secrets().len() <= crate::mls::EXPORTER_RING_K;
+                                let early = |at: u64| before_join(restored, ring_whole, at, created_at);
                                 state.opaque_frames += n(lost.len());
-                                state.live_opaque += n(lost.iter().filter(|at| live(**at)).count());
+                                state.before_join += n(lost.iter().filter(|at| early(**at)).count());
+                                state.live_opaque += n(lost.iter().filter(|at| !early(**at) && live(**at)).count());
                                 let _ = health.send(state.clone());
                             }
                         }
@@ -2957,6 +2985,92 @@ mod tests {
     async fn an_opaque_frame_from_before_the_subscription_is_history() {
         let h = one_opaque_frame(true).await;
         assert_eq!(h.live_opaque, 0, "history is not a live loss");
+    }
+
+    /// Gap 22: a restored device replaying traffic sealed before its join
+    /// counts it as before this device, not as unreadable.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_restored_device_counts_pre_join_frames_as_before_this_device() {
+        let now = crate::ritual_net::now_secs();
+        let h = opaque_before_advance(true, now - 30, now + 150).await;
+        assert_eq!((h.before_join, h.live_opaque), (1, 0), "{h:?}");
+    }
+
+    /// A frame stamped with the advance could be newer than this device's
+    /// epoch: it stays unreadable even on a restored device.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_restored_device_still_counts_a_frame_of_its_own_time_as_unreadable() {
+        let now = crate::ritual_net::now_secs();
+        let h = opaque_before_advance(true, now, now).await;
+        assert_eq!((h.before_join, h.live_opaque), (0, 1), "{h:?}");
+    }
+
+    /// A device that was not restored counts exactly as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_device_that_was_not_restored_counts_as_before() {
+        let now = crate::ritual_net::now_secs();
+        let h = opaque_before_advance(false, now - 30, now + 150).await;
+        assert_eq!((h.before_join, h.live_opaque), (0, 1), "{h:?}");
+    }
+
+    /// Once the ring dropped an epoch since the join, "older than every
+    /// held epoch" no longer means "before the join".
+    #[test]
+    fn a_full_ring_dates_nothing_before_the_join() {
+        assert!(before_join(true, true, 1_000, 1_000 + LIVE_SKEW_SECS + 1));
+        assert!(!before_join(true, false, 1_000, 1_000 + LIVE_SKEW_SECS + 1));
+        assert!(!before_join(true, true, 1_000, 1_000 + LIVE_SKEW_SECS));
+        assert!(!before_join(false, true, 1_000, 1_000 + LIVE_SKEW_SECS + 1));
+    }
+
+    /// Bob (joined by Welcome) subscribes, meets one frame no epoch opens
+    /// stamped `frame_at`, then the commit stamped `commit_at` whose retry
+    /// proves the frame lost.
+    async fn opaque_before_advance(restored: bool, frame_at: u64, commit_at: u64) -> GroupHealth {
+        use nostr_relay_builder::MockRelay;
+
+        let (alice, bob, commit) = alice_rekeys_cara();
+        let relay = MockRelay::run().await.expect("relay");
+        let url = relay.url().await.to_string();
+        let seed = [7u8; 32];
+        let alice_chan = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url.clone()], seed);
+        let commit_frame = MlsChannel::new(alice)
+            .group_frame(&molt_core::EventEnvelope {
+                prev_seq: 0,
+                seq: 1,
+                ts: 1_751_000_000,
+                by: "alice".to_string(),
+                body: molt_core::WorkspaceEvent::MlsCommit { commit: hex::encode(&commit), stamp: 0 },
+            })
+            .expect("commit frame");
+        let (_wake, wake_rx) = watch::channel(0u64);
+        let (health_tx, mut health_rx) = watch::channel(GroupHealth::default());
+        let bob_chan = crate::ritual_net::GroupChannel::new(crate::dial::Dialer::direct(), vec![url], seed);
+        let handle = spawn_group(
+            bob_chan,
+            MlsChannel::new(bob),
+            GroupNetConfig::fast("bob".into(), vec!["alice".into()]).restored(restored),
+            crate::MemLog::default(),
+            crate::MemStateStore::default(),
+            Sink::default(),
+            wake_rx,
+            health_tx,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        alice_chan.publish_frame_at(&[9u8; 32], &[0x5au8; 64], frame_at).await.expect("publish the alien frame");
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        alice_chan
+            .publish_frame_at(&commit_frame.exporter, &commit_frame.ciphertext, commit_at)
+            .await
+            .expect("publish the commit");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        while health_rx.borrow_and_update().opaque_frames == 0 {
+            assert!(tokio::time::Instant::now() < deadline, "the opaque frame was never counted");
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let h = health_rx.borrow().clone();
+        handle.shutdown().await;
+        h
     }
 
     /// **The 445 carrier stamp never picks the commit winner** (audit #9,

@@ -700,6 +700,19 @@ fn a_held_resend_is_its_own_note_and_never_a_lockout() {
     assert!(st.status().resend_held.is_empty());
 }
 
+/// Gap 22: frames a restored device dates before its join keep the health
+/// ok and show in the status as their own count.
+#[test]
+fn frames_before_this_device_keep_health_ok_and_show_in_status() {
+    let mut st = presence_fixture();
+    let healthy = molt_net::group_runtime::GroupHealth { subscribed: true, ..Default::default() };
+    st.apply_group_health(molt_net::group_runtime::GroupHealth { opaque_frames: 9, before_join: 9, ..healthy.clone() });
+    assert_eq!(st.session.net_health, molt_core::NetHealth::Ok);
+    assert_eq!(st.status().before_this_device, 9);
+    st.apply_group_health(molt_net::group_runtime::GroupHealth { opaque_frames: 10, live_opaque: 1, before_join: 9, ..healthy });
+    assert!(matches!(&st.session.net_health, molt_core::NetHealth::Degraded { reason } if reason == "1 new messages unreadable"));
+}
+
 /// A listing wider than the asked range is refused, and a stale page
 /// never replaces the newer one already held.
 #[test]

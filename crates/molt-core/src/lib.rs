@@ -9014,6 +9014,10 @@ pub struct StatusView {
     /// Peers whose inbound stream is held behind a missing envelope.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inbound_held: Vec<InboundHeld>,
+    /// Group frames this restored device dates before its own join: never
+    /// its keys, so no fault (0 = none).
+    #[serde(default)]
+    pub before_this_device: u64,
     /// The folded bases this node serves and waits for.
     #[serde(default)]
     pub bases: Box<BaseStatus>,

@@ -1080,7 +1080,7 @@ impl State {
         let handle = molt_net::group_runtime::spawn_group(
             channel,
             molt_net::supervisor::MlsChannel::from_shared(mls_arc.clone()),
-            molt_net::group_runtime::GroupNetConfig::new(owner, others),
+            molt_net::group_runtime::GroupNetConfig::new(owner, others).restored(self.incarnation_height() > 0),
             feed,
             store,
             // `generation: None`: the generation gate requires `self.net` to be

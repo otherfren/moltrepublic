@@ -990,6 +990,8 @@ pub(crate) struct DeliveryState {
     pub(crate) behind: Vec<MemberId>,
     /// The own outbox's spent budget holds a tail: the owed seats, since.
     pub(crate) resend_held: Option<(Vec<MemberId>, u64)>,
+    /// The group runtime's `before_join` (gap 22). Runtime-only.
+    pub(crate) before_join: u64,
     /// Per sender: repeats a legacy window drops (`net/delivery.rs`).
     /// Runtime-only.
     pub(crate) dups: std::collections::HashMap<MemberId, net::DupEpisode>,

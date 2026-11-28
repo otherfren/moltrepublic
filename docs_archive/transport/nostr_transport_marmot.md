@@ -501,6 +501,10 @@ Resolution — split the two secrets explicitly:
   unreadable"). Opaque frames of the first replay are counted in the log
   only: the resends above cover what is owed, and a rejoiner never held keys
   for its day window. The first replay itself reads as "catching up".
+  A restored device (gap 22) counts an opaque frame as
+  `status.before_this_device`, not unreadable, when its exporter ring
+  still holds every epoch since its Welcome and the frame was stamped over
+  120 s before the commit whose retry proved it opaque.
 
 Everything else from the 2026-07-28 work stays and mostly gets simpler:
 
