@@ -502,10 +502,11 @@ depends on the chain's design waits for the user's decisions on
 | 25 | merged (`2239e162`) |
 | C.1 with 9 and 12 (1, 4) | review: fix first, two critical and four high claims; fix round running |
 | 26 | review: merge after cleanups; fix round next (a peer that stays behind is served once per claim; the tests pin the rule) |
-| 30 | being built |
+| 30 | merged (`df312a19`) |
 | 19, 24, 27 | being built |
 | 22, 23 | after C.1 |
 | 28, 29 | after 26 |
+| D: irreversible effects wait until final (`docs/chain/chain_whitepaper.md` §13.6; added by the user 2026-11-28) | being specified; what "final" means on today's chain and when each effect fires are the user's to approve before code |
 | acceptance | the full gate on master, then the release build |
 
 Moved out, to be planned again after the whitepaper's decisions: N3,
