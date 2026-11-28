@@ -9218,6 +9218,9 @@ pub struct ChainSync {
     /// When that request was last sent (unix seconds; 0 = none).
     #[serde(default)]
     pub catchup_since: u64,
+    /// A catch-up height every heard peer reported not holding (0 = none).
+    #[serde(default)]
+    pub catchup_unheld: u64,
     /// Buffered blocks of another branch.
     #[serde(default)]
     pub fork_candidates: u32,

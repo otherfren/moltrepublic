@@ -108,6 +108,7 @@ impl State {
         if self.net_generation_current(generation) {
             self.delivery.unreachable.remove(&member);
             let now = self.presence_now();
+            self.note_return(&member, now);
             self.stamp_member_pill(&member, now);
             // before the health fold, which would re-raise on the old mark
             let cleared = self.clear_lockout(&member);
@@ -119,6 +120,26 @@ impl State {
             self.genesis_heard(&member);
         }
         Ok(Reply::Ack)
+    }
+
+    /// Gap 26: a peer heard again after its pill went offline is a return -
+    /// its next catch-up request is served the open governance once more.
+    fn note_return(&mut self, member: &str, now: u64) {
+        let lapsed = self
+            .session
+            .workspaces
+            .iter()
+            .find(|w| w.id == self.session.active_workspace)
+            .and_then(|w| w.members.iter().find(|m| m.name == member))
+            .is_some_and(|m| molt_core::presence_state(now, m.last_seen) == 2);
+        if lapsed {
+            self.chain.governance_claim.remove(member);
+            // a tombstone its full park dropped gets another chance too
+            self.chain.tombstones_served.remove(member);
+        }
+        if lapsed || !self.chain.heard_since.contains_key(member) {
+            self.chain.heard_since.insert(member.to_string(), now);
+        }
     }
 
     /// End the genesis re-publish once every other seat spoke in the

@@ -111,7 +111,7 @@ fn reopen_keeps_the_proposer_and_every_vote(with_snapshot: bool) {
         other => panic!("unexpected: {other:?}"),
     };
     // the catch-up re-serve: it re-authors BOTH cards under this node
-    walter.serve_open_governance();
+    walter.serve_open_governance("dora");
 
     let live_foreign = card(&walter, 8);
     assert_eq!(live_foreign.approvals, 1, "the live card counts petra's signature");
@@ -457,6 +457,35 @@ fn a_forged_decision_line_never_takes_the_deterministic_id() {
     assert_eq!(lines.len(), 1);
     assert_eq!(lines[0].0, "walter", "the seat's own line holds the id");
     assert_eq!(lines[0].1, crate::State::decision_summary(4, &payload, Some("petra")));
+}
+
+/// Gap 29: a well-formed decision line whose outcome contradicts this
+/// seat's (applied there, rejected here) comes from another branch, not a
+/// forger; it is dropped all the same, a malformed one stays `forged`.
+#[test]
+fn a_decision_line_with_the_other_outcome_is_from_another_branch() {
+    let b = Builder::new(&["petra", "walter", "dora"], 2);
+    let (mut walter, _tmp, _dir) = stored_chain_signer(&b, "walter", &["petra", "walter", "dora"]);
+    let payload = json!({ "op": "set_name", "value": "X" });
+    wire(
+        &mut walter,
+        "petra",
+        1,
+        WorkspaceEvent::Proposed { id: ProposalId(4), surface: Surface::Organization, payload: payload.clone() },
+    );
+    walter.proposals.get_mut(&4).expect("card").state = ProposalState::Rejected;
+    let sid = crate::chat::decision_summary_id(&b.republic_id, 4, false);
+    let line = |body: String| {
+        molt_core::ChatMessage::text(sid, "petra".to_string(), body, crate::now_secs())
+            .with_channel(molt_core::ChannelRef::Patch { id: ProposalId(4) })
+            .with_kind(molt_core::ChatKind::System)
+    };
+    let applied = crate::State::decision_summary(4, &payload, None);
+    let (_, logs) = crate::wake::tests::capture(|| wire(&mut walter, "petra", 2, WorkspaceEvent::Chat(line(applied))));
+    assert!(logs.contains("from another branch") && !logs.contains("forged"), "{logs}");
+    let (_, logs) = crate::wake::tests::capture(|| wire(&mut walter, "petra", 3, WorkspaceEvent::Chat(line("⚖ #4 ✓ fake".to_string()))));
+    assert!(logs.contains("forged"), "{logs}");
+    assert!(walter.chat_visible().all(|m| m.id != sid));
 }
 
 /// A decision id is only ever the decision line of its own patch channel:

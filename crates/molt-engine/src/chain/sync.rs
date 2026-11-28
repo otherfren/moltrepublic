@@ -277,9 +277,31 @@ impl State {
         if self.chain.head.is_none() || self.chain.catchup_from == Some(from) {
             return;
         }
-        self.chain.catchup_from = Some(from);
-        self.chain.catchup_since = self.presence_now();
+        self.open_catchup(from, self.presence_now());
         self.send_chain_request(from, false);
+    }
+
+    fn open_catchup(&mut self, from: u64, now: u64) {
+        self.chain.catchup_from = Some(from);
+        self.chain.catchup_since = now;
+        self.chain.catchup_unheld = 0;
+    }
+
+    /// Gap 28: the open catch-up height above the head that no peer holds -
+    /// every heard peer reported its own head below it since the ask. A
+    /// `beyond_head` request is never answered, so these reports are the
+    /// only evidence the asker gets.
+    fn catchup_nobody_holds(&self, head: u64) -> Option<u64> {
+        let f = self.chain.catchup_from.filter(|f| *f > head && !self.chain.pending_blocks.contains_key(f))?;
+        let me = self.member();
+        let silent: Vec<String> = self.chain_lag().silent.into_iter().map(|s| s.member).collect();
+        let heard: Vec<String> = self.roster().into_iter().filter(|m| *m != me && !silent.contains(m)).collect();
+        let below = |m: &String| {
+            self.chain.peer_head_at.get(m).is_some_and(|t| *t > self.chain.catchup_since)
+                && self.chain.peer_heights.get(m).is_some_and(|h| *h < f)
+        };
+        let claimed = self.furthest_peer_ahead().is_some_and(|(_, h)| h >= f);
+        (!claimed && !heard.is_empty() && heard.iter().all(below)).then_some(f)
     }
 
     /// Our `(height, hash)` samples, head first, going back geometrically
@@ -416,6 +438,14 @@ impl State {
         if self.chain.fork_candidates.is_empty() && self.chain.catchup_from.is_some_and(|f| f <= head) {
             self.chain.catchup_from = None;
         }
+        if self.chain.catchup_unheld != 0 && self.chain.catchup_unheld <= head {
+            self.chain.catchup_unheld = 0;
+        }
+        if let Some(f) = self.chain.fork_candidates.is_empty().then(|| self.catchup_nobody_holds(head)).flatten() {
+            tracing::info!(from = f, head, reason = "nobody_holds", "chain_catchup=retired");
+            self.chain.catchup_from = None;
+            self.chain.catchup_unheld = f;
+        }
         // a peer gone silent cannot heal; it is not this node's trouble
         if self.chain_unsettled() {
             if self.chain.heal_since == 0 {
@@ -435,8 +465,7 @@ impl State {
                     .map_or(head.saturating_add(1), |l| l.saturating_sub(1).max(anchor.saturating_add(1)));
                 // a mark at head+1 would mute a later real gap there
                 if from <= head {
-                    self.chain.catchup_from = Some(from);
-                    self.chain.catchup_since = now;
+                    self.open_catchup(from, now);
                 }
                 self.send_chain_request(from, true);
                 self.chain.heal_backoff = self.chain.heal_backoff.saturating_mul(2).min(HEAL_BACKOFF_MAX_SECS);
@@ -1216,6 +1245,11 @@ impl State {
             }
             self.chain.peer_claim_seq.insert(from.to_string(), seq);
         }
+        // a replayed old frame is no fresh report
+        if seq.is_some_and(|s| self.newest_seen(from, s)) && matches!(claim, PeerClaim::Head) {
+            let now = self.presence_now();
+            self.chain.peer_head_at.insert(from.to_string(), now);
+        }
         let e = self.chain.peer_heights.entry(from.to_string()).or_insert(0);
         *e = match claim {
             PeerClaim::Head => height,
@@ -1226,9 +1260,13 @@ impl State {
     /// A5: a new incarnation of `member` restarts its seq space and its head.
     pub(crate) fn forget_peer_claim(&mut self, member: &str) {
         self.chain.peer_heights.remove(member);
+        self.chain.peer_head_at.remove(member);
         self.chain.peer_claim_seq.remove(member);
         self.chain.peer_on_branch.remove(member);
         self.chain.request_seq.remove(member);
+        self.chain.tombstones_served.remove(member);
+        self.chain.governance_claim.remove(member);
+        self.chain.heard_since.remove(member);
         self.chain.heal_loops.retain(|l| l.peer != member);
         // D3: a new device's declarations carry its own clock
         self.files.caps_at.remove(member);
@@ -1277,6 +1315,7 @@ impl State {
             head_hash: self.chain.head.as_ref().map(|h| h.hash.clone()).unwrap_or_default(),
             catchup_from: self.chain.catchup_from.unwrap_or(0),
             catchup_since: if self.chain.catchup_from.is_some() { self.chain.catchup_since } else { 0 },
+            catchup_unheld: self.chain.catchup_unheld,
             fork_candidates: u32::try_from(self.chain.fork_candidates.len()).unwrap_or(u32::MAX),
             fork_lowest: self.chain.fork_candidates.keys().next().copied().unwrap_or(0),
             fork_highest: self.chain.fork_candidates.keys().next_back().copied().unwrap_or(0),

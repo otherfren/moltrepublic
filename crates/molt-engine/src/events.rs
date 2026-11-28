@@ -964,6 +964,10 @@ impl State {
         self.chain.own_approvals.clear();
         self.chain.lock = crate::chain::LockRuntime::default();
         self.chain.served_at.clear();
+        self.chain.tombstones_served.clear();
+        self.chain.governance_claim.clear();
+        self.chain.heard_since.clear();
+        self.chain.governance_broadcast = None;
         self.chain.refused_at.clear();
         // the chain PROJECTIONS too (review E5): a chainless workspace opened
         // next has nothing to refold them from, so they bled across
@@ -1008,6 +1012,7 @@ impl State {
         self.chain.pending_blocks.clear();
         self.chain.catchup_from = None;
         self.chain.catchup_since = 0;
+        self.chain.catchup_unheld = 0;
         self.chain.fork_decisions = 0;
         self.chain.last_fork = None;
         self.chain.resent_at.clear();
@@ -1020,6 +1025,7 @@ impl State {
         self.chain.request_seq.clear();
         self.chain.heal_since = 0;
         self.chain.peer_heights.clear();
+        self.chain.peer_head_at.clear();
         self.chain.peer_claim_seq.clear();
         self.chain.applied_at.clear();
         self.chain.feedback_emitted_at = 0;

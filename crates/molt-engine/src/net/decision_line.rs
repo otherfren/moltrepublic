@@ -35,6 +35,8 @@ pub(crate) struct DecisionLines {
 pub(super) enum Verdict {
     Genuine,
     Pending,
+    /// Well formed, but the other outcome: a seat on another branch.
+    OtherBranch,
     Forged,
 }
 
@@ -77,11 +79,26 @@ impl State {
                 .chain(std::iter::once(&p.declined_by))
                 .filter(|w| !w.is_empty())
                 .any(|w| msg.body == Self::decision_summary(proposal, &p.payload, Some(w))),
-            (ProposalState::Applied, true) | (ProposalState::Rejected, false) => false,
+            (ProposalState::Rejected, false) => {
+                return self.other_outcome(msg.body == Self::decision_summary(proposal, &p.payload, None));
+            }
+            (ProposalState::Applied, true) => {
+                let well_formed =
+                    self.roster().iter().any(|w| msg.body == Self::decision_summary(proposal, &p.payload, Some(w)));
+                return self.other_outcome(well_formed);
+            }
             _ => return Verdict::Pending,
         };
         if matches {
             Verdict::Genuine
+        } else {
+            Verdict::Forged
+        }
+    }
+
+    fn other_outcome(&self, well_formed: bool) -> Verdict {
+        if well_formed {
+            Verdict::OtherBranch
         } else {
             Verdict::Forged
         }
@@ -115,6 +132,9 @@ impl State {
                 Verdict::Genuine => self.land_wire_chat(h.from, h.msg),
                 Verdict::Forged => {
                     tracing::warn!(from = %h.from, id = %h.msg.id, proposal, "dropping a forged decision line");
+                }
+                Verdict::OtherBranch => {
+                    tracing::info!(from = %h.from, id = %h.msg.id, proposal, "dropping a decision line from another branch");
                 }
                 Verdict::Pending if h.until > now => self.decision_lines.held.push(h),
                 Verdict::Pending => {

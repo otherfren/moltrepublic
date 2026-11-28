@@ -8,30 +8,83 @@ use super::*;
 use molt_core::{ChainChange, Surface};
 use serde_json::json;
 
-/// C3: one requester is served a catch-up at most once per debounce,
-/// and never for a height above the head.
+/// How many open-governance envelopes `st` has authored: the re-serve of
+/// open cards and tombstones is what floods a level republic (gap 26).
+fn governance_serves(st: &crate::State) -> usize {
+    st.chain
+        .lock
+        .outbox
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.body,
+                WorkspaceEvent::Proposed { .. }
+                    | WorkspaceEvent::Withdrawn { .. }
+                    | WorkspaceEvent::Declined { .. }
+            )
+        })
+        .count()
+}
+
+/// Gap 26: the CHAIN serve keeps its debounce and its beyond-head refusal;
+/// the OPEN GOVERNANCE serve answers a peer's first request (since this
+/// seat's start or the peer's return), then only a peer below our head
+/// whose claim moved. A level heal retry from the forked branch gets the
+/// chain serve but no second governance broadcast.
 #[test]
-fn a_catch_up_request_is_served_once_per_debounce() {
+fn open_governance_serves_a_first_request_then_only_a_peer_behind() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("runtime");
     let _guard = rt.enter();
-    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
-    b.commit_applied(1, &["petra", "dora"]);
-    let mut walter = chain_peer("walter", &b, b.blocks.clone());
+    let (win, lose) = forked_pair();
+    let mut walter = chain_signer("walter", &win, win.blocks.clone());
     walter.presence.clock_override = Some(1_000);
+    propose(&mut walter, Surface::Memory, json!({ "op": "add_note", "id": 41 }));
+    let g0 = governance_serves(&walter);
+    assert!(g0 > 0, "the own open card crossed the wire once");
+
+    // petra heals at THIS head height on the forked branch: its retry names
+    // the fork point, so the chain is served from there; the first request
+    // also carries the open governance, its repeats do not
+    let forked = chain_peer("petra", &lose, lose.blocks.clone());
+    let retry = |st: &mut crate::State, seq: u64| {
+        wire(st, "petra", seq, WorkspaceEvent::ChainRequest { from_height: 1, known: forked.dense_known_heads() });
+    };
+    retry(&mut walter, 1);
+    assert!(walter.next_seq > 2, "the chain suffix went out");
+    let g1 = governance_serves(&walter);
+    assert!(g1 > g0, "the first request since this seat's start is served");
+    walter.presence.clock_override = Some(1_000 + crate::net::CHAIN_SERVE_DEBOUNCE_SECS + 1);
     let before = walter.next_seq;
-    wire(&mut walter, "petra", 1, WorkspaceEvent::ChainRequest { from_height: 0, known: vec![] });
-    let served = walter.next_seq;
-    assert!(served > before, "the first request is served");
-    wire(&mut walter, "petra", 2, WorkspaceEvent::ChainRequest { from_height: 0, known: vec![] });
-    assert_eq!(walter.next_seq, served, "a repeat inside the debounce serves nothing");
-    wire(&mut walter, "petra", 3, WorkspaceEvent::ChainRequest { from_height: 99, known: vec![] });
-    assert_eq!(walter.next_seq, served, "nothing above the head is served");
-    walter.presence.clock_override = Some(1_000 + crate::net::CHAIN_SERVE_DEBOUNCE_SECS);
-    wire(&mut walter, "petra", 4, WorkspaceEvent::ChainRequest { from_height: 0, known: vec![] });
-    assert!(walter.next_seq > served, "after the debounce it is served again");
+    retry(&mut walter, 2);
+    assert!(walter.next_seq > before, "the chain is served again past the debounce");
+    assert_eq!(governance_serves(&walter), g1, "a level retry, whatever its branch, gets no governance");
+
+    // a peer genuinely behind on our branch is served again
+    let behind = chain_peer("petra", &win, win.blocks[..1].to_vec());
+    walter.presence.clock_override = Some(1_000 + 2 * (crate::net::CHAIN_SERVE_DEBOUNCE_SECS + 1));
+    wire(
+        &mut walter,
+        "petra",
+        3,
+        WorkspaceEvent::ChainRequest { from_height: 1, known: behind.known_heads() },
+    );
+    assert!(governance_serves(&walter) > g1, "a peer behind gets every open card");
+
+    // nothing above the head is served at all
+    let g2 = governance_serves(&walter);
+    wire(&mut walter, "petra", 4, WorkspaceEvent::ChainRequest { from_height: 99, known: vec![] });
+    assert_eq!(governance_serves(&walter), g2, "nothing above the head is served");
+    // and the debounce still bounds a repeat
+    wire(
+        &mut walter,
+        "petra",
+        5,
+        WorkspaceEvent::ChainRequest { from_height: 1, known: behind.known_heads() },
+    );
+    assert_eq!(governance_serves(&walter), g2, "a repeat inside the debounce serves nothing");
 }
 
 /// C6: a headless node adopts only ITS republic's genesis — a valid
@@ -1524,4 +1577,513 @@ fn a_new_incarnation_starts_with_no_claim() {
     let level = walter.known_heads();
     wire(&mut walter, "dora", 1, WorkspaceEvent::ChainRequest { from_height: 2, known: level });
     assert!(a6_vote(&mut walter, 7).is_ok(), "the new incarnation is level");
+}
+
+/// A full-roster peer holding exactly `chain` (usually only the genesis):
+/// [`super::test_support::chain_peer_3`] pins the full chain.
+fn peer3(member: &str, b: &Builder, chain: Vec<ChainBlock>) -> crate::State {
+    let mut peer = crate::tests::plain_state();
+    peer.replica = Some(crate::ReplicaState {
+        name: "Chess Club".to_string(),
+        member: member.to_string(),
+        roster: vec!["petra".to_string(), "walter".to_string(), "dora".to_string()],
+        rule_m: 2,
+        identities: Vec::new(),
+        agenda: "play chess".to_string(),
+        features: None,
+        republic_id: b.republic_id.clone(),
+        founded_ts: 0,
+    });
+    peer.adopt_chain(chain);
+    peer
+}
+
+/// The tombstones this seat has re-served, as the test outbox counts them.
+fn tombstones_served(st: &crate::State) -> usize {
+    st.chain
+        .lock
+        .outbox
+        .iter()
+        .filter(|e| matches!(&e.body, WorkspaceEvent::Withdrawn { by, .. } if by == st.member().as_str()))
+        .count()
+}
+
+/// Gap 26: a withdrawn card is re-served to one peer at most once per
+/// incarnation. A peer that holds the tombstone is not sent it again; a
+/// different peer still is; the peer's NEW incarnation (its seq space
+/// reset) asks again and gets it - a rejoiner must not miss the verdict.
+#[test]
+fn a_tombstone_is_served_to_one_peer_once_per_incarnation() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "dora"]);
+    let mut walter = chain_peer_3("walter", &b);
+    walter.identity_sk = Some(b.key("walter").clone());
+    walter.presence.clock_override = Some(1_000);
+    let own = propose(&mut walter, Surface::Memory, json!({ "op": "add_note", "id": 41 }));
+    walter
+        .cmd_withdraw(molt_core::ProposalId(own), None)
+        .expect("the proposer pulls its own card back");
+    assert_eq!(tombstones_served(&walter), 1, "the withdraw itself crossed");
+    walter.chain.lock.outbox.clear();
+
+    let behind = peer3("dora", &b, b.blocks[..1].to_vec());
+    let dora_known = behind.known_heads();
+    let request = |known: Vec<molt_core::HeightHash>| WorkspaceEvent::ChainRequest {
+        from_height: 1,
+        known,
+    };
+    wire(&mut walter, "dora", 10, request(dora_known.clone()));
+    assert_eq!(tombstones_served(&walter), 1, "the first serve carries the tombstone");
+    walter.chain.lock.outbox.clear();
+    walter.presence.clock_override = Some(1_000 + crate::net::CHAIN_SERVE_DEBOUNCE_SECS + 1);
+    wire(&mut walter, "dora", 11, request(dora_known.clone()));
+    assert_eq!(
+        tombstones_served(&walter),
+        0,
+        "a peer that holds the tombstone is not sent it again this incarnation"
+    );
+
+    // a different peer is served
+    wire(
+        &mut walter,
+        "petra",
+        10,
+        request(peer3("petra", &b, b.blocks[..1].to_vec()).known_heads()),
+    );
+    assert_eq!(tombstones_served(&walter), 1, "a fresh peer gets the verdict");
+
+    // dora's new incarnation asks again - and gets it
+    walter.chain.lock.outbox.clear();
+    walter.reset_peer_accept_window(&"dora".to_string());
+    wire(&mut walter, "dora", 1, request(dora_known));
+    assert_eq!(tombstones_served(&walter), 1, "the peer's new incarnation is served again");
+}
+
+/// Three seats of one head height for one simulated hour: two on the
+/// winning branch (their beacons go out every 300 s), one healing on the
+/// forked branch (its retry every 60 s). Past each peer's first request
+/// none of that may record an open governance serve envelope. Before the
+/// fix every retry re-broadcast the cards and tombstones to the whole
+/// group - the field's 92,538 ignored withdraw frames in two days.
+#[test]
+fn an_hour_between_level_heads_records_no_governance_serve() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let base = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut a = base.clone();
+    for id in [1, 2, 3] {
+        a.commit_applied(id, &["petra", "walter"]);
+    }
+    let mut c = base.clone();
+    for id in [11, 12, 13] {
+        c.commit_applied(id, &["petra", "walter"]);
+    }
+    let rid = &base.republic_id;
+    let (win, lose) = if block_hash(rid, &a.blocks[1]) < block_hash(rid, &c.blocks[1]) {
+        (a, c)
+    } else {
+        (c, a)
+    };
+    let mut walter = chain_peer_3("walter", &win);
+    walter.identity_sk = Some(win.key("walter").clone());
+    walter.presence.clock_override = Some(1_000);
+    // the flood's mass: an open card and a withdrawn one, both this seat's
+    let own = propose(&mut walter, Surface::Memory, json!({ "op": "add_note", "id": 41 }));
+    walter
+        .cmd_withdraw(molt_core::ProposalId(own), None)
+        .expect("the proposer pulls its own card back");
+    walter.chain.lock.outbox.clear();
+
+    let healing = chain_peer_3("petra", &lose);
+    let forked_known = healing.dense_known_heads();
+    let dora = chain_peer_3("dora", &win);
+    let dora_known = dora.known_heads();
+
+    let mut first = 0;
+    for minute in 0..60i64 {
+        if minute == 1 {
+            first = governance_serves(&walter);
+        }
+        let now = 1_000 + 60 * minute;
+        walter.presence.clock_override = Some(u64::try_from(now).expect("small"));
+        // the healing seat's retry (its fork candidates keep it retrying):
+        // a dense request down to the shared genesis, from the fork point
+        wire(
+            &mut walter,
+            "petra",
+            u64::try_from(100 + minute).expect("small"),
+            WorkspaceEvent::ChainRequest { from_height: 1, known: forked_known.clone() },
+        );
+        // the level seats' beacons, one every five minutes
+        if minute % 5 == 0 {
+            wire(
+                &mut walter,
+                "dora",
+                u64::try_from(500 + minute).expect("small"),
+                WorkspaceEvent::ChainRequest { from_height: 4, known: dora_known.clone() },
+            );
+        }
+    }
+    let committed = walter
+        .chain
+        .lock
+        .outbox
+        .iter()
+        .filter(|e| matches!(e.body, WorkspaceEvent::Committed(_)))
+        .count();
+    assert_eq!(
+        governance_serves(&walter),
+        first,
+        "an hour of level heads serves no open governance past the first requests - {} envelopes, {} committed serves, request_seq={:?}",
+        governance_serves(&walter),
+        committed,
+        walter.chain.request_seq
+    );
+}
+
+/// Give `st` an active session entry with a pill per roster seat, so a
+/// sighting (`cmd_net_peer_seen`) has a stamp to move.
+fn with_pills(st: &mut crate::State) {
+    let roster = st.roster();
+    let now = st.presence_now();
+    let id = "w-serve".to_string();
+    st.session.active_workspace = id.clone();
+    st.session.workspaces.push(molt_core::WorkspaceInfo {
+        id,
+        name: "Serve".to_string(),
+        detail: "2-of-3".to_string(),
+        synced: true,
+        state: 0,
+        last_sync_min: 0,
+        sync_queue: 0,
+        s3: false,
+        size_kib: 0,
+        last_backup_min: molt_core::WorkspaceInfo::NEVER,
+        backup_checked_min: molt_core::WorkspaceInfo::NEVER,
+        backup_copies: 0,
+        backup_error: String::new(),
+        has_seed: false,
+        net: "none".to_string(),
+        encrypted: false,
+        restored: false,
+        members: molt_core::roster_members(&roster, now, |_| molt_core::MemberInfo::NEVER),
+        agenda: String::new(),
+    });
+}
+
+/// Walter at head 2 of a 2-of-3 chain, holding petra's open card.
+fn serving_walter() -> (Builder, crate::State) {
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    b.commit_applied(1, &["petra", "dora"]);
+    b.commit_applied(2, &["petra", "dora"]);
+    let mut walter = chain_peer_3("walter", &b);
+    walter.identity_sk = Some(b.key("walter").clone());
+    walter.presence.clock_override = Some(1_000);
+    with_pills(&mut walter);
+    wire(
+        &mut walter,
+        "petra",
+        1,
+        WorkspaceEvent::Proposed {
+            id: molt_core::ProposalId(8),
+            surface: Surface::Organization,
+            payload: json!({ "op": "set_name", "value": "One" }),
+        },
+    );
+    walter.chain.lock.outbox.clear();
+    (b, walter)
+}
+
+/// Review M1 of gap 26: a peer that STAYS behind (a lower fork, blocks it
+/// cannot adopt) keeps asking with the same claim; the open governance goes
+/// out once per claim, not once per retry. A moved claim is served again.
+#[test]
+fn a_peer_that_stays_behind_is_served_governance_once_per_claim() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let (b, mut walter) = serving_walter();
+    let stuck = peer3("dora", &b, b.blocks[..1].to_vec()).known_heads();
+    for minute in 0..60u64 {
+        walter.presence.clock_override = Some(1_000 + 60 * minute);
+        wire(
+            &mut walter,
+            "dora",
+            10 + minute,
+            WorkspaceEvent::ChainRequest { from_height: 1, known: stuck.clone() },
+        );
+    }
+    assert_eq!(governance_serves(&walter), 1, "an hour of one claim: one governance serve");
+    let moved = peer3("dora", &b, b.blocks[..2].to_vec()).known_heads();
+    walter.presence.clock_override = Some(1_000 + 3_700);
+    wire(&mut walter, "dora", 100, WorkspaceEvent::ChainRequest { from_height: 2, known: moved });
+    assert_eq!(governance_serves(&walter), 2, "a moved claim is served again");
+}
+
+/// Review M2 of gap 26: a LEVEL seat back from an absence - its relay
+/// backlog gone, no sender owing it a resend - gets the open cards from
+/// the first catch-up request it sends after its presence lapsed.
+#[test]
+fn a_level_returner_gets_its_open_cards_from_its_first_request() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let (b, mut walter) = serving_walter();
+    let head = b.blocks.last().expect("head").height;
+    // dora was served once while behind: a serve record stands for it
+    let behind = peer3("dora", &b, b.blocks[..1].to_vec()).known_heads();
+    walter.cmd_net_peer_seen("dora".to_string(), None).expect("heard");
+    wire(&mut walter, "dora", 10, WorkspaceEvent::ChainRequest { from_height: 1, known: behind });
+    assert_eq!(governance_serves(&walter), 1, "the behind request was served");
+    walter.chain.lock.outbox.clear();
+
+    // dora goes silent past the offline mark and comes back level
+    let back = 1_000 + molt_core::MemberInfo::STALE_SECS + 600;
+    walter.presence.clock_override = Some(back);
+    walter.cmd_net_peer_seen("dora".to_string(), None).expect("heard again");
+    let level = chain_peer_3("dora", &b).known_heads();
+    wire(&mut walter, "dora", 11, WorkspaceEvent::ChainRequest { from_height: head + 1, known: level });
+    assert_eq!(governance_serves(&walter), 1, "the returner's first request carries the open card");
+}
+
+/// Review M2 of gap 26: a level peer that stays heard is served at most
+/// once in an hour of beacons (the first, from this seat's own start).
+#[test]
+fn a_level_peer_that_stays_heard_is_served_at_most_once() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let (b, mut walter) = serving_walter();
+    let head = b.blocks.last().expect("head").height;
+    let level = chain_peer_3("dora", &b).known_heads();
+    for k in 0..13u64 {
+        walter.presence.clock_override = Some(1_000 + 300 * k);
+        walter.cmd_net_peer_seen("dora".to_string(), None).expect("heard");
+        wire(
+            &mut walter,
+            "dora",
+            10 + k,
+            WorkspaceEvent::ChainRequest { from_height: head + 1, known: level.clone() },
+        );
+    }
+    assert_eq!(governance_serves(&walter), 1, "the first sighting is served once, the later beacons not");
+}
+
+/// Gap 28: a catch-up for a height nobody holds is retired once every
+/// heard peer has reported its head below it since the ask; the status
+/// names the height. No answer crosses the wire for `beyond_head`, so the
+/// peers' own head reports are the evidence.
+#[test]
+fn a_catch_up_nobody_holds_is_retired_by_the_peers_head_reports() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let (b, mut walter) = serving_walter();
+    let head = b.blocks.last().expect("head").height;
+    for p in ["petra", "dora"] {
+        walter.cmd_net_peer_seen(p.to_string(), None).expect("heard");
+    }
+    walter.request_catchup(head + 1);
+    let level = chain_peer_3("dora", &b).known_heads();
+    walter.presence.clock_override = Some(1_100);
+    walter.cmd_net_peer_seen("petra".to_string(), None).expect("heard");
+    wire(&mut walter, "petra", 20, WorkspaceEvent::ChainRequest { from_height: head + 1, known: level.clone() });
+    walter.chain_heal_tick();
+    assert_eq!(walter.chain.catchup_from, Some(head + 1), "dora has not reported since the ask");
+
+    walter.presence.clock_override = Some(1_200);
+    walter.cmd_net_peer_seen("dora".to_string(), None).expect("heard");
+    wire(&mut walter, "dora", 20, WorkspaceEvent::ChainRequest { from_height: head + 1, known: level });
+    walter.chain_heal_tick();
+    assert_eq!(walter.chain.catchup_from, None, "every heard peer reported a head below the ask");
+    assert_eq!(walter.chain_sync().catchup_unheld, head + 1, "the status says nobody holds it");
+}
+
+/// Gap 28: a peer that reports holding the asked height keeps the
+/// catch-up open.
+#[test]
+fn a_catch_up_a_peer_holds_stays_open() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let (b, mut walter) = serving_walter();
+    let head = b.blocks.last().expect("head").height;
+    let mut ahead = b.clone();
+    ahead.commit_applied(3, &["petra", "dora"]);
+    for p in ["petra", "dora"] {
+        walter.cmd_net_peer_seen(p.to_string(), None).expect("heard");
+    }
+    walter.request_catchup(head + 1);
+    walter.presence.clock_override = Some(1_100);
+    let level = chain_peer_3("dora", &b).known_heads();
+    wire(&mut walter, "dora", 20, WorkspaceEvent::ChainRequest { from_height: head + 1, known: level });
+    let holds = chain_peer_3("petra", &ahead).known_heads();
+    wire(&mut walter, "petra", 20, WorkspaceEvent::ChainRequest { from_height: head + 2, known: holds });
+    walter.chain_heal_tick();
+    assert_eq!(walter.chain.catchup_from, Some(head + 1), "petra holds it");
+    assert_eq!(walter.chain_sync().catchup_unheld, 0);
+}
+
+/// Review 2 M1 of gap 26: a first request from a peer AHEAD of this seat
+/// gets no governance serve - this seat's open cards may be decided on the
+/// chain it has not caught up to.
+#[test]
+fn a_first_request_from_a_peer_ahead_records_no_governance_serve() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let (b, mut walter) = serving_walter();
+    let head = b.blocks.last().expect("head").height;
+    let mut ahead = b.clone();
+    ahead.commit_applied(3, &["petra", "dora"]);
+    walter.cmd_net_peer_seen("petra".to_string(), None).expect("heard");
+    let known = chain_peer_3("petra", &ahead).known_heads();
+    wire(&mut walter, "petra", 20, WorkspaceEvent::ChainRequest { from_height: head + 2, known });
+    assert_eq!(governance_serves(&walter), 0, "a peer ahead is not served stale governance");
+}
+
+/// Review 2 M2 of gap 26: the serve is a group broadcast. Two peers heard
+/// before it went out are both reached by it - one broadcast, not two; a
+/// peer first heard after it is served on its own.
+#[test]
+fn peers_returning_within_the_debounce_cause_one_broadcast() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let (b, mut walter) = serving_walter();
+    let head = b.blocks.last().expect("head").height;
+    let level = chain_peer_3("dora", &b).known_heads();
+    let beacon = |known: Vec<molt_core::HeightHash>| WorkspaceEvent::ChainRequest { from_height: head + 1, known };
+    for p in ["petra", "dora"] {
+        walter.cmd_net_peer_seen(p.to_string(), None).expect("heard");
+    }
+    walter.presence.clock_override = Some(1_001);
+    wire(&mut walter, "petra", 20, beacon(level.clone()));
+    walter.presence.clock_override = Some(1_005);
+    wire(&mut walter, "dora", 20, beacon(level.clone()));
+    assert_eq!(governance_serves(&walter), 1, "both were listening: one broadcast");
+
+    // a fresh seat state: dora is first heard AFTER petra's broadcast
+    let (_, mut walter) = serving_walter();
+    walter.cmd_net_peer_seen("petra".to_string(), None).expect("heard");
+    walter.presence.clock_override = Some(1_001);
+    wire(&mut walter, "petra", 20, beacon(level.clone()));
+    walter.presence.clock_override = Some(1_005);
+    walter.cmd_net_peer_seen("dora".to_string(), None).expect("heard");
+    wire(&mut walter, "dora", 20, beacon(level));
+    assert_eq!(governance_serves(&walter), 2, "a peer heard only after the broadcast is served");
+}
+
+/// Review 2 L1 of gap 28: a peer still claiming a height at or above the
+/// ask keeps the catch-up open, even when it has not been heard lately.
+#[test]
+fn a_catch_up_stays_open_while_a_quiet_peer_claims_the_height() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let (b, mut walter) = serving_walter();
+    let head = b.blocks.last().expect("head").height;
+    walter.note_peer_height("petra", head + 1);
+    walter.cmd_net_peer_seen("dora".to_string(), None).expect("heard");
+    walter.request_catchup(head + 1);
+    walter.presence.clock_override = Some(1_100);
+    walter.cmd_net_peer_seen("dora".to_string(), None).expect("heard");
+    let level = chain_peer_3("dora", &b).known_heads();
+    wire(&mut walter, "dora", 20, WorkspaceEvent::ChainRequest { from_height: head + 1, known: level });
+    walter.chain_heal_tick();
+    assert_eq!(walter.chain.catchup_from, Some(head + 1), "petra still claims it");
+}
+
+/// Review 2 L2 of gap 28: a replayed old frame (below the sender's newest
+/// seen seq) is no fresh head report.
+#[test]
+fn a_replayed_vote_refusal_is_no_fresh_head_report() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let (b, mut walter) = serving_walter();
+    let head = b.blocks.last().expect("head").height;
+    walter.delivery.seen_high.insert("petra".to_string(), 50);
+    wire(
+        &mut walter,
+        "petra",
+        10,
+        WorkspaceEvent::VoteRefused {
+            id: molt_core::ProposalId(8),
+            voter: "walter".to_string(),
+            height: head - 1,
+            head: head - 1,
+            reason: String::new(),
+        },
+    );
+    assert!(!walter.chain.peer_head_at.contains_key("petra"), "an old frame stamps no report");
+}
+
+/// Review 2 L3 of gap 28: the heal retry opens a catch-up, and with it the
+/// "nobody holds" mark of an older one is gone.
+#[test]
+fn a_heal_retry_clears_the_unheld_mark() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let (b, mut walter) = serving_walter();
+    let mut other = Builder::new(&["petra", "walter", "dora"], 2);
+    other.commit_applied(9, &["petra", "dora"]);
+    walter.chain.fork_candidates.insert(1, other.blocks[1].clone());
+    walter.chain.catchup_unheld = 9;
+    walter.chain_heal_tick();
+    walter.presence.clock_override = Some(1_000 + 61);
+    walter.chain_heal_tick();
+    assert!(walter.chain.catchup_from.is_some_and(|f| f <= b.blocks.last().expect("head").height), "the retry opened a catch-up");
+    assert_eq!(walter.chain.catchup_unheld, 0, "the old mark is gone");
+}
+
+/// Review 2 L4 of gap 28: a report in the same second as the ask may
+/// predate it and does not count.
+#[test]
+fn a_same_second_head_report_does_not_retire_the_catch_up() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let (b, mut walter) = serving_walter();
+    let head = b.blocks.last().expect("head").height;
+    for p in ["petra", "dora"] {
+        walter.cmd_net_peer_seen(p.to_string(), None).expect("heard");
+    }
+    walter.request_catchup(head + 1);
+    let level = chain_peer_3("dora", &b).known_heads();
+    wire(&mut walter, "petra", 20, WorkspaceEvent::ChainRequest { from_height: head + 1, known: level.clone() });
+    wire(&mut walter, "dora", 20, WorkspaceEvent::ChainRequest { from_height: head + 1, known: level });
+    walter.chain_heal_tick();
+    assert_eq!(walter.chain.catchup_from, Some(head + 1), "same-second reports may predate the ask");
 }

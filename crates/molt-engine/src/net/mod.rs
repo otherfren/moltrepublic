@@ -91,6 +91,8 @@ pub(crate) struct DropSeam {
     pub(crate) force_probe: std::sync::atomic::AtomicBool,
     /// This many listing asks are lost on the way.
     pub(crate) drop_list_asks: std::sync::atomic::AtomicU64,
+    /// How many open-governance envelopes this node has re-served.
+    pub(crate) governance_served: std::sync::atomic::AtomicU64,
 }
 
 impl DropSeam {

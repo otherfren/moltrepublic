@@ -932,7 +932,7 @@ fn serving_open_governance_keeps_the_own_cards_decliners() {
         1,
         WorkspaceEvent::Declined { id: ProposalId(9), by: "dora".to_string(), hash: String::new() },
     );
-    peer.serve_open_governance();
+    peer.serve_open_governance("dora");
     assert_eq!(
         peer.proposals.get(&9).expect("card").decliners,
         vec!["dora".to_string()],
@@ -2994,4 +2994,79 @@ fn an_approve_of_a_relay_change_is_held_through_a_restart() {
     back.clear_divergence("dora");
     assert!(back.own_signature_stands(4), "signed on the heal");
     assert_eq!(back.chain.blocks.len(), 1, "no head move");
+}
+
+/// The log capture of [`crate::wake::tests::capture`], at DEBUG - for the
+/// lines the default (INFO) level must keep out.
+fn debug_capture<T>(run: impl FnOnce() -> T) -> (T, String) {
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let sink = Sink::default();
+    let writer = sink.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(move || writer.clone())
+        .finish();
+    let out = tracing::subscriber::with_default(subscriber, run);
+    let logs = String::from_utf8(sink.0.lock().expect("lock").clone()).expect("utf8");
+    (out, logs)
+}
+
+/// Gap 26: the day log of a level republic stays quiet. A duplicate
+/// proposal frame and an ignored or repeated-parked withdraw log at
+/// DEBUG; only a first sight stays at INFO.
+#[test]
+fn duplicate_governance_frames_log_at_debug_only() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let _guard = rt.enter();
+    let b = Builder::new(&ALL3, 2);
+    let mut walter = chain_peer_3("walter", &b);
+    let card = |v: &str| WorkspaceEvent::Proposed {
+        id: ProposalId(8),
+        surface: Surface::Organization,
+        payload: json!({ "op": "set_name", "value": v }),
+    };
+    let (_, first) = crate::wake::tests::capture(|| wire(&mut walter, "petra", 1, card("One")));
+    assert!(first.contains("proposal received"), "{first}");
+    let (_, dup) = crate::wake::tests::capture(|| wire(&mut walter, "petra", 2, card("One")));
+    assert!(!dup.contains("proposal received"), "a duplicate stays out of the info log: {dup}");
+    let (_, dup_debug) = debug_capture(|| wire(&mut walter, "petra", 3, card("One")));
+    assert!(dup_debug.contains("proposal received"), "{dup_debug}");
+
+    let withdraw = |id: u64| WorkspaceEvent::Withdrawn {
+        id: ProposalId(id),
+        by: "petra".to_string(),
+    };
+    // a registered withdraw stays loud; its ignored duplicate does not
+    let petra_card = |v: &str| WorkspaceEvent::Proposed {
+        id: ProposalId(14),
+        surface: Surface::Organization,
+        payload: json!({ "op": "set_name", "value": v }),
+    };
+    wire(&mut walter, "petra", 4, petra_card("Fourteen"));
+    let (_, w1) = crate::wake::tests::capture(|| wire(&mut walter, "petra", 5, withdraw(14)));
+    assert!(w1.contains("withdraw_received") && w1.contains("Withdrawn"), "{w1}");
+    let (_, w2) = crate::wake::tests::capture(|| wire(&mut walter, "petra", 6, withdraw(14)));
+    assert!(!w2.contains("withdraw_received"), "an ignored duplicate leaves the info log: {w2}");
+    let (_, w2d) = debug_capture(|| wire(&mut walter, "petra", 7, withdraw(14)));
+    assert!(w2d.contains("withdraw_received"), "{w2d}");
+
+    // a withdraw for an unknown card parks: first at INFO, the repeat at DEBUG
+    let (_, p1) = crate::wake::tests::capture(|| wire(&mut walter, "petra", 8, withdraw(11)));
+    assert!(p1.contains("withdraw_received") && p1.contains("Parked"), "{p1}");
+    let (_, p2) = crate::wake::tests::capture(|| wire(&mut walter, "petra", 9, withdraw(11)));
+    assert!(!p2.contains("withdraw_received"), "a repeated park goes quiet: {p2}");
 }

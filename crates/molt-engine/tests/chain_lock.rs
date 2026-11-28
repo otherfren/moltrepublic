@@ -784,6 +784,13 @@ async fn a_device_without_the_mode_is_not_welcomed_and_comes_back_on_a_new_link(
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     assert!(chain(&mara).await.iter().all(|(h, pid, _)| *h == 0 || *pid != 0), "the restore is still open");
+    // walter must hold the enabling block before its seal lets go, or it
+    // seals the restore at that same height and the tie-break picks one
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    while !status(&walter).await.chain_sync.lock_active {
+        assert!(tokio::time::Instant::now() < deadline, "walter never got the enabling block");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     // the held seal lets go: the card seals under the mode
     for w in [&mara, &walter] {
         w.__hold_restore_seals(false);

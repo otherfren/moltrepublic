@@ -321,6 +321,13 @@ state; a signature is only its expression at one head+1.
   `chain_catchup=requested` / `served` lines carry the first and last hash
   of their range. An identical line goes out once per key per minute, the
   next one carries `repeated=<n>`.
+- A request at or beyond the server's head gets no answer on the wire
+  (`chain_catchup=not_served`, debug). The asker retires an open catch-up
+  above its head once every heard peer has reported its own head below
+  it since the ask, in a frame not older than its newest seen, and no
+  peer's recorded height reaches it (`chain_catchup=retired reason=nobody_holds`;
+  `status.chain_sync.catchup_unheld` names the height until the head
+  reaches it or a new ask goes out).
 
 ### 7.3 A fork that does not heal: the branch choice (v0.1.3)
 
@@ -421,6 +428,22 @@ Having verified a chain, a member knows — not trusts — that:
   per member, `try_commit` refuses decided proposals), so several answering
   peers converge harmlessly; membership (recovery) proposals are deliberately
   not re-served — their window is mesh-liveness-bound by design.
+  Since gap 26 (2026-11-27, review fix 2026-11-28) the governance re-serve
+  answers a peer's first catch-up request since this seat's start, the
+  peer's new incarnation (`forget_peer_claim`) or its return (its presence
+  pill had gone offline), unless its top `known` sample is above this
+  seat's head; after that only a request whose top sample sits below this
+  seat's head and differs from the one last served (`governance_claim`).
+  A level retry, from any branch, gets no governance broadcast, and a seat
+  with fork candidates, buffered blocks or a catch-up at or below its head
+  serves none. The serve is a group broadcast: a peer heard before the last
+  one, within the serve debounce, is marked served without another. A peer
+  that acked the serve and lost it in a hard kill is not served again until
+  its claim moves or it returns. This seat's own withdrawn cards inside the
+  retention re-serve to one peer at most once per incarnation or return
+  (`tombstones_served`). A returner's open cards thus come from the
+  relay's stored frames, the sender's resend (only to a peer that had
+  acked it) and this one serve per return.
 - **Real (WP4b, 2026-07-18): threshold-signed chain checkpoints.** The
   republic compacts the way it governs: `propose_checkpoint` (a co-equal
   verb — MCP tool + GUI button) cuts at the current head; every member

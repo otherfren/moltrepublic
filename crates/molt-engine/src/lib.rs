@@ -487,6 +487,13 @@ impl WalletHandle {
         self.drop_seam.dropped.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    /// Test seam: how many open-governance envelopes this node re-served
+    /// (gap 26). A read only; no `Command` reaches it.
+    #[doc(hidden)]
+    pub fn __governance_served(&self) -> u64 {
+        self.drop_seam.governance_served.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Test seam: a partition - every inbound envelope of `peers` is lost
     /// on this node until the next call (empty heals it).
     #[doc(hidden)]
@@ -1285,6 +1292,17 @@ pub(crate) struct ChainProjection {
     /// per frame, into the durable log), so one requester is served at
     /// most once per `CHAIN_SERVE_DEBOUNCE_SECS` (net/ingest.rs) (review C3).
     pub(crate) served_at: HashMap<MemberId, u64>,
+    /// Per peer, the own withdrawn ids already re-served to it. Cleared per
+    /// peer in `forget_peer_claim`, on its return, and with the workspace.
+    pub(crate) tombstones_served: HashMap<MemberId, std::collections::BTreeSet<u64>>,
+    /// Per peer, the top `known` sample its last open-governance serve
+    /// answered (gap 26): a repeat of the same claim is not served again.
+    /// Cleared with `tombstones_served`, and when the peer's presence lapsed.
+    pub(crate) governance_claim: HashMap<MemberId, Option<molt_core::HeightHash>>,
+    /// When each peer was first heard since this seat's start or its return.
+    pub(crate) heard_since: HashMap<MemberId, u64>,
+    /// The last open-governance broadcast: when, and the tombstone ids in it.
+    pub(crate) governance_broadcast: Option<(u64, std::collections::BTreeSet<u64>)>,
     /// A6: when each voter was last told its vote was dropped.
     pub(crate) refused_at: HashMap<MemberId, u64>,
     /// Declines waiting for their proposal (keyed by proposal id, one entry
@@ -1367,6 +1385,11 @@ pub(crate) struct ChainProjection {
     pub(crate) blob_parts: chain::blob_parts::BlobAssembly,
     /// When the open catch-up request was last sent (presence clock).
     pub(crate) catchup_since: u64,
+    /// Gap 28: a catch-up height retired because every heard peer reported
+    /// its head below it (0 = none).
+    pub(crate) catchup_unheld: u64,
+    /// Gap 28: when each peer last reported its own head in a frame.
+    pub(crate) peer_head_at: HashMap<MemberId, u64>,
     /// Fork decisions since open (S1 diagnostics).
     pub(crate) fork_decisions: u64,
     /// Cuts refused while a base was missing: the newest per proposer,

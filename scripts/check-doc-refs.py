@@ -76,6 +76,7 @@ NO_BARE_SCAN_FILES = {
     "crates/molt-engine/tests/wiki_files.rs": "the file-reference keystones' fixtures are wiki paths",
     "crates/molt-engine/src/tests/proposal_store_tests.rs": "the proposal-store keystones' wiki patch fixtures",
     "crates/molt-engine/tests/checkpoint_under_load.rs": "the cut keystone's patch fixtures are wiki paths",
+    "crates/molt-engine/tests/governance_serve_keystone.rs": "the governance-serve keystone's patch fixtures are wiki paths",
     "crates/molt-engine/src/vault/fold_tests.rs": "the vault cut keeps the wiki fold choice: its fixture is a wiki path",
     "docs_archive/reviews/agent_wiki_round_3/briefing_v3.md": "the round-3 agent briefing names wiki pages and the seats' friction.md",
     "docs_archive/reviews/agent_wiki_round_3/friction-left.md": "a seat's friction log: wiki paths and its own friction.md",

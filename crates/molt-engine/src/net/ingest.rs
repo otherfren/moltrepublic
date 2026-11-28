@@ -221,6 +221,10 @@ impl State {
                             tracing::warn!(%from, id = %msg.id, proposal, "dropping a forged decision line");
                             return Ok(Reply::Ack);
                         }
+                        super::decision_line::Verdict::OtherBranch => {
+                            tracing::info!(%from, id = %msg.id, proposal, "dropping a decision line from another branch");
+                            return Ok(Reply::Ack);
+                        }
                     }
                 }
                 self.land_wire_chat(from, msg);
@@ -292,13 +296,9 @@ impl State {
             // chain governance gossip + block broadcast — only a chain-governed
             // workspace acts on it (the transport carries it; the chain decides)
             WorkspaceEvent::Proposed { id, surface, payload } if self.is_chain_governed() => {
-                tracing::info!(
-                    from = %from,
-                    id = id.0,
-                    surface = ?surface,
-                    op = payload.get("op").and_then(serde_json::Value::as_str).unwrap_or(""),
-                    "proposal received"
-                );
+                // Gap 26: logged at first sight only - the announce line sits
+                // below, with `receive_proposed`; a duplicate reaches DEBUG
+                let op = payload.get("op").and_then(serde_json::Value::as_str).unwrap_or("").to_string();
                 // defense in depth: the same two gates the local propose path
                 // applies — dropped, never recorded (convergence before
                 // enforcement, like every wire guard). Both verdicts are
@@ -416,7 +416,15 @@ impl State {
                 }
                 // announce only a genuinely NEW proposal: a WP2 re-serve or
                 // an id-collision refusal must not (re-)ring frontends
-                if self.receive_proposed(id.0, surface, payload, &from) {
+                let fresh = self.receive_proposed(id.0, surface, payload, &from);
+                if fresh {
+                    tracing::info!(
+                        from = %from,
+                        id = id.0,
+                        surface = ?surface,
+                        op = %op,
+                        "proposal received"
+                    );
                     // wake a sleeping agent harness if this seat's vote is
                     // now awaited (debounced; no-op without a wake command)
                     self.maybe_wake_pending(&from);
@@ -502,6 +510,9 @@ impl State {
                         self.after_wallet_proposed(id.0);
                         self.wallet_cosign_review();
                     }
+                } else {
+                    // a duplicate, or refused (the refusal logged its own reason)
+                    tracing::debug!(from = %from, id = id.0, "proposal received=not_new");
                 }
             }
             WorkspaceEvent::Approved { id, by, height, sig } if self.is_chain_governed() => {
@@ -634,8 +645,18 @@ impl State {
                     tracing::warn!(%from, claimed = %by, "dropping a withdraw claiming another member");
                     return Ok(Reply::Ack);
                 }
+                let repeated_park = self.chain.pending_withdrawals.contains_key(&id.0);
                 let outcome = self.register_withdraw(id.0, &from, envelope.ts);
-                tracing::info!(id = id.0, %from, ?outcome, "withdraw_received");
+                // Gap 26: the flood read as thousands of info lines a day -
+                // only a first sight (a registered verdict, or a first park)
+                // stays at INFO
+                let first = matches!(outcome, crate::proposals::WithdrawOutcome::Withdrawn)
+                    || (matches!(outcome, crate::proposals::WithdrawOutcome::Parked) && !repeated_park);
+                if first {
+                    tracing::info!(id = id.0, %from, ?outcome, "withdraw_received");
+                } else {
+                    tracing::debug!(id = id.0, %from, ?outcome, "withdraw_received");
+                }
                 // R12: durable like the decline above, at the wire stamp -
                 // a parked one too (D1), or a reopen reopens its card
                 if outcome != crate::proposals::WithdrawOutcome::Ignored {
@@ -681,7 +702,7 @@ impl State {
                     tracing::debug!(%from, seq = envelope.seq, "chain_catchup=stale");
                     return Ok(Reply::Ack);
                 }
-                tracing::info!(%from, from_height, known = known.len(), "chain_catchup=received");
+                tracing::debug!(%from, from_height, known = known.len(), "chain_catchup=received");
                 // A5: the requester's own samples say where it stands
                 if let Some(top) = known.iter().max_by_key(|h| h.height) {
                     self.note_peer_claim(&from, top.height, Some(envelope.seq), crate::chain::PeerClaim::Head);
@@ -709,14 +730,29 @@ impl State {
                     .is_some_and(|t| now.saturating_sub(*t) < CHAIN_SERVE_DEBOUNCE_SECS);
                 if beyond_head || recently {
                     let reason = if beyond_head { "beyond_head" } else { "recently" };
-                    tracing::info!(%from, from_height, reason, "chain_catchup=not_served");
+                    tracing::debug!(%from, from_height, reason, "chain_catchup=not_served");
                 } else {
                     self.chain.served_at.insert(from.clone(), now);
                     self.serve_chain_from(&from, from_height);
-                    // WP2: the requester is (re)joining the conversation — beyond
-                    // the committed suffix it also lost the ephemeral open
-                    // governance state with its RAM, so re-serve that too
-                    self.serve_open_governance();
+                }
+                // gap 26: once per peer return, and again only for a peer below
+                // our head whose claim moved; never from a seat still catching up
+                let claim = known.iter().max_by_key(|k| k.height).cloned();
+                let head_h = self.chain.head.as_ref().map_or(0, |h| h.height);
+                let current = self.chain.fork_candidates.is_empty()
+                    && self.chain.pending_blocks.is_empty()
+                    && self.chain.catchup_from.map_or(true, |f| f > head_h);
+                let due = current
+                    && !recently
+                    && match self.chain.governance_claim.get(&from) {
+                        None => claim.as_ref().map_or(true, |c| c.height <= head_h),
+                        Some(last) => !beyond_head && *last != claim && claim.as_ref().is_some_and(|c| c.height < head_h),
+                    };
+                if due {
+                    self.chain.governance_claim.insert(from.clone(), claim);
+                    if !self.governance_reached(&from, now) {
+                        self.serve_open_governance(&from);
+                    }
                 }
             }
             WorkspaceEvent::MembershipProposed {

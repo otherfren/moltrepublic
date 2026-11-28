@@ -892,7 +892,14 @@ it is the stored window's `high`, except for a legacy window (it may
 describe another device). A `ChainRequest` (round, serve, divergence
 clear, claim, seat head) and a `VoteRefused` (notice) act only for a frame
 at that seq; an older one - a gap-filler after a restart included - is
-applied to state as history. A merge reset starts it anew, an operator
+applied to state as history. Since gap 26 (2026-11-27) the governance part
+of the serve answers a peer's first request since the server's start or
+the peer's return, then only a request whose top `known` sample sits below
+the server's head with a claim not served before (`persistent_chain.md`);
+a tombstone re-serves to one peer at most once per incarnation or return
+(the recovery-announce reset clears the peer's mark, so a rejoiner gets
+the verdicts again). A
+merge reset starts it anew, an operator
 resync of a legacy window too; one of a `current` window keeps it. After
 a legacy `resync_seat` the seat's re-fetched history arrives ascending
 with nothing seen yet, so its old catch-up requests each act once as they

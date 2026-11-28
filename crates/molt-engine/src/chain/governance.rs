@@ -2141,10 +2141,48 @@ impl State {
         }
     }
 
-    pub(crate) fn serve_open_governance(&mut self) {
+    /// Gap 26: the last governance broadcast, inside the serve debounce,
+    /// already reached `peer` (heard before it went out, and every own
+    /// tombstone it lacks was in it); its tombstones are then marked served.
+    pub(crate) fn governance_reached(&mut self, peer: &str, now: u64) -> bool {
+        let Some((at, ids)) = self.chain.governance_broadcast.clone() else {
+            return false;
+        };
+        if now.saturating_sub(at) >= crate::net::CHAIN_SERVE_DEBOUNCE_SECS
+            || !self.chain.heard_since.get(peer).is_some_and(|h| *h < at)
+        {
+            return false;
+        }
+        let served = self.chain.tombstones_served.get(peer).cloned().unwrap_or_default();
+        let missing = self.open_governance_events().iter().any(|ev| {
+            matches!(ev, WorkspaceEvent::Withdrawn { id, .. } if !served.contains(&id.0) && !ids.contains(&id.0))
+        });
+        if missing {
+            return false;
+        }
+        self.chain.tombstones_served.entry(peer.to_string()).or_default().extend(ids);
+        true
+    }
+
+    pub(crate) fn serve_open_governance(&mut self, peer: &str) {
         let mut events = self.open_governance_events();
         events.extend(self.branch_open_events());
+        // Gap 26: a tombstone already re-served to `peer` stays out; one its
+        // full withdraw park dropped is sent again after the peer's return
+        let served = self.chain.tombstones_served.entry(peer.to_string()).or_default();
+        events.retain(|ev| match ev {
+            WorkspaceEvent::Withdrawn { id, .. } => served.insert(id.0),
+            _ => true,
+        });
+        let ids = events.iter().filter_map(|ev| match ev {
+            WorkspaceEvent::Withdrawn { id, .. } => Some(id.0),
+            _ => None,
+        });
+        self.chain.governance_broadcast = Some((self.presence_now(), ids.collect()));
         let me = self.member();
+        self.drop_seam
+            .governance_served
+            .fetch_add(u64::try_from(events.len()).unwrap_or(u64::MAX), std::sync::atomic::Ordering::SeqCst);
         for body in events {
             let env = self.make_env(me.clone(), body);
             self.record(env);
