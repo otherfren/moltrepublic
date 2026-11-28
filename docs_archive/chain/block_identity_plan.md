@@ -151,11 +151,11 @@ first v3 block.
 ## 4. Activation
 
 Every seat must switch at the same height, or they compute different
-`prev` values and reject each other's blocks for good (rule `link`).
+`prev` values and reject each other's blocks for good (rule `threshold`: the signatures from H cover `prev`).
 
 | option | how | old builds | verdict |
 |---|---|---|---|
-| (a) feature key by vote | `set_features` naming `block-v2`; active from the height after the enabling block. Propose and approve refused unless every seat announced `molt-block-identity-v2` in its mirror declaration `caps` (`net/mirror.rs:722`, `prefs.seat_caps`) | an older build refuses the KEY at propose and in a charter (`canonical_features`, `verify_canonical_features`, `molt-core/src/lib.rs:173-182, 272-300`). It does not check a received `set_features` block, so it applies the block and then refuses the first v2 block (`link`). It stops extending, and its frames show it behind | recommended for existing republics |
+| (a) feature key by vote | `set_features` naming `block-v2`; active from the height after the enabling block. Propose and approve refused unless every seat announced `molt-block-identity-v2` in its mirror declaration `caps` (`net/mirror.rs:722`, `prefs.seat_caps`) | an older build refuses the KEY at propose and in a charter (`canonical_features`, `verify_canonical_features`, `molt-core/src/lib.rs:173-182, 272-300`). It does not check a received `set_features` block, so it applies the block and then refuses the first v2 block (`threshold`: its link holds, its signatures do not verify over the older bytes). It stops extending, and its frames show it behind | recommended for existing republics |
 | (b) new foundings ratify `block-v2` in the charter | v2 from height 1; the genesis keeps its v1 hash (no variants, republic id untouched) | an older joiner refuses the unknown key at sign-what-you-see | recommended for new foundings, together with (a) |
 | (c) a flag day by height in config | | a mismatch is a permanent fork | rejected |
 
@@ -182,7 +182,7 @@ reading a chain it cannot verify.
 | pre-activation history with relinked variants | still verifies |
 | a cut below, at and above H; re-anchor across the boundary | suffix walks agree |
 | recovery of a seat after activation | the rejoiner hashes the anchor and the suffix as v2 |
-| an older build meets the enabling block | applies it, refuses the next block (`link`), stops |
+| an older build meets the enabling block | applies it, refuses the next block (`threshold`), stops |
 | `chain_convergence.rs` keystone before/after | fork decisions and frames per block (expect fewer re-served votes) |
 
 Risk: the identity no longer commits to who attested. A block with the

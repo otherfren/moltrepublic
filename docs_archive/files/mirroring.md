@@ -266,9 +266,15 @@ version boundary, authenticated by the MLS credential like the poke, and
   mirrored series). Sent when the list changed (at most once a minute)
   and unchanged every 5 min while non-empty; stored per member in
   `TransportState.mirror.status`, replacing the last. "Mirrored by N" =
-  the members whose status says `held == of` plus the sharer.
+  the members whose status says `held == of` plus the sharer. Since
+  2026-11-28 the first beat of every runtime sends it even when empty,
+  so a restored seat's new device replaces its old device's claim; a
+  persisted share that loses its only whole holder that way logs a WARN
+  at every other seat.
 - `MirrorWho` (`\x00molt-mwho-v1`) - sent ONCE per runtime start; every
-  holder answers with its status, at most once an hour.
+  seat answers with its status, empty included (since 2026-11-28), at
+  most once an hour; a status from a seat outside the roster counts for
+  nothing.
 
 All three are gossip, never chain state; a seat that was offline learns
 them from the next periodic send or its own ask at start. The status and
@@ -311,7 +317,8 @@ follow `read_mirror`.
 
 ### 3.7 MCP - as built
 
-`read_uploads` rows carry `mirrors`, `mirror_held`, `mirror_of`;
+`read_uploads` rows carry `mirrors`, `mirror_held`, `mirror_of`, and
+`only_on` (a persisted share with one known whole holder: that seat);
 `read_mirror` and `set_mirror` are tools; `read_state files` is
 unchanged; the gossip, progress and folder commands are INTERNAL.
 
