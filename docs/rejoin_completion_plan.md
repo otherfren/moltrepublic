@@ -506,10 +506,11 @@ depends on the chain's design waits for the user's decisions on
 | 19, 24, 27 | being built |
 | 22, 23 | after C.1 |
 | 28, 29 | after 26 |
-| D: irreversible effects wait until final (`docs/chain/chain_whitepaper.md` §13.6; added by the user 2026-11-28) | being specified; what "final" means on today's chain and when each effect fires are the user's to approve before code |
 | acceptance | the full gate on master, then the release build |
 
-Moved out, to be planned again after the whitepaper's decisions: N3,
+Moved out, to be planned again after the whitepaper's decisions: the
+effect gate (irreversible effects wait until final; added and moved out
+again by the user on 2026-11-28), N3,
 C.7 with C.10 (21, 6, 7, 8, 13), 18, C.2, C.3 with 15 and N1, the branch
 choice (14; its lane stays unmerged and dark, the fix items and the
 approver's withdrawal unbuilt), 5e, 5f, 17, the 5b/5c strings, C.5 with
