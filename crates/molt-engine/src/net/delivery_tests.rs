@@ -35,6 +35,63 @@ fn the_ack_flush_takes_only_due_deadlines_and_link_up_arms_one() {
 
 // ---- G7 inbound gap: hold by need, close actively, never deafen --------
 
+#[derive(Clone, Default)]
+struct AskSink;
+impl molt_net::EngineSink for AskSink {
+    async fn deliver(&self, _from: &molt_core::MemberId, _env: molt_core::EventEnvelope) -> Result<(), molt_net::NetError> {
+        Ok(())
+    }
+    async fn peer_seen(&self, _m: &molt_core::MemberId) {}
+    async fn send_failed(&self, _m: &molt_core::MemberId, _r: &str) {}
+}
+
+/// Attach a group runtime on a dead relay (bound, then dropped - never a
+/// service port): its tasks never deliver, only the control queue takes the
+/// asks. Needs a tokio runtime.
+pub(super) fn attach_dead_group(st: &mut crate::State, replaying: bool) {
+    let (health_tx, health_rx) = tokio::sync::watch::channel(molt_net::group_runtime::GroupHealth {
+        subscribed: true,
+        replaying,
+        ..molt_net::group_runtime::GroupHealth::default()
+    });
+    let mls = std::sync::Arc::new(std::sync::Mutex::new({
+        let mut m = molt_net::MlsMember::new(&molt_storage::SigningKey::from_bytes(&[9u8; 32]), "ada").expect("mls");
+        m.create_group().expect("group");
+        m
+    }));
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let url = format!("ws://127.0.0.1:{}", dead.local_addr().expect("addr").port());
+    drop(dead);
+    let channel = molt_net::ritual_net::GroupChannel::new(molt_net::dial::Dialer::direct(), vec![url], [7u8; 32]);
+    let (wake, wake_rx) = tokio::sync::watch::channel(0u64);
+    let handle = molt_net::group_runtime::spawn_group(
+        channel.clone(),
+        molt_net::supervisor::MlsChannel::from_shared(mls.clone()),
+        molt_net::group_runtime::GroupNetConfig::fast("ada".to_string(), vec!["bob".to_string()]),
+        molt_net::supervisor::MemLog::new(),
+        molt_net::supervisor::MemStateStore::new(),
+        AskSink,
+        wake_rx,
+        health_tx,
+    );
+    let trickle = molt_net::trickle::spawn_trickle(
+        channel,
+        molt_net::supervisor::MemStateStore::new(),
+        handle.outbox_busy(),
+        molt_net::trickle::TrickleConfig::new(3600, 1),
+    );
+    st.group_net = Some(crate::GroupNet {
+        handle,
+        mls,
+        wakeup: wake,
+        health: health_rx,
+        trickle,
+        lockout: crate::net::LockOut::default(),
+        unreadable: crate::net::UnreadableEpisode::default(),
+    });
+}
+
+
 fn chat_env(seq: u64, prev: u64, body: &str) -> molt_core::EventEnvelope {
     let n = usize::try_from(seq).expect("small");
     molt_core::EventEnvelope {
@@ -309,6 +366,151 @@ fn an_answering_senders_duplicates_are_no_evidence() {
     at(&mut st, 20);
     st.cmd_net_delivery_tick().expect("tick");
     assert_eq!(bodies(&st), ["base"], "still waiting for the asked seq");
+}
+
+/// Gap 30: a sender that answered once, then leaves our listing asks
+/// unanswered, is again judged by its rounds (§10(c)) - a tail held at the
+/// cap behind a predecessor no round re-offers heals on the next round. The
+/// flag ages at exactly the third unanswered listing ask.
+#[tokio::test]
+async fn a_sender_whose_hold_has_answered_still_self_heals_a_cap_held_tail() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, chat_env(2, 1, "second"));
+    st.cmd_net_gap_answered("bob".to_string(), "ada".to_string(), Vec::new(), Vec::new());
+    attach_dead_group(&mut st, false);
+    at(&mut st, 100);
+    let tail = 2 + molt_core::ACCEPT_WINDOW_BITS + 500;
+    land(&mut st, request_env(tail, tail - 1)); // its prev was acked before a restart
+    assert!(st.inbound_held_has("bob", tail), "held at the cap");
+    for secs in [102, 112] {
+        at(&mut st, secs);
+        st.cmd_net_delivery_tick().expect("tick");
+    }
+    land(&mut st, request_env(tail, tail - 1));
+    at(&mut st, 112 + crate::net::GAP_PASS_GRACE_SECS + 1);
+    st.cmd_net_delivery_tick().expect("tick");
+    assert!(!accepted(&st, tail), "two unanswered listing asks are no evidence yet");
+    at(&mut st, 122);
+    st.cmd_net_delivery_tick().expect("tick");
+    land(&mut st, request_env(tail, tail - 1)); // the round re-offers the tail
+    at(&mut st, 122 + crate::net::GAP_PASS_GRACE_SECS);
+    st.cmd_net_delivery_tick().expect("tick");
+    assert!(accepted(&st, tail), "the round healed the tail: frontier {}", st.delivery.accepted["bob"].frontier);
+}
+
+/// The sender's refusal window bounds the aging: three unanswered listing
+/// asks within 60 s of its last answer prove nothing yet.
+#[tokio::test]
+async fn an_answer_does_not_age_inside_the_senders_refusal_window() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, chat_env(2, 1, "second"));
+    let tail = 2 + molt_core::ACCEPT_WINDOW_BITS + 500;
+    land(&mut st, request_env(tail, tail - 1));
+    st.cmd_net_gap_answered("bob".to_string(), "ada".to_string(), Vec::new(), Vec::new());
+    attach_dead_group(&mut st, false);
+    for secs in [2, 12, 22] {
+        at(&mut st, secs);
+        st.cmd_net_delivery_tick().expect("tick");
+    }
+    land(&mut st, request_env(tail, tail - 1));
+    at(&mut st, 22 + crate::net::GAP_PASS_GRACE_SECS + 1);
+    st.cmd_net_delivery_tick().expect("tick");
+    assert!(!accepted(&st, tail), "inside the refusal window");
+    for secs in [32, 42, 52, 62] {
+        at(&mut st, secs);
+        st.cmd_net_delivery_tick().expect("tick");
+    }
+    land(&mut st, request_env(tail, tail - 1));
+    at(&mut st, 62 + crate::net::GAP_PASS_GRACE_SECS);
+    st.cmd_net_delivery_tick().expect("tick");
+    assert!(accepted(&st, tail), "past it the round heals");
+}
+
+/// Named asks never age the flag: a seq the sender re-published to us is
+/// refused to us for 60 s and the sender then answers nothing. A repeat
+/// meanwhile (a resend for another asker) must not give the listed seq up;
+/// the late original closes the gap in order.
+#[tokio::test]
+async fn a_refused_named_ask_does_not_age_the_flag() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, request_env(3, 2));
+    land(&mut st, chat_env(4, 3, "held"));
+    st.cmd_net_gap_listed(&"bob".to_string(), &"ada".to_string(), 1, 4, vec![2, 3, 4]);
+    attach_dead_group(&mut st, false);
+    for secs in [1, 3] {
+        at(&mut st, secs);
+        st.cmd_net_delivery_tick().expect("tick");
+    }
+    st.cmd_net_gap_answered("bob".to_string(), "ada".to_string(), vec![2], Vec::new()); // the resend is lost
+    for secs in [8, 13, 23, 33] {
+        at(&mut st, secs);
+        st.cmd_net_delivery_tick().expect("tick");
+    }
+    land(&mut st, request_env(3, 2)); // a resend for another asker
+    at(&mut st, 33 + crate::net::GAP_PASS_GRACE_SECS + 1);
+    st.cmd_net_delivery_tick().expect("tick");
+    assert_eq!(st.delivery.accepted["bob"].frontier, 1, "2 stays owed");
+    land(&mut st, chat_env(2, 1, "late"));
+    assert_eq!(st.delivery.accepted["bob"].frontier, 4);
+    assert_eq!(bodies(&st), ["base", "late", "held"], "in order");
+}
+
+/// The count is per hold episode: two unanswered listing asks in a gap that
+/// then fills by itself leave nothing for the next episode's first ask.
+#[tokio::test]
+async fn unanswered_asks_do_not_carry_into_the_next_episode() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, chat_env(2, 1, "two"));
+    st.cmd_net_gap_answered("bob".to_string(), "ada".to_string(), Vec::new(), Vec::new());
+    attach_dead_group(&mut st, false);
+    at(&mut st, 100);
+    land(&mut st, chat_env(4, 3, "four"));
+    for secs in [102, 112] {
+        at(&mut st, secs);
+        st.cmd_net_delivery_tick().expect("tick");
+    }
+    land(&mut st, chat_env(3, 2, "three"));
+    at(&mut st, 116);
+    st.cmd_net_delivery_tick().expect("tick");
+    at(&mut st, 200);
+    land(&mut st, chat_env(6, 5, "six"));
+    at(&mut st, 202);
+    st.cmd_net_delivery_tick().expect("tick");
+    land(&mut st, chat_env(6, 5, "six")); // a resend for another asker
+    at(&mut st, 202 + crate::net::GAP_PASS_GRACE_SECS + 1);
+    st.cmd_net_delivery_tick().expect("tick");
+    assert_eq!(st.delivery.accepted["bob"].frontier, 4, "5 stays owed");
+}
+
+/// The safety the flag keeps: while the sender answers our asks - even
+/// only every second one - it is filling the gap, and a repeat (a resend
+/// for another asker) never moves the frontier over the owed seq.
+#[tokio::test]
+async fn an_answering_sender_in_progress_never_lets_a_repeat_jump_the_frontier() {
+    let mut st = presence_fixture();
+    land(&mut st, chat_env(1, 0, "base"));
+    land(&mut st, request_env(3, 2));
+    land(&mut st, chat_env(4, 3, "held"));
+    st.cmd_net_gap_answered("bob".to_string(), "ada".to_string(), Vec::new(), Vec::new());
+    attach_dead_group(&mut st, false);
+    for secs in [2, 12, 22] {
+        at(&mut st, secs);
+        st.cmd_net_delivery_tick().expect("tick");
+        if secs == 12 {
+            st.cmd_net_gap_answered("bob".to_string(), "ada".to_string(), Vec::new(), Vec::new());
+        }
+    }
+    land(&mut st, request_env(3, 2)); // a resend for another asker
+    at(&mut st, 22 + crate::net::GAP_PASS_GRACE_SECS);
+    st.cmd_net_delivery_tick().expect("tick");
+    assert_eq!(st.delivery.accepted["bob"].frontier, 1, "2 stays owed");
+    assert!(!accepted(&st, 2));
+    land(&mut st, chat_env(2, 1, "late"));
+    assert_eq!(st.delivery.accepted["bob"].frontier, 4, "the real 2 closes it");
 }
 
 /// More than the hold's cap behind one gap: nothing is shed - the overflow
