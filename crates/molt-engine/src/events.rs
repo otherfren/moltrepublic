@@ -662,6 +662,8 @@ impl State {
             minted_tickets: self.recovery.attempts.minted.iter().cloned().collect(),
             restore_unfinished: self.recovery.unfinished.iter().cloned().collect(),
             rekey_ahead: self.recovery.rekey_ahead.iter().cloned().collect(),
+            rekey_ahead_for: self.recovery.rekey_ahead_for.iter().map(|((m, a), h)| (m.clone(), a.clone(), *h)).collect(),
+            rekey_provisional: self.recovery.rekey_provisional.iter().cloned().collect(),
             restore_interrupted: self.recovery.interrupted.iter().map(|(m, a)| (m.clone(), a.clone())).collect(),
             seal_first_seats: {
                 let mut v: Vec<(String, String)> = self.recovery.seal_first_seats.iter().cloned().collect();
@@ -818,6 +820,8 @@ impl State {
         self.recovery.seal_first_seats.extend(dump.seal_first_seats.iter().cloned());
         self.recovery.unfinished.extend(dump.restore_unfinished.iter().cloned());
         self.recovery.rekey_ahead.extend(dump.rekey_ahead.iter().cloned());
+        self.recovery.rekey_ahead_for.extend(dump.rekey_ahead_for.iter().map(|(m, a, h)| ((m.clone(), a.clone()), *h)));
+        self.recovery.rekey_provisional.extend(dump.rekey_provisional.iter().cloned());
         self.recovery.interrupted.extend(dump.restore_interrupted.iter().cloned());
         for (m, a, n) in &dump.anchor_repushes {
             self.recovery.repushes.insert((m.clone(), a.clone()), (*n, 0));
@@ -1041,6 +1045,8 @@ impl State {
         self.recovery.anchor_first_seats.clear();
         self.recovery.unfinished.clear();
         self.recovery.rekey_ahead.clear();
+        self.recovery.rekey_ahead_for.clear();
+        self.recovery.rekey_provisional.clear();
         self.recovery.interrupted.clear();
         self.recovery.swept.clear();
         self.recovery.withdrawn.clear();

@@ -2766,10 +2766,35 @@ fn a_restore_after_a_finished_one_still_shows_unfinished() {
     assert!(unfinished(&walter, "dora"), "no re-key merged for the second");
 }
 
-/// The cleared flag survives a hard kill: a snapshot written while it
-/// stood must not bring it back.
+/// G23-1: a late re-key of restore #1 counted for open card #2 must not
+/// leave a token behind once #2's own re-key lands, or restore #3 that
+/// never re-keys would hide.
 #[test]
-fn a_cleared_restore_flag_survives_a_hard_kill() {
+fn a_late_rekey_does_not_hide_a_third_unfinished_restore() {
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let _guard = rt.enter();
+    let mut b = Builder::new(&["petra", "walter", "dora"], 2);
+    let mut walter = chain_signer("walter", &b, b.blocks.clone());
+    let first = b.commit(dora_restore(&b, &"aa".repeat(32)), &["petra", "walter"]);
+    assert!(walter.append_committed_block(first.clone()));
+    walter.after_block_applied(&first);
+    open_restore_vote(&mut walter, &b, 40, &"bb".repeat(32));
+    walter.rekey_reset("dora"); // #1's, late
+    let second = b.commit(dora_restore(&b, &"bb".repeat(32)), &["petra", "walter"]);
+    assert!(walter.append_committed_block(second.clone()));
+    walter.after_block_applied(&second);
+    walter.rekey_reset("dora"); // #2's, after its block
+    assert!(!unfinished(&walter, "dora"));
+    let third = b.commit(dora_restore(&b, &"cc".repeat(32)), &["petra", "walter"]);
+    assert!(walter.append_committed_block(third.clone()));
+    walter.after_block_applied(&third);
+    assert!(unfinished(&walter, "dora"), "restore #3 never re-keyed");
+}
+
+/// The cleared flag survives a reopen from the snapshot written while it
+/// stood (the writer queue drained: a crash after the clear's own write).
+#[test]
+fn a_cleared_restore_flag_survives_a_reopen_from_an_older_snapshot() {
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
     let _guard = rt.enter();
     let mut b = Builder::new(&["petra", "walter", "dora"], 2);

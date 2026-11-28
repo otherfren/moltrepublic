@@ -1477,6 +1477,11 @@ pub(crate) struct RecoveryState {
     /// Seats whose re-key merged here before their `Restored` block did.
     /// Persisted.
     pub(crate) rekey_ahead: std::collections::BTreeSet<String>,
+    /// Re-keys merged while that restore's card was open, by `(seat,
+    /// anchor)`; `true` = it also cleared an older flag. Persisted.
+    pub(crate) rekey_ahead_for: std::collections::BTreeMap<(String, String), bool>,
+    /// Seats whose newest block a hedged re-key matched. Persisted.
+    pub(crate) rekey_provisional: std::collections::BTreeSet<String>,
     /// Gap 22: the Welcome time of the restore being materialized.
     pub(crate) welcomed_at: Option<u64>,
     /// Seat -> the anchor of the `Restored` block this coordinator could not
@@ -2138,6 +2143,8 @@ impl State {
                 anchor_first_seats: std::collections::HashSet::new(),
                 unfinished: std::collections::BTreeSet::new(),
                 rekey_ahead: std::collections::BTreeSet::new(),
+                rekey_ahead_for: std::collections::BTreeMap::new(),
+                rekey_provisional: std::collections::BTreeSet::new(),
                 interrupted: std::collections::BTreeMap::new(),
                 swept: HashMap::new(),
                 withdrawn: std::collections::VecDeque::new(),

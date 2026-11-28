@@ -3863,6 +3863,14 @@ pub struct EngineStateDump {
     /// Seats whose re-key this node merged before their `Restored` block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rekey_ahead: Vec<MemberId>,
+    /// `(seat, anchor, hedged)`: a re-key merged here while that restore's
+    /// card was open; `hedged` = it also cleared an older flag.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rekey_ahead_for: Vec<(MemberId, String, bool)>,
+    /// Seats whose newest `Restored` block a hedged re-key matched: the
+    /// next re-key of the seat is that block's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rekey_provisional: Vec<MemberId>,
     /// `(seat, anchor)` whose re-key this coordinator could not run: the
     /// device waiting on that anchor is answered `link outdated`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
