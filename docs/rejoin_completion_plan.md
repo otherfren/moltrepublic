@@ -1,7 +1,7 @@
 # Finishing the rejoin
 
 **Status: PLAN, STARTED; release v0.1.4, BEFORE Robo-Scrum (user
-decision 2026-11-25); v0.1.4 CUT on 2026-11-28 to §D3, the rest waits
+decision 2026-11-25); v0.1.4 RELEASED on 2026-11-28 (§D3), the rest waits
 for the decisions on the chain whitepaper.** Inventory taken on tag v0.1.3 (`3ad6790d`);
 re-baselined 2026-11-27 on master `4e4256a1`, after the user decided
 every question in §F. Fork prevention is REJECTED and not part of this
@@ -491,31 +491,36 @@ R10; the small lane (step 11). `docs_archive/transport/delivery_guarantee.md`
 is still German: translate it once gaps 25 and C.1 are merged, since
 both change it.
 
-## D3. v0.1.4 as cut (user, 2026-11-28)
+## D3. v0.1.4 as released (2026-11-28)
 
-The release is cut to the delivery and re-key fixes. Everything that
-depends on the chain's design waits for the user's decisions on
-`docs/chain/chain_whitepaper.md`.
+Released as tag `v0.1.4` on `d1e8e0ff`: the delivery fixes and the
+small gaps. Everything that depends on the chain's design waits for the
+user's decisions on `docs/chain/chain_whitepaper.md`.
 
-| in v0.1.4 | state |
+| in v0.1.4 | merge |
 |---|---|
-| 25 | merged (`2239e162`) |
-| C.1 with 9 and 12 (1, 4) | review: fix first, two critical and four high claims; fix round running |
-| 26 | review: merge after cleanups; fix round next (a peer that stays behind is served once per claim; the tests pin the rule) |
-| 30 | merged (`df312a19`) |
-| 19, 24, 27 | being built |
-| 22, 23 | after C.1 |
-| 28, 29 | after 26 |
-| acceptance | the full gate on master, then the release build |
+| 25 | `2239e162` |
+| 30 | `df312a19` |
+| 19, 24, 27 | `142f2875` |
+| 22, 23 | `be7360e1` |
+| 26, 28, 29 | `d91c9ca0` |
 
-Moved out, to be planned again after the whitepaper's decisions: the
-effect gate (irreversible effects wait until final; added and moved out
-again by the user on 2026-11-28), N3,
-C.7 with C.10 (21, 6, 7, 8, 13), 18, C.2, C.3 with 15 and N1, the branch
-choice (14; its lane stays unmerged and dark, the fix items and the
-approver's withdrawal unbuilt), 5e, 5f, 17, the 5b/5c strings, C.5 with
-11, 16, the lag guard, the field runs over Tor. Known and shipped open:
-a rejoiner that dies before its Welcome still needs a new link (21).
+Not in it:
+
+- C.1 (1, 4, 9, 12): four fix rounds on `worktree-agent-a0607100893122088`
+  (tip `4b7ea32b`); each of three reviews found a schedule that forks the
+  MLS group, the third one worse than master. Its fourth review is open.
+  Merge only on a review that finds no schedule worse than master.
+- The effect gate (irreversible effects wait until final): planned, not
+  built.
+- N3, C.7 with C.10 (21, 6, 7, 8, 13), 18, C.2, C.3 with 15 and N1, the
+  branch choice (14; its lane stays unmerged and dark), 5e, 5f, 17, the
+  5b/5c strings, C.5 with 11, 16, the lag guard, the field runs over Tor.
+  A rejoiner that dies before its Welcome still needs a new link (21).
+
+Seen in the gates and not fixed: `chain_lock::a_stopped_leader_is_completed_with_the_same_change`
+failed three times in loaded batches on two lanes and passed 5 of 5 on
+master; the mode is dark.
 
 ## E. Out of scope
 
