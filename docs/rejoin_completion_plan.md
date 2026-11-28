@@ -509,8 +509,15 @@ Not in it:
 
 - C.1 (1, 4, 9, 12): four fix rounds on `worktree-agent-a0607100893122088`
   (tip `4b7ea32b`); each of three reviews found a schedule that forks the
-  MLS group, the third one worse than master. Its fourth review is open.
-  Merge only on a review that finds no schedule worse than master.
+  MLS group, the third one worse than master. The fourth review
+  (2026-11-28) says HOLD: the lane turns "no relay this seat can see
+  holds the commit" into a durable "the commit reached nobody", which
+  relays with different reachability per seat cannot decide; a commit
+  that did reach part of the group is dropped and the group stays split
+  where master converges. Its proposal: keep only the durable Welcome
+  re-send and `mls_behind`, and decide two racing re-keys at the
+  receivers by binding a re-key commit to its `Restored` block (one wire
+  field). Not decided.
 - The effect gate (irreversible effects wait until final): planned, not
   built.
 - N3, C.7 with C.10 (21, 6, 7, 8, 13), 18, C.2, C.3 with 15 and N1, the
