@@ -62,7 +62,7 @@ messages.
 of D1. A closed thread is not final.
 
 **D4 - A thread expires as a whole, after inactivity (user, 2026-11-13).**
-A thread has an expiry date: `letzte Aktivität + Thread-Fenster`.
+A thread has an expiry date: `last activity + thread window`.
 Activity is every message, including a close or open line. When
 the date is reached, the thread disappears on every seat **completely**:
 all messages at once, not piece by piece from the back. A half
@@ -112,8 +112,8 @@ existing `WorkspaceEvent::Chat(ChatMessage)`:
 ChatMessage {
     kind: System,
     channel: Topic { name },
-    body: "closed the thread",   // für alte Leser; die GUI nennt den Absender
-    thread_op: Some(ThreadOp::Close | ThreadOp::Reopen),   // NEU, additiv
+    body: "closed the thread",   // for old readers; the GUI names the sender
+    thread_op: Some(ThreadOp::Close | ThreadOp::Reopen),   // NEW, additive
     ..
 }
 ```
@@ -171,7 +171,7 @@ Forgotten and expired threads are missing from the enumeration and in
 it back, just as a foreign message does (D2).
 
 **GUI.** In the "Discussions" sidebar every topic carries its expiry
-date at the right, short (`3 T`, `5 h`). A closed topic shows a
+date at the right, short (`3 d`, `5 h`; the German window shows `3 T`). A closed topic shows a
 padlock. The head of an opened topic holds two buttons: "Close"
 (on a closed topic: "Reopen") and "Forget". Only
 "Forget" asks: closing is visible to everyone and reversible with a
@@ -277,7 +277,7 @@ Conclusions:
 
 ### 8.2 Built (2026-11-13, user: all three conclusions)
 
-- **445 of the running group** carry `expiration = created_at + 3 Tage`
+- **445 of the running group** carry `expiration = created_at + 3 days`
   (`ritual_net::GROUP_EVENT_EXPIRY_SECS`). Set in
   `group_runtime::spawn_group` and for the recovery rekey
   (`chain/membership.rs`) via `GroupChannel::with_group_expiry`.
@@ -340,7 +340,7 @@ Decided (user, 2026-11-13):
   every single thread message, as before. No content lives longer than
   before this change.
 - **Timestamp of a lifecycle line:** real, after the thread's last
-  activity (`max(now, letzte + 1)`). Otherwise a close and
+  activity (`max(now, last + 1)`). Otherwise a close and
   reopen in the same second would be decided by the random id.
   Concurrent actions of different seats are still decided by the id,
   the same on every seat. The stamp is capped at `now + 900 s`,
