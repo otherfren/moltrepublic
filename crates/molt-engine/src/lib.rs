@@ -1477,6 +1477,8 @@ pub(crate) struct RecoveryState {
     /// Seats whose re-key merged here before their `Restored` block did.
     /// Persisted.
     pub(crate) rekey_ahead: std::collections::BTreeSet<String>,
+    /// Gap 22: the Welcome time of the restore being materialized.
+    pub(crate) welcomed_at: Option<u64>,
     /// Seat -> the anchor of the `Restored` block this coordinator could not
     /// re-key for (`recover-interrupted:`). Persisted.
     pub(crate) interrupted: std::collections::BTreeMap<String, String>,
@@ -2128,6 +2130,7 @@ impl State {
                 unsolicited_cooldown: std::collections::HashMap::new(),
                 held_approvals: std::collections::BTreeSet::new(),
                 held_seals: std::collections::BTreeSet::new(),
+                welcomed_at: None,
                 pending: HashMap::new(),
                 rejoiner_caps: std::collections::VecDeque::new(),
                 anchor_first: HashMap::new(),
