@@ -170,7 +170,12 @@ From the activation height H the two layouts change together:
 - Downgrade wall: a chain on disk that enables `block-v2` raises the
   manifest to `STORAGE_VERSION_BLOCK_V2 = 5`; an older binary refuses the
   workspace. An older build on the network applies the enabling block and
-  refuses the block at H (`threshold`), so it stops extending.
+  refuses the block at H (`threshold`: H still links, but its signatures
+  cover `prev`), so it stops extending. An older-build rejoiner after H is
+  refused by the coordinator (no `molt-block-identity-v2` capability in its
+  recover request); were a chain served to it anyway, `verify_served`
+  refuses it, full or anchored on a cut above H (`threshold`), before any
+  write.
 
 ## 6. Verification — every check is hard-reject
 
