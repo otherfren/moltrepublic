@@ -459,6 +459,30 @@ green gate on master.
 | branch choice gate, `amnesia_ack`, pause rule, keystones (14, step 7) | `worktree-agent-a405fe84b36ff8783` | `9d7dcb6d` to `8703e249` | built and green; reviewed 2026-11-28: fix first | (1) the keystone fixtures' literal page names fail `scripts/check-doc-refs.py`; (2) the pause does not recall signatures an approver made before it approved the card, so a card can still go stale: pin it and correct the claim in the rescue plan's status line; (3) a branch card has no withdraw, decline or expiry, so the plan's "or fails" needs an exit: decided 2026-11-28, an approver withdraws its own approval (§C.6); (4) one `chain_lock` test failed in the loaded batch and must be shown flaky or old; (5) the capability gate with a seat that truly did not announce. Then merge dark |
 | lag guard (§C.9) | `worktree-agent-a9076529ed30a58c4` | `faa970b9` to `fd07abf0` | reviewed 2026-11-28: fix first | parked for v0.1.4 (user, 2026-11-28) |
 
+**Second cut, 2026-11-28 (the machine restarts with more CPUs).** Master
+merged into three lanes; every run below is after that merge, nothing
+red, every tree clean. The table's "next" column still holds except
+where this list says otherwise.
+
+| lane | tip | green | still to run |
+|---|---|---|---|
+| 25 | `e959bc8c` | `molt-net` 472, the engine library 1354, the five delivery suites 13, the doc checker | clippy for `molt-net` and `molt-engine`; then merge |
+| C.1 | `3cefe7e9` (one conflict, this plan's gap table) | `molt-net`, the engine library 1351, `backup_ticker`, `branch_rescue`, `c_free_guard`, `chain_convergence`, `chain_lock`, `chat_channels`, the doc checker | the other integration suites from `checkpoint_under_load` on (`nostr_recovery` too), `molt-core`, `molt-storage`, `molt-mcp --lib`, clippy for five crates; then its review |
+| 26 | `0b551c84` | `molt-net` 472, `governance_serve_keystone` 2, `chain_convergence`, `three_nodes`, `majority_rule`, clippy 0, the doc checker | the engine library, `vote_at_a_moving_head`, `vote_survives_restart`, `proposal_listing`, `rejoin_cut`, `delivery_guarantee`, `nostr_delivery_guarantee`; then its review |
+
+Lane 26's question is answered without a rule change: a seat that was
+offline and returns level receives its open cards by the delivery
+guarantee (`a_level_seat_back_from_an_absence_gets_its_open_cards`), and
+master's beacon never served a level seat either (its ask from head+1
+is refused `beyond_head`). For the review: the new keystone never ran
+red, so prove it by mutation; confirm the claim about master in the
+code. Unbuilt and the same on master: an absence longer than the
+compaction grace leaves a level seat without its open cards.
+
+Decided by the user on 2026-11-28: the lag guard is parked; a branch
+card's exit is the approver's withdrawal (§C.6), built with step 7's
+fix items after C.1 merges (the two lanes conflict).
+
 Still to start from §D: N3 (step 2) after C.1; C.7 and the rejoiner with
 C.10 (step 3); the evidence column of the seat table and the choice's
 GUI (step 7); C.5 with gap 11 (step 9); gap 28 with the lag guard's rule
