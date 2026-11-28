@@ -603,9 +603,10 @@ fn the_reopen_pass_is_bounded_too() {
 }
 
 /// An automatic offer that cannot be built is not rebuilt on every retry
-/// gap: the refusal holds until the head moves.
+/// gap: the refusal holds until the head or the peer's claimed height
+/// moves, since both decide whether there is something to offer.
 #[test]
-fn an_unbuildable_offer_waits_for_a_new_head() {
+fn an_unbuildable_offer_waits_for_the_head_or_the_peer_to_move() {
     let (x, _) = fork();
     let mut a = genesis_seat("a", &x, x.blocks[..3].to_vec());
     // b reports our own head: nothing to offer
@@ -624,14 +625,26 @@ fn an_unbuildable_offer_waits_for_a_new_head() {
     a.chain.evidence.no_net = true;
     a.evidence_tick(1_000);
     assert_eq!(a.seat_evidence("b").reason, "nothing to offer");
-    // buildable now, but the head has not moved: no rebuild
-    a.chain.peer_heights.insert("b".to_string(), 0);
+    assert_eq!(a.chain.evidence.auto_tried.get("b"), Some(&1_000));
+    // nothing moved: no second attempt
     a.evidence_tick(1_060);
-    assert_eq!(a.seat_evidence("b").reason, "nothing to offer", "no rebuild at the same head");
+    assert_eq!(a.seat_evidence("b").reason, "nothing to offer", "no rebuild at the same head and claim");
+    assert_eq!(a.chain.evidence.auto_tried.get("b"), Some(&1_000), "not attempted again");
+    // the peer's claim is corrected and the head stands: the offer builds now
+    a.chain.peer_heights.insert("b".to_string(), 0);
+    a.evidence_tick(1_120);
+    assert_eq!(a.seat_evidence("b").reason, "no relay channel", "built once the claim moved");
+    assert_eq!(a.chain.evidence.auto_tried.get("b"), Some(&1_120));
+    // the peer claims our head again: refused, and held while nothing moves
+    a.chain.peer_heights.insert("b".to_string(), 2);
+    a.evidence_tick(1_180);
+    assert_eq!(a.seat_evidence("b").reason, "nothing to offer");
+    a.evidence_tick(1_240);
+    assert_eq!(a.chain.evidence.auto_tried.get("b"), Some(&1_180), "held at the same head and claim");
     // the head moves: the offer is built again
     a.receive_block_from("c", x.blocks[3].clone());
-    a.evidence_tick(1_120);
-    assert_eq!(a.seat_evidence("b").reason, "no relay channel");
+    a.evidence_tick(1_300);
+    assert_eq!(a.seat_evidence("b").reason, "no relay channel", "built once the head moved");
 }
 
 /// Bounds of a part: an index past the total, a zero total, a duplicate.

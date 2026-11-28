@@ -110,9 +110,10 @@ pub(crate) struct EvidenceRuntime {
     /// Per peer, the last tick an automatic offer was ATTEMPTED: the gap
     /// keeps a peer without a relay channel from a build every tick.
     pub(crate) auto_tried: BTreeMap<MemberId, u64>,
-    /// Per peer, the head at which an automatic offer failed to BUILD
-    /// (`nothing to offer`, `too large`): no rebuild until the head moves.
-    pub(crate) auto_failed: BTreeMap<MemberId, (String, String)>,
+    /// Per peer, the head and the peer's claimed height at which an
+    /// automatic offer failed to BUILD (`nothing to offer`, `too large`):
+    /// no rebuild until one of them moves.
+    pub(crate) auto_failed: BTreeMap<MemberId, (String, Option<u64>, String)>,
     /// Per sender, what was judged at the current head: one evaluation
     /// per offer and head, at most [`JUDGE_MAX_PER_HEAD`] of any offers.
     pub(crate) judged: BTreeMap<MemberId, JudgedHead>,
@@ -681,14 +682,15 @@ impl State {
             if self.chain.evidence.auto_tried.get(&peer).is_some_and(|at| now.saturating_sub(*at) < AUTO_RETRY_SECS) {
                 continue;
             }
-            if self.chain.evidence.auto_failed.get(&peer).is_some_and(|(h, _)| *h == head) {
+            let claim = self.chain.peer_heights.get(&peer).copied();
+            if self.chain.evidence.auto_failed.get(&peer).is_some_and(|(h, c, _)| *h == head && *c == claim) {
                 continue;
             }
             self.chain.evidence.auto_tried.insert(peer.clone(), now);
             match self.offer_evidence(&peer) {
                 // the latch waits for the send: a tick without a relay
                 // channel must not switch the automatic path off; a build
-                // refusal holds until the head moves
+                // refusal holds until the head or the claim moves
                 Ok(true) => {
                     self.chain.evidence.auto_failed.remove(&peer);
                     self.note_auto_offer(&peer);
@@ -698,7 +700,7 @@ impl State {
                     tracing::info!(peer = %peer, reason = "no relay channel", "evidence=not_offered");
                 }
                 Err(why) => {
-                    self.chain.evidence.auto_failed.insert(peer.clone(), (head.clone(), why.to_string()));
+                    self.chain.evidence.auto_failed.insert(peer.clone(), (head.clone(), claim, why.to_string()));
                     tracing::info!(peer = %peer, reason = %why, "evidence=not_offered");
                 }
             }
