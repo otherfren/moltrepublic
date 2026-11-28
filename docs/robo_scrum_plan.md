@@ -236,9 +236,36 @@ to help close a wait story early; the chain never checks.
 - Every string goes through `lexicon!` and `Strings`, compact, no em
   dash.
 
+### 4.8 Names
+
+The old names "Quests" and "Kanban" go everywhere; the feature is
+Robo-Scrum and its object is the board. No step is done while its own
+area still says either.
+
+| where | old | new |
+|---|---|---|
+| strings a human reads (GUI, toasts, errors, log lines, tool descriptions, `wake_skill.md`) | Quests, Kanban | Robo-Scrum, board |
+| identifiers, modules, files, test names | `quests*`, `kanban*`, `Quest*`, `Kanban*` | `board*`, `robo_scrum*` |
+| MCP tools | `quests_*` | D5 |
+| documents and their paths | `docs_archive/kanban/`, `kanban_workflows.md` | `docs_archive/robo_scrum/` |
+
+Kept, each with a one-line comment at its site saying why:
+
+- the wire key `quests` (§4.1) and the surface's place in
+  `Surface::ALL` and the frozen checkpoint set: renaming it changes
+  signed bytes and strands every live republic;
+- the op name `kanban_ops`, where the fold recognises and skips it;
+- executed and superseded documents in the archive, which keep their
+  text and get the new path only.
+
+S10 closes it with a grep over `crates/`, `scripts/`, `docs/` and
+`landing_page/` for `quest` and `kanban` (case-insensitive, `request`
+excluded): every remaining hit is on the kept list above.
+
 ## 5. Steps
 
-Each step is test-first, reviewed, and lands green on master. clippy
+Each step is test-first, reviewed, and lands green on master, and
+renames what it touches per §4.8. clippy
 runs per crate. GUI steps are checked with the live-preview chain
 (`scripts/dev-ui.sh build`, the GUI tests under `--features
 molt-ui/live-preview`); no full window build per step.
@@ -298,9 +325,11 @@ select shows "nothing matches" with the clear action; one board shows
 no management view.
 
 **S10 - Documents.** `docs/robo_scrum.md` moves to
-`docs_archive/kanban/` as the spec and replaces
-`kanban_workflows.md` in the read-first list of `CLAUDE.md`; this plan
-is archived as executed; `python3 scripts/check-doc-refs.py`. The
+`docs_archive/robo_scrum/` as the spec and replaces
+`kanban_workflows.md` in the read-first list of `CLAUDE.md`; the old
+`docs_archive/kanban/` documents move there marked superseded; the
+rename grep of §4.8 is clean; this plan is archived as executed;
+`python3 scripts/check-doc-refs.py`. The
 window module is re-measured and the figure in `CLAUDE.md` re-dated.
 
 S3 to S6 are independent of each other once S2 is in; S7 to S9 need S2
