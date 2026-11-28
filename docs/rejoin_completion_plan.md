@@ -6,9 +6,13 @@ re-baselined 2026-11-27 on master `4e4256a1`, after the user decided
 every question in §F. Fork prevention is REJECTED and not part of this
 release: forks below the threshold stay possible, are healed and made
 visible, and are counted in the field. Built on master: 5a, 5b, 5c
-(engine side). Merged 2026-11-28 (`cc9febf1`): the base trickle and the
-close drain (5d, 20). Built on side branches, not merged: the evidence
-exchange (§C.8). Built on side branches, not merged: the branch choice's capability gate, `amnesia_ack`, pause rule and keystones (step 7, in review), the lag guard (§C.9). Questions Q11
+(engine side). Merged 2026-11-28: the base trickle and the close drain
+(5d, 20; `cc9febf1`), the evidence exchange (§C.8; `d2fb9442`). Built
+on side branches, not merged (§D2): the accepted window's cap deadlock
+(25), the durable pending re-key (C.1), the governance gossip flood
+(26), the branch choice's capability gate, `amnesia_ack`, pause rule and
+keystones (step 7). Parked by recommendation after its review: the lag
+guard (§C.9). Questions Q11
 and Q12 decided 2026-11-28: a displaced restore is proposed again
 (§C.10). Field evidence from a second seat's dump of the
 same day: §A3 (gaps 25 to 29, questions Q11 and Q12).
@@ -436,6 +440,29 @@ gate. "After" names what must be merged first.
 
 Calendar: about 10 to 14 working days with three lanes; the serial lane
 (about 100 h with reviews) sets the pace.
+
+## D2. State of the lanes at the cut (2026-11-28, 12:15 CET)
+
+The session that built the lanes above was cut here. Master is
+`f6e96612`, pushed. Every lane sits in its own worktree under
+`.claude/worktrees/`, one branch each, its tree clean; none of the five
+below is merged. Each is merged only after an independent review and a
+green gate on master.
+
+| lane (gap) | branch | commits on top of master | state | next |
+|---|---|---|---|---|
+| accepted window's cap deadlock (25) | `worktree-agent-a9f0851128a72e486` | `743bd999` | built; the unit tests, the delivery keystones and clippy green | the independent review was cut short before its report: rerun it (row 25 names the questions), then merge |
+| durable pending re-key, C.1 (1, 4, 12, 9) | `worktree-agent-a0607100893122088` | `f3cea226`, `d34f9273`, `ad6e8e8b`, `ee563ea1`, `43661cda` | built; `molt-net` 292, the engine library 1320, `nostr_recovery` 43 green | not run: the 16 remaining integration suites, `molt-mcp`, clippy; then an independent review, then merge. Open in it: no engine keystone with disjoint link and group relays (gap 9); the runtime detector of `mls_behind` has no red test of its own; the GUI line for `status.mls_behind` |
+| governance gossip flood (26) | `worktree-agent-aab3c91af45368f0c` | `ff2aef6b`, `703a09d9` (wip) | rules 1, 2, 3 and 5 built and green; the keystone of rule 4 is red | `a_seat_far_behind_gets_every_card_approval_and_tombstone`: a reopened seat reaches the chain head and holds no open card. Settle whether the new rule ("only a peer behind or joining") leaves a seat that was offline while cards were proposed without them; on master the 300 s beacon served everyone. Red test first, then the rule or the keystone; then review, then merge |
+| branch choice gate, `amnesia_ack`, pause rule, keystones (14, step 7) | `worktree-agent-a405fe84b36ff8783` | `9d7dcb6d` to `8703e249` | built and green; reviewed 2026-11-28: fix first | (1) the keystone fixtures' literal page names fail `scripts/check-doc-refs.py`; (2) the pause does not recall signatures an approver made before it approved the card, so a card can still go stale: pin it and correct the claim in the rescue plan's status line; (3) a branch card has no withdraw, decline or expiry, so the plan's "or fails" needs an exit or must say there is none (the user decides); (4) one `chain_lock` test failed in the loaded batch and must be shown flaky or old; (5) the capability gate with a seat that truly did not announce. Then merge dark |
+| lag guard (§C.9) | `worktree-agent-a9076529ed30a58c4` | `faa970b9` to `fd07abf0` | reviewed 2026-11-28: fix first | parked by recommendation; the user decides |
+
+Still to start from §D: N3 (step 2) after C.1; C.7 and the rejoiner with
+C.10 (step 3); the evidence column of the seat table and the choice's
+GUI (step 7); C.5 with gap 11 (step 9); gap 28 with the lag guard's rule
+R10; the small lane (step 11). `docs_archive/transport/delivery_guarantee.md`
+is still German: translate it once gaps 25 and C.1 are merged, since
+both change it.
 
 ## E. Out of scope
 
