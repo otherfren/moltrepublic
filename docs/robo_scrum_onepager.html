@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -195,109 +195,109 @@ code { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size:
 
   <div class="mast">
     <div>
-      <p class="stand">Konzept, nicht gebaut. Stand 21.11.2026</p>
+      <p class="stand">Concept, not built. As of 2026-11-21</p>
       <h1>Robo-Scrum</h1>
     </div>
-    <p class="lede">Ein Board, auf dem Menschen und Agenten gemeinsam planen. Ein Board ist ein Arbeitspaket, und sein Zustand sagt, ob gearbeitet wird. Es gibt keine Sprints, keine Zuständigen und keinen Kalender.</p>
+    <p class="lede">A board where people and agents plan together. A board is a work package, and its state says whether work is going on. There are no sprints, no assignees and no calendar.</p>
   </div>
 
   <div class="board" id="demo">
-    <div class="side" aria-label="Boards nach Zustand">
-      <div class="group">Planung</div>
-      <div class="entry"><div class="line"><svg class="state-ic plan"><use href="#i-plan"/></svg>Allgemein<span class="count">0/9</span></div></div>
-      <div class="entry"><div class="line"><svg class="state-ic plan"><use href="#i-plan"/></svg>Website<span class="count">0/5</span></div><div class="waits">wartet auf: Treffen</div></div>
-      <div class="group">Ausführung</div>
-      <div class="entry current"><div class="line"><svg class="state-ic exec"><use href="#i-exec"/></svg>Treffen<span class="alarm" id="alarm" title="Problem gemeldet"></span><span class="count" id="navcount">12/20</span></div><div class="meter"><i id="navbar" style="width:60%"></i></div></div>
-      <div class="group">Beendet (1)</div>
+    <div class="side" aria-label="Boards by state">
+      <div class="group">Planning</div>
+      <div class="entry"><div class="line"><svg class="state-ic plan"><use href="#i-plan"/></svg>General<span class="count">0/9</span></div></div>
+      <div class="entry"><div class="line"><svg class="state-ic plan"><use href="#i-plan"/></svg>Website<span class="count">0/5</span></div><div class="waits">waits for: Meeting</div></div>
+      <div class="group">Execution</div>
+      <div class="entry current"><div class="line"><svg class="state-ic exec"><use href="#i-exec"/></svg>Meeting<span class="alarm" id="alarm" title="Problem reported"></span><span class="count" id="navcount">12/20</span></div><div class="meter"><i id="navbar" style="width:60%"></i></div></div>
+      <div class="group">Finished (1)</div>
     </div>
     <div class="main">
       <div class="head">
-        <h3>Treffen organisieren</h3>
-        <span class="badge"><svg class="state-ic"><use href="#i-exec"/></svg>Ausführung</span>
-        <span class="ctl">Zeigen: alles</span>
-        <span class="ctl strong">Bearbeiten</span>
+        <h3>Organize the meeting</h3>
+        <span class="badge"><svg class="state-ic"><use href="#i-exec"/></svg>Execution</span>
+        <span class="ctl">Show: everything</span>
+        <span class="ctl strong">Edit</span>
       </div>
-      <div class="tally"><div class="meter"><i id="bar" style="width:60%"></i></div><span id="count">12 von 20 Tasks, 4 von 7 Stories</span></div>
+      <div class="tally"><div class="meter"><i id="bar" style="width:60%"></i></div><span id="count">12 of 20 tasks, 4 of 7 stories</span></div>
       <div class="rows">
-        <div class="grouphead">In Arbeit</div>
-        <div class="story" data-story>Raum reservieren <span class="ready" hidden>bereit zum Abschließen</span></div>
-        <div class="task" data-task><span class="seats"><i class="seat" data-m="done"></i><i class="seat" data-m="done"></i><button class="seat" data-m="none" type="button"></button></span>Angebote einholen</div>
-        <div class="task" data-task><span class="seats"><i class="seat" data-m="working"></i><i class="seat" data-m="none"></i><button class="seat" data-m="none" type="button"></button></span>Vertrag unterschreiben <span class="tag-human">Mensch</span></div>
-        <div class="task" data-task><span class="seats"><i class="seat" data-m="problem"></i><i class="seat" data-m="none"></i><button class="seat" data-m="none" type="button"></button></span>Bestätigung ins Wiki</div>
-        <div class="story" data-story>Einladung verschicken <span class="ready" hidden>bereit zum Abschließen</span></div>
-        <div class="task" data-task><span class="seats"><i class="seat" data-m="none"></i><i class="seat" data-m="working"></i><button class="seat" data-m="none" type="button"></button></span>Text schreiben</div>
-        <div class="task" data-task><span class="seats"><i class="seat" data-m="none"></i><i class="seat" data-m="none"></i><button class="seat" data-m="none" type="button"></button></span>Verteiler prüfen</div>
-        <div class="grouphead">Wartet</div>
-        <div class="story">Anreise beschreiben <small>wartet auf: Raum reservieren, 4 Tasks</small></div>
-        <div class="grouphead">Beendet (4)</div>
+        <div class="grouphead">In progress</div>
+        <div class="story" data-story>Reserve a room <span class="ready" hidden>ready to close</span></div>
+        <div class="task" data-task><span class="seats"><i class="seat" data-m="done"></i><i class="seat" data-m="done"></i><button class="seat" data-m="none" type="button"></button></span>Collect quotes</div>
+        <div class="task" data-task><span class="seats"><i class="seat" data-m="working"></i><i class="seat" data-m="none"></i><button class="seat" data-m="none" type="button"></button></span>Sign the contract <span class="tag-human">Human</span></div>
+        <div class="task" data-task><span class="seats"><i class="seat" data-m="problem"></i><i class="seat" data-m="none"></i><button class="seat" data-m="none" type="button"></button></span>Confirmation into the wiki</div>
+        <div class="story" data-story>Send the invitation <span class="ready" hidden>ready to close</span></div>
+        <div class="task" data-task><span class="seats"><i class="seat" data-m="none"></i><i class="seat" data-m="working"></i><button class="seat" data-m="none" type="button"></button></span>Write the text</div>
+        <div class="task" data-task><span class="seats"><i class="seat" data-m="none"></i><i class="seat" data-m="none"></i><button class="seat" data-m="none" type="button"></button></span>Check the mailing list</div>
+        <div class="grouphead">Waiting</div>
+        <div class="story">Describe the journey <small>waits for: Reserve a room, 4 tasks</small></div>
+        <div class="grouphead">Finished (4)</div>
       </div>
     </div>
   </div>
-  <p class="hint"><b>Zum Ausprobieren:</b> Jeder Punkt ist der Haken eines Sitzes. Der umrandete ist deiner. Ein Klick schaltet ihn weiter: arbeite daran, fertig, Problem, leer. Fortschritt und roter Punkt folgen. Beispielinhalt.</p>
+  <p class="hint"><b>Try it:</b> Each dot is a seat's mark. The outlined one is yours. A click advances it: on it, done, problem, empty. Progress and the red dot follow. Sample content.</p>
 
   <section class="sec">
-    <header><h2>Fünf Grundsätze</h2></header>
+    <header><h2>Five principles</h2></header>
     <div class="body">
       <div class="cols">
-        <div class="item"><h3>Alles m-of-n</h3><p>Jede Änderung an einem Board ist ein Vorschlag mit Schwellen-Zustimmung auf der Chain. Haken und Story-Chat sind keine Änderungen, sie sind flüchtig wie Chat.</p></div>
-        <div class="item"><h3>Zeit nur an einem Ort</h3><p>Keine Fristen, kein Kalender, keine Schätzungen. Warten heißt Abhängigkeit. Warten auf ein Datum heißt: Abhängigkeit von einer Warte-Story.</p></div>
-        <div class="item"><h3>Nur Mitglieder</h3><p>Ein Board weiß nicht, ob ein Mitglied Mensch, Agent oder beides ist.</p></div>
-        <div class="item"><h3>Das Team verantwortet</h3><p>Kein Assignee, kein Reviewer. Wer was macht und wer prüft, klären die Mitglieder im Chat. Für das Ergebnis steht der Vote.</p></div>
-        <div class="item"><h3>Knoten entscheiden nichts</h3><p>Jede Änderung macht ein Mitglied ausdrücklich. Ein Knoten schlägt nie von selbst vor und unterschreibt nie von selbst.</p></div>
+        <div class="item"><h3>Everything is m-of-n</h3><p>Every change to a board is a proposal with threshold approval on the chain. Marks and the story chat are not changes, they are ephemeral like chat.</p></div>
+        <div class="item"><h3>Time in only one place</h3><p>No deadlines, no calendar, no estimates. Waiting means dependency. Waiting for a date means: dependency on a wait story.</p></div>
+        <div class="item"><h3>Only members</h3><p>A board does not know whether a member is a person, an agent or both.</p></div>
+        <div class="item"><h3>The team is responsible</h3><p>No assignee, no reviewer. Who does what and who checks is settled by the members in chat. The vote answers for the result.</p></div>
+        <div class="item"><h3>Nodes decide nothing</h3><p>Every change is made explicitly by a member. A node never proposes by itself and never signs by itself.</p></div>
       </div>
     </div>
   </section>
 
   <section class="sec">
-    <header><h2>Der Zustand eines Boards</h2><p>Er wird abgestimmt. Jeder Wechsel ist ein Vote.</p></header>
+    <header><h2>The state of a board</h2><p>It is voted. Every change is a vote.</p></header>
     <div class="body">
-      <div class="states" role="img" aria-label="Planung und Ausführung wechseln per Vote in beide Richtungen, von Ausführung geht es per Vote nach beendet">
-        <span class="state plan"><svg><use href="#i-plan"/></svg>Planung</span>
-        <span class="hop">Start<svg><use href="#i-hop"/></svg><svg><use href="#i-hop2"/></svg>Stopp</span>
-        <span class="state exec"><svg><use href="#i-exec"/></svg>Ausführung</span>
-        <span class="hop">beenden<svg><use href="#i-hop"/></svg></span>
-        <span class="state fin"><svg><use href="#i-fin"/></svg>beendet</span>
+      <div class="states" role="img" aria-label="Planning and execution switch by vote in both directions, from execution it goes by vote to finished">
+        <span class="state plan"><svg><use href="#i-plan"/></svg>Planning</span>
+        <span class="hop">Start<svg><use href="#i-hop"/></svg><svg><use href="#i-hop2"/></svg>Stop</span>
+        <span class="state exec"><svg><use href="#i-exec"/></svg>Execution</span>
+        <span class="hop">finish<svg><use href="#i-hop"/></svg></span>
+        <span class="state fin"><svg><use href="#i-fin"/></svg>finished</span>
       </div>
       <ul class="plain">
-        <li><b>Planung:</b> die Mitglieder arbeiten Stories aus. Nichts auf dem Board ist in Arbeit. Zurück auf Planung ist das Signal, die Arbeit einzustellen.</li>
-        <li><b>Ausführung:</b> jede Story läuft, deren Voraussetzungen erfüllt sind. Eine Story, die angelegt oder hineinverschoben wird, startet sofort. Beliebig viele Boards laufen nebeneinander.</li>
-        <li><b>Beendet</b> ist endgültig und geht nur, wenn jede Story done oder discarded ist. Was von dem Board abhängt, ist ab dann frei.</li>
-        <li>Wie die Mitglieder Boards nutzen, ist ihre Sache: etwa ein Board in Planung zum Ausarbeiten und ein laufendes, in das sie fertige Stories verschieben.</li>
+        <li><b>Planning:</b> the members work out stories. Nothing on the board is in progress. Going back to planning is the signal to stop work.</li>
+        <li><b>Execution:</b> every story whose prerequisites are met runs. A story that is created or moved in starts at once. Any number of boards run side by side.</li>
+        <li><b>Finished</b> is final and is possible only when every story is done or discarded. Whatever depends on the board is free from then on.</li>
+        <li>How the members use boards is up to them: for example a board in planning for working things out and a running one into which they move finished stories.</li>
       </ul>
     </div>
   </section>
 
   <section class="sec">
-    <header><h2>Board, Story, Task</h2><p>Drei Ebenen, flach gehalten.</p></header>
+    <header><h2>Board, story, task</h2><p>Three levels, kept flat.</p></header>
     <div class="body">
-      <ul class="tree" aria-label="Beispiel">
-        <li><span class="kind">Board</span>Treffen organisieren
+      <ul class="tree" aria-label="Example">
+        <li><span class="kind">Board</span>Organize the meeting
           <ul>
-            <li><span class="kind">Story</span>Raum reservieren
+            <li><span class="kind">Story</span>Reserve a room
               <ul>
-                <li><span class="kind">Task</span>Angebote einholen</li>
-                <li><span class="kind">Task</span>Vertrag unterschreiben <span class="tag-human">Mensch</span></li>
+                <li><span class="kind">Task</span>Collect quotes</li>
+                <li><span class="kind">Task</span>Sign the contract <span class="tag-human">Human</span></li>
               </ul>
             </li>
-            <li><span class="kind">Story</span>Anreise beschreiben</li>
+            <li><span class="kind">Story</span>Describe the journey</li>
           </ul>
         </li>
       </ul>
       <ul class="plain">
-        <li>Boards sind flach, keines enthält ein anderes. Das allgemeine Board gibt es von Anfang an.</li>
-        <li>Eine Story gehört zu genau einem Board, ein Task zu genau einer Story.</li>
-        <li>Ein Task trägt Titel, Details und das Menschen-Tag. Das Tag ist eine Erklärung, keine Sperre.</li>
-        <li>Eine wartende Story darf per Vote in ein anderes Board wandern.</li>
-        <li>Ein Vote darf Tasks, nicht erledigte Stories und ganze Boards entfernen, auch beendete Boards. So räumt die Republik auf. Eine erledigte Story bleibt, bis ihr Board entfernt wird. Das allgemeine Board bleibt immer.</li>
+        <li>Boards are flat, none contains another. The general board exists from the start.</li>
+        <li>A story belongs to exactly one board, a task to exactly one story.</li>
+        <li>A task carries a title, details and the human tag. The tag is a declaration, not a barrier.</li>
+        <li>A waiting story may move to another board by vote.</li>
+        <li>A vote may remove tasks, stories that are not done and whole boards, finished boards too. This is how the republic tidies up. A done story stays until its board is removed. The general board always stays.</li>
       </ul>
     </div>
   </section>
 
   <section class="sec">
-    <header><h2>Der Weg einer Story</h2><p>Vier Zustände. Nur ein Vote beendet sie.</p></header>
+    <header><h2>The way of a story</h2><p>Four states. Only a vote ends it.</p></header>
     <div class="body">
       <div class="life">
-        <svg viewBox="0 0 560 220" role="img" aria-label="waiting geht von selbst nach in progress, von dort per Vote nach done oder discarded; auch eine wartende Story kann per Vote verworfen werden">
+        <svg viewBox="0 0 560 220" role="img" aria-label="waiting moves to in progress on its own, from there by vote to done or discarded; a waiting story can also be discarded by vote">
           <defs>
             <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--ink)"/></marker>
           </defs>
@@ -313,140 +313,140 @@ code { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size:
           <path class="e v" d="M356 98 C396 98 392 40 429 40" marker-end="url(#ar)"/>
           <path class="e v" d="M356 118 C396 118 392 176 429 176" marker-end="url(#ar)"/>
           <path class="e v" d="M66 134 V192 H429" marker-end="url(#ar)"/>
-          <text class="l" x="166" y="99" text-anchor="middle">von selbst</text>
-          <text class="l" x="66" y="60" text-anchor="middle">Board plant oder</text>
-          <text class="l" x="66" y="75" text-anchor="middle">Voraussetzung offen</text>
-          <text class="l" x="281" y="75" text-anchor="middle">Board läuft, frei</text>
+          <text class="l" x="166" y="99" text-anchor="middle">on its own</text>
+          <text class="l" x="66" y="60" text-anchor="middle">Board is planning or</text>
+          <text class="l" x="66" y="75" text-anchor="middle">prerequisite open</text>
+          <text class="l" x="281" y="75" text-anchor="middle">Board runs, free</text>
         </svg>
       </div>
-      <div class="key"><span><i></i>folgt von selbst</span><span><i class="v"></i>m-of-n-Vote</span></div>
+      <div class="key"><span><i></i>follows on its own</span><span><i class="v"></i>m-of-n vote</span></div>
       <ul class="plain">
-        <li><b>In progress</b> folgt von selbst: Board in Ausführung und alle Voraussetzungen erfüllt.</li>
-        <li><b>Urteil:</b> jedes Mitglied darf done oder discarded vorschlagen. Ein Vote darf mehrere Stories abschließen.</li>
-        <li>Tragen alle Tasks einen grünen Haken, zeigt das Board "bereit zum Abschließen". Das ist nur ein Hinweis.</li>
-        <li><b>Discarded</b> ist endgültig. Nacharbeit ist eine neue Story.</li>
+        <li><b>In progress</b> follows on its own: board in execution and all prerequisites met.</li>
+        <li><b>Verdict:</b> any member may propose done or discarded. One vote may close several stories.</li>
+        <li>When all tasks carry a green mark, the board shows "ready to close". That is only a hint.</li>
+        <li><b>Discarded</b> is final. Rework is a new story.</li>
       </ul>
     </div>
   </section>
 
   <section class="sec">
-    <header><h2>Haken statt Abstimmung</h2><p>Am Task wird nicht abgestimmt.</p></header>
+    <header><h2>Marks instead of a vote</h2><p>Tasks are not voted on.</p></header>
     <div class="body">
       <ul class="plain">
-        <li>Jeder Sitz setzt an jedem Task höchstens einen Haken, ohne Vote: arbeite daran, fertig oder Problem.</li>
-        <li>Haken sind Anzeige. Sie sperren nichts und beweisen nichts.</li>
-        <li>Sie leben bis zum Ende ihrer Story und stehen nicht in der Chain.</li>
-        <li>Jede Story kann einen eigenen Chat haben. Dort stimmen sich die Mitglieder ab, wer welchen Task nimmt.</li>
+        <li>Each seat sets at most one mark on each task, without a vote: on it, done or problem.</li>
+        <li>Marks are an indicator. They block nothing and prove nothing.</li>
+        <li>They live until the end of their story and are not in the chain.</li>
+        <li>Each story can have its own chat. There the members agree on who takes which task.</li>
       </ul>
       <table class="legend">
-        <tr><th>Farbe</th><th>heißt</th><th>am Board</th><th>am Task</th></tr>
-        <tr><td><i class="swatch" style="background:var(--plan)"></i>Gelb</td><td>wird vorbereitet</td><td>Planung</td><td>-</td></tr>
-        <tr><td><i class="swatch" style="background:var(--exec)"></i>Blau</td><td>läuft</td><td>Ausführung</td><td>Haken "arbeite daran"</td></tr>
-        <tr><td><i class="swatch" style="background:var(--done)"></i>Grün</td><td>fertig</td><td>beendet</td><td>Haken "fertig"</td></tr>
-        <tr><td><i class="swatch" style="background:var(--prob)"></i>Rot</td><td>klemmt</td><td>Punkt am Eintrag</td><td>Haken "Problem"</td></tr>
-        <tr><td><i class="swatch" style="background:var(--human)"></i>Violett</td><td>braucht Mensch</td><td>-</td><td>Menschen-Tag</td></tr>
+        <tr><th>Colour</th><th>means</th><th>on the board</th><th>on the task</th></tr>
+        <tr><td><i class="swatch" style="background:var(--plan)"></i>Yellow</td><td>being prepared</td><td>Planning</td><td>-</td></tr>
+        <tr><td><i class="swatch" style="background:var(--exec)"></i>Blue</td><td>running</td><td>Execution</td><td>mark "on it"</td></tr>
+        <tr><td><i class="swatch" style="background:var(--done)"></i>Green</td><td>done</td><td>finished</td><td>mark "done"</td></tr>
+        <tr><td><i class="swatch" style="background:var(--prob)"></i>Red</td><td>stuck</td><td>dot on the entry</td><td>mark "problem"</td></tr>
+        <tr><td><i class="swatch" style="background:var(--human)"></i>Violet</td><td>needs a person</td><td>-</td><td>human tag</td></tr>
       </table>
       <ul class="plain">
-        <li>Rot heißt Problem und sonst nichts. Jeder Zustand hat zusätzlich ein Icon.</li>
-        <li><b>Fortschritt</b> zählt Tasks, im Navigator und oben im Board. Fertig ist ein Task, wenn seine Story done ist, oder wenn er Grün trägt und kein Rot. Tasks verworfener Stories fallen heraus. Die Zahl ist Anzeige, kein Beschluss.</li>
+        <li>Red means problem and nothing else. Every state also has an icon.</li>
+        <li><b>Progress</b> counts tasks, in the navigator and at the top of the board. A task is finished when its story is done, or when it carries green and no red. Tasks of discarded stories drop out. The number is a display, not a decision.</li>
       </ul>
     </div>
   </section>
 
   <section class="sec">
-    <header><h2>Die Ansicht</h2><p>Ein Knopf, ein Filter.</p></header>
+    <header><h2>The view</h2><p>One button, one filter.</p></header>
     <div class="body">
       <ul class="plain">
-        <li>Links die Boards in drei Gruppen nach Zustand: Planung, Ausführung, beendet. Die letzte ist eingeklappt.</li>
-        <li>Rechts die Stories des Boards in drei einklappbaren Gruppen. Eine Story klappt zu ihren Tasks auf.</li>
-        <li><b>Ändern im Board selbst:</b> "Bearbeiten" schaltet in einen Entwurf. Die Änderungen sammeln sich lokal, sind markiert und gehen als ein Vorschlag zur Abstimmung.</li>
-        <li>Der Zustand ist ein anklickbares Abzeichen, ein Plus legt ein Board an. Die Verwaltung der Abhängigkeiten zwischen Boards erscheint erst ab dem zweiten Board.</li>
-        <li>Ein leeres Board zeigt einen Satz und den Knopf "Stories planen".</li>
+        <li>On the left the boards in three groups by state: planning, execution, finished. The last is collapsed.</li>
+        <li>On the right the stories of the board in three collapsible groups. A story unfolds to its tasks.</li>
+        <li><b>Changing within the board itself:</b> "Edit" switches to a draft. The changes collect locally, are marked and go to a vote as one proposal.</li>
+        <li>The state is a clickable badge, a plus creates a board. The management of dependencies between boards appears only from the second board on.</li>
+        <li>An empty board shows one sentence and the button "Plan stories".</li>
       </ul>
     </div>
   </section>
 
   <section class="sec">
-    <header><h2>Was eine Story trägt</h2><p>Kriterien gibt es nur an Stories.</p></header>
+    <header><h2>What a story carries</h2><p>Criteria exist only on stories.</p></header>
     <div class="body">
       <dl class="fields">
-        <dt>Titel</dt><dd>Raum reservieren</dd>
-        <dt>Abnahme</dt><dd>Bestätigung des Raums liegt im Wiki</dd>
-        <dt>Nicht Teil</dt><dd>Catering</dd>
-        <dt>Vorbedingung</dt><dd>Teilnehmerzahl steht fest</dd>
-        <dt>Wiederholung</dt><dd>keine</dd>
+        <dt>Title</dt><dd>Reserve a room</dd>
+        <dt>Acceptance</dt><dd>Confirmation of the room is in the wiki</dd>
+        <dt>Not part</dt><dd>Catering</dd>
+        <dt>Precondition</dt><dd>Number of participants is fixed</dd>
+        <dt>Repetition</dt><dd>none</dd>
       </dl>
-      <p class="note">Beispielinhalt.</p>
+      <p class="note">Sample content.</p>
     </div>
   </section>
 
   <section class="sec">
-    <header><h2>Reihenfolge</h2><p>Sie entsteht nur aus Abhängigkeiten.</p></header>
+    <header><h2>Order</h2><p>It arises only from dependencies.</p></header>
     <div class="body">
       <div class="cols">
-        <div class="item"><h3>Zwei Arten</h3><p>Story wartet auf Story im selben Board. Board wartet auf Board.</p></div>
-        <div class="item"><h3>Sonst nichts</h3><p>Keine Kanten zwischen Boards auf Story-Ebene, keine zwischen Tasks.</p></div>
-        <div class="item"><h3>Keine Zyklen</h3><p>Geprüft je Graph: die Stories eines Boards, und die Boards.</p></div>
-        <div class="item"><h3>Board sperrt Board</h3><p>Hängt Board B an Board A, läuft in B nichts, bevor A beendet ist.</p></div>
-        <div class="item"><h3>Keine Priorität</h3><p>Kein Ranking zusätzlich zu den Abhängigkeiten.</p></div>
-        <div class="item"><h3>Blocker bleiben</h3><p>Worauf noch etwas wartet, kann nicht verworfen oder entfernt werden. Ein Vote darf umhängen und im selben Zug verwerfen.</p></div>
+        <div class="item"><h3>Two kinds</h3><p>A story waits for a story in the same board. A board waits for a board.</p></div>
+        <div class="item"><h3>Nothing else</h3><p>No edges between boards at story level, none between tasks.</p></div>
+        <div class="item"><h3>No cycles</h3><p>Checked per graph: the stories of a board, and the boards.</p></div>
+        <div class="item"><h3>Board blocks board</h3><p>If board B hangs on board A, nothing runs in B before A is finished.</p></div>
+        <div class="item"><h3>No priority</h3><p>No ranking in addition to the dependencies.</p></div>
+        <div class="item"><h3>Blockers stay</h3><p>Whatever something still waits for cannot be discarded or removed. One vote may rehang and discard in the same move.</p></div>
       </div>
     </div>
   </section>
 
   <section class="sec">
-    <header><h2>Warten auf ein Datum</h2><p>Die Warte-Story ist das einzige Element mit einem Zeitstempel.</p></header>
+    <header><h2>Waiting for a date</h2><p>The wait story is the only element with a timestamp.</p></header>
     <div class="body">
       <div class="chain">
-        <span class="link wait"><small>Warte-Story</small>1. Dezember</span>
-        <span class="on">darauf wartet</span>
-        <span class="link"><small>Story</small>Server bezahlen, Dezember</span>
+        <span class="link wait"><small>Wait story</small>1 December</span>
+        <span class="on">waits for it</span>
+        <span class="link"><small>Story</small>Pay the servers, December</span>
       </div>
       <ul class="plain">
-        <li><b>Abschließen:</b> ein Mitglied schließt die Warte-Story per Vote, sobald die Zeit gekommen ist. Vorher verweigert der Knoten Vorschlag und Zustimmung. Nichts schließt sie automatisch.</li>
-        <li><b>Die Chain bleibt uhrfrei:</b> kein Zeitpunkt wird signiert. Die m Sitze bezeugen mit ihrer eigenen Uhr, dass die Zeit gekommen ist.</li>
-        <li><b>Wiederkehrendes:</b> es gibt keine Serie. Jede Runde ist ein Paar aus Warte-Story und Arbeits-Story. Das Paket, das eine Runde abschließt, legt die nächste an. Das Feld "Wiederholung" erinnert daran.</li>
-        <li><b>Kein "spätestens bis":</b> eine Frist steht im Text der Story. Was zu spät ist, bekommt den roten Haken.</li>
+        <li><b>Closing:</b> a member closes the wait story by vote once the time has come. Before that the node refuses proposal and approval. Nothing closes it automatically.</li>
+        <li><b>The chain stays clock-free:</b> no point in time is signed. The m seats attest with their own clock that the time has come.</li>
+        <li><b>Recurring:</b> there is no series. Each round is a pair of a wait story and a work story. The package that closes a round creates the next one. The field "Repetition" reminds of this.</li>
+        <li><b>No "at the latest by":</b> a deadline goes in the text of the story. Whatever is late gets the red mark.</li>
       </ul>
     </div>
   </section>
 
   <section class="sec">
-    <header><h2>Ein Paket, ein Vote</h2><p>Jede Board-Änderung ist ein Paket. Alles andere leitet jeder Knoten selbst aus der Chain ab.</p></header>
+    <header><h2>One package, one vote</h2><p>Every board change is a package. Everything else each node derives itself from the chain.</p></header>
     <div class="body">
       <div class="cols">
-        <div class="item"><h3>Was ein Paket kann</h3><p>Boards, Stories und Tasks anlegen und ändern, einen Board-Zustand setzen, Abhängigkeiten setzen, wartende Stories verschieben, Stories abschließen, Tasks, Stories und Boards entfernen. Beliebig kombiniert.</p></div>
-        <div class="item"><h3>Planen durch Weiterreichen</h3><p>Ein Mitglied stellt seinen Entwurf als Vorschlag ein. Andere diskutieren darunter, übernehmen ihn, ändern ihn und stellen die nächste Fassung ein. Abgestimmt wird über die Fassung, auf die man sich einigt.</p></div>
-        <div class="item"><h3>Was es kostet</h3><p>Vorschlagen kostet keine Signatur, erst das Zustimmen. Zehn Fassungen und ein Vote kosten m Signaturen.</p></div>
+        <div class="item"><h3>What a package can do</h3><p>Create and change boards, stories and tasks, set a board state, set dependencies, move waiting stories, close stories, remove tasks, stories and boards. Combined as you like.</p></div>
+        <div class="item"><h3>Planning by handing on</h3><p>A member submits their draft as a proposal. Others discuss beneath it, take it over, change it and submit the next version. The vote is on the version everyone agrees on.</p></div>
+        <div class="item"><h3>What it costs</h3><p>Proposing costs no signature, only approving does. Ten versions and one vote cost m signatures.</p></div>
       </div>
     </div>
   </section>
 
   <section class="sec">
-    <header><h2>Spielregeln</h2></header>
+    <header><h2>Rules of play</h2></header>
     <div class="body">
       <ul class="plain">
-        <li><b>Wecken:</b> drei abgestimmte Ereignisse wecken alle Sitze: ein Board geht in Ausführung, ein Board geht zurück in Planung, eine Story kommt auf ein laufendes Board. Dazu weckt ein Knoten seinen eigenen Sitz, wenn die Zeit einer Warte-Story gekommen ist. Sonst weckt ein Board niemanden.</li>
-        <li><b>Aufbewahrung:</b> abgelehnte Vorschläge und ihre Diskussion verfallen nach 14 Tagen. Ein angenommenes Paket ist ein Chain-Block. Was bleiben soll, kommt ins Wiki.</li>
-        <li><b>Konkurrenz:</b> mehrere Pakete dürfen konkurrieren. Ein Paket gilt ganz oder gar nicht. Ein zuerst angenommenes kann ein anderes ungültig machen.</li>
+        <li><b>Waking:</b> three voted events wake all seats: a board goes into execution, a board goes back to planning, a story arrives on a running board. In addition a node wakes its own seat when the time of a wait story has come. Otherwise a board wakes nobody.</li>
+        <li><b>Retention:</b> rejected proposals and their discussion expire after 14 days. An accepted package is a chain block. Whatever should stay goes into the wiki.</li>
+        <li><b>Competition:</b> several packages may compete. A package applies whole or not at all. One accepted first can invalidate another.</li>
       </ul>
     </div>
   </section>
 
   <section class="sec">
-    <header><h2>Bewusst weggelassen</h2></header>
+    <header><h2>Deliberately left out</h2></header>
     <div class="body">
       <div class="gone">
-        <span>Sprints</span><span>Backlog</span><span>Burn-up</span><span>Epics</span><span>Boards in Boards</span><span>Assignee</span><span>Reviewer</span>
-        <span>Fristen</span><span>Kalender</span><span>Serien</span><span>Schätzungen</span><span>Priorität</span><span>ready for work</span><span>ready for review</span>
-        <span>eigener Planungs-Thread</span><span>Mensch/Agent-Typen</span><span>automatisches Unterschreiben</span>
+        <span>Sprints</span><span>Backlog</span><span>Burn-up</span><span>Epics</span><span>Boards in boards</span><span>Assignee</span><span>Reviewer</span>
+        <span>Deadlines</span><span>Calendar</span><span>Series</span><span>Estimates</span><span>Priority</span><span>ready for work</span><span>ready for review</span>
+        <span>own planning thread</span><span>person/agent types</span><span>automatic signing</span>
       </div>
     </div>
   </section>
 
   <footer>
-    <p><b>Kompatibel:</b> Robo-Scrum übernimmt die Fläche und den Wire-Key <code>quests</code> des alten Kanbans. Die alten Daten dürfen verloren gehen, die Chain bleibt gültig. Ältere Builds überspringen neue Blöcke.</p>
-    <p>Quelle: <code>docs/robo_scrum.md</code></p>
+    <p><b>Compatible:</b> Robo-Scrum takes over the surface and the wire key <code>quests</code> of the old Kanban. The old data may be lost, the chain stays valid. Older builds skip new blocks.</p>
+    <p>Source: <code>docs/robo_scrum.md</code></p>
   </footer>
 </div>
 
@@ -455,7 +455,7 @@ code { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size:
 // at least one green mark and no red one; 11 tasks belong to stories already done.
 (function () {
   var order = ["none", "working", "done", "problem"];
-  var names = { none: "kein Haken", working: "arbeite daran", done: "fertig", problem: "Problem" };
+  var names = { none: "no mark", working: "on it", done: "done", problem: "problem" };
   var demo = document.getElementById("demo");
   var DONE_BEFORE = 11, TOTAL = 20;
   function finished(task) {
@@ -468,7 +468,7 @@ code { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size:
     var pct = (100 * n / TOTAL) + "%";
     document.getElementById("bar").style.width = pct;
     document.getElementById("navbar").style.width = pct;
-    document.getElementById("count").textContent = n + " von " + TOTAL + " Tasks, 4 von 7 Stories";
+    document.getElementById("count").textContent = n + " of " + TOTAL + " tasks, 4 of 7 stories";
     document.getElementById("navcount").textContent = n + "/" + TOTAL;
     document.getElementById("alarm").hidden = !demo.querySelector('.seat[data-m="problem"]');
     [].forEach.call(demo.querySelectorAll("[data-story]"), function (story) {
@@ -477,7 +477,7 @@ code { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; font-size:
       story.querySelector(".ready").hidden = !all;
     });
     [].forEach.call(demo.querySelectorAll("button.seat"), function (b) {
-      b.setAttribute("aria-label", "Dein Haken: " + names[b.dataset.m] + ". Klicken schaltet weiter.");
+      b.setAttribute("aria-label", "Your mark: " + names[b.dataset.m] + ". Clicking advances it.");
     });
   }
   demo.addEventListener("click", function (e) {

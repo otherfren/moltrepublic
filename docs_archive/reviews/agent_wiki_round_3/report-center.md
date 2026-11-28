@@ -1,67 +1,67 @@
-# Bericht Sitz B (Mr. Center) - "Second Wiki Test", Runde 3
+# Report Seat B (Mr. Center) - "Second Wiki Test", Round 3
 
 (Verbatim the seat's final message, 2026-09-06 17:45 local.)
 
-## 1. Bestand, Anträge, Zusammenarbeit
+## 1. Holdings, proposals, collaboration
 
-| Größe | vorher | nachher |
+| Quantity | before | after |
 | --- | --- | --- |
-| Seiten im Wiki | 125 | **212** |
-| Seiten mit `sitz-b` | 56 | **81** |
-| Kettenkopf | 59 (Checkpoint) | **126** (Antrag 225) |
-| `wiki_rev` | 0 | 19 (zwei Checkpoints haben zwischendurch neu gefaltet) |
+| Pages in the wiki | 125 | **212** |
+| Pages with `sitz-b` | 56 | **81** |
+| Chain head | 59 (checkpoint) | **126** (proposal 225) |
+| `wiki_rev` | 0 | 19 (two checkpoints re-folded in between) |
 
-**Eigene Anträge: 28** (127–244), davon **27 angewandt**, 1 zurückgezogen-und-ersetzt (205 → 217). Zusätzlich zu Beginn zwei tote Altlasten aus Runde 2 zurückgezogen (25, 55 — Duplikate bereits angewandter Patches).
-**Fremde Anträge: 25 gezeichnet, 3 abgelehnt** — 147 (zwei `authored_by`-Kanten auf einer Personenseite statt auf dem Werk), 189 und 212 (Referenz auf eine noch nicht persistierte Datei). Alle drei wurden von ihren Autoren binnen Minuten repariert und neu vorgelegt (168, 189+192, 242); keine Ablehnung blieb ein Streit.
-**Umbenennung: 1** — `standards/http-signatures.md` → `standards/draft-cavage-http-signatures.md`, alle vier eingehenden Kanten repariert (gemessen mit `wiki_links direction:in`), Alias „HTTP Signatures" auf `rfc-9421.md` verschoben; danach `dangling 0`.
-**Fremde Seiten: 3 gezeichnete Abschnitte** — `standards/nip-29.md` (NIP-29 = MUC-Bauplan, 22 Jahre später), `standards/nip-46.md` (Signierer vs. MSC3861: Entzug ist der Unterschied), `protokolle/openpgp.md` (OpenPGP in XMPP zweimal versucht, zweimal Experimental).
-**Streitfälle: 2 neue**, beide mit beiden Belegen auf der Seite und im Topic `disputes` — „Ist MIX der Nachfolger von MUC?" (aufgelöst als `competes_with`, nicht `supersedes`: Experimental 0.14.6 von 2020 gegen Stable 1.35.5 von 2026) und „Was die AGPL-Umstellung von Synapse bedeutet" (aufgelöst durch Zerlegen: AGPL und CLA sind zwei Fragen).
-**Ontologie Fassung 5** (Antrag 127): Abschnitt 9, Bild- und Dateigrammatik.
-**Nachrichten von meinem Sitz in diesem Lauf: 124** — 14 Gruppe, 8 `sync`, 2 `ontologie`, 1 `disputes`, 99 in Patch-Kanälen (darin die ⚖-Systemzeilen der Engine, die meinen Namen tragen). Gesamt im Lauf: 270 (Left 81, Right 65).
+**Own proposals: 28** (127–244), of which **27 applied**, 1 withdrawn-and-replaced (205 → 217). In addition, two dead leftovers from round 2 withdrawn at the start (25, 55 — duplicates of already applied patches).
+**Others' proposals: 25 signed, 3 rejected** — 147 (two `authored_by` edges on a person page instead of on the work), 189 and 212 (reference to a file not yet persisted). All three were repaired by their authors within minutes and resubmitted (168, 189+192, 242); no rejection stayed a dispute.
+**Rename: 1** — `standards/http-signatures.md` → `standards/draft-cavage-http-signatures.md`, all four incoming edges repaired (measured with `wiki_links direction:in`), alias "HTTP Signatures" moved to `rfc-9421.md`; afterwards `dangling 0`.
+**Others' pages: 3 signed sections** — `standards/nip-29.md` (NIP-29 = MUC blueprint, 22 years later), `standards/nip-46.md` (signer vs. MSC3861: revocation is the difference), `protokolle/openpgp.md` (OpenPGP in XMPP tried twice, Experimental twice).
+**Disputes: 2 new**, both with both pieces of evidence on the page and in the topic `disputes` — "Is MIX the successor of MUC?" (resolved as `competes_with`, not `supersedes`: Experimental 0.14.6 of 2020 against Stable 1.35.5 of 2026) and "What the AGPL switch of Synapse means" (resolved by decomposition: AGPL and CLA are two questions).
+**Ontology version 5** (proposal 127): section 9, image and file grammar.
+**Messages from my seat in this run: 124** — 14 group, 8 `sync`, 2 `ontologie`, 1 `disputes`, 99 in patch channels (including the engine's ⚖ system lines, which carry my name). Total in the run: 270 (Left 81, Right 65).
 
-## 2. Bilder und Dateien
+## 2. Images and files
 
-Vier PNG mit PIL aus Abfragen dieses Wikis gezeichnet, eine CSV als Datengrundlage. Alle persistent, alle referenziert, `local.kind` am Ende überall `own`.
+Four PNGs drawn with PIL from queries of this wiki, one CSV as the data basis. All persistent, all referenced, `local.kind` is `own` everywhere at the end.
 
-| Datei | Share-ID | sha256-Präfix | persist | Seite | `files`-Block |
+| File | Share ID | sha256 prefix | persist | Page | `files` block |
 | --- | --- | --- | --- | --- | --- |
 | B-protokollstapel.png (102817 B) | 6cb4e687… | `2db745a887c7` | 130 | uebersicht/matrix-xmpp-activitypub.md | `state: local` |
 | B-ap-zustellweg.png (82295 B) | 2d525df0… | `4454feac3f71` | 133 | protokolle/activitypub.md | `state: local` |
 | B-zeitachse-segment-v2.png (123482 B) | c060ffc1… | `1cebf89b01b5` | 220 | uebersicht/… | `state: local` |
 | B-implementierungen-balken-v2.png (89062 B) | 2b0a7173… | `9b93ef09c733` | 223 | uebersicht/… | `state: local` |
-| B-implementierungen-v2.csv (2312 B) | 7c797ce4… | `f446ed72b324` | 226 | uebersicht/… (als `[Datengrundlage](upload:…)`) | `state: local` |
+| B-implementierungen-v2.csv (2312 B) | 7c797ce4… | `f446ed72b324` | 226 | uebersicht/… (as `[Datengrundlage](upload:…)`) | `state: local` |
 
-**Zeiten (eigene Uhr, die API liefert keine):** share 14:41:02/03 → alle fünf `checksum` in `read_uploads` um 14:41:07 (< 5 s für 1,5 KB bis 105 KB); persist-Anträge 14:41:1x; erster Block vor 14:43:2x, alle fünf angewandt vor 14:49. Die v2-Runde: share 15:18:59, persist angewandt vor 15:22.
+**Times (own clock, the API provides none):** share 14:41:02/03 → all five `checksum` in `read_uploads` at 14:41:07 (< 5 s for 1.5 KB to 105 KB); persist proposals 14:41:1x; first block before 14:43:2x, all five applied before 14:49. The v2 round: share 15:18:59, persist applied before 15:22.
 
-**Spiegel-Experiment (Poll alle 20 s, Einheit ist das STÜCK, nicht das Byte):**
+**Mirror experiment (poll every 20 s, the unit is the PIECE, not the byte):**
 
-- `left-at-protocol-weg.png` 145 KB/4 Stücke: persistent 14:56:14 → partial 14:57:36 → **mirrored 14:58:57** (2:43)
+- `left-at-protocol-weg.png` 145 KB/4 pieces: persistent 14:56:14 → partial 14:57:36 → **mirrored 14:58:57** (2:43)
 - `left-nostr-kind-baender.png` 104 KB/3: persistent 14:55:54 → **mirrored 14:57:36** (1:42)
 - `mr-right-abloeseketten.png` 88 KB/3: persistent 14:49:06 → 1/3 14:49:26 → 2/3 14:49:46 → **mirrored 14:50:07** (1:01)
-- `holders` wächst von `[Sharer]` auf alle drei Sitze genau dann, wenn das letzte Stück landet. Taktung ~20 s je Stück, passend zu `mirror_publish_interval_secs: 15`. `set_mirror` habe ich nicht angefasst.
+- `holders` grows from `[Sharer]` to all three seats exactly when the last piece lands. Cadence ~20 s per piece, matching `mirror_publish_interval_secs: 15`. I did not touch `set_mirror`.
 
-**Vorgeschriebene Experimente:** (a) Referenz vor Persist, absichtlich (Antrag 145): `resolve_upload` las `temporary: true`, `wiki_edit` proposte **ohne jeden Warnhinweis** — das ist der Grund für Ontologie 9. (b) 12-Hex-Präfix ins Leere, `dry_run`: genau eine Warnung, `file reference unresolved: upload:0123456789ab`, und der Aufruf wird verweigert. (c) `unpersist` verifiziert: nach Block liest die Datei `persistent: false` mit frischem `expires_ts`.
+**Prescribed experiments:** (a) Reference before persist, deliberately (proposal 145): `resolve_upload` read `temporary: true`, `wiki_edit` proposed **without any warning** — this is the reason for ontology 9. (b) 12-hex prefix pointing nowhere, `dry_run`: exactly one warning, `file reference unresolved: upload:0123456789ab`, and the call is refused. (c) `unpersist` verified: after the block the file reads `persistent: false` with a fresh `expires_ts`.
 
-## 3. Facetten und Hygiene (Endstand)
+## 3. Facets and hygiene (final state)
 
-`wiki_props`: 33 Schlüssel, `tags` n=977/207 verschieden, `aliases` 790, `type` 199/9, `year` 131, `first_released` 96, `implements` 57, `authored_by` 56, `depends_on` 49, `notable_year` 45, `disputed_by` 21, `supersedes` 11.
+`wiki_props`: 33 keys, `tags` n=977/207 distinct, `aliases` 790, `type` 199/9, `year` 131, `first_released` 96, `implements` 57, `authored_by` 56, `depends_on` 49, `notable_year` 45, `disputed_by` 21, `supersedes` 11.
 
-`wiki_health` am Ende: **dangling 0 · orphans 0 · key_drift 0 · files 0/0/0** bei 212 Dokumenten. Meine Hygienerunde brachte Waisen von 15 auf 7; die letzte eigene Waise habe ich nach der DIVERGENZ-Meldung nicht mehr selbst eingehängt, sondern als fertigen Edit im Topic `sync` herausgegeben — Mr. Left hat ihn übernommen (Antrag 263).
+`wiki_health` at the end: **dangling 0 · orphans 0 · key_drift 0 · files 0/0/0** at 212 documents. My hygiene round brought orphans from 15 to 7; the last orphan of my own I no longer linked in myself after the DIVERGENZ report, but handed out as a finished edit in the topic `sync` — Mr. Left took it over (proposal 263).
 
-## 4. Sync-Verlauf und die Divergenz
+## 4. Sync history and the divergence
 
-`HEAD h=59 last=0 docs=125 rev=0` (14:36) · `h=71 last=154 docs=135 rev=4` (14:52) · `h=83 last=178 docs=169 rev=14` (15:01) · `h=115 last=241 docs=199 rev=8` (15:24). Deckungsgleiches Paar bei 14:58/14:59 (Right und Left beide `h=80 last=172 docs=159 rev=11`).
+`HEAD h=59 last=0 docs=125 rev=0` (14:36) · `h=71 last=154 docs=135 rev=4` (14:52) · `h=83 last=178 docs=169 rev=14` (15:01) · `h=115 last=241 docs=199 rev=8` (15:24). Matching pair at 14:58/14:59 (Right and Left both `h=80 last=172 docs=159 rev=11`).
 
-**Erste Abweichung:** Rights Zeile 15:19:28 `h=96 last=194 docs=197 rev=26` gegen meine `h=115`. Er hat DIVERGENZ gemeldet, ich habe sie mit Zahlen bestätigt: **mein Block 97 IST der Kompaktierungs-Checkpoint und trägt SEINE Unterschrift neben meiner** — sein Knoten hat den Schnitt mitgezeichnet und den fertigen Block dann verworfen; ab 98 sind alle Blöcke nur noch `[Mr. Center, Mr. Left]`. Reaktion: Antragstellen eingestellt, weiter gezeichnet, alles protokolliert. **Beide eingebauten Detektoren schwiegen durchgehend** (`read_chain.diverged = []`, `status.chain_diverged = []`) — bei 19 Blöcken Abstand. Bemerkt wurde es an drei Symptomen, von denen keines ein Detektor ist: eine Welle von `superseded` ohne Pfadkonflikt, ⚖-Chatzeilen über Beschlüsse, die der eigene Knoten nicht kennt, und ein stehender Kopf bei laufenden Beschlüssen.
+**First deviation:** Right's line 15:19:28 `h=96 last=194 docs=197 rev=26` against my `h=115`. He reported DIVERGENZ, I confirmed it with numbers: **my block 97 IS the compaction checkpoint and carries HIS signature next to mine** — his node co-signed the cut and then discarded the finished block; from 98 on all blocks are only `[Mr. Center, Mr. Left]`. Reaction: stopped filing proposals, kept signing, logged everything. **Both built-in detectors stayed silent throughout** (`read_chain.diverged = []`, `status.chain_diverged = []`) — at a distance of 19 blocks. It was noticed through three symptoms, none of which is a detector: a wave of `superseded` without a path conflict, ⚖ chat lines about decisions that the own node does not know, and a standing head while decisions keep running.
 
-## 5. Reibungsprotokoll
+## 5. Friction log
 
-`friction-center.md` (12,4 KB, mit `[NEW]`/`[R2]` markiert).
+`friction-center.md` (12.4 KB, marked with `[NEW]`/`[R2]`).
 
-Die schwersten NEUEN Punkte: Kettenblöcke tragen **keinen Zeitstempel**, Sekunden von share bis persistiert sind aus der API nicht rekonstruierbar · eine Referenz auf eine nur temporäre Datei passiert `wiki_edit` **lautlos** · `unpersist` verlangt ein in keiner Beschreibung genanntes Feld `at` (geraten: der Share-`ts`) · ein Checkpoint faltet die Basis und tötet **jeden** offenen Patch, wobei der Antragsteller **seine eigene Unterschrift verliert** und der Antrag trotzdem als `proposed` dasteht · das Ersetzen der Bytes einer geteilten Datei auf der Platte bleibt dem Knoten **unbemerkt** (er meldet weiter alte Größe und `available: true`) · `wiki_neighbors` antwortet während eines Index-Neubaus mit einem Fehler, den ein `.get("docs", [])` als leeres Ergebnis verbucht — mein erstes Balkenbild hätte deshalb zwei Nullen gezeigt.
+The heaviest NEW points: chain blocks carry **no timestamp**, seconds from share to persisted cannot be reconstructed from the API · a reference to a merely temporary file passes `wiki_edit` **silently** · `unpersist` requires a field `at` named in no description (guessed: the share `ts`) · a checkpoint folds the base and kills **every** open patch, and the proposer **loses its own signature** while the proposal still stands as `proposed` · replacing the bytes of a shared file on disk goes **unnoticed** by the node (it keeps reporting the old size and `available: true`) · `wiki_neighbors` answers during an index rebuild with an error that a `.get("docs", [])` books as an empty result — my first bar image would therefore have shown two zeros.
 
-Was ohne Reibung lief: `share_file` → Prüfsumme unter 5 s, `approve/decline` mit `note` (Begründung landet immer vor der Stimme), `wiki_resolve` (verhinderte zwei Doppelseiten: „MSC4186" und „Element X" banden bereits als Alias), `dry_run` + `with_patch` als Review-Werkzeug, und die Dateigrammatik selbst — `![alt](upload:<12 hex>)` löste auf jeder Seite beim ersten Versuch auf.
+What ran without friction: `share_file` → checksum under 5 s, `approve/decline` with `note` (the reason always lands before the vote), `wiki_resolve` (prevented two duplicate pages: "MSC4186" and "Element X" already bound as aliases), `dry_run` + `with_patch` as a review tool, and the file grammar itself — `![alt](upload:<12 hex>)` resolved on every page at the first attempt.
 
-## 6. Zusammenarbeit
+## 6. Collaboration
 
-Niemand hat mich blockiert, überschrieben oder umgangen. Left und ich haben zeitgleich dieselbe Einsicht (NIP-29 ≙ MUC) auf je die Seite des anderen geschrieben — kein Konflikt, aber beinahe eine dritte Kopie; im Patch-Kanal geklärt. Meine drei Ablehnungen wurden ausnahmslos sachlich aufgenommen und repariert. **Der unangenehmste Befund betrifft mich selbst:** Nachdem ich 147 wegen einer Kante in der falschen Richtung abgelehnt hatte, habe ich denselben Test über alle 197 Seiten laufen lassen — **13 Treffer, alle 13 auf meinen eigenen Personenseiten aus Runde 2**, keiner bei den anderen. Repariert in 214 und 238, offengelegt im Topic `ontologie`. Eine Richtungsverwechslung fällt in keiner Prüfung dieses Wikis auf: weder `wiki_health` noch `wiki_edit` kennen sie, und beim Lesen klingt der Satz richtig.
+Nobody blocked, overwrote or bypassed me. Left and I wrote the same insight (NIP-29 ≙ MUC) at the same time onto each other's page — no conflict, but almost a third copy; settled in the patch channel. My three rejections were without exception received on the merits and repaired. **The most uncomfortable finding concerns myself:** after I had rejected 147 for an edge in the wrong direction, I ran the same test over all 197 pages — **13 hits, all 13 on my own person pages from round 2**, none on the others'. Repaired in 214 and 238, disclosed in the topic `ontologie`. A direction mix-up is caught by no check of this wiki: neither `wiki_health` nor `wiki_edit` knows it, and when reading, the sentence sounds right.

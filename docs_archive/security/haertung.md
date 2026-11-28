@@ -1,4 +1,4 @@
-# Härtung: Queue-Creds-Persist beim Mesh-Up + ehrlicher Offline-Zustand
+# Hardening: queue-creds persist at mesh-up + honest offline state
 
 > **Historical (2026-07-30):** the SMP transport this plan targets was removed
 > in etappe N-demo of the Nostr transport replacement
@@ -8,161 +8,161 @@
 > (`docs_archive/transport/delivery_guarantee.md`); the SMP-specific parts
 > (`SmpTransport`, `reopen_transport`, SKEY sender keys) are historical.
 
-> **STATUS: AUSFÜHRUNGSREIF (2026-07-19).** Analyse und Design sind fertig und
-> gegen den Quellstand **master `1d4f273`** verifiziert; die roten Tests (TDD)
-> liegen fertig committet auf Branch **`worktree-mesh-cred-persist`**
-> (Commit `d18e1e5`, Worktree `.claude/worktrees/mesh-cred-persist`) und sind
-> zusätzlich vollständig im Anhang dieses Dokuments. Dieser Plan ist so
-> geschrieben, dass er ohne weitere Recherche abgearbeitet werden kann.
-> CLAUDE.md gilt uneingeschränkt (TDD, clippy 0, Review vor Merge, Ende =
-> getestet-grün auf master).
+> **STATUS: READY TO EXECUTE (2026-07-19).** Analysis and design are done and
+> verified against the source state **master `1d4f273`**; the red tests (TDD)
+> are committed and ready on branch **`worktree-mesh-cred-persist`**
+> (commit `d18e1e5`, worktree `.claude/worktrees/mesh-cred-persist`) and are
+> also reproduced in full in the appendix of this document. This plan is
+> written so that it can be worked off without further research.
+> CLAUDE.md applies without restriction (TDD, clippy 0, review before merge,
+> end state = tested green on master).
 
 ---
 
-## 0 Auftrag in einem Satz
+## 0 The task in one sentence
 
-Nach einem **harten Kill** (Ctrl+C bei offenem Workspace) muss ein Sitz beim
-nächsten Öffnen sein echtes Mesh wieder aufnehmen können (Teil 1), und wenn er
-es nicht kann, muss der Zustand **unübersehbar ehrlich** sein — niemals ein
-stilles „sieht gesund aus, sendet aber nichts" (Teil 2).
+After a **hard kill** (Ctrl+C with the workspace open), a seat must be able to
+resume its real mesh on the next open (part 1), and if it
+cannot, the state must be **unmistakably honest** — never a
+silent "looks healthy, but sends nothing" (part 2).
 
-**Out of scope (bewusst):** der Reconnect-/Resubscribe-Supervisor („Stage B")
-— im Abschlussbericht als offen vermerken, NICHT anfangen.
+**Out of scope (deliberately):** the reconnect/resubscribe supervisor ("Stage B")
+— note it as open in the final report, do NOT start it.
 
 ---
 
-## 1 Der Vorfall und die verifizierte Ursachenkette
+## 1 The incident and the verified chain of causes
 
-Eine 2-of-3-Republik über drei moltd-Instanzen starb nach einem Neustart; zwei
-Instanzen waren zuvor hart gekillt worden. Kette (alle Fundstellen @`1d4f273`):
+A 2-of-3 republic across three moltd instances died after a restart; two
+instances had been hard-killed beforehand. Chain (all locations @`1d4f273`):
 
-1. **SMP-Queue-Empfangs-Credentials (`smp_queues` in `TransportState`) werden
-   NUR vom Clean-Close-Pfad persistiert** (`persist_net_crypto_on_close` →
-   `persist_crypto_blocking`). Die Founding-/Join-Writes schreiben
-   `TransportState { mls, mesh, identity_sk, ..Default::default() }` — also
+1. **SMP queue receive credentials (`smp_queues` in `TransportState`) are
+   persisted ONLY by the clean-close path** (`persist_net_crypto_on_close` →
+   `persist_crypto_blocking`). The founding/join writes write
+   `TransportState { mls, mesh, identity_sk, ..Default::default() }` — i.e.
    `smp_queues: None`:
    - `crates/molt-engine/src/lifecycles.rs` ~110–118 (`materialize_workspace`)
-   - Founder-Merge ohne Creds: `crates/molt-engine/src/founding.rs` ~1713–1723
-     (`cmd_net_mesh_ready` ruft `persist_mesh_crypto_blocking(Some(mls), None,
-     mesh)` — das zweite Argument ist heute hart `None`).
-   - Der periodische Cursor-Save des Storage-Writers schreibt nur Cursors und
-     fügt nie Creds hinzu (`crates/molt-storage/src/lib.rs` ~1975–1994).
-2. **Beim Reopen resümiert das echte Mesh nur, wenn `mls` UND `smp_queues` UND
-   nicht-leeres `mesh` UND ein aufgelöster Dialer vorliegen**
-   (`crates/molt-engine/src/session.rs` ~594–601); jedes Fehlen fällt still auf
-   `ensure_demo_net()` durch (Produktions-No-Op) → Workspace öffnet **ganz ohne
-   Transport**.
-3. **Der Zustand ist unsichtbar:** die „detached"-Notice feuert nur, wenn ALLES
-   fehlt (mit MLS wird sie geleert, session.rs ~614–623); `net_health` bleibt
-   `Ok`; `chat_send` ackt lokal und sendet nichts. Ein hart gekillter Sitz ist
-   außer über das Recovery-Ritual unrettbar, weil die Empfangs-Creds nur im
-   Prozess-Speicher existierten.
+   - Founder merge without creds: `crates/molt-engine/src/founding.rs` ~1713–1723
+     (`cmd_net_mesh_ready` calls `persist_mesh_crypto_blocking(Some(mls), None,
+     mesh)` — the second argument is currently hard-coded `None`).
+   - The storage writer's periodic cursor save writes only cursors and
+     never adds creds (`crates/molt-storage/src/lib.rs` ~1975–1994).
+2. **On reopen the real mesh resumes only if `mls` AND `smp_queues` AND a
+   non-empty `mesh` AND a resolved dialer are present**
+   (`crates/molt-engine/src/session.rs` ~594–601); any absence silently falls through to
+   `ensure_demo_net()` (a no-op in production) → the workspace opens **with no
+   transport at all**.
+3. **The state is invisible:** the "detached" notice fires only when EVERYTHING
+   is missing (with MLS it is cleared, session.rs ~614–623); `net_health` stays
+   `Ok`; `chat_send` acks locally and sends nothing. A hard-killed seat is
+   unrecoverable except via the recovery ritual, because the receive creds existed
+   only in process memory.
 
 ---
 
-## 2 Verifizierter Ist-Stand (erspart erneutes Suchen)
+## 2 Verified current state (saves searching again)
 
-- **Alle Mesh-Up-Stellen im Engine-Code** (wo ein echtes Netz entsteht):
-  1. Founder: `cmd_net_mesh_ready` (`founding.rs` ~1693–1744) — persistiert
-     heute `mls + mesh` per `persist_mesh_crypto_blocking`, **Creds = None**.
-  2. Joiner: `cmd_net_join_sealed` (`lifecycles.rs` ~1174–1191) — nimmt den
-     Ritual-Transport aus `self.join_transport`, baut das Netz, **persistiert
-     keine Creds** (materialize hat vorher mls+mesh geschrieben).
-  3. Recovery: `cmd_net_recover_sealed` (`lifecycles.rs` ~1433–1450) — Zwilling
-     des Joiners mit `self.recover_transport`, **persistiert keine Creds**.
-  4. Mesh-Extension: `cmd_net_mesh_extended` (`net.rs` ~1422–1477) —
-     **persistiert bereits korrekt** `mls + creds + mesh` über
-     `crypto_for_close()` → hier ist NICHTS zu tun (Referenzmuster!).
-  5. Reopen: `cmd_open_workspace` (`session.rs` ~551–626) mit
+- **All mesh-up sites in the engine code** (where a real network comes into being):
+  1. Founder: `cmd_net_mesh_ready` (`founding.rs` ~1693–1744) — currently persists
+     `mls + mesh` via `persist_mesh_crypto_blocking`, **creds = None**.
+  2. Joiner: `cmd_net_join_sealed` (`lifecycles.rs` ~1174–1191) — takes the
+     ritual transport from `self.join_transport`, builds the network, **persists
+     no creds** (materialize wrote mls+mesh beforehand).
+  3. Recovery: `cmd_net_recover_sealed` (`lifecycles.rs` ~1433–1450) — twin
+     of the joiner using `self.recover_transport`, **persists no creds**.
+  4. Mesh extension: `cmd_net_mesh_extended` (`net.rs` ~1422–1477) —
+     **already persists correctly** `mls + creds + mesh` via
+     `crypto_for_close()` → NOTHING to do here (reference pattern!).
+  5. Reopen: `cmd_open_workspace` (`session.rs` ~551–626) with
      `reopen_transport` (`founding.rs` ~44–53).
-- **Der Storage-Writer ist schon korrekt:** `WriterMsg::SaveTransport` macht
-  Read-Modify-Write und übernimmt NUR die Cursor-Maps; `MergeCrypto`
-  (read-modify-write, fsync, optional `seal`) erhält Cursors. Beides ist durch
-  bestehende Tests gepinnt: `merge_crypto_preserves_delivery_cursors` und
+- **The storage writer is already correct:** `WriterMsg::SaveTransport` does a
+  read-modify-write and takes over ONLY the cursor maps; `MergeCrypto`
+  (read-modify-write, fsync, optional `seal`) preserves cursors. Both are pinned by
+  existing tests: `merge_crypto_preserves_delivery_cursors` and
   `a_cursor_save_never_clobbers_a_live_crypto_merge` (molt-storage,
-  `lib.rs`-Modultests). **In molt-storage ist KEINE Änderung nötig.**
-- **`persist_mesh_crypto_blocking(mls, creds, mesh)`** ist der richtige
-  Choke-Point für alle neuen Persists: LIVE-Merge (kein `seal`!), blockierend
-  bis fsync, vom Aktor aus aufrufbar (gleiches Muster wie Mesh-Extension und
-  Clean-Close). **Niemals `persist_crypto_blocking` für den Mesh-Up nehmen** —
-  das setzt `seal=true` und würde alle späteren Cursor-Saves der laufenden
-  Session verwerfen.
-- **`LoopbackTransport::export_creds()` liefert heute `None`** (Trait-Default,
-  `crates/molt-net/src/lib.rs` ~223–235), und `reopen_transport` liefert für
-  ein Loopback-Mesh `None` (Servername „loopback" parst nicht als SMP-URL).
-  Darum braucht Test (2) den Reopen-Seam (§4 S2).
-- **GUI braucht KEINE Änderung:** `molt-ui/src/lib.rs:2212` matcht exakt
-  `sv.notice == "detached"` → Toast; `:2233–2235` rendert `net_health` als
-  Pill (rot bei `Down`, Reason als Tooltip). MCP liest `SessionView.notice` +
-  `SessionView.net_health` unverändert mit. Kein neues `Command` → keine
-  MCP-Co-Equality-Änderung.
-- **`WalletHandle`-Drop modelliert den harten Kill korrekt:** alle
-  Engine-internen Halter des Command-Kanals sind `WeakSender`
-  (State/Sinks/Ticker/Brains); fällt der letzte starke Sender (das Handle),
-  endet die Aktor-Schleife, der Writer-Thread endet und gibt das flock-LOCK
-  frei — OHNE Clean-Close-Persist. Genau darauf bauen die Tests.
-- `Transport`-Trait ist in `founding.rs` in Scope; in `lifecycles.rs` und
-  `session.rs` die neuen Trait-Aufrufe **voll qualifiziert** schreiben
+  `lib.rs` module tests). **NO change is needed in molt-storage.**
+- **`persist_mesh_crypto_blocking(mls, creds, mesh)`** is the right
+  choke point for all new persists: LIVE merge (no `seal`!), blocking
+  until fsync, callable from the actor (same pattern as mesh extension and
+  clean close). **Never use `persist_crypto_blocking` for mesh-up** —
+  it sets `seal=true` and would discard all later cursor saves of the running
+  session.
+- **`LoopbackTransport::export_creds()` currently returns `None`** (trait default,
+  `crates/molt-net/src/lib.rs` ~223–235), and `reopen_transport` returns `None` for
+  a loopback mesh (server name "loopback" does not parse as an SMP URL).
+  That is why test (2) needs the reopen seam (§4 S2).
+- **The GUI needs NO change:** `molt-ui/src/lib.rs:2212` matches exactly
+  `sv.notice == "detached"` → toast; `:2233–2235` renders `net_health` as a
+  pill (red on `Down`, reason as tooltip). MCP reads `SessionView.notice` +
+  `SessionView.net_health` unchanged. No new `Command` → no
+  MCP co-equality change.
+- **Dropping `WalletHandle` models the hard kill correctly:** all
+  engine-internal holders of the command channel are `WeakSender`
+  (state/sinks/ticker/brains); when the last strong sender (the handle) falls,
+  the actor loop ends, the writer thread ends and releases the flock LOCK
+  — WITHOUT a clean-close persist. The tests build on exactly that.
+- The `Transport` trait is in scope in `founding.rs`; in `lifecycles.rs` and
+  `session.rs` write the new trait calls **fully qualified**
   (`molt_net::Transport::export_creds(&t)` / `…::import_creds(&t, creds)`),
-  dann keine Import-Änderung nötig.
+  then no import change is needed.
 
 ---
 
-## 3 Design-Entscheidungen (festgezurrt)
+## 3 Design decisions (pinned down)
 
-- **D1 — Persist-Zeitpunkt:** „in dem Moment, in dem das echte Mesh steht" =
-  die drei Aktor-Handler `cmd_net_mesh_ready` / `cmd_net_join_sealed` /
-  `cmd_net_recover_sealed`. Früher (bei `materialize_workspace`) gibt es beim
-  Founder noch keine Mesh-Queues; später wäre wieder ein Fenster offen.
-- **D2 — Merge-Semantik:** immer der LIVE-Merge (`seal=false`). Ordnung ist
-  sicher: alle transport.state-Schreiber laufen FIFO über den einen
-  Writer-Thread; ein späterer Clean-Close überschreibt mls/creds mit neueren
-  Werten (RMW), nie umgekehrt.
-- **D3 — Loopback-Creds sind echt, kein Fake:** `LoopbackTransport` bekommt
-  ein über Klone geteiltes Set der von ihm erzeugten Queue-Ids (das
-  Loopback-Analogon zu SMPs Empfangs-Credentials; `SmpTransport` teilt seinen
-  Zustand genauso über eine Arc). Export = Serialisierung dieser Ids; nur
-  gültig, solange der Hub lebt (ein neuer PROZESS kann ein Loopback-Mesh nie
-  resümieren — ein frischer Engine auf demselben Hub im Test schon). Founder-
-  Export enthält auch die (toten) Stern-Queues des Rituals — unschädlich, der
-  Supervisor subscribed nur die Mesh-Queues aus den Links.
-- **D4 — Reopen-Seam:** `#[doc(hidden)] __spawn_with_reopen_transport(config,
-  session, transport)` — ein Test-Seam exakt in der Tradition von
-  `__spawn_manual_founding*`/`__spawn_demo_mesh`. Das Produkt installiert ihn
-  nie; der echte Reopen baut weiterhin `reopen_transport` (SmpTransport +
+- **D1 — Persist timing:** "the moment the real mesh stands" =
+  the three actor handlers `cmd_net_mesh_ready` / `cmd_net_join_sealed` /
+  `cmd_net_recover_sealed`. Earlier (at `materialize_workspace`) the
+  founder has no mesh queues yet; later would leave a window open again.
+- **D2 — Merge semantics:** always the LIVE merge (`seal=false`). Ordering is
+  safe: all transport.state writers run FIFO through the one
+  writer thread; a later clean close overwrites mls/creds with newer
+  values (RMW), never the other way round.
+- **D3 — Loopback creds are real, not a fake:** `LoopbackTransport` gets
+  a set, shared across clones, of the queue ids it created (the
+  loopback analogue of SMP's receive credentials; `SmpTransport` shares its
+  state the same way via an Arc). Export = serialization of these ids; only
+  valid while the hub lives (a new PROCESS can never resume a loopback mesh
+  — a fresh engine on the same hub in a test can). The founder
+  export also contains the (dead) star queues of the ritual — harmless, the
+  supervisor subscribes only to the mesh queues from the links.
+- **D4 — Reopen seam:** `#[doc(hidden)] __spawn_with_reopen_transport(config,
+  session, transport)` — a test seam exactly in the tradition of
+  `__spawn_manual_founding*`/`__spawn_demo_mesh`. The product never installs it;
+  the real reopen still builds `reopen_transport` (SmpTransport +
   `import_creds`).
-- **D5 — Ehrlicher Offline-Zustand:** Notice-Token bleibt exakt `"detached"`
-  (GUI-Exact-Match, null GUI-Aufwand); die präzise Ursache trägt
-  `net_health = Down { reason }` (Pill-Tooltip + MCP). Dialer-Fehlschläge
-  behalten ihren eigenen fail-closed `Down`-Reason aus `resolve_dialer` und
-  bekommen KEINE detached-Notice (Settings fixen + neu öffnen resümiert —
-  der Workspace ist nicht detached).
-- **D6 — Import-Detached bleibt unverändert:** der bestehende §4.4-Fall
-  (Chain da, keinerlei Transport-Evidenz) behält sein Verhalten (Notice
-  `"detached"`, net_health unberührt) — `restore_real.rs` pinnt ihn. Ihn auch
-  auf `Down` zu heben ist ein optionales Follow-up, nicht Teil dieser Härtung.
-- **D7 — Offline-first bleibt:** `chat_send` u. a. schreiben lokal weiter;
-  nichts blockiert.
+- **D5 — Honest offline state:** the notice token stays exactly `"detached"`
+  (GUI exact match, zero GUI effort); the precise cause is carried by
+  `net_health = Down { reason }` (pill tooltip + MCP). Dialer failures
+  keep their own fail-closed `Down` reason from `resolve_dialer` and
+  get NO detached notice (fix the settings + reopen resumes —
+  the workspace is not detached).
+- **D6 — Import-detached stays unchanged:** the existing §4.4 case
+  (chain present, no transport evidence whatsoever) keeps its behavior (notice
+  `"detached"`, net_health untouched) — `restore_real.rs` pins it. Raising it
+  to `Down` as well is an optional follow-up, not part of this hardening.
+- **D7 — Offline-first stays:** `chat_send` and others keep writing locally;
+  nothing blocks.
 
 ---
 
-## 4 Implementierung Schritt für Schritt
+## 4 Implementation step by step
 
-**Arbeitsweise:** eigener Worktree (es EXISTIERT schon
-`worktree-mesh-cred-persist` mit den roten Tests — dort weiterarbeiten oder
-den Commit `d18e1e5` in einen frischen Worktree cherry-picken). NIE im
-Haupt-Checkout committen; am Ende normaler Merge nach master (§7).
+**Way of working:** a worktree of its own (`worktree-mesh-cred-persist`
+with the red tests ALREADY EXISTS — keep working there or
+cherry-pick commit `d18e1e5` into a fresh worktree). NEVER commit in the
+main checkout; at the end a normal merge to master (§7).
 
-**Schritt 0 — Rot verifizieren.**
+**Step 0 — verify red.**
 ```
 cargo test -p molt-engine --test mesh_resume --no-run
 ```
-Erwartung @`d18e1e5`: genau EIN Fehler — `__spawn_with_reopen_transport` fehlt
-(E0425). Nach S2 kompiliert alles; dann laufen lassen: Test (1) und (2) rot
-(keine Creds auf Platte / kein Resume), Test (3) rot (net_health Ok statt
-Down). Erst dann implementieren.
+Expectation @`d18e1e5`: exactly ONE error — `__spawn_with_reopen_transport` missing
+(E0425). After S2 everything compiles; then run it: tests (1) and (2) red
+(no creds on disk / no resume), test (3) red (net_health Ok instead of
+Down). Only then implement.
 
-### S1 — molt-net: echte Loopback-Creds
+### S1 — molt-net: real loopback creds
 
 `crates/molt-net/src/loopback.rs`:
 
@@ -181,10 +181,10 @@ pub struct LoopbackTransport {
 }
 ```
 
-- `LoopbackHub::transport()` initialisiert `created: Arc::new(Mutex::new(BTreeSet::new()))`.
-- `create_queue` (Trait-Impl) registriert: nach `create_queue_blocking()`
+- `LoopbackHub::transport()` initializes `created: Arc::new(Mutex::new(BTreeSet::new()))`.
+- `create_queue` (trait impl) registers: after `create_queue_blocking()`
   `self.created.lock()` → `insert(pair.rcv.id.0.clone())`.
-- Trait-Impl ergänzen:
+- Extend the trait impl:
 
 ```rust
 fn export_creds(&self) -> Option<Vec<u8>> {
@@ -209,19 +209,19 @@ fn import_creds(&self, creds: &[u8]) {
 }
 ```
 
-- Import `std::collections::BTreeSet` ergänzen; `hex`/`serde_json` sind in
-  molt-net schon Dependencies.
-- Vorher greppen: `LoopbackTransport {` wird NUR in `LoopbackHub::transport()`
-  konstruiert — falls doch weitere Literale existieren, alle anpassen.
-- Doc-Kommentar am Trait (`crates/molt-net/src/lib.rs`, `export_creds`)
-  aktualisieren: der Halbsatz „`None` for … the loopback hub …" stimmt danach
-  nicht mehr — Loopback exportiert jetzt seine Queue-Ids (prozess-lokal gültig).
+- Add the import `std::collections::BTreeSet`; `hex`/`serde_json` are already
+  dependencies of molt-net.
+- Grep first: `LoopbackTransport {` is constructed ONLY in `LoopbackHub::transport()`
+  — if further literals exist after all, adapt them all.
+- Update the doc comment on the trait (`crates/molt-net/src/lib.rs`, `export_creds`):
+  the half-sentence "`None` for … the loopback hub …" is no longer true afterwards
+  — loopback now exports its queue ids (valid process-locally).
 
-### S2 — Engine-Seam: `__spawn_with_reopen_transport`
+### S2 — Engine seam: `__spawn_with_reopen_transport`
 
 `crates/molt-engine/src/lib.rs`:
 
-1. `State` bekommt ein Feld (bei den anderen Seam-Feldern, ~Z. 560):
+1. `State` gets a field (next to the other seam fields, ~l. 560):
 
 ```rust
 /// Reopen **test seam only** ([`__spawn_with_reopen_transport`]): resume a
@@ -232,15 +232,15 @@ fn import_creds(&self, creds: &[u8]) {
 pub(crate) reopen_seam: Option<founding::RitualTransport>,
 ```
 
-   In `State::new` mit `reopen_seam: None` initialisieren.
-2. `spawn_actor` bekommt einen 14. Parameter
-   `reopen_seam: Option<founding::RitualTransport>` und setzt ihn wie die
-   anderen Seams (`state.reopen_seam = reopen_seam;`). ALLE bestehenden
-   Aufrufer (8 Stellen: `spawn_inner`, `__spawn_manual_founding`,
+   Initialize it in `State::new` with `reopen_seam: None`.
+2. `spawn_actor` gets a 14th parameter
+   `reopen_seam: Option<founding::RitualTransport>` and sets it like the
+   other seams (`state.reopen_seam = reopen_seam;`). ALL existing
+   callers (8 sites: `spawn_inner`, `__spawn_manual_founding`,
    `…_bootstrap`, `…_bootstrap_recoverable`, `__spawn_demo_mesh`,
    `__spawn_sim_founding`, `__spawn_manual_founding_over_smp`,
-   `spawn_with_config`) übergeben `None`.
-3. Neuer Spawner (bei den anderen `__spawn_*`):
+   `spawn_with_config`) pass `None`.
+3. New spawner (next to the other `__spawn_*`):
 
 ```rust
 /// Storage-backed engine that resumes a persisted mesh over the GIVEN
@@ -261,12 +261,12 @@ pub fn __spawn_with_reopen_transport(
 }
 ```
 
-   (Argument-Reihenfolge an die tatsächliche Signatur anpassen!)
+   (Adapt the argument order to the actual signature!)
 
-### S3 — `cmd_open_workspace`: Seam nutzen + ehrlicher Offline-Zustand
+### S3 — `cmd_open_workspace`: use the seam + honest offline state
 
-`crates/molt-engine/src/session.rs`, den Block von `let dialer = …` (~Z. 594)
-bis einschließlich der Notice-Zuweisung (~Z. 623) ERSETZEN durch:
+`crates/molt-engine/src/session.rs`, REPLACE the block from `let dialer = …` (~l. 594)
+up to and including the notice assignment (~l. 623) with:
 
 ```rust
 let dialer = self.resolve_dialer().ok();
@@ -337,14 +337,14 @@ self.session.notice = if let Some(reason) = offline {
 };
 ```
 
-(Der bestehende §4.4-Kommentarblock über der alten Notice-Zuweisung kann in
-den neuen Code wandern; die beiden Bedingungen sind disjunkt — Evidenz
-vs. keinerlei Evidenz.)
+(The existing §4.4 comment block above the old notice assignment can move into
+the new code; the two conditions are disjoint — evidence
+vs. no evidence at all.)
 
-### S4 — Founder: Creds im Mesh-Ready-Merge
+### S4 — Founder: creds in the mesh-ready merge
 
-`crates/molt-engine/src/founding.rs`, `cmd_net_mesh_ready` (~Z. 1711–1732),
-den Persist-/Aufbau-Teil ERSETZEN durch:
+`crates/molt-engine/src/founding.rs`, `cmd_net_mesh_ready` (~l. 1711–1732),
+REPLACE the persist/build part with:
 
 ```rust
 self.founder_mesh_in = None;
@@ -375,10 +375,10 @@ if let Some(transport) = transport {
 }
 ```
 
-### S5 — Joiner: Creds beim Join-Sealed
+### S5 — Joiner: creds at join-sealed
 
-`crates/molt-engine/src/lifecycles.rs`, `cmd_net_join_sealed` (~Z. 1179–1188),
-den Netz-Aufbau-Block ERSETZEN durch:
+`crates/molt-engine/src/lifecycles.rs`, `cmd_net_join_sealed` (~l. 1179–1188),
+REPLACE the network build block with:
 
 ```rust
 let (mls_blob, mesh) = net_seed;
@@ -403,119 +403,119 @@ if self.persist && !mesh.is_empty() {
 }
 ```
 
-### S6 — Recovery: Creds beim Recover-Sealed
+### S6 — Recovery: creds at recover-sealed
 
-Gleiche Änderung im Zwilling `cmd_net_recover_sealed` (~Z. 1437–1446), mit
-`self.recover_transport` statt `join_transport` (der umgebende Code ist dort
-bereits identisch strukturiert — nur den inneren `if let`-Block wie in S5 um
-den Creds-Persist erweitern).
+The same change in the twin `cmd_net_recover_sealed` (~l. 1437–1446), with
+`self.recover_transport` instead of `join_transport` (the surrounding code there is
+already structured identically — only extend the inner `if let` block as in S5
+with the creds persist).
 
-### S7 — Doku ehrlich halten
+### S7 — Keep the docs honest
 
-In **CLAUDE.md**, Abschnitt „Transport gotchas", den Satz „Only a CLEAN close
-persists — …" anpassen: seit dieser Härtung persistieren Founder-Mesh-Ready,
-Join-Sealed, Recover-Sealed und Mesh-Extension die Queue-Creds + MLS-Snapshot
-**live beim Mesh-Up**; der Clean-Close-Merge schreibt weiterhin den
-NEUESTEN Ratchet-Stand (ein harter Kill resümiert vom letzten persistierten
-Ratchet — ein paar In-Flight-Nachrichten werden replay-rejected, akzeptiert).
+In **CLAUDE.md**, section "Transport gotchas", adjust the sentence "Only a CLEAN close
+persists — …": since this hardening, founder mesh-ready,
+join-sealed, recover-sealed and mesh extension persist the queue creds + MLS snapshot
+**live at mesh-up**; the clean-close merge still writes the
+NEWEST ratchet state (a hard kill resumes from the last persisted
+ratchet — a few in-flight messages get replay-rejected, accepted).
 
 ---
 
-## 5 Erwartete Test-Landschaft (Audit-Anleitung)
+## 5 Expected test landscape (audit guide)
 
-Nach S1–S6 zuerst `cargo test -p molt-engine --test mesh_resume` (grün),
-dann die volle Suite. Mögliche Folge-Effekte, **einzeln prüfen, nicht
-pauschal wegfixen**:
+After S1–S6 first run `cargo test -p molt-engine --test mesh_resume` (green),
+then the full suite. Possible knock-on effects, **check individually, do not
+blanket-fix**:
 
-- Loopback-Workspaces, die in Tests **sauber geschlossen und wieder geöffnet**
-  werden, haben jetzt Creds auf Platte; ohne Seam schlägt `reopen_transport`
-  fehl („loopback" ist keine SMP-URL) → neu: `notice == "detached"` +
-  `net_health Down` statt vorher stillem Nichts. Das ist der EHRLICHE Zustand
-  — Assertions solcher Tests ggf. anpassen (oder den Seam installieren, wenn
-  der Test ein echtes Resume meint). Kandidaten: `two_instances.rs`,
+- Loopback workspaces that are **cleanly closed and reopened** in tests
+  now have creds on disk; without the seam `reopen_transport` fails
+  ("loopback" is not an SMP URL) → new: `notice == "detached"` +
+  `net_health Down` instead of the former silent nothing. That is the HONEST state
+  — adapt the assertions of such tests if needed (or install the seam if
+  the test means a real resume). Candidates: `two_instances.rs`,
   `three_nodes.rs`, `founding.rs`, `chat_channels.rs`, `demo_mesh.rs`.
-- `restore_real.rs` (Import-Detached, Zeilen 218/434) MUSS unverändert grün
-  bleiben (D6). `persisted_mesh.rs` ist unbetroffen (dessen Engine-Workspace
-  hat keinerlei Transport-Evidenz).
-- Sim-Founding (`__spawn_sim_founding`, ohne Bootstrap) schreibt mls, aber
-  weder Mesh noch Creds → Reopen zeigt jetzt Down+detached. Auch das ist
-  ehrlich (Sitz ohne Links); betroffene Assertions anpassen.
-- Die `#[ignore]`-Netztests (`ritual_engine_over_smp.rs`, `tor_e2e.rs`)
-  NICHT lokal laufen lassen (echter SMP-Server; außerdem laufen beim User
-  gerade drei moltd-Instanzen). Nichts an ihnen ändern.
+- `restore_real.rs` (import-detached, lines 218/434) MUST stay green
+  unchanged (D6). `persisted_mesh.rs` is unaffected (its engine workspace
+  has no transport evidence whatsoever).
+- Sim founding (`__spawn_sim_founding`, without bootstrap) writes mls, but
+  neither mesh nor creds → reopen now shows Down+detached. That too is
+  honest (a seat without links); adapt the affected assertions.
+- Do NOT run the `#[ignore]` network tests (`ritual_engine_over_smp.rs`, `tor_e2e.rs`)
+  locally (real SMP server; besides, the user currently has three moltd
+  instances running). Change nothing in them.
 
-**Clippy-Fallen:** kein `.unwrap()` (auch in Tests → `.expect("…")`);
-`--all-targets` muss 0 Warnungen zeigen.
+**Clippy traps:** no `.unwrap()` (also in tests → `.expect("…")`);
+`--all-targets` must show 0 warnings.
 
 ---
 
-## 6 Validierung (Pflicht, in dieser Reihenfolge)
+## 6 Validation (mandatory, in this order)
 
 ```
-cargo test -p molt-engine --test mesh_resume        # neue Tests grün
+cargo test -p molt-engine --test mesh_resume        # new tests green
 cargo test -p molt-engine -p molt-storage -p molt-net
-cargo clippy --all-targets                          # 0 Warnungen
+cargo clippy --all-targets                          # 0 warnings
 ```
 
-- **KEIN** `molt-ui-window`-Build (keine GUI-/Strings-Änderung nötig; falls
-  doch etwas in molt-ui angefasst wird: genau EIN `cargo build -p
-  molt-ui-window -p molt-ui`, vorher prüfen, dass kein anderer Build läuft,
-  bei knappem RAM `-j 1`).
-- Worktree-Falle (Memory): geteilte `CARGO_TARGET_DIR` über Worktrees mischt
-  molt-*-Artefakte — autoritative Läufe im Worktree-eigenen `target/`; bei
-  Geister-Fehlern `cargo clean -p molt-…`.
-- **Tabu:** die laufenden moltd-Instanzen des Users, `~/.moltrepublic*`,
-  `config.toml`/`config2.toml`/`config3.toml` (untracked im Repo-Dir) —
-  weder lesen-schreiben noch killen. Tests nur gegen Tempdirs.
+- **NO** `molt-ui-window` build (no GUI/strings change needed; if
+  something in molt-ui is touched after all: exactly ONE `cargo build -p
+  molt-ui-window -p molt-ui`, first check that no other build is running,
+  with tight RAM `-j 1`).
+- Worktree trap (memory): a shared `CARGO_TARGET_DIR` across worktrees mixes
+  molt-* artifacts — authoritative runs in the worktree's own `target/`; on
+  ghost errors `cargo clean -p molt-…`.
+- **Taboo:** the user's running moltd instances, `~/.moltrepublic*`,
+  `config.toml`/`config2.toml`/`config3.toml` (untracked in the repo dir) —
+  neither read-write nor kill. Tests only against temp dirs.
 
 ---
 
-## 7 Review + Landing
+## 7 Review + landing
 
-1. **Code-Review über den vollen Diff** (CLAUDE.md-Pflicht), Findings fixen.
-   Review-Schwerpunkte: (a) kein neuer Persist benutzt versehentlich den
-   sealenden `persist_crypto_blocking`; (b) `cmd_net_mesh_ready` persistiert
-   auch dann unverändert (Creds `None`), wenn `runtime_transport` schon weg
-   ist; (c) der Offline-Block setzt `Down` NIE bei `resumed_real`,
-   `!persist` oder Dialer-Fehler; (d) Import-Pfad (`import.rs`) exportiert
-   weiterhin nie Creds (bestehender Test Zeile ~616).
-2. Frisches lokales master mergen (master kann sich bewegen — andere Session
-   aktiv!), Suite + clippy erneut, dann im Haupt-Checkout
-   `git -C /home/user/projects/moltrepublic merge <branch>` (normaler Merge,
-   NIE push, NIE force, NIE History umschreiben). Bei nicht sicher lösbaren
-   Konflikten: STOPPEN und berichten.
-3. Worktree + Branch löschen (`git worktree remove …`, `git branch -d …`).
-   Die übrigen `worktree-agent-*`-Worktrees gehören anderen Sessions — nicht
-   anfassen. (Ein evtl. noch existierender Branch
-   `worktree-settings-network-fixes` gehört ebenfalls einer anderen Session.)
-4. Abschlussbericht: was wann wohin persistiert wird; Testnamen + was jeder
-   pinnt; wie der Offline-Zustand erscheint (`notice="detached"`,
-   `net_health=Down{reason}`); Review-Findings; master-Hash; Tests+clippy
-   grün; **Stage B (Reconnect-Supervisor) bleibt offen**.
-
----
-
-## 8 Bewusst offen (nach dieser Härtung)
-
-- **Stage B:** Reconnect-/Resubscribe-Supervisor (laufende Verbindung
-  überwachen, re-subscriben, Health live nachführen) — explizit NICHT Teil
-  dieses Auftrags.
-- Recovery-Link-Mint-Fenster: die dedizierte Recovery-Queue des Koordinators
-  entsteht off-actor; ein harter Kill zwischen Mint und Mesh-Extension
-  verliert sie (Link tot, neu minten). Klein, separat härtenswert.
-- Assertion „Creds nach Engine-Join auf Platte" im `#[ignore]`-SMP-Test
-  nachziehen (nur mit echtem Server ausführbar).
-- Import-Detached zusätzlich auf `net_health Down` heben (D6-Follow-up).
-- Per-Drain-MLS-Persist (volle Crash-Safety des Ratchets) — bekanntes
-  offenes Hardening aus CLAUDE.md.
+1. **Code review over the full diff** (CLAUDE.md duty), fix the findings.
+   Review focus: (a) no new persist accidentally uses the sealing
+   `persist_crypto_blocking`; (b) `cmd_net_mesh_ready` persists
+   unchanged (creds `None`) even when `runtime_transport` is already gone;
+   (c) the offline block NEVER sets `Down` on `resumed_real`,
+   `!persist` or dialer failure; (d) the import path (`import.rs`) still
+   never exports creds (existing test line ~616).
+2. Merge a fresh local master (master may move — another session
+   active!), suite + clippy again, then in the main checkout
+   `git -C /home/user/projects/moltrepublic merge <branch>` (normal merge,
+   NEVER push, NEVER force, NEVER rewrite history). On conflicts that cannot be resolved
+   safely: STOP and report.
+3. Delete worktree + branch (`git worktree remove …`, `git branch -d …`).
+   The remaining `worktree-agent-*` worktrees belong to other sessions — do not
+   touch them. (A branch `worktree-settings-network-fixes`, if it still exists,
+   likewise belongs to another session.)
+4. Final report: what is persisted when and where; test names + what each one
+   pins; how the offline state appears (`notice="detached"`,
+   `net_health=Down{reason}`); review findings; master hash; tests+clippy
+   green; **Stage B (reconnect supervisor) stays open**.
 
 ---
 
-## Anhang A — die roten Tests (vollständig)
+## 8 Deliberately open (after this hardening)
 
-Liegt committet als `crates/molt-engine/tests/mesh_resume.rs` auf Branch
-`worktree-mesh-cred-persist` (`d18e1e5`); falls Branch/Worktree verloren
-gehen, die Datei 1:1 aus diesem Anhang wiederherstellen.
+- **Stage B:** reconnect/resubscribe supervisor (monitor the running connection,
+  resubscribe, track health live) — explicitly NOT part of
+  this task.
+- Recovery-link mint window: the coordinator's dedicated recovery queue
+  is created off-actor; a hard kill between mint and mesh extension
+  loses it (link dead, mint again). Small, worth hardening separately.
+- Add the assertion "creds on disk after engine join" to the `#[ignore]` SMP test
+  (executable only with a real server).
+- Also raise import-detached to `net_health Down` (D6 follow-up).
+- Per-drain MLS persist (full crash safety of the ratchet) — known
+  open hardening from CLAUDE.md.
+
+---
+
+## Appendix A — the red tests (complete)
+
+Committed as `crates/molt-engine/tests/mesh_resume.rs` on branch
+`worktree-mesh-cred-persist` (`d18e1e5`); if the branch/worktree are lost,
+restore the file 1:1 from this appendix.
 
 ```rust
 // SPDX-License-Identifier: GPL-3.0-or-later

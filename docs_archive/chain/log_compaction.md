@@ -1,385 +1,385 @@
-# Kompaktierung: WP4a ephemeres Pruning · WP4b Chain-Checkpoint
+# Compaction: WP4a ephemeral pruning · WP4b chain checkpoint
 
 > **STATUS: BUILT.** WP4a complete 2026-07-25; WP4b stages landed through
 > 2026-08-03 (checkpoint layout now at `molt-chain-checkpoint-v8`,
 > conditional, see CLAUDE.md). The remaining items named in §B.8 are declared v1 limits,
 > not open work. Original decision record below.
 >
-> **ENTSCHIEDEN (2026-07-17, Diskussion mit dem User).**
-> F1–F4 sind beschlossen (§A.2); das Doc ist in zwei Teile gespalten:
-> **WP4a** = physisches Pruning des flüchtigen Logs (lokal, Policy-vollziehend),
-> **WP4b** = threshold-signierter Chain-Checkpoint (m-of-n bestätigen die
-> Korrektheit der Kompaktierung — Ergebnis der Checkpoint-Diskussion).
-> Routinemäßige WP4a-Läufe sind bewusst NICHT votiert: eine „ich habe
-> kompaktiert"-Signatur wäre unbeweisbar, ein Block über flüchtigen
-> Gerätezustand verletzte die Ephemeral-Grenze, und Offline-Geräte
-> änderten am Ergebnis nichts. Die Threshold-Hoheit liegt in der POLICY
-> (`set_chat_retention`, gated Vote) und im Checkpoint (WP4b).
+> **DECIDED (2026-07-17, discussion with the user).**
+> F1–F4 are settled (§A.2); the doc is split into two parts:
+> **WP4a** = physical pruning of the ephemeral log (local, policy-enforcing),
+> **WP4b** = threshold-signed chain checkpoint (m-of-n confirm the
+> correctness of the compaction — result of the checkpoint discussion).
+> Routine WP4a runs are deliberately NOT voted: an "I have
+> compacted" signature would be unprovable, a block over ephemeral
+> device state would violate the ephemeral boundary, and offline devices
+> would change nothing about the result. The threshold authority lies in the POLICY
+> (`set_chat_retention`, gated vote) and in the checkpoint (WP4b).
 
 ---
 
-# Teil A — WP4a: Physisches Pruning des flüchtigen Logs
+# Part A — WP4a: Physical pruning of the ephemeral log
 
-## A.1 Auftrag, Constraints
+## A.1 Mandate, constraints
 
-Wie im Ursprungs-Entwurf: Nach **Ablauf + Karenz** existieren Inhalt und
-Metadaten abgelaufener Chats/Shares lokal wirklich nicht mehr.
-Constraints C1–C5 unverändert:
+As in the original draft: after **expiry + grace**, the content and
+metadata of expired chats/shares really no longer exist locally.
+Constraints C1–C5 unchanged:
 
-- **C1** `seq` wird NIE renummeriert (Legacy-Id-Keystones; Einträge fallen
-  weg, Lücken bleiben).
-- **C2** Peer-Cursor < Kompaktierungs-Floor ⇒ Umleitung auf die
-  WP2-Catch-up-Schiene (`ChainRequest` → `serve_chain_from` +
-  `serve_open_governance`), nie Log-Replay auf gelöschtem Terrain.
-- **C3** Chain-Blöcke, Genesis, Roster: niemals von WP4a angefasst
-  (WP4b hat dafür einen EIGENEN, votierten Mechanismus).
-- **C4** User-Dateien tabu; nur `prefs.shared_files`-Einträge fallen.
-- **C5** Lokale Hygiene, nichts kreuzt die Wire.
+- **C1** `seq` is NEVER renumbered (legacy-id keystones; entries drop
+  out, gaps remain).
+- **C2** Peer cursor < compaction floor ⇒ redirect to the
+  WP2 catch-up track (`ChainRequest` → `serve_chain_from` +
+  `serve_open_governance`), never log replay on deleted terrain.
+- **C3** Chain blocks, genesis, roster: never touched by WP4a
+  (WP4b has its OWN, voted mechanism for them).
+- **C4** User files are off limits; only `prefs.shared_files` entries drop.
+- **C5** Local hygiene, nothing crosses the wire.
 
-Kernidee unverändert: **Kompaktierung = Snapshot-Vorziehen** (gestutzter
-`EngineStateDump` als neue Basis) **+ Drop ganzer Segmente** unter dem
-Floor. Kein Byte-Rewrite einzelner Einträge, kein Rewrite teilbetroffener
-Segmente. Floor-Regeln:
+Core idea unchanged: **compaction = snapshot pull-forward** (a pruned
+`EngineStateDump` as the new base) **+ drop of whole segments** below the
+floor. No byte rewrite of individual entries, no rewrite of partially affected
+segments. Floor rules:
 
-- **R1 Snapshot-Deckung:** Floor ≤ `at_seq` eines gültigen Snapshots.
-- **R2 Outbox-Deckung:** min über Peer-Delivery-Cursor; ein toter Peer
-  hält den Floor nur bis zur Peer-Karenz (F4), danach Umleitung (C2).
-- **R3 Retention + Karenz:** gestutzt wird nur
-  `ts + Fenster + Karenz < now`; `ts 0` (unbekanntes Alter) nie.
+- **R1 Snapshot coverage:** floor ≤ `at_seq` of a valid snapshot.
+- **R2 Outbox coverage:** min over peer delivery cursors; a dead peer
+  holds the floor only until the peer grace (F4), then redirect (C2).
+- **R3 Retention + grace:** only
+  `ts + window + grace < now` is pruned; `ts 0` (unknown age) never.
 
-## A.2 Entscheidungen (2026-07-17, User)
+## A.2 Decisions (2026-07-17, user)
 
-- **F1 — Rotation: nur größengesteuert** (8 MiB wie heute, keine
-  Zwangsrotation). Akzeptierte Konsequenz: das offene Segment kompaktiert
-  erst nach Rotation — Rest-Exposition ist auf ~8 MiB pro Workspace
-  begrenzt; stille Republiken behalten diesen Bodensatz länger.
-- **F2 — Inhalts-Karenz = 1× Retention-Fenster** (physisch weg nach 2×
-  Fenster).
-- **F3 — Segment-Schlüssel SOFORT** (kein Unlink-only-v1): echte
-  Krypto-Erasure ab der ersten Ausbaustufe. Design §A.3.
-- **F4 — Peer-Karenz = 2× Retention-Fenster** (doppelt so lang wie die
-  Inhalts-Karenz), danach Cursor-Umleitung auf Catch-up.
-- **F4b — Ack-Progress-Karenz (2026-10-11, User; Audit #32).** F4 misst
-  nur den KONTAKT; ein Peer, der da ist, aber nie ackt, hielt den Floor
-  ewig auf 0. Jetzt hält ein Peer nur, solange sein Haltewert (acked
-  floor, bzw. Sende-Cursor bei einem Nie-Acker im Alt-Pfad, 0 ohne
-  Cursor) sich innerhalb von **2× Retention-Fenster** bewegt hat. Pro
-  Peer persistiert `transport.state` `ack_progress` (`floor`, `since`,
-  `checked`); geschrieben nur vom Kompaktor (`compact_once`). Die Uhr
-  startet beim ersten Lauf, der den Peer als haltend sieht, und neu, wenn
-  der Wert steigt oder den Snapshot erreicht. Danach endet die
-  Zustellgarantie für den Teil unter dem Floor (C2). Präzisierungen
-  (konservativ, nicht Teil der Entscheidung): (a) gemessen wird pro
-  Kompaktorlauf, also täglich — die Freigabe kommt bis zu einen Tag
-  später. Täglich heißt: sobald einmal Chat gekappt wurde (`chat_pruned`),
-  läuft der Lauf auf JEDEM Tages-Beat, auch wenn nichts Neues abläuft —
-  sonst stünde die Uhr in einer stillen Republik und der Lurker hielte den
-  Floor ewig. Vor dem ersten Kappen läuft kein Lauf (nichts zu löschen);
-  (b) eine Lücke zwischen zwei Läufen > 1 Fenster, mindestens aber
-  > 2 Tage, ist UNSERE Abwesenheit (der Peer konnte niemandem acken, der
-  nicht lief) und wird ihm nicht angerechnet — der Tages-Beat selbst
-  (1 Tag + Tick-Verzug) darf bei 1-Tages-Retention nicht als Abwesenheit
-  zählen; die Stall-Karenz ist entsprechend mindestens 2 Tage; (c) ein Peer, der aus der haltenden Liste fällt,
-  verliert seinen Eintrag und startet bei Rückkehr frisch.
+- **F1 — Rotation: size-driven only** (8 MiB as today, no
+  forced rotation). Accepted consequence: the open segment is compacted
+  only after rotation — residual exposure is capped at ~8 MiB per workspace;
+  quiet republics keep this residue longer.
+- **F2 — Content grace = 1× retention window** (physically gone after 2×
+  the window).
+- **F3 — Segment keys IMMEDIATELY** (no unlink-only v1): real
+  crypto-erasure from the first build stage. Design §A.3.
+- **F4 — Peer grace = 2× retention window** (twice as long as the
+  content grace), then cursor redirect to catch-up.
+- **F4b — Ack-progress grace (2026-10-11, user; audit #32).** F4 measures
+  only CONTACT; a peer that is present but never acks held the floor
+  at 0 forever. Now a peer holds only as long as its hold value (acked
+  floor, or the send cursor for a never-acker on the legacy path, 0 without a
+  cursor) has moved within **2× the retention window**. Per
+  peer, `transport.state` persists `ack_progress` (`floor`, `since`,
+  `checked`); written only by the compactor (`compact_once`). The clock
+  starts at the first run that sees the peer as holding, and restarts when
+  the value rises or reaches the snapshot. After that the delivery
+  guarantee ends for the part below the floor (C2). Clarifications
+  (conservative, not part of the decision): (a) measurement happens per
+  compactor run, i.e. daily — the release comes up to a day
+  later. Daily means: once chat has been pruned (`chat_pruned`),
+  the run happens on EVERY daily beat, even if nothing new expires —
+  otherwise the clock would stand still in a quiet republic and the lurker would hold the
+  floor forever. Before the first prune no run happens (nothing to delete);
+  (b) a gap between two runs > 1 window, but at least
+  > 2 days, is OUR absence (the peer could not ack to anyone who
+  was not running) and is not counted against it — the daily beat itself
+  (1 day + tick lag) must not count as absence at 1-day retention;
+  the stall grace is accordingly at least 2 days; (c) a peer that drops off the holding list
+  loses its entry and starts fresh on return.
 
-Vorgaben aus der offenen F6–F9-Runde (werden so gebaut, solange kein
-Widerspruch kommt):
+Defaults from the open F6–F9 round (built this way unless there is
+an objection):
 
-- **F6 — Migration:** Alt-Segmente (unter dem Workspace-Key) werden beim
-  ERSTEN Kompaktorlauf einmalig auf Segment-Keys umgeschrieben
-  (Copy-then-Swap) — danach überall Key-Erasure, keine zwei
-  Lösch-Klassen.
-- **F7 — Backups:** Kein aktives Durchgreifen auf S3-Kopien; alte Kopien
-  altern über `s3_keep_copies` aus. Die Karenz bis dahin wird im Doc +
-  in der Settings-Hilfe ehrlich benannt.
-- **F8 — Trigger:** 1×/Tag pro offenem Workspace (Ticker) + einmal beim
-  Clean-Close (Snapshot und Cursor sind dort frisch).
-- **F9 — Beweisführung:** Der Byte-Fixture-Beweis „gestutzter Snapshot +
-  Tail-Replay hält die Legacy-Id-Keystones" ist der ERSTE Commit der
-  WP4a-Implementierung (rot = Design-Stopp), vor jedem Kompaktor-Code.
+- **F6 — Migration:** legacy segments (under the workspace key) are rewritten
+  to segment keys once, on the FIRST compactor run
+  (copy-then-swap) — after that, key erasure everywhere, no two
+  deletion classes.
+- **F7 — Backups:** no active reach into S3 copies; old copies
+  age out via `s3_keep_copies`. The grace until then is named honestly in the doc +
+  in the settings help.
+- **F8 — Trigger:** 1×/day per open workspace (ticker) + once on
+  clean close (snapshot and cursor are fresh there).
+- **F9 — Proof:** the byte-fixture proof "pruned snapshot +
+  tail replay holds the legacy-id keystones" is the FIRST commit of the
+  WP4a implementation (red = design stop), before any compactor code.
 
-## A.3 Segment-Schlüssel (F3-Design)
+## A.3 Segment keys (F3 design)
 
-- Pro Segment ein zufälliger Data-Key (DEK); die Frames eines Segments
-  verschlüsseln unter seinem DEK statt direkt unter dem Workspace-Key.
-- DEKs liegen, mit dem Workspace-Key gewrappt, in einer **Key-Tabelle**
-  (`log/keys.state`), die bei JEDER Änderung komplett neu geschrieben
-  wird (Tempfile + fsync + rename — dasselbe atomare Muster wie
+- One random data key (DEK) per segment; the frames of a segment
+  are encrypted under its DEK instead of directly under the workspace key.
+- DEKs live, wrapped with the workspace key, in a **key table**
+  (`log/keys.state`) that is rewritten in full on EVERY change
+  (tempfile + fsync + rename — the same atomic pattern as
   `write_snapshot`).
-- **Löschen = Segment-Datei unlinken UND den DEK aus der Tabelle
-  entfernen.** Ohne DEK sind forensisch wiederhergestellte Segment-Bytes
-  wertlos.
-- **Ehrliche Grenzen (dokumentierte Restrisiken):** (1) auf Flash/
-  Journaling-FS können ALTE Versionen der kleinen Key-Tabelle forensisch
-  überleben — harte Garantie liefert erst TRIM/Hardware-Verschlüsselung;
-  (2) alte S3-Backup-Kopien enthalten gelöschte Inhalte, bis
-  `s3_keep_copies` sie verdrängt (F7).
-- Format-Version im Tabellen-Header; ein älterer Reader ohne
-  Tabellen-Wissen darf das Workspace nicht schreibend öffnen
-  (additive-only-Regel sinngemäß auf Storage-Ebene).
+- **Deleting = unlink the segment file AND remove the DEK from the table.**
+  Without the DEK, forensically recovered segment bytes are
+  worthless.
+- **Honest limits (documented residual risks):** (1) on flash/
+  journaling FS, OLD versions of the small key table can survive
+  forensically — only TRIM/hardware encryption gives a hard guarantee;
+  (2) old S3 backup copies contain deleted content until
+  `s3_keep_copies` displaces them (F7).
+- Format version in the table header; an older reader without
+  table knowledge must not open the workspace for writing
+  (additive-only rule applied analogously at the storage level).
 
-## A.4 Crash-Sicherheit
+## A.4 Crash safety
 
-Reihenfolge je Lauf, jede Stufe idempotent wiederholbar: (1) gestutzten
-Snapshot als Tempfile schreiben + rename, (2) `compaction_floor` im
-Manifest nachziehen, (3) erst dann Segmente unlinken + Key-Tabelle neu
-schreiben. Crash zwischen Stufen: verwaiste Segmente unter dem Floor
-löscht der nächste Lauf; die Gegenrichtung (Floor über noch nötigem
-Terrain) kann nie entstehen.
+Order per run, each step idempotently repeatable: (1) write the pruned
+snapshot as a tempfile + rename, (2) advance `compaction_floor` in the
+manifest, (3) only then unlink segments + rewrite the key table.
+Crash between steps: orphaned segments below the floor are
+deleted by the next run; the opposite direction (floor above still-needed
+terrain) can never arise.
 
-## A.5 Etappen WP4a
+## A.5 Stages WP4a
 
-1. ✅ dieses Doc (entschieden 2026-07-17).
-2. ✅ **Keystone-Beweis (F9) + molt-storage-Primitive** (2026-07-25,
+1. ✅ this doc (decided 2026-07-17).
+2. ✅ **Keystone proof (F9) + molt-storage primitives** (2026-07-25,
    `c3fe291` + `141eb6d`).
-3. ✅ **Engine-Kompaktor** (Ticker + Clean-Close, F8) inkl. Floor/Cursor-
-   Umleitung (C2/F4) — `a386d87`.
-4. ✅ **Share-Vergessen** (`shared_files` fällt beim Stutzen, auch im
-   persistenten Sidecar).
-5. ✅ dieser Abschnitt.
+3. ✅ **Engine compactor** (ticker + clean close, F8) incl. floor/cursor
+   redirect (C2/F4) — `a386d87`.
+4. ✅ **Share forgetting** (`shared_files` drops on pruning, also in the
+   persistent sidecar).
+5. ✅ this section.
 
-### Was gebaut wurde (Ist-Stand 2026-07-25)
+### What was built (state as of 2026-07-25)
 
-**Der F9-Beweis kam zuerst und hat zwei echte Fallen gefunden**, die sonst
-still ausgeliefert worden wären:
+**The F9 proof came first and found two real traps** that would otherwise
+have shipped silently:
 
-- **Per-Sender-Ordinals verschieben sich.** Die Id einer Legacy-Nachricht ist
-  `sha256(TAG ‖ le64(sender_ordinal) ‖ from ‖ ts ‖ body)`; das Ordinal wird
-  über den Log gezählt. Wer alte Nachrichten wegwirft, zählt neu — die nächste
-  Legacy-Nachricht desselben Senders bekäme hier eine ANDERE Id als bei den
-  Peers, und ein id-adressiertes Protokoll divergiert. Gelöst durch
-  `EngineStateDump::chat_pruned_counts`: die gedroppte Anzahl pro Sender wird
-  mitgeführt und zum Ordinal addiert (eine Summe, keine Position — deckt auch
-  Out-of-Order-Ankünfte).
-- **Legacy-POSITIONS-Referenzen adressieren falsch.** Ein id-loses
-  Reaction/Delete/File-Removed (index-adressiert) und das numerische `quote`
-  würden nach einem Prune auf die Nachricht zeigen, die nachgerückt ist —
-  also eine unschuldige ÜBERLEBENDE Nachricht bereaktion/löschen. Gelöst durch
-  das klebrige `chat_pruned`-Flag (im Dump persistiert): danach verweigert
-  `chat_target` den Index-Fallback und das Quote bleibt unaufgelöst.
-  Id-adressierte Ops sind unberührt.
+- **Per-sender ordinals shift.** The id of a legacy message is
+  `sha256(TAG ‖ le64(sender_ordinal) ‖ from ‖ ts ‖ body)`; the ordinal is counted
+  over the log. Whoever discards old messages counts anew — the next
+  legacy message of the same sender would get a DIFFERENT id here than at the
+  peers, and an id-addressed protocol diverges. Solved by
+  `EngineStateDump::chat_pruned_counts`: the dropped count per sender is
+  carried along and added to the ordinal (a sum, not a position — also covers
+  out-of-order arrivals).
+- **Legacy POSITION references address wrongly.** An id-less
+  reaction/delete/file-removed (index-addressed) and the numeric `quote`
+  would, after a prune, point at the message that moved up —
+  i.e. react to/delete an innocent SURVIVING message. Solved by
+  the sticky `chat_pruned` flag (persisted in the dump): afterwards
+  `chat_target` refuses the index fallback and the quote stays unresolved.
+  Id-addressed ops are unaffected.
 
-**Ablauf einer Runde** (`compaction.rs` + `compact_once` im Storage-Writer):
-Inhalts-Cutoff = `now − (1 + F2-Karenz) × Fenster`; Live-State und Snapshot
-werden mit DEMSELBEN Aufruf gestutzt (sie können nicht auseinanderlaufen);
-dann Snapshot schreiben + fsync (R1), Floor = Snapshot-Position, gebremst vom
-Delivery-Cursor jedes Peers INNERHALB seiner Karenz (R2/F4) und seiner
-Ack-Progress-Karenz (F4b), dann F6-Migration,
-dann Drop (Keys zuerst löschen, dann unlinken). Erster echter Drop hebt die
-Manifest-Version — ältere Binaries verweigern das Workspace höflich, statt es
-als beschädigt zu lesen.
+**Flow of a round** (`compaction.rs` + `compact_once` in the storage writer):
+content cutoff = `now − (1 + F2 grace) × window`; live state and snapshot
+are pruned with the SAME call (they cannot drift apart);
+then write snapshot + fsync (R1), floor = snapshot position, held back by the
+delivery cursor of each peer WITHIN its grace (R2/F4) and its
+ack-progress grace (F4b), then F6 migration,
+then drop (delete keys first, then unlink). The first real drop raises the
+manifest version — older binaries politely refuse the workspace instead of reading it
+as damaged.
 
-**Abweichungen von der Vorgabe (bewusst, klein):**
-- Der Tages-Trigger reitet auf dem Presence-Tick statt auf einem eigenen
-  internen `Command` — dieselbe Lösung wie die Track-C-Rotation, spart eine
-  Command-Variante und damit Co-Equality-Churn. Der Clean-Close-Trigger läuft
-  SYNCHRON, sonst verliert er das Rennen gegen den `Close` des Writers.
-- Der Floor liegt in der Key-Tabelle, nicht im Manifest: er gehört zu genau
-  den Daten, die die Tabelle beschreibt, wird mit ihr atomar geschrieben und
-  leakt nicht im Klartext-Manifest. Das Manifest trägt nur den
-  Versions-Stop.
+**Deviations from the default (deliberate, small):**
+- The daily trigger rides on the presence tick instead of its own
+  internal `Command` — the same solution as the track-C rotation, saves a
+  command variant and thereby co-equality churn. The clean-close trigger runs
+  SYNCHRONOUSLY, otherwise it loses the race against the writer's `Close`.
+- The floor lives in the key table, not in the manifest: it belongs to exactly
+  the data the table describes, is written atomically with it, and
+  does not leak in the plaintext manifest. The manifest carries only the
+  version stop.
 
-**Dabei gefundene Lücke (gefixt):** `log/keys.state` fehlte in der
-Export-Include-Tabelle und der Import-Allowlist — ein Blob eines kompaktierten
-Workspaces hätte Segmente ohne ihre Schlüssel transportiert, also ein
-unentschlüsselbares Log auf genau dem Pfad, der zur Wiederherstellung da ist.
+**Gap found along the way (fixed):** `log/keys.state` was missing from the
+export include table and the import allowlist — a blob of a compacted
+workspace would have transported segments without their keys, i.e. an
+undecryptable log on exactly the path that exists for recovery.
 
-**Entschiedene Karten (2026-11-15):** Eine abgelehnte, zurückgezogene oder
-überholte Karte fällt in derselben Runde und am selben Schnitt wie ihre
-Diskussion (Fenster + Karenz, Standard 14 Tage; konfiguriert über
-`set_chat_retention`). Eine Karte ohne Stempel (überholt, Altbestand) startet
-ihre Uhr beim ersten Lauf. Die ID bleibt als Grabstein im Snapshot
-(`retired_proposals`): ein später Re-Serve, eine Stimme oder ein Withdraw für
-sie wird angenommen und verworfen, nie geparkt und nie als offene Karte
-wiederbelebt. Angenommene Karten bleiben (Chain-Blöcke).
+**Decided cards (2026-11-15):** A rejected, withdrawn or
+superseded card drops in the same round and at the same cut as its
+discussion (window + grace, default 14 days; configured via
+`set_chat_retention`). A card without a stamp (superseded, legacy) starts
+its clock at the first run. The ID stays as a tombstone in the snapshot
+(`retired_proposals`): a late re-serve, a vote or a withdraw for
+it is accepted and discarded, never parked and never revived as an open card.
+Accepted cards stay (chain blocks).
 
-**Offen / bewusst nicht gebaut:** F7 bleibt wie entschieden (alte S3-Kopien
-altern über `s3_keep_copies` aus, kein aktives Durchgreifen) — die Karenz ist
-in §A.3 als Restrisiko benannt und gehört noch in die Settings-Hilfe.
+**Open / deliberately not built:** F7 stays as decided (old S3 copies
+age out via `s3_keep_copies`, no active reach) — the grace is
+named in §A.3 as a residual risk and still belongs in the settings help.
 
 ---
 
-# Teil B — WP4b: Chain-Checkpoint (m-of-n-signierte Kompaktierung)
+# Part B — WP4b: Chain checkpoint (m-of-n-signed compaction)
 
-## B.1 Idee und Vertrag
+## B.1 Idea and contract
 
-Der aus der Chain projizierte Zustand ist bei allen Nodes byte-identisch
-(harte Sequenzierung: `height`-Counter + `prev`-Hash-Link +
-positionsgebundene Signaturen). Also kann die Republik ihn
-**kompaktieren, wie sie regiert**: Ein Checkpoint friert den
-projizierten Zustand bei Höhe `upto` ein; m-of-n signieren die
-**Checksum dieses Zustands** — m Teilnehmer bestätigen die *Korrektheit
-der Kompaktierung*, nicht ihren Vollzug. Danach darf jeder Node die
-Blöcke ≤ `upto` lokal droppen; Newcomer/Rejoiner bootstrappen aus
-**Checkpoint + Suffix** statt ab Block 0.
+The state projected from the chain is byte-identical on all nodes
+(hard sequencing: `height` counter + `prev` hash link +
+position-bound signatures). So the republic can
+**compact it the way it governs**: a checkpoint freezes the
+projected state at height `upto`; m-of-n sign the
+**checksum of this state** — m participants confirm the *correctness
+of the compaction*, not its execution. After that, every node may drop the
+blocks ≤ `upto` locally; newcomers/rejoiners bootstrap from
+**checkpoint + suffix** instead of from block 0.
 
-Erreicht: begrenztes Chain-Wachstum, billigere Recovery (heute reist die
-ganze Chain im Welcome), und die eine Stelle, an der Kompaktierung
-„offiziell" wird — chain-verankert, auditierbar, positionsgebunden.
+What this achieves: bounded chain growth, cheaper recovery (today the
+whole chain travels in the Welcome), and the one place where compaction becomes
+"official" — chain-anchored, auditable, position-bound.
 
-## B.2 Neues Chain-Vokabular (additiv)
+## B.2 New chain vocabulary (additive)
 
 ```rust
-// molt-core ChainChange, additive Variante (unknown ⇒ Reader stoppt, wie gehabt)
+// molt-core ChainChange, additive variant (unknown ⇒ reader stops, as before)
 Checkpoint {
-    /// Der letzte eingefaltete Block: der Checkpoint bezeugt den
-    /// Zustand NACH Anwendung von Block `upto`.
+    /// The last folded-in block: the checkpoint attests the
+    /// state AFTER block `upto` is applied.
     upto: u64,
-    /// sha256 (lowercase hex) über checkpoint_canonical_bytes(state@upto).
+    /// sha256 (lowercase hex) over checkpoint_canonical_bytes(state@upto).
     state_hash: String,
 }
 ```
 
-Der Checkpoint-Block sitzt an Höhe H mit **`upto` = H − 1, hart erzwungen**
-(Review-Finding 2026-07-18: ein kleineres `upto` ließe Blöcke in
-(`upto`, H) entstehen, die weder Blob noch Suffix tragen — ihre applied
-Ids entkämen dem Double-Apply-Guard, ihre Membership-Änderungen dem
-Roster; ein re-based Checkpoint-Proposal muss deshalb NEU schneiden:
-Zustand + Hash an der neuen Head-Höhe rekomputieren, nicht nur die
-Signaturhöhe wechseln). Signiert wird mit
-normalen positionsgebundenen Signaturen über
-`republic_id ‖ H ‖ change` (`approval_bytes` bekommt nur die neue
-Varianten-Serialisierung — **kein zweiter Signierpfad**, Genesis-Regel
-sinngemäß).
+The checkpoint block sits at height H with **`upto` = H − 1, strictly enforced**
+(review finding 2026-07-18: a smaller `upto` would let blocks arise in
+(`upto`, H) that are carried by neither blob nor suffix — their applied
+ids would escape the double-apply guard, their membership changes would escape the
+roster; a re-based checkpoint proposal must therefore cut ANEW:
+recompute state + hash at the new head height, not merely change the
+signature height). Signing uses
+normal position-bound signatures over
+`republic_id ‖ H ‖ change` (`approval_bytes` gets only the new
+variant serialization — **no second signing path**, genesis rule
+applied analogously).
 
-## B.3 Kanonische Zustands-Serialisierung (`molt-chain-checkpoint-v6`)
+## B.3 Canonical state serialization (`molt-chain-checkpoint-v6`)
 
-Deterministische Byte-Folge, längenpräfixierte Felder (dasselbe Framing
-wie `roster_canonical_bytes` — Geschwister-Layout, eigener
-Versions-Tag). Inhalt in fester Reihenfolge:
+Deterministic byte sequence, length-prefixed fields (the same framing
+as `roster_canonical_bytes` — sibling layout, its own
+version tag). Content in fixed order:
 
-1. Tag `molt-chain-checkpoint-v2\0` (v2 seit N1: beide Identity-Tabellen
-   tragen zusätzlich den `nostr_pk`-Transport-Anker jedes Mitglieds — unter
-   v1 wäre der Roster-Anker eines servierten Blobs ohne Hash-Änderung
-   austauschbar gewesen).
+1. Tag `molt-chain-checkpoint-v2\0` (v2 since N1: both identity tables
+   additionally carry each member's `nostr_pk` transport anchor — under
+   v1 the roster anchor of a served blob could have been swapped
+   without a hash change).
 2. `republic_id`.
-3. **Founding-Tabelle**: Name, `rule_m`, `rule_n`, GENESIS-Identities in
-   Gründungsreihenfolge, Agenda — damit jeder Verifier `republic_id`
-   aus dem Inhalt REKOMPUTIEREN kann (Fälschungsschutz wie beim
-   Genesis-Check, §B.5).
-4. **Aktueller Roster** nach allen Membership-Blöcken ≤ `upto`:
-   `(member, identity_pk, nostr_pk)` in Chain-Reihenfolge
-   (deterministisch, weil die Blockfolge total geordnet ist).
-5. **Applied-Projektion** pro Surface, Surfaces in
-   `Surface::ALL`-Reihenfolge; je Surface die Liste
-   `(proposal_id, payload_canonical_json)` in Block-Reihenfolge.
-   `payload_canonical_json` = serde_json mit sortierten Map-Keys
-   (Default-BTreeMap; ein Test PINNT, dass `preserve_order` im Workspace
-   nirgends aktiv ist). **Seit v4 ZUSAMMENGEFASST, nicht archiviert**
-   (§B.6a): ein Last-Write-Wins-Slot behält nur seinen letzten Eintrag,
-   akkumulierende Einträge überleben alle — die Deklaration ist
-   `molt_core::applied_lww_slot`, angewandt in `fold_one`.
-6. **Verbrauchte Proposal-Ids**: sortierte Liste aller in Blöcken
-   ≤ `upto` applied Ids — Seed für den Double-Apply-Guard eines
-   Suffix-Verifiers (§B.5). **JEDE** Id, auch die eines
-   zusammengefassten (weggefallenen) Payloads.
-7. **Working-Transport-Anker** (v5): `(member, nostr_pk)` je Sitz, den ein
-   `Restored`-Block neu verankert hat, nach Member sortiert. Aus demselben
-   Grund getragen wie der Relay-Pool — die Blöcke, die den Anker gesetzt
-   haben, fallen am Schnitt weg, und der Roster behält bauartbedingt den
-   GRÜNDUNGS-Anker (ein `Restored` darf den Identity-Key eines Sitzes nicht
-   bewegen, also reist der Anker NEBEN dem Roster). Siehe §B.6b.
-8. **Relay-Ledger** (v6, R3b): `(member, relays)` je Sitz, dessen
-   `Membership`-Block eine Relay-Deklaration trug, nach Member sortiert —
-   der Split-Detection-Input (R4) überlebt den Schnitt aus demselben Grund
-   wie die Anker in 7.
+3. **Founding table**: name, `rule_m`, `rule_n`, GENESIS identities in
+   founding order, agenda — so that every verifier can RECOMPUTE `republic_id`
+   from the content (forgery protection like the
+   genesis check, §B.5).
+4. **Current roster** after all membership blocks ≤ `upto`:
+   `(member, identity_pk, nostr_pk)` in chain order
+   (deterministic, because the block sequence is totally ordered).
+5. **Applied projection** per surface, surfaces in
+   `Surface::ALL` order; per surface the list
+   `(proposal_id, payload_canonical_json)` in block order.
+   `payload_canonical_json` = serde_json with sorted map keys
+   (default BTreeMap; a test PINS that `preserve_order` is active
+   nowhere in the workspace). **Since v4 SUMMARIZED, not archived**
+   (§B.6a): a last-write-wins slot keeps only its last entry,
+   accumulating entries all survive — the declaration is
+   `molt_core::applied_lww_slot`, applied in `fold_one`.
+6. **Consumed proposal ids**: sorted list of all ids applied in blocks
+   ≤ `upto` — seed for the double-apply guard of a
+   suffix verifier (§B.5). **EVERY** id, including that of a
+   summarized (dropped) payload.
+7. **Working transport anchors** (v5): `(member, nostr_pk)` per seat that a
+   `Restored` block re-anchored, sorted by member. Carried for the same
+   reason as the relay pool — the blocks that set the anchor
+   drop out at the cut, and the roster by construction keeps the
+   FOUNDING anchor (a `Restored` must not move a seat's identity key,
+   so the anchor travels BESIDE the roster). See §B.6b.
+8. **Relay ledger** (v6, R3b): `(member, relays)` per seat whose
+   `Membership` block carried a relay declaration, sorted by member —
+   the split-detection input (R4) survives the cut for the same reason
+   as the anchors in 7.
 9. `upto`.
 
-Gleiche Chain ⇒ gleiche Bytes ⇒ gleicher Hash, auf jedem Node. Im Block
-steht NUR der Hash; der **Zustands-Blob reist außerhalb der Chain**
-(lokal neben `chain.state` persistiert, bei Catch-up/Recovery
-mitgeliefert und gegen `state_hash` verifiziert) — Blöcke bleiben klein.
+Same chain ⇒ same bytes ⇒ same hash, on every node. The block contains
+ONLY the hash; the **state blob travels outside the chain**
+(persisted locally next to `chain.state`, delivered with catch-up/recovery
+and verified against `state_hash`) — blocks stay small.
 
-## B.4 Ablauf (Sign-what-you-see, das Membership-Muster)
+## B.4 Flow (sign-what-you-see, the membership pattern)
 
-1. **Propose:** menschliches Verb `propose_checkpoint` (parameterlos —
-   `upto` ist IMMER die aktuelle Head-Höhe, B-F1). Etappe 3 liefert das
-   MCP-Tool; die GUI-Affordance + Sichtbarkeit (pending-Anzeige,
-   Seal-/Stale-Ereignis) ist Etappe 5. Der Proposer
-   berechnet `state_hash` aus der eigenen Chain und announced
+1. **Propose:** human verb `propose_checkpoint` (parameterless —
+   `upto` is ALWAYS the current head height, B-F1). Stage 3 delivers the
+   MCP tool; the GUI affordance + visibility (pending display,
+   seal/stale event) is stage 5. The proposer
+   computes `state_hash` from its own chain and announces
    `WorkspaceEvent::CheckpointProposed { id, upto, state_hash }`
-   (additiv; der Empfangs-Arm ist INTERNAL, wie `MembershipProposed`).
-2. **Verify vor Sign:** Jeder Empfänger rekomputiert die kanonischen
-   Bytes aus der EIGENEN Chain@`upto` und vergleicht. Ungleich ⇒ nicht
-   signieren (+ WARN) — niemand signiert einen fremden Blob. Gleich ⇒
-   `chain_sign_and_gossip_approval`, positionsgebunden auf Zielhöhe H.
-3. **Seal:** m distinct Signaturen ⇒ deterministischer Block
-   (`try_commit`-Pfad; `proposal_changes` trägt die Checkpoint-Change wie
-   bei Membership).
-4. **Nach dem Commit:** Jeder Node persistiert den (verifizierten) Blob
-   und droppt Blöcke ≤ `upto` lokal (Vorgabe B-F2: automatisch — der
-   Vote hat die Korrektheit bestätigt). `chain.state` wird zu
-   `[Blob] + [Checkpoint-Block @H] + Suffix`.
-5. **Offene Proposals über den Schnitt:** unverändert — ein Checkpoint
-   ist ein normaler Block; pending Signaturen re-basen über die
-   bestehende Mechanik auf die neue Head-Höhe.
+   (additive; the receive arm is INTERNAL, like `MembershipProposed`).
+2. **Verify before sign:** every receiver recomputes the canonical
+   bytes from its OWN chain@`upto` and compares. Unequal ⇒ do not
+   sign (+ WARN) — nobody signs a foreign blob. Equal ⇒
+   `chain_sign_and_gossip_approval`, position-bound to target height H.
+3. **Seal:** m distinct signatures ⇒ deterministic block
+   (`try_commit` path; `proposal_changes` carries the checkpoint change as
+   for membership).
+4. **After the commit:** every node persists the (verified) blob
+   and drops blocks ≤ `upto` locally (default B-F2: automatic — the
+   vote confirmed correctness). `chain.state` becomes
+   `[blob] + [checkpoint block @H] + suffix`.
+5. **Open proposals across the cut:** unchanged — a checkpoint
+   is a normal block; pending signatures re-base via the
+   existing mechanism onto the new head height.
 
-## B.5 Verifikation (`verify_chain`-Erweiterung)
+## B.5 Verification (`verify_chain` extension)
 
-- **Voll-Historien-Halter** (Chain beginnt mit Genesis): wie heute,
-  PLUS: ein Checkpoint-Block wird inhaltlich geprüft (eigene
-  Projektion@`upto` ⇒ Hash-Gleichheit), sonst hard-reject —
-  alles-oder-nichts wie jede andere Verletzung.
-- **Suffix-Halter** (Chain beginnt mit einem Checkpoint-Block): neuer
-  Vertrauensanker, Pflicht-Checks alles-oder-nichts:
-  1. Blob-Hash == `state_hash` im Block.
-  2. `republic_id`-Rekomputation aus der Founding-Tabelle im Blob ==
-     erwartete Id (aus Invite/Recovery-Link) — Founding fälschen ändert
-     die Id, exakt der Genesis-Schutz. Dazu die Struktur-Checks der
-     Genesis-Regel: `rule_m ∈ [1, rule_n]` und
-     `founding_identities.len() == rule_n` (seit N1 — eine größere
-     Tabelle würde Angreifer-Keys in die Signer-Menge schmuggeln).
-  3. **Kein zirkuläres Vertrauen** (Review-Finding 2026-07-18): Der
-     Blob-Roster ist nur durch den Hash gebunden, den die Anker-Signaturen
-     selbst attestieren — deshalb verifizieren die Anker-Signaturen gegen
-     die **Founding-Identities** (rid-gebunden), und jeder Roster-Eintrag
-     muss wörtlich in der Founding-Tabelle stehen — alle DREI Anker,
-     `nostr_pk` eingeschlossen (Sitze sind ab Gründung fix; Restored
-     behält den verankerten Key). Fälschung erfordert damit
-     m ECHTE Gründungs-Keys — die Honest-Majority-Annahme, nicht weniger.
-     ≥ m distinct, m aus der Founding-Tabelle.
-  4. Suffix ab H normal (prev-Links, Höhen, Signaturen); Double-Apply-
-     Guard geseedet mit der Id-Liste aus dem Blob.
-- **Explizites Vertrauensmodell (dokumentierte Änderung):** Ein
-  Suffix-Bootstrapper prüft die Roster-Evolution unterhalb `upto` nicht
-  mehr Block für Block — er vertraut m-of-n des aktuellen Rosters, dass
-  der Blob diese Evolution korrekt zusammenfasst. Das ist dieselbe
-  Honest-Majority-Annahme, auf der die Threshold-Governance ohnehin
-  steht. Wer das nicht will, behält die volle Historie — Droppen ist
-  Erlaubnis, nie Pflicht (C5-Geist).
+- **Full-history holder** (chain begins with genesis): as today,
+  PLUS: a checkpoint block is checked for content (own
+  projection@`upto` ⇒ hash equality), otherwise hard-reject —
+  all-or-nothing like any other violation.
+- **Suffix holder** (chain begins with a checkpoint block): new
+  trust anchor, mandatory checks all-or-nothing:
+  1. Blob hash == `state_hash` in the block.
+  2. `republic_id` recomputation from the founding table in the blob ==
+     expected id (from the invite/recovery link) — forging the founding changes
+     the id, exactly the genesis protection. Plus the structure checks of the
+     genesis rule: `rule_m ∈ [1, rule_n]` and
+     `founding_identities.len() == rule_n` (since N1 — a larger
+     table would smuggle attacker keys into the signer set).
+  3. **No circular trust** (review finding 2026-07-18): the
+     blob roster is bound only by the hash that the anchor signatures
+     themselves attest — therefore the anchor signatures verify against
+     the **founding identities** (rid-bound), and every roster entry
+     must appear verbatim in the founding table — all THREE anchors,
+     `nostr_pk` included (seats are fixed from founding on; Restored
+     keeps the anchored key). Forgery therefore requires
+     m REAL founding keys — the honest-majority assumption, nothing less.
+     ≥ m distinct, m from the founding table.
+  4. Suffix from H normal (prev links, heights, signatures); double-apply
+     guard seeded with the id list from the blob.
+- **Explicit trust model (documented change):** a
+  suffix bootstrapper no longer checks the roster evolution below `upto`
+  block by block — it trusts m-of-n of the current roster that
+  the blob summarizes this evolution correctly. That is the same
+  honest-majority assumption on which threshold governance stands anyway.
+  Whoever does not want that keeps the full history — dropping is
+  permission, never obligation (C5 spirit).
 
-## B.6 Catch-up, Recovery, Persistenz
+## B.6 Catch-up, recovery, persistence
 
-- `serve_chain_from(from)`: **entschieden + gebaut (4b):** eigenes
-  additives Event `WorkspaceEvent::CheckpointServed { blob }`, serviert
-  VOR den Committed-Re-Serves, nur wenn der Requester echt unter dem
-  Anker liegt (`from < anchor`). Empfänger: first-stash-wins +
-  Invalidierung; Adopt nur nach voller Suffix-Verifikation. Bekannte
-  v1-Grenze: EIN böswilliger Sitz kann per Stash-Race das Re-Anchoring
-  eines Nachzüglers verzögern (Liveness, nie Safety) — per-Peer-Stashes
-  wären der vollere Fix. Ein Voll-Halter hinter dem Schnitt wird beim
-  Re-Anchor gepruned (die Mesh hält die Lückenblöcke nicht mehr) —
-  unter B-F2 (Auto-Drop überall) ist das konsistent: Archiv-Halter
-  existieren in diesem Design bewusst nicht, Recovery hängt seit 4c
-  nicht mehr an ihnen.
-- Recovery: das Welcome trägt Checkpoint-Blob + Suffix statt der vollen
-  Chain; der Rejoiner verifiziert nach den Suffix-Regeln (§B.5).
-  **Etappe 4c GEBAUT:** Das Welcome trägt die Pruned-Wire-Form
-  (`ServedChainWire`, untagged — Voll-Koordinatoren behalten das nackte
-  Array); der Rejoiner verifiziert per Suffix-Regeln und materialisiert
-  aus der rid-gebundenen Founding-Tabelle des Blobs mit LEEREN
-  Attestations (die Genesis-Signaturen sind mit Block 0 weg; Autorität
-  ist der verifizierte Blob+Suffix, der lokale Founded-Record ist
-  Bootstrap-Metadatum).
-- Persistenz: `chain.state` additiv um den Blob erweitert (untagged:
-  Array = voll, Objekt = pruned). **Ehrliche Old-Reader-Realität
-  (Review 2026-07-18):** ein ALTES Binary liest ein pruned
-  `chain.state` als „decode failed" und läuft CHAINLOS weiter — der
-  Log-seitige `unknown_events`-Stopp greift nur, solange Checkpoint-
-  Events im Tail liegen (vor dem nächsten Snapshot-Floor). Ein altes
-  Binary auf einem pruned Workspace kann also in die Legacy-Zählpfad-
-  Falle laufen; der saubere Stopp (Manifest-Format-Bump beim ersten
-  Prune) ist als Etappe-5-Punkt gepinnt.
+- `serve_chain_from(from)`: **decided + built (4b):** its own
+  additive event `WorkspaceEvent::CheckpointServed { blob }`, served
+  BEFORE the Committed re-serves, only if the requester is truly below the
+  anchor (`from < anchor`). Receiver: first-stash-wins +
+  invalidation; adopt only after full suffix verification. Known
+  v1 limit: ONE malicious seat can delay the re-anchoring of a
+  latecomer via a stash race (liveness, never safety) — per-peer stashes
+  would be the fuller fix. A full holder behind the cut is pruned on
+  re-anchor (the mesh no longer holds the gap blocks) —
+  under B-F2 (auto-drop everywhere) this is consistent: archive holders
+  deliberately do not exist in this design, recovery no longer depends on them
+  since 4c.
+- Recovery: the Welcome carries checkpoint blob + suffix instead of the full
+  chain; the rejoiner verifies per the suffix rules (§B.5).
+  **Stage 4c BUILT:** the Welcome carries the pruned wire form
+  (`ServedChainWire`, untagged — full coordinators keep the bare
+  array); the rejoiner verifies per the suffix rules and materializes
+  from the blob's rid-bound founding table with EMPTY
+  attestations (the genesis signatures are gone with block 0; authority
+  is the verified blob+suffix, the local Founded record is
+  bootstrap metadata).
+- Persistence: `chain.state` additively extended by the blob (untagged:
+  array = full, object = pruned). **Honest old-reader reality
+  (review 2026-07-18):** an OLD binary reads a pruned
+  `chain.state` as "decode failed" and keeps running CHAINLESS — the
+  log-side `unknown_events` stop applies only as long as checkpoint
+  events sit in the tail (before the next snapshot floor). An old
+  binary on a pruned workspace can therefore walk into the legacy
+  counting-path trap; the clean stop (manifest format bump on the first
+  prune) is pinned as a stage 5 item.
 
 ## B.6a A checkpoint SUMMARIZES — it does not archive
 
@@ -493,88 +493,88 @@ The two together are what make a pruned republic recoverable, and neither
 suffices alone: without the summary the blob grows without bound, and
 without the cap a single current logo can already be unpublishable.
 
-## B.6b Ein Schnitt darf keinen wiederhergestellten Sitz stranden lassen
+## B.6b A cut must not strand a restored seat
 
-**Verifizierter Defekt, gefunden 2026-08-03 beim Bau von N4b 6d, gefixt in
-v5.** `CheckpointState.roster` entsteht durch `apply_membership`, und das
-lässt den `nostr_pk` eines Sitzes bewusst unangetastet: ein `Restored`-Block
-darf den verankerten Identity-Key nicht bewegen (sonst könnten m-of-n
-Überlebende einen Sitz kapern). Der neue Transport-Anker ist deshalb eine
-Projektion NEBEN dem Roster (`State::chain_anchors`).
+**Verified defect, found 2026-08-03 while building N4b 6d, fixed in
+v5.** `CheckpointState.roster` arises from `apply_membership`, and that
+deliberately leaves a seat's `nostr_pk` untouched: a `Restored` block
+must not move the anchored identity key (otherwise m-of-n
+survivors could hijack a seat). The new transport anchor is therefore a
+projection BESIDE the roster (`State::chain_anchors`).
 
-Der Block, der ihn setzt, fiel aber am Schnitt weg, und `chain_anchors` wurde
-nur aus dem überlebenden Suffix gefaltet. Folge:
+The block that sets it, however, dropped out at the cut, and `chain_anchors` was
+folded only from the surviving suffix. Consequence:
 
-> Nach einer Kompaktierung war jedes Mitglied, das je wiederhergestellt
-> wurde, nur noch unter dem Schlüssel adressierbar, den es nicht mehr
-> besitzt — still.
+> After a compaction, every member that was ever restored
+> was addressable only under the key it no longer
+> owns — silently.
 
-Im Normalbetrieb erreichbar: `AUTO_CHECKPOINT_MIN_LEN` ist 32. Die
-Zusammenfassung trägt die Anker jetzt selbst (Item 7), und ein geprunter
-Halter SEEDET `chain_anchors` daraus, bevor er das Suffix darüberfaltet.
+Reachable in normal operation: `AUTO_CHECKPOINT_MIN_LEN` is 32. The
+summary now carries the anchors itself (item 7), and a pruned
+holder SEEDS `chain_anchors` from it before folding the suffix on top.
 Keystone: `a_compaction_keeps_the_working_anchor_of_a_recovered_seat`.
 
-## B.7 Grenzen (bewusst)
+## B.7 Limits (deliberate)
 
-- Der flüchtige Log (Chat/Shares) bekommt NIE eine gemeinsame Checksum:
-  ephemere Logs sind zwischen Nodes nicht identisch (Q4-Rejoiner ohne
-  Backfill, Ankunftsreihenfolgen, lokale Uhren). Dafür bleibt WP4a
-  zuständig — lokal, Policy-vollziehend.
-- ~~Checkpoint-Auslösung ist Governance-Sache (menschliches Verb); keine
-  Automatik in v1.~~ **Revidiert (Produktentscheidung 2026-07-18): die
-  Auslösung ist AUTOMATIK** (`maybe_auto_checkpoint`, molt-engine
-  chain.rs) — der GUI-Knopf ist entfernt, `propose_checkpoint` bleibt
-  als co-equales MCP-Verb (manueller Override). Die Signier-Seite war
-  immer schon mechanisch (verify-before-sign); automatisiert wurde nur
-  der Trigger, kollisionsfrei und deterministisch:
-  - Es triggert ausschließlich der **alphabetisch namenskleinste
-    Roster-Member** (ein Proposer — Proposal-Ids sind knoten-lokal;
-    zwei gleichzeitige Auto-Proposer würden kollidieren). Ist er
-    offline, passiert nichts — wie bei einem abwesenden manuellen
-    Proposer; das MCP-Verb bleibt der Ausweg.
-  - Nur wenn dieser Knoten **selbst am Live-Head versiegelt hat**
-    (`adopt_committed_block`, nach dem Re-Base): alle Co-Signer stehen
-    dann am selben Head — genau was `receive_checkpoint_proposal` zum
-    Nachrechnen braucht. Passiv angewendete Blöcke (`apply_next_block`:
-    Catch-up-Serve, Broadcast eines anderen Sealers) triggern NIE — ein
-    aufholender Knoten würde am veralteten Zwischen-Head schneiden, und
-    ein im Gleichschritt aufholendes Quorum könnte diesen Cut sogar
-    co-signieren und einen Holder NACH dem History-Drop forken
-    (Review-Fund 2026-07-18; per Test gepinnt). Kein Trigger beim Open
-    in ein kaltes Mesh (ohne Re-Serve wäre der Cut nur verloren).
-  - Nie **während offener Abstimmungen** (offene Surface-Proposals,
-    laufende Signatur-Sammlungen, oder ein bereits schwebender Cut) —
-    ein dazwischen siegelnder Block würde den Cut nur stale machen.
-    Der Commit, der die letzte offene Abstimmung auflöst, feuert den
-    Check erneut.
-  - **Stale braucht keinen Timer/Backoff**: der Block, der den Cut
-    stale macht, durchläuft denselben Hook und re-proposed am neuen
-    Head — maximal ein Auto-Propose pro committetem Block. Der
-    Stale-Toast in der GUI ist entfernt (das Event bleibt für MCP);
-    sichtbar bleibt nur „Checkpoint besiegelt #X".
-  - Schwelle: `AUTO_CHECKPOINT_MIN_LEN = 32` lokal gehaltene Blöcke —
-    Konstante, keine Einstellung (Kompaktion ist Hygiene, nicht Policy).
+- The ephemeral log (chat/shares) NEVER gets a shared checksum:
+  ephemeral logs are not identical between nodes (Q4 rejoiner without
+  backfill, arrival orders, local clocks). WP4a remains
+  responsible for that — local, policy-enforcing.
+- ~~Checkpoint triggering is a governance matter (human verb); no
+  automation in v1.~~ **Revised (product decision 2026-07-18): triggering
+  is AUTOMATIC** (`maybe_auto_checkpoint`, molt-engine
+  chain.rs) — the GUI button is removed, `propose_checkpoint` remains
+  as a co-equal MCP verb (manual override). The signing side was
+  always mechanical (verify-before-sign); only the trigger was
+  automated, collision-free and deterministic:
+  - Only the **alphabetically smallest-named
+    roster member** triggers (one proposer — proposal ids are node-local;
+    two simultaneous auto-proposers would collide). If it is
+    offline, nothing happens — as with an absent manual
+    proposer; the MCP verb remains the way out.
+  - Only when this node **itself sealed at the live head**
+    (`adopt_committed_block`, after the re-base): all co-signers are then
+    at the same head — exactly what `receive_checkpoint_proposal` needs
+    to recompute. Passively applied blocks (`apply_next_block`:
+    catch-up serve, broadcast of another sealer) NEVER trigger — a
+    catching-up node would cut at the stale intermediate head, and
+    a quorum catching up in lockstep could even
+    co-sign this cut and fork a holder AFTER the history drop
+    (review finding 2026-07-18; pinned by test). No trigger on open
+    into a cold mesh (without a re-serve the cut would only be lost).
+  - Never **during open votes** (open surface proposals,
+    ongoing signature collections, or an already pending cut) —
+    a block sealing in between would only make the cut stale.
+    The commit that resolves the last open vote fires the
+    check again.
+  - **Stale needs no timer/backoff**: the block that makes the cut
+    stale runs through the same hook and re-proposes at the new
+    head — at most one auto-propose per committed block. The
+    stale toast in the GUI is removed (the event remains for MCP);
+    only "Checkpoint besiegelt #X" remains visible.
+  - Threshold: `AUTO_CHECKPOINT_MIN_LEN = 32` locally held blocks —
+    a constant, not a setting (compaction is hygiene, not policy).
 
-## B.8 Etappen WP4b (je einzeln mergebar, TDD)
+## B.8 Stages WP4b (each individually mergeable, TDD)
 
-1. `checkpoint_canonical_bytes` + Hash in molt-core (rote Tests:
-   Determinismus über zwei unabhängig gebaute Chains, Versions-Tag,
-   republic_id-Rekomputation, sorted-JSON-Pin).
-2. `verify_chain`-Erweiterung: Checkpoint-Prüfung (Voll-Halter) +
-   Suffix-Anker (rote Tests: geforgter Roster, geforgte Founding-Tabelle,
-   Hash-Mismatch, Double-Apply über den Schnitt, unterschwelliger m).
-3. Engine-Fluss: `propose_checkpoint` (Command + MCP-Tool, co-equal),
-   `CheckpointProposed`-Wire-Arm (INTERNAL-Liste), Verify-vor-Sign, Seal.
-4. Drop + Serve: lokales Droppen ≤ `upto`, Catch-up mit Blob, Recovery
-   über Checkpoint (Loopback-E2E).
-5. ✅ Doku + Härtung (2026-07-18): persistent_chain.md-Abschnitt,
-   Manifest-Version-Bump beim ersten Prune (alte Binaries verweigern den
-   Workspace statt chainlos zu laufen), Checkpoint-Lebenszyklus sichtbar
-   (Event::CheckpointSealed/-Stale + Toasts), GUI-Verb im
-   Organization-Status (co-equal zum MCP-Tool). Bewusst offen geblieben:
-   kein ListProposals-Eintrag für pending Cuts (kollidiert mit dem
-   Id-Kollisions-Guard aus Etappe 3; die Events geben dem Proposer
-   Closure), Nachzügler-Buffer, per-Peer-Blob-Stashes.
+1. `checkpoint_canonical_bytes` + hash in molt-core (red tests:
+   determinism across two independently built chains, version tag,
+   republic_id recomputation, sorted-JSON pin).
+2. `verify_chain` extension: checkpoint check (full holder) +
+   suffix anchor (red tests: forged roster, forged founding table,
+   hash mismatch, double-apply across the cut, sub-threshold m).
+3. Engine flow: `propose_checkpoint` (command + MCP tool, co-equal),
+   `CheckpointProposed` wire arm (INTERNAL list), verify-before-sign, seal.
+4. Drop + serve: local drop ≤ `upto`, catch-up with blob, recovery
+   via checkpoint (loopback E2E).
+5. ✅ Docs + hardening (2026-07-18): persistent_chain.md section,
+   manifest version bump on the first prune (old binaries refuse the
+   workspace instead of running chainless), checkpoint lifecycle visible
+   (Event::CheckpointSealed/-Stale + toasts), GUI verb in the
+   Organization status (co-equal to the MCP tool). Deliberately left open:
+   no ListProposals entry for pending cuts (collides with the
+   id-collision guard from stage 3; the events give the proposer
+   closure), latecomer buffer, per-peer blob stashes.
 
 6. ✅ **DONE 2026-08-03 — the summary rule (§B.6a).** Item 5 carried the
    complete applied history; it now carries the CURRENT state.
@@ -609,102 +609,102 @@ Keystone: `a_compaction_keeps_the_working_anchor_of_a_recovered_seat`.
      the ability to compact at all;
    - the `-v4` byte-pin fixture, recomputed independently.
 
-Aus dem Etappe-2-Review offen für Etappe 3/4 (gepinnt, nicht vergessen):
-- `after_block_applied` braucht einen Checkpoint-Arm (Event emittieren,
-  `proposal_changes`/`pending_sigs` des Checkpoint-Proposals räumen).
-- Etappe 4 muss ALLE `verify_chain`-Aufrufer (adopt_chain,
-  append_committed_block, apply_next_block, tie_break, Open/Recovery) auf
-  Suffix-Chains routen — heute würde `adopt_chain` eine gedroppte Chain
-  beim Reopen löschen.
--   **4d GEBAUT:** beide Walker falten inkrementell (`fold_one` +
-  `hash_walk_state`) — O(n) statt O(n·Checkpoints).
-- Proposal-Id-Namespace ist knoten-lokal gemintet; Etappe 3 entschärft
-  die Checkpoint-Seite (belegte Ids werden nie auto-signiert), die
-  generelle Kollision zweier gleichzeitiger Proposals bleibt offen.
-- Etappe-3-Review, offen für Etappe 5: (a) Checkpoint-Lebenszyklus ist
-  unbeobachtbar (kein ListProposals-Eintrag, kein Event bei
-  Seal/Stale-Drop — Operator muss Status/Chain lesen); (b) Liveness:
-  ein Nachzügler verwirft den Cut und bekommt ihn nie re-served (kein
-  Buffer, kein Re-Gossip) — bei < m aktuellen Nodes sealt nichts, der
-  Proposer muss neu proposen. Beides bewusst v1, ehrlich dokumentiert.
+Open from the stage 2 review for stage 3/4 (pinned, not forgotten):
+- `after_block_applied` needs a checkpoint arm (emit event,
+  clear `proposal_changes`/`pending_sigs` of the checkpoint proposal).
+- Stage 4 must route ALL `verify_chain` callers (adopt_chain,
+  append_committed_block, apply_next_block, tie_break, open/recovery) to
+  suffix chains — today `adopt_chain` would delete a dropped chain
+  on reopen.
+-   **4d BUILT:** both walkers fold incrementally (`fold_one` +
+  `hash_walk_state`) — O(n) instead of O(n·checkpoints).
+- The proposal-id namespace is minted node-locally; stage 3 defuses
+  the checkpoint side (occupied ids are never auto-signed), the
+  general collision of two simultaneous proposals remains open.
+- Stage 3 review, open for stage 5: (a) the checkpoint lifecycle is
+  unobservable (no ListProposals entry, no event on
+  seal/stale drop — the operator must read status/chain); (b) liveness:
+  a latecomer discards the cut and never gets it re-served (no
+  buffer, no re-gossip) — with < m current nodes nothing seals, the
+  proposer must re-propose. Both deliberately v1, honestly documented.
 
-## B.9 Vorgaben (einspruchsfähig)
+## B.9 Defaults (open to objection)
 
-- **B-F1:** `upto` beim Proposen = aktuelle Head-Höhe (kein frei
-  wählbarer Schnitt in v1).
-- **B-F2:** Lokales Droppen ≤ `upto` automatisch nach dem Commit (der
-  Vote hat die Korrektheit bestätigt); kein separates Verb.
+- **B-F1:** `upto` at propose time = current head height (no freely
+  selectable cut in v1).
+- **B-F2:** local drop ≤ `upto` automatically after the commit (the
+  vote confirmed correctness); no separate verb.
 
 ---
 
-## Sicherheits-Audit WP4a + Mesh-Follow-ups (2026-07-25)
+## Security audit WP4a + mesh follow-ups (2026-07-25)
 
-Adversariales Audit über den Change-Set `7b7542a..HEAD`. Angreifermodell: ein
-**bösartiges Mitglied** der Republik (kann MLS-authentisch beliebige Announces
-schicken), ein **bösartiger Server**, und ein Angreifer mit **Zugriff auf das
-Medium** (für die Erasure-Behauptung). Keine kritische Lücke; fünf Befunde,
-alle gefixt (Commit `15f0f2f` — er enthält entgegen seiner Commit-Message auch
-Befund #5).
+Adversarial audit over the change set `7b7542a..HEAD`. Attacker model: a
+**malicious member** of the republic (can send arbitrary announces MLS-authentically),
+a **malicious server**, and an attacker with **access to the
+medium** (for the erasure claim). No critical gap; five findings,
+all fixed (commit `15f0f2f` — contrary to its commit message, it also contains
+finding #5).
 
-**#1 — Stiller Datenverlust: Peer ohne Cursor (WP4a).** Der Kompaktor bekam die
-Liste der zu IGNORIERENDEN Peers; ein Peer ganz ohne Cursor-Eintrag (nie
-beliefert, oder `transport.state` verloren — anderswo im Design ausdrücklich nur
-ein Grund für Resends) hielt damit gar nichts zurück. Der Log konnte genau
-denen unter den Füßen weggezogen werden, die ihn noch brauchten. Umgedreht: die
-Engine liefert jetzt, wer den Log HÄLT (`peers_holding_the_log`), und ein
-haltender Peer ohne Cursor zählt als „hat nichts bekommen" und stoppt die Runde.
+**#1 — Silent data loss: peer without a cursor (WP4a).** The compactor was given the
+list of peers to IGNORE; a peer with no cursor entry at all (never
+delivered to, or `transport.state` lost — elsewhere in the design explicitly only
+a reason for resends) thus held nothing back. The log could be pulled out from under
+exactly those who still needed it. Inverted: the
+engine now supplies who HOLDS the log (`peers_holding_the_log`), and a
+holding peer without a cursor counts as "has received nothing" and stops the round.
 
-**#2 — DoS durch ein Mitglied: dynamische Server-Tabelle (Mesh).** Die Tabelle
-der gepinnten Fremdserver evictete nie. Ein Mitglied, das bei jeder Rotation
-neue Hosts announced, füllt alle 64 Plätze dauerhaft; danach landet jeder
-EHRLICHE Peer, der später den Server wechselt, auf unserer Primary — wo seine
-Queue nicht existiert. Die Zustellung bricht also bei den Ehrlichen, nicht beim
-Angreifer. Jetzt wird der am längsten ungenutzte Eintrag verdrängt.
+**#2 — DoS by a member: dynamic server table (mesh).** The table
+of pinned foreign servers never evicted. A member that announces
+new hosts on every rotation fills all 64 slots permanently; after that every
+HONEST peer that later changes server lands on our primary — where its
+queue does not exist. Delivery thus breaks for the honest, not for the
+attacker. Now the least recently used entry is evicted.
 
-**#3 — Erasure nur auf Platte, nicht im Speicher (WP4a).** Die Kompaktierung
-verspricht, dass die Bytes eines gedroppten Segments wertlos sind, weil der
-Schlüssel weg ist — der DEK blieb aber im freigegebenen Heap liegen (Eintrag
-ohne Zeroize gedroppt; jede Klartext-Kopie der Tabelle beim Schreiben und Lesen
-ebenfalls). `SegmentKey` zeroisiert jetzt beim Drop, beide Klartext-Puffer sind
-`Zeroizing`. Das Dateisystem-Restrisiko (§A.3) bleibt wie dokumentiert bestehen.
+**#3 — Erasure only on disk, not in memory (WP4a).** The compaction
+promises that the bytes of a dropped segment are worthless because the
+key is gone — but the DEK stayed in freed heap (entry
+dropped without zeroize; every plaintext copy of the table during writing and reading
+likewise). `SegmentKey` now zeroizes on drop, both plaintext buffers are
+`Zeroizing`. The filesystem residual risk (§A.3) remains as documented.
 
-**#4 — Verfügbarkeit: fsync auf dem Actor (selbst eingebaut).** Der neue
-Pre-Backup-Flush wartete auf dem Actor auf einen fsync — gegen die eigene Regel,
-dass Handler nie I/O awaiten; eine langsame Platte hätte die Kommandobearbeitung
-angehalten. Beide kopierenden Pfade flushen jetzt in ihrem Blocking-Task, die
-Reihenfolge-Garantie bleibt.
+**#4 — Availability: fsync on the actor (self-inflicted).** The new
+pre-backup flush waited on the actor for an fsync — against our own rule
+that handlers never await I/O; a slow disk would have stalled
+command processing. Both copying paths now flush in their blocking task, the
+ordering guarantee remains.
 
-**#5 — Funktionsregression: `peek_genesis` (WP4a).** Der Open-Screen liest die
-Genesis als ERSTEN Log-Frame und entschlüsselte ihn mit dem Workspace-Key. Nach
-der F6-Migration liegt Segment 1 unter seinem DEK, nach dem ersten Drop ist es
-ganz weg — der Workspace-Liste wären für genau die langlebigen Republiken
-Roster und Charter abhandengekommen. `peek_genesis` liest jetzt segment-keyed
-und fällt danach auf den Snapshot zurück, der alle Genesis-Fakten ohnehin trägt
-(Attestations bleiben leer — Anzeige-Metadaten, nie Konsens-Input, wie beim
-Checkpoint-Recovery).
+**#5 — Functional regression: `peek_genesis` (WP4a).** The open screen reads the
+genesis as the FIRST log frame and decrypted it with the workspace key. After
+the F6 migration, segment 1 lies under its DEK, after the first drop it is
+gone entirely — the workspace list would have lost roster and charter for exactly the long-lived
+republics. `peek_genesis` now reads segment-keyed
+and then falls back to the snapshot, which carries all genesis facts anyway
+(attestations stay empty — display metadata, never consensus input, as with
+checkpoint recovery).
 
-**Geprüft und als akzeptabel bewertet (nicht geändert):**
-- Ein Mitglied kann in `queues_extra` fremde oder sogar UNSERE eigene Queue
-  announcen. Der Fan-out ist auf `MESH_REDUNDANCY_CAP` gedeckelt, der Inhalt
-  bleibt MLS-verschlüsselt (der Announcer ist ohnehin Mitglied), und eine
-  Selbst-Announce scheitert am Wrap-Key-Mismatch. Kosten: etwas Bandbreite.
-- Der gebundene SSRF-lite des Pinned-Dial (siehe `mesh_redundancy_stage2.md`).
-- Ein manipulierter `EngineStateDump` (via Restore-Blob) könnte `chat_pruned`
-  oder die Ordinal-Zähler setzen — das setzt aber die Recovery-Phrase voraus,
-  also dieselbe Vertrauensstufe wie das ganze Workspace.
-- Peers jenseits der Karenz verlieren flüchtige Gossip-Events unter dem Floor.
-  Das ist genau C2 (Catch-up über die Chain); die durable Wahrheit liegt in
-  `chain.state`, das WP4a nie anfasst (C3).
+**Checked and judged acceptable (not changed):**
+- A member can announce foreign or even OUR OWN queue in `queues_extra`.
+  The fan-out is capped at `MESH_REDUNDANCY_CAP`, the content
+  stays MLS-encrypted (the announcer is a member anyway), and a
+  self-announce fails on the wrap-key mismatch. Cost: some bandwidth.
+- The bounded SSRF-lite of the pinned dial (see `mesh_redundancy_stage2.md`).
+- A manipulated `EngineStateDump` (via restore blob) could set `chat_pruned`
+  or the ordinal counters — but that requires the recovery phrase,
+  i.e. the same trust level as the whole workspace.
+- Peers beyond the grace lose ephemeral gossip events below the floor.
+  That is exactly C2 (catch-up via the chain); the durable truth lies in
+  `chain.state`, which WP4a never touches (C3).
 
-**Offen (Testbefund, keine Sicherheitslücke) — VORBESTEHEND, gemessen:**
+**Open (test finding, not a security gap) — PRE-EXISTING, measured:**
 `recovery_distributes_the_rekey_commit_to_a_live_survivor` (two_instances)
-wartet auf die Chat-Notiz der neuen MLS-Epoche beim Überlebenden und ist flaky.
-Kontrollierter A/B-Test mit beiden Testbinaries, abwechselnd auf derselben
-Maschine, je 10 Läufe: **Vor-Session (7b7542a) 2/10 Fehlschläge, HEAD 3/10** —
-also vorbestehend, nicht von diesem Change-Set eingeführt. (Einzelne
-6/6-grüne Serien auf dem alten Stand hatten das zunächst anders aussehen
-lassen; nur der interleavte Vergleich ist aussagekräftig.) Zusätzlich
-ausgeschlossen: die Kompaktierung feuert in diesem Test nie (per Log
-verifiziert), und `ae92afd` (Mesh-Follow-ups) lief 6/6 grün. Der wahrscheinliche
-Kandidat bleibt ein Rennen im Supervisor-Rebuild der Mesh-Extension gegen die
-in-flight Chat-Notiz — ein eigener Untersuchungspunkt, kein Audit-Befund.
+waits for the chat note of the new MLS epoch at the survivor and is flaky.
+Controlled A/B test with both test binaries, alternating on the same
+machine, 10 runs each: **pre-session (7b7542a) 2/10 failures, HEAD 3/10** —
+so pre-existing, not introduced by this change set. (Individual
+6/6-green series on the old state had initially made it look
+different; only the interleaved comparison is meaningful.) Additionally
+ruled out: the compaction never fires in this test (verified via log),
+and `ae92afd` (mesh follow-ups) ran 6/6 green. The likely
+candidate remains a race in the supervisor rebuild of the mesh extension against the
+in-flight chat note — a separate investigation item, not an audit finding.

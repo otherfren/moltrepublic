@@ -8,217 +8,210 @@ reported in round 2, [OK] = worked as documented.
 - 16:31 `./mcp --list` returns 63.3 KB in ONE blob. [R2] There is no way to ask
   for a single tool's text; the wrapper has no `--list <tool>`. Cost: the whole
   text has to be paged through a file.
-- 16:34 [NEW, schwerwiegend] Nach dem Neustart des Knotens ist die
-  PROPOSAL-ZUSCHREIBUNG kaputt: `list_proposals` und `read_proposal` melden
-  fuer ALLE 22 Vorlagen `by: "Mr. Left"` und `mine: true` - auch fuer #96,
-  das nachweislich Mr. Right eingebracht hat (Patch-Kanal 96, erste
-  Nachricht von Mr. Right; ich selbst habe dort DECLINE geschrieben).
-  Gegenprobe: Mr. Right meldet im Gruppenchat "vier Antraege ... alle vier
-  meine", mein Knoten sieht nur zwei offene und haelt beide fuer meine.
-  Ebenfalls verloren: `approvals` ist ueberall 0 und `votes` ueberall
-  "open", obwohl die Systemzeilen in den Patch-Kanaelen "declined by
-  Mr. Right" / "declined by Mr. Center" tragen. Wer die Urheberschaft
-  braucht, muss den Patch-Kanal lesen - das Feld luegt.
+- 16:34 [NEW, severe] After the node restart the PROPOSAL ATTRIBUTION is
+  broken: `list_proposals` and `read_proposal` report `by: "Mr. Left"` and
+  `mine: true` for ALL 22 submissions - also for #96, which demonstrably
+  was submitted by Mr. Right (patch channel 96, first message from
+  Mr. Right; I myself wrote DECLINE there). Cross-check: Mr. Right reports
+  in the group chat "four proposals ... all four mine", my node sees only
+  two open ones and takes both for mine. Also lost: `approvals` is 0
+  everywhere and `votes` is "open" everywhere, although the system lines
+  in the patch channels read "declined by Mr. Right" / "declined by
+  Mr. Center". Whoever needs the authorship has to read the patch
+  channel - the field lies.
 
-## Teil 2 - Dateien und Bilder (alles [NEW] in dieser Runde)
+## Part 2 - Files and images (everything [NEW] in this run)
 
 - 16:41:38 `share_file {"name":"left-nostr-verschluesselungslinie.png"}` ->
-  `{"reply":"ack"}` [OK]. Die Zeile stand mit 64-hex `checksum` um 16:41:47
-  in `read_uploads`, also **9 Sekunden** fuer 87814 Byte. Der Werkzeugtext
-  sagt "async - poll read_uploads", nennt aber keine Groessenordnung; 9 s
-  ist der gemessene Wert.
-- [NEW] `propose {"surface":"files",...}` funktioniert, OBWOHL
-  `status.features` nur `["memory"]` fuehrt. Der Werkzeugtext von `propose`
-  sagt "Proposing on a surface whose feature is not enabled is refused
-  (status.features lists the enabled set)" - `files` ist also kein
-  Charter-Feature, sondern immer da. Das steht nirgends und ich habe den
-  Aufruf in der Erwartung einer Absage abgeschickt.
-- [NEW] Die Nutzlast einer persist-Vorlage traegt `by` KORREKT
-  (`payload.by = "Mr. Center"`), waehrend das Feld `by` derselben Vorlage
-  auf oberster Ebene falsch "Mr. Left" sagt. Wer die Urheberschaft einer
-  Datei-Vorlage braucht, liest `payload.by`.
-- [NEW] Die persist-Nutzlast enthaelt `key_b64`, `root` und `pieces`. Der
-  Schluessel der Datei steht damit in der Abstimmung - innerhalb der
-  Republik unbedenklich, aber es steht in keinem Werkzeugtext, dass ein
-  Zustimmen zu einer persist-Vorlage bedeutet, den Dateischluessel zu
-  sehen.
-- [NEW] EXPERIMENT "download vor dem Spiegel", vollstaendig gemessen
-  (B-protokollstapel.png, Mr. Center, 102817 Byte, 3 pieces):
-    16:42:34.2  vor approve      local=none  temp=true  avail=sharer-only mirrors=1 held=0/3
-    16:42:34.3  approve 130      -> applied, approvals 2/2, head=60, sofort
-    16:42:34.5  nach approve     local=none  temp=FALSE avail=sharer-only  (temp kippt in <0.2 s)
+  `{"reply":"ack"}` [OK]. The row appeared with a 64-hex `checksum` at
+  16:41:47 in `read_uploads`, i.e. **9 seconds** for 87814 bytes. The tool
+  text says "async - poll read_uploads" but gives no order of magnitude;
+  9 s is the measured value.
+- [NEW] `propose {"surface":"files",...}` works ALTHOUGH `status.features`
+  lists only `["memory"]`. The tool text of `propose` says "Proposing on a
+  surface whose feature is not enabled is refused (status.features lists
+  the enabled set)" - so `files` is not a charter feature but always
+  there. This is stated nowhere and I sent the call expecting a refusal.
+- [NEW] The payload of a persist submission carries `by` CORRECTLY
+  (`payload.by = "Mr. Center"`), while the top-level field `by` of the
+  same submission wrongly says "Mr. Left". Whoever needs the authorship of
+  a file submission reads `payload.by`.
+- [NEW] The persist payload contains `key_b64`, `root` and `pieces`. The
+  file's key is thereby in the vote - harmless within the republic, but no
+  tool text says that approving a persist submission means seeing the file
+  key.
+- [NEW] EXPERIMENT "download before the mirror", fully measured
+  (B-protokollstapel.png, Mr. Center, 102817 bytes, 3 pieces):
+    16:42:34.2  before approve   local=none  temp=true  avail=sharer-only mirrors=1 held=0/3
+    16:42:34.3  approve 130      -> applied, approvals 2/2, head=60, immediately
+    16:42:34.5  after approve    local=none  temp=FALSE avail=sharer-only  (temp flips in <0.2 s)
     16:42:34.5  download_file    -> {"reply":"ack"}
     +10.2 s     local=partial, avail=relay-held, download.percent=0 phase=requested
     +72.2 s     held 1/3, percent 42, phase=transferring
     +88.4 s     held 2/3, percent 85
     +104.7 s    local=DOWNLOADED, mirrors=3, held 3/3, percent 100, phase=done,
                 path=<exchange-left>/B-protokollstapel.png
-  Drei Befunde daraus:
-  1. `download.percent` bleibt 70 Sekunden lang auf 0 und `phase` auf
-     "requested", WAEHREND `local.kind` schon `partial` meldet und
-     `availability` von `sharer-only` auf `relay-held` gesprungen ist. Die
-     Fortschrittsanzeige des Downloads hinkt dem tatsaechlichen
-     Stueckerwerb um mehr als eine Minute hinterher.
-  2. Der Auftrag wollte "none -> partial -> mirrored" gegen den Download
-     abgrenzen. Das geht NICHT: beide fuellen denselben Stueckspeicher,
-     und weil ich explizit `download_file` gerufen habe, endet der Zustand
-     als `downloaded`, nie als `mirrored`. Die Frage "war es der Spiegel
-     oder mein Download" ist mit diesen Werkzeugen nicht beantwortbar.
-  3. `mirrors` springt erst am Ende von 1 auf 3 - der Zaehler zaehlt nur
-     Mitglieder mit der VOLLSTAENDIGEN Serie, Teilbestand erscheint darin
-     gar nicht. `availability` kennt mindestens die Woerter `sharer-only`
-     und `relay-held`; was sie genau bedeuten, sagt kein Werkzeugtext.
+  Three findings from this:
+  1. `download.percent` stays at 0 and `phase` at "requested" for 70
+     seconds, WHILE `local.kind` already reports `partial` and
+     `availability` has jumped from `sharer-only` to `relay-held`. The
+     download's progress display lags the actual piece acquisition by
+     more than a minute.
+  2. The assignment wanted to separate "none -> partial -> mirrored" from
+     the download. That is NOT possible: both fill the same piece store,
+     and because I explicitly called `download_file`, the state ends as
+     `downloaded`, never as `mirrored`. The question "was it the mirror
+     or my download" cannot be answered with these tools.
+  3. `mirrors` only jumps from 1 to 3 at the end - the counter counts
+     only members with the COMPLETE series, a partial holding does not
+     appear in it at all. `availability` knows at least the words
+     `sharer-only` and `relay-held`; what exactly they mean, no tool text
+     says.
 
-## Werkzeugbefunde Teil 1 (Wiki)
+## Tool findings part 1 (wiki)
 
-- [NEW] `wiki_edit` prueft die Namenswarnung gegen die BASIS, nicht gegen
-  die Arbeitskopie. Vorlage 176 entfernt in Edit 1 per `set_props` die
-  Aliase "Merkle Search Tree" und "MST" von
-  `standards/atproto-repository.md` und legt in Edit 3 die Seite
-  `primitive/merkle-search-tree.md` mit genau diesen Namen an. Der
-  Werkzeugtext sagt "edits apply IN ORDER to a working copy of the current
-  base" - die Warnung
+- [NEW] `wiki_edit` checks the name warning against the BASE, not against
+  the working copy. Submission 176 removes in edit 1 via `set_props` the
+  aliases "Merkle Search Tree" and "MST" from
+  `standards/atproto-repository.md` and in edit 3 creates the page
+  `primitive/merkle-search-tree.md` with exactly these names. The tool
+  text says "edits apply IN ORDER to a working copy of the current
+  base" - the warning
   `title "Merkle Search Tree" already names standards/atproto-repository.md
-  - both pages lose it` erscheint trotzdem, dreimal, und zwingt zu
-  `allow_warnings: true`. Damit ist eine echte Warnung von einer veralteten
-  im selben Aufruf nicht mehr unterscheidbar: `allow_warnings` schaltet
-  ALLE ab, es gibt kein "diese eine kenne ich".
-- [NEW] Referenzen `upload:<hex>` sind formfrei. Alle vier Faelle - 11
-  Stellen, 12 Stellen, 65 Stellen und `zzzzzzzzzzzz` (kein Hex) - liefern
-  dieselbe Warnung `file reference unresolved: upload:<was auch immer>`.
-  Der dokumentierte Bereich ist "12..=64 hex digits", aber ein Tippfehler
-  in der Laenge oder im Alphabet ist von einer gueltigen, nur unbekannten
-  Pruefsumme nicht zu unterscheiden.
-- [NEW] Eine Referenz auf eine noch TEMPORAERE Datei warnt nicht, weder im
-  `dry_run` noch im echten Aufruf (gemessen 16:51:34, Vorlage 164 auf
-  `left-at-protocol-weg.png`, `resolve_upload` sagte im selben Moment
-  `temporary: true`). Das ist so dokumentiert und es ist die richtige
-  Entscheidung - aber es heisst, dass die einzige Warnung vor einer Seite,
-  die nach dem Chat-Fenster ins Leere zeigt, `wiki_health.files.temporary`
-  ist, und die liest niemand, der gerade schreibt.
-- [NEW] EXPERIMENT "Spiegel ohne Download" (Kontrollgruppe, 6 fremde
-  Dateien), Stand 16:58:20:
+  - both pages lose it` appears nevertheless, three times, and forces
+  `allow_warnings: true`. A real warning can then no longer be told apart
+  from a stale one in the same call: `allow_warnings` switches off ALL of
+  them, there is no "I know this one".
+- [NEW] References `upload:<hex>` are free-form. All four cases - 11
+  digits, 12 digits, 65 digits and `zzzzzzzzzzzz` (not hex) - yield the
+  same warning `file reference unresolved: upload:<whatever>`. The
+  documented range is "12..=64 hex digits", but a typo in length or
+  alphabet cannot be told apart from a valid but unknown checksum.
+- [NEW] A reference to a still TEMPORARY file does not warn, neither in
+  `dry_run` nor in the real call (measured 16:51:34, submission 164 on
+  `left-at-protocol-weg.png`, `resolve_upload` said `temporary: true` at
+  the same moment). This is documented and it is the right decision - but
+  it means that the only warning before a page that points into the void
+  after the chat window is `wiki_health.files.temporary`, and nobody who
+  is currently writing reads that.
+- [NEW] EXPERIMENT "mirror without download" (control group, 6 foreign
+  files), state 16:58:20:
     B-ap-zustellweg.png            local=mirrored   held 2/2
     B-zeitachse-segment.png        local=mirrored   held 3/3
     B-implementierungen-balken.png local=mirrored   held 2/2
     B-implementierungen.csv        local=mirrored   held 1/1
     mr-right-abloeseketten.png     local=mirrored   held 3/3
     mr-right-kryptoschicht-stapel  local=mirrored   held 3/3
-    B-protokollstapel.png          local=DOWNLOADED held 3/3   (der eine, den ich gezogen habe)
-  DER UNTERSCHIED, den kein Werkzeugtext nennt und der praktisch der
-  wichtigste ist: gespiegelte Bytes liegen in
-  `~/.moltrepublic/mirror/<workspace-id>/` (read_mirror.dir), NICHT im
-  Austauschordner. Im Austauschordner liegt von sechs fremden Dateien
-  genau EINE - die heruntergeladene. Ein Agent, der eine fremde Datei
-  ANSEHEN will, muss `download_file` rufen, auch wenn `local.kind` schon
-  `mirrored` sagt; "der Knoten hat die Bytes" und "ich komme an die Bytes"
-  sind zwei verschiedene Aussagen.
-- [NEW] `wiki_edit` mit `op: rename` repariert IN-LINKS NICHT. Gemessen
-  2026-09-06: ein reiner Rename von `standards/lexicon.md` nach
-  `standards/atproto-lexicon.md` erzeugt mit `with_patch: true` genau
-  diesen Patch -
+    B-protokollstapel.png          local=DOWNLOADED held 3/3   (the one I pulled)
+  THE DIFFERENCE that no tool text states and that is practically the most
+  important: mirrored bytes live in
+  `~/.moltrepublic/mirror/<workspace-id>/` (read_mirror.dir), NOT in the
+  exchange folder. Of six foreign files exactly ONE is in the exchange
+  folder - the downloaded one. An agent that wants to LOOK AT a foreign
+  file has to call `download_file`, even if `local.kind` already says
+  `mirrored`; "the node has the bytes" and "I can get at the bytes" are two
+  different statements.
+- [NEW] `wiki_edit` with `op: rename` does NOT repair IN-LINKS. Measured
+  2026-09-06: a pure rename of `standards/lexicon.md` to
+  `standards/atproto-lexicon.md` yields with `with_patch: true` exactly
+  this patch -
     `similarity index 100% / rename from ... / rename to ...`
-  - und `paths` nennt nur die eine Datei. Die fuenf Seiten, die den Pfad
-  ausgeschrieben tragen, muss der Aufrufer selbst nachziehen, sonst haengen
-  fuenf Kanten. `wiki_links {"direction":"in"}` ist der einzige Weg, sie zu
-  finden.
-- [NEW] `wiki_list {"prefix": ...}` filtert nach ORDNER, nicht nach
-  Zeichenkette. Gemessen: `standards` -> 56, `standards/` -> 56,
-  `standards/atproto-` -> **0**. Der Werkzeugtext sagt "only paths under
-  this folder" und ist damit korrekt - der Parametername `prefix` legt
-  trotzdem das Gegenteil nahe, und ich habe eine Umbenennung mit einer
-  Begruendung geplant, die daran gescheitert ist.
+  - and `paths` names only the one file. The five pages that carry the
+  path spelled out have to be fixed up by the caller, otherwise five
+  edges dangle. `wiki_links {"direction":"in"}` is the only way to find
+  them.
+- [NEW] `wiki_list {"prefix": ...}` filters by FOLDER, not by string.
+  Measured: `standards` -> 56, `standards/` -> 56,
+  `standards/atproto-` -> **0**. The tool text says "only paths under
+  this folder" and is thus correct - the parameter name `prefix` suggests
+  the opposite nonetheless, and I planned a rename with a justification
+  that failed on this.
 
-## Governance und Kette
+## Governance and chain
 
-- [NEW] Eine 2-von-3-Republik kann einen Sitz ABHAENGEN, ohne dass
-  irgendein Knoten Divergenz meldet. Gemessen 17:33 auf meinem Knoten:
-  von 28 Bloecken ueber dem Genesis tragen **27** die Signierer
-  (Mr. Center, Mr. Left) und **einer** (Hoehe 97, der Checkpoint) die
-  Signierer (Mr. Center, Mr. Right). Der hoechste Block mit Mr. Rights
-  Unterschrift ist 97; er selbst meldet seine Kette auf 96 stehend, also
-  hat er den Schnitt SIGNIERT und nicht ANGEWANDT. Waehrenddessen:
-  `read_chain.diverged` = [] und `status.chain_diverged` = [] in JEDER
-  Lesung dieser Runde. Das ist kein Fehler des Detektors - es gibt keine
-  Gabelung, Center und ich sind ein gueltiges Quorum. Aber wer `diverged`
-  als "alles in Ordnung" liest, sieht diesen Fall nie. Es fehlt ein
-  Signal der Art "Mitglied X hat seit N Bloecken nicht mitgezeichnet".
-- [NEW] Gegenprobe, die die naheliegende Erklaerung ausschliesst: es sind
-  nicht Bloecke, die versiegelt wurden, bevor seine Stimme ankam.
-  `read_proposal` auf 209, 198, 201, 222 und 260 zeigt bei ALLEN
-  `Mr. Right: open` - auch bei **222, seinem EIGENEN Antrag**, dessen
-  Antragstellersignatur laut Werkzeugtext die erste von m ist. Seine
-  Governance-Nachrichten erreichen meinen Knoten seit 15:15:35Z nicht,
-  waehrend sein CHAT ankommt (DONE-Meldung 17:31:22, `read_members`
-  presence 0 um 17:33:02). Chat und Governance reiten auf demselben
-  Broadcast-Strom, und nur eines von beiden kommt an.
-- [R2, bestaetigt] `approvals` zaehlt nur die Signaturen DIESES Knotens.
-  Nach `approve` steht dort oft 1 und der Block versiegelt Sekunden
-  spaeter mit 2 - das ist kein Fehler, aber es macht die Zahl als
-  Fortschrittsanzeige unbrauchbar.
-- [NEW] Der CHECKPOINT setzt `wiki_rev` auf 0 zurueck und wechselt die
-  `base` von `wiki_changes` (`truncated: true`). Zwei HEAD-Zeilen ueber
-  einen Checkpoint hinweg sind damit NICHT vergleichbar - nach der
-  Sync-Regel des Auftrags sieht das aus wie eine Divergenz und ist keine.
-  Der Checkpoint auf Hoehe 97 kam ohne meine Stimme zustande; ich wurde
-  nicht gefragt und habe ihn erst an der zurueckgesetzten rev bemerkt.
+- [NEW] A 2-of-3 republic can LEAVE A SEAT BEHIND without any node
+  reporting divergence. Measured 17:33 on my node: of 28 blocks above the
+  genesis, **27** carry the signers (Mr. Center, Mr. Left) and **one**
+  (height 97, the checkpoint) the signers (Mr. Center, Mr. Right). The
+  highest block with Mr. Right's signature is 97; he himself reports his
+  chain standing at 96, so he SIGNED the cut and did not APPLY it.
+  Meanwhile: `read_chain.diverged` = [] and `status.chain_diverged` = []
+  in EVERY reading of this run. This is not a detector error - there is no
+  fork, Center and I are a valid quorum. But whoever reads `diverged` as
+  "all fine" never sees this case. A signal of the kind "member X has not
+  co-signed for N blocks" is missing.
+- [NEW] Cross-check that rules out the obvious explanation: these are not
+  blocks that were sealed before his vote arrived. `read_proposal` on 209,
+  198, 201, 222 and 260 shows `Mr. Right: open` for ALL of them - also for
+  **222, his OWN proposal**, whose proposer signature is, per the tool
+  text, the first of m. His governance messages have not reached my node
+  since 15:15:35Z, while his CHAT arrives (DONE message 17:31:22,
+  `read_members` presence 0 at 17:33:02). Chat and governance ride the
+  same broadcast stream, and only one of the two arrives.
+- [R2, confirmed] `approvals` counts only the signatures of THIS node.
+  After `approve` it often reads 1 and the block seals seconds later with
+  2 - this is not a bug, but it makes the number useless as a progress
+  display.
+- [NEW] The CHECKPOINT resets `wiki_rev` to 0 and changes the `base` of
+  `wiki_changes` (`truncated: true`). Two HEAD lines across a checkpoint
+  are therefore NOT comparable - by the assignment's sync rule this looks
+  like a divergence and is none. The checkpoint at height 97 came about
+  without my vote; I was not asked and noticed it only from the reset rev.
 
-## Was gut funktioniert hat [OK]
+## What worked well [OK]
 
-- `wiki_edit` mit `dry_run` vor jedem Stapel: 16 Vorlagen, keine einzige
-  wegen eines Formfehlers zurueckgewiesen. Die Warnung "alias X already
-  names Y - both pages lose it" hat zweimal einen echten Namenskonflikt
-  gefunden, bevor er im Wiki stand.
-- `supersedes` in `wiki_edit`: 212 -> 242 in einem Aufruf, ohne dass eine
-  abgelehnte Fassung offen liegen blieb.
-- `approve` mit `note`: der Grund landet VOR der Stimme im Patch-Kanal.
-  Bei 2 von 3 ist das Fenster zwischen erster Stimme und Entscheidung eine
-  einzige fremde Handlung breit - ohne diesen Parameter waeren mir in
-  dieser Runde mindestens fuenf Begruendungen in einen bereits
-  geschlossenen Kanal gefallen.
+- `wiki_edit` with `dry_run` before every batch: 16 submissions, not a
+  single one rejected for a form error. The warning "alias X already
+  names Y - both pages lose it" found a real name conflict twice before it
+  stood in the wiki.
+- `supersedes` in `wiki_edit`: 212 -> 242 in one call, without a rejected
+  version staying open.
+- `approve` with `note`: the reason lands BEFORE the vote in the patch
+  channel. At 2 of 3 the window between first vote and decision is a
+  single foreign action wide - without this parameter at least five
+  justifications would have fallen into an already closed channel in this
+  run.
 - `share_file` -> `read_uploads` -> `propose files persist` ->
-  `resolve_upload`: die Kette hat fuenfmal ohne Ueberraschung
-  funktioniert, Hashdauer 9 bis 14 Sekunden fuer 6 KB bis 145 KB.
-- `wiki_links {"direction":"in"}` ist das einzige Werkzeug, mit dem sich
-  eine Umbenennung ueberhaupt sauber nachziehen laesst.
+  `resolve_upload`: the chain worked five times without surprise, hash
+  duration 9 to 14 seconds for 6 KB to 145 KB.
+- `wiki_links {"direction":"in"}` is the only tool with which a rename can
+  be fixed up cleanly at all.
 
-## Was gefehlt hat
+## What was missing
 
-- Ein Weg, die Urheberschaft einer Vorlage zuverlaessig zu lesen. `by` und
-  `mine` sind nach einem Neustart falsch, `payload.by` gibt es nur auf der
-  Flaeche `files`, und fuer Wiki-Vorlagen bleibt nur: den Patch-Kanal
-  lesen und schauen, wer die erste Nachricht geschrieben hat.
-- Eine Suche nach einer Pruefsumme. `wiki_search "b8ecea4ac949"` findet
-  nichts, obwohl die Zeichenkette als `upload:`-Referenz im Text stehen
-  koennte. Vor einer `unpersist` muss man `wiki_get.files` auf JEDER Seite
-  lesen, die ueberhaupt eine Datei traegt - es gibt keine Rueckwaertsfrage
-  "welche Seiten nennen diese Datei".
-- Ein Signal fuer einen zurueckgebliebenen Sitz (siehe oben).
-- [NEW, praeziser] Die Diagnose der Divergenz laesst sich auf DREI Kanaele
-  aufteilen, alle am 2026-09-06 gemessen:
-    Chat            kommt an   (DONE-Meldung Mr. Right 17:31:22,
-                                read_members presence 0 um 17:33:02)
-    Antragstexte    kommen an  (sein Antrag 225 um 17:40 bei mir lesbar,
-                                mit Patch, auszaehlbar, zeichenbar)
-    Signaturen      kommen NICHT an (0 von 29 Bloecken seit 15:15:35Z,
-                                einschliesslich seiner EIGENEN Antraege
-                                222 und 225, deren Antragstellersignatur
-                                laut Werkzeugtext "the first of m" ist)
-  Nur EINER der drei Wege ist ausgefallen, und es ist der, den kein
-  Werkzeug beobachtet. `read_members` meldet ihn als online, `read_chain`
-  meldet `diverged: []`, `list_proposals` zeigt seine Antraege - alles
-  gruen, und trotzdem hat er seit 29 Bloecken nicht mitgezeichnet.
+- A way to read the authorship of a submission reliably. `by` and `mine`
+  are wrong after a restart, `payload.by` exists only on the surface
+  `files`, and for wiki submissions all that remains is: read the patch
+  channel and see who wrote the first message.
+- A search for a checksum. `wiki_search "b8ecea4ac949"` finds nothing,
+  although the string could stand in the text as an `upload:` reference.
+  Before an `unpersist` one has to read `wiki_get.files` on EVERY page
+  that carries a file at all - there is no reverse question "which pages
+  name this file".
+- A signal for a seat that has fallen behind (see above).
+- [NEW, more precise] The diagnosis of the divergence can be split into
+  THREE channels, all measured on 2026-09-06:
+    Chat            arrives    (DONE message Mr. Right 17:31:22,
+                                read_members presence 0 at 17:33:02)
+    Proposal texts  arrive     (his proposal 225 readable at mine at
+                                17:40, with patch, countable, signable)
+    Signatures      do NOT arrive (0 of 29 blocks since 15:15:35Z,
+                                including his OWN proposals
+                                222 and 225, whose proposer signature
+                                is, per the tool text, "the first of m")
+  Only ONE of the three paths has failed, and it is the one that no tool
+  observes. `read_members` reports him as online, `read_chain` reports
+  `diverged: []`, `list_proposals` shows his proposals - all green, and
+  yet he has not co-signed for 29 blocks.
 
-## Endstand 17:47
+## Final state 17:47
 
-- Kette: h=126, last=225, docs=212, rev=19, diverged=[],
+- Chain: h=126, last=225, docs=212, rev=19, diverged=[],
   status.chain_diverged=[]
 - wiki_health: dangling 0, orphans 0, key_drift 0,
   files {dangling 0, temporary 0, ambiguous 0}
-- Austauschordner: 5 eigene Dateien (4 PNG, 1 CSV) plus
-  B-protokollstapel.png, die einzige FREMDE Datei auf der Platte - und die
-  einzige, die ich per download_file geholt habe. Die anderen sechs
-  fremden liegen gespiegelt in ~/.moltrepublic/mirror/<workspace-id>/,
-  nicht hier.
-- Alle offenen Antraege sind entschieden, vier Messungen im Abstand von
-  30 s: open 0.
+- Exchange folder: 5 own files (4 PNG, 1 CSV) plus
+  B-protokollstapel.png, the only FOREIGN file on disk - and the only one
+  I fetched via download_file. The other six foreign ones lie mirrored in
+  ~/.moltrepublic/mirror/<workspace-id>/, not here.
+- All open proposals are decided, four measurements 30 s apart: open 0.

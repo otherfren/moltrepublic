@@ -1,203 +1,203 @@
-# Multisig-Wallet-Surface: Implementierungsplan Etappe 1
+# Multisig wallet surface: implementation plan, stage 1
 
 Status: **EXECUTED (Stage 1 built 2026-10-10).** The spec of the shipping
 behaviour is `docs_archive/chain/wallet_treasury_design.md`; open items are
 in `docs/reviews/known_debt.md`.
 
-Stand: **Revision 3, 2026-10-06**, Anker gegen master `0f0cb30d` geprüft.
-Ersetzt Revision 2 (gleicher Tag); §17 listet die Änderungen.
-Design-Autorität: `docs_archive/chain/wallet_treasury_design.md` (rev 3). Dieses
-Dokument ist der Bauplan: Dateien, Symbole, Tests, Reihenfolge.
+As of: **Revision 3, 2026-10-06**, anchors checked against master `0f0cb30d`.
+Replaces revision 2 (same day); §17 lists the changes.
+Design authority: `docs_archive/chain/wallet_treasury_design.md` (rev 3). This
+document is the build plan: files, symbols, tests, order.
 
-**Scope: nur Etappe 1** — Kasse einrichten, empfangen, beobachten.
-Ausgeben (Etappe 2) wartet auf SA+L-Threshold-Signing in monero-wallet
-(W2, Design §8). Kein Code für Etappe 2 anlegen.
+**Scope: stage 1 only** — set up the purse, receive, watch.
+Spending (stage 2) waits for SA+L threshold signing in monero-wallet
+(W2, design §8). Do not create any code for stage 2.
 
-**Für die Implementierung gilt zwingend:**
-- Zeilennummern driften — **immer per Symbolname greppen.**
-- Keine Upstream-API erfinden. Der Dep-Spike (§6) hat die Kern-APIs gegen
-  den Compiler gelockt; alles Weitere vor Gebrauch in
-  `~/.cargo/registry/src/*/<crate>-<ver>/` nachlesen.
-- Repo-Regeln aus `CLAUDE.md` gelten vollständig (§3).
+**Mandatory for the implementation:**
+- Line numbers drift — **always grep by symbol name.**
+- Do not invent an upstream API. The dependency spike (§6) locked the core APIs
+  against the compiler; read everything else in
+  `~/.cargo/registry/src/*/<crate>-<ver>/` before use.
+- The repo rules from `CLAUDE.md` apply in full (§3).
 
 ---
 
-## 1. Mission und Entscheidungen
+## 1. Mission and decisions
 
-Eine Republik erhält eine gemeinsame Monero-Kasse. Alle n Mitglieder halten
-einen Schlüsselteil aus einem DKG; ausgegeben wird später mit derselben
-Schwelle `rule_m`, mit der die Republik regiert.
+A republic gets a shared Monero purse. All n members hold a key part from a
+DKG; spending later uses the same threshold `rule_m` with which the republic
+governs.
 
-| | Entscheidung (User, 2026-10-06) |
+| | Decision (user, 2026-10-06) |
 |---|---|
-| W1 | Kasse nur bei `2 ≤ m ≤ n − 1` |
-| W2 | Etappe 2 wartet auf SA+L; kein CLSAG-Spend |
-| W3 | Nur Monero |
-| W4 | Nur ein ausdrücklicher Wallet-Akt (`wallet_init`-Vote) erzeugt eine Kasse; kein Marker, `set_features` kann `wallet` nicht hinzufügen |
-| W5 | Schlüsseldatei defekt: Export bricht ab; Import ohne sie, Sitz watch-only |
-| W6 | Ein Decline beendet den Lauf |
-| W7 | DKG-Teilnehmer = Position in der Genesis-Gründungstabelle (Vault-Ordnung) |
-| W8 | `wallet_created` trägt n Identitäts-Attestationen; die Projektion prüft sie aus dem Payload (übersteht jeden Schnitt) |
-| W9 | Kasse standardmäßig an; die Kassen-Stufe mit Fortschrittsbalken ist der automatische letzte Wizard-Schritt |
-| W10 | Späteres Einschalten zeigt dieselbe Stufe; alle n gleichzeitig online |
-| W11 | Mainnet erlaubt; neben der Adresse groß: „Spending does not work yet. Money sent here is gone.“ |
+| W1 | Purse only at `2 ≤ m ≤ n − 1` |
+| W2 | Stage 2 waits for SA+L; no CLSAG spend |
+| W3 | Monero only |
+| W4 | Only an explicit wallet act (`wallet_init` vote) creates a purse; no marker, `set_features` cannot add `wallet` |
+| W5 | Key file damaged: export aborts; import without it, seat watch-only |
+| W6 | One decline ends the run |
+| W7 | DKG participant = position in the genesis founding table (vault order) |
+| W8 | `wallet_created` carries n identity attestations; the projection checks them from the payload (survives any cut) |
+| W9 | Purse on by default; the purse stage with a progress bar is the automatic last wizard step |
+| W10 | Enabling it later shows the same stage; all n online at the same time |
+| W11 | Mainnet allowed; next to the address, large: „Spending does not work yet. Money sent here is gone.“ |
 
-Weiter gültig: Republik = Wallet, ein Threshold-Begriff, nur XMR,
-Charter-Feature, nie abschaltbar.
+Still valid: republic = wallet, one threshold notion, XMR only,
+charter feature, can never be switched off.
 
-## 2. Der Stack (per Spike verifiziert 2026-10-06)
+## 2. The stack (verified by spike 2026-10-06)
 
-Zwei Spikes (nicht im Repo): `treasury-spike` (DKG, Adresse, View-Key,
-FROST-Signatur) und `stage1-min` (Etappe 1 ohne `multisig` und ohne
-`modular-frost`: DKG-Test grün, kein `ring`, kein C). Nachgeprüft am
-selben Tag gegen die Crate-Quellen.
+Two spikes (not in the repo): `treasury-spike` (DKG, address, view key,
+FROST signature) and `stage1-min` (stage 1 without `multisig` and without
+`modular-frost`: DKG test green, no `ring`, no C). Re-checked the same day
+against the crate sources.
 
-**Etappe 1 braucht:**
+**Stage 1 needs:**
 
-| Krate | Version | Rolle |
+| Crate | Version | Role |
 |---|---|---|
 | `dkg` | 0.6.1 | `ThresholdParams`, `ThresholdKeys`, `Participant` |
-| `dkg-pedpop` | **=0.6.0** (Pin) | DKG, 2 Runden, `BlameMachine`; **auf Serais `next` gelöscht**; reviewed, not vendored (Design §12) |
-| `dalek-ff-group` | 0.5 | `Ed25519`-Ciphersuite |
-| `ciphersuite` | 0.4 | `Ciphersuite`-Trait |
-| `monero-wallet` | 0.2.0, **ohne** `multisig` | `ViewPair`, `Scanner`, Adressen |
-| `monero-daemon-rpc` | 0.2.0 | RPC-Client über eigenen `HttpTransport` |
-| `schnorr-signatures` | **=0.5.2** (Pin) | 0.5.3 weitet die `multiexp`-Spanne → `multiexp` 0.4 + 0.5 nebeneinander → `dkg-pedpop` bricht (zwei `BatchVerifier`) |
+| `dkg-pedpop` | **=0.6.0** (pin) | DKG, 2 rounds, `BlameMachine`; **deleted on Serai's `next`**; reviewed, not vendored (design §12) |
+| `dalek-ff-group` | 0.5 | `Ed25519` ciphersuite |
+| `ciphersuite` | 0.4 | `Ciphersuite` trait |
+| `monero-wallet` | 0.2.0, **without** `multisig` | `ViewPair`, `Scanner`, addresses |
+| `monero-daemon-rpc` | 0.2.0 | RPC client over our own `HttpTransport` |
+| `schnorr-signatures` | **=0.5.2** (pin) | 0.5.3 widens the `multiexp` range → `multiexp` 0.4 + 0.5 side by side → `dkg-pedpop` breaks (two `BatchVerifier`s) |
 
-`modular-frost` und das `multisig`-Feature (außerhalb SemVer) kommen erst
-mit Etappe 2.
+`modular-frost` and the `multisig` feature (outside SemVer) only come
+with stage 2.
 
-Verifizierte API-Fakten:
+Verified API facts:
 - DKG: `KeyGenMachine::new(params, context: [u8; 32])` →
   `generate_coefficients(rng)` → `generate_secret_shares(rng, map)` →
   `calculate_share(rng, map)` → `BlameMachine::complete()` / `.blame(..)`.
-- Alle n müssen teilnehmen (`validate_map`). pedpop erkennt **keine**
-  Equivocation — „responsibility lies with the caller“; Abschluss mit
-  allen bestätigen (Doku). → Transkript-Hash (§7.4).
-- Kontext soll pro Multisig eindeutig sein. → Run-Nonce im Kontext.
-- `*::read` brauchen die eigenen `ThresholdParams`.
-- Zwischenstände sind nicht serialisierbar.
-- `ciphersuite::read_G` prüft nur Gültigkeit/Kanonizität, **nicht** den
-  Identitätspunkt → eigene Prüfung, für jeden Punkt beider Frames
-  (Design §12).
-- **Kein View-Key aus dem DKG.** Adresse = `ViewPair::new(spend, view)
-  .legacy_address(network)`; `ViewPair::new` nimmt monero-oxides eigenen
-  `ed25519::Point` → Konvertierung aus dalek-ff-group nötig; lehnt Torsion ab.
-- **Nicht `GuaranteedViewPair`/`GuaranteedScanner`.** Standard-`Scanner`;
-  gesehene Output-Keys MÜSSEN geprüft und gespeichert werden.
-- `Scanner::scan` lehnt Blöcke mit `hardfork_version > 16` ab
-  (`UnsupportedProtocol`); unbekannte Output-Typen scheitern beim Dekodieren.
+- All n must take part (`validate_map`). pedpop does **not** detect
+  equivocation — „responsibility lies with the caller“; confirm completion
+  with everyone (docs). → transcript hash (§7.4).
+- The context should be unique per multisig. → run nonce in the context.
+- `*::read` need the own `ThresholdParams`.
+- Intermediate states are not serializable.
+- `ciphersuite::read_G` only checks validity/canonicality, **not** the
+  identity point → own check, for every point of both frames
+  (design §12).
+- **No view key from the DKG.** Address = `ViewPair::new(spend, view)
+  .legacy_address(network)`; `ViewPair::new` takes monero-oxide's own
+  `ed25519::Point` → conversion from dalek-ff-group needed; rejects torsion.
+- **Not `GuaranteedViewPair`/`GuaranteedScanner`.** Standard `Scanner`;
+  seen output keys MUST be checked and stored.
+- `Scanner::scan` rejects blocks with `hardfork_version > 16`
+  (`UnsupportedProtocol`); unknown output types fail at decoding.
 - `monero-daemon-rpc`: `trait HttpTransport { post(route, body,
-  response_size_limit) }`; Auth liegt beim Implementierer.
-- Größen (n=13): Runde 1 ≈ m·32 + 96 B, Runde 2 ≈ 128 B je Empfänger,
-  `wallet_created` ≈ n·64 B Signaturen + Felder.
-- `monero-simple-request-rpc`: zieht `ring` + `cc`. **Nicht verwenden.**
+  response_size_limit) }`; auth is up to the implementer.
+- Sizes (n=13): round 1 ≈ m·32 + 96 B, round 2 ≈ 128 B per recipient,
+  `wallet_created` ≈ n·64 B signatures + fields.
+- `monero-simple-request-rpc`: pulls in `ring` + `cc`. **Do not use.**
 
-## 3. Repo-Regeln, die hier besonders greifen
+## 3. Repo rules that bite here in particular
 
-1. **TDD.** Jeder Schritt beginnt mit roten Tests (§10).
-2. **clippy = 0, auch Tests, pro Crate.** `.expect("…")`, nie `.unwrap()`.
-3. **Co-Equality.** Neue `Command`-Varianten: MCP-Tool (mit `scope`) oder
-   `INTERNAL` (Liste in der Testfunktion
+1. **TDD.** Every step starts with red tests (§10).
+2. **clippy = 0, tests included, per crate.** `.expect("…")`, never `.unwrap()`.
+3. **Co-equality.** New `Command` variants: MCP tool (with `scope`) or
+   `INTERNAL` (list in the test function
    `co_equality_every_command_is_a_tool_or_documented_internal`).
-4. **Events additiv**; keine neue Regel in der Chain-Verifikation (§7.7).
-5. **Kein I/O in molt-core.** Handler synchron; Blockierendes off-actor.
-6. **GUI:** `scripts/dev-ui.sh build` + Live-Preview-Tests. Kein voller
-   Fenster-Build pro Change-Set. Nie `DISPLAY=:0`. Kein Em-Dash in UI-Text.
-7. **Direkt auf master;** Review über den Diff vor dem Landen.
-8. **Secrets nie in getrackten Artefakten benennen.**
-9. **Status-Zeilen pflegen;** nach Doc-Moves `scripts/check-doc-refs.py`.
-10. **Gründungsritual unangetastet** (I15): kein Byte, kein Schritt von
-    `founding.rs`/`nostr_ritual.rs` ändert sich; die Kassen-Stufe beginnt
-    nach dem Siegel.
+4. **Events additive**; no new rule in the chain verification (§7.7).
+5. **No I/O in molt-core.** Handlers synchronous; blocking work off-actor.
+6. **GUI:** `scripts/dev-ui.sh build` + live-preview tests. No full
+   window build per change-set. Never `DISPLAY=:0`. No em dash in UI text.
+7. **Directly on master;** review over the diff before landing.
+8. **Never name secrets in tracked artifacts.**
+9. **Keep status lines current;** after doc moves `scripts/check-doc-refs.py`.
+10. **Founding ritual untouched** (I15): not a byte, not a step of
+    `founding.rs`/`nostr_ritual.rs` changes; the purse stage begins
+    after the seal.
 
-## 4. Anker im Repo
+## 4. Anchors in the repo
 
-| Anker | Ort | Rolle |
+| Anchor | Location | Role |
 |---|---|---|
-| `Surface::Wallet`, Views | `molt-core/src/lib.rs` (`Surface::views`) | bleibt; `send` bleibt Stub |
-| `Surface::is_implemented` | `molt-core/src/lib.rs` (Test ~Z. 8380) | Wallet aufnehmen |
-| `effective_features` / `feature_on` / `require_feature` | `molt-engine/src/chain/projection.rs` | `wallet` effektiv auch durch angewandten `wallet_init` |
-| `propose_payload`, Enable-only-Gate („already enabled“, „cannot be disabled“) | `molt-engine/src/proposals.rs` | `set_features` darf `wallet` nicht neu hinzufügen; `wallet_init` ohne Feature erlaubt |
-| `cmd_propose` / `cmd_approve` (ruft `require_feature`) | `proposals.rs` | Wallet-Arm, Approve-Checks; `wallet_init` vom Feature-Gate ausnehmen |
-| `register_decline` (`veto_room`) | `proposals.rs` | `veto_room = 0` für `wallet_init` |
-| `chain_sign_and_gossip_approval` | `chain/governance.rs` | dieselben Checks auch hier |
-| `try_commit` | `chain/governance.rs` | **unverändert** (Siegel bei m) |
-| `proposal_change` / `id_free_for` | `chain/governance.rs` | eigene ID für `wallet_created` |
-| `rebase_pending_approvals`, `forget_votes_for` | `chain/governance.rs`, `events.rs` | Re-Sign; Geschwister-Karten |
-| `own_approvals` (Feld des Chain-Zustands) | `molt-engine/src/lib.rs` | „eigene Zustimmung steht“ |
-| `after_block_applied` | `molt-engine/src/chain/` | **ein** Hook für den Auto-Start; Pfade ohne ihn (Checkpoint-Kandidat `checkpoint.rs`, Recovery-Adoption) starten nichts |
-| Create/Join-Abschluss (nach `materialize_workspace` in `lifecycles.rs`, `chain_blocks` = `None`) | `molt-engine/src/lifecycles.rs` | Auto-Init nur hier; nie Recovery, nie Reopen; Ritual-Code selbst unverändert |
-| `own_signature_stands`, Auto-Co-Sign des Checkpoints | `chain/governance.rs`, `chain/checkpoint.rs` | Vorbild Auto-Co-Sign |
-| `vault_arm`, `vault_approve_check` | `molt-engine/src/vault/mod.rs` | Vorbild geschlossener Op-Satz + Prüfung in jedem Signierpfad |
-| `supersede_stale_vault_cards` | `vault/deposit.rs` | Vorbild Geschwister-Karten schließen |
-| `State::vault_founding_table()` | `molt-engine/src/vault/fold.rs` | **die** Sitzordnung (Genesis/Anker, jeder Roster); Wallet nutzt sie direkt |
-| `bounds_ok` | `vault/mod.rs` | Vorbild W1 |
-| `CheckpointState.rule_m` / `.rule_n` / `.founding_identities` | `molt-core/src/chain.rs` | Quelle für W1 und die Attestations-Prüfung; **nicht** `State::threshold()` (Config-Fallback) |
-| `net_scope_current`, `reset_workspace_state` | `net/mod.rs`, `events.rs` | Lebensdauer Scanner/Lauf |
-| `cmd_net_presence_tick`, `vault::receipts::tick` | `net/presence.rs`, `vault/receipts.rs` | Resend, Deadlines |
-| `CONTROL_FRAMES`, `ControlParser` | `molt-net/src/supervisor.rs` | neue Tags; Frames sind nur MLS-authentifiziert |
-| `vault_frames.rs`, `mirror_gossip.rs` | `molt-net/src/` | Vorbild Frames |
-| `GroupHandle::publish_control` | `molt-net/src/group_runtime.rs` | best-effort (Queue 64), daher Resend |
-| `TransportState` (`mirror`, `vault_status`) | `molt-core/src/lib.rs` | Shareholder-Status, Laufzustand |
-| Segmente `−1 … −8` (`−7`/`−8` Kanban), `RESERVED_SEGMENT_FLOOR` (per Test gepinnt) | `molt-storage/src/lib.rs` | neu `−9` Schlüssel, `−10` Scan; Floor + Test mitziehen |
-| `chain_state_key`/`hkdf32`, `encode_frame`, `write_atomic` | `molt-storage/src/lib.rs` | Muster für beide Dateien |
-| `persist_chain_blocking`, `WriterMsg` | `molt-storage/src/lib.rs` | blockierender Writer |
-| Export-Funktion mit Closure `checked_kind` | `molt-storage/src/export.rs` | Export-Arme |
-| `allowed_entry`, Verify-Loop, `staging.dropped` | `molt-storage/src/import.rs` | Import-Arme |
-| Backup-Ticker | `molt-engine/src/backup.rs` | Backoff bei Schlüssel-Fehler |
-| `tools()`, `Scope` | `molt-mcp/src/lib.rs` | neue Tools (Seat) |
-| `VaultView` / `SurfaceSnapshot.vault` | `molt-core/src/vault.rs` | Vorbild `WalletView` / `.wallet` |
-| `classified` / `relay_kind` / `RelayKind` | `molt-core/src/relay.rs` | Host-Regel extrahieren; nimmt heute nur `ws`/`wss` |
-| `relay_block` / `clearnet_enabled` | `relay.rs`, `molt-config/src/lib.rs` | dasselbe Nicht-Onion-Gate für den Daemon |
-| `s3::http` (freie Funktionen über einen Stream; `MAX_RESPONSE` Modulkonstante, `S3Error`) | `molt-net/src/s3/http.rs` | Grenze als Parameter, Fehlertyp generisch — Refactor |
-| `Dialer` (Enum) | `molt-net/src/dial.rs` | Transport |
-| `Config` (`deny_unknown_fields`, `render`, `salvage`) | `molt-config/src/` | Sektion `[wallet]` |
-| Wizard Feature-Schritt: `cw-feat-*`, Wallet `checked: false; enabled: false` | `molt-ui-window/ui/app.slint` (~Z. 3966) | Default an, Sperre nur bei W1 |
-| `SealedPanel` (Gründer `cw-outcome == 1`, Joiner `jw-sealed`) | `app.slint`, `parts.slint` | danach automatisch die Kassen-Stufe |
-| Organization-Modal `org-feat-wallet` (gesperrt; Ride-along `" wallet"`) | `app.slint` (~Z. 6353, 9805) | Checkbox → `wallet_init` statt `set_features` |
-| `WalletPane` (Mock) | `molt-ui-window/ui/surfaces.slint`; Route `app.slint` | wird echt |
-| `default_op` (`"transfer"`), `wl_*` | `molt-ui/src/labels.rs`, `i18n.rs` | aufräumen |
-| E2E-Harness | `molt-engine/tests/vault_support/mod.rs` | Vorlage |
-| **Namensfalle** `WalletHandle` | `molt-engine/src/lib.rs` | Engine-Aktor-Handle, nicht die Kasse |
+| `Surface::Wallet`, views | `molt-core/src/lib.rs` (`Surface::views`) | stays; `send` stays a stub |
+| `Surface::is_implemented` | `molt-core/src/lib.rs` (test ~l. 8380) | include Wallet |
+| `effective_features` / `feature_on` / `require_feature` | `molt-engine/src/chain/projection.rs` | `wallet` effective also through an applied `wallet_init` |
+| `propose_payload`, enable-only gate („already enabled“, „cannot be disabled“) | `molt-engine/src/proposals.rs` | `set_features` must not newly add `wallet`; `wallet_init` allowed without the feature |
+| `cmd_propose` / `cmd_approve` (calls `require_feature`) | `proposals.rs` | wallet arm, approve checks; exempt `wallet_init` from the feature gate |
+| `register_decline` (`veto_room`) | `proposals.rs` | `veto_room = 0` for `wallet_init` |
+| `chain_sign_and_gossip_approval` | `chain/governance.rs` | the same checks here too |
+| `try_commit` | `chain/governance.rs` | **unchanged** (seal at m) |
+| `proposal_change` / `id_free_for` | `chain/governance.rs` | own ID for `wallet_created` |
+| `rebase_pending_approvals`, `forget_votes_for` | `chain/governance.rs`, `events.rs` | re-sign; sibling cards |
+| `own_approvals` (field of the chain state) | `molt-engine/src/lib.rs` | „own approval stands“ |
+| `after_block_applied` | `molt-engine/src/chain/` | **one** hook for the auto-start; paths without it (checkpoint candidate `checkpoint.rs`, recovery adoption) start nothing |
+| Create/join finish (after `materialize_workspace` in `lifecycles.rs`, `chain_blocks` = `None`) | `molt-engine/src/lifecycles.rs` | auto-init only here; never recovery, never reopen; ritual code itself unchanged |
+| `own_signature_stands`, auto-co-sign of the checkpoint | `chain/governance.rs`, `chain/checkpoint.rs` | model for auto-co-sign |
+| `vault_arm`, `vault_approve_check` | `molt-engine/src/vault/mod.rs` | model for a closed op set + check in every signing path |
+| `supersede_stale_vault_cards` | `vault/deposit.rs` | model for closing sibling cards |
+| `State::vault_founding_table()` | `molt-engine/src/vault/fold.rs` | **the** seat order (genesis/anchor, every roster); the wallet uses it directly |
+| `bounds_ok` | `vault/mod.rs` | model for W1 |
+| `CheckpointState.rule_m` / `.rule_n` / `.founding_identities` | `molt-core/src/chain.rs` | source for W1 and the attestation check; **not** `State::threshold()` (config fallback) |
+| `net_scope_current`, `reset_workspace_state` | `net/mod.rs`, `events.rs` | lifetime of scanner/run |
+| `cmd_net_presence_tick`, `vault::receipts::tick` | `net/presence.rs`, `vault/receipts.rs` | resend, deadlines |
+| `CONTROL_FRAMES`, `ControlParser` | `molt-net/src/supervisor.rs` | new tags; frames are only MLS-authenticated |
+| `vault_frames.rs`, `mirror_gossip.rs` | `molt-net/src/` | model for frames |
+| `GroupHandle::publish_control` | `molt-net/src/group_runtime.rs` | best-effort (queue 64), hence resend |
+| `TransportState` (`mirror`, `vault_status`) | `molt-core/src/lib.rs` | shareholder status, run state |
+| Segments `−1 … −8` (`−7`/`−8` Kanban), `RESERVED_SEGMENT_FLOOR` (pinned by test) | `molt-storage/src/lib.rs` | new `−9` keys, `−10` scan; move floor + test along |
+| `chain_state_key`/`hkdf32`, `encode_frame`, `write_atomic` | `molt-storage/src/lib.rs` | pattern for both files |
+| `persist_chain_blocking`, `WriterMsg` | `molt-storage/src/lib.rs` | blocking writer |
+| Export function with closure `checked_kind` | `molt-storage/src/export.rs` | export arms |
+| `allowed_entry`, verify loop, `staging.dropped` | `molt-storage/src/import.rs` | import arms |
+| Backup ticker | `molt-engine/src/backup.rs` | backoff on key error |
+| `tools()`, `Scope` | `molt-mcp/src/lib.rs` | new tools (seat) |
+| `VaultView` / `SurfaceSnapshot.vault` | `molt-core/src/vault.rs` | model for `WalletView` / `.wallet` |
+| `classified` / `relay_kind` / `RelayKind` | `molt-core/src/relay.rs` | extract the host rule; today takes only `ws`/`wss` |
+| `relay_block` / `clearnet_enabled` | `relay.rs`, `molt-config/src/lib.rs` | the same non-onion gate for the daemon |
+| `s3::http` (free functions over a stream; `MAX_RESPONSE` module constant, `S3Error`) | `molt-net/src/s3/http.rs` | limit as a parameter, error type generic — refactor |
+| `Dialer` (enum) | `molt-net/src/dial.rs` | transport |
+| `Config` (`deny_unknown_fields`, `render`, `salvage`) | `molt-config/src/` | section `[wallet]` |
+| Wizard feature step: `cw-feat-*`, wallet `checked: false; enabled: false` | `molt-ui-window/ui/app.slint` (~l. 3966) | default on, lock only at W1 |
+| `SealedPanel` (founder `cw-outcome == 1`, joiner `jw-sealed`) | `app.slint`, `parts.slint` | afterwards automatically the purse stage |
+| Organization modal `org-feat-wallet` (locked; ride-along `" wallet"`) | `app.slint` (~l. 6353, 9805) | checkbox → `wallet_init` instead of `set_features` |
+| `WalletPane` (mock) | `molt-ui-window/ui/surfaces.slint`; route `app.slint` | becomes real |
+| `default_op` (`"transfer"`), `wl_*` | `molt-ui/src/labels.rs`, `i18n.rs` | clean up |
+| E2E harness | `molt-engine/tests/vault_support/mod.rs` | template |
+| **Naming trap** `WalletHandle` | `molt-engine/src/lib.rs` | engine actor handle, not the purse |
 
-## 5. Architektur
+## 5. Architecture
 
 ### 5.1 Crate `crates/molt-treasury`
 
-Vorbild `molt-vault`: reine Funktionen, kein I/O, hängt nur an `molt-core`
-und den Krates aus §2. Workspace-Header ergänzen.
+Modelled on `molt-vault`: pure functions, no I/O, depends only on `molt-core`
+and the crates from §2. Add to the workspace header.
 
 ```
 crates/molt-treasury/src/
-  lib.rs      // Fassade, TreasuryError
-  dkg.rs      // Runden: Kontext (mit Run-Nonce), Identity-Check, Transkript
-  attest.rs   // Attestations-Bytes, Signieren, Prüfen aller n
-  keys.rs     // View-Key aus Beiträgen, Standardadresse, (De)Serialisierung,
-              // zeroize; Byte-Layouts mit Tags + Byte-Pin-Tests
-  scan.rs     // Scanner-Kern hinter eigenem Trait: ViewPair, gesehene Keys,
-              // Block-Hashes, UnsupportedProtocol -> Pause
+  lib.rs      // facade, TreasuryError
+  dkg.rs      // rounds: context (with run nonce), identity check, transcript
+  attest.rs   // attestation bytes, signing, verifying all n
+  keys.rs     // view key from contributions, standard address, (de)serialization,
+              // zeroize; byte layouts with tags + byte-pin tests
+  scan.rs     // scanner core behind its own trait: ViewPair, seen keys,
+              // block hashes, UnsupportedProtocol -> pause
 ```
 
-- **Daemon-URL:** in `molt-core/src/relay.rs` die Host-Klassifizierung aus
-  `classified` als gemeinsame Funktion herauslösen (WHATWG-Parse, ASCII,
-  kein Backslash, kein Userinfo, kanonische Schreibweise); Eintritt
-  `daemon_kind(url)` für `http`/`https`, `relay_kind` unverändert für
-  `ws`/`wss`. Kein zweiter Parser.
-- **RPC-Transport** in molt-net (`monero_rpc.rs`): `HttpTransport` über die
-  `s3::http`-Funktionen und den `Dialer`. Onion → Tor; Local/Clearnet →
-  nur bei `clearnet_enabled` und bestätigtem Daemon (wie ein Relay),
-  sonst fail-closed mit Grund. Login: `http-auth` (digest-scheme), Urteil
-  in §6. Antwortgrenze pro Aufruf (`get_blocks.bin` groß).
-- **Sitzordnung:** `State::vault_founding_table()` — kein neuer Helfer.
+- **Daemon URL:** in `molt-core/src/relay.rs` factor the host classification
+  out of `classified` as a shared function (WHATWG parse, ASCII,
+  no backslash, no userinfo, canonical spelling); entry point
+  `daemon_kind(url)` for `http`/`https`, `relay_kind` unchanged for
+  `ws`/`wss`. No second parser.
+- **RPC transport** in molt-net (`monero_rpc.rs`): `HttpTransport` over the
+  `s3::http` functions and the `Dialer`. Onion → Tor; local/clearnet →
+  only with `clearnet_enabled` and a confirmed daemon (like a relay),
+  otherwise fail-closed with a reason. Login: `http-auth` (digest-scheme), verdict
+  in §6. Response limit per call (`get_blocks.bin` is large).
+- **Seat order:** `State::vault_founding_table()` — no new helper.
 
-### 5.2 Kontrakt in molt-core (`molt-core/src/wallet.rs`, neu)
+### 5.2 Contract in molt-core (`molt-core/src/wallet.rs`, new)
 
 ```rust
 pub struct WalletView {
-    pub address: String,             // "" bis zum Terminal-Block
+    pub address: String,             // "" until the terminal block
     pub network: String,             // mainnet | stagenet | testnet
-    pub balance: u64,                // >= 20 Bestätigungen, Piconero
+    pub balance: u64,                // >= 20 confirmations, piconero
     pub pending: u64,
     pub scan_height: u64,
     pub daemon_height: u64,
@@ -206,25 +206,25 @@ pub struct WalletView {
     pub threshold: u32,
     pub participants: u32,
     pub phase: WalletPhase,          // Off | Bounds | NoPurse | Init | Ready
-    pub run: Option<WalletRunView>,  // Fortschritt (§7.5)
+    pub run: Option<WalletRunView>,  // progress (§7.5)
     pub shareholders: Vec<(String, ShareStatus)>, // Held | WatchOnly | Unknown
     pub history: Vec<WalletTxView>,
-    pub can_spend: bool,             // Etappe 1: immer false
-    pub can_watch: bool,             // View-Key liegt hier (7b)
-    pub founding: bool,              // Gründungssitzung mit wallet: Kassen-Stufe (7b)
+    pub can_spend: bool,             // stage 1: always false
+    pub can_watch: bool,             // the view key is here (7b)
+    pub founding: bool,              // founding session with wallet: purse stage (7b)
 }
 
 pub struct WalletRunView {
     pub stage: RunStage,             // Ready | Round1 | Round2 | Attest | Sealing | Done | Aborted
-    pub done: u32,                   // k von n
+    pub done: u32,                   // k of n
     pub of: u32,
-    pub missing: Vec<String>,        // wer fehlt (Readiness)
-    pub reason: Option<String>,      // Abbruchgrund, ein Wort/eine Zeile
-    pub needs_consent: bool,         // dieser Sitz muss noch zustimmen
+    pub missing: Vec<String>,        // who is missing (readiness)
+    pub reason: Option<String>,      // abort reason, one word/one line
+    pub needs_consent: bool,         // this seat still has to consent
 }
 ```
 
-## 6. Dependency-Lock (Schritt 2)
+## 6. Dependency lock (step 2)
 
 ```toml
 dkg = { version = "0.6", default-features = false, features = ["std"] }
@@ -236,15 +236,15 @@ monero-daemon-rpc = { version = "0.2", default-features = false, features = ["st
 schnorr-signatures = { version = "=0.5.2", default-features = false }
 ```
 
-1. In `[workspace.dependencies]`, Minor exakt halten. Den Pin mit einer
-   Zeile begründen (multiexp-Spaltung), damit ihn niemand „aufräumt“.
-2. Bare `molt-treasury` mit den Spike-Funktionen. Compilieren = gelockt.
-3. Prüfprotokoll: `cargo tree -d`, `-i ring`, `-i cc` leer, keine `*-sys`.
-4. **`dkg-pedpop` reviewen** (Transcript, Kontext, Blame) und entscheiden:
-   crates.io-Pin oder vendoren (es ist auf Serais `next` gelöscht,
-   `dkg-evrf` unveröffentlicht). Urteil ins Design §12.
-5. Digest-Auth-Crate suchen und bewerten (§5.1).
-6. QR-Crate suchen und bewerten (§11).
+1. In `[workspace.dependencies]`, keep the minor exact. Justify the pin in one
+   line (multiexp split) so nobody „tidies it up“.
+2. Bare `molt-treasury` with the spike functions. Compiling = locked.
+3. Audit protocol: `cargo tree -d`, `-i ring`, `-i cc` empty, no `*-sys`.
+4. **Review `dkg-pedpop`** (transcript, context, blame) and decide:
+   crates.io pin or vendor (it is deleted on Serai's `next`,
+   `dkg-evrf` unpublished). Verdict into design §12.
+5. Search for and evaluate a digest-auth crate (§5.1).
+6. Search for and evaluate a QR crate (§11).
 
 **Done 2026-10-09** (verdicts with their arguments in Design §12):
 
@@ -271,217 +271,217 @@ schnorr-signatures = { version = "=0.5.2", default-features = false }
 
 ## 7. Engine
 
-### 7.1 Die Tür (W1, W4)
+### 7.1 The door (W1, W4)
 
-- `Command::WalletInit` (Tool, Seat): Gates W1 (aus Genesis/Anker),
-  chain-governed, kein angewandter oder offener `wallet_init`;
-  Daemon-Probe off-actor; Proposal `{op: wallet_init, birthday_height,
-  network}` auf `Surface::Wallet`, Birthday = Daemon-Höhe − Marge.
-  `require_feature(Wallet)` gilt für diese Op nicht — bei Propose,
-  `cmd_approve` **und** im Re-Sign-Pfad.
-- Navigation: Wallet sichtbar, sobald ein Init offen oder angewandt ist.
-- `effective_features` enthält `wallet`, sobald ein `wallet_init`
-  angewandt ist (aus der Wallet-Liste des Fold, schnittfest).
-- `set_features`: `wallet` nur als Ride-along eines schon effektiven
-  Features; Neu-Hinzufügen → `BadPayload("wallet: set up the purse")`.
-- Projektion: erster `wallet_init` zählt, jeder weitere wird ignoriert.
+- `Command::WalletInit` (tool, seat): gates W1 (from genesis/anchor),
+  chain-governed, no applied or open `wallet_init`;
+  daemon probe off-actor; proposal `{op: wallet_init, birthday_height,
+  network}` on `Surface::Wallet`, birthday = daemon height − margin.
+  `require_feature(Wallet)` does not apply to this op — at propose,
+  `cmd_approve` **and** in the re-sign path.
+- Navigation: wallet visible as soon as an init is open or applied.
+- `effective_features` contains `wallet` as soon as a `wallet_init` is
+  applied (from the wallet list of the fold, cut-proof).
+- `set_features`: `wallet` only as a ride-along of an already effective
+  feature; newly adding it → `BadPayload("wallet: set up the purse")`.
+- Projection: the first `wallet_init` counts, every further one is ignored.
 
-### 7.2 Init-Vote und Zustimmung (W6)
+### 7.2 Init vote and consent (W6)
 
-- **Approve-Checks** in `cmd_approve` **und**
-  `chain_sign_and_gossip_approval` (Vorbild `vault_approve_check`):
-  geschlossener Op-Satz; Birthday ≤ eigene Daemon-Höhe + Schlupf und
-  nicht mehr als ein festes Fenster darunter; Netz = eigenes; Gates aus
-  §7.1. **Ohne Daemon: Enthaltung** (weder Approve noch Decline);
-  Auto-Approve sobald einer gesetzt ist.
-- **Decline tötet die Karte** dort, wo er ankommt: `veto_room = 0` für
-  `wallet_init`. Vorher gesammelte m Approvals siegeln trotzdem — die
-  Garantie von W6 ist die Zustimmung im Lauf.
-- Siegel bei **m** (normaler `try_commit`).
-- Zustimmung eines Sitzes = eigene Approve-Signatur, solange das eigene
-  Log sie trägt (`own_approvals` wird aus dem Log gebaut), sonst
-  `WalletConsent` im Lauf.
+- **Approve checks** in `cmd_approve` **and**
+  `chain_sign_and_gossip_approval` (model `vault_approve_check`):
+  closed op set; birthday ≤ own daemon height + slack and
+  not more than a fixed window below it; network = own; gates from
+  §7.1. **Without a daemon: abstention** (neither approve nor decline);
+  auto-approve as soon as one is set.
+- **A decline kills the card** where it arrives: `veto_room = 0` for
+  `wallet_init`. m approvals collected earlier still seal — the
+  guarantee of W6 is the consent in the run.
+- Seal at **m** (normal `try_commit`).
+- A seat's consent = its own approve signature, as long as its own
+  log carries it (`own_approvals` is built from the log), otherwise
+  `WalletConsent` in the run.
 
-### 7.3 Auto-Init und Wizard (W9)
+### 7.3 Auto-init and wizard (W9)
 
-- Nach dem Create/Join-Abschluss (nie Recovery, nie Reopen): enthält die
-  Charter `wallet` und hält W1, schlägt die niedrigste Gründungsposition
-  **mit Daemon** den Init vor; die nächste nach einer Verzögerung, falls
-  kein Init sichtbar.
-- Ein Sitz, der `wallet` **in dieser Gründungssitzung** ratifiziert hat
-  (Ritual-Zustand, nur im Speicher), approved automatisch nach dem
-  Birthday-Check.
-- Der Wizard (Gründer und Joiner) geht nach dem Siegel automatisch in die
-  Kassen-Stufe: zuerst Daemon (falls keiner), dann `WalletView.run`.
-  „Enter republic“ ist ab Beginn der Stufe da; Verlassen schiebt den
-  Balken ins Panel. Ohne `wallet` in der Charter endet der Wizard am
-  Siegel wie heute.
+- After the create/join finish (never recovery, never reopen): if the
+  charter contains `wallet` and W1 holds, the lowest founding position
+  **with a daemon** proposes the init; the next one after a delay, if
+  no init is visible.
+- A seat that ratified `wallet` **in this founding session**
+  (ritual state, memory only) approves automatically after the
+  birthday check.
+- After the seal the wizard (founder and joiner) goes automatically into the
+  purse stage: first the daemon (if none), then `WalletView.run`.
+  „Enter republic“ is there from the start of the stage; leaving moves the
+  bar into the panel. Without `wallet` in the charter the wizard ends at the
+  seal as today.
 
-### 7.4 Lauf und Runden (Control-Frames)
+### 7.4 Run and rounds (control frames)
 
-Tags in `CONTROL_FRAMES`, je mit `init_id` und Run-Nonce `r`; Resend am
-Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
+Tags in `CONTROL_FRAMES`, each with `init_id` and run nonce `r`; resend at the
+presence tick until commit or abort; never in the workspace log:
 
-| Tag | Inhalt |
+| Tag | Content |
 |---|---|
-| `\x00molt-wstart-v1` | Start eines Laufs: `init_id`, `r`, Starter-Position |
-| `\x00molt-wdhint-v1` | Daemon-URL als Vorschlag, solange eine Kassen-Stufe offen ist |
-| `\x00molt-wrdy-v1` | Build + Daemon + Zustimmung, oder Decline |
-| `\x00molt-wr1-v1` | Commitments + PoP, View-Beitrag `c_i` |
-| `\x00molt-wr2-v1` | Shares (je Empfänger) + Transkript-Hash `T` |
-| `\x00molt-watt-v1` | Attestation `A_i` |
-| `\x00molt-wabrt-v1` | Abbruch mit Grund (kein Name) |
+| `\x00molt-wstart-v1` | start of a run: `init_id`, `r`, starter position |
+| `\x00molt-wdhint-v1` | daemon URL as a suggestion, while a purse stage is open |
+| `\x00molt-wrdy-v1` | build + daemon + consent, or decline |
+| `\x00molt-wr1-v1` | commitments + PoP, view contribution `c_i` |
+| `\x00molt-wr2-v1` | shares (per recipient) + transcript hash `T` |
+| `\x00molt-watt-v1` | attestation `A_i` |
+| `\x00molt-wabrt-v1` | abort with reason (no name) |
 
-- **Starter:** Gründungsposition 1, Fallback nach Position; startet
-  automatisch **einmal pro Init**, für den ersten Init der Projektion, im
-  Hook `after_block_applied` mit einer In-Memory-Menge gestarteter Inits
-  (nie beim Restore beim Öffnen); danach nur per `WalletRetry` (Tool,
-  Seat).
-- **Rennen:** bekannte Nonce → ablehnen; zwei Starts in der Readiness →
-  jeder nimmt den mit niedrigster Starter-Position, dann niedrigster Nonce.
-- **Sitz mit Keys-Record eines älteren Laufs** tritt neuen Läufen bei und
-  behält den Record; vollendet sich der alte doch, gewinnt er.
-- **Kontext:** `H("molt-wallet-dkg-v1" ‖ republic_id ‖ init_id ‖ r ‖ t ‖ n)`.
-- **Transkript:** `T = H("molt-wallet-transcript-v1" ‖ r ‖ alle Runde-1-
-  Nachrichten in Teilnehmer-Reihenfolge)`. Abweichendes `T` → Abbruch.
-- **Equivocation / Blame:** Abbruch mit Grund; Sender und Library-Blame
-  nur im lokalen Log (`wallet_abort init=… run=… reason=… from=…`).
-- Identity-Punkte (jeder Punkt in Runde 1 und 2, Gruppenschlüssel) →
-  Abbruch vor dem Library-Aufruf.
-- Ingest idempotent; Frames für einen fremden/alten Lauf ignorieren.
-- `State.wallet_run` im Speicher. Deadline im Presence-Tick. Reopen ohne
-  Laufzustand **und** ohne Keys-Record → Abbruch-Frame; mit Keys-Record →
-  nie abbrechen, erneut attestieren.
-- Encodings (`i` u16 LE, `init_id` u64 LE, `republic_id` roh 32 B, `r`
-  32 B) mit Byte-Pin-Tests.
+- **Starter:** founding position 1, fallback by position; starts
+  automatically **once per init**, for the projection's first init, in the
+  hook `after_block_applied` with an in-memory set of started inits
+  (never at the restore on open); afterwards only via `WalletRetry` (tool,
+  seat).
+- **Races:** known nonce → refuse; two starts in readiness →
+  everyone takes the one with the lowest starter position, then lowest nonce.
+- **A seat with a keys record of an older run** joins new runs and
+  keeps the record; should the old one complete after all, it wins.
+- **Context:** `H("molt-wallet-dkg-v1" ‖ republic_id ‖ init_id ‖ r ‖ t ‖ n)`.
+- **Transcript:** `T = H("molt-wallet-transcript-v1" ‖ r ‖ all round-1
+  messages in participant order)`. A differing `T` → abort.
+- **Equivocation / blame:** abort with a reason; sender and library blame
+  only in the local log (`wallet_abort init=… run=… reason=… from=…`).
+- Identity points (every point in rounds 1 and 2, group key) →
+  abort before the library call.
+- Ingest idempotent; ignore frames for a foreign/old run.
+- `State.wallet_run` in memory. Deadline in the presence tick. Reopen without
+  run state **and** without a keys record → abort frame; with a keys record →
+  never abort, attest again.
+- Encodings (`i` u16 LE, `init_id` u64 LE, `republic_id` raw 32 B, `r`
+  32 B) with byte-pin tests.
 
-### 7.5 Fortschritt (W9, W10)
+### 7.5 Progress (W9, W10)
 
-- `WalletRunView` aus dem Laufzustand: `Ready k/n` (mit `missing`) →
+- `WalletRunView` from the run state: `Ready k/n` (with `missing`) →
   `Round1 k/n` → `Round2 k/n` → `Attest k/n` → `Sealing` → `Done`;
-  `Aborted` mit `reason`.
-- Frontend-`Event::WalletRunProgress` bei jeder Änderung, damit Wizard,
-  Panel und MCP denselben Stand sehen.
-- Später eingeschaltet: jeder Sitz bekommt beim Start das Panel über dem
-  Hauptfenster (§11).
+  `Aborted` with `reason`.
+- Frontend `Event::WalletRunProgress` on every change, so that wizard,
+  panel and MCP see the same state.
+- Enabled later: every seat gets the panel over the main window at the
+  start (§11).
 
-### 7.6 Abschluss, Attestation, Terminal-Block (W8)
+### 7.6 Completion, attestation, terminal block (W8)
 
-1. Lokal: `ThresholdKeys`, View-Key, Adresse.
-2. `A_i` signieren (Identitätsschlüssel, Tag `molt-wallet-attest-v1`,
-   Felder Design §3.5).
-3. Keys-Record (Share, View-Key, Init, `r`, `T`, Adresse, Netz, m, n,
-   Birthday, `A_i`) über den blockierenden Writer schreiben (I4), **dann**
-   `A_i` senden.
-4. Wer n gültige Attestationen hält, schlägt `wallet_created` vor
-   (Position 1 zuerst, dann nach Verzögerung die nächste); eigene
-   Proposal-ID; `attestations` in Teilnehmer-Reihenfolge.
-5. Approver co-signieren nur bei exaktem Match **und** n gültigen
-   Attestationen. Siegel bei m.
-6. **Projektion:** Kasse = erster `wallet_created` in der Wallet-Liste,
-   der auf den angewandten Init zeigt, W1 hält, Birthday und Netz des
-   Inits trägt, `threshold == rule_m`,
-   `participants == n` (Genesis/Anker) und n Attestationen trägt, die je
-   unter dem `identity_pk` der Gründungsposition `i`
-   (`vault_founding_table`) prüfen. Nur Payload + `CheckpointState`.
-7. Beim Commit Geschwister-Karten schließen (Vorbild
-   `supersede_stale_vault_cards`); die Keys-Records aller anderen Läufe
-   erst löschen, wenn der Kassen-Block final ist (unter einem
-   Checkpoint-Schnitt, wo kein Reorg hinreicht).
-8. **Restart:** Keys-Records vorhanden, keine Kasse → jede Attestation
-   erneut senden, passenden offenen `wallet_created` co-signieren.
+1. Locally: `ThresholdKeys`, view key, address.
+2. Sign `A_i` (identity key, tag `molt-wallet-attest-v1`,
+   fields design §3.5).
+3. Write the keys record (share, view key, init, `r`, `T`, address, network, m, n,
+   birthday, `A_i`) through the blocking writer (I4), **then**
+   send `A_i`.
+4. Whoever holds n valid attestations proposes `wallet_created`
+   (position 1 first, then the next after a delay); own
+   proposal ID; `attestations` in participant order.
+5. Approvers co-sign only on an exact match **and** n valid
+   attestations. Seal at m.
+6. **Projection:** purse = the first `wallet_created` in the wallet list
+   that points at the applied init, holds W1, carries the init's birthday and
+   network, `threshold == rule_m`,
+   `participants == n` (genesis/anchor) and carries n attestations that each
+   verify under the `identity_pk` of founding position `i`
+   (`vault_founding_table`). Payload + `CheckpointState` only.
+7. At commit close sibling cards (model
+   `supersede_stale_vault_cards`); delete the keys records of all other runs
+   only when the purse block is final (below a
+   checkpoint cut, where no reorg reaches).
+8. **Restart:** keys records present, no purse → resend every attestation,
+   co-sign the matching open `wallet_created`.
 
-### 7.7 Keine neue Verifikationsregel
+### 7.7 No new verification rule
 
-- Keine Ablehnung in `verify_chain` / `verify_next` / `fold_one`;
-  Checkpoint-Layouts unverändert.
-- Op-Satz bei Propose, Approve, Wire-Ingest und in jedem Signierpfad.
-- Die Projektion ignoriert deterministisch: andere Wallet-Ops, jeden
-  `wallet_init` außer dem ersten, jeden `wallet_created` außer dem ersten
-  gültigen.
+- No rejection in `verify_chain` / `verify_next` / `fold_one`;
+  checkpoint layouts unchanged.
+- Op set at propose, approve, wire ingest and in every signing path.
+- The projection deterministically ignores: other wallet ops, every
+  `wallet_init` except the first, every `wallet_created` except the first
+  valid one.
 
-### 7.8 Recovery und Status
+### 7.8 Recovery and status
 
-- **Status-Frame** `\x00molt-wstat-v1` (Held/WatchOnly), je Mitglied in
-  `TransportState`, Resend am Presence-Tick.
-- **Frage/Antwort** `\x00molt-wvask-v1` / `\x00molt-wvresp-v1`: Sitz ohne
-  View-Key fragt nach dem Rejoin; Prüfung `view·G` gegen die Adresse.
+- **Status frame** `\x00molt-wstat-v1` (Held/WatchOnly), per member in
+  `TransportState`, resend at the presence tick.
+- **Question/answer** `\x00molt-wvask-v1` / `\x00molt-wvresp-v1`: a seat without a
+  view key asks after the rejoin; check `view·G` against the address.
 
 ### 7.9 Scanner
 
-- Off-actor-Task pro offenem Workspace mit eigener Generation (veraltete
-  Rückmeldungen fallen weg), Abbruch in `reset_workspace_state`.
-- Ab `max(birthday, cursor)`; Rückmeldung per `Net*`-Command.
-- Gesehene Output-Keys; letzte Block-Hashes je Höhe für Reorg-Erkennung.
-- 20 Bestätigungen; Reorg → zurückspulen oder Rescan ab Birthday.
-- `UnsupportedProtocol` → `scan_paused = "update needed"`; Dekodierfehler →
-  `scan_paused = "daemon fault"`, nie die Pause.
+- Off-actor task per open workspace with its own generation (stale
+  replies are dropped), aborted in `reset_workspace_state`.
+- From `max(birthday, cursor)`; reply via a `Net*` command.
+- Seen output keys; last block hashes per height for reorg detection.
+- 20 confirmations; reorg → rewind or rescan from birthday.
+- `UnsupportedProtocol` → `scan_paused = "update needed"`; decode error →
+  `scan_paused = "daemon fault"`, never the pause.
 
-## 8. Kontrakt-Erweiterungen
+## 8. Contract extensions
 
-- `Command`: Tools (Seat) `WalletInit`, `WalletConsent { accept }`,
+- `Command`: tools (seat) `WalletInit`, `WalletConsent { accept }`,
   `WalletRetry`, `WalletAcknowledgeLoss`; INTERNAL `NetWalletProbe`,
   `NetWalletFrame`, `NetWalletScan`, `NetWalletStatus`,
-  `NetWalletViewAnswer` (Namen beim Bau final; Liste in der Testfunktion).
-- Keine neuen `WorkspaceEvent`-Varianten (Läufe sind Control-Frames).
-- `Event` (Frontend): `WalletRunProgress`, `WalletCreated { address }`,
+  `NetWalletViewAnswer` (names final at build time; list in the test function).
+- No new `WorkspaceEvent` variants (runs are control frames).
+- `Event` (frontend): `WalletRunProgress`, `WalletCreated { address }`,
   `WalletScanPaused`.
 - `SurfaceSnapshot.wallet: Option<WalletView>`.
-- MCP: obige Tools mit `Scope::Seat`. `read_state(wallet)` bleibt Seat; der
-  Read-Key sieht die Kasse **nicht**.
+- MCP: the tools above with `Scope::Seat`. `read_state(wallet)` stays seat; the
+  read key does **not** see the purse.
 - `[wallet]`: `daemon_url`, `daemon_confirmed`, `daemon_login`,
-  `network` (Default `mainnet`, W11). In `Config`, `Settings`, `salvage`, `render`. Kein
-  Default-Daemon. Nur abweichend vom Default geschrieben: ältere Binaries
-  lehnen nur eine Config mit gesetztem Daemon ab — Release-Notes.
+  `network` (default `mainnet`, W11). In `Config`, `Settings`, `salvage`, `render`. No
+  default daemon. Written only when different from the default: older binaries
+  refuse only a config with a daemon set — release notes.
 
-## 9. Persistenz
+## 9. Persistence
 
-| Datei | Segment | Inhalt | Export | Import |
+| File | Segment | Content | Export | Import |
 |---|---|---|---|---|
-| `wallet_keys.state` | `u64::MAX − 9` | Keys-Records (je attestiertem Lauf, ab finaler Kasse nur der der Kasse) | prüfen; defekt → **Abbruch** | prüfen; defekt → verwerfen, watch-only; Record ≠ Kasse → watch-only |
-| `wallet_scan.state` | `u64::MAX − 10` | Adresse, Cursor, Block-Hashes + -Zeiten, gesehene Keys, Outputs | prüfen; defekt → skip + benennen | prüfen; defekt → verwerfen, Rescan |
+| `wallet_keys.state` | `u64::MAX − 9` | keys records (one per attested run, from the final purse on only the purse's) | check; damaged → **abort** | check; damaged → discard, watch-only; record ≠ purse → watch-only |
+| `wallet_scan.state` | `u64::MAX − 10` | address, cursor, block hashes + times, seen keys, outputs | check; damaged → skip + name | check; damaged → discard, rescan |
 
-- Sub-Keys `hkdf32(ws_key, "molt-wallet-keys", id)` /
-  `"molt-wallet-scan"`; `encode_frame` + `write_atomic`; Cap
-  `READ_CAP_STATE`. `RESERVED_SEGMENT_FLOOR` auf `−10`, Pin-Test mit.
-- Schlüsseldatei: `WriterMsg::PersistWalletKeys` +
-  `persist_wallet_keys_blocking`. Records werden angehängt, nie ersetzt;
-  erst die finale Kasse räumt die anderen ab (I16).
-- Beim Öffnen und Import: Record gegen die projizierte Kasse (Init, Lauf,
-  Adresse); Abweichung → watch-only.
-- **Ausweg (W5):** `WalletAcknowledgeLoss` legt eine defekte
-  Schlüsseldatei als Dot-Datei beiseite (Export ignoriert Dot-Dateien);
-  Sitz watch-only; Exporte laufen wieder (hebt `backup_hold` auf, Test).
-- **Backup-Ticker:** Backoff bei Schlüssel-Fehler; eine Meldung.
-- Import mit Ersetzen: die Records des ersetzten Ordners kommen zu denen
-  des Blobs (I12); eine defekte Datei dort reist mit, wenn der Blob keine
-  bringt.
-- `docs_archive/storage/backup_restore_design.md` §3.2 + Allowlist
-  nachziehen. Release-Notes: ältere Builds exportieren ohne Schlüsseldatei
-  und lehnen Blobs mit ihr ab.
+- Sub-keys `hkdf32(ws_key, "molt-wallet-keys", id)` /
+  `"molt-wallet-scan"`; `encode_frame` + `write_atomic`; cap
+  `READ_CAP_STATE`. `RESERVED_SEGMENT_FLOOR` to `−10`, pin test along.
+- Key file: `WriterMsg::PersistWalletKeys` +
+  `persist_wallet_keys_blocking`. Records are appended, never replaced;
+  only the final purse clears the others (I16).
+- On open and import: record against the projected purse (init, run,
+  address); deviation → watch-only.
+- **Way out (W5):** `WalletAcknowledgeLoss` sets a damaged
+  key file aside as a dot file (export ignores dot files);
+  seat watch-only; exports run again (lifts `backup_hold`, test).
+- **Backup ticker:** backoff on key error; one notice.
+- Import with replace: the records of the replaced folder join those
+  of the blob (I12); a damaged file there travels along if the blob brings
+  none.
+- Update `docs_archive/storage/backup_restore_design.md` §3.2 + allowlist.
+  Release notes: older builds export without the key file
+  and reject blobs that have it.
 
-## 10. TDD-Fahrplan (rote Tests zuerst)
+## 10. TDD roadmap (red tests first)
 
 **molt-treasury:**
-1. `a_three_seat_dkg_agrees_on_key_view_and_address` (Byte-Roundtrip).
+1. `a_three_seat_dkg_agrees_on_key_view_and_address` (byte round trip).
 2. `the_context_binds_republic_init_and_run`.
 3. `view_key_depends_on_every_contribution`.
 4. `a_differing_transcript_aborts`.
 5. `two_round_one_frames_from_one_sender_abort`.
-6. `an_identity_point_in_either_frame_aborts` (jeder Punkt beider
-   Frames; der Gruppenschlüssel: `an_identity_group_key_has_no_address`).
+6. `an_identity_point_in_either_frame_aborts` (every point of both
+   frames; the group key: `an_identity_group_key_has_no_address`).
 7. `the_address_is_a_standard_main_address`.
 8. `attestations_verify_only_for_their_seat_and_fields`.
 9. `an_attestation_from_another_run_or_init_fails`.
 10. `wallet_keys_round_trip_and_zeroize`.
 11. `a_repeated_output_key_is_ignored`.
 12. `unsupported_protocol_pauses_and_a_decode_error_does_not`.
-13. Byte-Pin-Tests aller Layouts (Kontext, View, Transkript, Attestation);
-    dazu `attest_tag_cannot_collide_with_openmls_sign_content`.
+13. Byte-pin tests of all layouts (context, view, transcript, attestation);
+    plus `attest_tag_cannot_collide_with_openmls_sign_content`.
 
 **molt-core:**
-14. `daemon_kind_classifies_onion_local_clearnet` (inkl. Userinfo,
-    Backslash, `ws://` abgelehnt; `relay_kind` unverändert).
+14. `daemon_kind_classifies_onion_local_clearnet` (incl. userinfo,
+    backslash, `ws://` rejected; `relay_kind` unchanged).
 
 **molt-storage:**
 15. `wallet_keys_and_scan_round_trip_under_their_segments`.
@@ -490,7 +490,7 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
 18. `a_damaged_scan_file_is_skipped_and_named`.
 19. `an_acknowledged_loss_lets_the_export_resume`.
 
-**molt-engine (E2E über MockRelay, Harness `vault_support`):**
+**molt-engine (E2E over MockRelay, harness `vault_support`):**
 20. `wallet_needs_two_to_n_minus_one`.
 21. `set_features_cannot_add_wallet`.
 22. `a_memory_vote_in_a_legacy_wallet_republic_creates_no_purse`.
@@ -501,20 +501,20 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
 25b. `the_init_card_is_approvable_while_wallet_is_off`.
 26. `a_seat_without_a_daemon_aborts_at_readiness_and_is_named`.
 27. `a_declined_consent_aborts_the_run_and_retry_starts_a_new_nonce`.
-28. `three_seats_found_one_purse` (gleiche Adresse, Datei vor Attestation).
-29. `a_founding_with_wallet_runs_the_purse_stage` (Auto-Init, Auto-Approve).
+28. `three_seats_found_one_purse` (same address, file before attestation).
+29. `a_founding_with_wallet_runs_the_purse_stage` (auto-init, auto-approve).
 30. `an_aborted_founding_stage_leaves_the_republic_founded`.
 31. `a_late_enable_runs_the_stage_on_every_seat`.
 32. `wallet_created_without_n_attestations_is_ignored`.
 33. `m_seats_cannot_seal_a_purse_of_their_own`.
-34. `an_anchor_rejoiner_computes_the_same_purse` (Schnitt zwischen Init und
-    `wallet_created` und danach).
+34. `an_anchor_rejoiner_computes_the_same_purse` (cut between init and
+    `wallet_created` and after it).
 35. `racing_wallet_created_cards_leave_one_purse`.
-36. `a_mock_transfer_block_does_not_break_the_chain` (Alt-Republik).
+36. `a_mock_transfer_block_does_not_break_the_chain` (legacy republic).
 37. `reopening_does_not_restart_a_run`.
 38. `a_withheld_attestation_cannot_seal_a_run_without_shares`
-    (Records bleiben; welcher Lauf auch gewinnt, jeder Sitz hält seinen Teil).
-38a. `racing_starts_converge_on_one_run` und `a_reused_nonce_is_refused`.
+    (records stay; whichever run wins, every seat holds its part).
+38a. `racing_starts_converge_on_one_run` and `a_reused_nonce_is_refused`.
 38b. `a_recovery_never_auto_proposes_an_init`.
 38c. `a_restored_record_of_another_run_is_view_only`.
 38d. `a_purse_with_a_foreign_birthday_or_network_is_ignored`.
@@ -522,106 +522,106 @@ Presence-Tick bis Commit oder Abbruch; nie im Workspace-Log:
 40. `a_phrase_only_recovery_is_watch_only_and_gets_the_view_key`.
 41. `a_backup_restore_keeps_the_share`.
 42. `the_read_key_does_not_see_the_wallet`.
-43. Co-Equality grün; `is_implemented`-Test angepasst.
+43. Co-equality green; `is_implemented` test adjusted.
 
-**Manuell, `#[ignore]`:** regtest-monerod hinter `MOLT_TEST_MONEROD`
-(`network = testnet` bzw. regtest): Mining sichtbar; Close/Reopen hält
-Stand.
+**Manual, `#[ignore]`:** regtest monerod behind `MOLT_TEST_MONEROD`
+(`network = testnet` or regtest): mining visible; close/reopen keeps
+state.
 
-## 11. UI und Usability (Etappe 1)
+## 11. UI and usability (stage 1)
 
-**Maßstab: der offizielle Monero-GUI-Client im Simple Mode.** Wer ihn
-bedienen kann, bedient die Kasse ohne Erklärung. Die Mehrparteien-Technik
-bleibt unsichtbar; sichtbar sind nur Kontostand, Empfangen, Verlauf.
+**Yardstick: the official Monero GUI client in Simple Mode.** Whoever can
+operate it operates the purse without explanation. The multi-party machinery
+stays invisible; only balance, receive, history are visible.
 
-**Regeln (Review-Kriterium wie kompakte Texte):**
+**Rules (review criterion, like compact texts):**
 
-- **U1 Kein Krypto-Vokabular.** Nie „DKG“, „Runde“, „Transkript“,
-  „Attestation“, „Share“, „View-Key“, „Init“, „Nonce“ in der UI. Wörter:
+- **U1 No crypto vocabulary.** Never „DKG“, „round“, „transcript“,
+  „attestation“, „share“, „view key“, „init“, „nonce“ in the UI. Words:
   *purse*, *set up*, *key part*, *view only*.
-- **U2 Ein Balken, vier Klartext-Stufen** (Abbildung von `RunStage`):
-  `Ready` → „Waiting for members 3/5“ (+ wer fehlt); `Round1`/`Round2` →
+- **U2 One bar, four plain-language stages** (mapping of `RunStage`):
+  `Ready` → „Waiting for members 3/5“ (+ who is missing); `Round1`/`Round2` →
   „Creating the purse“; `Attest` → „Confirming 4/5“; `Sealing` →
-  „Sealing“; `Done` → Adresse + Warnung. `Aborted` → ein Grund
-  („Bob is offline“, „Bob declined“) und „Try again“.
-- **U3 Beträge in XMR**, nachlaufende Nullen weg, nie Piconero; Gruppierung
-  nach Locale.
-- **U4 Keine Eingaben, wo keine nötig sind.** Gründung: die Checkbox ist die
-  Zustimmung; die Kassen-Stufe fragt nur nach dem Daemon, wenn keiner
-  gesetzt ist. Später: Zustimmen/Ablehnen, sonst nichts.
-- **U5 Fehler in einer Zeile**, der Ausweg einmal.
-- **U6 Technik nur unter „Details“** (eingeklappt): Daemon, Höhe,
-  Netzwerk, „Key parts held 4/5“, je Mitglied *key part* / *view only*.
+  „Sealing“; `Done` → address + warning. `Aborted` → one reason
+  („Bob is offline“, „Bob declined“) and „Try again“.
+- **U3 Amounts in XMR**, trailing zeros dropped, never piconero; grouping
+  by locale.
+- **U4 No inputs where none are needed.** Founding: the checkbox is the
+  consent; the purse stage asks for the daemon only if none is
+  set. Later: agree/decline, nothing else.
+- **U5 Errors in one line**, the way out once.
+- **U6 Technique only under „Details“** (collapsed): daemon, height,
+  network, „Key parts held 4/5“, per member *key part* / *view only*.
 
-**Ansichten** (bestehende Views `balance`, `receive`, `history`,
+**Views** (existing views `balance`, `receive`, `history`,
 `status`):
 
-| Ansicht | Inhalt |
+| View | Content |
 |---|---|
-| Balance | große Zahl „1.25 XMR“; darunter „0.5 XMR pending“ nur wenn > 0; ohne Kasse ein Knopf „Set up the purse“ |
-| Receive | Warnung (W11) groß direkt über der Adresse; Adresse monospace; „Copy“; QR-Code als `monero:<address>`-URI |
-| History | je Zeile: Richtung, Betrag, Datum, „3/20“ bis bestätigt, dann ein Haken; txid nur im Kontextmenü „Copy txid“ |
+| Balance | large number „1.25 XMR“; below it „0.5 XMR pending“ only if > 0; without a purse a button „Set up the purse“ |
+| Receive | warning (W11) large directly above the address; address monospace; „Copy“; QR code as a `monero:<address>` URI |
+| History | per row: direction, amount, date, „3/20“ until confirmed, then a check mark; txid only in the context menu „Copy txid“ |
 | Details (`status`) | U6 |
-| Send | gesperrt, eine Zeile „Spending is not available yet.“ |
+| Send | locked, one line „Spending is not available yet.“ |
 
-**Daemon wie der „Remote node“ des GUI:** ein Feld, ein Knopf. Der Start-
-Sitz mit Daemon kündigt seine URL als **Vorschlag** an (`wdhint`,
-flüchtig, nie auf der Chain), solange eine Kassen-Stufe offen ist; die
-Stufe zeigt ihn vorausgefüllt mit „Use“. Nicht-Onion → derselbe Bestätigungsdialog wie bei Relays, einmal.
-Kein mitgelieferter Daemon. Wer einen eigenen setzt, stärkt die
-Gegenprüfung (Design §7); der Vorschlag tauscht etwas davon gegen einen
-Klick.
+**Daemon like the GUI's „Remote node“:** one field, one button. The starter
+seat with a daemon announces its URL as a **suggestion** (`wdhint`,
+ephemeral, never on the chain) while a purse stage is open; the
+stage shows it prefilled with „Use“. Non-onion → the same confirmation dialog as for relays, once.
+No bundled daemon. Whoever sets their own strengthens the
+cross-check (design §7); the suggestion trades some of that for one
+click.
 
 **Wizard:**
-- Feature-Schritt: Wallet-Checkbox **standardmäßig an**, wenn W1 hält;
-  sonst gesperrt mit einer Zeile Grund. Darunter die drei Zeilen aus
-  Design §3.3 (U1-konform formuliert).
-- **Letzter Schritt (Gründer und Joiner):** nach `SealedPanel`
-  automatisch die Kassen-Stufe (U2, U4): erst „Choose a node“ falls
-  keiner gesetzt, dann der Balken; „Enter republic“ immer da, der Balken
-  läuft im Panel weiter.
+- Feature step: wallet checkbox **on by default** when W1 holds;
+  otherwise locked with a one-line reason. Below it the three lines from
+  design §3.3 (worded U1-compliant).
+- **Last step (founder and joiner):** after `SealedPanel`
+  automatically the purse stage (U2, U4): first „Choose a node“ if
+  none is set, then the bar; „Enter republic“ always there, the bar
+  keeps running in the panel.
 
-**Späteres Einschalten:** dieselbe Komponente als Modal über dem
-Hauptfenster auf jedem Sitz; Zustimmen/Ablehnen bei `needs_consent`; eine
-Zeile „Everyone must be online.“; „Try again“ nach Abbruch.
-Organization-Modal: Wallet-Checkbox entsperrt (W1), erzeugt `wallet_init`.
+**Enabling later:** the same component as a modal over the
+main window on every seat; agree/decline at `needs_consent`; one
+line „Everyone must be online.“; „Try again“ after an abort.
+Organization modal: wallet checkbox unlocked (W1), creates `wallet_init`.
 
-**Sonst:** Verlust-Dialog für die Schlüsseldatei (§9); `default_op`
-(`transfer`) und tote `wl_*` entfernen; kein Em-Dash. Tests nach
-`tests/gui/vault.rs`, u. a. `the_warning_sits_beside_the_address`,
+**Otherwise:** loss dialog for the key file (§9); remove `default_op`
+(`transfer`) and dead `wl_*`; no em dash. Tests go to
+`tests/gui/vault.rs`, among them `the_warning_sits_beside_the_address`,
 `the_wizard_ends_with_the_purse_stage`, `no_crypto_words_in_wallet_strings`
-(Wortliste U1 gegen alle `wl_*`/Wallet-Strings), `amounts_render_in_xmr`.
+(word list U1 against all `wl_*`/wallet strings), `amounts_render_in_xmr`.
 
-**QR-Code:** keine eigene Kodierung: `qrcode` 0.14 ohne Default-Features
-(Urteil §6).
+**QR code:** no own encoding: `qrcode` 0.14 without default features
+(verdict §6).
 
-## 12. Fork-Vorsorge (FCMP++ + Carrot)
+## 12. Fork provision (FCMP++ + Carrot)
 
-- Scanner hinter eigenem Trait; Carrot-Update = Implementierung tauschen.
-- `UnsupportedProtocol` → Pause, Bilanz bleibt.
-- Am Fork prüfen: Carrot-fähiges monero-wallet-Release; Legacy-Scan mit
-  geteiltem View-Key unverändert?
-- `ThresholdKeys` und Adresse bleiben; nichts migrieren.
+- Scanner behind its own trait; Carrot update = swap the implementation.
+- `UnsupportedProtocol` → pause, balance stays.
+- At the fork check: a Carrot-capable monero-wallet release; legacy scan with
+  shared view key unchanged?
+- `ThresholdKeys` and address stay; nothing to migrate.
 
-## 13. Etappe 2 — Bedingungen, kein Bau
+## 13. Stage 2 — conditions, no build
 
-Erst, wenn alle drei gelten (Design §8): `SalLegacyAlgorithm` über
-`ThresholdKeys<Ed25519>` in veröffentlichter monero-wallet (nicht
-`SalAlgorithm`, das läuft über `Ed25519T`); Beweis oder Audit;
-Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
+Only when all three hold (design §8): `SalLegacyAlgorithm` over
+`ThresholdKeys<Ed25519>` in a published monero-wallet (not
+`SalAlgorithm`, which runs over `Ed25519T`); proof or audit;
+fork heights fixed. Until then `can_spend = false`, no `sign.rs`.
 
-## 14. Ausführungsreihenfolge
+## 14. Execution order
 
-1. [x] Design rev 3 + Plan rev 3 — zur Ratifizierung.
-2. [x] §6 Dependency-Lock + bare `molt-treasury` + pedpop-Review +
-   Digest-Auth-Urteil (2026-10-09).
-3. [x] §10.1–13 molt-treasury; §10.14 Daemon-Klassifizierung (2026-10-09).
-   Runde-1-Nachricht = `c_i ‖ pedpop-Bytes`, `T` deckt beide; `m`/`n` in
-   Attestation und Keys-Record u16 LE, Netz ein Byte (0 main, 1 test,
-   2 stage). `http://` nur zu Onion/Local (wie `ws://`). Der Graph-Guard
-   lässt molt-cores Teilbaum aus (chronos Plattform-Krates). Die
-   Scan-Datei-Bytes kommen mit Schritt 4.
-4. [x] §9 + §10.15–19 Storage, Backup-Doku (2026-10-09). Storage keeps
+1. [x] Design rev 3 + plan rev 3 — for ratification.
+2. [x] §6 dependency lock + bare `molt-treasury` + pedpop review +
+   digest-auth verdict (2026-10-09).
+3. [x] §10.1–13 molt-treasury; §10.14 daemon classification (2026-10-09).
+   Round-1 message = `c_i ‖ pedpop bytes`, `T` covers both; `m`/`n` in
+   attestation and keys record u16 LE, network one byte (0 main, 1 test,
+   2 stage). `http://` only to onion/local (like `ws://`). The graph guard
+   leaves out molt-core's subtree (chrono's platform crates). The
+   scan file bytes come with step 4.
+4. [x] §9 + §10.15–19 storage, backup docs (2026-10-09). Storage keeps
    the records opaque (no molt-treasury dependency, as with the vault):
    plaintext `molt-wallet-keys-file-v1` ‖ count ‖ length-prefixed records,
    byte-pinned. Append skips a byte-equal record and refuses a damaged
@@ -632,7 +632,7 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    rides `NetBackupFailed.hold`: 1 h, doubling to 24 h, one notice. The
    record-vs-purse check stays with step 7 (`read_wallet_keys`,
    `ImportStaging::wallet_keys_dropped`).
-5. [x] §8 Kontrakt, MCP, Config; Co-Equality grün (2026-10-09).
+5. [x] §8 contract, MCP, config; co-equality green (2026-10-09).
    `molt-core/src/wallet.rs` (view, `WalletRefusal`, `bounds_ok`);
    `SurfaceSnapshot.wallet` is boxed (clippy: `Reply` size). INTERNAL:
    `NetWalletProbe`, `NetWalletFrame`, `NetWalletScan`, `NetWalletStatus`,
@@ -727,7 +727,7 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
      chain) settles on the next beat. §10.29–31, 38b, 40–41 run end to
      end (`tests/wallet_stage.rs`); the status, ask/answer and arming
      rules also as unit tests (`wallet_run_tests.rs`).
-8. [x] §7.9 Scanner; manueller regtest-Lauf (2026-10-10). The scanner
+8. [x] §7.9 Scanner; manual regtest run (2026-10-10). The scanner
    lives in `molt-engine/src/wallet_scan.rs`: one task while a purse, its
    view key and a dialable daemon exist (fingerprinted; a change restarts
    it), aborted in `reset_workspace_state`. It owns the `ScanState`,
@@ -774,74 +774,74 @@ Fork-Höhen fest. Bis dahin `can_spend = false`, kein `sign.rs`.
    export; a closed republic's hold is a toast naming it. English refusal
    toasts stay the MCP text but for the daemon and op words (U1).
    Tests: `tests/wallet.rs`, `tests/gui/wallet.rs` (live-preview).
-10. [x] clippy pro Crate = 0; Suiten grün; Review über den Gesamt-Diff;
+10. [x] clippy per crate = 0; suites green; review over the whole diff;
     master (2026-10-10). The three-instance manual walk (§16) is open,
     in `docs/reviews/known_debt.md`.
 
-## 15. Bekannte Fallen
+## 15. Known traps
 
-- Zeilennummern driften — Symbole greppen.
-- Den `schnorr-signatures`-Pin nicht „aufräumen“ (multiexp-Spaltung).
-- **Keine neue Regel in der Chain-Verifikation**, Checkpoint-Layouts
-  unverändert (§7.7).
-- Die Projektion liest **nur** Payload + `CheckpointState`: keine
-  Signaturanzahl, keine Höhe, keine Reihenfolge zwischen Surfaces — die
-  überleben keinen Schnitt.
-- `rule_m`/`rule_n` aus Genesis/Anker, nie `State::threshold()`.
-- Marker nie aus dem Feature-Wert ableiten; `set_features` fügt `wallet`
-  nicht hinzu.
-- `wallet_created` braucht eine eigene ID; Geschwister-Karten schließen.
-- Decline- und Birthday-Check in **jedem** Signierpfad.
-- Auto-Start nur im Hook `after_block_applied`, einmal pro Init, nie beim
-  Restore; Auto-Init nur bei Create/Join, nie Recovery; danach nur
+- Line numbers drift — grep symbols.
+- Do not „tidy up“ the `schnorr-signatures` pin (multiexp split).
+- **No new rule in the chain verification**, checkpoint layouts
+  unchanged (§7.7).
+- The projection reads **only** payload + `CheckpointState`: no
+  signature count, no height, no order between surfaces — those
+  do not survive a cut.
+- `rule_m`/`rule_n` from genesis/anchor, never `State::threshold()`.
+- Never derive the marker from the feature value; `set_features` does not
+  add `wallet`.
+- `wallet_created` needs its own ID; close sibling cards.
+- Decline and birthday check in **every** signing path.
+- Auto-start only in the hook `after_block_applied`, once per init, never at
+  restore; auto-init only at create/join, never recovery; afterwards only
   `WalletRetry`.
-- Keys-Records nie ersetzen, bevor die Kasse final ist (I16); Reopen mit Record bricht
-  nie ab.
-- `require_feature` sitzt auch in `cmd_approve` — `wallet_init` ausnehmen.
-- Gründungsritual nicht anfassen; die Stufe beginnt nach dem Siegel.
-- `relay_kind` kennt nur `ws`/`wss` — Daemon über `daemon_kind`.
-- Kind-445-Events werden nicht gechunkt; Control-Frames sind klein.
-- Control-Frames sind nicht an Dritte beweisbar — keine öffentliche Schuld.
-- `WeakSender` beendet keine Workspace-Tasks; `net_scope`.
-- `MemberSeen` ist ein No-op.
-- Nicht `monero-simple-request-rpc`, nicht `GuaranteedScanner`, nicht
-  `multisig`-Feature in Etappe 1.
-- Read-Key sieht die Kasse nicht.
+- Never replace keys records before the purse is final (I16); reopen with a record never
+  aborts.
+- `require_feature` also sits in `cmd_approve` — exempt `wallet_init`.
+- Do not touch the founding ritual; the stage begins after the seal.
+- `relay_kind` knows only `ws`/`wss` — daemon via `daemon_kind`.
+- Kind-445 events are not chunked; control frames are small.
+- Control frames are not provable to third parties — no public blame.
+- `WeakSender` does not end workspace tasks; `net_scope`.
+- `MemberSeen` is a no-op.
+- Not `monero-simple-request-rpc`, not `GuaranteedScanner`, not the
+  `multisig` feature in stage 1.
+- The read key does not see the purse.
 
-## 16. Definition of Done (Etappe 1)
+## 16. Definition of Done (stage 1)
 
-- Tests aus §10 grün; regtest-Lauf einmal manuell, Protokoll im Commit.
-- clippy pro Crate = 0; `dev-ui.sh build` sauber.
-- Manuell über drei Instanzen: Gründung mit Kassen-Stufe als letztem
-  Wizard-Schritt, gleiche Adresse, Warnung sichtbar, Mining sichtbar,
-  Close/Reopen, Export/Import behält den Teil, Phrase-Recovery zeigt
-  watch-only; zweite Republik ohne Kasse → späteres Einschalten mit Panel.
-- Review über den Gesamt-Diff, Findings gefixt, grün auf master.
-- Doc-Status aktualisiert, `check-doc-refs.py` sauber.
+- Tests from §10 green; regtest run once manually, log in the commit.
+- clippy per crate = 0; `dev-ui.sh build` clean.
+- Manually over three instances: founding with the purse stage as the last
+  wizard step, same address, warning visible, mining visible,
+  close/reopen, export/import keeps the part, phrase recovery shows
+  watch-only; second republic without a purse → enabling later with panel.
+- Review over the whole diff, findings fixed, green on master.
+- Doc status updated, `check-doc-refs.py` clean.
 
-## 17. Änderungen gegenüber Revision 2
+## 17. Changes against revision 2
 
-- W8: n Identitäts-Attestationen im `wallet_created`; Projektion prüft aus
-  dem Payload; Siegel bei m statt n, `try_commit` unverändert.
-- W4 neu: `wallet_init` ist die einzige Tür; kein `wallet_rev`-Marker;
-  `set_features` fügt `wallet` nicht hinzu.
-- Init (einmal, Chain) und Lauf (flüchtig, Run-Nonce, Retry ohne Block)
-  getrennt; Starter/Proposer mit Positions-Fallback.
-- W9/W10: Kasse standardmäßig an; Kassen-Stufe als automatischer letzter
-  Wizard-Schritt; Panel beim späteren Einschalten.
-- W11: Mainnet erlaubt, Warnung neben der Adresse.
-- Usability-Regeln U1–U6 nach dem offiziellen GUI (Simple Mode); QR-Code;
-  Daemon-Vorschlag per `wdhint`.
-- Review-Runde rev 3: Keys-Record je Lauf (nie ersetzt), Daemon zuerst +
-  Enthaltung, Birthday-Marge, Feature-Gate auch bei Approve, Hook
-  `after_block_applied`, Auto-Init nur Create/Join, Lauf-Rennen,
-  „Enter republic“ immer offen, Kasse prüft Birthday/Netz des Inits,
-  Mainnet als Default.
-- Keine öffentliche Schuldzuweisung.
-- Daemon: `daemon_kind` aus der Relay-Host-Regel, Nicht-Onion-Gate, kein
-  Default-Daemon.
-- Anker korrigiert: `vault_founding_table` statt neuem Helfer;
-  `own_approvals` ist ein Feld; `checked_kind` eine Closure; Floor per
-  Test gepinnt; `s3::http` sind freie Funktionen; `rule_m` aus Genesis.
-- Upstream korrigiert: Pin-Ursache, pedpop auf `next` gelöscht,
-  `SalLegacyAlgorithm`, Scanner gehört zu monero-wallet.
+- W8: n identity attestations in `wallet_created`; the projection checks from
+  the payload; seal at m instead of n, `try_commit` unchanged.
+- W4 new: `wallet_init` is the only door; no `wallet_rev` marker;
+  `set_features` does not add `wallet`.
+- Init (once, chain) and run (ephemeral, run nonce, retry without a block)
+  separated; starter/proposer with position fallback.
+- W9/W10: purse on by default; purse stage as the automatic last
+  wizard step; panel when enabling later.
+- W11: mainnet allowed, warning next to the address.
+- Usability rules U1–U6 after the official GUI (Simple Mode); QR code;
+  daemon suggestion via `wdhint`.
+- Review round rev 3: keys record per run (never replaced), daemon first +
+  abstention, birthday margin, feature gate also at approve, hook
+  `after_block_applied`, auto-init only create/join, run races,
+  „Enter republic“ always open, purse checks the init's birthday/network,
+  mainnet as default.
+- No public blame.
+- Daemon: `daemon_kind` from the relay host rule, non-onion gate, no
+  default daemon.
+- Anchors corrected: `vault_founding_table` instead of a new helper;
+  `own_approvals` is a field; `checked_kind` a closure; floor pinned by
+  test; `s3::http` are free functions; `rule_m` from genesis.
+- Upstream corrected: cause of the pin, pedpop deleted on `next`,
+  `SalLegacyAlgorithm`, the scanner belongs to monero-wallet.

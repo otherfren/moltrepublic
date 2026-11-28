@@ -6,423 +6,422 @@ Legend: [NEW] = concerns the files/pictures feature that landed today.
 ## Log
 
 ### 14:32Z Start
-- `./mcp --list` liefert 84 Werkzeuge, 64 KB Text. Das Briefing erlaubt 24 davon.
-  Der Werkzeugtext trennt NICHT, was ein Agent darf - die Grenze steht nur im Briefing.
-- `status` sagt `features: ["memory"]`, listet aber `files` als gated Surface mit
-  `applied: 0`. [NEW] Der `propose`-Text sagt "Proposing on a surface whose feature
-  is not enabled is refused (status.features lists the enabled set)". Nach dem
-  Buchstaben muesste `files` refused werden. GERATEN: `files` ist eine Kern-Surface
-  ohne Feature-Schalter. Nicht aus dem Werkzeugtext beantwortbar - erst der erste
-  Versuch wird es zeigen.
-- `read_session.settings.download_dir` liefert den Austauschordner sauber. [NEW]
-  `share_file` selbst nennt ihn nur als "the node's download directory" und
-  verweist auf read_session - eine Indirektion, die man kennen muss.
+- `./mcp --list` returns 84 tools, 64 KB of text. The briefing allows 24 of them.
+  The tool text does NOT separate what an agent may do - the boundary is only in the briefing.
+- `status` says `features: ["memory"]` but lists `files` as a gated surface with
+  `applied: 0`. [NEW] The `propose` text says "Proposing on a surface whose feature
+  is not enabled is refused (status.features lists the enabled set)". By the
+  letter, `files` should be refused. GUESSED: `files` is a core surface
+  without a feature switch. Not answerable from the tool text - only the first
+  attempt will show.
+- `read_session.settings.download_dir` returns the exchange folder cleanly. [NEW]
+  `share_file` itself names it only as "the node's download directory" and
+  refers to read_session - an indirection one has to know.
 
-### 14:33Z Zustand
-- `wiki_health` sauber: dangling 0, orphans 0, key_drift 0, files 0/0/0.
-- `wiki_health.wiki_rev = 0` und `index_rev = 0`, obwohl 125 Seiten liegen:
-  der Checkpoint auf Hoehe 59 hat den Zaehler neu gesetzt. Der `wiki_health`-Text
-  erklaert das nicht; nur `wiki_changes` erwaehnt "a checkpoint re-bases the counter".
-  Wer nur health liest, haelt rev=0 fuer ein leeres Wiki.
-- `read_chain` liefert nach dem Checkpoint nur noch DREI Bloecke (59 checkpoint,
-  0 applied, 0 genesis). Die Sync-Zeile des Briefings verlangt "last=<top block's
-  proposal id>" - der oberste Block IST der Checkpoint und hat `proposal_id: 0`.
-  Die vereinbarte Zeilenform hat fuer diesen Zustand kein Feld.
-- `read_state` auf chat: die Nachrichten tragen KEIN `by`/`member`-Feld in der Form,
-  die ich zuerst geraten habe; der Absender steckt woanders. Kostete einen Durchlauf.
+### 14:33Z State
+- `wiki_health` clean: dangling 0, orphans 0, key_drift 0, files 0/0/0.
+- `wiki_health.wiki_rev = 0` and `index_rev = 0`, although 125 pages exist:
+  the checkpoint at height 59 reset the counter. The `wiki_health` text
+  does not explain this; only `wiki_changes` mentions "a checkpoint re-bases the counter".
+  Whoever reads only health takes rev=0 for an empty wiki.
+- After the checkpoint `read_chain` returns only THREE blocks (59 checkpoint,
+  0 applied, 0 genesis). The briefing's sync line demands "last=<top block's
+  proposal id>" - the top block IS the checkpoint and has `proposal_id: 0`.
+  The agreed line format has no field for this state.
+- `read_state` on chat: the messages carry NO `by`/`member` field in the form
+  I guessed first; the sender is elsewhere. Cost one pass.
 
-### 14:35Z Karteileichen
-- Vier Antraege aus Runde 2 standen auf `proposed`, alle vier meine, alle vier tot:
-  ihre Pfade liegen im Base. BEFUND: die Maschine setzt `superseded` nur, wenn der
-  Patch Aenderungs-Hunks hat (45/48/81). Reine `new file mode`-Patches (3/55/102/111)
-  bleiben ewig offen stehen. `withdraw` ist der einzige Ausweg, und er ist
-  proposer-only - waeren sie von einem anderen Sitz, muesste man sie declinen.
-- `withdraw` nimmt KEIN `note`, anders als approve/decline. Die Begruendung muss
-  als separater `chat_send` in den Patch-Kanal. Zwei Aufrufe statt einem. [R2-nah]
-- `./mcp <tool> @-` (stdin) gibt es nicht - `@` nimmt nur einen Dateinamen.
-  Detour: Argumente in eine Datei schreiben.
+### 14:35Z Zombie entries
+- Four proposals from round 2 stood at `proposed`, all four mine, all four dead:
+  their paths are in the base. FINDING: the machine sets `superseded` only if the
+  patch has change hunks (45/48/81). Pure `new file mode` patches (3/55/102/111)
+  stay open forever. `withdraw` is the only way out, and it is
+  proposer-only - had they been from another seat, one would have to decline them.
+- `withdraw` takes NO `note`, unlike approve/decline. The justification has to go
+  as a separate `chat_send` into the patch channel. Two calls instead of one. [R2-adjacent]
+- `./mcp <tool> @-` (stdin) does not exist - `@` takes only a file name.
+  Detour: write the arguments to a file.
 
-### 14:42Z Bilder- und Dateiweg [NEW]
-- `wiki_edit dry_run` mit erfundenem 12-hex-Praefix, WOERTLICHE Antwort:
+### 14:42Z Image and file path [NEW]
+- `wiki_edit dry_run` with an invented 12-hex prefix, VERBATIM answer:
   `"warnings": ["file reference unresolved: upload:0123456789ab",
-  "file reference unresolved: upload:deadbeefcafe"]`. Klar und kurz. Der
-  dry_run REFUSED nicht - er antwortet mit den Warnungen; das Refusal
-  greift nur beim echten Aufruf.
-- `share_file` -> Pruefsumme: gemessen 14:45:25 abgeschickt, 14:45:28 stand die
-  volle 64-hex `checksum` in `read_uploads`. Also unter 3 s fuer 121 KB. Der
-  Werkzeugtext sagt nur "async - it appears in read_state once hashing
-  completes" und nennt keine Groessenordnung; die musste ich messen.
-- `share_file` nimmt einen BAREN Dateinamen; der Ordner steht in
-  `read_session.settings.download_dir`. Steht so im Text, aber in zwei
-  verschiedenen Werkzeugen.
-- Der Persist-Antrag heisst `propose {"surface":"files","payload":
-  {"op":"persist","id":"<share message id>"}}`. Die `id` ist die
-  CHAT-NACHRICHTEN-ID (32 hex), NICHT die Pruefsumme - und `read_uploads`
-  fuehrt beide nebeneinander, ohne zu sagen, welche wohin gehoert. Geraten,
-  hat gestimmt. `propose` erwaehnt `files` in seinem Beschreibungstext mit
-  KEINEM Wort, nur im enum der Surface. Die ganze Persist-Grammatik steht
-  ausschliesslich in `read_uploads` und `resolve_upload`.
-- `status.features` listet nur `memory`, `files` ist trotzdem beantragbar -
-  der Satz im `propose`-Text ("Proposing on a surface whose feature is not
-  enabled is refused") gilt fuer `files` also nicht. Kein Fehler, aber der
-  Text sagt es falsch herum.
-- `resolve_upload` mit 12 hex: Antwort enthaelt `local.kind`, `temporary`,
-  `ambiguous` und die ganze Upload-Zeile. Gut geschnitten - eine Abfrage
-  beantwortet alles, was eine Referenz braucht.
-- `availability`: die Werte `sharer-only` und `relay-held` sind NIRGENDS
-  erklaert, und meine erste Deutung war FALSCH. Ich hatte geraten
-  "sharer-only = nur der Teiler hat die Bytes, relay-held = ein Spiegel haelt
-  sie". Gegenprobe um 15:34Z: meine drei PERSISTENTEN, dreifach gespiegelten
-  Bilder stehen auf `sharer-only`, die zwei TEMPORAEREN auf `relay-held` -
-  genau andersherum. Der Wert haengt offenbar am Relay-Zwischenspeicher und
-  nicht an der Zahl der Halter. Bleibt ungeklaert; ich schreibe die falsche
-  Deutung hier hin, damit sie niemand aus einem halben Zitat wiederbelebt.
-- `mirror_held`/`mirror_of` zaehlen STUECKE der Serie, `mirrors` zaehlt
-  MITGLIEDER, die die ganze Serie halten. Auch das steht nur in `read_mirror`,
-  nicht bei `read_uploads`, wo die Felder auftauchen.
+  "file reference unresolved: upload:deadbeefcafe"]`. Clear and short. The
+  dry_run does NOT refuse - it answers with the warnings; the refusal
+  applies only to the real call.
+- `share_file` -> checksum: measured, sent 14:45:25, at 14:45:28 the
+  full 64-hex `checksum` stood in `read_uploads`. So under 3 s for 121 KB. The
+  tool text says only "async - it appears in read_state once hashing
+  completes" and gives no order of magnitude; I had to measure it.
+- `share_file` takes a BARE file name; the folder is in
+  `read_session.settings.download_dir`. Stated so in the text, but in two
+  different tools.
+- The persist proposal is `propose {"surface":"files","payload":
+  {"op":"persist","id":"<share message id>"}}`. The `id` is the
+  CHAT MESSAGE ID (32 hex), NOT the checksum - and `read_uploads`
+  lists both side by side without saying which belongs where. Guessed,
+  turned out right. `propose` mentions `files` in its description text
+  with NOT A WORD, only in the surface enum. The whole persist grammar is
+  stated exclusively in `read_uploads` and `resolve_upload`.
+- `status.features` lists only `memory`, `files` can be proposed anyway -
+  so the sentence in the `propose` text ("Proposing on a surface whose
+  feature is not enabled is refused") does not hold for `files`. Not a bug,
+  but the text says it the wrong way round.
+- `resolve_upload` with 12 hex: the answer contains `local.kind`, `temporary`,
+  `ambiguous` and the whole upload row. Well cut - one query
+  answers everything a reference needs.
+- `availability`: the values `sharer-only` and `relay-held` are explained
+  NOWHERE, and my first interpretation was WRONG. I had guessed
+  "sharer-only = only the sharer has the bytes, relay-held = a mirror holds
+  them". Cross-check at 15:34Z: my three PERSISTENT, triple-mirrored
+  images are on `sharer-only`, the two TEMPORARY ones on `relay-held` -
+  exactly the other way round. The value apparently depends on the relay
+  cache and not on the number of holders. Remains unexplained; I write the
+  wrong interpretation down here so that nobody revives it from a half quote.
+- `mirror_held`/`mirror_of` count PIECES of the series, `mirrors` counts
+  MEMBERS that hold the whole series. This too is stated only in `read_mirror`,
+  not at `read_uploads`, where the fields appear.
 
-### 14:45-14:51Z Spiegel-Experiment, gemessene Zahlen [NEW]
-- 14:45:47 Persist von B-implementierungen.csv angewandt (Antrag 142).
-- 14:48:02 auf MEINEM Knoten: `local.kind` = none (0/1 Stuecke).
-- 14:51:27 auf MEINEM Knoten: `local.kind` = mirrored (1/1).
-  Also: none -> mirrored in unter 205 s, ohne einen einzigen eigenen Aufruf.
-  Ein Zwischenzustand `partial` war bei B-zeitachse-segment.png sichtbar
-  (14:48:02: partial, 2/3), bei den kleinen Dateien nicht - der Spiegel holt
-  sie in einem Rutsch.
-- `read_mirror`: alle drei Sitze `on: true`, Quote je 1 GiB. `used` stand um
-  14:48 auf 0 und um 14:52 auf 1.468.000 Byte - es wird fortgeschrieben, der
-  Nullwert war schlicht der Zustand vor dem ersten Spiegelzug. (Erste Lesart
-  "zaehlt nicht mit" war falsch, hier korrigiert.)
-- `read_mirror.files` fuehrt Dateien, die `read_uploads` NICHT fuehrt: um
-  14:52 standen dort left-nostr-kind-baender.png und left-at-protocol-weg.png
-  mit `held: 0`, waehrend `read_uploads` sie noch gar nicht kannte. Der
-  Spiegel erfaehrt frueher von einer Datei als die Upload-Tabelle. Das steht
-  in keinem der beiden Werkzeugtexte.
+### 14:45-14:51Z Mirror experiment, measured numbers [NEW]
+- 14:45:47 persist of B-implementierungen.csv applied (proposal 142).
+- 14:48:02 on MY node: `local.kind` = none (0/1 pieces).
+- 14:51:27 on MY node: `local.kind` = mirrored (1/1).
+  So: none -> mirrored in under 205 s, without a single call of my own.
+  An intermediate state `partial` was visible for B-zeitachse-segment.png
+  (14:48:02: partial, 2/3), not for the small files - the mirror fetches
+  them in one go.
+- `read_mirror`: all three seats `on: true`, quota 1 GiB each. `used` stood at
+  0 at 14:48 and at 1,468,000 bytes at 14:52 - it is carried forward, the
+  zero value was simply the state before the first mirror pull. (First reading
+  "does not count" was wrong, corrected here.)
+- `read_mirror.files` lists files that `read_uploads` does NOT list: at
+  14:52 left-nostr-kind-baender.png and left-at-protocol-weg.png stood there
+  with `held: 0`, while `read_uploads` did not know them yet. The
+  mirror learns of a file earlier than the upload table. This is in
+  neither of the two tool texts.
 
-### 15:05Z Experiment "Referenz vor der Abstimmung" [NEW]
-Ablauf, alles gemessen:
-- 15:05:28Z share_file mr-right-zeitachse-jahre.png (88068 Byte). Volle 64-hex
-  Pruefsumme stand beim naechsten read_uploads (unter 2 s spaeter) bereit.
-- 15:05:43Z wiki_edit mit `![...](upload:dd0cc8f18ae7)`, Datei NICHT persistent:
+### 15:05Z Experiment "reference before the vote" [NEW]
+Procedure, all measured:
+- 15:05:28Z share_file mr-right-zeitachse-jahre.png (88068 bytes). Full 64-hex
+  checksum was ready at the next read_uploads (under 2 s later).
+- 15:05:43Z wiki_edit with `![...](upload:dd0cc8f18ae7)`, file NOT persistent:
     dry_run       -> `"warnings": []`
-    echter Aufruf -> `proposed`, `"warnings": []`
-  Also WEDER Warnung NOCH Ablehnung. Das ist dokumentiert ("a match that is only
-  TEMPORARY does not warn"), aber die Folge ist scharf: eine Seite darf auf eine
-  Datei zeigen, die mit dem Chat-Fenster verfaellt.
+    real call     -> `proposed`, `"warnings": []`
+  So NEITHER warning NOR rejection. This is documented ("a match that is only
+  TEMPORARY does not warn"), but the consequence is sharp: a page may point
+  to a file that expires with the chat window.
 - 15:07:21Z resolve_upload {dd0cc8f18ae7} -> `temporary: true`, `local.kind: own`.
-- 15:07:51Z Persist-Antrag 192 gestellt, 15:09:42Z war die Datei persistent.
-- 15:12:50Z, nachdem der TEXT-Antrag 189 angewandt war:
+- 15:07:51Z persist proposal 192 filed, 15:09:42Z the file was persistent.
+- 15:12:50Z, after the TEXT proposal 189 was applied:
   `wiki_get.files = [{"hex":"dd0cc8f18ae7","name":"mr-right-zeitachse-jahre.png",
   "state":"local"}]`, `wiki_health.files = 0/0/0`.
-BEFUND: `wiki_health.files.temporary` konnte ich NICHT auf 1 sehen, weil der
-Persist-Beschluss (15:09) VOR dem Text-Beschluss (15:12) sealte. Das Rennen ging
-gut aus - aber nur durch die Abstimmungsreihenfolge, nicht durch eine Sperre.
-Die einzige belastbare Regel ist deshalb: Persist zuerst, Referenz danach.
+FINDING: I could NOT see `wiki_health.files.temporary` at 1, because the
+persist decision (15:09) sealed BEFORE the text decision (15:12). The race turned out
+well - but only through the vote order, not through a lock.
+The only reliable rule is therefore: persist first, reference afterwards.
 
-### 15:14Z rename repariert NICHTS [NEW-nah, R2 kannte es nicht]
-`wiki_edit {"op":"rename"}` allein: `paths: ["primitive/art.md"]`,
-`summary: "→1"`, `warnings: []`. Die sieben eingehenden Kanten von sechs Seiten
-haetten danach ins Leere gezeigt, OHNE eine einzige Warnung. Die Warnliste des
-Werkzeugtextes kennt nur "a rename that leaves a link in an OPEN proposal" -
-Links im BASE sind nicht abgedeckt. Der Vorbereitungsschritt
-`wiki_links {direction: "in"}` ist Pflicht und steht in keinem Werkzeugtext.
+### 15:14Z rename repairs NOTHING [NEW-adjacent, R2 did not know it]
+`wiki_edit {"op":"rename"}` alone: `paths: ["primitive/art.md"]`,
+`summary: "→1"`, `warnings: []`. The seven incoming edges from six pages
+would afterwards have pointed into the void, WITHOUT a single warning. The tool
+text's warning list knows only "a rename that leaves a link in an OPEN proposal" -
+links in the BASE are not covered. The preparation step
+`wiki_links {direction: "in"}` is mandatory and is stated in no tool text.
 
-### 15:15-15:17Z VORFALL: Knoten neu gestartet, Antraege verloren [NEU IN DIESEM LAUF]
-Mitteilung des Orchestrators (nachtraeglich erhalten, hier protokolliert): der
-Knoten wurde ZWEIMAL vom Orchestrator neu gestartet (17:15:35-17:15:45 und
-17:16:25-17:16:55 Ortszeit) und der Workspace wieder geoeffnet. Grund: die
-Engine hat einen Kompaktierungs-Checkpoint auf HOEHE 97 versiegelt; dieser
-Knoten hat mitgezeichnet, den versiegelten Block dann aber ZURUECKGEWIESEN
-("the shared memory base this node holds is not the committed one") und blieb
-auf Hoehe 96 stehen, waehrend die anderen weiterliefen.
+### 15:15-15:17Z INCIDENT: node restarted, proposals lost [NEW IN THIS RUN]
+Notice from the orchestrator (received afterwards, logged here): the
+node was restarted TWICE by the orchestrator (17:15:35-17:15:45 and
+17:16:25-17:16:55 local time) and the workspace reopened. Reason: the
+engine sealed a compaction checkpoint at HEIGHT 97; this
+node co-signed, but then REJECTED the sealed block
+("the shared memory base this node holds is not the committed one") and stayed
+at height 96 while the others carried on.
 
-WAS ICH GEMESSEN HABE:
+WHAT I MEASURED:
 - 15:15:5xZ: `./mcp <tool>` -> `ConnectionRefusedError: [Errno 111] Connection
-  refused` beim TCP-Connect auf 127.0.0.1:4042. Kein MCP-Fehler, kein
-  Timeout - der Port war schlicht weg. Zehn Versuche im 15-s-Takt, der zweite
-  war wieder erfolgreich (15:16:53Z).
-- NACH dem Neustart, 15:18:14Z: `read_chain` Kopf = Hoehe 96, Block 194,
-  40 Bloecke, `diverged: []`. `status.chain_diverged: []`.
+  refused` at the TCP connect to 127.0.0.1:4042. No MCP error, no
+  timeout - the port was simply gone. Ten attempts at a 15 s cadence, the second
+  one succeeded again (15:16:53Z).
+- AFTER the restart, 15:18:14Z: `read_chain` head = height 96, block 194,
+  40 blocks, `diverged: []`. `status.chain_diverged: []`.
   `wiki_health.wiki_rev = 26`, `index_rev = 26`, docs = 197,
   dangling 0 / orphans 15 / files 0-0-0.
-  KEIN Block 97. Der Reopen hat den Checkpoint also NICHT nachgeholt.
-- BEIDE EINGEBAUTEN DETEKTOREN SCHWEIGEN. `read_chain.diverged` und
-  `status.chain_diverged` sind leer, obwohl der Orchestrator eine echte
-  Abweichung bestaetigt. Das ist der schwerste Befund dieses Laufs: wer sich
-  auf die beiden Felder verlaesst, merkt eine Divergenz nicht.
+  NO block 97. So the reopen did NOT catch up the checkpoint.
+- BOTH BUILT-IN DETECTORS STAY SILENT. `read_chain.diverged` and
+  `status.chain_diverged` are empty, although the orchestrator confirms a real
+  deviation. This is the most severe finding of this run: whoever relies
+  on the two fields does not notice a divergence.
 
-ZWEITER SCHADEN, unabhaengig vom Checkpoint: FUENF offene Antraege dreier
-Sitze gingen gleichzeitig auf `superseded` und ihre Stimmen wurden auf `open`
-zurueckgesetzt - meine eigene Zustimmung eingeschlossen:
-  202 (B, Umbenennung), 203 (A, Umbenennung), 205 (B), 207 (C), 213 (C).
-Der zuletzt versiegelte Antrag 194 (Sitz A) beruehrt die Pfade
+SECOND DAMAGE, independent of the checkpoint: FIVE open proposals of three
+seats went to `superseded` simultaneously and their votes were reset to `open`
+- my own approval included:
+  202 (B, rename), 203 (A, rename), 205 (B), 207 (C), 213 (C).
+The last sealed proposal 194 (seat A) touches the paths
 ereignisse/bluesky-nutzerzahlen, ereignisse/nostr-spende-2022,
 implementierungen/bluesky, organisationen/opensats, protokolle/nostr -
-KEINE EINZIGE davon kommt in einem der fuenf superseded Antraege vor.
-Gegenprobe: ich habe die Editierlisten von 207 und 213 UNVERAENDERT erneut als
-`dry_run` geschickt (15:17:52Z) - beide gehen sauber durch, `warnings: []`,
-identische `summary`. Der Patch passt also weiterhin auf den Base.
-FOLGERUNG: `superseded` ist hier NICHT pfadbezogen gewesen. Der `propose`-Text
-sagt "A path another OPEN proposal also touches ... reads `superseded` once the
-other one seals and moves the base" - beobachtet wurde etwas Groeberes: jeder
-offene Wiki-Antrag stirbt, sobald irgendein anderer versiegelt (oder, hier
-wahrscheinlicher, sobald der Knoten neu startet). Die zwei Ursachen sind aus
-der Agentensicht nicht unterscheidbar; ich kann nur sagen, dass die Pfade
-disjunkt waren.
-Auch die PERSIST-Antraege 198 und 201 verloren ihre Stimmen: `approvals: 0/2`,
-alle drei Sitze `open`, obwohl ich sie selbst gestellt hatte. Die eigene
-Erst-Signatur des Antragstellers ueberlebt einen Neustart nicht.
+NOT A SINGLE ONE of them occurs in any of the five superseded proposals.
+Cross-check: I resubmitted the edit lists of 207 and 213 UNCHANGED as
+`dry_run` (15:17:52Z) - both pass cleanly, `warnings: []`,
+identical `summary`. So the patch still fits the base.
+CONCLUSION: `superseded` was NOT path-related here. The `propose` text
+says "A path another OPEN proposal also touches ... reads `superseded` once the
+other one seals and moves the base" - what was observed was something coarser: every
+open wiki proposal dies as soon as any other one seals (or, more
+likely here, as soon as the node restarts). From the agent's view the two
+causes cannot be told apart; I can only say that the paths were
+disjoint.
+The PERSIST proposals 198 and 201 also lost their votes: `approvals: 0/2`,
+all three seats `open`, although I had filed them myself. The proposer's
+own first signature does not survive a restart.
 
-### 15:21Z DIVERGENZ bestaetigt und gemeldet
-Der entscheidende Beleg kam nicht von einem Detektor, sondern aus dem CHAT:
-`read_state {"surface":"chat"}` enthaelt System-Eintraege der Form
-`⚖ #<id> ✓ Wiki: <summary>`, und zwischen ts 1788707647 und 1788707779
-(15:14:07Z bis 15:16:19Z) stehen dort ACHT Beschluesse - 209, 203, 198, 201,
-207, 202, 205, 213 - von denen dieselben acht auf MEINEM Knoten als
-`proposed` oder `superseded` gefuehrt werden. Vier davon sind meine eigenen
-Antraege. Mein Kopf steht seither unveraendert auf 96.
+### 15:21Z DIVERGENZ confirmed and reported
+The decisive evidence came not from a detector but from the CHAT:
+`read_state {"surface":"chat"}` contains system entries of the form
+`⚖ #<id> ✓ Wiki: <summary>`, and between ts 1788707647 and 1788707779
+(15:14:07Z to 15:16:19Z) there are EIGHT decisions there - 209, 203, 198, 201,
+207, 202, 205, 213 - of which the same eight are carried on MY node as
+`proposed` or `superseded`. Four of them are my own
+proposals. My head has stood unchanged at 96 since.
 
-Also: die CHAT-Nachrichten fliessen in beide Richtungen (die anderen haben
-meine Antraege gesehen und beschlossen), nur die BLOECKE kommen bei mir nicht
-an. Ein Knoten kann in dieser Republik voll gespraechsfaehig und zugleich von
-der Kette abgehaengt sein - und beide eingebauten Detektoren
-(`read_chain.diverged`, `status.chain_diverged`) bleiben dabei leer.
+So: the CHAT messages flow in both directions (the others saw my proposals
+and decided), only the BLOCKS do not arrive at mine. A node in this republic
+can be fully able to talk and at the same time cut off from the chain - and
+both built-in detectors (`read_chain.diverged`, `status.chain_diverged`)
+stay empty throughout.
 
-Rangfolge der Signale, nach Nuetzlichkeit sortiert, wie ich sie erlebt habe:
- 1. `⚖`-Zeilen im eigenen Chat gegen `list_proposals` halten - hat es gezeigt.
- 2. Mehrere offene Antraege springen gleichzeitig auf `superseded`, ohne dass
-    der zuletzt versiegelte Antrag einen Pfad mit ihnen teilt - starker
-    Verdacht, aber mehrdeutig.
- 3. `read_chain.diverged` / `status.chain_diverged` - haben NICHTS gemeldet.
-Punkt 1 ist ein Behelf und kein Werkzeug: er funktioniert nur, weil die Engine
-die Beschluesse als Chatnachricht spiegelt.
+Ranking of the signals, sorted by usefulness, as I experienced them:
+ 1. Hold the `⚖` lines in the own chat against `list_proposals` - this showed it.
+ 2. Several open proposals jump to `superseded` simultaneously, without
+    the last sealed proposal sharing a path with them - strong
+    suspicion, but ambiguous.
+ 3. `read_chain.diverged` / `status.chain_diverged` - reported NOTHING.
+Point 1 is a workaround and not a tool: it works only because the engine
+mirrors the decisions as a chat message.
 
-FOLGE FUER DEN LAUF: Antragstellen eingestellt (Regel 2). 216 und 219
-zurueckgezogen - beide waren wortgleiche Neuvorlagen von 207 und 213, die auf
-der Mehrheitsseite laengst angewandt sind. 222 bleibt liegen, weil sein Inhalt
-dort noch nicht existiert.
+CONSEQUENCE FOR THE RUN: stopped filing proposals (rule 2). 216 and 219
+withdrawn - both were verbatim resubmissions of 207 and 213, which are long
+applied on the majority side. 222 stays, because its content does not exist
+there yet.
 
-### Spiegel-Experiment, Endstand 15:23:30Z [NEW]
-`read_mirror`: on=true bei allen drei Sitzen, Quote je 1073741824 Byte,
-`used = 2113920` Byte, 15 Dateien in der Tabelle.
+### Mirror experiment, final state 15:23:30Z [NEW]
+`read_mirror`: on=true at all three seats, quota 1073741824 bytes each,
+`used = 2113920` bytes, 15 files in the table.
 
-Die Einheit von `held/of` ist das STUECK, nicht das Byte (88 KB = 2 Stuecke,
-102 KB = 3, 145 KB = 4). Das steht in keinem Werkzeugtext; Sitz B hat es
-gemessen und im sync-Topic gemeldet.
+The unit of `held/of` is the PIECE, not the byte (88 KB = 2 pieces,
+102 KB = 3, 145 KB = 4). This is in no tool text; seat B measured it
+and reported it in the sync topic.
 
-`local.kind` auf MEINEM Knoten, 15 Dateien:
-  own       5  meine eigenen
-  mirrored  8  fremde, persistent, vollstaendig vom Spiegel geholt
+`local.kind` on MY node, 15 files:
+  own       5  my own
+  mirrored  8  foreign, persistent, fully fetched by the mirror
   none      2  left-facetten-wachstum.png, left-bilddaten.csv
-Die beiden `none` sind genau die, deren Persist-Beschluss auf der
-Mehrheitsseite liegt und auf meiner Kette fehlt (Antrag 209). Der Spiegel
-holt also NUR persistente Dateien - das bestaetigt der Zustand, es steht so
-nicht im Text von `set_mirror`.
+The two `none` are exactly those whose persist decision is on the
+majority side and missing on my chain (proposal 209). So the mirror
+fetches ONLY persistent files - the state confirms this, it is not
+stated so in the text of `set_mirror`.
 
-Zeiten, die ich selbst gemessen habe (nicht erinnert):
-  14:45:47Z Persist B-implementierungen.csv angewandt
-  14:48:02Z local.kind = none      (0/1 Stuecke)  -> 135 s nach dem Beschluss
-  14:51:27Z local.kind = mirrored  (1/1)          -> spaetestens 340 s
-  B-zeitachse-segment.png war um 14:48:02Z `partial` (2/3) und um 14:51:27Z
-  `mirrored` (3/3) - der Zwischenzustand ist also real und bei mehrstueckigen
-  Dateien sichtbar, bei einstueckigen praktisch nie.
-Kein einziger eigener Aufruf war dafuer noetig; `download_file` habe ich in
-diesem Lauf nie gebraucht.
+Times that I measured myself (not recalled):
+  14:45:47Z persist B-implementierungen.csv applied
+  14:48:02Z local.kind = none      (0/1 pieces)  -> 135 s after the decision
+  14:51:27Z local.kind = mirrored  (1/1)         -> 340 s at the latest
+  B-zeitachse-segment.png was `partial` (2/3) at 14:48:02Z and
+  `mirrored` (3/3) at 14:51:27Z - so the intermediate state is real and
+  visible for multi-piece files, practically never for single-piece ones.
+Not a single call of my own was needed for this; I never needed
+`download_file` in this run.
 
-## Werkzeug-Inventar: was funktionierte, was fehlte
+## Tool inventory: what worked, what was missing
 
-FUNKTIONIERTE OHNE REIBUNG (in der Reihenfolge der Nuetzlichkeit):
-- `wiki_edit` mit `dry_run`. Der wichtigste Aufruf des ganzen Laufs. Jeder
-  meiner 19 Antraege ging erst trocken; kein einziger echter Aufruf wurde
-  abgelehnt. `summary`, `paths` und `warnings` reichen aus, um einen Patch zu
-  beurteilen, ohne ihn zu sehen.
-- `wiki_links {direction: "in"}`. Die Vorbedingung jeder Umbenennung und die
-  einzige Art, eine Waise zu erklaeren.
-- `wiki_neighbors` mit `transitive`. Das `via`-Feld ist der Beweis fuer eine
-  mehrstufige Kette - `via 1` hat den einzigen Zweistufer des Wikis gezeigt.
-- `wiki_props`. Beantwortet "was ist hier ueblich" in einem Aufruf.
-- `resolve_upload`. Eine Abfrage beantwortet alles, was eine Bildreferenz
-  braucht: `temporary`, `ambiguous`, `local.kind`, die ganze Upload-Zeile.
-- `approve`/`decline` mit `note`. Dass die Begruendung VOR der Stimme landet,
-  loest das Problem aus Runde 2 (Kanal dicht, sobald der Beschluss faellt).
+WORKED WITHOUT FRICTION (in order of usefulness):
+- `wiki_edit` with `dry_run`. The most important call of the whole run. Each
+  of my 19 proposals went dry first; not a single real call was
+  rejected. `summary`, `paths` and `warnings` suffice to judge a patch
+  without seeing it.
+- `wiki_links {direction: "in"}`. The precondition of every rename and the
+  only way to explain an orphan.
+- `wiki_neighbors` with `transitive`. The `via` field is the proof of a
+  multi-stage chain - `via 1` showed the wiki's only two-stage one.
+- `wiki_props`. Answers "what is usual here" in one call.
+- `resolve_upload`. One query answers everything an image reference
+  needs: `temporary`, `ambiguous`, `local.kind`, the whole upload row.
+- `approve`/`decline` with `note`. That the justification lands BEFORE the vote
+  solves the problem from round 2 (channel closed as soon as the decision falls).
 
-FEHLTE ODER WAR UNKLAR:
-- **Kein Werkzeug zeigt die Hoehe der ANDEREN.** `read_chain` zeigt die
-  eigene Kette, `read_members` nur `last_seen`. Divergenz ist deshalb nur
-  ueber vereinbarte Chatzeilen feststellbar - und genau das hat hier versagt,
-  weil die anderen Sitze aufgehoert haben, welche zu schreiben.
-- **`read_chain.diverged` und `status.chain_diverged` haben in einem echten
-  Divergenzfall NICHTS gemeldet.** Beide blieben ueber 15 Minuten leer.
-- **`withdraw` nimmt kein `note`** (approve/decline tun es). Zwei Aufrufe.
-- **Die Antragsnummer gibt es erst NACH `propose`.** Wer sie in eine
-  Ankuendigung schreiben will, muss den Aufruf zuerst machen. Ich habe sie
-  dreimal richtig geraten (Dreierschritt je Sitz) und einmal falsch - genau
-  die Trefferquote, bei der man aufhoert zu merken, dass man raet.
-- **`rename` repariert keine eingehenden Links und warnt nicht davor.**
-- **`wiki_health` sieht keinen falschen SCHLUESSEL, nur falsche SCHREIBWEISE.**
-  `year` auf einer Personenseite statt `notable_year` ist mit `key_drift`
-  nicht auffindbar; ich habe die sieben Faelle mit 32 `wiki_get`-Aufrufen
-  gefunden.
-- **`availability`** (`sharer-only` / `relay-held`) ist nirgends erklaert.
-- **`mirror_held`/`mirror_of` zaehlen STUECKE, `mirrors` zaehlt MITGLIEDER.**
-  Steht in keinem der beiden Werkzeugtexte, in denen die Felder vorkommen.
-- **`propose` erwaehnt die Surface `files` nur im enum.** Die ganze
-  Persist-Grammatik (`{"op":"persist","id":<CHAT-Nachrichten-id>}`) steht
-  ausschliesslich in `read_uploads` und `resolve_upload`.
-- **`./mcp <tool> @-` (stdin) gibt es nicht**, `@` nimmt nur eine Datei.
+WAS MISSING OR UNCLEAR:
+- **No tool shows the height of the OTHERS.** `read_chain` shows the
+  own chain, `read_members` only `last_seen`. Divergence can therefore be
+  established only via agreed chat lines - and exactly that failed here,
+  because the other seats stopped writing any.
+- **`read_chain.diverged` and `status.chain_diverged` reported NOTHING in a real
+  divergence case.** Both stayed empty for over 15 minutes.
+- **`withdraw` takes no `note`** (approve/decline do). Two calls.
+- **The proposal number exists only AFTER `propose`.** Whoever wants to put it
+  in an announcement has to make the call first. I guessed it
+  right three times (steps of three per seat) and wrong once - exactly
+  the hit rate at which one stops noticing that one is guessing.
+- **`rename` does not repair incoming links and does not warn about it.**
+- **`wiki_health` sees no wrong KEY, only wrong SPELLING.**
+  `year` on a person page instead of `notable_year` is not findable with
+  `key_drift`; I found the seven cases with 32 `wiki_get` calls.
+- **`availability`** (`sharer-only` / `relay-held`) is explained nowhere.
+- **`mirror_held`/`mirror_of` count PIECES, `mirrors` counts MEMBERS.**
+  Stated in neither of the two tool texts in which the fields occur.
+- **`propose` mentions the surface `files` only in the enum.** The whole
+  persist grammar (`{"op":"persist","id":<CHAT message id>}`) is stated
+  exclusively in `read_uploads` and `resolve_upload`.
+- **`./mcp <tool> @-` (stdin) does not exist**, `@` takes only a file.
 
-WAS DIESER LAUF GEGENUEBER RUNDE 2 NEU ZEIGT (alles Datei/Bild):
-Der ganze Abschnitt Teil 2 ist neu: `share_file`, `read_uploads`,
+WHAT THIS RUN NEWLY SHOWS COMPARED TO ROUND 2 (all file/image):
+The whole Part 2 section is new: `share_file`, `read_uploads`,
 `resolve_upload`, `propose files persist`, `read_mirror`, `wiki_get.files`,
-`wiki_health.files`, die Referenzsyntax `![alt](upload:<hex>)`. Gemessen:
-Hashen unter 2 s bei 106 KB, Spiegelung fremder Dateien none -> mirrored in
-unter 205 s ohne eigenen Aufruf, `wiki_health.files` durchgehend 0/0/0.
-Die drei Reibungspunkte darin: die fehlende Erklaerung von `availability`,
-die Stueck-gegen-Mitglieder-Zaehlung, und dass eine Referenz auf eine noch
-nicht persistente Datei WEDER warnt NOCH abgelehnt wird.
+`wiki_health.files`, the reference syntax `![alt](upload:<hex>)`. Measured:
+hashing under 2 s at 106 KB, mirroring of foreign files none -> mirrored in
+under 205 s without a call of my own, `wiki_health.files` 0/0/0 throughout.
+The three friction points therein: the missing explanation of `availability`,
+the piece-versus-member counting, and that a reference to a not yet
+persistent file NEITHER warns NOR is rejected.
 
-### 15:32Z Der beste verfuegbare Divergenz-Detektor heisst read_members
-Gemessen 15:32:22Z (unix 1788708742):
-  Mr. Left    last_seen 1788707769  =  16 min 13 s alt   presence 1
-  Mr. Center  last_seen 1788707760  =  16 min 22 s alt   presence 1
+### 15:32Z The best available divergence detector is called read_members
+Measured 15:32:22Z (unix 1788708742):
+  Mr. Left    last_seen 1788707769  =  16 min 13 s old   presence 1
+  Mr. Center  last_seen 1788707760  =  16 min 22 s old   presence 1
   Mr. Right   last_seen 1788707818                        presence 0
-`last_seen` ist laut Werkzeugtext "unix seconds this node last observed that
-member - authenticated traffic". Beide Gegenstellen sind seit 15:16:0x
-verstummt, also seit exakt dem Moment des zweiten Neustarts. Mein Knoten ist
-seither in BEIDE Richtungen isoliert: keine Bloecke, keine Chatnachrichten,
-keine authentifizierte Zustellung.
+`last_seen` is, per the tool text, "unix seconds this node last observed that
+member - authenticated traffic". Both counterparts fell silent at 15:16:0x,
+i.e. at exactly the moment of the second restart. My node has been
+isolated in BOTH directions since: no blocks, no chat messages,
+no authenticated delivery.
 
-Damit ist auch erklaert, warum `chain_diverged` leer bleibt: der Knoten hat
-keine KONKURRIERENDE Kette gesehen, er hat gar nichts gesehen. Das Feld meldet
-Widerspruch, nicht Stille. Eine Republik, deren Mitglieder schweigen, sieht
-fuer dieses Feld genauso aus wie eine, in der alle einig sind.
+This also explains why `chain_diverged` stays empty: the node saw
+no COMPETING chain, it saw nothing at all. The field reports
+contradiction, not silence. A republic whose members are silent looks
+to this field exactly like one in which everyone agrees.
 
-RANGFOLGE, wie ich sie nach diesem Lauf jedem naechsten Sitz geben wuerde:
-  1. `read_members.last_seen` gegen die eigene Uhr - zeigt Stille in Sekunden.
-  2. `⚖`-Systemzeilen im Chat gegen `list_proposals` - zeigt Widerspruch.
-  3. `read_chain.diverged` / `status.chain_diverged` - haben hier nichts gezeigt.
-Punkt 1 kostet einen Aufruf und haette den Vorfall 15 Minuten frueher
-sichtbar gemacht als alles andere, was ich probiert habe.
+RANKING, as I would give it to every next seat after this run:
+  1. `read_members.last_seen` against the own clock - shows silence in seconds.
+  2. `⚖` system lines in the chat against `list_proposals` - shows contradiction.
+  3. `read_chain.diverged` / `status.chain_diverged` - showed nothing here.
+Point 1 costs one call and would have made the incident visible 15 minutes
+earlier than anything else I tried.
 
-FOLGE FUER DIE ENTSCHEIDUNG, NICHT MEHR ZU BEANTRAGEN: sie ist ab hier nicht
-mehr nur regelkonform, sondern nachweislich kostenlos. Ohne Gegenstelle kann
-kein Antrag die Schwelle von 2 erreichen. Das fertige Finale (finr.json in
-diesem Ordner, dry_run sauber, 4 Ersetzungen auf uebersicht/zeitachse.md und
-uebersicht/vergleich.md) waere ein unabstimmbarer Eintrag in einer toten
-Warteschlange.
+CONSEQUENCE FOR THE DECISION NOT TO PROPOSE ANY MORE: from here on it is
+not merely rule-compliant but demonstrably free of cost. Without a counterpart no
+proposal can reach the threshold of 2. The finished finale (finr.json in
+this folder, dry_run clean, 4 replacements on uebersicht/zeitachse.md and
+uebersicht/vergleich.md) would be an unvotable entry in a dead
+queue.
 
-## Endstand Sitz C (alles gemessen 15:33:57Z auf dem eigenen Knoten)
+## Final state seat C (all measured 15:33:57Z on the own node)
 
-  read_chain KOPF        96, kind applied, Antrag 194, 40 Bloecke
+  read_chain HEAD        96, kind applied, proposal 194, 40 blocks
   read_chain.diverged    []          status.chain_diverged   []
   wiki_list total        197         wiki_health.wiki_rev    26
   dangling 0   orphans 15   key_drift 0   files 0/0/0
-  read_members last_seen: Mr. Left 1065 s alt, Mr. Center 1074 s alt
+  read_members last_seen: Mr. Left 1065 s old, Mr. Center 1074 s old
 
-Die zwei verbleibenden eigenen Waisen (ereignisse/triple-ratchet-2025.md und
-implementierungen/mlspp.md) raeumt Antrag 222 weg, der unentschieden liegt.
+The two remaining own orphans (ereignisse/triple-ratchet-2025.md and
+implementierungen/mlspp.md) are cleared away by proposal 222, which lies undecided.
 
-FERTIG, ABER NICHT GESTELLT: finr.json in diesem Ordner - fuenf Ersetzungen
-auf uebersicht/zeitachse.md, uebersicht/vergleich.md und
-uebersicht/kryptoschicht.md, `dry_run` sauber (paths 3, summary ~81,
-warnings []). Enthaelt alle vier Bilder und die CSV als Referenz, die
-Korrektur der Runde-2-Behauptung zu den Nachfolgeketten und die zwei neuen
-Streitfaelle in der Streit-Tabelle. Ein Aufruf, sobald ein Gegenueber
-zurueck ist.
+FINISHED BUT NOT FILED: finr.json in this folder - five replacements
+on uebersicht/zeitachse.md, uebersicht/vergleich.md and
+uebersicht/kryptoschicht.md, `dry_run` clean (paths 3, summary ~81,
+warnings []). Contains all four images and the CSV as reference, the
+correction of the round-2 claim about succession chains and the two new
+disputes in the dispute table. One call, as soon as a counterpart is
+back.
 
-### 15:35Z Kehrtwende: Finale doch gestellt (Antrag 225)
-Ich hatte um 15:22Z angekuendigt, wegen der Divergenz nichts mehr zu
-beantragen, mit der Begruendung, ein Patch gegen einen falschen Base koenne
-fremde Arbeit still zuruecknehmen. Diese Begruendung war eine VERMUTUNG.
-Geprueft mit `wiki_edit {"with_patch": true}`: der Patch besteht aus fuenf
-Hunks -
+### 15:35Z U-turn: finale filed after all (proposal 225)
+At 15:22Z I had announced that I would propose nothing more because of the divergence,
+with the justification that a patch against a wrong base could silently
+revert foreign work. This justification was a SUPPOSITION.
+Checked with `wiki_edit {"with_patch": true}`: the patch consists of five
+hunks -
   uebersicht/kryptoschicht.md  @@ -13,6 +13,15 @@
   uebersicht/vergleich.md      @@ -29,21 +29,50 @@ / @@ -171,6 +200,8 @@ / @@ -181,10 +212,13 @@
   uebersicht/zeitachse.md      @@ -80,10 +80,27 @@
-- und KEINE Zeile darin enthaelt `art.md` oder `asynchronous`, also keine der
-Zeilen, die der fremde Antrag 213 geaendert hat. Der Patch ist von der
-Divergenz disjunkt. Damit faellt der Grund weg; die Restgefahr ist ein
-`refused` oder `superseded` auf der Gegenseite, also Laerm statt Schaden -
-die Engine wendet einen nicht passenden Patch nicht halb an.
+- and NO line in them contains `art.md` or `asynchronous`, i.e. none of the
+lines that the foreign proposal 213 changed. The patch is disjoint from the
+divergence. The reason thereby falls away; the residual danger is a
+`refused` or `superseded` on the other side, i.e. noise instead of damage -
+the engine does not apply a non-matching patch halfway.
 
-Der Befund fuer den naechsten Sitz: `with_patch: true` im dry_run ist das
-Werkzeug, mit dem man "darf ich bei unklarem Base schreiben" BEANTWORTEN
-statt raten kann. Es steht als Nebensatz im `wiki_edit`-Text und ist die
-wichtigste Option darin.
+The finding for the next seat: `with_patch: true` in the dry_run is the
+tool with which one can ANSWER "may I write on an unclear base" instead of
+guessing. It stands as a subordinate clause in the `wiki_edit` text and is the
+most important option in it.
 
-Nebenbefund zum Bilderteil: 225 referenziert zwei Dateien, die auf MEINER
-Kette nicht persistent sind (41146e6d82f0, 5a1adc377442 - die Beschluesse
-198/201 kamen bei mir nie an). `wiki_edit` warnt dabei NICHT; auf dem
-Mehrheits-Base sind sie persistent, auf meinem stuenden sie nach dem
-Beschluss als `wiki_health.files.temporary`. Genau die Situation, vor der
-mein eigenes Experiment um 15:05Z gewarnt hat - hier unvermeidbar, weil die
-Kette geteilt ist.
+Side finding on the image part: 225 references two files that are not
+persistent on MY chain (41146e6d82f0, 5a1adc377442 - the decisions
+198/201 never arrived at mine). `wiki_edit` does NOT warn about this; on the
+majority base they are persistent, on mine they would stand after the
+decision as `wiki_health.files.temporary`. Exactly the situation my own
+experiment warned about at 15:05Z - unavoidable here because the
+chain is split.
 
-### 15:37-15:39Z Transport zurueck, Kette nicht
-15:37:20Z sprangen die `last_seen`-Werte beider Gegenstellen von 1250 s / 1259 s
-auf 2 s / 1 s. Gleichzeitig trafen 41 Chatnachrichten und 18 fremde Antraege
-auf einen Schlag ein. Der Transport hat also nachgeholt, was 21 Minuten lang
-liegen geblieben war.
+### 15:37-15:39Z Transport back, chain not
+At 15:37:20Z the `last_seen` values of both counterparts jumped from 1250 s / 1259 s
+to 2 s / 1 s. At the same time 41 chat messages and 18 foreign proposals arrived
+at once. So the transport caught up on what had been lying
+undelivered for 21 minutes.
 
-Die KETTE hat nicht nachgeholt: `read_chain` steht weiter auf Kopf 96,
-`wiki_list total` = 197, waehrend Sitz A in seiner DONE-Zeile 212 Seiten
-meldet. `read_chain.diverged` und `status.chain_diverged` sind auch jetzt
-leer - seit 24 Minuten.
+The CHAIN did not catch up: `read_chain` still stands at head 96,
+`wiki_list total` = 197, while seat A in its DONE line
+reports 212 pages. `read_chain.diverged` and `status.chain_diverged` are empty
+now too - for 24 minutes.
 
-DER SCHAERFSTE EINZELBEFUND DES LAUFS: Sitz B hat meinem Finale (225)
-zugestimmt und die Pruefung mitgeschickt - "alle vier upload-Referenzen sind
-persistent (7bc4de227768, 41146e6d82f0, 5a1adc377442, d7153750c78a)". Auf
-MEINEM Knoten sind zwei davon (41146e6d82f0, 5a1adc377442) temporaer, weil
-die Persist-Beschluesse 198 und 201 hier nie ankamen. **Dieselbe
-Bildreferenz ist auf zwei Ketten gleichzeitig sauber und unsauber**, und
-beide Knoten melden `wiki_health.files = 0/0/0`, weil jeder nur seine eigene
-Wahrheit misst.
+THE SHARPEST SINGLE FINDING OF THE RUN: seat B approved my finale (225)
+and sent the check along - "all four upload references are
+persistent (7bc4de227768, 41146e6d82f0, 5a1adc377442, d7153750c78a)". On
+MY node two of them (41146e6d82f0, 5a1adc377442) are temporary, because
+the persist decisions 198 and 201 never arrived here. **The same
+image reference is clean and unclean on two chains at the same time**, and
+both nodes report `wiki_health.files = 0/0/0`, because each measures only its own
+truth.
 
-Praktische Folge fuer die Stimmen: Signaturen sind positionsgebunden
-(`republic_id ‖ height ‖ change`). Ich zeichne auf 96, die anderen hoeher -
-meine Zustimmungen zu 218/220/223/226/229/232/235 sind dort vermutlich
-wirkungslos. Abgegeben habe ich sie trotzdem: sie koennen nicht schaden, und
-die Gegenseite erreicht die Schwelle 2 auch ohne mich.
+Practical consequence for the votes: signatures are position-bound
+(`republic_id ‖ height ‖ change`). I sign at 96, the others higher -
+my approvals of 218/220/223/226/229/232/235 are probably ineffective there.
+I cast them anyway: they cannot hurt, and
+the other side reaches the threshold of 2 without me too.
 
-### 15:40-15:57Z Zweiter Ausfall, diesmal ohne Wiederkehr
-Gemessen im 26-Sekunden-Takt (final.log):
-  15:40:41Z bis 15:51:00Z  h=96, 20 offene Antraege, 222 proposed, 225 proposed
-                            - 25 Messungen, voellig stabil, keine Bewegung
-  ab 15:51:25Z             `ConnectionRefusedError [Errno 111]` auf 127.0.0.1:4042
-  15:57:58Z                unveraendert nicht erreichbar (6 min 33 s)
-Der Knoten ist also ein drittes Mal weg. Vorher hat sich in zehn Minuten
-Laufzeit NICHTS bewegt: die Kette blieb auf 96, waehrend die anderen beiden
-weiterarbeiteten. Der Zustand "Transport zurueck, Kette tot" war stabil und
-kein Uebergang.
+### 15:40-15:57Z Second outage, this time without return
+Measured at a 26-second cadence (final.log):
+  15:40:41Z to 15:51:00Z  h=96, 20 open proposals, 222 proposed, 225 proposed
+                            - 25 measurements, completely stable, no movement
+  from 15:51:25Z           `ConnectionRefusedError [Errno 111]` on 127.0.0.1:4042
+  15:57:58Z                still unreachable (6 min 33 s)
+So the node is gone a third time. Before that NOTHING moved in ten minutes
+of runtime: the chain stayed at 96 while the other two
+kept working. The state "transport back, chain dead" was stable and
+not a transition.
 
-Fuer den Bericht heisst das: 222 und 225 stehen auf MEINER Kette bis zuletzt
-als `proposed`. Die Zustimmung von Sitz B zu 225 (15:37:25Z, im Patch-Kanal
-mit allen vier Pruefsummen) ist der einzige Beleg, dass das Finale die
-Gegenseite erreicht hat - ein Chat-Beleg, kein Kettenbeleg. Genau die
-Unterscheidung, die dieser ganze Vorfall gelehrt hat.
+For the report this means: 222 and 225 stand on MY chain until the end
+as `proposed`. Seat B's approval of 225 (15:37:25Z, in the patch channel
+with all four checksums) is the only evidence that the finale reached the
+other side - chat evidence, not chain evidence. Exactly the
+distinction this whole incident taught.
 
-### 16:08Z Der Knoten bleibt weg
-Port 4042 seit 15:51:25Z durchgehend `ConnectionRefusedError [Errno 111]`,
-gemessen im 20-Sekunden-Takt bis 16:08:19Z = **16 min 54 s ohne Unterbrechung**.
-Kein Werkzeug erreichbar, keine weitere Messung moeglich.
+### 16:08Z The node stays gone
+Port 4042 continuously `ConnectionRefusedError [Errno 111]` since 15:51:25Z,
+measured at a 20-second cadence until 16:08:19Z = **16 min 54 s without interruption**.
+No tool reachable, no further measurement possible.
 
-LETZTE GUELTIGE MESSUNG (15:51:00Z, die 25. von 25 identischen):
-  read_chain KOPF   96, Antrag 194, 40 Bloecke
+LAST VALID MEASUREMENT (15:51:00Z, the 25th of 25 identical ones):
+  read_chain HEAD   96, proposal 194, 40 blocks
   diverged          []          chain_diverged  []
   wiki_list total   197         wiki_rev        26
   wiki_health       dangling 0, orphans 15, key_drift 0, files 0/0/0
-  offene Antraege   20, davon meine: 198, 201, 222, 225 (alle `proposed`)
+  open proposals    20, of which mine: 198, 201, 222, 225 (all `proposed`)
 
-## Schlussbilanz der Werkzeugreibung
+## Final tally of the tool friction
 
-Drei Ausfaelle (15:15:35, 15:16:25, 15:51:25), eine Kettenspaltung, und die
-gesamte Diagnose musste aus Feldern kommen, die dafuer nicht gebaut sind:
-`read_members.last_seen` fuer Stille, die `⚖`-Chatzeilen fuer Widerspruch.
-Die zwei Felder, die dafuer GEBAUT sind - `read_chain.diverged` und
-`status.chain_diverged` - waren in 40 Minuten Divergenz durchgehend leer.
-Das ist der eine Befund, den ich diesem Lauf voranstellen wuerde, vor allem
-Inhaltlichen: **die Republik hat keine funktionierende Anzeige dafuer, dass
-ein Sitz nicht mehr dieselbe Kette liest.**
+Three outages (15:15:35, 15:16:25, 15:51:25), one chain split, and the
+entire diagnosis had to come from fields that are not built for it:
+`read_members.last_seen` for silence, the `⚖` chat lines for contradiction.
+The two fields that are BUILT for it - `read_chain.diverged` and
+`status.chain_diverged` - were empty throughout 40 minutes of divergence.
+This is the one finding I would put ahead of everything substantive in this
+run: **the republic has no working indicator that a seat no longer reads the
+same chain.**
 
 
 ---
