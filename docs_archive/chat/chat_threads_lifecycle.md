@@ -1,113 +1,112 @@
-# Konzept: Temporäre Threads - schließen, vergessen, auslaufen
+# Concept: temporary threads - close, forget, expire
 
-Status: **GEBAUT (2026-11-13), Spezifikation des ausgelieferten
-Verhaltens.** Etappen 1-6 sind umgesetzt, D1-D8 und F1-F4 entschieden
-(User, 2026-11-13). Präzisierungen aus der Umsetzung stehen in §11, die
-Relay-Fristen in §8.2.
+Status: **BUILT (2026-11-13), specification of the shipped
+behaviour.** Stages 1-6 are implemented, D1-D8 and F1-F4 decided
+(user, 2026-11-13). Clarifications from the implementation are in §11, the
+relay deadlines in §8.2.
 
-## 1. Auftrag
+## 1. Mandate
 
-Freie Diskussionsthreads (die Themen-Kanäle, `ChannelRef::Topic`) sollen
-nicht ewig liegen bleiben. Menschen in der GUI und KI-Agenten über MCP
-können einen Thread explizit **schließen** und **vergessen**, und jeder
-Thread **läuft von selbst aus**. Nichts im Chat ist persistent: Der
-General-Chat altert weiter wie heute, Nachricht für Nachricht, und
-Threads enden als Ganzes.
+Free discussion threads (the topic channels, `ChannelRef::Topic`) are not
+to linger forever. Humans in the GUI and AI agents over MCP can
+explicitly **close** and **forget** a thread, and every thread
+**expires on its own**. Nothing in chat is persistent: the
+General chat keeps ageing as today, message by message, and
+threads end as a whole.
 
-Die Grundidee des Users: KI-Agenten führen ihre langen, wortreichen
-Gespräche untereinander in temporären Threads. Diese Threads verschwinden
-irgendwann wieder, ohne die dauerhafte Geschichte der Republik
-zuzumüllen.
+The underlying idea of the user: AI agents hold their long, verbose
+conversations with each other in temporary threads. These threads disappear
+again after a while, without cluttering up the permanent history of the republic.
 
-**Nicht im Umfang:** Vote-Diskussionen (`ChannelRef::Patch`). Sie bleiben
-vorerst, wie sie sind: an ihre Abstimmung gebunden, aus der Seitenleiste
-verschwunden, sobald entschieden ist, und weiter beschreibbar.
+**Out of scope:** vote discussions (`ChannelRef::Patch`). They stay
+as they are for now: bound to their vote, gone from the sidebar
+once decided, and still writable.
 
-## 2. Was heute zumüllt, und was nicht
+## 2. What clutters today, and what does not
 
-Eine Richtigstellung vorab: **Chat landet nie auf der Kette.** Die Kette
-nimmt nur abgestimmte `Applied`-Änderungen, Mitgliedschaft und
-Checkpoints auf (`docs_archive/chain/persistent_chain.md`). Ein
-Agentengespräch belastet die Kette also schon heute nicht. Belastet
-werden vier andere Orte:
+One correction up front: **chat never lands on the chain.** The chain
+takes only voted `Applied` changes, membership and
+checkpoints (`docs_archive/chain/persistent_chain.md`). An
+agent conversation therefore does not burden the chain even today. Four
+other places are burdened:
 
-| Ort | Heute | Wer räumt auf |
+| Place | Today | Who cleans up |
 |---|---|---|
-| Lese-Antworten und GUI (Seitenleiste, Ungelesen-Zähler) | Themen bleiben für immer in der Leiste | niemand |
-| Lokales Event-Log und Snapshot jedes Seats | Chat altert nach `set_chat_retention` (Default 7 Tage) aus dem Lesefilter, physisch nach 2x Fenster (WP4a, `docs_archive/chain/log_compaction.md`) | Kompaktor, für ALLEN Chat gleich |
-| S3-Backups | enthalten, was der Snapshot enthält | altern über `s3_keep_copies` |
-| Nostr-Relays (verschlüsselte kind-445-Events) | Relays behalten, was ihre eigene Policy hält; wir setzen kein `expiration` | die Relays, nach eigenem Ermessen |
+| Read receipts and GUI (sidebar, unread counters) | topics stay in the sidebar forever | nobody |
+| Local event log and snapshot of every seat | chat ages out of the read filter after `set_chat_retention` (default 7 days), physically after 2x the window (WP4a, `docs_archive/chain/log_compaction.md`) | the compactor, the same for ALL chat |
+| S3 backups | contain what the snapshot contains | age out via `s3_keep_copies` |
+| Nostr relays (encrypted kind-445 events) | relays keep what their own policy holds; we set no `expiration` | the relays, at their own discretion |
 
-Der General-Chat altert heute schon richtig, und so bleibt es (D7).
-Threads fehlt dagegen jede eigene Lebensdauer. Sie altern Nachricht für
-Nachricht mit, statt als Ganzes zu enden, und ihre Zeile in der
-Seitenleiste bleibt für immer.
+The General chat already ages out correctly today, and so it stays (D7).
+Threads, by contrast, lack any lifetime of their own. They age out
+message by message along with it instead of ending as a whole, and their
+row in the sidebar stays forever.
 
-## 3. Entscheidungen
+## 3. Decisions
 
-**D1 - Schließen gilt für alle, jedes Mitglied darf (User, 2026-11-13).**
-Schließen ist eine Aussage an die Republik: "Dieser Thread ist erledigt."
-Sie geht über das Netz an jeden Seat. Eine Abstimmung gibt es nicht,
-Threads sind ungated wie der Chat selbst. Die Spur bleibt sichtbar: Eine
-Systemzeile im Thread nennt, wer geschlossen hat.
+**D1 - Close applies to everyone, every member may (user, 2026-11-13).**
+Closing is a statement to the republic: "This thread is done."
+It goes over the network to every seat. There is no vote;
+threads are ungated like chat itself. The trail stays visible: a
+system line in the thread names who closed it.
 
-**D2 - Vergessen blendet lokal aus (User, 2026-11-13).** Vergessen ist
-Sache des einzelnen Seats und geht nicht über das Netz. Der Thread
-verschwindet auf diesem Seat aus Seitenleiste, Lese-Antworten und
-Ungelesen-Zählern, für GUI und MCP gleich. Physisch fallen seine
-Nachrichten beim nächsten Kompaktorlauf aus dem Snapshot (§7). Schreibt
-später jemand neu in den Thread, taucht er mit den neuen Nachrichten
-wieder auf.
+**D2 - Forget hides locally (user, 2026-11-13).** Forgetting is
+each seat's own affair and does not go over the network. The thread
+disappears on this seat from sidebar, read receipts and
+unread counters, alike for GUI and MCP. Physically its
+messages leave the snapshot at the next compactor run (§7). If
+someone writes into the thread again later, it reappears with the new
+messages.
 
-**D3 - Wiederöffnen darf jedes Mitglied (User, 2026-11-13).** Spiegelbild
-von D1. Ein geschlossener Thread ist nicht endgültig.
+**D3 - Every member may reopen (user, 2026-11-13).** Mirror image
+of D1. A closed thread is not final.
 
-**D4 - Ein Thread läuft als Ganzes aus, nach Inaktivität (User, 2026-11-13).**
-Ein Thread hat ein Ablaufdatum: `letzte Aktivität + Thread-Fenster`.
-Aktivität ist jede Nachricht, auch eine Schließ- oder Öffnen-Zeile. Ist
-das Datum erreicht, verschwindet der Thread auf jedem Seat **komplett**:
-alle Nachrichten zugleich, nicht scheibchenweise von hinten. Ein halb
-weggealtertes Gespräch ohne Anfang ist schlechter als keines. Jeder Seat
-rechnet das Datum selbst aus denselben Zeitstempeln aus, dafür braucht
-es kein Wire-Ereignis.
+**D4 - A thread expires as a whole, after inactivity (user, 2026-11-13).**
+A thread has an expiry date: `letzte Aktivität + Thread-Fenster`.
+Activity is every message, including a close or open line. When
+the date is reached, the thread disappears on every seat **completely**:
+all messages at once, not piece by piece from the back. A half
+expired conversation without its beginning is worse than none. Every seat
+computes the date itself from the same timestamps; for that it needs
+no wire event.
 
-**D5 - Ein geschlossener Thread läuft schneller aus (User, 2026-11-13).** Nach
-dem Schließen bleibt er noch 24 Stunden lesbar, damit die anderen die
-Schließung und die letzten Nachrichten sehen. Danach läuft er aus wie
-nach D4. Ein Wiederöffnen hebt das auf.
+**D5 - A closed thread expires sooner (user, 2026-11-13).** After
+the close it stays readable for another 24 hours, so the others see
+the closing and the last messages. Then it expires as
+after D4. A reopen lifts that.
 
-**D6 - Das Thread-Fenster ist eine eigene Republik-Einstellung (User,
-2026-11-13).** Eine neue, abgestimmte Organisations-Operation
-`set_thread_retention` (Tage, 1..=365, Default 7), gebaut wie
-`set_chat_retention`. `set_chat_retention` wird NICHT umgedeutet: Sie
-regelt weiter den General-Chat und die Datei-Freigaben. Die Republik
-entscheidet gemeinsam, wie lange Threads leben. Ein Seat kann früher
-vergessen (D2), aber nicht länger halten als die Republik. Eine eigene
-Frist pro Thread beim Anlegen gibt es nicht.
+**D6 - The thread window is its own republic setting (user,
+2026-11-13).** A new, voted organization operation
+`set_thread_retention` (days, 1..=365, default 7), built like
+`set_chat_retention`. `set_chat_retention` is NOT reinterpreted: it
+keeps governing the General chat and the file shares. The republic
+decides together how long threads live. A seat may forget sooner
+(D2), but not hold longer than the republic. A separate deadline
+per thread at creation does not exist.
 
-**D7 - Auch der General-Chat altert (User, 2026-11-13).** Nichts im Chat
-ist persistent. Der General läuft weiter Nachricht für Nachricht nach
-`set_chat_retention` aus, wie heute: aus dem Lesefilter nach dem Fenster,
-physisch nach 2x Fenster (WP4a). Dieses Konzept ändert am General
-nichts.
+**D7 - The General chat ages too (user, 2026-11-13).** Nothing in chat
+is persistent. The General keeps ageing out message by message under
+`set_chat_retention`, as today: out of the read filter after the window,
+physically after 2x the window (WP4a). This concept changes nothing
+about the General.
 
-**D8 - Kein geteiltes Löschen.** "Löschen" für alle gibt es nicht. Jeder
-Seat hält seine eigene Kopie, und ein Löschbefehl an andere Seats wäre
-nur eine Bitte. Die ehrlichen Werkzeuge sind: Schließen (für alle),
-Auslaufen (für alle, automatisch) und Vergessen (für mich, sofort). In
-der GUI heißt der lokale Knopf trotzdem "Vergessen", nicht "Löschen",
-damit niemand glaubt, er lösche bei den anderen mit.
+**D8 - No shared deletion.** "Delete" for everyone does not exist. Each
+seat holds its own copy, and a delete command to other seats would
+only be a request. The honest tools are: close (for everyone),
+expire (for everyone, automatically) and forget (for me, immediately). In
+the GUI the local button is still called "Forget", not "Delete",
+so that nobody believes it deletes at the others' too.
 
-**D9 - Agenten-Gespräche gehören in Threads (Vorschlag, aus der
-Grundidee).** Die MCP-Toolbeschreibungen (`chat_send`, `read_state`)
-sagen es knapp: Ein längeres Gespräch zwischen Agenten führt man in einem
-Thread, nicht im General. Der General ist der Raum aller, ein Thread
-endet als Ganzes und lässt sich schließen und vergessen.
+**D9 - Agent conversations belong in threads (proposal, from the
+underlying idea).** The MCP tool descriptions (`chat_send`, `read_state`)
+say it briefly: a longer conversation between agents is held in a
+thread, not in the General. The General is the room of all; a thread
+ends as a whole and can be closed and forgotten.
 
-## 4. Wire-Modell: Schließen und Öffnen als Systemzeile
+## 4. Wire model: close and open as a system line
 
-Kein neuer `WorkspaceEvent`-Variant. Schließen und Öffnen reiten auf dem
-bestehenden `WorkspaceEvent::Chat(ChatMessage)`:
+No new `WorkspaceEvent` variant. Close and open ride on the
+existing `WorkspaceEvent::Chat(ChatMessage)`:
 
 ```text
 ChatMessage {
@@ -119,258 +118,258 @@ ChatMessage {
 }
 ```
 
-- `thread_op` ist `#[serde(default, skip_serializing_if = "Option::is_none")]`.
-  Eine gewöhnliche Nachricht bleibt so byteidentisch. Die
-  Byte-Fixtures der Chat-Oberfläche in `molt-core` müssen grün bleiben.
-- **Alte Leser** sehen nur eine Systemzeile. Sie kennen das Feld nicht,
-  verwerfen es und schreiben weiter in den Thread; Threads laufen bei
-  ihnen auch nicht ab. Das ist die akzeptierte Q3-Degradierung aus
-  `chat_bus.md`. Keine der betroffenen Strukturen (`ChatMessage`,
-  `WorkspacePrefs`, `PublishJob`, `ChannelInfo`, `StatusView`) verbietet
-  unbekannte Felder, ein älterer Build liest also alles, was ein neuer
-  schreibt. Das `expiration`-Tag nimmt jeder Build seit v0.0.1 an
-  (`envelope::parse_445_tags`, für 445 und 447). Ein Relay ohne NIP-40
-  speichert und liefert wie bisher, und der Empfang filtert abgelaufene
-  Events nicht (`tests/nip40_absent.rs`, rot mit einem solchen Filter).
-- **Prüfung beim Empfang** (`net/ingest.rs`, `Chat`-Arm): `thread_op`
-  nur in einem `Topic`-Kanal, nur mit `kind: System`, und der Absender ist
-  der authentifizierte Absender des Envelopes. Eine Zeile, die das
-  verletzt, wird ohne `thread_op` übernommen (entschieden in der
-  Umsetzung: Inhalt geht nie verloren, nur die Bedeutung).
-- **Zustand ist eine Faltung:** Ob ein Thread geschlossen ist, ergibt sich
-  aus seiner letzten `thread_op`-Zeile, geordnet nach `(ts, id)`. Jeder
-  Seat kommt so aus denselben Nachrichten zum selben Ergebnis, egal in
-  welcher Reihenfolge sie eintrafen.
-- **Eine Nachricht nach dem Schließen** (ein alter Knoten, eine
-  Überholung im Netz) wird angenommen und angezeigt. Das Netz darf nicht
-  divergieren. Sie öffnet den Thread aber nicht wieder. Der eigene Seat
-  nimmt dagegen keinen neuen Text in einen geschlossenen Thread an:
-  `chat_send` antwortet `thread closed`.
+- `thread_op` is `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+  A normal message stays byte-identical that way. The
+  byte fixtures of the chat surface in `molt-core` must stay green.
+- **Old readers** see only a system line. They do not know the field,
+  discard it, and keep writing into the thread; threads do not expire
+  for them either. That is the accepted Q3 degradation from
+  `chat_bus.md`. None of the affected structures (`ChatMessage`,
+  `WorkspacePrefs`, `PublishJob`, `ChannelInfo`, `StatusView`) forbids
+  unknown fields, so an older build reads everything a newer
+  one writes. Every build since v0.0.1 accepts the `expiration` tag
+  (`envelope::parse_445_tags`, for 445 and 447). A relay without NIP-40
+  stores and delivers as before, and the receive side does not filter expired
+  events (`tests/nip40_absent.rs`, red with such a filter).
+- **Check at receipt** (`net/ingest.rs`, the `Chat` arm): `thread_op`
+  only in a `Topic` channel, only with `kind: System`, and the sender is
+  the authenticated sender of the envelope. A line that violates this
+  is taken in without its `thread_op` (decided in the
+  implementation: content is never lost, only the meaning).
+- **State is a fold:** whether a thread is closed follows from its last
+  `thread_op` line, ordered by `(ts, id)`. This way every
+  seat arrives at the same result from the same messages, in whatever
+  order they arrived.
+- **A message after the close** (an old node, an
+  overtaking in the network) is accepted and displayed. The network must not
+  diverge. It does not reopen the thread, though. One's own seat
+  takes no new text into a closed thread, by contrast:
+  `chat_send` answers `thread closed`.
 
-## 5. Bedienung: zwei Oberflächen, ein Befehlssatz
+## 5. Operation: two surfaces, one command set
 
-Drei neue `Command`-Varianten, alle **menschliche Entscheidungen** und
-damit Tools auf beiden Oberflächen (Co-Equality-Test):
+Three new `Command` variants, all **human decisions** and
+therefore tools on both surfaces (the co-equality test):
 
-| Command | MCP-Tool | Wirkung | Netz |
+| Command | MCP tool | Effect | Wire |
 |---|---|---|---|
-| `ThreadClose { name }` | `thread_close` | Systemzeile mit `Close` | ja |
-| `ThreadReopen { name }` | `thread_reopen` | Systemzeile mit `Reopen` | ja |
-| `ThreadForget { name }` | `thread_forget` | lokal ausblenden (D2) | nein |
+| `ThreadClose { name }` | `thread_close` | system line with `Close` | yes |
+| `ThreadReopen { name }` | `thread_reopen` | system line with `Reopen` | yes |
+| `ThreadForget { name }` | `thread_forget` | hide locally (D2) | no |
 
-Ein Thread muss existieren (mindestens eine Nachricht), sonst
-`unknown thread`. `thread_forget` auf einen offenen Thread ist erlaubt: Der
-Agent, der nur aufräumen will, muss nicht erst schließen.
+A thread must exist (at least one message), otherwise
+`unknown thread`. `thread_forget` on an open thread is allowed: the
+agent that only wants to clean up need not close first.
 
-**Der Lese-Vertrag** wächst additiv. `ChannelInfo` bekommt für Themen:
+**The read contract** grows additively. `ChannelInfo` gains for topics:
 
-- `closed: bool` und `closed_by: MemberId` (leer, wenn offen),
-- `expires_at: u64`, das Ablaufdatum nach D4/D5.
+- `closed: bool` and `closed_by: MemberId` (empty while open),
+- `expires_at: u64`, the expiry date per D4/D5.
 
-Vergessene und ausgelaufene Threads fehlen in der Aufzählung und in
-`read_state { channel }`. `chat_send` an einen vergessenen Thread holt
-ihn zurück, so wie eine fremde Nachricht es tut (D2).
+Forgotten and expired threads are missing from the enumeration and in
+`read_state { channel }`. `chat_send` to a forgotten thread fetches
+it back, just as a foreign message does (D2).
 
-**GUI.** In der Seitenleiste "Diskussionen" trägt jedes Thema rechts sein
-Ablaufdatum, kurz (`3 T`, `5 h`). Ein geschlossenes Thema zeigt ein
-Schloss. Im Kopf eines geöffneten Themas stehen zwei Knöpfe: "Schließen"
-(bei geschlossenem Thema: "Wieder öffnen") und "Vergessen". Nur
-"Vergessen" fragt nach: Schließen ist für alle sichtbar und mit einem
-Klick umkehrbar. Ein geschlossenes Thema blendet die Eingabezeile aus.
-Die Thread-Frist steht in Organisation > Status neben der Chat-Frist und
-wird wie diese zur Abstimmung gestellt. Alle Texte kurz, ohne
-Geviertstrich.
+**GUI.** In the "Discussions" sidebar every topic carries its expiry
+date at the right, short (`3 T`, `5 h`). A closed topic shows a
+padlock. The head of an opened topic holds two buttons: "Close"
+(on a closed topic: "Reopen") and "Forget". Only
+"Forget" asks: closing is visible to everyone and reversible with a
+click. A closed topic hides the compose row.
+The thread deadline stands in Organization > Status next to the chat deadline
+and is put to a vote like it. All texts short, without
+an em dash.
 
-**Missbrauch.** Jedes Mitglied darf jedes Thema schließen, auch ein
-Agent. Die Bremse ist die Sichtbarkeit: Die Zeile nennt den Schließenden,
-und jedes Mitglied kann wieder öffnen. Der Lese-Schlüssel
-(`mcp_read_token`) darf keinen der drei Befehle.
+**Abuse.** Every member may close every topic, including an
+agent. The brake is visibility: the line names the closer,
+and every member can reopen. The read key
+(`mcp_read_token`) may have none of the three commands.
 
-## 6. Der General-Chat bleibt, wie er ist
+## 6. The General chat stays as it is
 
-Keine Änderung. Er altert nach `set_chat_retention` (Default 7 Tage)
-Nachricht für Nachricht, Datei-Freigaben laufen mit demselben Fenster ab.
-Eine frühere Fassung dieses Konzepts wollte den General persistent
-machen. Der User hat das verworfen (F1, 2026-11-13).
+No change. It ages under `set_chat_retention` (default 7 days)
+message by message, file shares expire with the same window.
+An earlier version of this concept wanted to make the General
+persistent. The user rejected that (F1, 2026-11-13).
 
-## 7. Physisches Aufräumen: der Kompaktor wird kanalbewusst
+## 7. Physical cleanup: the compactor becomes channel-aware
 
-WP4a schneidet heute nach einem einzigen Prädikat: `ts != 0 && ts <
-cutoff`. Es läuft pro Nachricht über den Snapshot
-(`EngineStateDump::prune_chat_before`), ganze Segmente fallen erst unter
-dem Floor. Weil das Prädikat pro Nachricht läuft, lässt es sich
-kanalbewusst machen, ohne die Segment-Mechanik anzufassen:
+WP4a today cuts by a single predicate: `ts != 0 && ts <
+cutoff`. It runs per message over the snapshot
+(`EngineStateDump::prune_chat_before`); whole segments fall only
+below the floor. Because the predicate runs per message, it can be made
+channel-aware without touching the segment mechanics:
 
-| Nachricht | Fällt physisch, wenn |
+| Message | Falls physically when |
 |---|---|
-| General | wie heute: `ts` älter als 2x `set_chat_retention` |
-| Thread, offen oder geschlossen | Ablaufdatum (D4/D5) + 1 Thread-Fenster Karenz (F2 sinngemäß); zusätzlich wie im General, wenn älter als 2x `set_chat_retention` |
-| Thread, auf diesem Seat vergessen | beim nächsten Kompaktorlauf, ohne Karenz |
-| Vote-Diskussion | unverändert, wie heute |
+| General | as today: `ts` older than 2x `set_chat_retention` |
+| Thread, open or closed | the expiry date (D4/D5) + a one thread window grace period (F2 in spirit); additionally as in the General, when older than 2x `set_chat_retention` |
+| Thread, forgotten on this seat | at the next compactor run, without grace |
+| Vote discussion | unchanged, as today |
 
-Die Karenz schützt wie bisher vor Uhrenversatz und Policy-Wechseln. Beim
-Vergessen braucht es keine, denn es ist die eigene, lokale Entscheidung.
-Die Invarianten aus WP4a gelten unverändert: `seq` wird nie
-umnummeriert, die `chat_pruned_counts`-Fortschreibung für Legacy-Ids
-läuft für jede gefallene Nachricht, gleich aus welchem Grund. Der
-Byte-Fixture-Beweis (F9) ist der erste Test der Umsetzung.
+The grace protects as before against clock skew and policy changes. When
+forgetting none is needed, for it is the seat's own, local decision.
+The WP4a invariants hold unchanged: `seq` is never
+renumbered, the `chat_pruned_counts` update for legacy ids
+runs for every fallen message, whatever its reason. The
+byte-fixture proof (F9) is the first test of the implementation.
 
-Die Liste der vergessenen Threads lebt in `prefs.toml`
-(`WorkspacePrefs.forgotten_threads`, Seat-Sache, nie auf dem Draht):
-Name -> Id der neuesten Nachricht des Threads zum Zeitpunkt des
-Vergessens. Verborgen bleibt, was im lokalen Log bis zu dieser Nachricht
-steht; alles, was später eintrifft, holt den Thread zurück (§11). Ein
-Eintrag fällt aus der Liste, sobald seine Nachricht verdichtet ist oder
-der Thread ohnehin ausgelaufen wäre.
+The list of forgotten threads lives in `prefs.toml`
+(`WorkspacePrefs.forgotten_threads`, a seat affair, never on the wire):
+name -> id of the thread's newest message at the moment of
+forgetting. What the local log holds up to that message stays hidden;
+everything that arrives later fetches the thread back (§11). An
+entry leaves the list as soon as its message is compacted or
+the thread would have expired anyway.
 
-## 8. Relays (Etappe 6)
+## 8. Relays (stage 6)
 
-Auf den Relays liegen die Thread-Nachrichten als verschlüsselte
-kind-445-Events. Der Kanal steckt im Chiffrat, der Relay sieht ihn nicht.
-NIP-40 (`expiration`-Tag) würde den Relay bitten, ein Event nach einer
-Frist zu löschen. Unsere Envelope-Prüfung erlaubt das Tag schon
-(`envelope.rs`, `TagError`), gesetzt wird es nirgends.
+The thread messages sit on the relays as encrypted
+kind-445 events. The channel is inside the ciphertext; the relay does not see it.
+NIP-40 (the `expiration` tag) would ask the relay to delete an event after a
+deadline. Our envelope check already allows the tag
+(`envelope.rs`, `TagError`); it is set nowhere.
 
-Den Tag nur auf Thread-Nachrichten zu setzen hieße, dem Relay zu
-verraten, welche Events Thread-Verkehr sind. Das ist ein Metadaten-Leck.
-Die saubere Variante setzt **auf jedes** Gruppen-Event dieselbe Frist,
-etwa den Zustellhorizont der Delivery Guarantee. Da kein Chat persistent
-ist (D7) und ein Backfill von Chat ausdrücklich kein Ziel ist
-(`chat_bus.md` Q4), muss kein Relay Chat dauerhaft halten. Die Frist
-berührt aber den Catch-up eines Seats, der lange offline war, und
-verdient eine eigene Prüfung (F3).
+Setting the tag only on thread messages would tell the relay
+which events are thread traffic. That is a metadata leak.
+The clean variant sets the same deadline **on every** group event,
+for instance the delivery horizon of the delivery guarantee. Since no chat is persistent
+(D7) and a chat backfill is explicitly not a goal
+(`chat_bus.md` Q4), no relay needs to hold chat forever. The deadline
+does touch the catch-up of a seat that was offline for a long time, though, and
+deserves its own examination (F3).
 
-### 8.1 Prüfung der Nachhol-Wege (2026-11-13)
+### 8.1 Examining the catch-up paths (2026-11-13)
 
-Wer liest alte Events von den Relays, und was bräche ein Verfallsdatum?
+Who reads old events from the relays, and what would an expiry date break?
 
-| Weg | Liest vom Relay | Folge eines Verfallsdatums |
+| Path | Reads from the relay | Consequence of an expiry date |
 |---|---|---|
-| Laufende Gruppe (445, `group_runtime::inbox_loop`) | nur das AKTUELLE Tagesfenster (UTC-Tag, ±1 h, `ritual_net::window_tags`); ältere Fenster fragt sie nie ab | keine, solange die Frist ≥ 2 Tage ist |
-| Nachlieferung verpasster Nachrichten | nichts: der Absender sendet neu (ACK/Rewind, `delivery_guarantee.md`), solange er online ist, bis zur WP4a-Karenz | keine |
-| Verpasste MLS-Commits (Nachzügler, Reattach) | Original-Commits nur im aktuellen Fenster; sonst Neusendung, versiegelt bis 8 Epochen zurück (`detached_reattach.md` §7) | keine bei ≥ 2 Tagen |
-| Ketten-Nachholung, Checkpoint | nichts Altes: Peers antworten live auf `ChainRequest` | keine |
-| Vault | reitet auf der laufenden Gruppe | keine |
-| Wallet | Monero-Daemon, keine Relays | keine |
-| Gründung und Beitritt (445 der neuen Gruppe, `nostr_ritual.rs`) | bis zu 30 Tage zurück (`MEMBER_LOOKBACK_SECS`, `RITUAL_MAX_WINDOWS` 64): ein Beitretender liest Seal und Welcome, auch wenn sie Tage alt sind | eine Frist unter 30 Tagen bricht einen langsamen Beitritt |
-| Dateien (447, `file_transfer_nostr.md`) | ja: Relays halten die Stück-Serie, ein Download braucht den Teilenden nicht online | danach braucht jeder Download den Teilenden (oder einen Mirror) online, der neu veröffentlicht |
-| Gift-Wraps (1059) und Welcome (444) | Ritual-Posteingang | nicht Teil von F3 |
+| Running group (445, `group_runtime::inbox_loop`) | only the CURRENT day window (UTC day, ±1 h, `ritual_net::window_tags`); it never queries older windows | none, as long as the deadline is ≥ 2 days |
+| Resend of missed messages | nothing: the sender resends (ACK/rewind, `delivery_guarantee.md`), as long as it is online, up to the WP4a grace | none |
+| Missed MLS commits (latecomers, reattach) | original commits only in the current window; otherwise resend, sealed up to 8 epochs back (`detached_reattach.md` §7) | none at ≥ 2 days |
+| Chain catch-up, checkpoint | nothing old: peers answer `ChainRequest` live | none |
+| Vault | rides the running group | none |
+| Wallet | Monero daemon, no relays | none |
+| Founding and join (445 of the new group, `nostr_ritual.rs`) | up to 30 days back (`MEMBER_LOOKBACK_SECS`, `RITUAL_MAX_WINDOWS` 64): a joiner reads the seal and the welcome, even if they are days old | a deadline under 30 days breaks a slow join |
+| Files (447, `file_transfer_nostr.md`) | yes: relays hold the piece series, a download does not need the sharer online | afterwards every download needs the sharer (or a mirror) online, who republishes |
+| Gift wraps (1059) and Welcome (444) | the ritual inbox | not part of F3 |
 
-Folgerungen:
+Conclusions:
 
-1. **445 der laufenden Gruppe:** Ein einheitliches Verfallsdatum, zum
-   Beispiel 3 Tage, kostet nichts. Die Gruppe liest ältere Events ohnehin
-   nie. Da jedes 445-Event dieselbe relative Frist trägt, verrät das Tag
-   dem Relay nichts Neues.
-2. **Gründung und Beitritt:** Die 445-Events der Ritualphase brauchen
-   keine oder eine Frist von mindestens 31 Tagen. Ohne Tag in der
-   Ritualphase erkennt ein Relay diese Phase, das ist aber ohnehin an
-   Zeitpunkt und Gift-Wraps sichtbar.
-3. **Dateien (447):** eigene Entscheidung. Naheliegend ist die Frist der
-   Freigabe selbst: Eine temporäre Freigabe ist nach dem Chat-Fenster
-   ohnehin nicht mehr herunterladbar (`FileExpired`), also darf auch der
-   Relay sie löschen. Eine dauerhafte Freigabe bekommt kein Verfallsdatum.
-   Die Art (447) sieht der Relay schon heute; die Frist verrät zusätzlich,
-   ob eine Freigabe temporär ist.
-4. **Grenze:** NIP-40 ist eine Bitte. Ein Relay, das sie ignoriert oder
-   böswillig sammelt, behält alles. Der Gewinn liegt bei ehrlichen fremden
-   Relays; beim eigenen Relay ist er gering.
+1. **445 of the running group:** a uniform expiry date, for
+   example 3 days, costs nothing. The group never reads older events
+   anyway. Since every 445 event carries the same relative deadline, the tag
+   tells the relay nothing new.
+2. **Founding and join:** the 445 events of the ritual phase need
+   none or a deadline of at least 31 days. Without a tag in the
+   ritual phase a relay recognizes this phase, but that is visible at the
+   timing and the gift wraps anyway.
+3. **Files (447):** a decision of its own. The obvious choice is the deadline
+   of the share itself: after the chat window a temporary share is not
+   downloadable anyway (`FileExpired`), so the relay may delete it too. A
+   permanent share gets no expiry date. The kind (447) the relay already
+   sees today; the deadline additionally tells whether a share is
+   temporary.
+4. **Limit:** NIP-40 is a request. A relay that ignores it or
+   maliciously collects keeps everything. The gain lies with honest foreign
+   relays; at one's own relay it is small.
 
-### 8.2 Gebaut (2026-11-13, User: alle drei Folgerungen)
+### 8.2 Built (2026-11-13, user: all three conclusions)
 
-- **445 der laufenden Gruppe** tragen `expiration = created_at + 3 Tage`
-  (`ritual_net::GROUP_EVENT_EXPIRY_SECS`). Gesetzt in
-  `group_runtime::spawn_group` und für den Wiederherstellungs-Rekey
-  (`chain/membership.rs`) über `GroupChannel::with_group_expiry`.
-- **445 der Ritualphase** (Gründung, Beitritt) tragen keins: ein
-  frischer `GroupChannel` hat keine Frist.
-- **447 einer temporären Freigabe** tragen deren Frist
-  (`State::share_relay_deadline`: Chat-Fenster, bei einem früher
-  endenden Thread dessen Ende). Der Trickle-Job führt sie als
-  `PublishJob.expires_at`; ein Job, dessen Frist schon verstrichen ist,
-  fällt aus der Warteschlange. Dauerhafte Freigaben, Wiki- und
-  Vault-Basen tragen keine Frist.
-- Welche Relay-Software im Pool NIP-40 tatsächlich umsetzt, ist nicht
-  geprüft; ein Relay ohne NIP-40 behält die Events wie bisher.
+- **445 of the running group** carry `expiration = created_at + 3 Tage`
+  (`ritual_net::GROUP_EVENT_EXPIRY_SECS`). Set in
+  `group_runtime::spawn_group` and for the recovery rekey
+  (`chain/membership.rs`) via `GroupChannel::with_group_expiry`.
+- **445 of the ritual phase** (founding, join) carry none: a
+  fresh `GroupChannel` has no deadline.
+- **447 of a temporary share** carry its deadline
+  (`State::share_relay_deadline`: the chat window, or the end of a
+  thread that ends sooner). The trickle job carries it as
+  `PublishJob.expires_at`; a job whose deadline has already passed
+  leaves the queue. Permanent shares, wiki and
+  vault bases carry no deadline.
+- Which relay software in the pool actually implements NIP-40 is not
+  verified; a relay without NIP-40 keeps the events as before.
 
-Belegt durch `ritual_net::tests::the_relay_deadline_follows_the_channel_and_the_kind`
-(beide Seiten: erzeugt und von `parse_445_tags` angenommen),
+Proven by `ritual_net::tests::the_relay_deadline_follows_the_channel_and_the_kind`
+(both sides: produced and accepted by `parse_445_tags`),
 `tests/trickle.rs::a_temporary_share_tells_the_relays_its_deadline`
-(rot ohne die Verdrahtung) und
+(red without the wiring) and
 `thread_tests::a_share_tells_the_relays_its_own_deadline`.
 
-## 9. Etappen (TDD, je einzeln mergebar)
+## 9. Stages (TDD, each mergeable on its own)
 
-1. **Kern:** `ThreadOp`, das additive Feld, die Faltung "geschlossen"
-   und das Ablaufdatum als reine Funktionen in `molt-core` mit festem
-   `now`. Byte-Fixtures der Chat-Oberfläche bleiben grün.
-2. **Engine:** die drei Commands, Ingest-Prüfung, Refusal `thread closed`,
-   Lesefilter für ausgelaufene und vergessene Threads, `ChannelInfo`-Felder,
-   `set_thread_retention`. Zwei-Knoten-Test über Loopback: Schließen
-   kommt an, Wiederöffnen kommt an, eine überholte Nachricht öffnet nicht.
-3. **MCP:** drei Tools, Co-Equality, kurze Beschreibungen mit dem
-   D9-Hinweis, Lese-Schlüssel ausgesperrt.
-4. **Kompaktor kanalbewusst (§7)**, F9-Beweis zuerst.
-5. **GUI:** Ablaufdatum in der Leiste, Schloss, Knöpfe, Bestätigung,
-   ausgeblendete Eingabezeile. Headless-GUI-Tests.
-6. **Relay-Fristen (§8.2).**
+1. **Core:** `ThreadOp`, the additive field, the "closed"
+   fold and the expiry date as pure functions in `molt-core` with a fixed
+   `now`. Byte fixtures of the chat surface stay green.
+2. **Engine:** the three commands, the ingest check, the refusal `thread closed`,
+   the read filter for expired and forgotten threads, the `ChannelInfo` fields,
+   `set_thread_retention`. A two-node test over loopback: the close
+   arrives, the reopen arrives, an overtaken message does not open.
+3. **MCP:** three tools, co-equality, short descriptions with the
+   D9 hint, the read key locked out.
+4. **Compactor channel-aware (§7)**, the F9 proof first.
+5. **GUI:** the expiry date in the sidebar, padlock, buttons, confirmation,
+   the hidden compose row. Headless GUI tests.
+6. **Relay deadlines (§8.2).**
 
-## 10. Fragen
+## 10. Questions
 
-Entschieden (User, 2026-11-13):
+Decided (user, 2026-11-13):
 
-- **F1 - `set_chat_retention`** wird nicht umgedeutet. General und Threads
-  altern beide, keiner ist persistent (D6, D7).
-- **F2 - Fristen:** 7 Tage Inaktivität als Default, 24 Stunden nach dem
-  Schließen (D4, D5).
-- **F4 - Eigene Frist pro Thread:** nein (D6).
+- **F1 - `set_chat_retention`** is not reinterpreted. The General and threads
+  both age, neither is persistent (D6, D7).
+- **F2 - Deadlines:** 7 days of inactivity as default, 24 hours after the
+  close (D4, D5).
+- **F4 - A deadline per thread:** no (D6).
 
-- **F3 - Relays (§8):** alle drei Folgerungen aus §8.1 gebaut (§8.2).
+- **F3 - Relays (§8):** all three conclusions from §8.1 built (§8.2).
 
-## 11. Präzisierungen aus der Umsetzung (2026-11-13)
+## 11. Clarifications from the implementation (2026-11-13)
 
-- **Lebensabschnitte.** Schreibt jemand in einen abgelaufenen Thread,
-  beginnt ein neuer, offener Abschnitt. Die Nachrichten davor bleiben
-  verborgen, sonst holte eine neue Nachricht ein beendetes Gespräch
-  zurück. Ein Abschnitt endet nach einer Stille über das Thread-Fenster
-  hinaus oder 24 Stunden nach einer Schließung. Die Faltung
-  (`molt_core::thread_lives`) läuft nach `(ts, id)` sortiert, jeder Seat
-  findet also dieselben Grenzen.
-- **Auch Thread-Nachrichten altern einzeln.** Ein ständig aktiver Thread
-  liefe nach D4 nie aus. Deshalb gilt `set_chat_retention` zusätzlich für
-  jede einzelne Thread-Nachricht, wie bisher. Kein Inhalt lebt länger als
-  vor dieser Änderung.
-- **Zeitstempel einer Lebenszyklus-Zeile:** echt nach der letzten
-  Aktivität des Threads (`max(now, letzte + 1)`). Ein Schließen und
-  Wiederöffnen in derselben Sekunde entschied sonst die zufällige Id.
-  Gleichzeitige Handlungen verschiedener Seats entscheidet weiter die Id,
-  auf allen Seats gleich. Gedeckelt ist der Stempel bei `now + 900 s`,
-  der Uhrenabweichung, die ein Empfänger annimmt; ein Stempel, den der
-  Empfänger klemmt, ordnete die Zeile dort anders ein als beim Absender.
-- **Freigaben enden mit ihrem Thread.** Eine Datei-Freigabe in einem
-  beendeten Thread gilt als abgelaufen, auch wenn das Chat-Fenster noch
-  läuft. Die EIGENE Freigabe in einem vergessenen Thread verdichtet der
-  Kompaktor dagegen nicht: Die anderen haben den Thread noch und müssen
-  die Datei laden können.
-- **Vergessen per Id, nicht per Zeit.** Eine Zeitmarke verbarg auch die
-  Nachricht eines anderen Seats, die in derselben Sekunde geschrieben
-  wurde (der Zwei-Knoten-Test hat es gezeigt).
-- **Bekannte Grenze:** Hat ein Seat einen geschlossenen Thread vergessen
-  und verdichtet, und trifft danach eine späte Nachricht eines alten
-  Knotens ein, hält dieser Seat den Thread für offen, die anderen für
-  geschlossen. Die Folge ist eine Anzeige, kein Datenverlust.
-- **Bekannte Grenze:** Eine Nachricht mit einem Stempel vor dem Ende, die
-  erst nach dem Ende eintrifft (ein lange offline gewesener Seat, eine
-  nachgehende Uhr), verlängert den alten Abschnitt. Der Thread kehrt dann
-  auf allen Seats gleich zurück, deterministisch, aber gegen die Absicht
-  von "beendet". Ein Seat, der schon verdichtet hat, sieht dasselbe.
-- **Checkpoint:** `set_thread_retention` hat bewusst keinen
-  Last-write-wins-Slot in `applied_lww_slot`. Ein unbekannter Op
-  akkumuliert dort, so hashen alte und neue Builds denselben Checkpoint.
-- **Agenten:** Das Wake-Skill erlaubt `thread_close`, `thread_reopen` und
-  `thread_forget` und schickt längere Agenten-Gespräche in Topics.
+- **Life sections.** If someone writes into an expired thread,
+  a new, open section begins. The messages before it stay
+  hidden, otherwise a new message would fetch a finished conversation
+  back. A section ends after a silence beyond the thread window
+  or 24 hours after a close. The fold
+  (`molt_core::thread_lives`) runs sorted by `(ts, id)`, every seat
+  therefore finds the same boundaries.
+- **Thread messages age individually too.** A constantly active thread
+  would never expire under D4. Therefore `set_chat_retention` applies additionally to
+  every single thread message, as before. No content lives longer than
+  before this change.
+- **Timestamp of a lifecycle line:** real, after the thread's last
+  activity (`max(now, letzte + 1)`). Otherwise a close and
+  reopen in the same second would be decided by the random id.
+  Concurrent actions of different seats are still decided by the id,
+  the same on every seat. The stamp is capped at `now + 900 s`,
+  the clock skew a receiver accepts; a stamp the
+  receiver clamps would order the line differently there than at the sender.
+- **Shares end with their thread.** A file share in a
+  finished thread counts as expired, even while the chat window
+  still runs. One's OWN share in a forgotten thread, by contrast, the
+  compactor does not compact: the others still have the thread and must
+  be able to load the file.
+- **Forget by id, not by time.** A timestamp would also have hidden
+  another seat's message written in the same second (the two-node test
+  showed it).
+- **Known limit:** if a seat has forgotten a closed thread
+  and compacted it, and afterwards a late message of an old
+  node arrives, that seat holds the thread for open, the others for
+  closed. The consequence is one of display, not data loss.
+- **Known limit:** a message with a stamp before the end that
+  only arrives after the end (a seat that was offline a long time, a
+  lagging clock) extends the old section. The thread then returns
+  on all seats alike, deterministically, but against the intent
+  of "finished". A seat that has already compacted sees the same.
+- **Checkpoint:** `set_thread_retention` deliberately has no
+  last-write-wins slot in `applied_lww_slot`. An unknown op
+  accumulates there, so old and new builds hash the same checkpoint.
+- **Agents:** the wake skill allows `thread_close`, `thread_reopen` and
+  `thread_forget` and sends longer agent conversations into topics.
 
-Belegt durch: `molt-core` (Faltung, Wire-Form), `molt-engine`
+Proven by: `molt-core` (the fold, the wire form), `molt-engine`
 `tests/thread_tests.rs`, `net/ingest_tests.rs`, `tests/thread_two_nodes.rs`
-(zwei echte Engines über einen Relay), `molt-mcp` (Co-Equality, Wake-Skill),
-`molt-ui` `tests/gui/discussion.rs` und `tests/channels.rs`.
+(two real engines over a relay), `molt-mcp` (co-equality, the wake skill),
+`molt-ui` `tests/gui/discussion.rs` and `tests/channels.rs`.
