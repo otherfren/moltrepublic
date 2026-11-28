@@ -90,11 +90,22 @@ pub fn __gap_republished() -> u64 {
 /// Test seam: gap wants that reached an answering runtime in this process.
 static GAP_ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Test seam: NAMED gap wants (a listing ask is none) that reached an
+/// answering runtime in this process.
+static GAP_NAMED_ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Test seam: how many gap wants reached an answering runtime in this
 /// process.
 #[doc(hidden)]
 pub fn __gap_asked() -> u64 {
     GAP_ASKED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Test seam: how many NAMED gap wants reached an answering runtime in
+/// this process.
+#[doc(hidden)]
+pub fn __gap_named_asked() -> u64 {
+    GAP_NAMED_ASKED.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// What one asker wants answered, coalesced: a flood overwrites only its
@@ -387,6 +398,9 @@ impl GroupHandle {
     /// §10); `false` = dropped, the queue is full - the asker asks again.
     pub fn answer_gap(&self, to: MemberId, seqs: Vec<u64>, range: Option<(u64, u64)>) -> bool {
         GAP_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if !seqs.is_empty() {
+            GAP_NAMED_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         let Ok(mut pending) = self.gaps.pending.lock() else { return false };
         let ask = pending.entry(to).or_default();
         ask.seqs.extend(seqs);

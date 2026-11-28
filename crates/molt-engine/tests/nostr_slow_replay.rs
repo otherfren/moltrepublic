@@ -156,7 +156,7 @@ async fn gap_wants_wait_for_the_replay_and_then_close_a_real_hole() {
     }
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(densest_second(&db).await < 100, "precondition: no second holds a page");
-    let asked_before = molt_net::group_runtime::__gap_asked();
+    let asked_before = molt_net::group_runtime::__gap_named_asked();
     let republished_before = molt_net::group_runtime::__gap_republished();
     b.__drop_inbound_chat("m250");
     slow.armed.store(true, SeqCst);
@@ -165,7 +165,7 @@ async fn gap_wants_wait_for_the_replay_and_then_close_a_real_hole() {
     let deadline = Instant::now() + Duration::from_secs(180);
     let mut first_ask_ms = None;
     loop {
-        if first_ask_ms.is_none() && molt_net::group_runtime::__gap_asked() > asked_before {
+        if first_ask_ms.is_none() && molt_net::group_runtime::__gap_named_asked() > asked_before {
             first_ask_ms = Some(u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX));
         }
         if shows_all(&b, &want, Duration::from_millis(1)).await.is_some() {
@@ -178,7 +178,9 @@ async fn gap_wants_wait_for_the_replay_and_then_close_a_real_hole() {
     let first_ask = first_ask_ms.expect("the real hole was asked for");
     eprintln!("last_page_ms={last_page} first_ask_ms={first_ask}");
     assert!(last_page > 0, "the replay was paged");
-    assert!(first_ask > last_page, "no want before the last page was served");
+    // a NAMED want waits for the replay (the listing ask does not - it
+    // re-publishes nothing, §10)
+    assert!(first_ask > last_page, "no named want before the last page was served");
     assert!(first_ask - last_page < 20_000, "the hole is asked for right after the replay");
     assert_eq!(
         molt_net::group_runtime::__gap_republished() - republished_before,
