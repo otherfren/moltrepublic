@@ -2010,6 +2010,30 @@ pub fn tools() -> Vec<ToolDef> {
             build: |args| Ok(Command::BranchImport { path: str_arg(args, "path")?, passphrase: str_arg(args, "passphrase")? }),
         },
         ToolDef {
+            name: "evidence_offer",
+            command: "evidence_offer",
+            scope: Scope::Seat,
+            description: "Send this seat's evidence to `member` now: the blocks it lacks (from the fork point, or from its reported head), wrapped to the seat's own key over the consented relays, outside the group. At most 4 MiB; larger goes by branch_export. A seat offers by itself when the peer is on another branch or its catch-up stalls; this is the manual door. Progress: status.seats[].evidence.out.",
+            schema: || json!({ "type": "object", "properties": { "member": { "type": "string" } }, "required": ["member"] }),
+            build: |args| Ok(Command::EvidenceOffer { member: str_arg(args, "member")? }),
+        },
+        ToolDef {
+            name: "evidence_adopt",
+            command: "evidence_adopt",
+            scope: Scope::Seat,
+            description: "Take in the evidence `member` sent (status.seats[].evidence.in = ready): blocks that EXTEND this chain are applied like a catch-up, nothing is dropped. Evidence of ANOTHER branch is refused (`another branch: the branch choice decides`) - it only shows in branch_status. Every block was verified on arrival against the roster.",
+            schema: || json!({ "type": "object", "properties": { "member": { "type": "string" } }, "required": ["member"] }),
+            build: |args| Ok(Command::EvidenceAdopt { member: str_arg(args, "member")? }),
+        },
+        ToolDef {
+            name: "evidence_dismiss",
+            command: "evidence_dismiss",
+            scope: Scope::Seat,
+            description: "Drop the evidence `member` sent, unadopted.",
+            schema: || json!({ "type": "object", "properties": { "member": { "type": "string" } }, "required": ["member"] }),
+            build: |args| Ok(Command::EvidenceDismiss { member: str_arg(args, "member")? }),
+        },
+        ToolDef {
             name: "choose_branch",
             command: "choose_branch",
             scope: Scope::Seat,
@@ -3542,7 +3566,7 @@ pub(crate) mod tests {
         // hook; the value itself rides the settings surface as
         // `poke_wake_command` (ADR-0007), so this stays internal only
         // because it is a second door, not because it is off limits.
-        const INTERNAL: [&str; 99] = [
+        const INTERNAL: [&str; 102] = [
             // not a door of its own: chat_send/approve/decline/withdraw
             // build it from their `operator`/`agent` arguments
             "as_operator",
@@ -3582,6 +3606,11 @@ pub(crate) mod tests {
             // branch_import are the tools)
             "net_branch_exported",
             "net_branch_loaded",
+            // the seat inbox handing over a proven sender's evidence parts and
+            // re-asks, and the send task's progress (evidence_offer is the tool)
+            "net_evidence_part",
+            "net_evidence_want",
+            "net_evidence_sent",
             // the off-actor WIKI export task reporting its real outcome
             // (wiki_export is the tool; an agent must not be able to forge
             // an export success, least of all one that claims a proof

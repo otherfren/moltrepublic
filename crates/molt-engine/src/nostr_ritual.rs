@@ -276,6 +276,14 @@ fn recover_inbox_command(delivery: RitualDelivery, generation: u64) -> Option<Co
         RitualMsg::RecoverReady { member, ticket, attempt } => {
             Command::NetRecoverReady { member, ticket, attempt, sender, generation: Some(generation) }
         }
+        // the evidence exchange (chain_rescue_plan.md §5a): the sender is
+        // the proven sealing key, judged against the roster by the engine
+        RitualMsg::EvidencePart { republic_id, offer, index, total, data } => {
+            Command::NetEvidencePart { sender, republic_id, offer, index, total, data }
+        }
+        RitualMsg::EvidenceWant { republic_id, offer, missing } => {
+            Command::NetEvidenceWant { sender, republic_id, offer, missing }
+        }
         _ => return None,
     })
 }
